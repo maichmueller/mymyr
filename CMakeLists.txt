@@ -55,6 +55,16 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
     endif()
 endif()
 
+# Apple's linker warns when a static library appears twice on a link line, which CMake does for libraries that
+# depend on each other.
+if(APPLE)
+    include(CheckLinkerFlag)
+    check_linker_flag(CXX "LINKER:-no_warn_duplicate_libraries" MYMYR_HAS_NO_WARN_DUPLICATE_LIBRARIES)
+    if(MYMYR_HAS_NO_WARN_DUPLICATE_LIBRARIES)
+        add_link_options(LINKER:-no_warn_duplicate_libraries)
+    endif()
+endif()
+
 if(MYMYR_SANITIZE)
     string(REPLACE ";" "," _mymyr_san "${MYMYR_SANITIZE}")
     add_compile_options(-fsanitize=${_mymyr_san} -fno-omit-frame-pointer)

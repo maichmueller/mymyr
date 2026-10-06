@@ -23,11 +23,12 @@ def main(argv: list[str]) -> int:
     text = open(argv[1], errors="replace").read()
     expected = json.loads(Path(__file__).with_name("expected_counts.json").read_text())
     min_total, max_skipped = expected["ctest_min_total"], expected["ctest_max_skipped"]
-    m = re.search(r"(\d+)% tests passed, (\d+) tests failed out of (\d+)", text)
+    # CMake 4 leaves out ", 0 tests failed" when none failed: "100% tests passed out of 1205"
+    m = re.search(r"(\d+)% tests passed(?:, (\d+) tests failed)? out of (\d+)", text)
     if m is None:
         print("error: no ctest summary found in the log", file=sys.stderr)
         return 1
-    failed, total = int(m.group(2)), int(m.group(3))
+    failed, total = int(m.group(2) or 0), int(m.group(3))
     skipped = len(re.findall(r"^\s+\d+ - .*\(Skipped\)\s*$", text, re.M))
     line = f"ctest: {total} tests, {failed} failed, {skipped} skipped"
     print(line)
