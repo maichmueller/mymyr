@@ -23,7 +23,7 @@
 #include "mymyr/search/portfolio.hpp"
 #include "mymyr/search/rollout_iw.hpp"
 #include "mymyr/task/task.hpp"
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
 
@@ -455,7 +455,7 @@ int main(int argc, char** argv)
             task = Task::from_text_file(task_file);
         else
         {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
             const auto data = frontend::load_task(domain, problem);
             task = Task::create(*data);
 #else

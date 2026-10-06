@@ -30,7 +30,7 @@
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/task/workspace.hpp"
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
 
@@ -298,7 +298,7 @@ int main(int argc, char** argv)
             task = Task::from_text_file(path, to);
         else
         {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
             task = Task::create(*frontend::load_task(path, problem), to);
 #else
             usage("built without the PDDL front end: pass an exported task file");

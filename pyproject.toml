@@ -17,7 +17,7 @@ test = ["pytest>=8", "nanobind>=3.1,<4"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
-cmake.version = ">=3.24"
+cmake.version = ">=3.25"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/mymyr"]
 

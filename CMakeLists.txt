@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25)
 
 # The package version lives in pyproject.toml. MYMYR_VERSION is the full PEP 440 string (it may carry
 # a pre-release suffix); project() receives its numeric release part.
@@ -16,6 +16,14 @@ option(MYMYR_TESTS "Build the C++ unit tests" ON)
 option(MYMYR_CUDA "Build the CUDA backend (libmymyr_cuda)" OFF)
 option(MYMYR_FRONTEND "Build the loki PDDL front end (mymyr_frontend); needs the dependency superbuild" ON)
 option(MYMYR_BENCH "Build the benchmark drivers (bench/cpp)" ON)
+option(MYMYR_INSTALL_SDK "Install the C++ SDK: headers, static libraries and the mymyr CMake package" ON)
+# Where the SDK lies inside the install prefix, empty or ending in '/': the wheel keeps it inside the mymyr package.
+if(MYMYR_PYTHON)
+    set(_mymyr_sdk_dir_default "mymyr/")
+else()
+    set(_mymyr_sdk_dir_default "")
+endif()
+set(MYMYR_SDK_DIR "${_mymyr_sdk_dir_default}" CACHE STRING "Directory of the C++ SDK inside the install prefix")
 set(MYMYR_SANITIZE "" CACHE STRING "Sanitizers to enable: address;undefined or thread")
 set(MYMYR_DEPS_PREFIX "${PROJECT_SOURCE_DIR}/dependencies/installs" CACHE PATH
     "Install prefix of the dependency superbuild (dependencies/CMakeLists.txt)")
@@ -128,13 +136,15 @@ add_library(mymyr_core STATIC
     src/mymyr/search/portfolio.cpp
 )
 add_library(mymyr::core ALIAS mymyr_core)
+set_target_properties(mymyr_core PROPERTIES EXPORT_NAME core)
 target_include_directories(mymyr_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>)
+    $<INSTALL_INTERFACE:${MYMYR_SDK_DIR}include>)
+target_compile_features(mymyr_core PUBLIC cxx_std_26)
 target_compile_definitions(mymyr_core PRIVATE
     MYMYR_VERSION_STRING="${MYMYR_VERSION}"
     MYMYR_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
-target_link_libraries(mymyr_core PRIVATE mymyr_warnings)
+target_link_libraries(mymyr_core PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
 find_package(Threads REQUIRED)
 target_link_libraries(mymyr_core PUBLIC Threads::Threads)
 
@@ -167,9 +177,14 @@ if(MYMYR_FRONTEND)
         src/mymyr/frontend/translate.cpp
     )
     add_library(mymyr::frontend ALIAS mymyr_frontend)
+    set_target_properties(mymyr_frontend PROPERTIES EXPORT_NAME frontend)
+    # The parser dependencies are linked for the build tree only; the installed archive carries them (cmake/MymyrSdk.cmake).
     target_link_libraries(mymyr_frontend
         PUBLIC mymyr::core
-        PRIVATE loki::parsers absl::flat_hash_map absl::flat_hash_set absl::inlined_vector absl::hash mymyr_warnings)
+        PRIVATE $<BUILD_INTERFACE:loki::parsers> $<BUILD_INTERFACE:absl::flat_hash_map>
+                $<BUILD_INTERFACE:absl::flat_hash_set> $<BUILD_INTERFACE:absl::inlined_vector>
+                $<BUILD_INTERFACE:absl::hash> $<BUILD_INTERFACE:mymyr_warnings>)
+    target_compile_definitions(mymyr_frontend PUBLIC MYMYR_HAS_FRONTEND=1)
     # GCC 16 at -O3 reports -Wmaybe-uninitialized inside abseil's InlinedVector/raw_hash_set once they are inlined
     # into the front end (false positives; the headers are -isystem, the warning is issued after inlining).
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -224,6 +239,11 @@ if(MYMYR_CUDA)
     add_subdirectory(cuda)
 endif()
 
+# ------------------------------------------------------------------------------------------------ install
+if(MYMYR_INSTALL_SDK)
+    include("${PROJECT_SOURCE_DIR}/cmake/MymyrSdk.cmake")
+endif()
+
 # ------------------------------------------------------------------------------------------------ tests
 if(MYMYR_TESTS)
     enable_testing()
@@ -236,35 +256,30 @@ if(MYMYR_BENCH)
     target_link_libraries(mymyr_brfs PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_brfs PRIVATE mymyr::frontend)
-        target_compile_definitions(mymyr_brfs PRIVATE MYMYR_HAVE_FRONTEND)
     endif()
     # IW / SIW / single passes; reads PDDL when the front end is built
     add_executable(mymyr_iw bench/cpp/mymyr_iw.cpp)
     target_link_libraries(mymyr_iw PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_iw PRIVATE mymyr::frontend)
-        target_compile_definitions(mymyr_iw PRIVATE MYMYR_HAVE_FRONTEND)
     endif()
     # heuristics and best-first search
     add_executable(mymyr_heur bench/cpp/mymyr_heur.cpp)
     target_link_libraries(mymyr_heur PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_heur PRIVATE mymyr::frontend)
-        target_compile_definitions(mymyr_heur PRIVATE MYMYR_HAVE_FRONTEND)
     endif()
     # relaxed reachability and landmarks
     add_executable(mymyr_landmarks bench/cpp/mymyr_landmarks.cpp)
     target_link_libraries(mymyr_landmarks PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_landmarks PRIVATE mymyr::frontend)
-        target_compile_definitions(mymyr_landmarks PRIVATE MYMYR_HAVE_FRONTEND)
     endif()
     # IW family variants: AIW / LIW / Rollout IW / parallel rollouts / portfolio
     add_executable(mymyr_iw_variants bench/cpp/mymyr_iw_variants.cpp)
     target_link_libraries(mymyr_iw_variants PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_iw_variants PRIVATE mymyr::frontend)
-        target_compile_definitions(mymyr_iw_variants PRIVATE MYMYR_HAVE_FRONTEND)
     endif()
     # CpuEnvPool env-steps/s over a task table (PDDL through the front end)
     if(TARGET mymyr_frontend)
@@ -276,7 +291,6 @@ if(MYMYR_BENCH)
     target_link_libraries(mymyr_datasets PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_datasets PRIVATE mymyr::frontend)
-        target_compile_definitions(mymyr_datasets PRIVATE MYMYR_HAVE_FRONTEND)
     endif()
 endif()
 

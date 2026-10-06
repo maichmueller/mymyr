@@ -23,7 +23,7 @@
 #include "mymyr/datasets/generalized_state_space.hpp"
 #include "mymyr/datasets/sampler.hpp"
 #include "mymyr/datasets/state_space.hpp"
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
 #include "mymyr/task/task.hpp"
@@ -320,7 +320,7 @@ TaskPtr load(const Line& l, bool text, const TaskOptions& to, double* parse_s, d
         *task_s = 0;
         return t;
     }
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
     const auto data = frontend::load_task(l.domain, l.problem);
     *parse_s = seconds_since(t0);
     const auto t1 = Clock::now();
@@ -498,7 +498,7 @@ int run_pool(const Common& c)
 
 int run_gss(const Common& c)
 {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
     if (c.positional.size() < 2)
         usage("gss needs DOMAIN PROBLEM...");
     const auto t0 = Clock::now();
@@ -587,7 +587,7 @@ int run_gss(const Common& c)
 
 int run_sampler(const Common& c)
 {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
     if (c.positional.size() != 2)
         usage("sampler needs DOMAIN PROBLEM");
     const auto data = frontend::load_task(c.positional[0], c.positional[1]);

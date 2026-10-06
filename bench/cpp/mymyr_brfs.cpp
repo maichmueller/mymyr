@@ -9,7 +9,7 @@
 //              [--numeric-storage auto|f64|i32] [--quantum Q] [--tolerant]
 
 #include "mymyr/formalism/text_format.hpp"
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
 #include "mymyr/search/brfs.hpp"
@@ -139,7 +139,7 @@ int main(int argc, char** argv)
             task = Task::from_text_file(task_file, to);
         else
         {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
             const auto data = frontend::load_task(domain, problem);
             task = Task::create(*data, to);
 #else

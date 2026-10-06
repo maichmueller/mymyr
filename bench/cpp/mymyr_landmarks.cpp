@@ -29,7 +29,7 @@
 #include "mymyr/search/iw.hpp"
 #include "mymyr/reachability/relaxed_reachability.hpp"
 #include "mymyr/task/task.hpp"
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
 
@@ -702,7 +702,7 @@ int main(int argc, char** argv)
             task = Task::from_text_file(a.task_file, a.to);
         else
         {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
             if (a.domain.empty() || a.problem.empty())
                 usage("need a task file or --domain and --problem");
             const auto t0 = Clock::now();

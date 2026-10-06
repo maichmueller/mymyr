@@ -26,7 +26,7 @@ wheel builds.
 ## Requirements
 
 - A C++26 compiler (GCC >= 16)
-- CMake >= 3.24 and Ninja
+- CMake >= 3.25 and Ninja
 - Optional: CUDA 13 (`-DMYMYR_CUDA=ON`)
 - Optional: CPython 3.14t or 3.15t, free-threaded, for the Python bindings
 

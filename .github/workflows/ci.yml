@@ -92,6 +92,11 @@ jobs:
           ctest -j "$(nproc)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
       - name: Check the ctest counts
         run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+      # The C++ SDK: install the build tree, then build and run a downstream project against the install.
+      - name: C++ consumer of the installed build tree
+        run: |
+          cmake --install build/cpu --prefix build/prefix
+          ci/check_cmake_consumer.sh build/prefix/lib/cmake/mymyr build/consumer
 
   # The Python suite against the installed package.
   python:
@@ -141,6 +146,8 @@ jobs:
           CUDA_VISIBLE_DEVICES: ""
           JAX_PLATFORMS: cpu
         run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+      - name: C++ consumer of the installed package
+        run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer
 
   # The CUDA backend compiles without a GPU to run it on (about 35 minutes for PTX). Pull requests compile PTX
   # for sm_80 (the front end and all template instantiations); main and manual runs also assemble SASS for sm_80
@@ -306,6 +313,10 @@ jobs:
           ctest -j "$(sysctl -n hw.ncpu)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
       - name: Check the ctest counts
         run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+      - name: C++ consumer of the installed build tree
+        run: |
+          cmake --install build/cpu --prefix build/prefix
+          ci/check_cmake_consumer.sh build/prefix/lib/cmake/mymyr build/consumer
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: 0.12.6
@@ -325,3 +336,5 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
         run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+      - name: C++ consumer of the installed package
+        run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer-wheel
