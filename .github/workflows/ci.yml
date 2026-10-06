@@ -92,6 +92,11 @@ jobs:
           ctest -j "$(nproc)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
       - name: Check the ctest counts
         run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+      # The C++ SDK: install the build tree, then build and run a downstream project against the install.
+      - name: C++ consumer of the installed build tree
+        run: |
+          cmake --install build/cpu --prefix build/prefix
+          ci/check_cmake_consumer.sh build/prefix/lib/cmake/mymyr build/consumer
 
   # The Python suite against the installed package.
   python:
@@ -141,20 +146,22 @@ jobs:
           CUDA_VISIBLE_DEVICES: ""
           JAX_PLATFORMS: cpu
         run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+      - name: C++ consumer of the installed package
+        run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer
 
   # The CUDA backend compiles without a GPU to run it on (about 35 minutes for PTX). Pull requests compile PTX
-  # for sm_80 (the front end and all template instantiations); main and manual runs also assemble SASS for sm_80
-  # and sm_90, where ptxas needs about half an hour for the largest translation unit.
+  # for sm_80 (the front end and all template instantiations); main and manual runs also assemble SASS, one job per
+  # architecture (sm_80, sm_90), where ptxas needs about half an hour for the largest translation unit.
   cuda-build:
     name: Linux CUDA 13 compile-only, ${{ matrix.name }}
     needs: deps
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '{"include":[{"name":"PTX sm_80","archs":"80-virtual"},{"name":"SASS sm_80 and sm_90","archs":"80;90"}]}' || '{"include":[{"name":"PTX sm_80","archs":"80-virtual"}]}') }}
+      matrix: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '{"include":[{"name":"PTX sm_80","archs":"80-virtual"},{"name":"SASS sm_80","archs":"80"},{"name":"SASS sm_90","archs":"90"}]}' || '{"include":[{"name":"PTX sm_80","archs":"80-virtual"}]}') }}
     steps:
       - name: Install build tools and the CUDA toolkit
         run: |
@@ -306,6 +313,10 @@ jobs:
           ctest -j "$(sysctl -n hw.ncpu)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
       - name: Check the ctest counts
         run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+      - name: C++ consumer of the installed build tree
+        run: |
+          cmake --install build/cpu --prefix build/prefix
+          ci/check_cmake_consumer.sh build/prefix/lib/cmake/mymyr build/consumer
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: 0.12.6
@@ -325,3 +336,5 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
         run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+      - name: C++ consumer of the installed package
+        run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer-wheel

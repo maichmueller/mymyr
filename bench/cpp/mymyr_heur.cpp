@@ -21,7 +21,7 @@
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/task/workspace.hpp"
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
 
@@ -223,7 +223,7 @@ int main(int argc, char** argv)
             task = Task::from_text_file(task_file, to);
         else
         {
-#if defined(MYMYR_HAVE_FRONTEND)
+#if defined(MYMYR_HAS_FRONTEND)
             if (domain.empty() || problem.empty())
                 usage("need a task file or --domain and --problem");
             const auto data = frontend::load_task(domain, problem);

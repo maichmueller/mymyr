@@ -26,7 +26,6 @@ target_link_libraries(_core PRIVATE mymyr::core mymyr_warnings)
 if(TARGET mymyr_frontend)
     target_sources(_core PRIVATE src/frontend_bindings.cpp)
     target_link_libraries(_core PRIVATE mymyr::frontend)
-    target_compile_definitions(_core PRIVATE MYMYR_HAS_FRONTEND=1)
 endif()
 # mymyr.cuda, when the CUDA backend is built (MYMYR_CUDA=ON; mymyr_cuda defines MYMYR_HAS_CUDA publicly).
 if(TARGET mymyr_cuda)
@@ -61,6 +60,12 @@ target_compile_options(_core PRIVATE -include Python.h)
 # must stay hidden (--exclude-libs), or they interpose with the loaded libstdc++ and mix two versions' locale state.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE AND NOT MYMYR_SANITIZE)
     target_link_options(_core PRIVATE -static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL)
+endif()
+
+# nanobind links macOS modules with a list of the CPython symbols that may stay undefined until load time; the list of
+# nanobind 3.1 lacks this CPython 3.14 API, which the module calls (module.cpp) to enable deferred reference counting.
+if(APPLE)
+    target_link_options(_core PRIVATE LINKER:-U,_PyUnstable_Object_EnableDeferredRefcount)
 endif()
 
 install(TARGETS _core LIBRARY DESTINATION mymyr)

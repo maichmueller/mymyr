@@ -1,0 +1,40 @@
+@PACKAGE_INIT@
+
+# find_package(mymyr CONFIG [REQUIRED] [COMPONENTS core frontend cuda])
+#
+#   mymyr::core      the planning core (tasks, search, heuristics, datasets, rl); depends on Threads only
+#   mymyr::frontend  the PDDL front end (mymyr::frontend::Domain); its parser dependencies are part of the archive
+#   mymyr::cuda      the CUDA backend; needs the CUDA toolkit
+#
+# Without COMPONENTS, core and the front end (when installed) are provided. The headers need C++26 (GCC 16 or
+# clang 22 with libc++); the targets request it through compile features.
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+set(_mymyr_components core frontend cuda)
+if(NOT mymyr_FIND_COMPONENTS)
+    set(mymyr_FIND_COMPONENTS core frontend)
+    set(mymyr_FIND_REQUIRED_core FALSE)
+    set(mymyr_FIND_REQUIRED_frontend FALSE)
+endif()
+foreach(_comp IN LISTS mymyr_FIND_COMPONENTS)
+    if(NOT _comp IN_LIST _mymyr_components)
+        set(mymyr_FOUND FALSE)
+        set(mymyr_NOT_FOUND_MESSAGE "mymyr: unknown component '${_comp}' (known: ${_mymyr_components})")
+        return()
+    endif()
+endforeach()
+if("cuda" IN_LIST mymyr_FIND_COMPONENTS)
+    find_dependency(CUDAToolkit)
+endif()
+
+if(NOT TARGET mymyr::core)
+    include("${CMAKE_CURRENT_LIST_DIR}/mymyrTargets.cmake")
+endif()
+foreach(_comp IN LISTS _mymyr_components)
+    set(mymyr_${_comp}_FOUND FALSE)
+    if(TARGET mymyr::${_comp})
+        set(mymyr_${_comp}_FOUND TRUE)
+    endif()
+endforeach()
+check_required_components(mymyr)

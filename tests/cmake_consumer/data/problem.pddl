@@ -1,0 +1,8 @@
+(define (problem consumer)
+(:domain logistics)
+(:objects apn1 apt1 pos1 cit1 tru1 obj11)
+(:init (package obj11) (truck tru1) (city cit1)
+ (location pos1) (location apt1) (airport apt1) (airplane apn1) (at apn1 apt1)
+ (at tru1 pos1) (at obj11 pos1) (in-city pos1 cit1) (in-city apt1 cit1))
+(:goal (and (at obj11 apt1)))
+)
