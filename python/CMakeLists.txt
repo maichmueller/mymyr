@@ -62,6 +62,12 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE AND NOT MYMYR_SANITIZE)
     target_link_options(_core PRIVATE -static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL)
 endif()
 
+# nanobind links macOS modules with a list of the CPython symbols that may stay undefined until load time; the list of
+# nanobind 3.1 lacks this CPython 3.14 API, which the module calls (module.cpp) to enable deferred reference counting.
+if(APPLE)
+    target_link_options(_core PRIVATE LINKER:-U,_PyUnstable_Object_EnableDeferredRefcount)
+endif()
+
 install(TARGETS _core LIBRARY DESTINATION mymyr)
 
 # Typing stubs: nanobind's stubgen on the freshly built module, recursive and with
