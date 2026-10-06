@@ -118,9 +118,13 @@ jobs:
       - name: List the sdist
         run: |
           ls -l dist
-          tar tzf dist/*.tar.gz | head -40
-          tar tzf dist/*.tar.gz | grep -q -E '^[^/]+/CMakeLists.txt$'
-          tar tzf dist/*.tar.gz | grep -q -E '^[^/]+/dependencies/CMakeLists.txt$'
+          # to a file first: with pipefail, tar fails on the pipe that head or grep -q close early
+          tar tzf dist/*.tar.gz > sdist-files.txt
+          echo "$(wc -l < sdist-files.txt) files"
+          head -40 sdist-files.txt
+          for f in CMakeLists.txt dependencies/CMakeLists.txt pyproject.toml; do
+            grep -q -E "^[^/]+/$f\$" sdist-files.txt || { echo "error: the sdist has no $f" >&2; exit 1; }
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-sdist
