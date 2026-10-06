@@ -29,8 +29,9 @@
 #include <mutex>
 #include <numeric>
 #include <set>
-#include <unordered_set>
 #include <string>
+#include <thread>
+#include <unordered_set>
 
 using namespace mymyr;
 using namespace mymyr::search;

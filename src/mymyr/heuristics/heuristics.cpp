@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <functional>
 #include <map>
 #include <stdexcept>
@@ -382,9 +381,11 @@ private:
         const RelaxedTask& R = *m_R;
         const bool add = m_kind == Kind::Add, ff = m_kind == Kind::FF;
         const u32 P = R.num_props(), O = R.num_ops();
-        std::memcpy(m_cost.data(), m_cost_init.data(), P * sizeof(u32));
-        std::memcpy(m_cnt.data(), m_npos.data(), O * sizeof(u32));
-        std::memset(m_acc.data(), 0, O * sizeof(u32));
+        // copy_n / fill_n, not memcpy / memset: the buffers are empty for a task without propositions or operators,
+        // and memcpy must not receive their null data() even for a zero size
+        std::copy_n(m_cost_init.data(), P, m_cost.data());
+        std::copy_n(m_npos.data(), O, m_cnt.data());
+        std::fill_n(m_acc.data(), O, u32{0});
         if (ff)
             std::fill(m_supp.begin(), m_supp.end(), k_none);
         m_q.clear();
