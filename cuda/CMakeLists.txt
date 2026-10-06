@@ -26,6 +26,7 @@ add_library(mymyr_cuda STATIC
     src/rollouts.cpp
 )
 add_library(mymyr::cuda ALIAS mymyr_cuda)
+set_target_properties(mymyr_cuda PROPERTIES EXPORT_NAME cuda)
 # the environment step on the device (cuda/env.hpp, cuda/env_kernels.hpp)
 target_sources(mymyr_cuda PRIVATE src/env.cu src/env.cpp)
 # novelty rewards, prefix masks and hindsight relabels on the device (cuda/rl_ops.hpp)
