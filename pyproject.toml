@@ -33,12 +33,13 @@ testpaths = ["tests/python"]
 build = ["cp314t-*", "cp315t-*"]
 skip = ["*musllinux*"]
 build-verbosity = 1
-test-requires = ["pytest>=8", "nanobind>=3.1,<4"]
+test-requires = ["pytest>=8", "nanobind>=3.1,<4", "cmake>=3.25", "ninja"]
 # The CPU test suite against the installed wheel, with the benchmark data fetched next to it.
 before-test = "bash {project}/ci/fetch_test_data.sh /tmp/mymyr-test-data"
 test-command = [
     "python -c \"import importlib.metadata as m, mymyr; assert mymyr.__version__ == m.version('mymyr'), (mymyr.__version__, m.version('mymyr'))\"",
     "python {project}/ci/run_pytest.py -W error -q -rs -p no:cacheprovider {project}/tests/python",
+    "bash {project}/ci/check_cmake_consumer.sh \"$(python -c 'import mymyr; print(mymyr.get_cmake_dir())')\" /tmp/mymyr-consumer",
 ]
 
 [tool.cibuildwheel.test-environment]
@@ -52,9 +53,14 @@ JAX_PLATFORMS = "cpu"
 # compiler and the dependency superbuild live in /opt/mymyr-toolchain, which CI mounts from a cache.
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
+inherit.test-environment = "append"
 manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64@sha256:e4ca528d41ab66b3654110295d7a2c7bfa599ddbb6efb269ec21f7f73b88f1b6"
 before-all = "bash {package}/ci/wheel_toolchain.sh /opt/mymyr-toolchain"
 repair-wheel-command = "auditwheel show {wheel} && auditwheel repair -w {dest_dir} {wheel}"
+
+# the C++ consumer test of the wheel builds with the same GCC
+[tool.cibuildwheel.linux.test-environment]
+CXX = "/opt/mymyr-toolchain/gcc/bin/x86_64-conda-linux-gnu-g++"
 
 [tool.cibuildwheel.linux.environment]
 CC = "/opt/mymyr-toolchain/gcc/bin/x86_64-conda-linux-gnu-gcc"

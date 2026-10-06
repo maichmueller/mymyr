@@ -60,6 +60,22 @@ A handful of tests compare mymyr against the mimir fork's own PDDL instances and
 (`github.com/maichmueller/mimir`, its `data/` directory). Point `MYMYR_FORK_DATA` (and, for the IPC-2023 tasks,
 `MYMYR_IPC`) at a checkout of that data to run them; without it, they skip rather than fail.
 
+## Using mymyr from C++
+
+`cmake --install build --prefix <prefix>` installs the headers, the static libraries and a CMake package; the wheel
+carries the same under `mymyr/include` and `mymyr/lib`. A consumer needs only that install and a C++26 compiler (GCC 16,
+or clang 22 with libc++): the front end's parser dependencies are part of `libmymyr_frontend.a`.
+
+```cmake
+find_package(mymyr CONFIG REQUIRED COMPONENTS core frontend)   # components: core, frontend, cuda
+target_link_libraries(app PRIVATE mymyr::core mymyr::frontend)
+```
+
+Pass `-Dmymyr_DIR=<prefix>/lib/cmake/mymyr`, or for the wheel `-Dmymyr_DIR=$(python -c "import mymyr; print(mymyr.get_cmake_dir())")`
+(`mymyr.get_include()` is the header directory). The C++ package is a source-level interface: rebuild consumers when
+mymyr changes, and use the C++ standard library the install was built with. The plain-C API (`mymyr/ext.h`) is the
+stable binary interface. `tests/cmake_consumer/` is a complete example.
+
 ## Python
 
 ```bash
