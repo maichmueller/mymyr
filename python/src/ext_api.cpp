@@ -1,5 +1,6 @@
 // The provider side of mymyr/ext.h: one static function table exported as the capsule mymyr._core._C_API.
 // minor 0: version, hashing, state views. minor 1: tasks, successors, apply, is_goal, atom lookup, state stores.
+// minor 2: numeric tasks (slots, values, metric) and the state-view counterparts of the minor-1 entries.
 
 #include "mymyr/ext.h"
 
@@ -14,6 +15,8 @@
 
 #include <nanobind/nanobind.h>
 
+#include <algorithm>
+#include <cstring>
 #include <new>
 #include <string>
 #include <vector>
@@ -115,13 +118,6 @@ int api_task_from_py(PyObject* obj, mymyr_task_view* out)
     try
     {
         const Task& T = *core->task;
-        if (T.numeric_slots() > 0)
-        {
-            // minor 1 passes states as atom words only: a numeric task's states also carry values
-            PyErr_SetString(PyExc_ValueError, "mymyr task: tasks with numeric fluents are not available through the C API "
-                                              "(its states are atom words only)");
-            return -1;
-        }
         out->task = reinterpret_cast<const mymyr_task*>(core);
         out->uid = T.uid();
         out->fingerprint = T.fingerprint();
@@ -147,7 +143,7 @@ int64_t api_successors(const mymyr_task* t, const uint64_t* words, uint32_t num_
     try
     {
         const Task& T = *core_of(t)->task;
-        if (!assigned_only(T, words, num_words))
+        if (T.numeric_slots() > 0 || !assigned_only(T, words, num_words))
             return -1;
         Successors& succ = T.workspace().successors();
         LineVector<u64> tmp;  // per-thread hot scratch (see LineAllocator)
@@ -175,7 +171,7 @@ int64_t api_apply(const mymyr_task* t, const uint64_t* words, uint32_t num_words
     try
     {
         const Task& T = *core_of(t)->task;
-        if (!assigned_only(T, words, num_words) || schema >= T.num_schemas() ||
+        if (T.numeric_slots() > 0 || !assigned_only(T, words, num_words) || schema >= T.num_schemas() ||
             arity != T.data().schemas[schema].arity())
             return -1;
         Successors& succ = T.workspace().successors();
@@ -202,7 +198,7 @@ int api_is_goal(const mymyr_task* t, const uint64_t* words, uint32_t num_words)
     try
     {
         const Task& T = *core_of(t)->task;
-        if (!assigned_only(T, words, num_words))
+        if (T.numeric_slots() > 0 || !assigned_only(T, words, num_words))
             return -1;
         return T.is_goal(StateView{words, num_words, nullptr, 0}) ? 1 : 0;
     }
@@ -245,7 +241,7 @@ mymyr_store* api_store_new(const mymyr_task* t)
     try
     {
         const TaskPtr& task = core_of(t)->task;
-        return new (std::nothrow) mymyr_store{task, FlatStateStore(std::max<u32>(1, task->words()))};
+        return new (std::nothrow) mymyr_store{task, FlatStateStore(std::max<u32>(1, task->words()), 16, task->numeric_words())};
     }
     catch (...)
     {
@@ -259,6 +255,8 @@ int64_t api_store_insert(mymyr_store* s, const uint64_t* words, uint32_t num_wor
 {
     try
     {
+        if (s->task->numeric_slots() > 0)
+            return -1;
         const auto [id, is_new] = s->store.insert(words, num_words);
         if (inserted)
             *inserted = is_new ? 1 : 0;
@@ -272,6 +270,8 @@ int64_t api_store_insert(mymyr_store* s, const uint64_t* words, uint32_t num_wor
 
 int64_t api_store_lookup(const mymyr_store* s, const uint64_t* words, uint32_t num_words)
 {
+    if (s->task->numeric_slots() > 0)
+        return -1;
     const StateId id = s->store.find(StateView{words, num_words, nullptr, 0});
     return id.valid() ? static_cast<int64_t>(id.v) : -1;
 }
@@ -286,6 +286,227 @@ const uint64_t* api_store_state(const mymyr_store* s, uint64_t id, uint32_t* num
 }
 
 uint64_t api_store_size(const mymyr_store* s) { return s->store.size(); }
+
+// ------------------------------------------------------------------------------------------------ minor 2
+
+StateView view_of(const mymyr_state_view& s)
+{
+    return StateView{s.words, s.num_words, s.num_numeric ? static_cast<const u64*>(s.numeric) : nullptr, s.num_numeric};
+}
+
+// A view that matches the task: its numeric words are the task's, and it sets no atom slot the task has not assigned.
+bool fits(const Task& T, const mymyr_state_view* s)
+{
+    return s && s->num_numeric == T.numeric_words() && (s->num_numeric == 0 || s->numeric) &&
+           (s->num_words == 0 || s->words) && assigned_only(T, s->words, s->num_words);
+}
+
+int api_task_numeric(const mymyr_task* t, mymyr_numeric_view* out)
+{
+    try
+    {
+        const Task& T = *core_of(t)->task;
+        out->slots = T.numeric_slots();
+        out->words = T.numeric_words();
+        out->storage = T.numeric_storage() == NumericStorage::I32 ? 1 : 0;
+        switch (core_of(t)->costs().kind())
+        {
+            case heuristics::ActionCosts::Kind::Unit: out->metric = 0; break;
+            case heuristics::ActionCosts::Kind::TotalCost: out->metric = 1; break;
+            case heuristics::ActionCosts::Kind::StateMetric: out->metric = 2; break;
+        }
+        return 0;
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int32_t api_numeric_slot_name(const mymyr_task* t, uint32_t slot, char* buf, uint32_t capacity)
+{
+    try
+    {
+        const Task& T = *core_of(t)->task;
+        if (slot >= T.numeric_slots())
+            return -1;
+        const std::string name = T.numeric_name(slot);
+        if (capacity > 0)
+        {
+            const size_t n = std::min<size_t>(name.size(), capacity - 1);
+            std::memcpy(buf, name.data(), n);
+            buf[n] = '\0';
+        }
+        return static_cast<int32_t>(name.size());
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int64_t api_numeric_slot(const mymyr_task* t, const char* name)
+{
+    try
+    {
+        const u32 slot = core_of(t)->numeric_slot(name);
+        return slot == ~u32{0} ? -1 : static_cast<int64_t>(slot);
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int32_t api_numeric_values(const mymyr_task* t, const mymyr_state_view* st, double* out, uint32_t capacity)
+{
+    const Task& T = *core_of(t)->task;
+    if (!st || st->num_numeric != T.numeric_words() || (st->num_numeric && !st->numeric))
+        return -1;
+    const plan::Numeric& N = T.numeric();
+    const u64* num = static_cast<const u64*>(st->numeric);
+    for (u32 i = 0; i < N.slots && i < capacity; ++i)
+        out[i] = plan::load(N, num, i);
+    return static_cast<int32_t>(N.slots);
+}
+
+int api_metric_initial(const mymyr_task* t, const mymyr_state_view* st, double* g)
+{
+    try
+    {
+        if (!fits(*core_of(t)->task, st))
+            return -1;
+        *g = core_of(t)->costs().initial(view_of(*st));
+        return 0;
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int64_t api_successors_state(const mymyr_task* t, const mymyr_state_view* st, double g, mymyr_emit_state_fn emit, void* ctx)
+{
+    try
+    {
+        PyTaskCore& core = *core_of(t);
+        const Task& T = *core.task;
+        if (!fits(T, st))
+            return -1;
+        const heuristics::ActionCosts& costs = core.costs();
+        const StateView s = view_of(*st);
+        Successors& succ = T.workspace().successors();
+        LineVector<u64> tmp;  // per-thread hot scratch (see LineAllocator)
+        int64_t n = 0;
+        succ.prepare(s);
+        succ.generate<true>(
+            [&](u32 schema, const ObjectId* b, const Delta& d) -> bool
+            {
+                const u32 k = apply_delta(s.w, s.nw, d, tmp);
+                ++n;
+                const mymyr_state_view v{tmp.data(), k, d.nnum, d.nnum ? d.num : nullptr, T.uid()};
+                return emit(ctx, schema, reinterpret_cast<const uint32_t*>(b), succ.arity(schema), &v, costs.next(g, d)) == 0;
+            },
+            false, true);
+        return n;
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int64_t api_apply_state(const mymyr_task* t, const mymyr_state_view* st, double g, uint32_t schema, const uint32_t* binding,
+                        uint32_t arity, uint64_t* out_words, uint32_t words_capacity, uint64_t* out_numeric, double* out_g)
+{
+    try
+    {
+        PyTaskCore& core = *core_of(t);
+        const Task& T = *core.task;
+        if (!fits(T, st) || schema >= T.num_schemas() || arity != T.data().schemas[schema].arity() ||
+            (T.numeric_words() && !out_numeric))
+            return -1;
+        Successors& succ = T.workspace().successors();
+        const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding), arity}};
+        const StateView s = view_of(*st);
+        if (!succ.is_applicable(s, label))
+            return -1;
+        StateBuilder b;
+        const Delta d = succ.apply_with_delta(s, label, b);
+        if (out_g)
+            *out_g = core.costs().next(g, d);
+        const u32 n = bits::trimmed_size(b.words().data(), static_cast<u32>(b.words().size()));
+        if (n <= words_capacity)
+        {
+            for (u32 i = 0; i < n; ++i)
+                out_words[i] = b.words()[i];
+            for (u32 i = 0; i < T.numeric_words(); ++i)
+                out_numeric[i] = b.numeric()[i];
+        }
+        return n;
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int api_is_goal_state(const mymyr_task* t, const mymyr_state_view* st)
+{
+    try
+    {
+        const Task& T = *core_of(t)->task;
+        if (!fits(T, st))
+            return -1;
+        return T.is_goal(view_of(*st)) ? 1 : 0;
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+uint64_t api_state_hash(const mymyr_state_view* st) { return view_of(*st).hash(); }
+
+int api_state_equal(const mymyr_state_view* a, const mymyr_state_view* b) { return view_of(*a) == view_of(*b) ? 1 : 0; }
+
+int64_t api_store_insert_state(mymyr_store* s, const mymyr_state_view* st, int* inserted)
+{
+    try
+    {
+        if (!fits(*s->task, st))
+            return -1;
+        const auto [id, is_new] = s->store.insert(view_of(*st));
+        if (inserted)
+            *inserted = is_new ? 1 : 0;
+        return id.v;
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int64_t api_store_lookup_state(const mymyr_store* s, const mymyr_state_view* st)
+{
+    if (!fits(*s->task, st))
+        return -1;
+    const StateId id = s->store.find(view_of(*st));
+    return id.valid() ? static_cast<int64_t>(id.v) : -1;
+}
+
+int api_store_state_view(const mymyr_store* s, uint64_t id, mymyr_state_view* out)
+{
+    if (id >= s->store.size())
+        return -1;
+    const StateId sid{static_cast<u32>(id)};
+    out->words = s->store.words(sid);
+    out->num_words = s->store.stride();
+    out->num_numeric = s->store.numeric_words();
+    out->numeric = s->store.numeric_words() ? s->store.numeric(sid) : nullptr;
+    out->task_uid = s->task->uid();
+    return 0;
+}
 
 const mymyr_api k_api = {
     MYMYR_EXT_ABI_VERSION,
@@ -311,6 +532,20 @@ const mymyr_api k_api = {
     &api_store_lookup,
     &api_store_state,
     &api_store_size,
+    // minor 2
+    &api_task_numeric,
+    &api_numeric_slot_name,
+    &api_numeric_slot,
+    &api_numeric_values,
+    &api_metric_initial,
+    &api_successors_state,
+    &api_apply_state,
+    &api_state_hash,
+    &api_state_equal,
+    &api_is_goal_state,
+    &api_store_insert_state,
+    &api_store_lookup_state,
+    &api_store_state_view,
 };
 }  // namespace
 
