@@ -10,7 +10,8 @@
  * downstream rebuild (mimir's six modules sharing NB_DOMAIN had to be rebuilt in lockstep).
  *
  * Minor versions: 0 = version, hashing, state views. 1 = tasks (task_from_py), successors, apply, is_goal, atom
- * lookup, state stores; state_from_py accepts mymyr.State.
+ * lookup, state stores; state_from_py accepts mymyr.State. 2 = numeric tasks: numeric slots and values, action costs
+ * (the metric), and successors / apply / is_goal / stores over states that carry numeric values.
  *
  * Compatibility rules:
  *   - The table is append-only. New entries go at the end and bump MYMYR_EXT_MINOR. A consumer built against a newer
@@ -30,7 +31,7 @@ extern "C" {
 #endif
 
 #define MYMYR_EXT_ABI_VERSION 1
-#define MYMYR_EXT_MINOR 1
+#define MYMYR_EXT_MINOR 2
 #define MYMYR_EXT_CAPSULE_NAME "mymyr._core._C_API"
 
 /* A state's words (little-endian u64, atom slot i at word i >> 6, bit i & 63; missing words read as zero). */
@@ -67,6 +68,21 @@ typedef struct mymyr_task_view
     uint32_t atom_mode;   /* 0 lazy slots, 1 frozen (slot = canonical id) */
 } mymyr_task_view;
 
+/* minor 2 ------------------------------------------------------------------------------------------------------ */
+
+typedef struct mymyr_numeric_view
+{
+    uint32_t slots;   /* numeric slots (ground fluent functions with an initial value); 0 for a classical task */
+    uint32_t words;   /* numeric u64 words per state: slots (storage 0) or ceil(slots / 2) (storage 1) */
+    uint32_t storage; /* 0: one IEEE double per word (its bit pattern); 1: two int32 per word, slot 2k in the low half */
+    uint32_t metric;  /* 0: unit costs, 1: total-cost effects, 2: the problem's metric expression */
+} mymyr_numeric_view;
+
+/* Called once per successor by successors_state(), in canonical order: the action (schema and full binding as for
+ * mymyr_emit_fn), the successor state and its metric value. Return nonzero to stop the enumeration. */
+typedef int (*mymyr_emit_state_fn)(void* ctx, uint32_t schema, const uint32_t* binding, uint32_t arity,
+                                   const mymyr_state_view* succ, double metric);
+
 /* Called once per successor by successors(), in canonical order (schema, then binding). The binding lists the
  * schema's full parameter list; succ holds the successor's trimmed words. All pointers are valid during the call only.
  * Return nonzero to stop the enumeration. */
@@ -100,7 +116,9 @@ typedef struct mymyr_api
      * apply or is_goal of the same task on its own thread. Stores are single-threaded (one per thread). */
 
     /* Fills *out from a mymyr.Task, TaskHandle, State or Action (its task). Returns 0, or -1 with a Python exception
-     * set (ValueError for a task with numeric fluents: the functions below take atom words only). */
+     * set. Numeric tasks are accepted, but the entries of this minor take atom words only: on a task with numeric
+     * slots (task_numeric, minor 2) successors, apply, is_goal, store_insert and store_lookup return -1; use their
+     * *_state counterparts. */
     int (*task_from_py)(PyObject* obj, mymyr_task_view* out);
     /* Enumerates the applicable actions of a state and their successors (witness pruning off). Returns the number of
      * successors emitted, or -1 if the state sets atom slots the task has not assigned. */
@@ -128,6 +146,56 @@ typedef struct mymyr_api
     /* Words of state `id` (*num_words set), valid until the next insert; NULL for an unknown id. */
     const uint64_t* (*store_state)(const mymyr_store* store, uint64_t id, uint32_t* num_words);
     uint64_t (*store_size)(const mymyr_store* store);
+
+    /* minor 2: numeric tasks (check MYMYR_API_HAS(api, store_state_view) first). The thread rules of minor 1 apply.
+     *
+     * A numeric task's state is its atom words plus its numeric words (mymyr_state_view.numeric, task_numeric().words
+     * of them, the encoding of numeric_values below): the *_state entries take and return states as
+     * mymyr_state_view, and a view whose num_numeric is not the task's word count is rejected with -1. They also work
+     * on classical tasks (no numeric words).
+     *
+     * Metric. A search's path cost is the metric value g of mimir: the initial state has metric_initial; the
+     * successor of a state with value g has the value the emit callback / apply_state report. Without total-cost and
+     * without a metric every action costs 1 (g' = g + 1); with total-cost g' applies the fired total-cost effects to
+     * g; with a metric g' is the metric expression evaluated on the successor. The action cost is g' - g. */
+
+    /* The numeric part of a task: always succeeds (a classical task has slots == 0). */
+    int (*task_numeric)(const mymyr_task* task, mymyr_numeric_view* out);
+    /* Writes the name "(function o1 ... ok)" of a numeric slot into buf as a NUL-terminated string, truncated to
+     * `capacity` bytes. Returns the full length without the NUL, or -1 for a slot the task does not have. */
+    int32_t (*numeric_slot_name)(const mymyr_task* task, uint32_t slot, char* buf, uint32_t capacity);
+    /* Slot of the name numeric_slot_name returns, or -1 if no slot has it. */
+    int64_t (*numeric_slot)(const mymyr_task* task, const char* name);
+    /* Writes the value of every numeric slot of the state, in slot order, into out (at most `capacity` of them) and
+     * returns the number of slots, or -1 if the state's numeric words do not fit the task. */
+    int32_t (*numeric_values)(const mymyr_task* task, const mymyr_state_view* state, double* out, uint32_t capacity);
+    /* Metric value g of the initial state `state` (see above). Returns 0, or -1 if the state does not fit the task. */
+    int (*metric_initial)(const mymyr_task* task, const mymyr_state_view* state, double* g);
+    /* successors for any task: enumerates the applicable actions of a state whose metric value is g, in canonical
+     * order, with each successor (words trimmed, numeric words) and its metric value. The views passed to emit are
+     * valid during the call only. Returns the number of successors emitted, or -1 as successors does. */
+    int64_t (*successors_state)(const mymyr_task* task, const mymyr_state_view* state, double g, mymyr_emit_state_fn emit,
+                                void* ctx);
+    /* apply for any task: writes the successor's trimmed words into out_words (nothing is written, and nothing in
+     * out_numeric either, if they exceed words_capacity: call again with that much room), its numeric words into
+     * out_numeric (task_numeric().words of them; may be NULL for a classical task) and its metric value into
+     * *out_g (may be NULL). Returns the successor's trimmed width in words, or -1 as apply does. */
+    int64_t (*apply_state)(const mymyr_task* task, const mymyr_state_view* state, double g, uint32_t schema,
+                           const uint32_t* binding, uint32_t arity, uint64_t* out_words, uint32_t words_capacity,
+                           uint64_t* out_numeric, double* out_g);
+    /* Hash of a state over its trimmed words and its numeric words (hash_words of the words alone for a classical
+     * task): equal for states that state_equal says are equal. */
+    uint64_t (*state_hash)(const mymyr_state_view* state);
+    /* 1 if both states have equal words (missing words read as zero) and bitwise equal numeric words. */
+    int (*state_equal)(const mymyr_state_view* a, const mymyr_state_view* b);
+    /* is_goal for any task: the atoms and the numeric goal constraints. */
+    int (*is_goal_state)(const mymyr_task* task, const mymyr_state_view* state);
+    /* store_insert / store_lookup keyed on atoms and numeric values (store_new covers numeric tasks). */
+    int64_t (*store_insert_state)(mymyr_store* store, const mymyr_state_view* state, int* inserted);
+    int64_t (*store_lookup_state)(const mymyr_store* store, const mymyr_state_view* state);
+    /* Fills *out with state `id` of the store (words padded to the store's width, numeric words), valid until the
+     * next insert; task_uid is the store's task. Returns 0, or -1 for an unknown id. */
+    int (*store_state_view)(const mymyr_store* store, uint64_t id, mymyr_state_view* out);
 } mymyr_api;
 
 #define MYMYR_API_HAS(api, field) (offsetof(mymyr_api, field) + sizeof(((mymyr_api*)0)->field) <= (api)->size)

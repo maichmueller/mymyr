@@ -12,6 +12,7 @@
 #include "formalism_task.hpp"
 #include "typing.hpp"
 
+#include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/rl/task_suite.hpp"
 #include "mymyr/rl/task_table.hpp"
@@ -70,13 +71,34 @@ public:
         return m_suite;
     }
 
+    /// The task's action costs (heuristics::ActionCosts), made on first use.
+    [[nodiscard]] const heuristics::ActionCosts& costs()
+    {
+        std::call_once(m_costs_once, [this] { m_costs = std::make_unique<heuristics::ActionCosts>(*task); });
+        return *m_costs;
+    }
+    /// Numeric slot of a name "(function o1 ... ok)" (Task::numeric_name), or ~0 if no slot has it.
+    [[nodiscard]] u32 numeric_slot(const std::string& name)
+    {
+        std::call_once(m_slots_once,
+                       [this]
+                       {
+                           for (u32 i = 0; i < task->numeric_slots(); ++i)
+                               m_slots.emplace(task->numeric_name(i), i);
+                       });
+        const auto it = m_slots.find(name);
+        return it == m_slots.end() ? ~u32{0} : it->second;
+    }
+
     /// State of the CUDA backend for this task (cuda_bindings.cpp: default contexts, device expanders), created on
     /// first use under cuda_mutex; released with the task.
     std::mutex cuda_mutex;
     std::shared_ptr<void> cuda;
 
 private:
-    std::once_flag m_names_once, m_table_once, m_suite_once;
+    std::once_flag m_names_once, m_table_once, m_suite_once, m_costs_once, m_slots_once;
+    std::unique_ptr<heuristics::ActionCosts> m_costs;
+    std::unordered_map<std::string, u32> m_slots;
     NameIndex m_names;
     rl::TaskTablePtr m_table;
     rl::TaskSuitePtr m_suite;
