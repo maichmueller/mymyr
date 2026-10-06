@@ -51,7 +51,7 @@ jobs:
       - name: Build the dependencies
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          g++ --version | head -1
+          g++ --version | sed -n 1p
           cmake -S dependencies -B build/deps -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
           cmake --build build/deps
@@ -79,7 +79,7 @@ jobs:
       - uses: ./.github/actions/test-data
       - name: Configure
         run: |
-          g++ --version | head -1
+          g++ --version | sed -n 1p
           cmake -S . -B build/cpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
       - name: Build
@@ -276,9 +276,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain
         run: |
-          xcodebuild -version | head -1
-          clang++ --version | head -1
-          cmake --version | head -1
+          xcodebuild -version | sed -n 1p
+          clang++ --version | sed -n 1p
+          cmake --version | sed -n 1p
       - name: Restore the dependency prefix
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
