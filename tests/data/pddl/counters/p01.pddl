@@ -1,0 +1,6 @@
+(define (problem counters-p01) (:domain counters)
+ (:objects a b - counter)
+ (:init (= (value a) 0) (= (value b) 1) (= (step a) 1) (= (step b) 2) (= (limit) 5) (= (total-cost) 0))
+ (:goal (and (done)))
+ (:metric minimize (total-cost))
+)

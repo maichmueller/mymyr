@@ -1,0 +1,24 @@
+name: Test data
+description: Fetch the benchmark data of the parity tests (cached) and export where the test suites find it.
+
+runs:
+  using: composite
+  steps:
+    - name: Restore cached test data
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ github.workspace }}/.ci-data
+        key: test-data-${{ hashFiles('ci/fetch_test_data.sh') }}
+
+    - name: Fetch test data
+      shell: bash
+      run: ci/fetch_test_data.sh "$GITHUB_WORKSPACE/.ci-data"
+
+    - name: Export the data locations
+      shell: bash
+      run: |
+        {
+          echo "MYMYR_FORK_DATA=$GITHUB_WORKSPACE/.ci-data/mimir-fork/data"
+          echo "MYMYR_IPC=$GITHUB_WORKSPACE/.ci-data/mimir-fork/data/ipc"
+          echo "MYMYR_WORK=$GITHUB_WORKSPACE/.ci-data/work"
+        } >> "$GITHUB_ENV"

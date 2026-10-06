@@ -1,0 +1,191 @@
+O 7
+P 21
+S 1 object
+S 1 place
+S 1 sandwich
+S 1 bread-portion
+S 1 tray
+S 1 child
+S 1 content-portion
+S 1 number
+S 1 no_gluten_bread
+S 1 no_gluten_content
+S 1 allergic_gluten
+S 1 not_allergic_gluten
+S 2 waiting
+F 1 at_kitchen_bread
+F 1 at_kitchen_content
+F 1 at_kitchen_sandwich
+F 2 ontray
+F 1 no_gluten_sandwich
+F 1 served
+F 2 at
+F 1 notexist
+N 0
+SI 18
+0 0
+1 0
+0 1
+5 1
+0 2
+4 2
+0 3
+2 3
+0 4
+3 4
+0 5
+6 5
+0 6
+1 6
+8 4
+9 5
+10 1
+12 1 6
+FI 4
+19 2 0
+13 4
+14 5
+20 3
+NI 0
+G 1
+18 1 1
+NG 0
+M none
+A 6
+make_sandwich_no_gluten 3
+L 11
+0 1 0
+2 1 0
+0 1 1
+3 1 1
+0 1 2
+6 1 2
+8 1 1
+9 1 2
+13 1 1
+14 1 2
+20 1 0
+NC 0
+E 1
+0
+L 0
+NC 0
+F 5
+13 0 1
+14 0 2
+15 1 0
+17 1 0
+20 0 0
+NE 0
+NA -
+make_sandwich 3
+L 9
+0 1 0
+2 1 0
+0 1 1
+3 1 1
+0 1 2
+6 1 2
+13 1 1
+14 1 2
+20 1 0
+NC 0
+E 1
+0
+L 0
+NC 0
+F 4
+13 0 1
+14 0 2
+15 1 0
+20 0 0
+NE 0
+NA -
+put_on_tray 2
+L 6
+0 1 0
+2 1 0
+0 1 1
+4 1 1
+15 1 0
+19 1 1 -1
+NC 0
+E 1
+0
+L 0
+NC 0
+F 2
+15 0 0
+16 1 0 1
+NE 0
+NA -
+serve_sandwich_no_gluten 4
+L 13
+0 1 0
+2 1 0
+0 1 1
+0 1 2
+4 1 2
+5 1 1
+0 1 3
+1 1 3
+10 1 1
+12 1 1 3
+17 1 0
+16 1 0 2
+19 1 2 3
+NC 0
+E 1
+0
+L 0
+NC 0
+F 2
+16 0 0 2
+18 1 1
+NE 0
+NA -
+serve_sandwich 4
+L 12
+0 1 0
+2 1 0
+0 1 1
+0 1 2
+4 1 2
+5 1 1
+0 1 3
+1 1 3
+12 1 1 3
+11 1 1
+16 1 0 2
+19 1 2 3
+NC 0
+E 1
+0
+L 0
+NC 0
+F 2
+16 0 0 2
+18 1 1
+NE 0
+NA -
+move_tray 3
+L 8
+0 1 0
+4 1 0
+0 1 1
+1 1 1
+0 1 2
+1 1 2
+19 1 0 1
+19 0 0 2
+NC 0
+E 1
+0
+L 0
+NC 0
+F 2
+19 0 0 1
+19 1 0 2
+NE 0
+NA -
+X 0

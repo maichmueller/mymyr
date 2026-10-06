@@ -1,0 +1,15 @@
+# TSan suppressions for running the free-threaded pytest stress test against a TSan build of mymyr._core.
+# CPython 3.14t and NumPy are not instrumented: they synchronize through their
+# own atomics and PyMutex (a parking lot), which TSan cannot see, so their internals and nanobind's instance map
+# (sharded, each shard guarded by a PyMutex) produce reports without a real race. Nothing here names mymyr code.
+race:tsl::detail_robin_hash
+race:tsl::rh::power_of_two_growth_policy
+race:inst_dealloc
+race:_PyObjectStack_Pop
+race:dictresize
+race:PyArrayIdentityHash_GetItem
+# thread-local bytecode copies are made under a PyMutex
+race:create_tlbc_lock_held
+# the free-threaded GC traverses objects while the other threads are stopped (stop-the-world, invisible to TSan)
+race:nb_bound_method_traverse
+race:gc_free_threading.c

@@ -1,0 +1,93 @@
+O 3
+P 4
+S 1 counter
+S 1 number
+S 1 object
+S 2 =
+N 4
+S 0 max_int
+F 1 value
+F 1 rate_value
+A 0 total-cost
+SI 9
+2 0
+0 0
+2 1
+0 1
+2 2
+0 2
+3 0 0
+3 1 1
+3 2 2
+FI 0
+NI 7
+0 6
+1 -1 0
+1 -2 0
+1 -3 0
+2 -1 0
+2 -2 0
+2 -3 0
+G 0
+NG 2
+<= 3 f 1 -1 c 1 + 1 f 1 -2
+<= 3 f 1 -2 c 1 + 1 f 1 -3
+M none
+A 4
+increment 1
+L 2
+2 1 0
+0 1 0
+NC 1
+<= 3 f 1 0 f 2 0 + 1 s 0
+E 1
+0
+L 0
+NC 0
+F 0
+NE 1
+increase 1 0 1 f 2 0
+NA increase 1 c 1
+decrement 1
+L 2
+2 1 0
+0 1 0
+NC 1
+>= 3 f 1 0 f 2 0 - 1 c 0
+E 1
+0
+L 0
+NC 0
+F 0
+NE 1
+decrease 1 0 1 f 2 0
+NA increase 1 c 1
+increase_rate 1
+L 2
+2 1 0
+0 1 0
+NC 1
+<= 3 f 2 0 c 1 + 1 c 10
+E 1
+0
+L 0
+NC 0
+F 0
+NE 1
+increase 2 0 1 c 1
+NA increase 1 c 1
+decrement_rate 1
+L 2
+2 1 0
+0 1 0
+NC 1
+>= 1 f 2 0 1 c 1
+E 1
+0
+L 0
+NC 0
+F 0
+NE 1
+decrease 2 0 1 c 1
+NA increase 1 c 1
+X 0

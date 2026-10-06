@@ -1,0 +1,70 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "nanobind>=3.1,<4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "mymyr"
+version = "0.1.0"
+description = "Data-oriented, lifted-first classical planning core with free-threaded Python bindings"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+dependencies = ["numpy>=2.3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "nanobind>=3.1,<4"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.24"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["python/mymyr"]
+
+[tool.scikit-build.cmake.define]
+MYMYR_PYTHON = "ON"
+MYMYR_TESTS = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+
+[tool.cibuildwheel]
+# free-threaded CPython only; Linux wheels are x86_64 manylinux, macOS wheels are arm64
+build = ["cp314t-*", "cp315t-*"]
+skip = ["*musllinux*"]
+build-verbosity = 1
+test-requires = ["pytest>=8", "nanobind>=3.1,<4"]
+# The CPU test suite against the installed wheel, with the benchmark data fetched next to it.
+before-test = "bash {project}/ci/fetch_test_data.sh /tmp/mymyr-test-data"
+test-command = [
+    "python -c \"import importlib.metadata as m, mymyr; assert mymyr.__version__ == m.version('mymyr'), (mymyr.__version__, m.version('mymyr'))\"",
+    "python {project}/ci/run_pytest.py -W error -q -rs -p no:cacheprovider {project}/tests/python",
+]
+
+[tool.cibuildwheel.test-environment]
+MYMYR_FORK_DATA = "/tmp/mymyr-test-data/mimir-fork/data"
+MYMYR_IPC = "/tmp/mymyr-test-data/mimir-fork/data/ipc"
+MYMYR_WORK = "/tmp/mymyr-test-data/work"
+CUDA_VISIBLE_DEVICES = ""
+JAX_PLATFORMS = "cpu"
+
+# GCC 16 comes from conda-forge, built against glibc 2.34: the wheels target manylinux_2_34. The
+# compiler and the dependency superbuild live in /opt/mymyr-toolchain, which CI mounts from a cache.
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64@sha256:e4ca528d41ab66b3654110295d7a2c7bfa599ddbb6efb269ec21f7f73b88f1b6"
+before-all = "bash {package}/ci/wheel_toolchain.sh /opt/mymyr-toolchain"
+repair-wheel-command = "auditwheel show {wheel} && auditwheel repair -w {dest_dir} {wheel}"
+
+[tool.cibuildwheel.linux.environment]
+CC = "/opt/mymyr-toolchain/gcc/bin/x86_64-conda-linux-gnu-gcc"
+CXX = "/opt/mymyr-toolchain/gcc/bin/x86_64-conda-linux-gnu-g++"
+CMAKE_ARGS = "-DMYMYR_DEPS_PREFIX=/opt/mymyr-toolchain/deps"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+before-all = "bash {package}/ci/wheel_toolchain.sh $HOME/mymyr-toolchain"
+
+[tool.cibuildwheel.macos.environment]
+MACOSX_DEPLOYMENT_TARGET = "15.0"
+CMAKE_ARGS = "-DMYMYR_DEPS_PREFIX=$HOME/mymyr-toolchain/deps"

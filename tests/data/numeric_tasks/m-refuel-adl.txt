@@ -1,0 +1,85 @@
+O 5
+P 7
+S 1 fuel-station
+S 1 location
+S 1 number
+S 1 vehicle
+S 1 object
+F 2 at
+D 0 axiom_0
+N 2
+S 0 fuel-level-max
+F 1 fuel-level
+SI 11
+4 0
+3 0
+4 1
+3 1
+4 2
+3 2
+4 3
+1 3
+4 4
+1 4
+0 4
+FI 3
+5 0 4
+5 1 3
+5 2 3
+NI 4
+0 3
+1 -1 0
+1 -2 1
+1 -3 2
+G 1
+6 0
+NG 0
+M none
+A 2
+drive-vehicle 3
+L 7
+4 1 0
+3 1 0
+4 1 1
+1 1 1
+4 1 2
+1 1 2
+5 1 0 1
+NC 1
+> 1 f 1 0 1 c 0
+E 1
+0
+L 0
+NC 0
+F 2
+5 0 0 1
+5 1 0 2
+NE 1
+decrease 1 0 1 c 1
+NA -
+fuel-vehicle 2
+L 6
+4 1 0
+3 1 0
+4 1 1
+1 1 1
+0 1 1
+5 1 0 1
+NC 1
+< 1 f 1 0 1 s 0
+E 1
+0
+L 0
+NC 0
+F 0
+NE 1
+increase 1 0 1 c 1
+NA -
+X 1
+6 1
+H
+L 2
+4 1 0
+3 1 0
+NC 1
+!= 1 f 1 0 1 s 0

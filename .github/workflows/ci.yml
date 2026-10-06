@@ -1,0 +1,327 @@
+name: CI
+
+# The Linux CPU jobs (GCC 16: build, ctest, Python) run on every push that changes more than Markdown files.
+# The CUDA compile-only and sanitizer jobs run on pull requests, main and manual runs; the macOS job on pull
+# requests to main, main, tags and manual runs. A pull request from a branch of this repository skips the
+# jobs its push already ran.
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # uv's cache and the virtual environments are on different file systems in the containers: copy without
+  # first trying hard links (and without the notice that the fallback prints)
+  UV_LINK_MODE: copy
+
+jobs:
+  # The dependency superbuild, built once per pin and compiler and restored by the jobs below.
+  deps:
+    name: Dependencies
+    runs-on: ubuntu-24.04
+    container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
+    timeout-minutes: 90
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cmake ninja-build git ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the dependency prefix
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-deps/release
+          key: deps-release-gcc16.1-${{ hashFiles('dependencies/CMakeLists.txt') }}
+      - name: Build the dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          g++ --version | head -1
+          cmake -S dependencies -B build/deps -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
+          cmake --build build/deps
+
+  # CPU build without warnings, then the C++ tests.
+  build-test:
+    name: Linux GCC 16, build and ctest
+    needs: deps
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
+    timeout-minutes: 60
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cmake ninja-build git ca-certificates python3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the dependency prefix
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-deps/release
+          key: deps-release-gcc16.1-${{ hashFiles('dependencies/CMakeLists.txt') }}
+          fail-on-cache-miss: true
+      - uses: ./.github/actions/test-data
+      - name: Configure
+        run: |
+          g++ --version | head -1
+          cmake -S . -B build/cpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
+      - name: Build
+        run: cmake --build build/cpu 2>&1 | tee build/cpu/build.log
+      - name: Check for warnings
+        run: ci/check_no_warnings.sh build/cpu/build.log
+      - name: ctest
+        run: |
+          cd build/cpu
+          ctest -j "$(nproc)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
+      - name: Check the ctest counts
+        run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+
+  # The Python suite against the installed package.
+  python:
+    name: Linux GCC 16, Python ${{ matrix.python }}
+    needs: deps
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.14t", "3.15t"]
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cmake ninja-build git ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the dependency prefix
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-deps/release
+          key: deps-release-gcc16.1-${{ hashFiles('dependencies/CMakeLists.txt') }}
+          fail-on-cache-miss: true
+      - uses: ./.github/actions/test-data
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.6
+          enable-cache: false
+      - name: Install CPython ${{ matrix.python }}
+        run: |
+          uv python install ${{ matrix.python }}
+          uv venv --python ${{ matrix.python }} .venv
+          .venv/bin/python -VV
+          .venv/bin/python -c "import sys; assert not sys._is_gil_enabled(), 'not a free-threaded build'"
+      - name: Build and install the package
+        # $GITHUB_WORKSPACE, not the github.workspace expression: in a container job the expression gives the
+        # host path, which only action inputs (the cache paths above) translate into the container
+        run: |
+          CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/release" \
+            uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
+      - name: Check for warnings
+        run: ci/check_no_warnings.sh build.log
+      - name: Test
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          JAX_PLATFORMS: cpu
+        run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+
+  # The CUDA backend compiles without a GPU to run it on (about 35 minutes for PTX). Pull requests compile PTX
+  # for sm_80 (the front end and all template instantiations); main and manual runs also assemble SASS for sm_80
+  # and sm_90, where ptxas needs about half an hour for the largest translation unit.
+  cuda-build:
+    name: Linux CUDA 13 compile-only, ${{ matrix.name }}
+    needs: deps
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '{"include":[{"name":"PTX sm_80","archs":"80-virtual"},{"name":"SASS sm_80 and sm_90","archs":"80;90"}]}' || '{"include":[{"name":"PTX sm_80","archs":"80-virtual"}]}') }}
+    steps:
+      - name: Install build tools and the CUDA toolkit
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cmake ninja-build git ca-certificates curl
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i /tmp/cuda-keyring.deb
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cuda-nvcc-13-1 cuda-cudart-dev-13-1 cuda-cccl-13-1 libcurand-dev-13-1
+          /usr/local/cuda-13.1/bin/nvcc --version | tail -2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the dependency prefix
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-deps/release
+          key: deps-release-gcc16.1-${{ hashFiles('dependencies/CMakeLists.txt') }}
+          fail-on-cache-miss: true
+      - name: Configure
+        run: |
+          cmake -S . -B build/cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release" \
+            -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc \
+            -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.archs }}"
+      - name: Build
+        run: cmake --build build/cuda 2>&1 | tee build/cuda/build.log
+      - name: Check for warnings
+        run: ci/check_no_warnings.sh build/cuda/build.log
+
+  # AddressSanitizer with UndefinedBehaviorSanitizer (dependencies built with ASan, which the front end needs)
+  # and ThreadSanitizer, on the C++ tests.
+  sanitize:
+    name: Linux GCC 16, ${{ matrix.name }}
+    needs: deps
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    container:
+      image: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
+      # the sanitizer runtimes need ptrace (leak checking) and personality (address space layout)
+      options: --cap-add SYS_PTRACE --security-opt seccomp=unconfined
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan and UBSan
+            sanitize: address;undefined
+            deps: asan
+            flags: -fsanitize=address -fno-omit-frame-pointer
+            options: detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1
+          - name: TSan
+            sanitize: thread
+            deps: release
+            flags: ""
+            options: second_deadlock_stack=1
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends cmake ninja-build git ca-certificates python3
+          # the container's path of the prefix (the github.workspace expression gives the host path)
+          echo "DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/${{ matrix.deps }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the dependency prefix
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-deps/${{ matrix.deps }}
+          key: deps-${{ matrix.deps }}-gcc16.1-${{ hashFiles('dependencies/CMakeLists.txt') }}
+      - name: Build the sanitized dependencies
+        if: matrix.deps == 'asan' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          CFLAGS: ${{ matrix.flags }}
+          CXXFLAGS: ${{ matrix.flags }}
+          LDFLAGS: -fsanitize=address
+          # the Spirit X3 parsers of loki need several GB per compiler process under ASan
+          CMAKE_BUILD_PARALLEL_LEVEL: 2
+        run: |
+          cmake -S dependencies -B build/deps -G Ninja -DMYMYR_DEPS_PREFIX="$DEPS_PREFIX"
+          cmake --build build/deps
+      - name: Check the dependency prefix
+        run: |
+          if [ -z "$(find "$DEPS_PREFIX" -name 'lokiConfig.cmake' 2>/dev/null)" ]; then
+            echo "error: no loki package in $DEPS_PREFIX (the dependency build or its cache is incomplete)" >&2
+            exit 1
+          fi
+      - uses: ./.github/actions/test-data
+      - name: Configure
+        run: |
+          cmake -S . -B build/san -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMYMYR_BENCH=OFF \
+            -DMYMYR_DEPS_PREFIX="$DEPS_PREFIX" -DMYMYR_SANITIZE="${{ matrix.sanitize }}" \
+            -DMYMYR_DEPS_SANITIZED=${{ matrix.deps == 'asan' && 'ON' || 'OFF' }}
+      - name: Build
+        run: cmake --build build/san 2>&1 | tee build/san/build.log
+      - name: Check for warnings
+        run: ci/check_no_warnings.sh build/san/build.log
+      - name: ctest
+        env:
+          ASAN_OPTIONS: ${{ matrix.options }}
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: ${{ matrix.options }}
+        run: |
+          cd build/san
+          ctest -j "$(nproc)" --timeout 1800 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
+      - name: Check the ctest counts
+        run: python3 ci/check_ctest_log.py build/san/ctest.log
+
+  # Apple Silicon: the CPU build, ctest and the Python suite.
+  macos:
+    name: macOS arm64
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain
+        run: |
+          xcodebuild -version | head -1
+          clang++ --version | head -1
+          cmake --version | head -1
+      - name: Restore the dependency prefix
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-deps/release
+          key: deps-macos-arm64-${{ hashFiles('dependencies/CMakeLists.txt') }}
+      - name: Build the dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S dependencies -B build/deps -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
+          cmake --build build/deps
+      - uses: ./.github/actions/test-data
+      - name: Configure
+        run: |
+          cmake -S . -B build/cpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
+      - name: Build
+        run: cmake --build build/cpu 2>&1 | tee build/cpu/build.log
+      - name: Report warnings
+        run: ci/check_no_warnings.sh build/cpu/build.log --report-only
+      - name: ctest
+        run: |
+          cd build/cpu
+          ctest -j "$(sysctl -n hw.ncpu)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
+      - name: Check the ctest counts
+        run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.6
+          enable-cache: false
+      - name: Install CPython 3.14t
+        run: |
+          uv python install 3.14t
+          uv venv --python 3.14t .venv
+          .venv/bin/python -c "import sys; assert not sys._is_gil_enabled(), 'not a free-threaded build'"
+      - name: Build and install the package
+        env:
+          CMAKE_ARGS: -DMYMYR_DEPS_PREFIX=${{ github.workspace }}/.ci-deps/release
+        run: uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
+      - name: Report warnings
+        run: ci/check_no_warnings.sh build.log --report-only
+      - name: Test
+        env:
+          JAX_PLATFORMS: cpu
+        run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python

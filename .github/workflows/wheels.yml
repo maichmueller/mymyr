@@ -1,0 +1,128 @@
+name: Wheels
+
+# CPU wheels for free-threaded CPython 3.14 and 3.15 (Linux x86_64 manylinux_2_34, macOS arm64) and the
+# source distribution. Every wheel is tested with the CPU suite by cibuildwheel (see [tool.cibuildwheel] in
+# pyproject.toml). Pull requests that touch the packaging build the Linux wheels only; a manual run builds the
+# macOS wheels when asked (macOS runners bill about ten times the Linux minutes); the release workflow calls
+# this workflow for all of them.
+on:
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: Also build the macOS arm64 wheels
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      macos:
+        description: Also build the macOS arm64 wheels
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - pyproject.toml
+      - CMakeLists.txt
+      - python/**
+      - dependencies/**
+      - ci/**
+      - .github/workflows/wheels.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    name: Linux wheel, ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [cp314t, cp315t]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # GCC 16 and the dependency superbuild, installed by ci/wheel_toolchain.sh inside the build container
+      # and mounted into it from this cache.
+      - name: Restore the toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ci-toolchain
+          key: wheel-toolchain-linux-${{ hashFiles('ci/wheel_toolchain.sh', 'dependencies/CMakeLists.txt') }}
+      - name: Prepare the toolchain mount
+        run: mkdir -p .ci-toolchain
+      - name: Build and test the wheel
+        uses: pypa/cibuildwheel@adba99c781d3746d38b3a09b1cf797965bcb7fe6 # v4.3.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-manylinux_x86_64
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume ${{ github.workspace }}/.ci-toolchain:/opt/mymyr-toolchain"
+      - name: Show the wheel's platform tag
+        run: |
+          python3 -m pip install --quiet auditwheel
+          for w in wheelhouse/*.whl; do
+            echo "$w"
+            auditwheel show "$w"
+          done
+          ls wheelhouse/*manylinux_2_34_x86_64.whl
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-linux-${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: macOS wheel, ${{ matrix.python }}
+    if: inputs.macos
+    runs-on: macos-26
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: [cp314t, cp315t]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore the dependency prefix
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/mymyr-toolchain
+          key: wheel-toolchain-macos-${{ hashFiles('ci/wheel_toolchain.sh', 'dependencies/CMakeLists.txt') }}
+      - name: Build and test the wheel
+        uses: pypa/cibuildwheel@adba99c781d3746d38b3a09b1cf797965bcb7fe6 # v4.3.0
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-macosx_arm64
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-macos-${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: 0.12.6
+          enable-cache: false
+      - name: Build the sdist
+        run: uv build --sdist --out-dir dist
+      - name: List the sdist
+        run: |
+          ls -l dist
+          tar tzf dist/*.tar.gz | head -40
+          tar tzf dist/*.tar.gz | grep -q -E '^[^/]+/CMakeLists.txt$'
+          tar tzf dist/*.tar.gz | grep -q -E '^[^/]+/dependencies/CMakeLists.txt$'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error

@@ -1,0 +1,19 @@
+# nanobind stubgen patterns for the mymyr._core stubs (python/CMakeLists.txt). Each entry is a regular expression
+# searched in the qualified name of a stub entry, followed by its indented replacement ('\1' refers to a group).
+
+# Comparisons return NotImplemented for other types, so they accept any object.
+\.(__eq__|__ne__)$:
+    def \1(self, other: object, /) -> bool: ...
+
+# Pickling: (the mymyr._pickle restore function, its arguments).
+\.__reduce__$:
+    def __reduce__(self) -> tuple[object, ...]: ...
+
+# The capsule of the C API (mymyr/ext.h).
+^mymyr\._core\._C_API$:
+    \import types
+    _C_API: types.CapsuleType
+
+# stubgen skips __version__.
+^mymyr\._core\.__suffix__$:
+    __version__: str

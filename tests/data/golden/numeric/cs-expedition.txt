@@ -1,0 +1,136 @@
+O 8
+P 6
+S 1 waypoint
+S 1 number
+S 1 sled
+S 1 object
+S 2 is_next
+F 2 at
+N 3
+S 1 sled_capacity
+F 1 sled_supplies
+F 1 waypoint_supplies
+SI 21
+3 0
+2 0
+3 1
+2 1
+3 2
+0 2
+3 3
+0 3
+3 4
+0 4
+3 5
+0 5
+3 6
+0 6
+3 7
+0 7
+4 2 3
+4 3 4
+4 4 5
+4 5 6
+4 6 7
+FI 2
+5 0 2
+5 1 2
+NI 10
+0 -1 4
+0 -2 4
+1 -1 1
+2 -3 1000
+2 -4 0
+2 -5 0
+2 -6 0
+2 -7 0
+2 -8 0
+1 -2 1
+G 2
+5 1 0 7
+5 1 1 7
+NG 0
+M none
+A 4
+move_forwards 3
+L 8
+3 1 0
+2 1 0
+3 1 1
+0 1 1
+3 1 2
+0 1 2
+4 1 1 2
+5 1 0 1
+NC 1
+>= 1 f 1 0 1 c 1
+E 1
+0
+L 0
+NC 0
+F 2
+5 0 0 1
+5 1 0 2
+NE 1
+decrease 1 0 1 c 1
+NA -
+move_backwards 3
+L 8
+3 1 0
+2 1 0
+3 1 1
+0 1 1
+3 1 2
+0 1 2
+4 1 2 1
+5 1 0 1
+NC 1
+>= 1 f 1 0 1 c 1
+E 1
+0
+L 0
+NC 0
+F 2
+5 0 0 1
+5 1 0 2
+NE 1
+decrease 1 0 1 c 1
+NA -
+store_supplies 2
+L 5
+3 1 0
+2 1 0
+3 1 1
+0 1 1
+5 1 0 1
+NC 1
+>= 1 f 1 0 1 c 1
+E 1
+0
+L 0
+NC 0
+F 0
+NE 2
+decrease 1 0 1 c 1
+increase 2 1 1 c 1
+NA -
+retrieve_supplies 2
+L 5
+3 1 0
+2 1 0
+3 1 1
+0 1 1
+5 1 0 1
+NC 2
+>= 1 f 2 1 1 c 1
+> 1 s 0 0 1 f 1 0
+E 1
+0
+L 0
+NC 0
+F 0
+NE 2
+increase 1 0 1 c 1
+decrease 2 1 1 c 1
+NA -
+X 0

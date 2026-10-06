@@ -1,0 +1,71 @@
+O 2
+P 5
+S 1 farm
+S 1 number
+S 1 object
+S 2 adj
+S 2 =
+N 2
+F 1 x
+F 0 cost
+SI 8
+2 0
+0 0
+2 1
+0 1
+3 0 1
+3 1 0
+4 0 0
+4 1 1
+FI 0
+NI 3
+0 -1 600
+0 -2 1
+1 0
+G 0
+NG 3
+>= 1 f 0 -1 1 c 1
+>= 1 f 0 -2 1 c 1
+>= 9 c 1 f 0 -1 * c 1.7 f 0 -2 * c 0 + + 1 c 840
+M none
+A 2
+move-fast 2
+L 6
+2 1 0
+0 1 0
+2 1 1
+0 1 1
+4 0 0 1
+3 1 0 1
+NC 1
+>= 1 f 0 0 1 c 4
+E 1
+0
+L 0
+NC 0
+F 0
+NE 3
+increase 1 1 c 1
+increase 0 1 1 c 2
+decrease 0 0 1 c 4
+NA -
+move-slow 2
+L 6
+2 1 0
+0 1 0
+2 1 1
+0 1 1
+4 0 0 1
+3 1 0 1
+NC 1
+>= 1 f 0 0 1 c 1
+E 1
+0
+L 0
+NC 0
+F 0
+NE 2
+increase 0 1 1 c 1
+decrease 0 0 1 c 1
+NA -
+X 0

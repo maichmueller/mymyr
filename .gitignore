@@ -68,7 +68,17 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# mymyr analysis: gitignored work dir (clones, venvs, builds) and probe binaries
+# gitignored work dir (clones, venvs, builds) for the fork and other external dependencies
 .work/
 __pycache__/
-analysis
+
+# local environments
+.venv/
+
+# dependency superbuild output
+dependencies/installs/
+
+# CI caches and packaging output
+.ci-*/
+wheelhouse/
+dist/

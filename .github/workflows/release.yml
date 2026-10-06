@@ -1,0 +1,105 @@
+name: Release
+
+# A tag v<version> builds the wheels and the sdist, checks the tag against the package version in
+# pyproject.toml and creates a GitHub Release with them. Publishing to TestPyPI and PyPI (trusted publishing)
+# happens only when the repository variables PUBLISH_TESTPYPI and PUBLISH_PYPI are set to 'true'.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag must be v<version of pyproject.toml>
+        id: version
+        run: python3 ci/check_release_version.py "$GITHUB_REF_NAME"
+
+  wheels:
+    name: Wheels and sdist
+    needs: check
+    uses: ./.github/workflows/wheels.yml
+    permissions:
+      contents: read
+
+  github-release:
+    name: GitHub Release
+    needs: [check, wheels]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Every artifact carries the tag's version
+        run: |
+          ls -l dist
+          python3 ci/check_release_version.py "$GITHUB_REF_NAME" dist
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/*
+          prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: [check, wheels]
+    if: ${{ vars.PUBLISH_TESTPYPI == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/mymyr
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [check, wheels, github-release, publish-testpypi]
+    # TestPyPI is optional; when it runs, it must have succeeded.
+    if: ${{ !cancelled() && vars.PUBLISH_PYPI == 'true' && needs.github-release.result == 'success' && (needs.publish-testpypi.result == 'success' || needs.publish-testpypi.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mymyr
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
