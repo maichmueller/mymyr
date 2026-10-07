@@ -29,7 +29,9 @@ struct ActionWriter
     u8 touched[k_max_words];
     u64 adds[k_max_words], dels[k_max_words];
     u8 aux_family = 0;
+    f64 aux_value = 0;
     bool valid = true;
+    bool missing_atom = false;
 
     __device__ bool group(u32 id, const u32* bind)
     {
@@ -58,8 +60,10 @@ struct ActionWriter
             if (aux_family && (aux_family != f || f == 1))
                 return false;
             aux_family = f;
-            if (std::isnan(numeric_eval(n, g[3], g[4], row + p.words, bind, t.num_objects)))
+            const f64 value = numeric_eval(n, g[3], g[4], row + p.words, bind, t.num_objects);
+            if (std::isnan(value))
                 return false;
+            aux_value = numeric_assign(g[2], aux_value, value);
         }
         return true;
     }
@@ -72,6 +76,7 @@ struct ActionWriter
             const u32 slot = slot_of(t, key);
             if (slot == k_none)
             {
+                missing_atom |= add;
                 if (add && out.missing_bits && key < t.fluent_total)
                 {
                     atomicOr(out.missing_bits + (key >> 5), 1u << (key & 31));
@@ -106,6 +111,7 @@ struct ActionWriter
                 saved[i] = values[i];
                 saved_touch[i] = touched[i];
             }
+            const f64 saved_aux = aux_value;
             const bool ok = group(meta[0], bind);
             bool fires = false;
             auto emit = [&](const u32* b) { fires = true; ce_literals(id, b); };
@@ -113,11 +119,14 @@ struct ActionWriter
             if (fires)
                 valid &= ok;
             else
+            {
+                aux_value = saved_aux;
                 for (u32 i = 0; i < t.numeric.slots; ++i)
                 {
                     values[i] = saved[i];
                     touched[i] = saved_touch[i];
                 }
+            }
         }
         else
         {
@@ -149,6 +158,7 @@ struct ActionWriter
             adds[i] = dels[i] = 0;
         valid = true;
         aux_family = 0;
+        missing_atom = false;
         literal(sc[k_sc_adds], sc[k_sc_adds_n], bind, true);
         literal(sc[k_sc_dels], sc[k_sc_dels_n], bind, false);
         const u32* ns = t.numeric.schema + u64{schema} * 2;
@@ -301,6 +311,78 @@ __global__ void successors(TaskView t, Parents p, Views v, SchemaSet set, const 
     }
 }
 
+template<u32 OW>
+__global__ void ground_labels(TaskView t, Parents p, Views v, kernels::DeviceLabels labels, u8* applicable,
+                             u64* successors, u32 out_words, u32* status, u32* error)
+{
+    const u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x;
+    if (i >= labels.count) return;
+    u32 bind[k_max_depth];
+    const u32 parent = labels.state_index[i], schema = labels.schema[i];
+    bool ok = parent < p.rows && schema < t.num_schemas;
+    const u32* sc = ok ? t.schema + u64{schema} * k_sc_count : nullptr;
+    ok &= sc && sc[k_sc_arity] <= k_max_depth && sc[k_sc_arity] <= labels.width;
+    if (ok)
+        for (u32 j = 0; j < sc[k_sc_arity]; ++j)
+        {
+            bind[j] = labels.binding[i * labels.width + j];
+            ok &= bind[j] < t.num_objects;
+        }
+    u32 code = k_none;
+    if (ok)
+    {
+        const u64* row = p.data + u64{parent} * p.stride;
+        const u64* derived = p.derived ? p.derived + u64{parent} * p.derived_words : nullptr;
+        ok = is_applicable(t, schema, bind, row, p.words, derived, p.derived_words);
+        const u32* matcher = t.numeric.matcher + u64{sc[k_sc_pre1]} * 8;
+        for (u32 j = 0; j < matcher[1] && ok; ++j)
+            ok = numeric_holds(t.numeric, matcher[0] + j, row + p.words, bind, t.num_objects);
+        for (u32 j = 0; j < matcher[3] && ok; ++j)
+            ok = numeric_holds(t.numeric, matcher[2] + j, row + p.words, bind, t.num_objects);
+        const SuccessorRows out{successors, out_words};
+        ActionWriter<OW> writer{t, p, v, out, row, derived, schema, parent, error};
+        if (ok) ok = writer.collect(bind);
+        if (ok)
+        {
+            code = k_apply_ok;
+            if (successors)
+            {
+                if (writer.missing_atom) code = k_apply_no_slot;
+                else
+                    for (u32 w = out_words - t.numeric.slots; w < k_max_words; ++w)
+                        if (((w < p.words ? row[w] : 0) & ~writer.dels[w]) | writer.adds[w])
+                            code = k_apply_width;
+                if (code == k_apply_ok) writer.put(i);
+            }
+        }
+    }
+    if (applicable) applicable[i] = ok;
+    if (status) status[i] = code;
+    if (successors && code != k_apply_ok)
+        for (u32 w = 0; w < out_words; ++w) successors[i * out_words + w] = 0;
+}
+
+template<u32 OW>
+__global__ void costs(TaskView t, Metric metric, Parents p, Views v, Labels labels, const f64* parent_g,
+                      u64 n, f64* next_g, u32* error)
+{
+    const u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const u32 parent = labels.parent[i], schema = labels.schema[i];
+    const u64* row = p.data + u64{parent} * p.stride;
+    const u64* derived = p.derived ? p.derived + u64{parent} * p.derived_words : nullptr;
+    ActionWriter<OW> writer{t, p, v, {}, row, derived, schema, parent, error};
+    writer.aux_value = parent_g[parent];
+    if (!writer.collect(labels.binding + i * labels.label_width))
+    {
+        atomicOr(error, 2u);
+        return;
+    }
+    next_g[i] = metric.kind == 0 ? parent_g[parent] + 1 :
+                metric.kind == 1 ? writer.aux_value :
+                numeric_eval(t.numeric, metric.begin, metric.end, writer.values, nullptr, t.num_objects);
+}
+
 __global__ void goals(TaskView t, Parents p, u32* count, const u32* order, u64 n, u8* flags)
 {
     const u64 index = u64{blockIdx.x} * blockDim.x + threadIdx.x;
@@ -376,6 +458,33 @@ cudaError_t launch_write(TaskView t, Parents p, Views v, SchemaSet schemas, cons
                          SuccessorRows out, u32* error, cudaStream_t stream)
 {
     return launch<true>(t, p, v, schemas, offsets, nullptr, labels, out, error, stream);
+}
+cudaError_t launch_labels(TaskView t, Parents p, Views v, kernels::DeviceLabels labels, u8* applicable,
+                          u64* successors, u32 out_words, u32* status, u32* error, cudaStream_t stream)
+{
+    if (!labels.count) return cudaSuccess;
+    if (successors && out_words < t.numeric.slots) return cudaErrorInvalidValue;
+    switch (t.ow)
+    {
+#define RUN(OW) case OW: ground_labels<OW><<<grid(labels.count), block, 0, stream>>>(t, p, v, labels, applicable, successors, out_words, status, error); break
+        RUN(1); RUN(2); RUN(3); RUN(4); RUN(5); RUN(6); RUN(7); RUN(8);
+#undef RUN
+        default: return cudaErrorInvalidValue;
+    }
+    return cudaGetLastError();
+}
+cudaError_t launch_costs(TaskView t, Metric metric, Parents p, Views v, Labels labels, const f64* parent_g,
+                         u64 n, f64* next_g, u32* error, cudaStream_t stream)
+{
+    if (!n) return cudaSuccess;
+    switch (t.ow)
+    {
+#define RUN(OW) case OW: costs<OW><<<grid(n), block, 0, stream>>>(t, metric, p, v, labels, parent_g, n, next_g, error); break
+        RUN(1); RUN(2); RUN(3); RUN(4); RUN(5); RUN(6); RUN(7); RUN(8);
+#undef RUN
+        default: return cudaErrorInvalidValue;
+    }
+    return cudaGetLastError();
 }
 cudaError_t launch_goals(TaskView t, Parents p, u32* count, const u32* order, u64 n, u8* flags, cudaStream_t stream)
 {

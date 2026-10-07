@@ -110,7 +110,7 @@ struct SuiteExpander::Impl
         u64 present = 0;
         for (u32 k = 0; k < D; ++k)
             present += per[k] ? 1 : 0;
-        runs = n == 0 || h[suitek::k_changes] + 1 == present;
+        runs = !suite->numeric() && (n == 0 || h[suitek::k_changes] + 1 == present);
         parts.clear();
         const u64* g = nullptr;
         if (runs)
@@ -136,14 +136,14 @@ struct SuiteExpander::Impl
             for (u32 k = 0; k < D; ++k)
                 if (per[k])
                 {
-                    const u32 w = std::max<u32>(1, std::min(in.words, suite->table(k)->words()));
+                    const u32 w = suite->table(k)->numeric() ? in.words : std::max<u32>(1, std::min(in.words, suite->table(k)->words()));
                     parts.push_back({k, at, per[k], 0, 0, w, rows_at});
                     at += per[k];
-                    rows_at += u64{per[k]} * w;
+                    rows_at += u64{per[k]} * (w + suite->table(k)->numeric_words());
                 }
             auto* gw = scratch_of<u64>(gathered, ctx, rows_at, s);
             for (const Part& p : parts)
-                check(lifted::launch_gather_rows(in.data, stride, p.words, n, di + p.first, p.rows, gw + p.rows_at, s),
+                check(lifted::launch_gather_rows(in.data, stride, p.words + suite->table(p.domain)->numeric_words(), n, di + p.first, p.rows, gw + p.rows_at, s),
                       "launch_gather_rows");
             g = gw;
         }
@@ -153,7 +153,8 @@ struct SuiteExpander::Impl
         for (Part& p : parts)
         {
             const rl::StateBatchView v = runs ? rl::StateBatchView{in.data + p.first * stride, p.rows, in.words, stride, 0}
-                                              : rl::StateBatchView{g + p.rows_at, p.rows, p.words, p.words, 0};
+                                              : rl::StateBatchView{g + p.rows_at, p.rows, p.words, p.words + suite->table(p.domain)->numeric_words(),
+                                                                   suite->table(p.domain)->numeric_words()};
             p.total = subs[p.domain]->count(v, dl + p.first, o);
             p.base = total;
             total += p.total;
@@ -317,10 +318,10 @@ u64 SuiteExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::E
     I.counted = false;
     if (in.rows && !in.data)
         throw std::invalid_argument("mymyr: expand: null state buffer");
-    if (in.stride && in.stride < in.words)
+    if (in.stride && in.stride < in.words + in.numeric_words)
         throw std::invalid_argument("mymyr: expand: row stride smaller than the row width");
-    if (in.numeric_words)
-        throw std::invalid_argument("mymyr: device expand: numeric rows (the device runs classical tables only)");
+    if (in.numeric_words != I.suite->numeric_words())
+        throw std::invalid_argument("mymyr: device expand: input numeric width differs from the suite");
     if (in.rows > k_i32_max)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
     if (in.words > lifted::k_max_words)
@@ -330,7 +331,7 @@ u64 SuiteExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::E
         throw std::invalid_argument("mymyr: expand: a batch over a suite of " + std::to_string(I.suite->size()) +
                                     " instances needs task ids");
     I.in = in;
-    I.stride = in.stride ? in.stride : in.words;
+    I.stride = in.stride ? in.stride : in.words + in.numeric_words;
     const u64 total = I.count_domains(task_ids, opt);
     I.counted = true;
     return total;
@@ -359,8 +360,8 @@ void SuiteExpander::write(rl::Expansion& out)
     if (out.succ && out.words > lifted::k_max_words)
         throw std::invalid_argument("mymyr: device expand: successor rows of " + std::to_string(out.words) +
                                     " words (the device kernels take at most " + std::to_string(lifted::k_max_words) + ")");
-    if (out.numeric_words)
-        throw std::invalid_argument("mymyr: device expand: numeric rows (the device runs classical tables only)");
+    if (out.numeric_words != I.suite->numeric_words())
+        throw std::invalid_argument("mymyr: device expand: output numeric width differs from the suite");
     if (out.offsets && I.total > k_i32_max)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     if (I.runs)

@@ -21,6 +21,7 @@
 //     straight at their batch positions at the suite's widths (DeviceExpander::write with a RowMap; zero words and -1
 //     labels past the domain's): a Multi domain's successor kernel puts each row at its batch row, a Single or
 //     PerInstance domain expands into scratch and scatters it.
+// Numeric suites gather each domain's rows with the shared atom boundary and pad numeric tails to the suite's width.
 // Each domain's expander runs its own mode on its rows (Single, Multi or PerInstance; cuda/expand.hpp).
 //
 // Destination-passing as DeviceExpander; one SuiteExpander serves one thread at a time.

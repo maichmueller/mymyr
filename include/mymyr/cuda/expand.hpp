@@ -55,8 +55,8 @@ public:
         PerInstance,  // each instance's rows apart
     };
 
-    /// Throws std::invalid_argument for tasks beyond ChunkGenerator::unsupported limits; tables with several numeric
-    /// instances require a numeric device table format. Numeric rows use the task's CPU encoding at the public boundary.
+    /// Throws std::invalid_argument for tasks beyond ChunkGenerator::unsupported limits. Numeric rows use each
+    /// instance's CPU encoding, padded to the table's numeric width at the public boundary.
     DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStream_t stream = nullptr);
     ~DeviceExpander();
     DeviceExpander(const DeviceExpander&) = delete;

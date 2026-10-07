@@ -187,6 +187,10 @@ public:
     /// interned in canonical-id order and the views and axioms rerun (a synchronization per chunk).
     void views();
     [[nodiscard]] const lifted::Parents& parents() const noexcept { return m_parents; }
+    [[nodiscard]] lifted::Views parent_views() const noexcept
+    {
+        return {static_cast<u64*>(m_views.data()), m_view_words};
+    }
     /// The goal test of the chunk's parents into out[0] (count, added) and out[1] (first goal row, min): device u32s.
     void goal_count(u32* out);
     /// Counts and scans: seg_offsets() [rows * S + 1] holds every (state, schema) segment's first row; the last entry

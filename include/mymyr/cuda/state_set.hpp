@@ -51,6 +51,9 @@ struct Live
 /// result[c] for the live candidates c of [0, n) (rows of cand, same width as the arena rows).
 cudaError_t launch_insert(Table t, Rows arena, Rows cand, u64 n, u32* result, cudaStream_t s, Live live = {});
 
+/// Resolves existing rows to arena ids after compact (k_dup when absent).
+cudaError_t launch_lookup(Table t, Rows arena, Rows rows, u64 n, u32* ids, cudaStream_t s);
+
 /// rank[c] for the live candidates c, and rank[live] = rank[n] = the number of new states: the owners among candidates
 /// [0, c) (candidate c is an owner iff rank[c + 1] > rank[c]). rank_temp_bytes(n) is its scratch. The scan
 /// reads the live count on the device (three launches sized for n whose tiles past the live candidates exit at once:

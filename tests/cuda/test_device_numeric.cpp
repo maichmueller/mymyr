@@ -1,5 +1,12 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/brfs.hpp"
+#include "mymyr/cuda/astar.hpp"
+#include "mymyr/cuda/generator.hpp"
+#include "mymyr/cuda/gbfs.hpp"
+#include "mymyr/cuda/numeric_kernels.hpp"
+#include "mymyr/cuda/suite_expand.hpp"
+#include "mymyr/search/best_first.hpp"
+#include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/cuda/expand.hpp"
 #include "mymyr/cuda/env.hpp"
 #include "mymyr/cuda/rollouts.hpp"
@@ -259,6 +266,126 @@ void compare_env_and_rollouts(const cuda::ContextPtr& ctx, const TaskPtr& task)
     }
 }
 
+void compare_cost_programs(const cuda::ContextPtr& ctx, TaskPtr task)
+{
+    const auto states = walks(*task);
+    for (const auto kind : {heuristics::Kind::Max, heuristics::Kind::Add, heuristics::Kind::FF})
+    {
+        cuda::DeviceHeuristicOptions options; options.kind = kind;
+        cuda::DeviceHeuristic h(ctx, task, options);
+        const auto values = h.evaluate(states);
+        for (u32 i = 0; i < states.size(); ++i)
+            EXPECT_EQ(values[i], h.reference(states[i].view()));
+    }
+    if (!task->numeric_slots()) return;
+    cuda::ChunkGenerator gen(ctx, task);
+    if (gen.placement(false).host_count) return;
+    const cudaStream_t stream = ctx->stream();
+    const heuristics::ActionCosts costs(*task);
+    for (const State& state : walks(*task))
+    {
+        const u32 W = std::max<u32>(1, task->words()) + task->numeric_slots(), L = gen.label_width();
+        std::vector<u64> row(W);
+        cuda::numeric::encode(*task, state.view(), row.data(), W);
+        cuda::DeviceBuffer input(ctx, W * 8), control(ctx, 8);
+        cuda::check(cudaMemcpyAsync(input.data(), row.data(), W * 8, cudaMemcpyHostToDevice, stream), "cost input");
+        gen.begin({static_cast<const u64*>(input.data()), W, W, 1, row.data(), W}, false, true);
+        gen.views(); gen.count();
+        u32 count = 0;
+        cuda::check(cudaMemcpyAsync(&count, gen.seg_offsets() + gen.num_schemas(), 4, cudaMemcpyDeviceToHost, stream), "cost count");
+        cuda::check(cudaStreamSynchronize(stream), "cost count sync");
+        if (!count) continue;
+        cuda::DeviceBuffer binding(ctx, u64{count} * L * 4), schema(ctx, u64{count} * 4), parent(ctx, u64{count} * 4),
+                           next(ctx, u64{count} * W * 8), pg(ctx, 8), cg(ctx, u64{count} * 8);
+        cuda::lifted::Labels labels{static_cast<u32*>(binding.data()), static_cast<u32*>(schema.data()),
+                                   static_cast<u32*>(parent.data()), count, L};
+        gen.write(labels, static_cast<u64*>(next.data()), W);
+        cuda::DeviceBuffer labelled(ctx, u64{count} * W * 8), status(ctx, u64{count} * 4), applicable(ctx, count);
+        cuda::check(cudaMemsetAsync(control.data(), 0, 8, stream), "label flags");
+        cuda::check(cuda::numeric::launch_labels(gen.view(), gen.parents(), gen.parent_views(),
+            {static_cast<const u32*>(parent.data()), static_cast<const u32*>(schema.data()), static_cast<const u32*>(binding.data()), count, L},
+            static_cast<u8*>(applicable.data()), static_cast<u64*>(labelled.data()), W, static_cast<u32*>(status.data()),
+            static_cast<u32*>(control.data()), stream), "numeric ground labels");
+        EXPECT_EQ(test::to_host<u8>(applicable.data(), count, stream), std::vector<u8>(count, 1));
+        EXPECT_EQ(test::to_host<u32>(status.data(), count, stream), std::vector<u32>(count, 0));
+        EXPECT_EQ(test::to_host<u64>(labelled.data(), u64{count} * W, stream), test::to_host<u64>(next.data(), u64{count} * W, stream));
+        for (const f64 g : {0.0, -0.0, -3.25, 7.0, 0.125, 9007199254740992.0})
+        {
+            cuda::check(cudaMemcpyAsync(pg.data(), &g, 8, cudaMemcpyHostToDevice, stream), "cost parent metric");
+            cuda::check(cudaMemsetAsync(control.data(), 0, 8, stream), "cost flags");
+            cuda::check(cuda::numeric::launch_costs(gen.view(), {static_cast<u32>(costs.kind()),
+                task->compiled().num.metric.begin, task->compiled().num.metric.end}, gen.parents(), gen.parent_views(), labels,
+                static_cast<const f64*>(pg.data()), count, static_cast<f64*>(cg.data()), static_cast<u32*>(control.data()), stream),
+                "cost programs");
+            std::vector<f64> actual(count), expected;
+            auto& succ = task->workspace().successors(); succ.prepare(state.view());
+            succ.generate<false>([&](u32, const ObjectId*, const Delta& delta) { expected.push_back(costs.next(g, delta)); return true; }, false, true);
+            cuda::check(cudaMemcpyAsync(actual.data(), cg.data(), u64{count} * 8, cudaMemcpyDeviceToHost, stream), "cost values");
+            u32 error = 0;
+            cuda::check(cudaMemcpyAsync(&error, control.data(), 4, cudaMemcpyDeviceToHost, stream), "cost error");
+            cuda::check(cudaStreamSynchronize(stream), "cost sync");
+            ASSERT_EQ(error, 0u); ASSERT_EQ(actual.size(), expected.size());
+            for (u32 i = 0; i < count; ++i)
+                EXPECT_EQ(std::bit_cast<u64>(actual[i]), std::bit_cast<u64>(expected[i])) << i << " g=" << g;
+        }
+    }
+}
+
+void compare_best_first(const cuda::ContextPtr& ctx, TaskPtr task, bool complete = false)
+{
+    const bool sanitized = std::getenv("MYMYR_TEST_SANITIZER") != nullptr;
+    for (const auto h : {heuristics::Kind::Blind, heuristics::Kind::Max})
+        for (const bool greedy : {false, true})
+        {
+            cuda::DeviceBestFirstOptions options;
+            options.search.heuristic.kind = h;
+            options.search.control.budget.max_expanded = sanitized && task->numeric_slots() ? 24 : 512;
+            options.search.control.budget.max_states = 20000;
+            const auto expected = greedy ? search::gbfs_eager(*task, options.search) : search::astar_eager(*task, options.search);
+            const auto actual = greedy ? cuda::gbfs(ctx, task, options).result : cuda::astar(ctx, task, options).result;
+            EXPECT_EQ(actual.status, expected.status);
+            EXPECT_EQ(actual.cost, expected.cost);
+            if (!task->numeric_slots()) continue;
+            EXPECT_EQ(actual.plan, expected.plan);
+            EXPECT_EQ(actual.goal_state, expected.goal_state);
+            EXPECT_EQ(actual.stats.states, expected.stats.states);
+            EXPECT_EQ(actual.stats.expanded, expected.stats.expanded);
+            EXPECT_EQ(actual.stats.generated, expected.stats.generated);
+        }
+    if (complete && !sanitized)
+    {
+        cuda::DeviceBestFirstOptions options;
+        options.search.heuristic.kind = heuristics::Kind::Max;
+        options.search.control.budget.max_states = 2'000'000;
+        const auto expected = search::astar_eager(*task, options.search);
+        if (expected.status == search::SearchStatus::Solved)
+        {
+            const auto actual = cuda::astar(ctx, task, options).result;
+            EXPECT_EQ(actual.status, expected.status);
+            EXPECT_EQ(actual.cost, expected.cost);
+            if (task->numeric_slots())
+            {
+                EXPECT_EQ(actual.plan, expected.plan);
+                EXPECT_EQ(actual.goal_state, expected.goal_state);
+                EXPECT_EQ(actual.stats.generated, expected.stats.generated);
+            }
+        }
+    }
+}
+
+TEST_P(DeviceNumeric, CostsAndBestFirstEqualCpu)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    for (const auto storage : {TaskOptions::NumericStorageMode::Auto, TaskOptions::NumericStorageMode::F64})
+    {
+        TaskOptions options; options.numeric_storage = storage;
+        const auto task = task_of(GetParam(), options);
+        compare_cost_programs(ctx, task);
+        compare_best_first(ctx, task, storage == TaskOptions::NumericStorageMode::Auto);
+    }
+}
+
 TEST_P(DeviceNumeric, EnvAndRolloutsEqualCpu)
 {
     if (cuda::device_count() == 0) GTEST_SKIP();
@@ -324,6 +451,11 @@ const char* kDomain = R"(
  (:action ce-families-conflict :parameters () :precondition (and) :effect (and (when (q) (assign (y) 5)) (when (p) (increase (y) 1))))
  (:action fluent-cost :parameters () :precondition (and) :effect (and (increase (y) 1) (increase (total-cost) (x))))
  (:action undefined-cost :parameters () :precondition (and) :effect (and (increase (y) 1) (increase (total-cost) (u))))
+ (:action assign-cost :parameters () :precondition (and) :effect (and (assign (total-cost) (+ (x) 0.125))))
+ (:action decrease-cost :parameters () :precondition (and) :effect (and (decrease (total-cost) (x))))
+ (:action scale-cost-up :parameters () :precondition (and) :effect (and (scale-up (total-cost) (+ (x) 0.25))))
+ (:action scale-cost-down :parameters () :precondition (and) :effect (and (scale-down (total-cost) (+ (x) 0.5))))
+ (:action zero-cost-divisor :parameters () :precondition (and) :effect (and (scale-down (total-cost) (z))))
  (:action conditional-cost :parameters () :precondition (and)
    :effect (and (increase (y) 1) (increase (total-cost) 1) (when (q) (increase (total-cost) 10)) (when (p) (increase (total-cost) 100))))
  (:action numeric-pre :parameters () :precondition (and (>= (x) 1)) :effect (and (increase (y) 1)))
@@ -353,6 +485,7 @@ TEST(DeviceNumericRules, EffectApplicabilityAndCanonicalZeros)
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto ctx = context();
     const auto task = rules_task();
+    compare_cost_programs(ctx, task);
     compare_expand(ctx, task, walks(*task, 16), false, 3);
     compare_expand(ctx, task, walks(*task, 16), true, 3);
 }
@@ -430,6 +563,8 @@ TEST_P(DeviceNumericPddl, ExpandBrfsAndIwEqualCpu)
     const auto ctx = context();
     const auto states = walks(*task);
     compare_env_and_rollouts(ctx, task);
+    compare_cost_programs(ctx, task);
+    compare_best_first(ctx, task, true);
     compare_expand(ctx, task, states, true, 3);
     BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true;
     const auto expected = brfs(*task, cpu);
@@ -519,4 +654,165 @@ TEST(DeviceNumericRules, FiniteStateSpacesEqualCpu)
             ASSERT_TRUE(table.results.front().host);
             compare(*table.results.front().host);
         }
+}
+
+namespace
+{
+TaskPtr instance(u32 objects, TaskOptions::NumericStorageMode storage, TaskOptions::Atoms atoms)
+{
+    const auto domain = frontend::Domain::from_string(R"(
+(define (domain levels)
+ (:requirements :strips :numeric-fluents :conditional-effects :action-costs :negative-preconditions)
+ (:predicates (done ?o))
+ (:functions (x ?o) (total-cost))
+ (:action advance :parameters (?o) :precondition (and (< (x ?o) 2))
+  :effect (and (increase (x ?o) 1) (increase (total-cost) (* (+ (x ?o) 1) 0.125))
+               (when (not (done ?o)) (done ?o)))))
+)", "levels.pddl");
+    std::string problem = "(define (problem p) (:domain levels) (:objects";
+    for (u32 i = 0; i < objects; ++i) problem += " o" + std::to_string(i);
+    problem += ") (:init (= (total-cost) 0)";
+    for (u32 i = 0; i < objects; ++i) problem += " (= (x o" + std::to_string(i) + ") 0)";
+    problem += ") (:goal (and";
+    for (u32 i = 0; i < objects; ++i) problem += " (done o" + std::to_string(i) + ")";
+    problem += ")) (:metric minimize (total-cost)))";
+    TaskOptions options; options.numeric_storage = storage; options.atoms = atoms;
+    return Task::create(*domain->instantiate_string(problem, "levels-problem.pddl"), options);
+}
+
+void mixed_expand(const cuda::ContextPtr& ctx, const rl::TaskSuitePtr& suite, const std::vector<i32>& ids)
+{
+    const cudaStream_t stream = ctx->stream();
+    const u32 W = suite->words(), NN = suite->numeric_words(), RW = W + NN, L = suite->label_width();
+    std::vector<u64> rows(ids.size() * RW);
+    for (u32 i = 0; i < ids.size(); ++i)
+    {
+        suite->initial_row(ids[i], rows.data() + u64{i} * RW, W, NN);
+        const auto states = walks(*suite->task(ids[i]), 4);
+        const State& state = states[i % states.size()];
+        std::fill_n(rows.data() + u64{i} * RW, RW, 0);
+        std::copy(state.words().begin(), state.words().end(), rows.data() + u64{i} * RW);
+        std::copy(state.numeric().begin(), state.numeric().end(), rows.data() + u64{i} * RW + W);
+    }
+    auto input = test::to_device(ctx, rows, stream), tids = test::to_device(ctx, ids, stream);
+    cuda::SuiteExpander expander(ctx, suite); expander.set_chunk_rows(2);
+    u64 count = 0;
+    ASSERT_NO_THROW(count = expander.count({static_cast<const u64*>(input.data()), ids.size(), W, RW, NN}, static_cast<const i32*>(tids.data())));
+    for (u64 capacity : {count, count / 2, u64{0}})
+    {
+        const u64 cap = std::max<u64>(capacity, 1);
+        std::vector<u64> states(cap * RW, 0);
+        std::vector<i32> parent(cap), schema(cap), binding(cap * L), offsets(ids.size() + 1);
+        std::vector<u8> goal(cap);
+        rl::Expansion cpu;
+        cpu.capacity = capacity; cpu.words = W; cpu.numeric_words = NN; cpu.label_width = L;
+        cpu.succ = states.data(); cpu.parent = parent.data(); cpu.schema = schema.data(); cpu.binding = binding.data();
+        cpu.goal = goal.data(); cpu.offsets = offsets.data();
+        rl::expand(*suite, {rows.data(), ids.size(), W, RW, NN}, ids.data(), cpu);
+        ASSERT_EQ(count, cpu.total);
+        auto ds = test::to_device(ctx, states, stream), dp = test::to_device(ctx, std::vector<i32>(cap), stream),
+             dc = test::to_device(ctx, std::vector<i32>(cap), stream), db = test::to_device(ctx, std::vector<i32>(cap * L), stream),
+             dg = test::to_device(ctx, std::vector<u8>(cap), stream), doff = test::to_device(ctx, std::vector<i32>(ids.size() + 1), stream);
+        rl::Expansion gpu = cpu;
+        gpu.succ = static_cast<u64*>(ds.data()); gpu.parent = static_cast<i32*>(dp.data()); gpu.schema = static_cast<i32*>(dc.data());
+        gpu.binding = static_cast<i32*>(db.data()); gpu.goal = static_cast<u8*>(dg.data()); gpu.offsets = static_cast<i32*>(doff.data());
+        expander.write(gpu);
+        EXPECT_EQ(gpu.total, cpu.total); EXPECT_EQ(gpu.words_needed, cpu.words_needed);
+        EXPECT_EQ(test::to_host<u64>(ds.data(), cap * RW, stream), states);
+        if (capacity)
+        {
+            parent.resize(capacity); schema.resize(capacity); binding.resize(capacity * L); goal.resize(capacity);
+            EXPECT_EQ(test::to_host<i32>(dp.data(), capacity, stream), parent);
+            EXPECT_EQ(test::to_host<i32>(dc.data(), capacity, stream), schema);
+            EXPECT_EQ(test::to_host<i32>(db.data(), capacity * L, stream), binding);
+            EXPECT_EQ(test::to_host<u8>(dg.data(), capacity, stream), goal);
+        }
+        EXPECT_EQ(test::to_host<i32>(doff.data(), offsets.size(), stream), offsets);
+        const u32 K = 8;
+        for (u32 extra : {0u, 2u})
+        {
+            std::vector<u64> padded(ids.size() * K * (RW + extra));
+            rl::PaddedExpansion hp; hp.K = K; hp.words = W + extra; hp.numeric_words = NN; hp.succ = padded.data();
+            rl::pad(cpu, ids.size(), hp);
+            auto pd = test::to_device(ctx, std::vector<u64>(padded.size()), stream);
+            rl::PaddedExpansion gd = hp; gd.succ = static_cast<u64*>(pd.data());
+            expander.pad(gpu, ids.size(), gd);
+            EXPECT_EQ(gd.overflow, hp.overflow);
+            EXPECT_EQ(test::to_host<u64>(pd.data(), padded.size(), stream), padded);
+        }
+    }
+    rl::EnvConfig config; config.max_steps = 5; config.seed = 271;
+    cuda::DeviceEnv device(ctx, suite, config);
+    rl::HostEnv host(suite, config);
+    test::HostEnvs h(*suite, ids, false);
+    test::DeviceEnvs d(ctx, device, ids, false);
+    host.reset(h.b, nullptr, h.v.count.data());
+    ASSERT_NO_THROW(device.reset(d.b, nullptr, static_cast<i32*>(d.count.data())));
+    for (u32 step = 0; step < 30; ++step)
+    {
+        host.step(h.b, h.out);
+        ASSERT_NO_THROW(device.step(d.b, d.out));
+        test::expect_equal(d.snapshot(), h.v, step);
+    }
+}
+}  // namespace
+
+TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    {
+        const auto table = rl::TaskTable::create({instance(2, TaskOptions::NumericStorageMode::I32, atoms),
+                                                instance(4, TaskOptions::NumericStorageMode::F64, atoms),
+                                                instance(3, TaskOptions::NumericStorageMode::Auto, atoms)});
+        const std::vector<i32> ids{2, 0, 1, 2, 1, 0, 1, 2};
+        ASSERT_NO_THROW(mixed_expand(ctx, rl::TaskSuite::of(table), ids));
+        const auto suite = rl::TaskSuite::group({table->task(0), task_of("cs-drone"), table->task(1), task_of("m-woodworking"), table->task(2)});
+        ASSERT_NO_THROW(mixed_expand(ctx, suite, {4, 1, 2, 0, 3, 1, 4, 2}));
+        const std::vector<u32> search_ids{2, 0, 1, 2, 1, 0};
+        std::vector<State> starts;
+        for (u32 i : search_ids) starts.push_back(table->task(i)->initial_state());
+        cuda::MultiIwOptions options; options.max_arity = 2;
+        cuda::DeviceTableIw run(ctx, table, options);
+        const auto results = run.run(starts, search_ids);
+        ASSERT_EQ(results.numeric_words, table->numeric_words());
+        const u32 RW = table->words() + table->numeric_words();
+        std::vector<u64> rows(search_ids.size() * RW);
+        for (u32 i = 0; i < search_ids.size(); ++i)
+            rl::TaskSuite::of(table)->initial_row(search_ids[i], rows.data() + u64{i} * RW, table->words(), table->numeric_words());
+        auto ds = test::to_device(ctx, rows, ctx->stream());
+        const auto device_starts = run.run({static_cast<const u64*>(ds.data()), RW, RW, static_cast<u32>(search_ids.size()), table->numeric_words()}, search_ids);
+        const u32 internal_width = table->words() + 4;
+        std::vector<u64> internal(search_ids.size() * internal_width);
+        for (u32 i = 0; i < search_ids.size(); ++i)
+            cuda::numeric::encode(*table->task(search_ids[i]), starts[i].view(), internal.data() + u64{i} * internal_width,
+                                  table->words() + table->task(search_ids[i])->numeric_slots());
+        auto dis = test::to_device(ctx, internal, ctx->stream());
+        const auto internal_starts = run.run({static_cast<const u64*>(dis.data()), internal_width, internal_width,
+                                             static_cast<u32>(search_ids.size()), 0}, search_ids);
+        for (u32 i = 0; i < starts.size(); ++i)
+        {
+            search::IwOptions cpu; cpu.max_arity = 2;
+            const auto expected = search::iw(*table->task(search_ids[i]), cpu);
+            const auto actual = results.result(i, *table->task(search_ids[i]), starts[i], true);
+            const auto actual_device = device_starts.result(i, *table->task(search_ids[i]), starts[i], true);
+            EXPECT_EQ(actual.status, expected.status); EXPECT_EQ(actual.plan, expected.plan);
+            EXPECT_EQ(actual.cost, expected.cost); EXPECT_EQ(actual.goal_state, expected.goal_state);
+            EXPECT_EQ(actual_device.status, expected.status); EXPECT_EQ(actual_device.goal_state, expected.goal_state);
+            EXPECT_EQ(internal_starts.result(i, *table->task(search_ids[i]), starts[i], true).goal_state, expected.goal_state);
+        }
+        datasets::StateSpaceOptions cpu; cpu.remove_if_unsolvable = false;
+        cuda::DeviceStateSpaceOptions gpu; gpu.space = cpu; gpu.output = cuda::StateSpaceOutput::Both;
+        const auto spaces = cuda::state_spaces(ctx, table, gpu);
+        for (u32 i = 0; i < table->size(); ++i)
+        {
+            const auto expected = datasets::generate_state_space(table->task(i), cpu);
+            ASSERT_TRUE(spaces.results[i].host && expected.space);
+            EXPECT_EQ(spaces.results[i].host->num_states(), expected.space->num_states());
+            EXPECT_EQ(spaces.results[i].host->num_transitions(), expected.space->num_transitions());
+            EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->state_words(), expected.space->state_words()));
+            EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->costs(), expected.space->costs()));
+        }
+    }
 }

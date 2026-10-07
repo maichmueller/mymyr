@@ -200,9 +200,11 @@ public:
     DeviceTableIw(const DeviceTableIw&) = delete;
     DeviceTableIw& operator=(const DeviceTableIw&) = delete;
 
-    /// One search per start row (table rows of at most the table's words; read on `stream`, null: the context's
-    /// stream), on instance task_ids[i]. The batch's goal rows and reached atoms are table rows (words = the table's
-    /// words, reached_words the widest instance's); plans are labels of the search's instance.
+    /// One search per start row on instance task_ids[i], read on `stream` (null: the context's stream).
+    /// CPU-encoded rows use the table's atom width and numeric_words; internal rows use the same atom width and
+    /// one double per slot of the widest instance, with numeric_words = 0. Numeric tails are padded across
+    /// instances. Goal rows use the table's CPU encoding; reached atoms use the widest instance's atom width.
+    /// Plans are labels of the search's instance.
     MultiIwBatch run(DeviceStarts starts, std::span<const u32> task_ids, std::span<const search::GoalSpec::AtomGoal> goals = {},
                      std::span<const u64> seeds = {}, cudaStream_t stream = nullptr);
     /// The same from host states (each a state of its instance's task).

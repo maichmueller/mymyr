@@ -317,13 +317,12 @@ struct SmokeInputs
     DeviceInput states, derived;
     WordsLayout w, dw;
     bool has_derived = false;
+    std::shared_ptr<cuda::DeviceBuffer> numeric_rows, numeric_views, numeric_error;
     std::vector<std::shared_ptr<void>> keep;
 };
 
 SmokeInputs smoke_inputs(PyDeviceTask& t, nb::handle states, nb::handle derived, nb::handle stream)
 {
-    if (t.task->numeric_slots())
-        throw nb::value_error("mymyr: numeric device states use rl.expand; the smoke operations accept atom words only");
     SmokeInputs in;
     t.ctx->drain();
     in.os = t.ctx->stream_of(stream);
@@ -345,7 +344,37 @@ SmokeInputs smoke_inputs(PyDeviceTask& t, nb::handle states, nb::handle derived,
         throw nb::value_error("mymyr: the task has axioms: pass derived=<[N, DW] derived words> (e.g. from "
                               "DeviceTask.host_derived); these smoke operations do not evaluate axiom strata "
                               "themselves (the search and expand paths do)");
+    if (t.task->numeric_slots())
+    {
+        const u32 nn = t.task->numeric_words();
+        if (in.w.words <= nn || in.w.rows > 0xFFFFFFFFu)
+            throw nb::value_error("mymyr: malformed numeric smoke state rows");
+        const u32 atoms = in.w.words - nn, rw = atoms + t.task->numeric_slots();
+        if (rw > cuda::lifted::k_max_words || t.task->compiled().max_bind > cuda::lifted::k_max_depth)
+            throw nb::value_error("mymyr: numeric smoke operations exceed the device row or binding limit; use rl.expand");
+        const auto& view = t.dt->acquire(in.os.s);
+        in.numeric_rows = device_output(*t.ctx, in.w.rows * rw * sizeof(u64), in.os);
+        in.numeric_views = device_output(*t.ctx, in.w.rows * view.view_rows * view.ow * sizeof(u64), in.os);
+        in.numeric_error = device_output(*t.ctx, sizeof(u32), in.os);
+        cuda::check(cudaMemsetAsync(in.numeric_error->data(), 0, sizeof(u32), in.os.s), "numeric smoke error");
+        cuda::check(cuda::numeric::launch_convert(view, in.w.data, in.w.stride, atoms,
+            static_cast<u64*>(in.numeric_rows->data()), rw, atoms, in.w.rows, true, in.os.s), "numeric smoke input");
+        in.w.data = static_cast<const u64*>(in.numeric_rows->data()); in.w.words = atoms; in.w.stride = rw;
+        cuda::lifted::Parents parents{in.w.data, rw, atoms, static_cast<u32>(in.w.rows),
+                                     in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0};
+        cuda::check(cuda::lifted::launch_view(view, parents,
+            {static_cast<u64*>(in.numeric_views->data()), u64{view.view_rows} * view.ow}, in.os.s), "numeric smoke views");
+        in.keep.push_back(in.numeric_rows); in.keep.push_back(in.numeric_views); in.keep.push_back(in.numeric_error);
+    }
     return in;
+}
+
+void check_numeric_smoke(const SmokeInputs& in)
+{
+    u32 error = 0;
+    cuda::check(cudaMemcpyAsync(&error, in.numeric_error->data(), sizeof(u32), cudaMemcpyDeviceToHost, in.os.s), "numeric smoke error read");
+    cuda::check(cudaStreamSynchronize(in.os.s), "numeric smoke sync");
+    if (error) throw std::domain_error("mymyr: numeric smoke successor overflows int32 storage");
 }
 
 k::DeviceLabels labels_of(PyDeviceTask& t, SmokeInputs& in, nb::handle state_index, nb::handle schema, nb::handle binding)
@@ -1078,10 +1107,21 @@ void bind_cuda(nb::module_& parent)
                 const k::DeviceLabels l = labels_of(t, in, state_index, schema, binding);
                 const rl::dev::TaskView& v = t.dt->acquire(in.os.s);
                 auto out = device_output(*t.ctx, l.count, in.os);
-                launched(t, in,
-                         k::launch_applicable(v, to_states(in.w), in.has_derived ? in.dw.data : nullptr,
-                                              in.has_derived ? in.dw.words : 0, l, static_cast<u8*>(out->data()), in.os.s),
-                         "applicable");
+                if (t.task->numeric_slots())
+                {
+                    cuda::lifted::Parents p{in.w.data, in.w.stride, in.w.words, static_cast<u32>(in.w.rows),
+                                            in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0};
+                    cuda::check(cuda::numeric::launch_labels(v, p,
+                        {static_cast<u64*>(in.numeric_views->data()), u64{v.view_rows} * v.ow}, l,
+                        static_cast<u8*>(out->data()), nullptr, 0, nullptr, static_cast<u32*>(in.numeric_error->data()), in.os.s), "numeric applicable");
+                    check_numeric_smoke(in);
+                    launched(t, in, cudaSuccess, "numeric applicable");
+                }
+                else
+                    launched(t, in,
+                             k::launch_applicable(v, to_states(in.w), in.has_derived ? in.dw.data : nullptr,
+                                                  in.has_derived ? in.dw.words : 0, l, static_cast<u8*>(out->data()), in.os.s),
+                             "applicable");
                 const auto [fw, enc] = output_kind(in.states, in.w, framework);
                 return export_buffer(out, in.os, rl::DType::Bool, {static_cast<i64>(l.count)}, false, fw, enc);
             },
@@ -1096,13 +1136,33 @@ void bind_cuda(nb::module_& parent)
                 SmokeInputs in = smoke_inputs(t, states, derived, stream);
                 const k::DeviceLabels l = labels_of(t, in, state_index, schema, binding);
                 const rl::dev::TaskView& v = t.dt->acquire(in.os.s);
-                const u32 W = words ? words : std::max(in.w.words, v.state_words);
+                const u32 W = words ? words : std::max(in.w.words, v.state_words) + t.task->numeric_words();
                 auto succ = device_output(*t.ctx, l.count * W * 8, in.os);
                 auto status = device_output(*t.ctx, l.count * 4, in.os);
-                launched(t, in,
-                         k::launch_apply(v, to_states(in.w), in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0,
-                                         l, static_cast<u64*>(succ->data()), W, static_cast<u32*>(status->data()), in.os.s),
-                         "apply");
+                if (t.task->numeric_slots())
+                {
+                    const u32 nn = t.task->numeric_words();
+                    if (W <= nn || W - nn + t.task->numeric_slots() > cuda::lifted::k_max_words)
+                        throw nb::value_error("mymyr: numeric smoke output width exceeds the device limit");
+                    const u32 rw = W - nn + t.task->numeric_slots();
+                    auto internal = device_output(*t.ctx, l.count * rw * sizeof(u64), in.os);
+                    in.keep.push_back(internal);
+                    cuda::lifted::Parents p{in.w.data, in.w.stride, in.w.words, static_cast<u32>(in.w.rows),
+                                            in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0};
+                    cuda::check(cuda::numeric::launch_labels(v, p,
+                        {static_cast<u64*>(in.numeric_views->data()), u64{v.view_rows} * v.ow}, l, nullptr,
+                        static_cast<u64*>(internal->data()), rw, static_cast<u32*>(status->data()),
+                        static_cast<u32*>(in.numeric_error->data()), in.os.s), "numeric apply");
+                    cuda::check(cuda::numeric::launch_convert(v, static_cast<const u64*>(internal->data()), rw, rw - t.task->numeric_slots(),
+                        static_cast<u64*>(succ->data()), W, W - nn, l.count, false, in.os.s), "numeric smoke output");
+                    check_numeric_smoke(in);
+                    launched(t, in, cudaSuccess, "numeric apply");
+                }
+                else
+                    launched(t, in,
+                             k::launch_apply(v, to_states(in.w), in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0,
+                                             l, static_cast<u64*>(succ->data()), W, static_cast<u32*>(status->data()), in.os.s),
+                             "apply");
                 const auto [fw, enc] = output_kind(in.states, in.w, framework);
                 return ArrayPair(nb::make_tuple(
                     export_buffer(succ, in.os, rl::DType::U64, {static_cast<i64>(l.count), static_cast<i64>(W)}, true, fw, enc),
@@ -1110,7 +1170,7 @@ void bind_cuda(nb::module_& parent)
             },
             "states"_a, "state_index"_a, "schema"_a, "binding"_a, "derived"_a = nb::none(), "words"_a = 0,
             "stream"_a = nb::none(), "framework"_a = nb::none(),
-            "Smoke kernel: successors (words) and status per label (0 ok, 1 conditional effects: CPU, 2 no slot, 3 too "
+            "Successors in CPU state encoding and status per label (0 ok, 1 classical conditional effects: CPU, 2 no slot, 3 too "
             "wide, -1 not applicable)")
         .def(
             "goal",
@@ -1118,10 +1178,18 @@ void bind_cuda(nb::module_& parent)
                 SmokeInputs in = smoke_inputs(t, states, derived, stream);
                 const rl::dev::TaskView& v = t.dt->acquire(in.os.s);
                 auto out = device_output(*t.ctx, in.w.rows, in.os);
-                launched(t, in,
-                         k::launch_goal(v, to_states(in.w), in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0,
-                                        static_cast<u8*>(out->data()), in.os.s),
-                         "goal");
+                if (t.task->numeric_slots())
+                {
+                    cuda::lifted::Parents p{in.w.data, in.w.stride, in.w.words, static_cast<u32>(in.w.rows),
+                                            in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0};
+                    launched(t, in, cuda::numeric::launch_goals(v, p, nullptr, nullptr, in.w.rows,
+                                                              static_cast<u8*>(out->data()), in.os.s), "numeric goal");
+                }
+                else
+                    launched(t, in,
+                             k::launch_goal(v, to_states(in.w), in.has_derived ? in.dw.data : nullptr, in.has_derived ? in.dw.words : 0,
+                                            static_cast<u8*>(out->data()), in.os.s),
+                             "goal");
                 const auto [fw, enc] = output_kind(in.states, in.w, framework);
                 return export_buffer(out, in.os, rl::DType::Bool, {static_cast<i64>(in.w.rows)}, false, fw, enc);
             },
@@ -1130,7 +1198,7 @@ void bind_cuda(nb::module_& parent)
         .def(
             "host_derived",
             [](const PyDeviceTask& t, StatesLike states) {
-                StateBatch b = import_states(states, t.task->words());
+                StateBatch b = import_task_states(states, *t.task);
                 const u32 DW = t.task->has_axioms() ? std::max<u32>(1, bits::words_for(t.task->atoms().max_derived_slots())) : 1;
                 auto block = std::make_shared<std::vector<u64>>(b.view.rows * DW, 0);
                 {
@@ -1138,7 +1206,7 @@ void bind_cuda(nb::module_& parent)
                     Successors& succ = t.task->workspace().successors();
                     for (u64 i = 0; i < b.view.rows && t.task->has_axioms(); ++i)
                     {
-                        succ.prepare(StateView{b.view.row(i), b.view.words, nullptr, 0});
+                        succ.prepare(StateView{b.view.row(i), b.view.words, b.view.numeric_words ? b.view.row(i) + b.view.words : nullptr, b.view.numeric_words});
                         const detail::Engine& e = succ.engine();
                         std::copy_n(e.derived(), std::min(e.derived_words(), DW), block->begin() + static_cast<std::ptrdiff_t>(i * DW));
                     }

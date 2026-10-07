@@ -56,6 +56,12 @@ bool full_suite()
     return e && std::string(e) == "1";
 }
 
+bool sanitizer_size()
+{
+    const char* e = std::getenv("MYMYR_TEST_SANITIZER");
+    return e && std::string(e) == "1";
+}
+
 template<class T>
 std::vector<T> to_host(const cuda::DeviceBuffer& d, u64 n, cudaStream_t s)
 {
@@ -279,11 +285,13 @@ TEST_P(DeviceEnvStepSuite, DeviceStepEqualsHostStep)
 {
     SKIP_WITHOUT_GPU();
     const auto& [name, frozen] = GetParam();
-    const u64 N = full_suite() ? 1024 : 256;
-    const int T = full_suite() ? 300 : 60;
+    const u64 N = sanitizer_size() ? 64 : full_suite() ? 1024 : 256;
+    const int T = sanitizer_size() ? 12 : full_suite() ? 300 : 60;
     const auto task = load(name, frozen);
     auto ctx = context();
-    const rl::EnvConfig cfg = config(0x5eed0000 + N, true);
+    rl::EnvConfig cfg = config(0x5eed0000 + N, true);
+    if (sanitizer_size())
+        cfg.max_steps = 5;
     // the device envs: the fast path where the task allows it, and the general path
     std::vector<std::unique_ptr<cuda::DeviceEnv>> envs;
     const std::string why = cuda::DeviceEnv::fast_unsupported(*rl::TaskTable::single(task), cfg);

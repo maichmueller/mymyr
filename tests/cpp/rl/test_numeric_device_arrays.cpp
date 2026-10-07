@@ -99,3 +99,17 @@ TEST(NumericDeviceArrays, ProgramsMatchCpuOnWalkStates)
         }
     }
 }
+
+TEST(NumericDeviceArrays, MetricProgramMetadata)
+{
+    for (const char* name : {"cs-counters", "cs-farmland", "cs-delivery", "cs-delivery-nometric"})
+    {
+        const auto task = numeric_task(name);
+        const auto arrays = rl::device_arrays(*task);
+        const auto& num = task->compiled().num;
+        EXPECT_EQ(arrays.scalar("num_has_aux"), num.has_aux ? 1u : 0u);
+        EXPECT_EQ(arrays.scalar("num_has_metric"), num.has_metric ? 1u : 0u);
+        EXPECT_EQ(arrays.scalar("num_metric_begin"), num.metric.begin);
+        EXPECT_EQ(arrays.scalar("num_metric_end"), num.metric.end);
+    }
+}
