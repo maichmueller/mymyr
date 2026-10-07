@@ -1,19 +1,36 @@
-; A robot with two grippers carries balls between two rooms: a small classical domain with symmetric objects, for
-; task sets, knowledge bases and tuple graphs.
-(define (domain gripper)
- (:requirements :strips :typing)
- (:types room ball gripper)
- (:predicates (at-robby ?r - room) (at ?b - ball ?r - room) (free ?g - gripper) (carry ?b - ball ?g - gripper))
- (:action move
-   :parameters (?from ?to - room)
-   :precondition (at-robby ?from)
-   :effect (and (at-robby ?to) (not (at-robby ?from))))
- (:action pick
-   :parameters (?b - ball ?r - room ?g - gripper)
-   :precondition (and (at ?b ?r) (at-robby ?r) (free ?g))
-   :effect (and (carry ?b ?g) (not (at ?b ?r)) (not (free ?g))))
- (:action drop
-   :parameters (?b - ball ?r - room ?g - gripper)
-   :precondition (and (carry ?b ?g) (at-robby ?r))
-   :effect (and (at ?b ?r) (free ?g) (not (carry ?b ?g))))
-)
+(define (domain gripper-strips)
+    (:requirements :strips)
+   (:constants rooma roomb)
+   (:predicates (room ?r)
+        (ball ?b)
+        (gripper ?g)
+        (at-robby ?r)
+        (at ?b ?r)
+        (free ?g)
+        (carry ?o ?g))
+
+   (:action move
+       :parameters  (?from ?to)
+       :precondition (and  (room ?from) (room ?to) (at-robby ?from))
+       :effect (and  (at-robby ?to)
+             (not (at-robby ?from))))
+
+
+
+   (:action pick
+       :parameters (?obj ?room ?gripper)
+       :precondition  (and  (ball ?obj) (room ?room) (gripper ?gripper)
+                (at ?obj ?room) (at-robby ?room) (free ?gripper))
+       :effect (and (carry ?obj ?gripper)
+            (not (at ?obj ?room))
+            (not (free ?gripper))))
+
+
+   (:action drop
+       :parameters  (?obj  ?room ?gripper)
+       :precondition  (and  (ball ?obj) (room ?room) (gripper ?gripper)
+                (carry ?obj ?gripper) (at-robby ?room))
+       :effect (and (at ?obj ?room)
+            (free ?gripper)
+            (not (carry ?obj ?gripper)))))
+

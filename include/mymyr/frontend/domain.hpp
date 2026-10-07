@@ -53,15 +53,23 @@
 // `fast_init = false` the whole problem goes through loki and the lock covers loki's parse of the full problem
 // (loki's normalization and the translation run unlocked).
 //
+// Errors. Every PDDL input mymyr cannot read raises PddlError, which names the file, the line (when known), the action
+// the error is in (when it is in one) and what is wrong: a syntax error, an undefined or mismatched name, a wrong
+// number of arguments, or a construct mymyr does not support (durative actions, processes and events, preferences,
+// trajectory constraints, object fluents, timed initial literals, non-deterministic or probabilistic effects, an
+// unknown requirement flag). A file that cannot be opened raises std::filesystem::filesystem_error.
+//
 // Text preprocessing. `from_file` / `instantiate_file` read files like loki does (comments stripped, lower-cased);
 // `from_string` / `instantiate_string` hand the text to loki as it is (loki's grammar has no comments and is
 // case-sensitive), which is also what mimir does with strings.
 
+#include "mymyr/core/types.hpp"
 #include "mymyr/formalism/task_data.hpp"
 
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -69,6 +77,28 @@
 namespace mymyr::frontend
 {
 using TaskPtr = std::shared_ptr<const formalism::TaskData>;
+
+/// PDDL that mymyr cannot read (see "Errors" above). what() is one line: "<path>:<line>: <message> (in action
+/// <name>)", with the parts that are known.
+class PddlError : public std::invalid_argument
+{
+public:
+    explicit PddlError(std::string message, std::string path = {}, u32 line = 0, std::string action = {});
+
+    /// What is wrong, without the location.
+    [[nodiscard]] const std::string& message() const noexcept { return m_message; }
+    /// The file; empty for text given as a string.
+    [[nodiscard]] const std::string& path() const noexcept { return m_path; }
+    /// 1-based line in the file; 0 when unknown.
+    [[nodiscard]] u32 line() const noexcept { return m_line; }
+    /// The action the error is in; empty when it is in none or unknown.
+    [[nodiscard]] const std::string& action() const noexcept { return m_action; }
+
+private:
+    std::string m_message, m_path;
+    u32 m_line = 0;
+    std::string m_action;
+};
 
 struct DomainOptions
 {
@@ -95,8 +125,7 @@ public:
     static std::shared_ptr<const Domain> from_string(std::string_view text, const std::filesystem::path& path = "",
                                                      const DomainOptions& options = {});
 
-    /// Instantiates a problem of this domain. Thread-safe. Throws std::runtime_error (or a loki exception) on
-    /// malformed input.
+    /// Instantiates a problem of this domain. Thread-safe. Throws PddlError on input mymyr cannot read.
     [[nodiscard]] TaskPtr instantiate_file(const std::filesystem::path& problem_path, const InstantiateOptions& options = {}) const;
     [[nodiscard]] TaskPtr instantiate_string(std::string_view text, const std::filesystem::path& path = "",
                                              const InstantiateOptions& options = {}) const;

@@ -52,3 +52,6 @@ print(search.format_plan(task, result.plan))
 
 `Task.from_pddl` is available in builds with the PDDL front end. `Task.from_text` reads mymyr's normalized task format
 when a parser is not needed. The next pages show task inspection, search options, heuristics and batched interfaces.
+
+The same search runs from the command line: `mymyr plan tests/data/pddl/counters/domain.pddl
+tests/data/pddl/counters/p01.pddl` prints the plan (see [Command line](cli.md)).

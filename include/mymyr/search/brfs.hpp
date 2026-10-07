@@ -11,11 +11,24 @@
 // successor index) plus a per-layer counting sort reproduces the single-threaded ids at every thread count.
 //
 // Every expanded state is goal-tested (goal_states counts them); stop_at_goal ends the search at the first goal
-// state expanded and, single-threaded, returns the plan. max_depth caps the expanded layers: with max_depth = D the
+// state expanded and returns its plan, a shortest one (multi-threaded: the goal state of the smallest id among those
+// the threads reached before they stopped, so which plan of that length can depend on the timing). max_depth caps the expanded layers: with max_depth = D the
 // states of depth < D are expanded and those of depth D stored (exhausted then says whether depth D was empty).
 //
 // Numeric tasks: states are [bits | slots] rows; every store keeps the numeric words next to the atom part and
 // deduplicates on both.
+//
+// Control (search/control.hpp): max_seconds and cancel stop the search (status OutOfTime, Cancelled); the time and the
+// token are checked every few expansions. Observer events: on_start(initial state) and, at the end, on_solution(plan,
+// plan length) when a plan was found, then on_end(status, totals), all on the calling thread; on_expand(id, state)
+// for every counted expansion; on_generate(parent, action, child, state, is_new) for every successor (is_new: it was
+// stored by this transition); on_pass(depth, layer statistics) for every layer expanded (partly, if the search stopped
+// inside it; depth 0 is the initial state's layer); on_progress(statistics so far) every progress_interval
+// expansions (false stops the search: Cancelled). Multi-threaded, the hot events (on_expand, on_generate,
+// on_progress) come from the worker threads: the search calls observer->make_worker(t) for every thread t on the
+// calling thread first, and thread t sends them to the observer it got (with child = ~0: ids are assigned when the
+// layer ends; on_progress counts that thread's expansions). If make_worker returns null for some thread, the search
+// runs on the calling thread alone (BrfsResult::threads = 1) with every event on the root observer.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/search/control.hpp"
@@ -23,6 +36,7 @@
 #include "mymyr/successor/action.hpp"
 
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -59,10 +73,17 @@ struct BrfsOptions
     /// states it drops stay stored (counted in BrfsResult::states, never expanded, never entered again: mimir's
     /// duplicate pruning), and both novelty modes behave alike (there is no novelty table).
     search::LayerOrdering layers{};
+    double max_seconds = std::numeric_limits<double>::infinity();  // wall time of the search (status OutOfTime)
+    search::CancelToken cancel{};               // request() from any thread stops the search (status Cancelled)
+    search::SearchObserver* observer = nullptr;  // not owned; must outlive the search
+    u64 progress_interval = u64{1} << 16;       // expansions between on_progress calls
 };
 
 struct BrfsResult
 {
+    /// Solved (stop_at_goal found a goal state), Exhausted, OutOfStates (max_states or max_depth stopped it),
+    /// OutOfTime or Cancelled (the token, or an observer's on_progress).
+    search::SearchStatus status = search::SearchStatus::Exhausted;
     u64 states = 0;     // stored states
     u64 expanded = 0;
     u64 generated = 0;  // successors generated (with duplicates)

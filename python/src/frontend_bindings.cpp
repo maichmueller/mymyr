@@ -2,6 +2,9 @@
 // are instantiated from it many times, from any number of threads. Each instantiation returns the normalized task as
 // mymyr.formalism.NormalizedTask, which mymyr.Task compiles. The NormalizedTask remembers its PDDL text, so a Task
 // built from it pickles as its source.
+//
+// Errors: frontend::PddlError becomes mymyr.PddlError (a ValueError with the path, line and action), and a file that
+// cannot be read an OSError (FileNotFoundError when it does not exist).
 
 #include "formalism_task.hpp"
 #include "py_domain.hpp"
@@ -13,11 +16,15 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
 
+#include <cerrno>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -28,7 +35,8 @@ std::string read_file(const std::string& path)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in)
-        throw std::runtime_error("mymyr: cannot open '" + path + "'");
+        throw std::filesystem::filesystem_error("mymyr: cannot open the file", path,
+                                                std::error_code(errno ? errno : ENOENT, std::generic_category()));
     std::ostringstream s;
     s << in.rdbuf();
     return s.str();
@@ -48,8 +56,43 @@ std::shared_ptr<const TaskSource> pddl_source(const PyDomain& d, std::string pro
 }
 }  // namespace
 
+namespace
+{
+/// Raises the Python exception of a C++ exception the front end throws (see the top of the file).
+void translate_frontend_error(const std::exception_ptr& p, void*)
+{
+    try
+    {
+        std::rethrow_exception(p);
+    }
+    catch (const frontend::PddlError& e)
+    {
+        nb::object cls = nb::module_::import_("mymyr._errors").attr("PddlError");
+        auto or_none = [](const std::string& s) -> nb::object {
+            if (s.empty())
+                return nb::none();
+            return nb::str(s.c_str(), s.size());
+        };
+        nb::object line = nb::none();
+        if (e.line() != 0)
+            line = nb::cast(e.line());
+        nb::object err = cls(e.message(), or_none(e.path()), line, or_none(e.action()));
+        PyErr_SetObject(cls.ptr(), err.ptr());
+    }
+    catch (const std::filesystem::filesystem_error& e)
+    {
+        // OSError(errno, strerror, filename) is the subclass of the errno: FileNotFoundError for ENOENT
+        const std::error_code& c = e.code();
+        nb::object err = nb::handle(PyExc_OSError)(c.value(), c.message(), e.path1().string());
+        PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(err.ptr())), err.ptr());
+    }
+}
+}  // namespace
+
 void bind_frontend(nb::module_& m)
 {
+    nb::register_exception_translator(translate_frontend_error);
+
     nb::class_<PyDomain>(m, "Domain",
                          "A PDDL domain, parsed and normalized once by loki. Instantiating problems is thread-safe.")
         .def_static(
@@ -88,6 +131,14 @@ void bind_frontend(nb::module_& m)
                 return FormalismTask{std::move(data), pddl_source(self, std::move(copy), "")};
             },
             "text"_a, nb::kw_only(), "fast_init"_a = true, "Instantiate problem PDDL text.")
+        .def_prop_ro(
+            "formalism",
+            [](const PyDomain& self) {
+                // shares the domain's ownership: the TaskData lives inside it
+                return FormalismTask{std::shared_ptr<const formalism::TaskData>(self.d, &self.d->domain_data()), nullptr};
+            },
+            "The normalized domain alone (mymyr.formalism.NormalizedTask): types, constants (as its objects), "
+            "predicates, functions, schemas and the domain's axioms; no initial state and no goal.")
         .def_prop_ro("name", [](const PyDomain& self) { return self.d->name(); })
         .def_prop_ro("path", [](const PyDomain& self) { return self.d->path(); })
         .def("__repr__", [](const PyDomain& self) { return "Domain(" + self.d->name() + ")"; });
