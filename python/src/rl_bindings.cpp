@@ -39,9 +39,11 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -743,17 +745,32 @@ struct TaskList
 };
 
 #if defined(MYMYR_HAS_FRONTEND)
+/// Whether a PDDL file defines a domain: its first form, after comments and whitespace, is (define (domain ...).
+bool is_domain_file(const std::filesystem::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    std::string tokens;  // the first characters outside comments, lowercase, without whitespace
+    for (char c; tokens.size() < 14 && in.get(c);)
+    {
+        if (c == ';')
+        {
+            while (in.get(c) && c != '\n')
+                ;
+            continue;
+        }
+        if (!std::isspace(static_cast<unsigned char>(c)))
+            tokens += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return tokens.starts_with("(define(domain");
+}
+
 /// The problem files of TaskTable.from_pddl: a list in its order; a directory's regular *.pddl files, sorted by path;
-/// the sorted matches of a glob pattern (any of *?[ in it; ** spans directories); or one file. The domain file is never
-/// one of the problems.
-std::vector<std::filesystem::path> problem_files(const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-                                                 const std::string& domain_path)
+/// the sorted matches of a glob pattern (any of *?[ in it; ** spans directories); or one file. Domain files in a
+/// directory or among a pattern's matches are skipped.
+std::vector<std::filesystem::path> problem_files(const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems)
 {
     namespace fs = std::filesystem;
-    const auto is_domain = [&](const fs::path& p) {
-        std::error_code ec;
-        return !domain_path.empty() && fs::equivalent(p, domain_path, ec);
-    };
+    const auto is_domain = [](const fs::path& p) { return is_domain_file(p); };
     std::vector<fs::path> files;
     if (const auto* list = std::get_if<std::vector<fs::path>>(&problems))
         files = *list;
@@ -801,7 +818,7 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
         nb::gil_scoped_release release;
         dom = PyDomain{frontend::Domain::from_file(path), std::make_shared<const std::string>(read_file(path.string())), path.string()};
     }
-    const std::vector<std::filesystem::path> files = problem_files(problems, dom.path);
+    const std::vector<std::filesystem::path> files = problem_files(problems);
     const usize n = files.size();
     std::vector<std::shared_ptr<const formalism::TaskData>> data(n);
     std::vector<std::shared_ptr<const TaskSource>> sources(n);
@@ -1225,10 +1242,10 @@ void bind_rl(nb::module_& parent)
             "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 0,
             "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "
             "once). problems is a list of problem files (kept in its order), a directory (its *.pddl files sorted by "
-            "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; the domain file "
-            "is never one of the problems. The problems are instantiated and compiled on `threads` threads (0: the "
-            "hardware concurrency); instance i is the same task as Task(domain.instantiate(files[i])) with these "
-            "options. Raises ValueError when a directory or pattern has no problem files.")
+            "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; domain files in a "
+            "directory or among the matches are skipped. The problems are instantiated and compiled on `threads` "
+            "threads (0: the hardware concurrency); instance i is the same task as Task(domain.instantiate(files[i])) "
+            "with these options. Raises ValueError when a directory or pattern has no problem files.")
 #endif
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
         .def(

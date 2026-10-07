@@ -1,5 +1,5 @@
-// mymyr._core._datasets: state spaces, generalized state spaces, samplers, object graphs and certificates
-// (mymyr.datasets; datasets/*.hpp in the C++ core).
+// mymyr._core._datasets: state spaces, generalized state spaces, knowledge bases, tuple graphs, samplers, object graphs
+// and certificates (mymyr.datasets; datasets/*.hpp in the C++ core).
 //
 // Every generation releases the thread state while it runs. The results are immutable C++ objects shared by the
 // Python wrappers; their arrays are exported zero-copy (read-only views that keep the result alive) to NumPy, torch or
@@ -447,7 +447,8 @@ const char* k_options_doc =
 
 void bind_datasets(nb::module_& parent)
 {
-    nb::module_ m = parent.def_submodule("_datasets", "State spaces, samplers, object graphs and certificates (mymyr.datasets)");
+    nb::module_ m = parent.def_submodule(
+        "_datasets", "State spaces, knowledge bases, tuple graphs, samplers, object graphs and certificates (mymyr.datasets)");
 
     nb::enum_<StateSpaceStatus>(m, "Status", "Outcome of a state space generation.")
         .value("OK", StateSpaceStatus::Ok)
@@ -1035,7 +1036,7 @@ void bind_datasets(nb::module_& parent)
             "the states at distance d are layer_vertices[layer_offsets[d] : layer_offsets[d + 1]].")
         .def("__len__", [](const PyTupleGraph& g) { return g.graph->num_vertices(); })
         .def("__eq__", [](const PyTupleGraph& a, const PyTupleGraph& b) { return *a.graph == *b.graph; }, nb::is_operator(),
-             "other"_a, "Equal roots, options and vertices, tuples, problem vertices and edges.")
+             "other"_a, "The same state space, root and options, and equal vertices, tuples, problem vertices and edges.")
         .def("__repr__", [](const PyTupleGraph& g) {
             return "TupleGraph(root=" + std::to_string(g.graph->root()) + ", width=" + std::to_string(g.graph->width()) +
                    ", vertices=" + std::to_string(g.graph->num_vertices()) + ", edges=" + std::to_string(g.graph->num_edges()) +

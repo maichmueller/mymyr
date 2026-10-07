@@ -94,7 +94,7 @@ std::string set_hash(const std::set<std::string>& items)
     return hex(h);
 }
 
-/// The digest of the golden file (run_tuple_graphs.py, tests/data/tuple_graphs/README.md).
+/// The digest of the golden file (run_tuple_graphs.py; tests/data/fork_golden/README.md, "Tuple graphs").
 struct Digest
 {
     std::vector<u64> n, m, p;

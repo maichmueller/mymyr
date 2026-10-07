@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The fork's tuple graphs on the state-space suite (tests/cpp/datasets/fork_cases.inc: the fork's own test instances,
 under MYMYR_FORK_DATA), written to tests/data/tuple_graphs/fork_tuple_graphs.json for
-tests/cpp/datasets/test_tuple_graphs_fork.cpp and tests/python/test_tuple_graphs.py.
+tests/cpp/datasets/test_tuple_graphs.cpp and tests/python/test_tuple_graphs.py.
 
     python3 tests/data/fork_golden/search_fork/run_tuple_graphs.py --build      # build search_fork, then run
     python3 tests/data/fork_golden/search_fork/run_tuple_graphs.py --only gripper
@@ -9,7 +9,7 @@ tests/cpp/datasets/test_tuple_graphs_fork.cpp and tests/python/test_tuple_graphs
 
 Per task: the state space (remove_if_unsolvable = false, no symmetry pruning) and the tuple graphs of width 0, and of
 widths 1 and 2 with and without dominance pruning, of every vertex (every ceil(N / sample)-th vertex on spaces of more
-than --sample vertices). The format is described in tests/data/tuple_graphs/README.md.
+than --sample vertices). The format is described in tests/data/fork_golden/README.md ("Tuple graphs").
 
 --time runs only the timing mode on the given tasks (<dir>/<problem>): the fork's TupleGraphImpl::create over every
 vertex at widths 1 and 2 with dominance pruning, its seconds and peak RSS, printed as JSON lines.
