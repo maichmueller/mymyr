@@ -107,6 +107,8 @@ CASES = {
                              problem(), "domain", 9, "move", ["probabilistic effects"]),
     "unknown_requirement": (domain(req=" :teleportation"), problem(), "domain", 2, None,
                             ["unknown requirement :teleportation"]),
+    "undeclared_requirement": (domain(pre=" (not (on ?x ?y))"), problem(), "domain", 8, "move",
+                               ["requirement :negative-preconditions", "not declared"]),
     "undefined_predicate": (domain(pre=" (holding ?x)"), problem(), "domain", 8, "move",
                             ["undefined predicate 'holding'"]),
     "undefined_type": (domain().replace("(?x ?y - block)", "(?x ?y - brick)"), problem(), "domain", 7, "move",

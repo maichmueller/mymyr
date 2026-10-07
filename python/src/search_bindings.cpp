@@ -1931,7 +1931,7 @@ void bind_search(nb::module_& parent)
         "cancel"_a = nb::none(), "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("Breadth-first search over the reachable states (search/brfs.hpp): single-threaded, or "
                      "layer-synchronous on `threads` threads with ids independent of the thread count. stop_at_goal "
-                     "returns the first goal state's plan (single-threaded). goal: the goal states, as the common "
+                     "returns the first goal state's plan, a shortest one. goal: the goal states, as the common "
                      "keyword argument of the other searches (a callable needs threads=1). fingerprint: the result's fingerprint "
                      "hashes (id, canonical state) over the whole store (determinism checks; 0 when off). An ordered "
                      "layer_order needs the 'flat' or 'chunked' store ('auto' picks one of them with one thread). "
