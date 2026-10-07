@@ -4,6 +4,8 @@
     s = task.initial_state                                     # a value: hashable, picklable, thread-safe
     for a in task.applicable_actions(s):                       # Action = label (schema, binding), canonical order
         t = task.apply(s, a)
+    for a in task.bindings("stack", s, partial={"x": "a"}):  # one schema's actions with parameters fixed
+        ...
     s2 = task.state(["(on a b)", "(clear a)"])                 # a state from its atoms (values= for numeric tasks)
     h = task.local()                                           # per-thread handle for hot Python loops
     exp = mymyr.rl.expand(task, states)                        # batched: flat CSR + padded view, zero-copy arrays
@@ -18,7 +20,11 @@ from mymyr._core import (
     Action,
     ApplicableActions,
     Atom,
+    Bindings,
+    ConjunctiveCondition,
     DLArray,
+    GroundConjunctions,
+    GroundLiteral,
     State,
     Task,
     TaskHandle,
@@ -33,7 +39,11 @@ __all__ = [
     "Action",
     "ApplicableActions",
     "Atom",
+    "Bindings",
+    "ConjunctiveCondition",
     "DLArray",
+    "GroundConjunctions",
+    "GroundLiteral",
     "State",
     "Task",
     "TaskHandle",

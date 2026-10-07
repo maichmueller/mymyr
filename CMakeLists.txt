@@ -88,8 +88,10 @@ add_library(mymyr_core STATIC
     src/mymyr/task/atom_index.cpp
     src/mymyr/task/compile.cpp
     src/mymyr/task/task.cpp
+    src/mymyr/task/workspace.cpp
     src/mymyr/successor/engine.cpp
     src/mymyr/successor/successors.cpp
+    src/mymyr/successor/bindings.cpp
     src/mymyr/axioms/evaluator.cpp
     src/mymyr/search/brfs.cpp
     # IW family

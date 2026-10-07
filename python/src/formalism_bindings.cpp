@@ -9,6 +9,7 @@
 //   - Terms render as Object views (constants/objects) or Variable (parameter index + name from the enclosing scope).
 
 #include "formalism_task.hpp"
+#include "formalism_views.hpp"
 
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/formalism/text_format.hpp"
@@ -39,15 +40,10 @@ namespace fm = formalism;
 
 // ------------------------------------------------------------------------------------------------ view types
 
-struct View
-{
-    TaskPtr t;
-    u32 i = 0;
-    [[nodiscard]] const TaskData& d() const { return *t; }
-};
+using View = FormalismView;
 
 struct TypeV : View {};
-struct ObjectV : View {};
+using ObjectV = ObjectView;
 struct PredicateV : View {};
 struct FunctionV : View {};
 struct SchemaV : View {};

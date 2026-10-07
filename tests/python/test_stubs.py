@@ -83,7 +83,16 @@ def test_stubs_parse_and_are_typed():
     assert "def __eq__(self, arg" not in core and "def __reduce__(self) -> object" not in core
     # the task API (typing.hpp, py_task.hpp): states as States or DLPack word arrays, typed results
     assert "import mymyr._typing" in core
-    assert "def applicable_actions(self, state: State | mymyr._typing.SupportsDLPack) -> list[Action]" in core
+    partial = ("partial: dict[int | str, _formalism.Object | str | int | None] | "
+               "Sequence[_formalism.Object | str | int | None] | None = None")
+    assert (f"def applicable_actions(self, state: State | mymyr._typing.SupportsDLPack, *, schema: str | int | None = None, "
+            f"{partial}) -> list[Action]") in core
+    # binding generators (task_bindings.cpp)
+    target = "target: str | int | ConjunctiveCondition, state: State | mymyr._typing.SupportsDLPack"
+    assert f"def bindings(self, {target}, {partial}, limit: int | None = None) -> Bindings" in core
+    assert f"def ground_conjunctions(self, {target}, {partial}, limit: int | None = None) -> GroundConjunctions" in core
+    assert "def __next__(self) -> Action | tuple[_formalism.Object, ...]" in core
+    assert "def precondition(self, schema: str | int) -> ConjunctiveCondition" in core
     assert "def successors(self, state: State | mymyr._typing.SupportsDLPack) -> list[tuple[Action, State]]" in core
     assert "def atom(self, atom: Atom | str | int | tuple[str | int | Sequence[str | int], ...]) -> Atom" in core
     assert "framework: Literal['numpy', 'torch', 'jax', 'dlpack'] | None = None) -> Any" in core

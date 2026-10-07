@@ -112,6 +112,8 @@ public:
     /// Truth of a numeric constraint under the current binding and state.
     [[nodiscard]] bool holds(const plan::NumCheck& c) const noexcept { return plan::holds(*m_numc, c, m_num, m_bind.data()); }
     [[nodiscard]] u32 state_words() const noexcept { return m_nw; }
+    /// Row `row` of the view tables (plan::ViewLayout; ow() words), as built for the current state.
+    [[nodiscard]] const u64* view_row(u32 row) const noexcept { return m_view.data() + static_cast<usize>(row) * m_ow; }
 
     /// Slots of the true atoms of driver predicate `d` (plan::Compiled::drivers) in the current state, in slot order.
     [[nodiscard]] std::span<const u32> true_atoms(u32 d) const noexcept { return {m_true[d].data(), m_true[d].size()}; }
