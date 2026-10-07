@@ -1,5 +1,5 @@
 {
-  "ctest_min_total": 1214,
+  "ctest_min_total": 1230,
   "ctest_max_skipped": 217,
-  "pytest_min_passed": 494
+  "pytest_min_passed": 504
 }
