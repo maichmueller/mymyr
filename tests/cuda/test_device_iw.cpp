@@ -341,7 +341,7 @@ TEST_P(CudaMultiIwSuite, RolloutsEqualTheCpu)
 
 INSTANTIATE_TEST_SUITE_P(Suite, CudaMultiIwSuite, ::testing::ValuesIn(params()), param_name);
 
-TEST(CudaGoals, DerivedLiteralsAndNumericConstraintsAreRefused)
+TEST(CudaGoals, DerivedConditionsEqualCpuSearches)
 {
     SKIP_WITHOUT_GPU();
     const auto task = load("philosophers__p03-phil4", false);
@@ -350,11 +350,21 @@ TEST(CudaGoals, DerivedLiteralsAndNumericConstraintsAreRefused)
     ASSERT_TRUE(g.has_value());
     ASSERT_FALSE(g->fluent_only());
     const std::vector<State> starts{task->initial_state()};
-    EXPECT_THROW((void)cuda::multi_iw(context(), task, starts, cuda::MultiIwOptions{}, std::span(&*g, 1)), std::invalid_argument);
+    cuda::MultiIwOptions options;
+    options.max_arity = 2;
+    options.budget.max_states = 3000;
+    check_against_cpu(task, starts, options, "derived goal", {*g});
     cuda::DeviceRolloutOptions d;
     d.seeds = {1};
+    d.iw = options;
     d.goals = {*g};
-    EXPECT_THROW((void)cuda::find_rollouts(context(), task, d), std::invalid_argument);
+    search::IwOptions cpu;
+    cpu.max_arity = 2;
+    cpu.control.budget = options.budget;
+    cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf;
+    cpu.control.goal.goals = {*g};
+    cpu.layers = {.kind = search::LayerOrdering::Kind::Randomized, .seed = 1};
+    expect_same(cuda::find_rollouts(context(), task, d).rollouts[0].search, search::iw(*task, cpu), "derived rollout");
     // the same goal over fluent literals only runs
     search::GoalSpec::AtomGoal fluent = *g;
     fluent.derived_positive.clear();

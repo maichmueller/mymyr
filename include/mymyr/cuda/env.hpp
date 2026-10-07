@@ -21,14 +21,14 @@
 //     batch rearranged since then is detected and runs in batch order: the same results, slower). A step's select also
 //     finds where each instance's rows start in that order, so the step's launches take the positions of their own
 //     groups' rows only (range launches, lifted::Multi::starts). Needs: every
-//     instance runs completely on the device kernels (no axioms, no CPU-fallback schema, no conditional effects),
+//     instance runs completely on the fast kernels (no numeric fluents, axioms, CPU-fallback schemas or conditional effects),
 //     frozen atom slots, and packed canonical-order keys within 64 bits (lifted::pick_keys_fit). Over a suite of
 //     several domains every domain runs the multi-instance kernels of its table (detail::multi_unsupported
 //     empty): the launch order groups the rows by domain, then as each table's; each domain's picks and counts take its
 //     rows' positions only and run on a stream of their own (forked from the env's stream and joined back by events);
 //     select, the views (one launch over every domain's rows) and finish run once over the batch (the count cache is
 //     laid out with the suite's widest schema count, a domain's schemas past its own counting 0);
-//   - general: every table the device expand runs (CPU-fallback schemas, conditional effects, axioms, lazy slots). A
+//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects, axioms or lazy slots. A
 //     step expands the current states into internal flat buffers with SuiteExpander (a table's DeviceExpander, or one
 //     per domain; canonical order, goal flags; it synchronizes), moves every environment to its chosen row, and counts
 //     the reached states' successors with a second expansion. The cache arrays are not used.

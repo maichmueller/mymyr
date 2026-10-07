@@ -922,17 +922,31 @@ u32 ChunkGenerator::host_words_needed(u32 out_words) const noexcept
 
 void ChunkGenerator::goal_flags(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out)
 {
+    goal_flags_impl(rows, stride, words, row_count, order, n, out, nullptr, nullptr);
+}
+
+void ChunkGenerator::goal_flags(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out,
+                                goal::View goals, const u32* row_goals)
+{
+    goal_flags_impl(rows, stride, words, row_count, order, n, out, &goals, row_goals);
+}
+
+void ChunkGenerator::goal_flags_impl(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out,
+                                     const goal::View* goals, const u32* row_goals)
+{
     if (n == 0)
         return;
     DeviceGuard g(m_ctx->device());
-    const bool derived = m_task->compiled().goal.uses_derived;
+    const bool derived = goals ? goals->derived_words != 0 : m_task->compiled().goal.uses_derived;
+    if (goals)
+        refresh();
     if (derived && !m_device_axioms)
         throw std::logic_error("mymyr: ChunkGenerator::goal_flags: the axioms of this task run on the CPU (" +
                                m_host_axioms_reason + ")");
     if (words > lifted::k_max_words)
         throw std::invalid_argument("mymyr: ChunkGenerator::goal_flags: rows of " + std::to_string(words) + " words");
     const bool gather = order || stride != words;
-    if (!derived && !gather && !m_task->numeric_slots())
+    if (!goals && !derived && !gather && !m_task->numeric_slots())
     {
         check(lifted::launch_goal_rows(m_view, rows, words, n, nullptr, out, m_s), "launch_goal_rows");
         return;
@@ -951,6 +965,20 @@ void ChunkGenerator::goal_flags(const u64* rows, u64 stride, u32 words, u64 row_
                                              order ? order + b : nullptr, c, dst, m_s),
                   "launch_gather_rows");
             src = dst;
+        }
+        if (goals)
+        {
+            lifted::Parents p{src, words, words - m_task->numeric_slots(), static_cast<u32>(c), nullptr, 0};
+            if (derived)
+            {
+                auto* views = static_cast<u64*>(m_goal_views.ensure(m_ctx, c * m_view_words * sizeof(u64), m_s));
+                u64* der = nullptr;
+                p.derived_words = views_and_axioms(p, views, m_goal_derived, &der);
+                p.derived = der;
+            }
+            check(goal::launch_flags(*goals, p, order ? row_goals : row_goals + b, order ? order + b : nullptr,
+                                     order ? row_count : c, c, out + b, m_s), "goal::launch_flags");
+            continue;
         }
         if (!derived && m_task->numeric_slots())
         {

@@ -1,5 +1,5 @@
 """State spaces, generalized state spaces, samplers, object graphs and certificates (datasets/*.hpp in the C++ core),
-on the CPU or, for classical tasks, on a CUDA device.
+on the CPU or a CUDA device, for classical and numeric tasks.
 
     task = mymyr.Task.from_pddl("domain.pddl", "p01.pddl", atoms="frozen")
     space = mymyr.datasets.state_space(task, threads=8)         # None if the generation failed

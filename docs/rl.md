@@ -35,9 +35,11 @@ The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `s
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
 
-On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. CPU tasks with
-numeric fluents are supported by the host RL APIs; device environments and device expansion currently require
-classical tasks. mymyr supplies expansion, environment and interoperability primitives, not encoders or replay buffers.
+On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. Host and device
+environments and expansion support numeric fluents, preconditions, effects and goals, preserving the CPU I32/F64 row
+encoding. Numeric tables and suites run per-instance kernels. Numeric environments use the general path, which
+synchronizes; the environment fast path and CUDA graph capture require tasks that path can run. mymyr supplies
+expansion, environment and interoperability primitives, not encoders or replay buffers.
 
 The following JAX rollout uses CUDA and the JAX/CUDA package in the optional CUDA environment:
 
