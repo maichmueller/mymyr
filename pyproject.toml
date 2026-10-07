@@ -12,6 +12,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = ["numpy>=2.3"]
 
+[project.scripts]
+mymyr = "mymyr.cli:console_main"
+
 [project.optional-dependencies]
 test = ["pytest>=8", "nanobind>=3.1,<4"]
 

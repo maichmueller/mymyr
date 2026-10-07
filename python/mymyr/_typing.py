@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from mymyr import State
 
-__all__ = ["HeuristicObject", "SearchObserver", "SupportsCudaStream", "SupportsDLPack"]
+__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack"]
 
 
 class SupportsDLPack(Protocol):
@@ -23,17 +23,6 @@ class SupportsCudaStream(Protocol):
 
     @property
     def cuda_stream(self) -> int: ...
-
-
-class SearchObserver(Protocol):
-    """A search observer (mymyr.search): any object. The searches call whichever of these methods it has, so none is
-    required (and every object satisfies this protocol):
-
-    on_start(state), on_expand(id, state), on_generate(parent, action, child, state, is_new), on_prune(parent, action,
-    state), on_transition(parent, action, child, state, outcome) (the IW family variants), on_pass(arity, stats),
-    on_solution(plan, cost), on_progress(stats) -> bool (False stops the search), on_end(status, stats), and
-    make_worker(k) -> SearchObserver | None (the make_worker protocol: worker k's own observer in the parallel
-    searches)."""
 
 
 class HeuristicObject(Protocol):

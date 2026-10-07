@@ -3,7 +3,9 @@
 These pages describe the Python package, optional CUDA backend, plain-C API and C++ package.
 
 - [Getting started](getting-started.md): install a wheel or build from source, parse a task and run a search.
-- [Parsing and tasks](parsing-and-tasks.md): PDDL, task and state values, formalism views, actions and binding generators.
+- [Command line](cli.md): the `mymyr plan` and `mymyr info` commands, options and exit codes.
+- [Parsing and tasks](parsing-and-tasks.md): PDDL, task and state values, errors, formalism views, actions and binding
+  generators.
 - [Formula values](formulas.md): atoms, literals, conditions, state checks, pickling and search goals.
 - [Search](search.md): breadth-first search, the IW family, best-first search, heuristics, goals, budgets and observers.
 - [Heuristics](heuristics.md): relaxation heuristics, h², set-additive and perfect heuristics.

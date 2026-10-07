@@ -182,6 +182,7 @@ if(MYMYR_FRONTEND)
     endif()
     find_package(absl CONFIG REQUIRED)
     add_library(mymyr_frontend STATIC
+        src/mymyr/frontend/diagnose.cpp
         src/mymyr/frontend/domain.cpp
         src/mymyr/frontend/init_reader.cpp
         src/mymyr/frontend/translate.cpp

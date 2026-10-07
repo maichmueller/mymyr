@@ -119,6 +119,10 @@ struct GbfsEager
                 {
                     nodes.set(cid, Nodes::Goal);
                     c.solved(nodes, cid, v, true);
+                    if (c.obs)  // the transitions after the goal's were generated too
+                        for (const Transitions::T* u = &t + 1; u != tr.t.data() + tr.t.size(); ++u)
+                            c.obs->on_generate(id, c.action(u->schema, tr.binding(*u)), u->child, tr.view(*u),
+                                               u->fresh);
                     done = true;
                     break;
                 }
@@ -230,6 +234,10 @@ struct GbfsLazy
                 {
                     nodes.set(cid, Nodes::Goal);
                     c.solved(nodes, cid, v, true);
+                    if (c.obs)  // the transitions after the goal's were generated too
+                        for (const Transitions::T* u = &t + 1; u != tr.t.data() + tr.t.size(); ++u)
+                            c.obs->on_generate(id, c.action(u->schema, tr.binding(*u)), u->child, tr.view(*u),
+                                               u->fresh);
                     done = true;
                     break;
                 }
