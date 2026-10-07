@@ -95,7 +95,7 @@ struct GoalSpec
 
         /// Whether the goal reads derived atoms: the state's axiom closure must be prepared to test it.
         [[nodiscard]] bool needs_view() const noexcept { return !derived_positive.empty() || !derived_negative.empty(); }
-        /// Whether the goal consists of fluent literals only (what the CUDA searches can test).
+        /// Whether the goal consists of fluent literals only, so it can be tested with atom masks alone.
         [[nodiscard]] bool fluent_only() const noexcept { return !needs_view() && !numeric; }
     };
 

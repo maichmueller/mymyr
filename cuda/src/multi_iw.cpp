@@ -9,12 +9,15 @@
 
 #include "mymyr/cuda/multi_iw.hpp"
 
+#include "goal_program.hpp"
+
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
 #include "mymyr/cuda/multi_iw_kernels.hpp"
 #include "mymyr/cuda/state_set.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
+#include "mymyr/search/goal.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -250,7 +253,7 @@ struct DeviceMultiIw::Impl
     u32 S = 0, L = 1, LW = 2;
     u32 W = 1;   // state row words
     u32 RW = 1;  // table row words
-    bool host_goal = false;  // goals over derived atoms
+    bool host_goal = false;  // goals evaluated outside the captured chunk
     bool cpu_goal = false;   // ... tested on the CPU (the axioms are not on the device): host mirrors of the rows
     bool needs_host = false;
     u64 chunk_cap = 0;
@@ -308,6 +311,9 @@ struct DeviceMultiIw::Impl
     std::vector<u32> h_order;
     std::vector<u64> h_gathered;
     std::vector<u8> h_goal;
+    std::vector<u32> h_search;
+    std::vector<search::GoalSpec::AtomGoal> h_goals;
+    std::unique_ptr<detail::GoalPrograms> goal_programs;
 
     Impl(ContextPtr c, TaskPtr t, const MultiIwOptions& opts) : ctx(std::move(c)), task(std::move(t)), o(opts) {}
 
@@ -694,10 +700,6 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     if (!goals.empty() && goals.size() != n)
         throw std::invalid_argument("mymyr: device IW: " + std::to_string(goals.size()) + " goals for " + std::to_string(n) +
                                     " searches (pass none, or one per search)");
-    for (const search::GoalSpec::AtomGoal& g : goals)
-        if (!g.fluent_only())
-            throw std::invalid_argument("mymyr: device IW: a goal with derived literals or numeric constraints (the device "
-                                        "searches test fluent literals only)");
     if (!seeds.empty() && seeds.size() != n)
         throw std::invalid_argument("mymyr: device IW: " + std::to_string(seeds.size()) + " seeds for " + std::to_string(n) +
                                     " searches (pass none, or one per search)");
@@ -705,8 +707,11 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
         throw std::invalid_argument("mymyr: device IW: malformed start rows");
     randomized = !seeds.empty();
     per_search_goals = !goals.empty();
-    host_goal = !per_search_goals && (task->compiled().goal.uses_derived || task->numeric_slots());
-    cpu_goal = host_goal && task->compiled().goal.uses_derived && !gen->device_axioms();
+    const bool derived_goal = per_search_goals ? std::ranges::any_of(goals, [](const auto& g) { return g.needs_view(); })
+                                             : task->compiled().goal.uses_derived;
+    host_goal = per_search_goals ? std::ranges::any_of(goals, [](const auto& g) { return !g.fluent_only(); })
+                                : derived_goal || task->numeric_slots();
+    cpu_goal = host_goal && derived_goal && !gen->device_axioms();
     const double secs = o.budget.max_seconds;
     timed = secs < 1e15;
     if (timed)
@@ -799,6 +804,13 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
                                     std::span<const u64> seeds, MultiIwBatch& out, Host& host)
 {
     alloc_searches(count);
+    h_goals.assign(goals.begin(), goals.end());
+    goal_programs.reset();
+    if (per_search_goals && host_goal)
+    {
+        goal_programs = std::make_unique<detail::GoalPrograms>(ctx, *task, goals, s);
+        gen->refresh();
+    }
     // per-search RNG streams, goals and reached sets
     sv.rng = nullptr;
     if (randomized)
@@ -1291,6 +1303,8 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
     {
         h_rows.assign(u64{R} * W, 0);
         to_host(h_rows.data(), n_rows.data(), h_rows.size(), s);
+        h_search.resize(R);
+        to_host(h_search.data(), n_search.data(), R, s);
         h_order.resize(R);
         for (u32 i = 0; i < R; ++i)
             h_order[i] = i;
@@ -1488,7 +1502,11 @@ bool DeviceMultiIw::Impl::enqueue_chunk(Run& r, u32 pb)
     {
         // the rows' axioms and goal on the device (not captured: the rows and count are host values); dead entries
         // (k_dead) read as zero rows, and k_rows_live skips them
-        gen->goal_flags(n_rows.data(), W, W, n_tail, order_a.data() + pb, step_host()->rows, const_cast<u8*>(ch.host_goal));
+        if (goal_programs)
+            gen->goal_flags(n_rows.data(), W, W, n_tail, order_a.data() + pb, step_host()->rows,
+                            const_cast<u8*>(ch.host_goal), goal_programs->view(), n_search.data());
+        else
+            gen->goal_flags(n_rows.data(), W, W, n_tail, order_a.data() + pb, step_host()->rows, const_cast<u8*>(ch.host_goal));
     }
     else if (host_goal)
     {
@@ -1503,7 +1521,13 @@ bool DeviceMultiIw::Impl::enqueue_chunk(Run& r, u32 pb)
                 continue;
             const u64* row = h_rows.data() + u64{node} * W;
             const State decoded = numeric::decode(*task, row, W);
-            h_goal[i] = succ.is_goal(decoded.view()) ? 1 : 0;
+            if (per_search_goals)
+            {
+                succ.prepare(decoded.view());
+                h_goal[i] = search::holds(h_goals[h_search[node]], succ, decoded.view());
+            }
+            else
+                h_goal[i] = succ.is_goal(decoded.view()) ? 1 : 0;
         }
         to_device(const_cast<u8*>(ch.host_goal), h_goal.data(), P, s);
         st.host_ms += ms_since(th);
@@ -1779,6 +1803,8 @@ bool DeviceMultiIw::Impl::chunk(u32 arity, u32 rule, u32 layer, u32 pb, u32& row
     {
         h_rows.resize(u64{n_tail + n_adm} * W);
         to_host(h_rows.data() + u64{n_tail} * W, n_rows.data() + u64{n_tail} * W, u64{n_adm} * W, s);
+        h_search.resize(u64{n_tail} + n_adm);
+        to_host(h_search.data() + n_tail, n_search.data() + n_tail, n_adm, s);
     }
     n_tail += n_adm;
     n_next += n_ent;

@@ -33,6 +33,6 @@ tasks must come from one domain. `StateSpaceSampler(space, seed=...)` samples st
 deterministically for a seed. An `ObjectGraph` exposes its arrays and color-refinement / k-FWL certificates; these
 are structural fingerprints used by symmetry pruning.
 
-For classical tasks, `state_space(task, device=0)` dispatches to `mymyr.cuda` and returns a
-`DeviceStateSpace`; `to_host()` copies the same indexed space back. Device state-space generation does not support
-symmetry pruning.
+`state_space(task, device=0)` dispatches to `mymyr.cuda` for classical and numeric tasks and returns a
+`DeviceStateSpace`; `to_host()` copies the same indexed space back, including CPU-encoded numeric values, costs
+and goal distances. Device state-space generation does not support symmetry pruning.

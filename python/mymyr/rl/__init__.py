@@ -56,8 +56,8 @@ the CPU's, and its outputs (a ``mymyr.cuda.DeviceExpansion``, or the caller's de
 the input's framework. ``stream=`` names the CUDA stream (None: the context's), ``ctx=`` the ``mymyr.cuda.Context``
 (None: the table's default context on the input's device); inputs are imported and outputs exported with the DLPack
 stream semantics of ``mymyr.cuda``. Host inputs take the CPU path unchanged (``stream`` and ``ctx`` are then ignored);
-the other functions here stay on the CPU. Numeric tables are not supported on the device (ValueError): expand their
-rows from host memory.
+the other functions here stay on the CPU. Numeric tables and suites preserve each instance's CPU encoding on the
+device; their expansion uses per-instance kernels and gathers/scatters rows at the shared atom/numeric boundary.
 
 Environments: :mod:`mymyr.rl.torch` (needs torch) has batched planning environments on the CPU or a CUDA device
 (``BatchedEnv``, the TorchRL ``PlanningEnv``), torch custom ops for the step and the expansion, and the counter-based

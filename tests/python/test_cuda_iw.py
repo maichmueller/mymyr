@@ -155,8 +155,7 @@ def test_rollouts_with_a_goal_solve_and_replay(ctx):
 
 
 def test_ground_condition_goals(ctx):
-    """A GroundCondition of fluent literals is a device goal, the same as its slots; derived literals and numeric
-    constraints are refused."""
+    """GroundCondition goals preserve CPU search semantics for fluent/derived literals and numeric constraints."""
     task = text_task("depot__p02")
     starts = walk(task, steps=10, seed=5, walks=2)
     slots = walk_goals(starts, 2)
@@ -172,11 +171,12 @@ def test_ground_condition_goals(ctx):
     r = mc.rollouts(task, list(range(8)), ctx=ctx, goal=neg)
     assert sum(r.solved) > 0
     phil = text_task("philosophers__p03-phil4")
-    with pytest.raises(ValueError, match="fluent literals only"):
-        mc.multi_iw(phil, [phil.initial_state], ctx=ctx, goals=[phil.goal_condition])
+    derived = phil.ground_condition([phil.goal_condition.literals[0]])
+    b = mc.multi_iw(phil, [phil.initial_state], ctx=ctx, goals=[derived], max_arity=2, max_states=3000)
+    assert_equal(b, 0, mymyr.search.iw(phil, goal=derived, max_arity=2, max_states=3000))
     counters = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError):
-        mc.multi_iw(counters, [counters.initial_state], ctx=ctx, goals=[counters.goal_condition])
+    b = mc.multi_iw(counters, [counters.initial_state], ctx=ctx, goals=[counters.goal_condition], max_arity=2, max_states=3000)
+    assert_equal(b, 0, mymyr.search.iw(counters, goal=counters.goal_condition, max_arity=2, max_states=3000))
 
 
 def test_errors(ctx):
@@ -197,3 +197,27 @@ def test_errors(ctx):
     with pytest.raises(TypeError):
         mc.rollouts(task, [1], ctx=ctx, start=5)
     assert len(mc.multi_iw(task, [], ctx=ctx)) == 0
+
+
+def test_ground_goal_refusals(ctx):
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    expression = "(value o3)"
+    for _ in range(64):
+        expression = f"(+ (value o3) {expression})"
+    deep = task.ground_condition(constraints=[f"(>= {expression} 0)"])
+    assert deep.holds(task.initial_state)
+    with pytest.raises(ValueError, match="more than 64 stack values"):
+        mc.multi_iw(task, [task.initial_state], ctx=ctx, goals=[deep])
+    other = text_task("depot__p02")
+    with pytest.raises(ValueError, match="another task"):
+        mc.multi_iw(task, [task.initial_state], ctx=ctx, goals=[other.goal_condition])
+    with pytest.raises(TypeError):
+        mc.rollouts(task, [1], ctx=ctx, goal=lambda state: True)
+    with pytest.raises(TypeError):
+        mc.rollouts(task, [1], ctx=ctx, goal=[task.goal_condition, task.goal_condition])
+    classical = text_task("gripper__prob05")
+    true_static = classical.atom(str(classical.formalism.static_init[0]))
+    impossible = classical.ground_condition([classical.literal(true_static, positive=False)])
+    assert not mymyr.search.iw(classical, goal=impossible).solved
+    with pytest.raises(ValueError, match="goal can never hold"):
+        mc.multi_iw(classical, [classical.initial_state], ctx=ctx, goals=[impossible])

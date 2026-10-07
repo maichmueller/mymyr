@@ -43,8 +43,10 @@ Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=
 `max_seconds=`. On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
 `mymyr.formalism.GroundCondition`, or a sequence of goals. Each goal in that sequence is a `GroundCondition` or a
 sequence of ground atoms and literals; any one that holds ends the search. See [Formula values](formulas.md) for
-construction examples. CUDA searches accept `GroundCondition` goals containing fluent literals only; they reject
-derived literals and numeric constraints. `search.CancelToken` supports cancellation from another thread.
+construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
+literals and numeric constraints; each batched goal selects one conjunction per search. Callable goals and any-of
+alternatives within one device search are not supported; device A*/GBFS use the task goal.
+`search.CancelToken` supports cancellation from another thread.
 
 An `observer` may implement `on_start`, `on_expand`, `on_generate`, `on_prune`, `on_pass`, `on_solution`,
 `on_progress` and `on_end`; IW-family algorithms also call `on_transition`. A false return from `on_progress` stops

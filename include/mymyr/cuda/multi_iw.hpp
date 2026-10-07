@@ -26,8 +26,10 @@
 // next layer, as the CPU's randomized layer ordering does.
 //
 // Refused with std::invalid_argument ("mymyr: ..."): arities above 2 and tasks beyond ChunkGenerator::unsupported limits.
-// Not offered: custom goals, blocked states, observers and successor-order hooks. Goals are the task's or, per search,
-// one conjunction of fluent atoms (search::GoalSpec::AtomGoal: the CPU's AnyOf with a single goal).
+// Not offered: callable goals, blocked states, observers and successor-order hooks. Goals are the task's or, per search,
+// one ground conjunction of fluent/derived literals and numeric constraints (search::GoalSpec::AtomGoal: the CPU's
+// AnyOf with a single goal). Numeric goal programs use at most 64 stack values; derived goals use the device axiom
+// closure or its CPU fallback. These goal evaluations run between chunks, outside graph capture.
 // The driver is host-driven and synchronous (run() returns when the searches are done). A chunk is one launch
 // sequence sized by capacities the driver estimates from earlier chunks; the kernels count on the device, an overflow
 // marks the chunk aborted (its committing kernels do nothing) and the driver redoes it at the reported sizes; the host
