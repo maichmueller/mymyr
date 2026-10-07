@@ -6,6 +6,11 @@ written on Linux (GCC 16, libstdc++). The same test on macOS (Apple Clang, libc+
 std::sort tie, a <random> distribution or a hash-table iteration that decides an order shows up there as a mismatch
 in the named entry.
 
+The front end's own translation order also follows the compiler that built loki (include/mymyr/frontend/domain.hpp):
+loki creates normalized parts in function arguments, whose evaluation order GCC and Clang choose differently, so a
+GCC-built and a Clang-built loki can give a different order of the schemas that one `or` splits into and of the
+literals of a condition. The PDDL cases here have no such parts, so their entries hold for either compiler.
+
 After an intended change of an order (a new tie-breaking rule, a new search default), regenerate the file and say why
 in the commit:
 

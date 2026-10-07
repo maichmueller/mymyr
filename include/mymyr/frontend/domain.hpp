@@ -27,9 +27,10 @@
 //     free variables in the iteration order of an unordered_set of variable pointers; mymyr sorts them by variable
 //     name (DomainOptions::generated_argument_order reproduces a particular mimir run), and orders the type literals
 //     of those axioms' parameters by parameter;
-//   - conditional effects of one schema are grouped in an std::unordered_map keyed by a condition *pointer*; for at
-//     most two groups libc++ iterates in reverse insertion order (reproduced), for three or more the order depends
-//     on heap addresses (we keep reverse insertion order);
+//   - conditional effects of one schema are grouped in an std::unordered_map keyed by a condition *pointer*; with
+//     at most two groups it iterates in reverse insertion order (libstdc++, which mimir uses, and libc++ alike;
+//     reproduced), with three or more two conditions whose addresses share a bucket change that order, so it
+//     depends on heap addresses (we keep reverse insertion order);
 //   - parameters that normalization appends to a schema (moved existentials) are sorted by pointer value; we sort
 //     by creation order, which is what the allocator produces in practice;
 //   - loki's normalization passes create the parts of an action, axiom, condition or effect inside the argument list
