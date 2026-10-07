@@ -1,5 +1,7 @@
 #include "init_reader.hpp"
 
+#include "mymyr/frontend/domain.hpp"
+
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/charconv.h>
 #include <boost/hana.hpp>
@@ -7,9 +9,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
+#include <system_error>
 
 namespace mymyr::frontend::detail
 {
@@ -32,7 +37,11 @@ bool keyword_at(std::string_view text, size_t pos, std::string_view kw)
 class Lexer
 {
 public:
-    Lexer(std::string_view text, std::string_view path) : m_text(text), m_path(path) {}
+    /// `first_line`: the line of the file at which `text` starts (error messages)
+    Lexer(std::string_view text, std::string_view path, u32 first_line)
+        : m_text(text), m_path(path), m_first_line(first_line)
+    {
+    }
 
     enum class Kind : u8
     {
@@ -73,11 +82,10 @@ public:
     [[noreturn]] void fail(const std::string& msg) const
     {
         // line number of the current position, for the error message
-        size_t line = 1;
+        u32 line = m_first_line;
         for (size_t i = 0; i < std::min(m_pos, m_text.size()); ++i)
             line += m_text[i] == '\n';
-        throw std::runtime_error("mymyr frontend: " + std::string(m_path) + ": :init section, line " + std::to_string(line)
-                                 + " of the section: " + msg);
+        throw PddlError(msg, std::string(m_path), line);
     }
     Token expect(Kind k, const char* what)
     {
@@ -105,6 +113,7 @@ private:
 
     std::string_view m_text;
     std::string_view m_path;
+    u32 m_first_line;
     size_t m_pos = 0;
 };
 
@@ -214,7 +223,8 @@ std::string read_pddl_file(const std::filesystem::path& path)
 {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f)
-        throw std::runtime_error("mymyr frontend: cannot open " + path.string());
+        throw std::filesystem::filesystem_error("mymyr: cannot open the PDDL file", path,
+                                                std::error_code(errno, std::generic_category()));
     std::string raw;
     char buf[1 << 16];
     for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;)
@@ -354,7 +364,8 @@ InitOrderTables make_init_order_tables(const DomainState& ds, const loki::Domain
 // ------------------------------------------------------------------------------------------------ reader
 
 GroundInit read_fast_init(const DomainState& ds, const InitOrderTables& tables, const loki::Problem& problem,
-                          const ObjectMap& object_of, std::string_view section, std::string_view path)
+                          const ObjectMap& object_of, std::string_view section, std::string_view path,
+                          u32 first_line)
 {
     const formalism::TaskData& d = ds.data;
     const u32 num_constants = static_cast<u32>(d.objects.size());
@@ -434,7 +445,7 @@ GroundInit read_fast_init(const DomainState& ds, const InitOrderTables& tables, 
     GroundInit init;
     std::vector<u32> objs;
 
-    Lexer lx(section, path);
+    Lexer lx(section, path, first_line);
     lx.expect(Lexer::Kind::Open, "'('");
     if (auto kw = lx.expect(Lexer::Kind::Word, "':init'"); !keyword_at(kw.text, 0, ":init"))
         lx.fail("expected ':init'");

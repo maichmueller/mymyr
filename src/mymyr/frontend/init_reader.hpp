@@ -59,5 +59,6 @@ InitOrderTables make_init_order_tables(const DomainState& ds, const loki::Domain
 /// The initial literals and function values of the problem, in loki's order (see above). `problem` is the translated
 /// problem without its `:init`; `section` is the text of the `(:init ...)` element.
 GroundInit read_fast_init(const DomainState& ds, const InitOrderTables& tables, const loki::Problem& problem,
-                          const ObjectMap& object_of, std::string_view section, std::string_view path);
+                          const ObjectMap& object_of, std::string_view section, std::string_view path,
+                          u32 first_line);
 }  // namespace mymyr::frontend::detail
