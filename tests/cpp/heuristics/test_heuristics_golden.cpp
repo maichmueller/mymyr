@@ -19,13 +19,28 @@
 // plans the test only counts h_FF differences. It always checks the invariants of relaxed
 // plans: h_FF finite iff h_max is finite, and at least h_max without conditional effects (with them the fork counts a
 // ground action once however many of its effect instances a plan uses, so h_FF < h_max happens, 6 golden states).
+//
+// Set-additive, h² and the perfect heuristic are compared with the fork's values on the same walk states of the BrFS
+// suite (tests/data/heuristics/fork_heuristics.json, written by search_fork/run_heuristics.py; each step carries the
+// fluent atom count and hash of the fork's state, checked against the golden walk). Perfect must match everywhere (on
+// tasks whose state space the fork could build; sanitizer builds: spaces of at most 100,000 states). Set-additive must
+// match up to the fork's ties among equally cheap supporters (as h_FF), counted. h² differs from the fork's by design
+// (heuristic.hpp): on tasks without negative literals, conditional effects and axioms the fork's value must equal
+// mimir's definition evaluated on mymyr's grounding (test::ReferenceH2 with mimir's delete check), which can only be
+// lower than mymyr's; elsewhere mymyr's h² must lie between h_max and h* (when known). A* with the perfect heuristic
+// finds the fork's optimal cost and, with unit costs, expands exactly the states of its plan but the goal. The fork's
+// perfect heuristic is the cost-goal distance: mymyr's with real costs.
 
 #include "../frontend/golden.hpp"
 #include "../support/json.hpp"
+#include "h2_reference.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/datasets/state_space.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
+#include "mymyr/heuristics/perfect.hpp"
+#include "mymyr/search/best_first.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -68,7 +83,7 @@ bool pddl_of(const test::json::Value& src, fs::path& domain, fs::path& problem)
     if (tag.rfind("ipc/", 0) == 0)
         base = test::fork_data_dir() / "ipc" / tag.substr(4) / "test";
     else if (tag == "adl/philosophers")
-        base = fs::path(MYMYR_SOURCE_DIR) / "analysis" / "bench" / "patched" / "adl" / "philosophers";
+        base = fs::path(MYMYR_SOURCE_DIR) / "tests" / "data" / "pddl" / "philosophers";
     else
         base = test::work_dir() / "mimir-cs" / "Benchmark" / tag;
     domain = base / src["domain_file"].str;
@@ -112,7 +127,23 @@ struct Tally
     u64 ff_below_hmax = 0;     // steps where the fork's h_FF is below its h_max (conditional effects)
     u64 lifted_hmax = 0, lifted_hadd = 0, lifted_ff_invariant = 0;
     double ff_absdiff = 0;
+    // set-additive, h², perfect against fork_heuristics.json
+    u64 sa_states = 0, sa_equal = 0, sa_higher = 0, sa_lower = 0;
+    u64 h2_states = 0, h2_equal = 0, h2_higher = 0, h2_comparable = 0, h2_mimir_equal = 0, h2_bad = 0;
+    u64 h2_fork_inadmissible = 0;  // the fork's h² above the unit-cost h*
+    u64 hstar_states = 0, hstar_diff = 0, misaligned = 0;
 };
+
+/// The fork's set-additive, h² and perfect values on the golden walks (search_fork/run_heuristics.py).
+const test::json::Value& fork_heuristics()
+{
+    static const test::json::Value doc = []
+    {
+        const fs::path f = fs::path(MYMYR_SOURCE_DIR) / "tests" / "data" / "heuristics" / "fork_heuristics.json";
+        return fs::exists(f) ? test::json::parse_file(f.string()) : test::json::Value{};
+    }();
+    return doc;
+}
 
 /// The fork's h_FF of one walk state with its relaxed plan and supporters (fork_heur --mode walks).
 struct ForkFF
@@ -340,6 +371,86 @@ private:
     std::vector<u32> m_cost;
 };
 
+bool ce_task(const Task& task) { return task.compiled().has_conditional_effects; }
+
+/// One walk state against the fork's set-additive, h² and perfect values (fork_heuristics.json).
+template<class Report>
+void compare_fork_heuristics(const test::json::Value& fh, usize wi, usize si, const test::json::Value& st, const State& s,
+                             heuristics::Heuristic* hsa, heuristics::Heuristic* hh2, heuristics::Heuristic* hstar,
+                             heuristics::Heuristic* hstar_unit,
+                             test::ReferenceH2* h2_mimir, bool h2_comparable, const Task& task, const heuristics::RelaxedTask& R,
+                             Tally& t, Report report)
+{
+    const auto& walks = fh["walks"];
+    if (walks.is_null() || wi >= walks.arr.size() || si >= walks[wi].arr.size())
+        return;
+    const auto& fs_ = walks[wi][si];
+    if (fs_["atoms"].num != st["fluent_atoms"]["count"].num || fs_["hash"].str != st["fluent_atoms"]["hash"].str)
+    {
+        ++t.misaligned;
+        report("the walk of fork_heuristics.json differs from the golden walk");
+        return;
+    }
+    const auto& h = fh["h"];
+    const double hmax_fork = golden_h(st["h"]["hmax"]);
+    if (hsa)
+    {
+        const double v = hsa->evaluate(s), f = golden_h(h["setadd"][wi][si]);
+        ++t.sa_states;
+        t.sa_equal += v == f;
+        t.sa_higher += v > f;
+        t.sa_lower += v < f;
+        if (std::isinf(v) != std::isinf(f))
+            report("set-additive " + show(v) + ", fork " + show(f));
+    }
+    if (hstar)
+    {
+        const double vstar = hstar->evaluate(s), f = golden_h(h["perfect"][wi][si]);
+        ++t.hstar_states;
+        if (vstar != f)
+        {
+            ++t.hstar_diff;
+            report("perfect " + show(vstar) + ", fork " + show(f));
+        }
+    }
+    if (hh2)
+    {
+        const double v = hh2->evaluate(s), f = golden_h(h["h2"][wi][si]);
+        ++t.h2_states;
+        t.h2_equal += v == f;
+        t.h2_higher += v > f;
+        // mymyr's h² is admissible and at least h_max (the fork's h_max equals mymyr's)
+        const double vstar = hstar_unit ? hstar_unit->evaluate(s) : heuristics::k_dead_end;
+        t.h2_fork_inadmissible += f > vstar;
+        if (v < hmax_fork || v > vstar)
+        {
+            ++t.h2_bad;
+            report("h2 " + show(v) + " outside [h_max " + show(hmax_fork) + ", unit h* " + show(vstar) + "]");
+        }
+        if (h2_comparable)
+        {
+            ++t.h2_comparable;
+            // the fork's delete check only drops pairs mymyr excludes: its value is at most mymyr's
+            if (f > v)
+            {
+                ++t.h2_bad;
+                report("h2 " + show(v) + " below the fork's " + show(f));
+            }
+            if (h2_mimir)
+            {
+                const double m = h2_mimir->evaluate(test::true_props(task, R, s), R.goal());
+                if (m == f)
+                    ++t.h2_mimir_equal;
+                else
+                {
+                    ++t.h2_bad;
+                    report("mimir's h2 on mymyr's grounding " + show(m) + ", fork " + show(f));
+                }
+            }
+        }
+    }
+}
+
 void run_task(const fs::path& file, Tally& total)
 {
     const test::json::Value doc = test::json::parse_file(file.string());
@@ -376,6 +487,13 @@ void run_task(const fs::path& file, Tally& total)
     }
     std::map<std::pair<u64, u64>, ForkFF> fork_plans;
     std::unique_ptr<ForkPlanCheck> plan_check;
+    // the fork's set-additive, h² and perfect values of this task
+    const test::json::Value* fh = nullptr;
+    if (fork_heuristics().has("tasks") && fork_heuristics()["tasks"].has(name))
+        fh = &fork_heuristics()["tasks"][name];
+    std::unique_ptr<heuristics::Heuristic> hsa, hh2, hstar, hstar_unit;
+    std::unique_ptr<test::ReferenceH2> h2_mimir;  // mimir's h² on mymyr's grounding
+    bool h2_comparable = false;
     if (want_relaxed)
     {
         relaxed = heuristics::ground(*task, {}, &gs);
@@ -407,6 +525,64 @@ void run_task(const fs::path& file, Tally& total)
             la = heuristics::make_heuristic(*task, l);
             l.kind = heuristics::Kind::FF;
             lf = heuristics::make_heuristic(*task, l);
+        }
+        if (fh && relaxed)
+        {
+            o.kind = heuristics::Kind::SetAdditive;
+            if (fh->operator[]("h").has("setadd"))
+                hsa = heuristics::make_heuristic(*task, o);
+            o.kind = heuristics::Kind::H2;
+            if (fh->operator[]("h").has("h2") && relaxed->num_props() <= 4000)
+            {
+                hh2 = heuristics::make_heuristic(*task, o);
+                bool negative = false;
+                for (u32 p = 0; p < relaxed->num_props(); ++p)
+                    negative = negative || relaxed->negative(p);
+                h2_comparable = !ce_task(*task) && !task->has_axioms() && !negative;
+                u32 max_props = 1500;  // the reference is a Bellman-Ford over the full pair table
+#if defined(MYMYR_SANITIZED)
+                max_props = 300;
+#endif
+                if (h2_comparable && relaxed->num_props() <= max_props)
+                    h2_mimir = std::make_unique<test::ReferenceH2>(*relaxed, true);
+            }
+            u64 max_states = 1'500'000;
+#if defined(MYMYR_SANITIZED)
+            max_states = 100'000;
+#endif
+            if (fh->operator[]("h").has("perfect"))
+            {
+                datasets::StateSpaceOptions so;
+                so.remove_if_unsolvable = false;
+                so.labels = false;
+                so.max_states = max_states;
+                auto space = datasets::generate_state_space(task, so);
+                if (space.status == datasets::StateSpaceStatus::Ok && space.space)
+                {
+                    // the fork's perfect heuristic is the cost-goal distance (action costs), as mymyr's with real costs
+                    hstar = heuristics::perfect(space.space, heuristics::Costs::Real);
+                    hstar_unit = heuristics::perfect(space.space);  // bounds h² (unit costs)
+                    if (fh->has("astar_perfect"))
+                    {
+                        // A* with h*: the fork's optimal cost; with unit costs it expands the states of its plan but
+                        // the goal (popped, not expanded)
+                        search::BestFirstOptions bo;
+                        bo.evaluator = hstar.get();
+                        const auto r = search::astar_eager(*task, bo);
+                        const auto& fa = fh->operator[]("astar_perfect");
+                        EXPECT_EQ(r.status, search::SearchStatus::Solved) << name;
+                        EXPECT_EQ(r.cost, fa["plan_cost"].num) << name;
+                        if (space.space->unit_costs())
+                        {
+                            EXPECT_EQ(r.stats.expanded, r.plan.size()) << name;
+                        }
+                        std::printf("GOLDEN %-40s A* perfect: cost %g, plan length %zu, expanded %llu (fork: cost %g, "
+                                    "expanded %g)\n",
+                                    name.c_str(), r.cost, r.plan.size(), static_cast<unsigned long long>(r.stats.expanded),
+                                    fa["plan_cost"].num, fa["expanded"].num);
+                    }
+                }
+            }
         }
         if (const char* d = std::getenv("MYMYR_FORK_PLANS"); d && *d && fs::exists(fs::path(d) / (file.stem().string() + ".txt")))
         {
@@ -529,6 +705,10 @@ void run_task(const fs::path& file, Tally& total)
                     }
                 }
             }
+            if (fh && (hsa || hh2 || hstar))
+                compare_fork_heuristics(*fh, wi, si, st, s, hsa.get(), hh2.get(), hstar.get(), hstar_unit.get(), h2_mimir.get(),
+                                        h2_comparable,
+                                        *task, *relaxed, t, [&](const std::string& what) { report(where + ": " + what); });
             const auto& taken = st["taken"];
             if (taken.is_null())
                 break;
@@ -573,6 +753,26 @@ void run_task(const fs::path& file, Tally& total)
     EXPECT_EQ(t.lifted_hmax, 0u) << name;
     EXPECT_EQ(t.lifted_hadd, 0u) << name;
     EXPECT_EQ(t.lifted_ff_invariant, 0u) << name;
+    if (t.sa_states || t.h2_states || t.hstar_states)
+        std::printf("GOLDEN %-40s set-additive %llu states: equal %llu, higher %llu, lower %llu | h2 %llu states: equal %llu, "
+                    "higher %llu, fork above h* %llu, comparable %llu (mimir's definition reproduces the fork in %llu) | "
+                    "perfect %llu states, differ %llu\n",
+                    name.c_str(), u(t.sa_states), u(t.sa_equal), u(t.sa_higher), u(t.sa_lower), u(t.h2_states), u(t.h2_equal),
+                    u(t.h2_higher), u(t.h2_fork_inadmissible), u(t.h2_comparable), u(t.h2_mimir_equal), u(t.hstar_states), u(t.hstar_diff));
+    EXPECT_EQ(t.misaligned, 0u) << name;
+    EXPECT_EQ(t.h2_bad, 0u) << name;
+    EXPECT_EQ(t.hstar_diff, 0u) << name;
+    total.sa_states += t.sa_states;
+    total.sa_equal += t.sa_equal;
+    total.sa_higher += t.sa_higher;
+    total.sa_lower += t.sa_lower;
+    total.h2_states += t.h2_states;
+    total.h2_equal += t.h2_equal;
+    total.h2_higher += t.h2_higher;
+    total.h2_fork_inadmissible += t.h2_fork_inadmissible;
+    total.h2_comparable += t.h2_comparable;
+    total.h2_mimir_equal += t.h2_mimir_equal;
+    total.hstar_states += t.hstar_states;
     total.states += t.states;
     total.hmax += t.hmax;
     total.hadd += t.hadd;
@@ -615,4 +815,9 @@ TEST(HeuristicsGolden, WalkValuesEqualTheForks)
                 u(total.states), u(total.hmax), u(total.hadd), u(total.gc), u(total.hff), u(total.ff_higher), u(total.ff_lower),
                 total.ff_absdiff, u(total.ff_explained), u(total.ff_checked), u(total.ff_fork_varies), u(total.ff_observed),
                 u(total.ff_observed_hit), u(total.ff_below_hmax), u(total.lifted_hmax), u(total.lifted_hadd));
+    std::printf("GOLDEN total set-additive %llu states: equal %llu, higher %llu, lower %llu | h2 %llu states: equal %llu, higher %llu, "
+                "fork above h* %llu, comparable %llu (mimir's definition reproduces the fork in %llu) | perfect %llu states\n",
+                u(total.sa_states), u(total.sa_equal), u(total.sa_higher), u(total.sa_lower), u(total.h2_states), u(total.h2_equal),
+                u(total.h2_higher), u(total.h2_fork_inadmissible),
+                u(total.h2_comparable), u(total.h2_mimir_equal), u(total.hstar_states));
 }

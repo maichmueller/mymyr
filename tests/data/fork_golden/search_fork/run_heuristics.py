@@ -4,12 +4,13 @@ BFS_INSTANCES), and its A* with the perfect heuristic, written to tests/data/heu
 tests/cpp/heuristics/test_heuristics_golden.cpp.
 
     python3 tests/data/fork_golden/search_fork/run_heuristics.py --build     # build search_fork, then run
-    python3 tests/data/fork_golden/search_fork/run_heuristics.py --only blocks
+    python3 tests/data/fork_golden/search_fork/run_heuristics.py --only blocks,gripper   # these tasks again
 
 The walks are those of the golden files (tests/data/expected: three seeded walks of 25 steps, README.md), regenerated
 by search_fork --algo walk_h; every step carries the fluent atom count and set hash, so that a reader can check that it
 replays the same states. A heuristic the fork cannot evaluate within the budget (time, memory, a state space of
---max-states states or more for perfect) is recorded under "killed". Paths as in ../export_all.py (MYMYR_WORK).
+--max-states states or more for perfect) is recorded under "killed", the budget of each task under "budget". Paths as
+in ../export_all.py (MYMYR_WORK).
 """
 
 import argparse
@@ -102,17 +103,18 @@ def main():
         subprocess.run(cfg, check=True)
         subprocess.run(["cmake", "--build", str(build), "-j", "8"], check=True)
     exe = build / "search_fork"
-    todo = [(n, d, p) for n, (d, p) in sorted(tasks().items()) if a.only in n]
+    only = a.only.split(",")
+    todo = [(n, d, p) for n, (d, p) in sorted(tasks().items()) if any(o in n for o in only)]
     results = json.loads(OUT.read_text())["tasks"] if OUT.exists() else {}
     with cf.ThreadPoolExecutor(a.jobs) as ex:
         for name, rec in ex.map(lambda t: run_task(exe, *t, a), todo):
+            rec["budget"] = {"seconds": a.seconds, "max_states": a.max_states, "mem_gb": a.mem_gb}
             results[name] = rec
     doc = {"format": "mymyr-fork-heuristics/1",
            "fork": {"version": "0.16.3", "successor_generator": "lifted KPKC, symmetry pruning off",
                     "heuristics": "SetAddHeuristic and H2Heuristic over a LiftedGrounder (unit costs), "
                                   "PerfectHeuristic over the search context"},
            "walks": {"num_walks": 3, "num_steps": 25, "seed_base": 1},
-           "budget": {"seconds": a.seconds, "max_states": a.max_states, "mem_gb": a.mem_gb},
            "tasks": dict(sorted(results.items()))}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(doc, separators=(",", ":")) + "\n")

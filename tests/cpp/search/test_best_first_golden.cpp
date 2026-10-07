@@ -53,7 +53,7 @@ bool pddl_of(const test::json::Value& src, fs::path& domain, fs::path& problem)
     if (tag.rfind("ipc/", 0) == 0)
         base = test::fork_data_dir() / "ipc" / tag.substr(4) / "test";
     else if (tag == "adl/philosophers")
-        base = fs::path(MYMYR_SOURCE_DIR) / "analysis" / "bench" / "patched" / "adl" / "philosophers";
+        base = fs::path(MYMYR_SOURCE_DIR) / "tests" / "data" / "pddl" / "philosophers";
     else
         base = test::work_dir() / "mimir-cs" / "Benchmark" / tag;
     domain = base / src["domain_file"].str;
