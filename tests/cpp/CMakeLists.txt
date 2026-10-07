@@ -31,6 +31,7 @@ add_executable(mymyr_tests
     heuristics/test_heuristics.cpp
     search/test_plan_file.cpp
     search/test_layer_orders_fork.cpp
+    search/test_beam.cpp
     search/test_beam_fork.cpp
     # device task layout (device_arrays version 2), host side
     rl/test_task_arrays_v2.cpp
