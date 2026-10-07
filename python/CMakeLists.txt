@@ -74,9 +74,10 @@ install(TARGETS _core LIBRARY DESTINATION mymyr)
 # Typing stubs: nanobind's stubgen on the freshly built module, recursive and with
 # the private submodules (_formalism, _rl, _search, ...), installed as the stub package mymyr/_core/*.pyi next to the
 # extension (py.typed ships with the Python sources). stubgen imports the module as mymyr._core from a staging
-# directory that holds only the extension and mymyr/_typing.py (a namespace package), under `python -S`: an editable
-# install's import hook would otherwise hand it the installed module. _typing.py holds the structural types the
-# signatures name (typing.hpp); stubgen imports what they name, so without it the stubs would `import mymyr` only.
+# directory that holds only the extension, mymyr/_typing.py and mymyr/search (namespace packages), under `python -S`: an
+# editable install's import hook would otherwise hand it the installed module. _typing.py holds the structural types
+# the signatures name (typing.hpp), mymyr.search the Observer class; stubgen imports what they name, so without them
+# the stubs would `import mymyr` only.
 # Sanitizer builds skip it: their modules need the runtime preloaded.
 option(MYMYR_PY_STUBS "Generate and install typing stubs for mymyr._core" ON)
 if(MYMYR_PY_STUBS AND NOT MYMYR_SANITIZE)
@@ -93,8 +94,10 @@ if(MYMYR_PY_STUBS AND NOT MYMYR_SANITIZE)
         COMMAND ${CMAKE_COMMAND} -E make_directory ${stage}/mymyr
         COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:_core> ${CMAKE_CURRENT_SOURCE_DIR}/mymyr/_typing.py
                 ${stage}/mymyr/
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/mymyr/search ${stage}/mymyr/search
         COMMAND ${Python_EXECUTABLE} -S ${stubgen} -q -r -P -p ${patterns} -i ${stage} -m mymyr._core -O ${stage}/mymyr
         DEPENDS _core ${stubgen} ${patterns} ${CMAKE_CURRENT_SOURCE_DIR}/mymyr/_typing.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/mymyr/search/__init__.py ${CMAKE_CURRENT_SOURCE_DIR}/mymyr/search/_observer.py
         COMMENT "Generating typing stubs for mymyr._core"
         VERBATIM)
     add_custom_target(_core_stubs ALL DEPENDS ${stage}/mymyr/_core/__init__.pyi)

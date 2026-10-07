@@ -79,6 +79,10 @@ def test_stubs_parse_and_are_typed():
         assert sig.endswith(f") -> {result}:"), sig
     # every parameter and result typed: observers are mymyr.search.Observer (any object with some of its methods works)
     assert "observer: mymyr.search.Observer | None = None" in search
+    brfs = next(line for line in search.splitlines() if line.startswith("def brfs("))
+    for arg in ("max_seconds: float | None = None", "cancel: CancelToken | None = None",
+                "observer: mymyr.search.Observer | None = None", "progress_interval: int | None = None"):
+        assert arg in brfs, arg
     assert ": object" not in search.replace("def __eq__(self, other: object, /)", "")
     assert "-> object" not in search and "-> list:" not in search and "-> dict:" not in search
     core = (d / "__init__.pyi").read_text()
