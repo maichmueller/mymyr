@@ -14,8 +14,9 @@
 //     snapshot and the static relations; rl/task_arrays_view.hpp documents the layout and reads it on the host and the
 //     device (cuda::DeviceTask uploads the block once). Sections are versioned (scalars section_core, section_plan),
 //     so later versions can append sections without moving what exists. Numeric tasks add init_numeric [NN] and
-//     the scalars numeric_slots, numeric_words, numeric_storage to the core (absent for classical tasks); no device
-//     kernel reads them yet, so DeviceTask rejects numeric tasks.
+//     the scalars numeric_slots, numeric_words, numeric_storage to the core (absent for classical tasks). Version 2
+//     appends numeric section 1: num_* arrays for postfix programs, function tables, checks, ordered effects and
+//     initial double values; rl/numeric_arrays_view.hpp describes their layouts.
 //
 // Everything is a snapshot: immutable once built, so it may be exported zero-copy to any number of consumers (JAX
 // requires that an imported buffer is never written again). Under lazy slots the snapshot covers the atom slots
@@ -173,7 +174,7 @@ struct DeviceSearchCosts
 /// dev::k_deep_matcher_depth parameters, no numeric constraints), replayed on the CPU's engine over sample states: the
 /// initial state and, in frozen mode, its successors in canonical order (at most k_probe_states states; under lazy
 /// slots generating them would intern atoms, so only the initial state). Deterministic. device_arrays sets
-/// dev::k_mc_device_fc from it; numeric tasks get zeros.
+/// dev::k_mc_device_fc from it; numeric plans use their compiled matcher's search order.
 [[nodiscard]] DeviceSearchCosts device_search_costs(const Task& task);
 
 /// A view of a version-2 export whose block starts at `base` (nullptr: the bundle's own host block; otherwise a copy

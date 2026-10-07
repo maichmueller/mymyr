@@ -218,8 +218,6 @@ ArrayOut evaluate(PyDeviceHeuristic& self, StatesLike states, StreamArg stream)
     {
         // host states: uploaded, evaluated, downloaded
         const StateBatch sb = import_task_states(states, task);
-        if (sb.view.numeric_words)
-            throw nb::value_error("mymyr: the CUDA backend cannot evaluate numeric tasks");
         std::vector<State> v;
         v.reserve(sb.view.rows);
         for (u64 i = 0; i < sb.view.rows; ++i)
@@ -241,8 +239,11 @@ ArrayOut evaluate(PyDeviceHeuristic& self, StatesLike states, StreamArg stream)
     std::intptr_t dl_stream = 0;
     const cudaStream_t st = stream_value(stream, c->stream(), dl_stream);
     const dl::Imported im = dl::import_dlpack(states, dl_stream);
-    const WordsLayout w = words_layout(im.data, im.dtype.code, im.dtype.bits, im.dtype.lanes, im.shape.size(),
+    WordsLayout w = words_layout(im.data, im.dtype.code, im.dtype.bits, im.dtype.lanes, im.shape.size(),
                                        im.shape.data(), im.strides.data());
+    if (w.words < task.numeric_words())
+        throw nb::value_error("mymyr: heuristic state rows are narrower than the numeric block");
+    w.words -= task.numeric_words();
     const Framework fw = framework_of(states);
     std::shared_ptr<cuda::DeviceBuffer> buf;
     {

@@ -4,6 +4,7 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/generator.hpp"
+#include "mymyr/cuda/numeric_kernels.hpp"
 #include "mymyr/cuda/state_set.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -119,9 +120,17 @@ struct DeviceBrfs::Impl
     {
         auto grown = std::make_unique<DeviceArena>(ctx, nw * 8, std::max(states->capacity(), count + 1024), states->has_mirror());
         std::byte* dst = grown->tail(count);
-        check(state_set::launch_relayout(reinterpret_cast<const u64*>(states->device_data()), W, reinterpret_cast<u64*>(dst), nw,
-                                         count, s),
-              "launch_relayout");
+        if (task->numeric_slots())
+        {
+            auto view = gen->view();
+            view.numeric.storage = 0;
+            check(numeric::launch_convert(view, reinterpret_cast<const u64*>(states->device_data()), W,
+                                           W - task->numeric_slots(), reinterpret_cast<u64*>(dst), nw,
+                                           nw - task->numeric_slots(), count, true, s), "numeric relayout");
+        }
+        else
+            check(state_set::launch_relayout(reinterpret_cast<const u64*>(states->device_data()), W, reinterpret_cast<u64*>(dst), nw,
+                                             count, s), "launch_relayout");
         grown->commit(count);
         states = std::move(grown);
         W = nw;
@@ -229,7 +238,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     st.device_axioms = task->has_axioms() && gen->device_axioms();
     const u32 S = gen->num_schemas(), L = gen->label_width();
     const bool host = gen->needs_host(witness);
-    W = bucket(task->words());
+    W = bucket(task->words() + task->numeric_slots());
     const u64 budget = std::min<u64>(o.max_states, state_set::k_max_states);
     const u64 expected = o.expected_states ? o.expected_states : (o.max_states != ~u64{0} ? budget : 0);
     const u64 cap0 = expected ? expected + expected / 8 + 1024 : u64{1} << 16;
@@ -241,7 +250,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     {
         const State s0 = task->initial_state();
         std::vector<u64> row(W, 0);
-        std::copy_n(s0.data(), std::min(s0.size_words(), W), row.begin());
+        numeric::encode(*task, s0.view(), row.data(), W);
         states->append_from_host(row.data(), 1);
         const u32 root[2] = {k_no_parent, 0};
         nodes->append_from_host(root, 1);
@@ -364,7 +373,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     // run without device loops (GraphExec::loops_enabled).
     constexpr u64 k_loop_layer = 16384;
     constexpr usize k_loop_graphs = 4;
-    const bool loops = grouped && !o.timings && GraphExec::enabled() && GraphExec::loops_enabled() && gen->capturable(witness);
+    const bool loops = o.max_depth == ~u32{0} && grouped && !o.timings && GraphExec::enabled() && GraphExec::loops_enabled() && gen->capturable(witness);
     bool warm = false;
     struct LoopGraph
     {
@@ -523,6 +532,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         }
         if (!started)
         {
+            if (r.layers >= o.max_depth)
+                break;
             if (count >= budget)
             {
                 budget_hit = true;
@@ -692,9 +703,9 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                         st.host_ms += ms_since(tm);
                         if (!missing)
                             break;
-                        if (bucket(task->words()) > W)
+                        if (bucket(task->words() + task->numeric_slots()) > W)
                         {
-                            widen(bucket(task->words()), count);
+                            widen(bucket(task->words() + task->numeric_slots()), count);
                             widened = true;
                             break;
                         }
@@ -833,7 +844,13 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                     for (u64 id = t; id < count; id += T)
                     {
                         const u64* row = h + id * W;
-                        x ^= brfs_fingerprint_term(id, task->canonical_hash(StateView{row, bits::trimmed_size(row, W), nullptr, 0}));
+                        if (task->numeric_slots())
+                        {
+                            const State state = numeric::decode(*task, row, W);
+                            x ^= brfs_fingerprint_term(id, task->canonical_hash(state.view()));
+                        }
+                        else
+                            x ^= brfs_fingerprint_term(id, task->canonical_hash(StateView{row, bits::trimmed_size(row, W), nullptr, 0}));
                     }
                     part[t] = x;
                 });
@@ -876,8 +893,9 @@ std::vector<Action> DeviceBrfs::Impl::plan_to(u64 id)
     {
         fetch(*states, p, prow.data());
         fetch(*states, v, crow.data());
-        const u32 nw = bits::trimmed_size(prow.data(), W);
-        succ.prepare(StateView{prow.data(), nw, nullptr, 0});
+        const State parent = numeric::decode(*task, prow.data(), W);
+        const u32 nw = parent.size_words();
+        succ.prepare(parent.view());
         u32 i = 0;
         bool found = false;
         succ.generate<true>(
@@ -887,8 +905,16 @@ std::vector<Action> DeviceBrfs::Impl::plan_to(u64 id)
                     return true;
                 const u32 n = apply_delta(prow.data(), nw, d, tmp);
                 tmp.resize(std::max<usize>(tmp.size(), W), 0);
-                found = n <= W && std::equal(tmp.begin(), tmp.begin() + n, crow.begin()) &&
-                        std::all_of(crow.begin() + n, crow.end(), [](u64 x) { return x == 0; });
+                if (task->numeric_slots())
+                {
+                    const State next(tmp.data(), n, d.num, d.nnum);
+                    std::vector<u64> encoded(W);
+                    numeric::encode(*task, next.view(), encoded.data(), W);
+                    found = encoded == crow;
+                }
+                else
+                    found = n <= W && std::equal(tmp.begin(), tmp.begin() + n, crow.begin()) &&
+                            std::all_of(crow.begin() + n, crow.end(), [](u64 x) { return x == 0; });
                 plan.emplace_back(SchemaId{schema}, std::vector<ObjectId>(b, b + succ.arity(schema)));
                 return false;
             },

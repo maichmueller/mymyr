@@ -57,7 +57,7 @@
 //
 // Device arrays live in buffers shared by the instances of a wave (DeviceStateSpace::storage() keeps them alive) and
 // are written on the result's stream; to_host() downloads one space into a datasets::StateSpace. Numeric tasks are
-// refused (std::invalid_argument), as are tasks the device cannot run (ChunkGenerator::unsupported).
+// supported with the CPU numeric encoding; tasks beyond ChunkGenerator::unsupported limits are refused.
 //
 // Host output overlaps the post-processing: the members' host arrays are sized (first touch, threads) in the
 // background once their sizes are known, each array is downloaded as soon as it is final (the rows, offsets, labels,
@@ -143,7 +143,10 @@ public:
     [[nodiscard]] i32 max_goal_distance() const noexcept { return m_max_unit; }
     [[nodiscard]] u32 layers() const noexcept { return m_layers; }
 
-    /// [num_states, words] state words in id order.
+    [[nodiscard]] u32 numeric_words() const noexcept { return m_task->numeric_words(); }
+    [[nodiscard]] u32 row_words() const noexcept { return m_words + numeric_words(); }
+
+    /// [num_states, row_words] state words in id order, with the CPU numeric encoding.
     [[nodiscard]] const u64* state_words() const noexcept;
     /// [num_states + 1] and [num_transitions]: the forward CSR.
     [[nodiscard]] const u64* forward_offsets() const noexcept;
@@ -204,8 +207,7 @@ struct DeviceStateSpaces
     DeviceStateSpaceStats stats;
 };
 
-/// Why the device cannot generate the state space of `task` (empty: it can): numeric fluents, and
-/// ChunkGenerator::unsupported.
+/// Why the device cannot generate the state space of `task` (empty: it can): ChunkGenerator::unsupported.
 [[nodiscard]] std::string state_space_unsupported(const Task& task);
 
 /// The state space of one task. Throws std::invalid_argument for tasks the device cannot run and for symmetry pruning,

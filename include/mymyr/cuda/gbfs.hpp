@@ -13,6 +13,7 @@
 // A batch expands states the sequential search never reaches; stats.expanded reports the expansion overhead against
 // search::gbfs_eager.
 //
+// Numeric tasks use the same host F64 heap and device metric programs as numeric A*, one parent per step.
 // The same options, statistics and refusals as cuda/astar.hpp.
 
 #include "mymyr/cuda/astar.hpp"

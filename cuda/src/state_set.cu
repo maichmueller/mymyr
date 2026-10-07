@@ -104,6 +104,28 @@ __global__ void k_insert(Table t, Rows arena, Rows cand, u64 n, u32* result, Liv
     }
 }
 
+__global__ void k_lookup(Table t, Rows arena, Rows rows, u64 n, u32* ids)
+{
+    for (u64 c = live_first(n); c < n; c += u64{gridDim.x} * blockDim.x)
+    {
+        const u64* x = rows.data + c * rows.words;
+        const u64 h = row_hash(x, rows.words), tag = h & k_tag;
+        ids[c] = k_dup;
+        for (u64 j = h & t.mask;; j = (j + 1) & t.mask)
+        {
+            const u64 slot = load_slot(t.slots + j);
+            if (!slot) break;
+            const u32 ref = static_cast<u32>(slot);
+            if ((slot & k_tag) == tag && !(ref & k_pending) &&
+                equal<0>(x, arena.data + u64{ref - 1} * arena.words, rows.words))
+            {
+                ids[c] = ref - 1;
+                break;
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ the rank scan
 // Tiles of k_tile candidates, k_per (8) per thread: k_rank_bits writes each thread's owner bits (a byte) and the tile's
 // owners, k_rank_offsets scans the live tiles' counts (one block), k_rank_write the ranks. Tiles past the live
@@ -446,6 +468,12 @@ u64 rank_temp_bytes(u64 n)
 {
     const u64 tiles = tiles_for(n + 1);
     return ((tiles + 3) & ~u64{3}) * sizeof(u32) + tiles * k_block;
+}
+
+cudaError_t launch_lookup(Table t, Rows arena, Rows rows, u64 n, u32* ids, cudaStream_t s)
+{
+    if (n) k_lookup<<<grid_for(n), k_block, 0, s>>>(t, arena, rows, n, ids);
+    return cudaGetLastError();
 }
 
 cudaError_t launch_rank(Table t, const u32* result, u64 n, u32* rank, void* temp, u64 temp_bytes, cudaStream_t s, Live live)

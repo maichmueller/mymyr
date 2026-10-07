@@ -3,6 +3,7 @@
 #include "mymyr/cuda/rollouts.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/cuda/numeric.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -40,12 +41,10 @@ MultiIwBatch DeviceRollouts::run(std::span<const u64> seeds, const State* start,
             throw std::invalid_argument("mymyr: device rollouts: a goal with derived literals or numeric constraints (the device "
                                         "searches test fluent literals only)");
     const State s = start ? *start : m_task->initial_state();
-    if (s.numeric_words())
-        throw std::invalid_argument("mymyr: device rollouts: a start state with numeric values (numeric tasks are not supported)");
     // one start row, broadcast to every rollout (stride 0)
-    const u32 w = std::max<u32>({1, m_task->words(), s.size_words()});
+    const u32 w = std::max<u32>({1, m_task->words(), s.size_words()}) + m_task->numeric_slots();
     std::vector<u64> row(w, 0);
-    std::copy_n(s.data(), s.size_words(), row.begin());
+    numeric::encode(*m_task, s.view(), row.data(), w);
     const cudaStream_t st = m_ctx->stream();
     if (m_start_words < w)
     {

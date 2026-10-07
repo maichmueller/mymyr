@@ -38,6 +38,7 @@ add_executable(mymyr_tests
     search/test_beam_fork.cpp
     # device task layout (device_arrays version 2), host side
     rl/test_task_arrays_v2.cpp
+    rl/test_numeric_device_arrays.cpp
     # host environments and the counter-based RNG
     rl/test_env.cpp
     # novelty rewards, prefix masks, hindsight relabels
@@ -138,6 +139,13 @@ if(TARGET mymyr_cuda)
     target_compile_definitions(mymyr_cuda_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     gtest_discover_tests(mymyr_cuda_tests DISCOVERY_TIMEOUT 60
         PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+    if(TARGET mymyr_frontend)
+        add_executable(mymyr_device_numeric_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_numeric.cpp)
+        target_link_libraries(mymyr_device_numeric_tests PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings GTest::gtest_main)
+        target_compile_definitions(mymyr_device_numeric_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        gtest_discover_tests(mymyr_device_numeric_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+    endif()
     # the device environment step against the host step (rl::HostEnv) on the suite, the device RNG
     add_executable(mymyr_device_env_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_env.cpp)
     target_link_libraries(mymyr_device_env_tests PRIVATE mymyr::cuda mymyr_warnings GTest::gtest_main)

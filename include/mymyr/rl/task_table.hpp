@@ -86,7 +86,7 @@ public:
     [[nodiscard]] u32 num_schemas() const noexcept { return static_cast<u32>(m_schema_names.size()); }
     [[nodiscard]] u32 label_width() const noexcept { return m_label_width; }
     [[nodiscard]] u32 max_objects() const noexcept { return m_max_objects; }
-    /// Whether some instance has numeric fluents (the device refuses such tables).
+    /// Whether some instance has numeric fluents.
     [[nodiscard]] bool numeric() const noexcept { return m_numeric; }
 
     [[nodiscard]] const std::vector<std::string>& schema_names() const noexcept { return m_schema_names; }

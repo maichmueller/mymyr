@@ -1,6 +1,8 @@
 // The device state spaces (include/mymyr/cuda/state_space.hpp).
 
 #include "mymyr/cuda/state_space.hpp"
+#include "mymyr/cuda/numeric.hpp"
+#include "mymyr/cuda/numeric_kernels.hpp"
 
 #include "cost_program_build.hpp"
 #include "state_space_kernels.hpp"
@@ -209,7 +211,7 @@ struct Shape
 
 Shape shape_of(const DeviceStateSpace& d)
 {
-    return {d.num_states(), d.num_transitions(), d.words(), d.label_width(), d.has_labels(), !d.unit_costs()};
+    return {d.num_states(), d.num_transitions(), d.row_words(), d.label_width(), d.has_labels(), !d.unit_costs()};
 }
 
 /// The host arrays of a space, in the CPU generator's order (for_arrays).
@@ -574,6 +576,7 @@ public:
             a.task = d.task();
             a.num_states = d.num_states();
             a.words = d.words();
+            a.numeric_words = d.numeric_words();
             a.labels = d.has_labels();
             a.label_width = d.label_width();
             a.threads = 0;
@@ -707,7 +710,7 @@ public:
         }
         m_L = max_arity(*m_tasks.front());
         m_S = static_cast<u32>(m_tasks.front()->data().schemas.size());
-        m_multi = m_table && detail::multi_unsupported(*m_table).empty();
+        m_multi = m_table && !m_table->numeric() && detail::multi_unsupported(*m_table).empty();
         m_st.multi = m_multi;
         setup_costs();
     }
@@ -819,7 +822,7 @@ private:
             else
             {
                 const State s0 = m_tasks[id]->initial_state();
-                std::copy_n(s0.data(), std::min(s0.size_words(), w.W), rows.begin() + static_cast<std::ptrdiff_t>(u64{j} * w.W));
+                numeric::encode(*m_tasks[id], s0.view(), rows.data() + u64{j} * w.W, w.W);
             }
             inst[j] = m;
             w.host_live[m] = m_multi ? id : 0;
@@ -889,7 +892,8 @@ private:
         else
         {
             const Task& t = *m_tasks[first];
-            w.W = t.atoms().mode() == AtomMode::Frozen ? std::max<u32>(1, t.words()) : bucket(t.words());
+            w.W = t.atoms().mode() == AtomMode::Frozen ? std::max<u32>(1, t.words()) + t.numeric_slots()
+                                                      : bucket(t.words() + t.numeric_slots());
             m_gen = std::make_unique<ChunkGenerator>(m_ctx, m_tasks[first], m_s);
         }
         const u64 expected = m_o.expected_states;
@@ -1168,7 +1172,28 @@ private:
         m_gen->begin(in, false, true);
         m_gen->views();
         const lifted::Parents& p = m_gen->parents();
-        if (p.derived)
+        if (m_gen->task()->compiled().goal.uses_derived && !m_gen->device_axioms())
+        {
+            std::vector<u64> values;
+            if (!host_rows)
+            {
+                values.resize(u64{ns} * w.W);
+                check(cudaMemcpyAsync(values.data(), rows_b, values.size() * 8, cudaMemcpyDeviceToHost, m_s), "goal rows");
+                sync(m_s);
+                host_rows = values.data();
+            }
+            std::vector<u8> flags(ns);
+            for (u32 i = 0; i < ns; ++i)
+            {
+                const State state = numeric::decode(*m_gen->task(), host_rows + u64{i} * w.W, w.W);
+                flags[i] = m_gen->task()->is_goal(state.view());
+            }
+            check(cudaMemcpyAsync(w.goal.data() + b, flags.data(), ns, cudaMemcpyHostToDevice, m_s), "goal flags");
+            sync(m_s);
+        }
+        else if (m_gen->task()->numeric_slots())
+            m_gen->goal_flags(rows_b, w.W, w.W, ns, nullptr, ns, w.goal.data() + b);
+        else if (p.derived)
             check(lifted::launch_goal_rows_derived(m_gen->view(), rows_b, w.W, ns, p.derived, p.derived_words, w.goal.data() + b, m_s),
                   "launch_goal_rows_derived");
         else
@@ -1189,9 +1214,9 @@ private:
         {
             if (!m_gen->resolve_missing())
                 return true;
-            if (bucket(task.words()) > w.W)
+            if (bucket(task.words() + task.numeric_slots()) > w.W)
             {
-                widen(w, bucket(task.words()));
+                widen(w, bucket(task.words() + task.numeric_slots()));
                 return false;
             }
             m_gen->write(lab, cand, w.W);
@@ -1203,7 +1228,16 @@ private:
     {
         Grow<u64> grown;
         grown.reserve(m_ctx, std::max<u64>(w.rows.cap / w.W, w.count + 1) * nw, 0, m_s);
-        check(state_set::launch_relayout(w.rows.data(), w.W, grown.data(), nw, w.count, m_s), "launch_relayout");
+        const u32 slots = m_gen->task()->numeric_slots();
+        if (slots)
+        {
+            auto view = m_gen->view();
+            view.numeric.storage = 0;
+            check(numeric::launch_convert(view, w.rows.data(), w.W, w.W - slots, grown.data(), nw, nw - slots,
+                                           w.count, true, m_s), "numeric relayout");
+        }
+        else
+            check(state_set::launch_relayout(w.rows.data(), w.W, grown.data(), nw, w.count, m_s), "launch_relayout");
         w.rows = std::move(grown);
         w.W = nw;
         check(cudaMemsetAsync(w.table.data(), 0, w.slots * sizeof(u64), m_s), "cudaMemsetAsync (state table)");
@@ -1424,7 +1458,8 @@ private:
                         const heuristics::ActionCosts& ac = m_costs[w.first + m];
                         Successors& succ = task.workspace().successors();
                         const u64* row = rows.data() + g * W;
-                        const StateView rec{row, bits::trimmed_size(row, static_cast<u32>(W)), nullptr, 0};
+                        const State state = numeric::decode(task, row, static_cast<u32>(W));
+                        const StateView rec = state.view();
                         succ.prepare(rec);
                         const bool metric = ac.kind() == heuristics::ActionCosts::Kind::StateMetric;
                         const f64 gv = metric ? ac.initial(rec) : static_cast<f64>(depth[g]);
@@ -1594,7 +1629,7 @@ private:
         std::vector<u64> row_base(k + 1, 0);
         for (u32 m = 0; m < k; ++m)
         {
-            words[m] = std::max<u32>(1, m_tasks[w.first + m]->words());
+            words[m] = std::max<u32>(1, m_tasks[w.first + m]->words()) + m_tasks[w.first + m]->numeric_words();
             row_base[m + 1] = row_base[m] + (P[m + 1] - P[m]) * words[m];
         }
         std::vector<DeviceStateSpace::Part> parts(k);
@@ -1627,8 +1662,13 @@ private:
         const ssk::Layout lay{ptr<u64>(dP), ptr<u64>(dQ), ptr<u32>(dwords), ptr<u64>(dbase), spos};
         // final now: the rows and the forward offsets (in local ids), the labels, the costs and the goal flags
         storage->rows = alloc(m_ctx, row_base[k] * 8, s);
-        check(ssk::launch_local_rows(w.rows.data(), w.W, k > 1 ? ptr<u32>(perm) : nullptr, lay, N, ptr<u64>(storage->rows), s),
-              "launch_local_rows");
+        if (!m_multi && m_tasks[w.first]->numeric_slots())
+            check(numeric::launch_convert(m_gen->view(), w.rows.data(), w.W, w.W - m_tasks[w.first]->numeric_slots(),
+                                           ptr<u64>(storage->rows), words[0], words[0] - m_tasks[w.first]->numeric_words(),
+                                           N, false, s), "numeric state-space output");
+        else
+            check(ssk::launch_local_rows(w.rows.data(), w.W, k > 1 ? ptr<u32>(perm) : nullptr, lay, N, ptr<u64>(storage->rows), s),
+                  "launch_local_rows");
         w.rows.release();
         perm.reset();
         storage->foff = alloc(m_ctx, (N + k) * 8, s);
@@ -1875,7 +1915,7 @@ DeviceStateSpace::DeviceStateSpace(std::shared_ptr<const Storage> storage, Part 
                                    u64 num_transitions, u32 words, u32 label_width, bool labels, bool unit_costs,
                                    u32 num_goal, u32 num_unsolvable, i32 max_goal_distance, u32 layers)
     : m_storage(std::move(storage)), m_part(part), m_task(std::move(task)), m_n(num_states), m_e(num_transitions),
-      m_words(words), m_label_width(labels ? label_width : 0), m_labels(labels), m_unit_costs(unit_costs),
+      m_words(words - m_task->numeric_words()), m_label_width(labels ? label_width : 0), m_labels(labels), m_unit_costs(unit_costs),
       m_num_goal(num_goal), m_num_unsolvable(num_unsolvable), m_max_unit(max_goal_distance), m_layers(layers)
 {
 }
@@ -1929,8 +1969,6 @@ datasets::StateSpacePtr DeviceStateSpace::to_host() const
 // ---------------------------------------------------------------------------------------------- entry points
 std::string state_space_unsupported(const Task& task)
 {
-    if (task.numeric_words() > 0)
-        return "numeric fluents (state spaces of numeric tasks run on the CPU: datasets::generate_state_space)";
     return ChunkGenerator::unsupported(task);
 }
 

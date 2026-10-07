@@ -455,7 +455,7 @@ TEST(DeviceStateSpace, OptionsMatchHost)
     o = cpu_options();
     o.max_seconds = 0;
     EXPECT_EQ(cuda::state_space(ctx, depot, dev_options(o)).status, StateSpaceStatus::Timeout);
-    // refused: symmetry pruning, numeric tasks
+    // symmetry pruning requires the CPU generator
     o = cpu_options();
     o.symmetry_pruning = true;
     EXPECT_THROW((void)cuda::state_space(ctx, spanner, dev_options(o)), std::invalid_argument);
@@ -472,8 +472,8 @@ TEST(DeviceStateSpace, OptionsMatchHost)
  (:init (= (x) 0))
  (:goal (done)))
 )");
-    EXPECT_FALSE(cuda::state_space_unsupported(*numeric).empty());
-    EXPECT_THROW((void)cuda::state_space(ctx, numeric, dev_options(cpu_options())), std::invalid_argument);
+    EXPECT_TRUE(cuda::state_space_unsupported(*numeric).empty());
+    EXPECT_NO_THROW((void)cuda::state_space(ctx, numeric, dev_options(cpu_options())));
 }
 
 // ----------------------------------------------------------------------------------------------- tables

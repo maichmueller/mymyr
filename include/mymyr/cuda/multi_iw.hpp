@@ -25,7 +25,7 @@
 // the search's own SplitMix64 stream (cuda/device_rng.hpp) before it is popped, and max_next_layer_states truncates the
 // next layer, as the CPU's randomized layer ordering does.
 //
-// Refused with std::invalid_argument ("mymyr: ..."): numeric tasks (ChunkGenerator::unsupported) and arities above 2.
+// Refused with std::invalid_argument ("mymyr: ..."): arities above 2 and tasks beyond ChunkGenerator::unsupported limits.
 // Not offered: custom goals, blocked states, observers and successor-order hooks. Goals are the task's or, per search,
 // one conjunction of fluent atoms (search::GoalSpec::AtomGoal: the CPU's AnyOf with a single goal).
 // The driver is host-driven and synchronous (run() returns when the searches are done). A chunk is one launch
@@ -106,14 +106,15 @@ struct MultiIwStats
 struct MultiIwBatch
 {
     u32 n = 0;
-    u32 words = 0;         // goal rows
+    u32 words = 0;         // atom words of goal rows
+    u32 numeric_words = 0;  // CPU numeric encoding follows the atom words
     u32 label_width = 0;   // plan labels hold 1 + label_width u32: schema, binding (0xFFFFFFFF past the arity)
     std::vector<search::SearchStatus> status;
     std::vector<u32> effective_width;
     std::vector<i32> plan_length;   // -1 unless solved
     std::vector<u64> plan_offsets;  // [n + 1] steps
     std::vector<u32> plan_labels;   // [steps, 1 + label_width]
-    std::vector<u64> goal_rows;     // [n, words] (zero unless solved)
+    std::vector<u64> goal_rows;     // [n, words + numeric_words] (zero unless solved)
     u32 pass_slots = 0;                               // passes per search at most (the stride of pass_stats)
     std::vector<search::IwPassStatistics> pass_stats;  // [n, pass_slots]: search i's passes first
     std::vector<u8> num_passes;                        // [n]
@@ -132,14 +133,15 @@ struct MultiIwBatch
     [[nodiscard]] search::IwResult result(u32 i, const Task& task, const State& start, bool costs) const;
 };
 
-/// Start states on the device: rows of `words` words, `stride` words apart (stride 0: every search starts from the one
-/// row, as rollouts do).
+/// Start states on the device: rows of `words` total words (atom words followed by numeric values), `stride` words
+/// apart (stride 0: every search starts from the one row, as rollouts do).
 struct DeviceStarts
 {
     const u64* data = nullptr;
     u64 stride = 0;
     u32 words = 0;
     u32 rows = 0;
+    u32 numeric_words = 0;  // 0: doubles at the tail; otherwise CPU numeric encoding at the tail of the total words
 };
 
 class DeviceMultiIw
@@ -198,9 +200,11 @@ public:
     DeviceTableIw(const DeviceTableIw&) = delete;
     DeviceTableIw& operator=(const DeviceTableIw&) = delete;
 
-    /// One search per start row (table rows of at most the table's words; read on `stream`, null: the context's
-    /// stream), on instance task_ids[i]. The batch's goal rows and reached atoms are table rows (words = the table's
-    /// words, reached_words the widest instance's); plans are labels of the search's instance.
+    /// One search per start row on instance task_ids[i], read on `stream` (null: the context's stream).
+    /// CPU-encoded rows use the table's atom width and numeric_words; internal rows use the same atom width and
+    /// one double per slot of the widest instance, with numeric_words = 0. Numeric tails are padded across
+    /// instances. Goal rows use the table's CPU encoding; reached atoms use the widest instance's atom width.
+    /// Plans are labels of the search's instance.
     MultiIwBatch run(DeviceStarts starts, std::span<const u32> task_ids, std::span<const search::GoalSpec::AtomGoal> goals = {},
                      std::span<const u64> seeds = {}, cudaStream_t stream = nullptr);
     /// The same from host states (each a state of its instance's task).

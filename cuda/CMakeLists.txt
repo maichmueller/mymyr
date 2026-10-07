@@ -32,7 +32,7 @@ target_sources(mymyr_cuda PRIVATE src/env.cu src/env.cpp)
 # novelty rewards, prefix masks and hindsight relabels on the device (cuda/rl_ops.hpp)
 target_sources(mymyr_cuda PRIVATE src/rl_ops.cu)
 # batched grounded heuristics, device A* and GBFS (cuda/heuristics.hpp, cuda/astar.hpp, cuda/gbfs.hpp)
-target_sources(mymyr_cuda PRIVATE src/heuristics.cu src/heuristics.cpp src/astar.cu src/astar.cpp src/gbfs.cpp)
+target_sources(mymyr_cuda PRIVATE src/heuristics.cu src/heuristics.cpp src/astar.cu src/astar.cpp src/gbfs.cpp src/numeric_best_first.cpp)
 # rows of schemas with conditional effects (sub-plans at the leaf) and axiom strata on the device; the kernels share
 # src/lifted_device.cuh with lifted.cu and are instantiated in units of their own (parallel builds)
 target_sources(mymyr_cuda PRIVATE src/lifted_ce.cu src/lifted_ce16.cu src/lifted_ce64.cu src/axioms.cu src/lifted_deep.cu
@@ -47,6 +47,9 @@ target_sources(mymyr_cuda PRIVATE src/multi_iw_table.cpp)
 target_sources(mymyr_cuda PRIVATE src/suite.cu src/suite_expand.cpp)
 # device action costs (cuda/cost_program.hpp: programs over static functions, the state spaces and A*)
 target_sources(mymyr_cuda PRIVATE src/cost_program.cpp)
+# Numeric programs use the CPU's operation order and rounding at every arithmetic instruction.
+target_sources(mymyr_cuda PRIVATE src/numeric.cu src/numeric_pad.cu)
+set_source_files_properties(src/numeric.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
 set_target_properties(mymyr_cuda PROPERTIES
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
@@ -112,3 +115,5 @@ if(MYMYR_BENCH)
             MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
     endif()
 endif()
+
+set_source_files_properties(src/numeric_best_first.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")

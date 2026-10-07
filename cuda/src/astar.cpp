@@ -113,7 +113,7 @@ std::string best_first_unsupported(const Task& task, const DeviceBestFirstOption
             return why;
     }
     const heuristics::ActionCosts costs(task);
-    if (!costs.unit() && (!costs.state_independent() || !costs.integral()))
+    if (!task.numeric_slots() && !costs.unit() && (!costs.state_independent() || !costs.integral()))
         return costs.state_independent() ? "action costs that are not integral" : "action costs that depend on the state";
     return {};
 }
@@ -1121,12 +1121,16 @@ DeviceBestFirstResult Driver::run()
 
 namespace detail
 {
+DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const DeviceBestFirstOptions& options, bool greedy);
+
 DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestFirstOptions& options, bool greedy)
 {
     if (!ctx || !task)
         throw std::invalid_argument("mymyr: device best-first search: null context or task");
     if (const std::string why = best_first_unsupported(*task, options); !why.empty())
         throw std::invalid_argument("mymyr: the CUDA backend cannot run this search: " + why);
+    if (task->numeric_slots())
+        return numeric_best_first(std::move(ctx), std::move(task), options, greedy);
     Driver d(std::move(ctx), std::move(task), options, greedy);
     return d.run();
 }

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -390,6 +391,9 @@ public:
         b.add("plan_axiom", DType::U32, shape2(axiom.size() / 2, 2), axiom);
         b.add("plan_stratum", DType::U32, shape2(stratum.size() / 3, 3), stratum);
 
+        if (C.num.slots)
+            write_numeric(b, schema);
+
         b.scalar("section_plan", k_section_plan_version);
         b.scalar("plan_max_bind", C.max_bind);
         b.scalar("plan_view_rows", m_view_rows);
@@ -404,6 +408,8 @@ public:
     }
 
 private:
+    void write_numeric(ArrayBundle::Builder& b, const std::vector<u32>& schema);
+
     static u32 count(u64 v)
     {
         if (v >= dev::k_none)
@@ -575,7 +581,7 @@ private:
         row[dev::k_mc_first_free] = m.first_free;
         row[dev::k_mc_flags] = (m.never ? dev::k_mc_never : 0u) | (m.use_fc ? dev::k_mc_use_fc : 0u) |
                                (m.binds_in_order ? dev::k_mc_binds_in_order : 0u) |
-                               (fc && C.ow <= dev::k_max_fc_ow ? dev::k_mc_device_fc : 0u) |
+                               ((C.num.slots ? m.use_fc : fc) && C.ow <= dev::k_max_fc_ow ? dev::k_mc_device_fc : 0u) |
                                (fixed_in_order(m) ? dev::k_mc_fixed_in_order : 0u) |
                                (m.steps.size() >= m.first_exist + 2 ? dev::k_mc_witnesses : 0u);
         row[dev::k_mc_first_exist] = m.first_exist;
@@ -610,6 +616,7 @@ private:
         put(row.data(), dev::k_mc_check_vars, list(m.check_vars));
         const u32 id = count(m_matcher_rows.size() / dev::k_mc_count);
         m_matcher_rows.insert(m_matcher_rows.end(), row.begin(), row.end());
+        m_numeric_matchers.push_back(&m);
         return id;
     }
 
@@ -622,8 +629,122 @@ private:
     std::vector<u8> m_view_live;  // ViewLayout row -> kept (not the zero row, not dropped)
     u32 m_view_rows = 0;
     std::vector<u64> m_rs, m_pattern_base, m_dom0, m_unary, m_rows, m_edges;
+    std::vector<const plan::Matcher*> m_numeric_matchers;
     std::vector<u32> m_vars, m_pattern_rows, m_check_rows, m_matcher_rows, m_index, m_steps, m_cond_effect;
 };
+
+void PlanWriter::write_numeric(ArrayBundle::Builder& b, const std::vector<u32>& schema)
+{
+    const plan::Numeric& n = C.num;
+    std::vector<u32> code, checks, matchers, steps, indices, masks, effects, groups, schemas, order, ces;
+    std::vector<u64> tables, rs, payload;
+    for (const plan::NumIns& in : n.code)
+        code.insert(code.end(), {static_cast<u32>(in.op), in.ar, in.a, in.b});
+    for (const plan::FunctionTable& t : n.tables)
+    {
+        const u64 ro = rs.size();
+        rs.insert(rs.end(), t.rs.begin(), t.rs.end());
+        const u64 dense = payload.size();
+        if (t.fluent)
+            payload.insert(payload.end(), t.slot.begin(), t.slot.end());
+        else
+            for (f64 v : t.value)
+                payload.push_back(std::bit_cast<u64>(v));
+        const u64 dn = payload.size() - dense;
+        const u64 keys = t.hkeys.empty() ? ~u64{0} : payload.size();
+        payload.insert(payload.end(), t.hkeys.begin(), t.hkeys.end());
+        const u64 values = payload.size();
+        if (t.fluent)
+            payload.insert(payload.end(), t.hslot.begin(), t.hslot.end());
+        else
+            for (f64 v : t.hvalue)
+                payload.push_back(std::bit_cast<u64>(v));
+        tables.insert(tables.end(), {t.size, ro, dense, dn, keys, values, t.hmask, t.fluent ? 1u : 0u});
+    }
+    auto put_checks = [&](const std::vector<plan::NumCheck>& cs)
+    {
+        const u32 begin = count(checks.size() / 5);
+        for (const plan::NumCheck& c : cs)
+            checks.insert(checks.end(), {static_cast<u32>(c.cmp), c.lhs.begin, c.lhs.end, c.rhs.begin, c.rhs.end});
+        return begin;
+    };
+    for (const plan::Matcher* pm : m_numeric_matchers)
+    {
+        const plan::Matcher& m = *pm;
+        const u32 pre = put_checks(m.npre), check = put_checks(m.nchecks);
+        const u32 at = count(steps.size() / 2), mask = count(masks.size());
+        for (const plan::Step& st : m.steps)
+        {
+            const u32 begin = count(indices.size());
+            for (u32 j = st.ncheck_begin; j < st.ncheck_end; ++j)
+                indices.push_back(check + m.step_nchecks[j]);
+            steps.insert(steps.end(), {begin, count(indices.size())});
+        }
+        for (u32 i = 0; i < m.nchecks.size(); ++i)
+        {
+            u32 bits = 0;
+            for (u32 j = m.ncheck_vars_begin[i]; j < m.ncheck_vars_begin[i + 1]; ++j)
+            {
+                if (m.ncheck_vars[j] < 32)
+                    bits |= u32{1} << m.ncheck_vars[j];
+            }
+            masks.push_back(bits);
+        }
+        matchers.insert(matchers.end(), {pre, count(m.npre.size()), check, count(m.nchecks.size()), at, mask, 0, 0});
+    }
+    auto group = [&](const auto& g)
+    {
+        const u32 id = count(groups.size() / 5), begin = count(effects.size() / 8);
+        for (const plan::NumEffect& e : g.neffs)
+            effects.insert(effects.end(), {static_cast<u32>(e.op), e.slot, e.lifted ? 1u : 0u, e.table, e.terms,
+                                          e.arity, e.expr.begin, e.expr.end});
+        groups.insert(groups.end(), {begin, count(g.neffs.size()), g.has_aux ? static_cast<u32>(g.aux.op) : dev::k_none,
+                                      g.aux.expr.begin, g.aux.expr.end});
+        return id;
+    };
+    for (u32 s = 0; s < C.schemas.size(); ++s)
+    {
+        const plan::Schema& ps = C.schemas[s];
+        std::vector<u32> ug;
+        for (const plan::NumGroup& g : ps.uncond_num)
+            ug.push_back(group(g));
+        for (const plan::CondEffect& ce : ps.ces)
+            ces.insert(ces.end(), {group(ce), ce.numeric ? 1u : 0u, ce.extras ? 1u : 0u});
+        schemas.insert(schemas.end(), {count(order.size() / 2), count(ps.num_order.size())});
+        for (const plan::NumRef& r : ps.num_order)
+            order.insert(order.end(), {r.conditional ? 1u : 0u,
+                                      r.conditional ? schema[u64{s} * dev::k_sc_count + dev::k_sc_ces] + r.index : ug[r.index]});
+    }
+    const u32 goal = put_checks(n.goal);
+    b.add("num_code", DType::U32, shape2(code.size() / 4, 4), code);
+    b.add("num_consts", DType::F64, shape1(n.consts.size()), n.consts);
+    b.add("num_terms", DType::I32, shape1(n.terms.size()), n.terms);
+    b.add("num_tables", DType::U64, shape2(tables.size() / 8, 8), tables);
+    b.add("num_rs", DType::U64, shape1(rs.size()), rs);
+    b.add("num_payload", DType::U64, shape1(payload.size()), payload);
+    b.add("num_checks", DType::U32, shape2(checks.size() / 5, 5), checks);
+    b.add("num_matchers", DType::U32, shape2(matchers.size() / 8, 8), matchers);
+    b.add("num_steps", DType::U32, shape2(steps.size() / 2, 2), steps);
+    b.add("num_index", DType::U32, shape1(indices.size()), indices);
+    b.add("num_masks", DType::U32, shape1(masks.size()), masks);
+    b.add("num_effects", DType::U32, shape2(effects.size() / 8, 8), effects);
+    b.add("num_groups", DType::U32, shape2(groups.size() / 5, 5), groups);
+    b.add("num_schema", DType::U32, shape2(schemas.size() / 2, 2), schemas);
+    b.add("num_order", DType::U32, shape2(order.size() / 2, 2), order);
+    b.add("num_ce", DType::U32, shape2(ces.size() / 3, 3), ces);
+    std::vector<f64> options{n.quantum, n.aux_initial};
+    b.add("num_options", DType::F64, shape1(options.size()), options);
+    b.add("num_initial", DType::F64, shape1(n.initial.size()), n.initial);
+    b.scalar("section_numeric", 1);
+    b.scalar("num_has_aux", n.has_aux ? 1 : 0);
+    b.scalar("num_has_metric", n.has_metric ? 1 : 0);
+    b.scalar("num_minimize", n.minimize ? 1 : 0);
+    b.scalar("num_metric_begin", n.metric.begin);
+    b.scalar("num_metric_end", n.metric.end);
+    b.scalar("num_tolerant", n.tolerant ? 1 : 0);
+    b.scalar("num_goal_begin", goal);
+    b.scalar("num_goal_count", n.goal.size());
+}
 
 void add_plan_section(ArrayBundle::Builder& b, const Task& task, u32 fluent_slots, u32 derived_slots)
 {
@@ -814,6 +935,37 @@ dev::TaskView task_view(const ArrayBundle& bundle, const void* base)
     v.n_cond_effects = static_cast<u32>(ptr("plan_cond_effect", v.cond_effect));
     v.n_axioms = static_cast<u32>(ptr("plan_axiom", v.axiom));
     v.n_strata = static_cast<u32>(ptr("plan_stratum", v.stratum));
+    if (u32s("numeric_slots"))
+    {
+        if (u32s("section_numeric") != 1)
+            throw std::invalid_argument("mymyr: task_view: numeric tasks need numeric section 1");
+        auto& n = v.numeric;
+        n.slots = u32s("numeric_slots");
+        n.storage = u32s("numeric_storage");
+        n.tolerant = u32s("num_tolerant");
+        n.goal_begin = u32s("num_goal_begin");
+        n.goal_count = u32s("num_goal_count");
+        const f64* options = nullptr;
+        ptr("num_options", options);
+        n.quantum = *reinterpret_cast<const f64*>(bundle.block() + bundle.find("num_options")->offset);
+        ptr("num_code", n.code);
+        ptr("num_consts", n.consts);
+        ptr("num_terms", n.terms);
+        ptr("num_tables", n.table);
+        ptr("num_rs", n.rs);
+        ptr("num_payload", n.payload);
+        ptr("num_checks", n.checks);
+        ptr("num_matchers", n.matcher);
+        ptr("num_steps", n.steps);
+        ptr("num_index", n.index);
+        ptr("num_masks", n.masks);
+        ptr("num_effects", n.effects);
+        ptr("num_groups", n.groups);
+        ptr("num_schema", n.schema);
+        ptr("num_order", n.order);
+        ptr("num_ce", n.ce);
+        ptr("num_initial", n.initial);
+    }
     return v;
 }
 }  // namespace mymyr::rl

@@ -1,6 +1,7 @@
 // ChunkGenerator: the host driver of the lifted successor kernels (include/mymyr/cuda/generator.hpp).
 
 #include "mymyr/cuda/generator.hpp"
+#include "mymyr/cuda/numeric_kernels.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/thread_pool.hpp"
@@ -143,14 +144,12 @@ std::vector<u64> axiom_reads(const plan::Compiled& C)
 std::string ChunkGenerator::unsupported(const Task& task)
 {
     const plan::Compiled& C = task.compiled();
-    // numeric states carry values after the atom words; the kernels and the device format read atoms only
-    if (task.numeric_slots() > 0)
-        return "numeric fluents (the device format has no numeric section yet)";
     if (C.ow > lifted::k_max_ow)
         return "object bitsets of " + std::to_string(C.ow) + " words (the device kernels take at most " +
                std::to_string(lifted::k_max_ow) + ", i.e. " + std::to_string(64 * lifted::k_max_ow) + " objects)";
-    if (task.atoms().mode() == AtomMode::Frozen && task.words() > lifted::k_max_words)
-        return "states of " + std::to_string(task.words()) + " words (the device kernels take at most " +
+    if (task.numeric_slots() > lifted::k_max_words ||
+        (task.atoms().mode() == AtomMode::Frozen && task.words() + task.numeric_slots() > lifted::k_max_words))
+        return "states of " + std::to_string(task.words() + task.numeric_slots()) + " words (the device kernels take at most " +
                std::to_string(lifted::k_max_words) + ")";
     return {};
 }
@@ -169,6 +168,8 @@ std::string ChunkGenerator::host_reason(const Task& task, u32 schema, bool witne
     const plan::Compiled& C = task.compiled();
     const plan::Schema& ps = C.schemas.at(schema);
     const plan::Matcher& m = ps.pre[witness ? 0 : 1];
+    if (task.numeric_slots() && (m.total > lifted::k_max_depth || m.steps.size() > lifted::k_max_depth))
+        return "a numeric matcher deeper than " + std::to_string(lifted::k_max_depth) + " parameters";
     if (m.total > lifted::k_deep_depth || m.steps.size() > lifted::k_deep_depth)
         return "a matcher of " + std::to_string(m.total) + " parameters (the device kernels take at most " +
                std::to_string(lifted::k_deep_depth) + ")";
@@ -193,8 +194,6 @@ std::string ChunkGenerator::host_reason(const Task& task, u32 schema, bool witne
                std::to_string(lifted::k_max_depth) + ")";
     for (const plan::CondEffect& ce : ps.ces)
     {
-        if (ce.numeric)
-            return "numeric conditional effects";
         if (ce.cond.steps.size() > lifted::k_ce_depth)
             return "a conditional effect with " + std::to_string(ce.cond.steps.size()) +
                    " forall parameters to bind (the device sub-plans take at most " + std::to_string(lifted::k_ce_depth) + ")";
@@ -247,7 +246,7 @@ ChunkGenerator::ChunkGenerator(ContextPtr ctx, TaskPtr task, cudaStream_t stream
     m_last = std::make_shared<LastUse>(m_ctx->device());
     for (Scratch* x : {&m_dev_derived, &m_goal_views, &m_goal_derived, &m_goal_rows, &m_views, &m_counts, &m_offsets, &m_scan,
                        &m_derived, &m_schema_sets, &m_put_mask, &m_deep_work, &m_missing, &m_h_seg, &m_h_rank, &m_h_bind, &m_h_words, &m_h_counts_seg,
-                       &m_h_counts})
+                       &m_h_counts, &m_numeric_error})
         x->track(m_last);
     const plan::Compiled& C = m_task->compiled();
     m_S = static_cast<u32>(C.schemas.size());
@@ -443,10 +442,13 @@ void ChunkGenerator::host_work(const ChunkInput& in, bool witness, bool canonica
         for (u64 i = lo; i < hi; ++i)
         {
             const u64* row = in.host_states + i * in.host_stride;
-            const u32 nw = bits::trimmed_size(row, in.words);
+            const u32 slots = m_task->numeric_slots();
+            const u32 atom_words = in.words - slots;
+            const State decoded = slots ? numeric::decode(*m_task, row, in.words) : State{};
+            const u32 nw = bits::trimmed_size(row, atom_words);
             // Successors::prepare, with the CPU's axiom time measured apart
             e.set_state(row, nw);
-            e.set_numeric(nullptr);
+            e.set_numeric(slots ? decoded.numeric().data() : nullptr);
             e.build_view();
             if (axioms)
             {
@@ -480,8 +482,10 @@ void ChunkGenerator::host_work(const ChunkInput& in, bool witness, bool canonica
                         for (SlotId a : d.add)
                             max_add = std::max(max_add, bits::word_of(a.v) + 1);
                         const u32 n = apply_delta(row, nw, d, tmp);
-                        part.rows.push_back({seg, rank++, std::max(nw, max_add), n, part.words.size()});
+                        part.rows.push_back({seg, rank++, std::max(nw, max_add) + slots, n + slots, part.words.size()});
                         part.words.insert(part.words.end(), tmp.begin(), tmp.begin() + n);
+                        for (u32 slot = 0; slot < slots; ++slot)
+                            part.words.push_back(std::bit_cast<u64>(plan::load(m_task->compiled().num, d.num, slot)));
                         const u32 arity = succ.arity(s);
                         for (u32 k = 0; k < m_L; ++k)
                             part.bind_rows.push_back(k < arity ? b[k].v : 0xFFFFFFFFu);
@@ -541,8 +545,11 @@ void ChunkGenerator::host_work(const ChunkInput& in, bool witness, bool canonica
             m_host_rank.push_back(r.rank);
             m_host_need.push_back(r.need);
             m_host_exact.push_back(r.exact);
-            std::copy_n(part.words.begin() + static_cast<std::ptrdiff_t>(r.words_at), r.exact,
+            const u32 slots = m_task->numeric_slots();
+            std::copy_n(part.words.begin() + static_cast<std::ptrdiff_t>(r.words_at), r.exact - slots,
                         m_host_words.begin() + static_cast<std::ptrdiff_t>(k * m_host_row_words));
+            std::copy_n(part.words.begin() + static_cast<std::ptrdiff_t>(r.words_at + r.exact - slots), slots,
+                        m_host_words.begin() + static_cast<std::ptrdiff_t>((k + 1) * m_host_row_words - slots));
             ++k;
         }
     m_stats.host_rows += nrows;
@@ -556,6 +563,8 @@ bool ChunkGenerator::can_defer_host() const noexcept
 void ChunkGenerator::begin_device(const ChunkInput& in, bool witness, bool canonical)
 {
     DeviceGuard g(m_ctx->device());
+    if (in.words < m_task->numeric_slots())
+        throw std::invalid_argument("mymyr: numeric state rows have no numeric block");
     if (!can_defer_host())
         throw std::logic_error("mymyr: ChunkGenerator::begin_device: lazy slots or CPU axioms need the host work first (begin)");
     if (in.rows_dev && needs_host(witness))
@@ -564,7 +573,7 @@ void ChunkGenerator::begin_device(const ChunkInput& in, bool witness, bool canon
     m_canonical = canonical;
     m_deferred = in;
     m_host_pending = true;
-    m_parents = lifted::Parents{in.states, in.stride, in.words, in.rows, nullptr, 0};
+    m_parents = lifted::Parents{in.states, in.stride, in.words - m_task->numeric_slots(), in.rows, nullptr, 0};
     m_parents.rows_dev = in.rows_dev;
 }
 
@@ -579,6 +588,8 @@ void ChunkGenerator::host_work()
 void ChunkGenerator::begin(const ChunkInput& in, bool witness, bool canonical)
 {
     DeviceGuard g(m_ctx->device());
+    if (in.words < m_task->numeric_slots())
+        throw std::invalid_argument("mymyr: numeric state rows have no numeric block");
     if (in.rows_dev && needs_host(witness))
         throw std::logic_error("mymyr: ChunkGenerator::begin: a device row count with CPU-fallback work (the host needs the rows)");
     m_witness = witness;
@@ -586,7 +597,7 @@ void ChunkGenerator::begin(const ChunkInput& in, bool witness, bool canonical)
     m_host_pending = false;
     host_work(in, witness, canonical);
     refresh();
-    m_parents = lifted::Parents{in.states, in.stride, in.words, in.rows, nullptr, 0};
+    m_parents = lifted::Parents{in.states, in.stride, in.words - m_task->numeric_slots(), in.rows, nullptr, 0};
     m_parents.rows_dev = in.rows_dev;
     if (m_task->has_axioms() && !m_device_axioms)
     {
@@ -663,7 +674,10 @@ void ChunkGenerator::views()
 
 void ChunkGenerator::goal_count(u32* out)
 {
-    check(lifted::launch_goal_count(m_view, m_parents, out, m_s), "launch_goal_count");
+    if (m_task->numeric_slots())
+        check(numeric::launch_goals(m_view, m_parents, out, nullptr, m_parents.rows, nullptr, m_s), "numeric goals");
+    else
+        check(lifted::launch_goal_count(m_view, m_parents, out, m_s), "launch_goal_count");
 }
 
 void ChunkGenerator::count()
@@ -694,15 +708,32 @@ void ChunkGenerator::count_device()
                                           {sets + L.fixed + L.fixed_ce, L.fc + L.fc_ce, m_S, w, c, 1, 0},
                                           {sets + shallow, L.deep, m_S, w, c, 0, 1, work, m_deep_budget},
                                           {sets + shallow + L.deep, L.deep_fc, m_S, w, c, 1, 1, work, m_deep_budget}};
-    for (const lifted::SchemaSet& set : sets_of)
-        if (set.count)
-            check(lifted::launch_count(m_view, m_parents, views, set, counts, m_s), "launch_count");
+    if (m_task->numeric_slots())
+    {
+        auto* error = static_cast<u32*>(m_numeric_error.ensure(m_ctx, sizeof(u32), m_s));
+        check(cudaMemsetAsync(error, 0, sizeof(u32), m_s), "cudaMemsetAsync");
+        for (const lifted::SchemaSet& set : sets_of)
+            if (set.count)
+                check(numeric::launch_count(m_view, m_parents, views, set, counts, error, m_s), "numeric count");
+    }
+    else
+        for (const lifted::SchemaSet& set : sets_of)
+            if (set.count)
+                check(lifted::launch_count(m_view, m_parents, views, set, counts, m_s), "launch_count");
 }
 
 void ChunkGenerator::count_host()
 {
     if (m_host_pending)
         throw std::logic_error("mymyr: ChunkGenerator::count_host: the chunk's host work has not run (host_work)");
+    if (m_task->numeric_slots())
+    {
+        u32 error = 0;
+        check(cudaMemcpyAsync(&error, m_numeric_error.data(), sizeof(u32), cudaMemcpyDeviceToHost, m_s), "numeric error");
+        check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");
+        if (error)
+            throw std::overflow_error("mymyr: a numeric value is not an int32; build the task with TaskOptions::numeric_storage = F64");
+    }
     const u64 n = static_cast<u64>(m_parents.rows) * m_S + 1;
     auto* counts = static_cast<u32*>(m_counts.data());
     auto* offsets = static_cast<u32*>(m_offsets.data());
@@ -745,6 +776,17 @@ void ChunkGenerator::write(const lifted::Labels& labels, u64* words, u32 out_wor
     {
         out.missing_bits = static_cast<u32*>(m_missing.data());
         out.missing_flag = out.missing_bits + m_missing_words;
+    }
+    if (m_task->numeric_slots())
+    {
+        if (out_words < m_task->numeric_slots())
+            throw std::invalid_argument("mymyr: numeric successor rows have no room for fluent values");
+        for (const lifted::SchemaSet& set : {fixed, fixed_ce, fc, fc_ce, deep, deep_fc})
+            if (set.count)
+                check(numeric::launch_write(m_view, m_parents, views, set, seg_offsets(), labels, out,
+                                             static_cast<u32*>(m_numeric_error.data()), m_s), "numeric write");
+        place_host(labels, words, out_words);
+        return;
     }
     // the lists without conditional effects label their rows, launch_put writes the successors one thread each
     // (a state with many successors does not bound the launch with its one thread's writes)
@@ -792,8 +834,14 @@ void ChunkGenerator::place_host(const lifted::Labels& labels, u64* words, u32 ou
         m_staging.assign(n * out_words, 0);
         for (u64 i = 0; i < n; ++i)
             if (m_host_need[i] <= out_words)
-                std::copy_n(m_host_words.begin() + static_cast<std::ptrdiff_t>(i * m_host_row_words), std::min(m_host_exact[i], out_words),
+            {
+                const u32 slots = m_task->numeric_slots();
+                std::copy_n(m_host_words.begin() + static_cast<std::ptrdiff_t>(i * m_host_row_words),
+                            std::min(m_host_exact[i] - slots, out_words - slots),
                             m_staging.begin() + static_cast<std::ptrdiff_t>(i * out_words));
+                std::copy_n(m_host_words.begin() + static_cast<std::ptrdiff_t>((i + 1) * m_host_row_words - slots), slots,
+                            m_staging.begin() + static_cast<std::ptrdiff_t>((i + 1) * out_words - slots));
+            }
         upload_vec(m_ctx, m_h_words, m_staging, m_s);
         h.words = static_cast<const u64*>(m_h_words.data());
     }
@@ -868,7 +916,7 @@ u32 ChunkGenerator::host_words_needed(u32 out_words) const noexcept
     u32 w = 0;
     for (usize i = 0; i < m_host_need.size(); ++i)
         if (m_host_need[i] > out_words)
-            w = std::max(w, m_host_exact[i]);
+            w = std::max(w, m_host_exact[i] - m_task->numeric_slots());
     return w;
 }
 
@@ -884,7 +932,7 @@ void ChunkGenerator::goal_flags(const u64* rows, u64 stride, u32 words, u64 row_
     if (words > lifted::k_max_words)
         throw std::invalid_argument("mymyr: ChunkGenerator::goal_flags: rows of " + std::to_string(words) + " words");
     const bool gather = order || stride != words;
-    if (!derived && !gather)
+    if (!derived && !gather && !m_task->numeric_slots())
     {
         check(lifted::launch_goal_rows(m_view, rows, words, n, nullptr, out, m_s), "launch_goal_rows");
         return;
@@ -904,16 +952,29 @@ void ChunkGenerator::goal_flags(const u64* rows, u64 stride, u32 words, u64 row_
                   "launch_gather_rows");
             src = dst;
         }
+        if (!derived && m_task->numeric_slots())
+        {
+            const lifted::Parents p{src, words, words - m_task->numeric_slots(), static_cast<u32>(c), nullptr, 0};
+            check(numeric::launch_goals(m_view, p, nullptr, nullptr, c, out + b, m_s), "numeric goals");
+            continue;
+        }
         if (!derived)
         {
             check(lifted::launch_goal_rows(m_view, src, words, c, nullptr, out + b, m_s), "launch_goal_rows");
             continue;
         }
-        const lifted::Parents p{src, words, words, static_cast<u32>(c), nullptr, 0};
+        lifted::Parents p{src, words, words - m_task->numeric_slots(), static_cast<u32>(c), nullptr, 0};
         auto* views = static_cast<u64*>(m_goal_views.ensure(m_ctx, c * m_view_words * sizeof(u64), m_s));
         u64* der = nullptr;
         const u32 dw = views_and_axioms(p, views, m_goal_derived, &der);
-        check(lifted::launch_goal_rows_derived(m_view, src, words, c, der, dw, out + b, m_s), "launch_goal_rows_derived");
+        if (m_task->numeric_slots())
+        {
+            p.derived = der;
+            p.derived_words = dw;
+            check(numeric::launch_goals(m_view, p, nullptr, nullptr, c, out + b, m_s), "numeric goals");
+        }
+        else
+            check(lifted::launch_goal_rows_derived(m_view, src, words, c, der, dw, out + b, m_s), "launch_goal_rows_derived");
     }
 }
 

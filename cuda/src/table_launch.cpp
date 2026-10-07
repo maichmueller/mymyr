@@ -29,6 +29,8 @@ std::string multi_unsupported(const rl::TaskTable& table)
     {
         const Task& task = *table.task(i);
         const std::string at = "instance " + std::to_string(i) + ": ";
+        if (task.numeric_slots())
+            return at + "numeric states require per-instance kernels";
         if (task.has_axioms())
             return at + "axioms";
         if (task.atoms().mode() != AtomMode::Frozen)

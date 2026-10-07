@@ -62,14 +62,15 @@ struct DeviceTableIw::Impl
         std::vector<std::vector<u32>> plans;
         std::vector<std::vector<u64>> reached;
 
-        Merge(u32 n, u32 words)
+        Merge(u32 n, u32 words, u32 numeric_words)
         {
             out.n = n;
             out.words = words;
+            out.numeric_words = numeric_words;
             out.status.assign(n, search::SearchStatus::Exhausted);
             out.effective_width.assign(n, 0);
             out.plan_length.assign(n, -1);
-            out.goal_rows.assign(u64{n} * words, 0);
+            out.goal_rows.assign(u64{n} * (words + numeric_words), 0);
             out.num_passes.assign(n, 0);
             plans.assign(n, {});
             reached.assign(n, {});
@@ -98,8 +99,10 @@ struct DeviceTableIw::Impl
                 const std::span<const search::IwPassStatistics> ps = b.passes(j);
                 std::copy(ps.begin(), ps.end(), out.pass_stats.begin() + static_cast<std::ptrdiff_t>(u64{i} * out.pass_slots));
                 out.num_passes[i] = static_cast<u8>(ps.size());
-                std::copy_n(b.goal_rows.begin() + static_cast<std::ptrdiff_t>(u64{j} * b.words), std::min(b.words, out.words),
-                            out.goal_rows.begin() + static_cast<std::ptrdiff_t>(u64{i} * out.words));
+                const u64* src = b.goal_rows.data() + u64{j} * (b.words + b.numeric_words);
+                u64* dst = out.goal_rows.data() + u64{i} * (out.words + out.numeric_words);
+                std::copy_n(src, std::min(b.words, out.words), dst);
+                std::copy_n(src + b.words, b.numeric_words, dst + out.words);
                 if (!b.plan_offsets.empty())
                 {
                     // labels of width b.label_width, widened at finish()
@@ -205,11 +208,19 @@ MultiIwBatch DeviceTableIw::run(DeviceStarts starts, std::span<const u32> task_i
                                     " searches (pass none, or one per search)");
     if (n && (!starts.data || starts.words == 0 || (starts.stride != 0 && starts.stride < starts.words)))
         throw std::invalid_argument("mymyr: device IW: malformed start rows");
+    if (starts.numeric_words && starts.numeric_words != m->table->numeric_words())
+        throw std::invalid_argument("mymyr: table IW device starts have the wrong CPU numeric width");
+    u32 tail = starts.numeric_words;
+    if (!tail)
+        for (u32 i = 0; i < m->table->size(); ++i)
+            tail = std::max(tail, m->table->task(i)->numeric_slots());
+    if (starts.words < tail)
+        throw std::invalid_argument("mymyr: table IW device starts are narrower than their numeric tail");
     const auto g = m->groups(task_ids, n);
     const cudaStream_t s = m->ctx->stream();
     if (stream && stream != s)
         stream_wait(s, stream);  // the starts were written on `stream`
-    Impl::Merge merge(n, m->table->words());
+    Impl::Merge merge(n, m->table->words(), m->table->numeric_words());
     for (u32 i = 0; i < m->table->size(); ++i)
     {
         const std::vector<u32>& idx = g[i];
@@ -229,7 +240,10 @@ MultiIwBatch DeviceTableIw::run(DeviceStarts starts, std::span<const u32> task_i
               "launch_gather_rows");
         const std::vector<search::GoalSpec::AtomGoal> gg = Impl::pick(goals, idx);
         const std::vector<u64> gs = Impl::pick(seeds, idx);
-        const DeviceStarts part{static_cast<const u64*>(m->rows.data()), starts.words, starts.words, static_cast<u32>(k)};
+        const u32 nn = starts.numeric_words ? m->table->task(i)->numeric_words() : 0;
+        const u32 local_tail = starts.numeric_words ? nn : m->table->task(i)->numeric_slots();
+        const DeviceStarts part{static_cast<const u64*>(m->rows.data()), starts.words,
+                                starts.words - tail + local_tail, static_cast<u32>(k), nn};
         const MultiIwBatch b = m->of(i).run(part, gg, gs, s);
         merge.add(b, idx);
     }
@@ -252,7 +266,7 @@ MultiIwBatch DeviceTableIw::run(std::span<const State> starts, std::span<const u
         throw std::invalid_argument("mymyr: device IW: " + std::to_string(seeds.size()) + " seeds for " + std::to_string(n) +
                                     " searches (pass none, or one per search)");
     const auto g = m->groups(task_ids, n);
-    Impl::Merge merge(n, m->table->words());
+    Impl::Merge merge(n, m->table->words(), m->table->numeric_words());
     for (u32 i = 0; i < m->table->size(); ++i)
     {
         const std::vector<u32>& idx = g[i];

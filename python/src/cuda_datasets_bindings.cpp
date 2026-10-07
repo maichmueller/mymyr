@@ -139,7 +139,7 @@ ArrayDict device_arrays(const PyDeviceStateSpace& x, nb::handle framework)
         return export_device_array(std::move(s), DeviceExport{dl::k_cuda, device, sync}, fw, default_words(fw));
     };
     ArrayDict d{nb::dict()};
-    d["state_words"] = out(D.state_words(), rl::DType::U64, {N, static_cast<i64>(D.words())}, true);
+    d["state_words"] = out(D.state_words(), rl::DType::U64, {N, static_cast<i64>(D.row_words())}, true);
     d["forward_offsets"] = out(D.forward_offsets(), rl::DType::U64, {N + 1});
     d["forward_targets"] = out(D.forward_targets(), rl::DType::U32, {E});
     if (D.has_labels())
@@ -164,7 +164,7 @@ ArrayDict device_arrays(const PyDeviceStateSpace& x, nb::handle framework)
 u64 space_bytes(const cuda::DeviceStateSpace& D)
 {
     const u64 N = D.num_states(), E = D.num_transitions();
-    u64 b = N * D.words() * 8 + (N + 1) * 16 + E * 12 + N * (4 + 8 + 3);
+    u64 b = N * D.row_words() * 8 + (N + 1) * 16 + E * 12 + N * (4 + 8 + 3);
     if (D.has_labels())
         b += E * 4 * (1 + u64{D.label_width()});
     if (!D.unit_costs())
@@ -363,7 +363,7 @@ const char* k_options_doc =
     "chunk_states caps the parents per "
     "chunk, view_bytes the per-chunk view memory, expected_states pre-sizes the arrays; none changes the result. "
     "ctx: a mymyr.cuda.Context, or None: the task's (table's) default context on `device` (default 0). stream: the "
-    "stream of the work and of the result's arrays (None: the context's). Numeric tasks and tasks the device cannot run "
+    "stream of the work and of the result's arrays (None: the context's). Tasks beyond the device's limits "
     "raise ValueError; negative, NaN or undefined transition costs ValueError.";
 
 #define MYMYR_DSS_ARGS                                                                                                  \
@@ -390,6 +390,8 @@ void bind_cuda_datasets(nb::module_& parent)
         .def_prop_ro("num_transitions", [](const PyDeviceStateSpace& x) { return x.d->num_transitions(); })
         .def_prop_ro("initial_state_id", [](const PyDeviceStateSpace& x) { return x.d->initial_state(); })
         .def_prop_ro("words", [](const PyDeviceStateSpace& x) { return x.d->words(); }, "Fluent words per state row.")
+        .def_prop_ro("numeric_words", [](const PyDeviceStateSpace& x) { return x.d->numeric_words(); })
+        .def_prop_ro("row_words", [](const PyDeviceStateSpace& x) { return x.d->row_words(); })
         .def_prop_ro("has_labels", [](const PyDeviceStateSpace& x) { return x.d->has_labels(); })
         .def_prop_ro("label_width", [](const PyDeviceStateSpace& x) { return x.d->label_width(); })
         .def_prop_ro("unit_costs", [](const PyDeviceStateSpace& x) { return x.d->unit_costs(); },
@@ -407,7 +409,7 @@ void bind_cuda_datasets(nb::module_& parent)
             "arrays", [](const PyDeviceStateSpace& x, FrameworkArg framework) { return device_arrays(x, framework); },
             "framework"_a = nb::none(),
             "Zero-copy read-only device arrays (framework 'torch', 'jax' or 'dlpack'; None: dlpack), the keys and "
-            "layouts of mymyr.datasets.StateSpace.arrays(): state_words [N, W], forward_offsets [N + 1] (uint64), "
+            "layouts of mymyr.datasets.StateSpace.arrays(): state_words [N, W + numeric_words], forward_offsets [N + 1] (uint64), "
             "forward_targets [E], label_schemas [E] and label_bindings [E, label_width] (with labels), "
             "backward_offsets [N + 1], backward_sources and backward_edges [E], unit_goal_distances [N] (int32), "
             "cost_goal_distances [N] (float64), costs [E] (float64; absent for unit costs), goal, unsolvable, alive "
@@ -431,9 +433,9 @@ void bind_cuda_datasets(nb::module_& parent)
                 std::vector<u64> row;
                 {
                     nb::gil_scoped_release release;
-                    row = download(*x.d, x.d->state_words() + u64{i} * x.d->words(), x.d->words());
+                    row = download(*x.d, x.d->state_words() + u64{i} * x.d->row_words(), x.d->row_words());
                 }
-                return make_state(x.owner, State(row.data(), bits::trimmed_size(row.data(), x.d->words())));
+                return make_state(x.owner, State(row.data(), x.d->words(), row.data() + x.d->words(), x.d->numeric_words()));
             },
             "id"_a, "The state with this id (copies its row to the host).")
         .def("__len__", [](const PyDeviceStateSpace& x) { return x.d->num_states(); })

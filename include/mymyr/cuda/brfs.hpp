@@ -38,6 +38,7 @@ struct DeviceBrfsOptions
     bool witness_pruning = true;
     bool canonical_order = true;  // without it a (state, schema) keeps the matcher's order (still deterministic)
     u64 max_states = ~u64{0};
+    u32 max_depth = ~u32{0};  // layers to expand, as in BrfsOptions::max_depth
     bool stop_at_goal = false;
     bool fingerprint = false;          // BrfsResult::fingerprint (downloads the states once at the end)
     u32 chunk_states = u32{1} << 20;   // parents per chunk at most (tests use tiny chunks: the ids must not change)
@@ -100,8 +101,8 @@ public:
     /// unsupported), std::length_error beyond 2^31 - 2 states.
     DeviceBrfsResult run();
 
-    /// State rows [0, size) of words() words (ids in BrFS order), and node records {parent id, successor index}
-    /// (the root's parent is 0xFFFFFFFF).
+    /// State rows [0, size) of words() words in BrFS order (numeric tasks: atom padding, then double fluent slots),
+    /// and node records {parent id, successor index} (the root's parent is 0xFFFFFFFF).
     [[nodiscard]] const DeviceArena& states() const;
     [[nodiscard]] const DeviceArena& nodes() const;
     [[nodiscard]] u32 words() const noexcept;

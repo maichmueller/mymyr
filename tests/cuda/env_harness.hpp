@@ -130,9 +130,9 @@ struct HostEnvs
     HostEnvs(const Table& T, const std::vector<i32>& ids, bool goals)
     {
         const u64 n = ids.size();
-        const u32 W = T.words(), L = std::max<u32>(1, T.label_width());
-        v.states.assign(n * W, 0);
-        v.final_states.assign(n * W, 0);
+        const u32 W = T.words(), NN = T.numeric_words(), L = std::max<u32>(1, T.label_width());
+        v.states.assign(n * (W + NN), 0);
+        v.final_states.assign(n * (W + NN), 0);
         v.draws.assign(n, 0);
         v.task_ids = ids;
         v.steps.assign(n, 0);
@@ -150,6 +150,7 @@ struct HostEnvs
             v.gneg.assign(n * W, 0);
         }
         bind(W);
+        b.numeric_words = NN;
         out = rl::StepOutputs{v.reward.data(), v.terminated.data(), v.truncated.data(), v.count.data(), v.final_states.data(),
                               v.schema.data(), v.binding.data(), L, v.invalid.data(), v.goal.data()};
     }
@@ -172,7 +173,7 @@ struct HostEnvs
 struct DeviceEnvs
 {
     u64 N;
-    u32 W, L, C;
+    u32 W, NN, L, C;
     u64 V;
     cudaStream_t s;
     cuda::DeviceBuffer states, final_states, draws, task_ids, steps, count, schema, binding, reward, terminated, truncated,
@@ -182,8 +183,8 @@ struct DeviceEnvs
     rl::StepOutputs out;
 
     DeviceEnvs(const cuda::ContextPtr& ctx, const cuda::DeviceEnv& env, const std::vector<i32>& ids, bool with_goals)
-        : N(ids.size()), W(env.words()), L(env.label_width()), C(env.cache_schemas()), V(env.cache_view_words()),
-          s(env.stream()), states(ctx, N * W * 8, s), final_states(ctx, N * W * 8, s), draws(ctx, N * 8, s),
+        : N(ids.size()), W(env.words()), NN(env.suite()->numeric_words()), L(env.label_width()), C(env.cache_schemas()), V(env.cache_view_words()),
+          s(env.stream()), states(ctx, N * (W + NN) * 8, s), final_states(ctx, N * (W + NN) * 8, s), draws(ctx, N * 8, s),
           task_ids(to_device(ctx, ids, s)), steps(ctx, N * 4, s), count(ctx, N * 4, s), schema(ctx, N * 4, s),
           binding(ctx, N * L * 4, s), reward(ctx, N * 4, s), terminated(ctx, N, s), truncated(ctx, N, s),
           invalid(ctx, N, s), goal(ctx, N, s), counts(ctx, std::max<u64>(N * C, 1) * 4, s),
@@ -209,6 +210,7 @@ struct DeviceEnvs
         b.states = static_cast<u64*>(states.data());
         b.rows = N;
         b.words = W;
+        b.numeric_words = NN;
         b.task_ids = static_cast<i32*>(task_ids.data());
         b.goal_pos = goals ? static_cast<u64*>(gpos.data()) : nullptr;
         b.goal_neg = goals ? static_cast<u64*>(gneg.data()) : nullptr;
@@ -222,8 +224,8 @@ struct DeviceEnvs
     {
         Snapshot v;
         v.task_ids = to_host<i32>(task_ids.data(), N, s);
-        v.states = to_host<u64>(states.data(), N * W, s);
-        v.final_states = to_host<u64>(final_states.data(), N * W, s);
+        v.states = to_host<u64>(states.data(), N * (W + NN), s);
+        v.final_states = to_host<u64>(final_states.data(), N * (W + NN), s);
         v.draws = to_host<u64>(draws.data(), N, s);
         v.steps = to_host<i32>(steps.data(), N, s);
         v.count = to_host<i32>(count.data(), N, s);

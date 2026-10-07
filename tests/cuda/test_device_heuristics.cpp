@@ -417,13 +417,15 @@ TEST(CudaHeuristic, StatesOutsideTheGroundingTakeTheCpuFallback)
         GTEST_SKIP() << "no suite task has an atom outside its grounding";
 }
 
-TEST(CudaHeuristic, RefusesNumericTasksOtherKindsAndLargeGroundings)
+TEST(CudaHeuristic, IgnoresNumericValuesAndRefusesOtherKindsAndLargeGroundings)
 {
     SKIP_WITHOUT_GPU();
     const cuda::ContextPtr ctx = context();
     const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
-    EXPECT_FALSE(cuda::DeviceHeuristic::unsupported(*numeric, {}).empty());
-    EXPECT_THROW((void)cuda::DeviceHeuristic(ctx, numeric), std::invalid_argument);
+    EXPECT_TRUE(cuda::DeviceHeuristic::unsupported(*numeric, {}).empty());
+    cuda::DeviceHeuristic nh(ctx, numeric);
+    const std::vector<State> starts{numeric->initial_state()};
+    EXPECT_EQ(nh.evaluate(starts)[0], nh.reference(starts[0].view()));
     const TaskPtr task = load("depot__p02", true);
     for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount, heuristics::Kind::SetAdditive,
                                heuristics::Kind::H2, heuristics::Kind::Perfect})
@@ -731,9 +733,13 @@ TEST(CudaBestFirst, BudgetsStartsAndRefusals)
     }
     // refusals
     const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
-    EXPECT_FALSE(cuda::best_first_unsupported(*numeric, {}).empty());
-    EXPECT_THROW((void)cuda::astar(ctx, numeric), std::invalid_argument);
-    EXPECT_THROW((void)cuda::gbfs(ctx, numeric), std::invalid_argument);
+    EXPECT_TRUE(cuda::best_first_unsupported(*numeric, {}).empty());
+    cuda::DeviceBestFirstOptions numeric_options;
+    numeric_options.search.control.budget.max_expanded = 10;
+    EXPECT_EQ(cuda::astar(ctx, numeric, numeric_options).result.status,
+              search::astar_eager(*numeric, numeric_options.search).status);
+    EXPECT_EQ(cuda::gbfs(ctx, numeric, numeric_options).result.status,
+              search::gbfs_eager(*numeric, numeric_options.search).status);
     cuda::DeviceBestFirstOptions o = device_search(heuristics::Kind::GoalCount, 10);
     EXPECT_THROW((void)cuda::astar(ctx, task, o), std::invalid_argument);
     o = device_search(heuristics::Kind::Max, 0);

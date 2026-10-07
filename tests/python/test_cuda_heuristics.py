@@ -163,10 +163,8 @@ def test_start_and_budgets(ctx):
 
 def test_errors(ctx):
     numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError, match="numeric"):
-        mc.Heuristic(numeric, "max", ctx=ctx)
-    with pytest.raises(ValueError, match="numeric"):
-        mc.astar(numeric, ctx=ctx)
+    assert mc.Heuristic(numeric, "max", ctx=ctx).evaluate(numeric.initial_state).shape == (1,)
+    assert mc.astar(numeric, ctx=ctx, max_expanded=10).status == mymyr.search.astar(numeric, heuristic="max", max_expanded=10).status
     task = text_task("depot__p02")
     other = text_task("gripper__prob05")
     with pytest.raises(ValueError):

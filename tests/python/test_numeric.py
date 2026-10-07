@@ -101,26 +101,41 @@ def test_rl_rows_carry_the_numeric_words(counters, hydropower):
             rl.expand(task, np.zeros((1, NN), dtype=np.uint64))  # no atom words
 
 
-def test_device_task_rejects_numeric_tasks(counters):
-    # the device format has no numeric section yet: uploading a numeric task must fail, not drop the values
+def test_device_numeric_expand_and_search(counters):
     try:
         import mymyr.cuda as mc
     except ImportError:
         pytest.skip("mymyr was built without the CUDA backend")
     if not mc.available():
         pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
-    ctx = mc.Context(0, max_bytes=1 << 28)
-    with pytest.raises(ValueError, match="numeric"):
-        mc.DeviceTask(counters, ctx)
-    # nor do the device kernels read the values: the device BrFS and the device expand refuse numeric tasks
-    with pytest.raises(ValueError, match="numeric"):
-        mc.brfs(counters, ctx=ctx)
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("torch has no CUDA device")
-    rows = torch.from_dlpack(counters.encode([counters.initial_state], framework="torch")).cuda()
-    with pytest.raises(ValueError, match="numeric"):
-        rl.expand(counters, rows)
+    from mymyr import search
+
+    ctx = mc.Context(0, max_bytes=1 << 28)
+    uploaded = mc.DeviceTask(counters, ctx)
+    assert uploaded.validate() == (0, 0)
+    cpu_brfs = search.brfs(counters)
+    gpu_brfs = mc.brfs(counters, ctx=ctx)
+    assert gpu_brfs.states == cpu_brfs.states
+    stored = torch.from_dlpack(gpu_brfs.state_words()).cpu().numpy()
+    decoded = counters.decode(stored)
+    assert len(decoded) == gpu_brfs.states and decoded[0] == counters.initial_state
+    assert len(set(decoded)) == gpu_brfs.states
+    starts = [counters.initial_state] + counters.successor_states(counters.initial_state)
+    arr, _ = rows(counters, starts)
+    device_rows = torch.from_numpy(arr).cuda()
+    expected = rl.expand(counters, arr, goal=True)
+    actual = rl.expand(counters, device_rows, goal=True, ctx=ctx)
+    assert actual.numeric_words == counters.numeric_words
+    assert np.array_equal(torch.from_dlpack(actual.succ).cpu().numpy(), expected.succ)
+    assert np.array_equal(torch.from_dlpack(actual.goal).cpu().numpy(), expected.goal)
+    padded = actual.pad()
+    assert padded.succ.shape[-1] == expected.words + counters.numeric_words
+    batch = mc.multi_iw(counters, starts, ctx=ctx)
+    for i, start in enumerate(starts):
+        want = search.iw(counters, start=start)
+        assert batch.status[i] == want.status
+        assert len(batch.plan(i)) == len(want.plan)
 
 
 def replay_to_goal(task, plan):
@@ -158,3 +173,81 @@ def test_python_heuristic_reads_the_values(counters):
 
     r = search.astar(counters, heuristic=h)
     assert r.status == search.Status.SOLVED and len(set(seen)) > 1
+
+
+def test_numeric_device_arrays_have_programs(counters, hydropower):
+    for task in (counters, hydropower):
+        arrays = task.device_arrays()
+        assert arrays["section_numeric"] == 1
+        assert arrays["numeric_slots"] == task.numeric_slots
+        assert arrays["num_code"].dtype == np.uint32 and arrays["num_code"].shape[1] == 4
+        assert arrays["num_effects"].shape[1] == 8
+        assert arrays["num_tables"].dtype == np.uint64
+        assert arrays["num_initial"].dtype == np.float64
+        assert np.array_equal(arrays["num_initial"], task.initial_state.numeric_values())
+        assert not arrays["num_code"].flags.writeable
+
+
+def test_classical_device_arrays_have_no_numeric_section():
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/tasks/gripper__prob05.txt"))
+    arrays = task.device_arrays()
+    assert "section_numeric" not in arrays and "num_code" not in arrays
+
+
+@pytest.mark.parametrize("name", ["cs-counters", "cs-hydropower", "m-refuel-adl"])
+def test_numeric_cuda_labels_heuristics_and_table_starts(name):
+    mc = pytest.importorskip("mymyr.cuda", exc_type=ImportError)
+    if not mc.available():
+        pytest.skip("no visible CUDA device")
+    torch = pytest.importorskip("torch")
+    from mymyr import search
+
+    task = numeric_task(name, atoms="frozen")
+    states = [task.initial_state]
+    for i in range(8):
+        actions = task.applicable_actions(states[-1])
+        states.append(task.apply(states[-1], actions[i % len(actions)]) if actions else task.initial_state)
+    packed, _ = rows(task, states)
+    device_rows = torch.from_numpy(packed.view(np.int64)).cuda()
+    ctx = mc.Context(0, max_bytes=2 << 30)
+    dt = mc.DeviceTask(task, ctx)
+    labels = []
+    for s in states:
+        labels.extend((a.schema, list(a.binding)) for a in task.applicable_actions(s)[:8])
+    labels = labels[:48]
+    assert labels
+    idx = np.arange(len(labels), dtype=np.int32) % len(states)
+    schema = np.array([a[0] for a in labels], dtype=np.int32)
+    binding = np.zeros((len(labels), max(1, task.label_width)), dtype=np.int32)
+    for i, (_, b) in enumerate(labels):
+        binding[i, :len(b)] = b
+    indices, schemas, bindings = (torch.from_numpy(x).cuda() for x in (idx, schema, binding))
+    derived = torch.from_numpy(dt.host_derived(states).view(np.int64)).cuda() if task.has_axioms else None
+    expected_ok = [task.is_applicable(states[i], label) for i, label in zip(idx, labels)]
+    assert dt.applicable(device_rows, indices, schemas, bindings, derived=derived).cpu().tolist() == expected_ok
+    successors, status = dt.apply(device_rows, indices, schemas, bindings, derived=derived)
+    successors = successors.cpu().numpy().view(np.uint64)
+    for j, (i, label, ok) in enumerate(zip(idx, labels, expected_ok)):
+        assert status[j].item() == (0 if ok else -1)
+        expected = rows(task, [task.apply(states[i], label)])[0][0] if ok else np.zeros(packed.shape[1], np.uint64)
+        assert np.array_equal(successors[j], expected)
+    assert dt.goal(device_rows, derived=derived).cpu().tolist() == [task.is_goal(s) for s in states]
+    for kind in ("max", "add", "ff"):
+        h = mc.Heuristic(task, kind, ctx=ctx)
+        expected = [h.reference(s) for s in states]
+        assert h.evaluate(states).tolist() == expected
+        assert h.evaluate(device_rows).cpu().tolist() == expected
+        if kind != "ff":
+            cpu = search.Heuristic(task, kind)
+            assert expected == [cpu(s) for s in states]
+    table = rl.TaskTable([task, task])
+    ids = [0, 1, 0, 1]
+    starts = states[:4]
+    host = mc.batched_iw1(table, starts, task_ids=ids, ctx=ctx, max_states=20000)
+    device = mc.batched_iw1(table, torch.from_numpy(rows(task, starts)[0].view(np.int64)).cuda(), task_ids=ids, ctx=ctx, max_states=20000)
+    for i, start in enumerate(starts):
+        expected = search.iw(task, start=start, max_arity=1, max_states=20000)
+        assert host.status[i] == device.status[i] == expected.status
+        assert host.goal_state(i) == device.goal_state(i) == expected.goal_state
+        assert host.cost(i) == device.cost(i) == expected.cost
+    ctx.synchronize()

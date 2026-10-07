@@ -80,8 +80,6 @@ const char* to_string(HeuristicVariant v) noexcept
 
 std::string DeviceHeuristic::unsupported(const Task& task, const DeviceHeuristicOptions& o)
 {
-    if (task.numeric_slots() > 0)
-        return "numeric fluents (relaxation heuristics over numeric tasks are not supported)";
     if (kind_code(o.kind) == ~u32{0})
         return std::string("the heuristic '") + heuristics::to_string(o.kind) + "' (the device evaluates max, add and ff)";
     if (o.costs == heuristics::Costs::Real)
@@ -450,7 +448,7 @@ void DeviceHeuristic::evaluate_async(const u64* rows, u64 stride, u32 words, u64
                                      cudaStream_t stream)
 {
     DeviceGuard guard(m->ctx->device());
-    if (n && (!rows || !out || !flags || words == 0 || stride < words))
+    if (n && (!rows || !out || !flags || stride < words))
         throw std::invalid_argument("mymyr: DeviceHeuristic::evaluate_async: malformed rows or output");
     if (n == 0)
         return;
@@ -463,7 +461,7 @@ void DeviceHeuristic::evaluate_async(const u64* rows, u64 stride, u32 words, u64
 void DeviceHeuristic::evaluate(const u64* rows, u64 stride, u32 words, u64 n, u32* out, cudaStream_t stream)
 {
     DeviceGuard guard(m->ctx->device());
-    if (n && (!rows || !out || words == 0 || stride < words))
+    if (n && (!rows || !out || stride < words))
         throw std::invalid_argument("mymyr: DeviceHeuristic::evaluate: malformed rows or output");
     m->run(rows, stride, words, n, out, stream ? stream : m->ctx->stream());
 }
@@ -471,7 +469,7 @@ void DeviceHeuristic::evaluate(const u64* rows, u64 stride, u32 words, u64 n, u3
 void DeviceHeuristic::evaluate(const u64* rows, u64 stride, u32 words, u64 n, f64* out, cudaStream_t stream)
 {
     DeviceGuard guard(m->ctx->device());
-    if (n && (!rows || !out || words == 0 || stride < words))
+    if (n && (!rows || !out || stride < words))
         throw std::invalid_argument("mymyr: DeviceHeuristic::evaluate: malformed rows or output");
     const cudaStream_t s = stream ? stream : m->ctx->stream();
     if (m->out_cap < n || m->out_u32.stream() != s)
@@ -490,8 +488,6 @@ std::vector<f64> DeviceHeuristic::evaluate(std::span<const State> states)
     u32 w = std::max<u32>(1, m->task->words());
     for (const State& x : states)
     {
-        if (x.numeric_words())
-            throw std::invalid_argument("mymyr: DeviceHeuristic: states with numeric values");
         w = std::max<u32>(w, x.size_words());
     }
     const u64 n = states.size();

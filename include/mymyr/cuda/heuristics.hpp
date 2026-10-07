@@ -20,7 +20,8 @@
 // States with an atom outside the grounding (not reachable in the delete relaxation from the initial state) are
 // evaluated by the CPU heuristic (its lifted fallback), as heuristics::make_heuristic does.
 //
-// Refused with std::invalid_argument ("mymyr: ..."): numeric tasks, groundings beyond the budget
+// Numeric values and constraints are ignored as in the CPU relaxation.
+// Refused with std::invalid_argument ("mymyr: ..."): groundings beyond the budget
 // (heuristics::GroundingBudget, as the CPU's Evaluation::Grounded), kinds other than Max, Add and FF, and real costs
 // the CPU refuses. One DeviceHeuristic serves one stream at a time (its scratch is reused across launches).
 

@@ -5,7 +5,7 @@
 // ArrayBundle or its uploaded copy (cuda::DeviceTask), so nothing in the layout is a pointer.
 //
 // This header is part of the device-code subset: it must compile as C++20 under nvcc, so it includes only
-// core/types.hpp and uses no standard library beyond <cstdint>/<cstddef>. Keep it that way.
+// core/types.hpp and the numeric program primitives (C++20 scalar math and bit casts).
 //
 // Section "plan" (version 1) of the export, i.e. what version 2 adds to version 1 (all arrays are prefixed plan_):
 //   plan_slot_of        u32 [atom_total + 1]  the slot table snapshot (cid -> slot; k_none: no slot; entry atom_total
@@ -37,6 +37,7 @@
 // exactly as in plan::Matcher; everything else is an absolute row of its table.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/rl/numeric_arrays_view.hpp"
 
 namespace mymyr::rl::dev
 {
@@ -142,6 +143,7 @@ enum StaticRelCol : u32
 /// A read-only view of a version-2 export. Every pointer addresses the same block (host or device).
 struct TaskView
 {
+    NumericView numeric{};
     // scalars
     u32 num_objects = 0;
     u32 ow = 0;           // words per object bitset

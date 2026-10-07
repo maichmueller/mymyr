@@ -26,7 +26,7 @@
   :func:`prefix_masks` (factored action masks from the binding table) as jitted jnp functions equal to the native
   ``mymyr.rl`` versions.
 
-Numeric tasks run on the CPU only (the device environment refuses them).
+Numeric tasks use the general device environment path.
 """
 
 from ._env import Env, EnvState, FlatExpansion, Observation, PaddedExpansion, as_words, key_seed

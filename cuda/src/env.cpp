@@ -73,6 +73,8 @@ std::string fast_why(const Task& task, const rl::EnvConfig& config)
 {
     if (const std::string why = ChunkGenerator::unsupported(task); !why.empty())
         return why;
+    if (task.numeric_slots())
+        return "numeric applicability and effects require the general expansion path";
     if (task.has_axioms())
         return "axioms (their derived atoms are evaluated on the CPU)";
     if (task.atoms().mode() != AtomMode::Frozen)
@@ -159,6 +161,7 @@ struct DeviceEnv::Impl
     rl::EnvConfig cfg;
     bool fast = false;
     u32 I = 1, D = 1, W = 1, L = 1, S = 0;  // instances (global), domains, row words, label width, segments per state
+    u32 NN = 0;
     u64 V = 0;
     u64 C0 = 0;  // words of the count cache proper (the most any domain's layout takes)
     u64 C = 0;   // columns of EnvBatch::counts: C0, then the launch order's two over several instances
@@ -549,15 +552,16 @@ struct DeviceEnv::Impl
     /// General path: the offsets (and, with `full`, the rows) of the expansion of `rows` states into the flat buffers.
     rl::Expansion expand(const u64* states, const i32* inst, u64 rows, bool full, i32* offsets)
     {
-        const u64 total = x->count(rl::StateBatchView{states, rows, W, 0, 0}, inst, expand_options(cfg));
+        const u64 total = x->count(rl::StateBatchView{states, rows, W, W + NN, NN}, inst, expand_options(cfg));
         rl::Expansion e;
         e.words = W;
+        e.numeric_words = NN;
         e.label_width = L;
         e.offsets = offsets;
         if (full)
         {
             e.capacity = total;
-            e.succ = grow<u64>(f_succ, total * W);
+            e.succ = grow<u64>(f_succ, total * (W + NN));
             e.schema = grow<i32>(f_schema, total);
             e.binding = grow<i32>(f_binding, total * L);
             e.goal = grow<u8>(f_goal, total);
@@ -795,6 +799,7 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     I.I = I.suite->size();
     I.D = I.suite->num_domains();
     I.W = I.suite->words();
+    I.NN = I.suite->numeric_words();
     if (I.W > lifted::k_max_words)
         throw std::invalid_argument("mymyr: the CUDA backend cannot run this " + std::string(I.suite->noun()) +
                                     ": states of " + std::to_string(I.W) + " words (the device env takes at most " +
@@ -816,12 +821,12 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     // suite's width (an instance's domain table may be narrower: zero words)
     {
         const rl::HostEnv host(I.suite, I.cfg);
-        std::vector<u64> rows(u64{I.I} * I.W, 0), gp(u64{I.I} * I.W, 0), gn(u64{I.I} * I.W, 0);
+        std::vector<u64> rows(u64{I.I} * (I.W + I.NN), 0), gp(u64{I.I} * I.W, 0), gn(u64{I.I} * I.W, 0);
         for (u32 i = 0; i < I.I; ++i)
         {
             const rl::TaskTable::Instance& in = I.suite->instance(i);
             const u32 w = I.suite->table_of(i).words();
-            std::copy_n(in.init.begin(), w, rows.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
+            I.suite->initial_row(i, rows.data() + u64{i} * (I.W + I.NN), I.W, I.NN);
             std::copy_n(in.goal_pos.begin(), w, gp.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
             std::copy_n(in.goal_neg.begin(), w, gn.begin() + static_cast<std::ptrdiff_t>(u64{i} * I.W));
             I.init_count.push_back(host.initial_count(i));
@@ -967,7 +972,7 @@ void DeviceEnv::reset(rl::EnvBatch& b, const u8* mask, i32* count, bool keep_goa
     envk::Reset r;
     r.rows = b.rows;
     r.words = I.W;
-    r.row_words = I.W;
+    r.row_words = I.W + I.NN;
     r.states = b.states;
     r.steps = b.steps;
     r.mask = mask;
@@ -1052,7 +1057,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     envk::Finish f;
     f.rows = N;
     f.words = I.W;
-    f.row_words = I.W;
+    f.row_words = I.W + I.NN;
     f.states = b.states;
     f.steps = b.steps;
     f.status = status;
@@ -1164,7 +1169,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     auto* goal = I.grow<u8>(I.goal_flag, N);
     envk::Move mv;
     mv.rows = N;
-    mv.row_words = I.W;
+    mv.row_words = I.W + I.NN;
     mv.states = b.states;
     mv.pick_row = sel.pick_row;
     mv.succ = e.succ;

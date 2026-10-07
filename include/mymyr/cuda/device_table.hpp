@@ -41,8 +41,8 @@ public:
     /// Exports every instance and uploads the table. Throws std::invalid_argument when the device cannot run some
     /// instance (unsupported()).
     static std::shared_ptr<DeviceTaskTable> upload(ContextPtr ctx, rl::TaskTablePtr table);
-    /// Empty if the device kernels run every instance, else `instance i: <why>` for the first one they do not (numeric
-    /// fluents, more than lifted::k_max_ow object words, states wider than lifted::k_max_words words).
+    /// Empty if the device kernels run every instance, else `instance i: <why>` for the first one they do not
+    /// (more than lifted::k_max_ow object words, states wider than lifted::k_max_words words).
     [[nodiscard]] static std::string unsupported(const rl::TaskTable& table);
 
     DeviceTaskTable(Private, ContextPtr ctx, rl::TaskTablePtr table);
