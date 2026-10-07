@@ -20,6 +20,8 @@
 #include <chrono>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <thread>
 
@@ -54,11 +56,15 @@ inline bool is_goal(const search::GoalSpec& g, Successors& succ, StateView s)
 }
 double seconds_since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
 
-/// Per-layer counts (BrfsOptions::layer_stats): open() at the start of a layer, close() at its end.
+/// Per-layer counts (BrfsOptions::layer_stats) and the observer's on_pass: open() at the start of a layer, close() at
+/// its end.
 struct LayerLog
 {
     std::vector<std::array<u64, 3>>* out = nullptr;
+    search::SearchObserver* obs = nullptr;
     u64 e0 = 0, g0 = 0, end = 0;
+    u32 depth = 0;
+    Clock::time_point t0{};
     bool open_ = false;
 
     void open(u64 expanded, u64 generated, u64 stored)
@@ -67,14 +73,115 @@ struct LayerLog
         g0 = generated;
         end = stored;
         open_ = true;
+        if (obs)
+            t0 = Clock::now();
     }
     void close(u64 expanded, u64 generated, u64 stored)
     {
-        if (out && open_)
+        if (!open_)
+            return;
+        if (out)
             out->push_back({expanded - e0, generated - g0, stored - end});
+        if (obs)
+            obs->on_pass(depth, {.expanded = expanded - e0, .generated = generated - g0, .states = stored - end,
+                                 .seconds = seconds_since(t0)});
+        ++depth;
         open_ = false;
     }
 };
+
+/// The stop conditions of BrfsOptions (max_seconds, cancel, on_progress) and the lifecycle events of the observer,
+/// for a single-threaded search and the calling thread of the multi-threaded one.
+class Control
+{
+public:
+    Control(const BrfsOptions& o, search::SearchObserver* obs)
+        : m_o(o), m_obs(obs), m_timed(o.max_seconds < std::numeric_limits<double>::infinity()),
+          m_next_progress(std::max<u64>(1, o.progress_interval))
+    {
+        if (m_timed)
+            m_deadline = m_t0 + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(std::max(0.0, o.max_seconds)));
+    }
+
+    [[nodiscard]] search::SearchObserver* observer() const { return m_obs; }
+    [[nodiscard]] Clock::time_point deadline() const { return m_deadline; }
+    [[nodiscard]] bool timed() const { return m_timed; }
+
+    void start(StateView initial) const
+    {
+        if (m_obs)
+            m_obs->on_start(initial);
+    }
+
+    /// Before an expansion: false once max_seconds, the token or on_progress stops the search.
+    bool keep_going(const BrfsResult& r, u64 states)
+    {
+        if ((m_tick++ & 7) == 0 && !check())
+            return false;
+        if (m_obs && r.expanded >= m_next_progress)
+        {
+            m_next_progress = r.expanded + std::max<u64>(1, m_o.progress_interval);
+            if (!m_obs->on_progress(statistics(r.expanded, r.generated, states)))
+            {
+                stop(search::SearchStatus::Cancelled);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// The time and the token: false (and the reason recorded) once one of them stops the search.
+    bool check()
+    {
+        if (m_timed && Clock::now() >= m_deadline)
+            stop(search::SearchStatus::OutOfTime);
+        else if (m_o.cancel.requested())
+            stop(search::SearchStatus::Cancelled);
+        return !m_stopped;
+    }
+    void stop(search::SearchStatus why)
+    {
+        if (!m_stopped)
+            m_stopped = why;
+    }
+
+    [[nodiscard]] search::SearchStatistics statistics(u64 expanded, u64 generated, u64 states) const
+    {
+        return {.expanded = expanded, .generated = generated, .states = states, .seconds = seconds_since(m_t0)};
+    }
+
+    /// Sets r.status and sends on_solution (when r carries the plan) and on_end.
+    void finish(BrfsResult& r, bool has_plan) const
+    {
+        if (r.solved)
+            r.status = search::SearchStatus::Solved;
+        else if (m_stopped)
+            r.status = *m_stopped;
+        else
+            r.status = r.exhausted ? search::SearchStatus::Exhausted : search::SearchStatus::OutOfStates;
+        if (!m_obs)
+            return;
+        if (r.solved && has_plan)
+            m_obs->on_solution(r.plan, static_cast<double>(r.plan.size()));
+        m_obs->on_end(r.status, statistics(r.expanded, r.generated, r.states));
+    }
+
+private:
+    const BrfsOptions& m_o;
+    search::SearchObserver* m_obs;
+    Clock::time_point m_t0 = Clock::now();
+    Clock::time_point m_deadline{};
+    bool m_timed;
+    u64 m_next_progress;
+    u32 m_tick = 0;
+    std::optional<search::SearchStatus> m_stopped;
+};
+
+/// The action of a successor as the observer gets it.
+inline Action action_of(Successors& succ, u32 schema, const ObjectId* binding)
+{
+    return {SchemaId{schema}, std::vector<ObjectId>(binding, binding + succ.arity(schema))};
+}
 
 /// SoA search nodes of the single-threaded searches: parent, schema and binding of each state's first discovery.
 struct Nodes
@@ -116,7 +223,7 @@ struct Nodes
 
 // ------------------------------------------------------------------------------------------------- flat
 template<bool Ordered>
-BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
+BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Control& ctl)
 {
     BrfsResult r;
     r.store = "flat";
@@ -128,10 +235,12 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
     store.insert(s0.view());
     nodes.root();
     std::vector<u64> cur, next;
+    search::SearchObserver* const obs = ctl.observer();
+    ctl.start(s0.view());
     const auto t0 = Clock::now();
     u32 layer_end = 0;
     u32 pos = 0;
-    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr};
+    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, obs};
     // Ordered layers (BrfsOptions::layers): the layer [layer_begin, layer_end) of ids is expanded in the order `order`
     // (with a beam, only its first beam_width ids; the others stay stored and are never expanded)
     [[maybe_unused]] search::detail::LayerOrderer lo;
@@ -142,6 +251,8 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
         lo = search::detail::LayerOrderer(task, o.layers);
     for (; pos < store.size() && store.size() < o.max_states; ++pos)
     {
+        if (!ctl.keep_going(r, store.size()))
+            break;
         if (pos == layer_end)
         {
             log.close(r.expanded, r.generated, store.size());
@@ -179,12 +290,17 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
             break;
         }
         ++r.expanded;
+        if (obs)
+            obs->on_expand(id, sv);
         succ.generate<Ordered>(
             [&](u32 s, const ObjectId* b, const Delta& d)
             {
                 ++r.generated;
                 const u32 nn = apply_delta(cur.data(), n, d, next);
-                if (store.insert(next.data(), nn, d.num).second)
+                const auto [child, fresh] = store.insert(next.data(), nn, d.num);
+                if (obs)
+                    obs->on_generate(id, action_of(succ, s, b), child.v, {next.data(), nn, d.num, NN}, fresh);
+                if (fresh)
                 {
                     nodes.push(id, s, b, succ.arity(s));
                     if constexpr (Ordered)
@@ -210,12 +326,13 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
     if (o.fingerprint)
         for (u32 i = 0; i < store.size(); ++i)
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash(store[StateId{i}]));
+    ctl.finish(r, true);
     return r;
 }
 
 // ------------------------------------------------------------------------------------------------- chunked
 template<bool Ordered>
-BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
+BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ, Control& ctl)
 {
     BrfsResult r;
     r.store = "chunked";
@@ -227,10 +344,12 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
     store.insert(s0.view());
     nodes.root();
     std::vector<u64> cur, next, curnum(NN), scratch;
+    search::SearchObserver* const obs = ctl.observer();
+    ctl.start(s0.view());
     const auto t0 = Clock::now();
     u32 layer_end = 0;
     u32 pos = 0;
-    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr};
+    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, obs};
     // Ordered layers (BrfsOptions::layers): the layer [layer_begin, layer_end) of ids is expanded in the order `order`
     // (with a beam, only its first beam_width ids; the others stay stored and are never expanded)
     [[maybe_unused]] search::detail::LayerOrderer lo;
@@ -241,6 +360,8 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
         lo = search::detail::LayerOrderer(task, o.layers);
     for (; pos < store.size() && store.size() < o.max_states; ++pos)
     {
+        if (!ctl.keep_going(r, store.size()))
+            break;
         if (pos == layer_end)
         {
             log.close(r.expanded, r.generated, store.size());
@@ -280,6 +401,8 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
             break;
         }
         ++r.expanded;
+        if (obs)
+            obs->on_expand(id, sv);
         succ.generate<Ordered>(
             [&](u32 s, const ObjectId* b, const Delta& d)
             {
@@ -303,7 +426,11 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
                         bits::reset(next.data(), x.v);
                 for (SlotId x : d.add)
                     bits::set(next.data(), x.v);
-                if (store.insert_successor(StateId{id}, cur.data(), next.data(), d).second)
+                const auto [child, fresh] = store.insert_successor(StateId{id}, cur.data(), next.data(), d);
+                if (obs)
+                    obs->on_generate(id, action_of(succ, s, b), child.v,
+                                     {next.data(), bits::trimmed_size(next.data(), W), d.num, NN}, fresh);
+                if (fresh)
                 {
                     nodes.push(id, s, b, succ.arity(s));
                     if constexpr (Ordered)
@@ -335,11 +462,12 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash({w.data(), store.words(), NN ? curnum.data() : nullptr, NN}));
         }
     }
+    ctl.finish(r, true);
     return r;
 }
 
 // ------------------------------------------------------------------------------------------------- compact
-BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
+BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ, Control& ctl)
 {
     BrfsResult r;
     r.store = "compact";
@@ -383,9 +511,11 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
     closed.insert(key_of(f0, s0.numeric().data()));
     nodes.root();
     u32 layer_first = 0;
+    search::SearchObserver* const obs = ctl.observer();
+    ctl.start(s0.view());
     const auto t0 = Clock::now();
     bool stopped = false;
-    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr};
+    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, obs};
     while (!layer_f.empty() && closed.size() < o.max_states && !stopped && r.layers < o.max_depth)
     {
         ++r.layers;
@@ -395,6 +525,11 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
         next_f.clear();
         for (usize li = 0; li < layer_f.size() && !stopped; ++li)
         {
+            if (!ctl.keep_going(r, closed.size()))
+            {
+                stopped = true;
+                break;
+            }
             std::memcpy(cur.data(), layer.data() + li * W, W * sizeof(u64));
             if (NN)
                 std::memcpy(curnum.data(), layer_num.data() + li * NN, NN * sizeof(u64));
@@ -413,6 +548,8 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
                 break;
             }
             ++r.expanded;
+            if (obs)
+                obs->on_expand(pid, sv);
             succ.generate<false>(
                 [&](u32 s, const ObjectId* b, const Delta& d)
                 {
@@ -467,7 +604,11 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
                         toggle(x.v);
                     for (u32 slot : changed)
                         bits::reset(tog.data(), slot);
-                    if (closed.size() >= o.max_states || !closed.insert(key_of(f, d.num)))
+                    const bool fresh = closed.size() < o.max_states && closed.insert(key_of(f, d.num));
+                    if (obs)  // a duplicate's id is not kept (closed states are fingerprints)
+                        obs->on_generate(pid, action_of(succ, s, b), fresh ? closed.size() - 1 : ~u64{0},
+                                         {next.data(), bits::trimmed_size(next.data(), W), d.num, NN}, fresh);
+                    if (!fresh)
                         return true;
                     next_layer.insert(next_layer.end(), next.begin(), next.end());
                     if (NN)
@@ -492,6 +633,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
                     (layer.capacity() + next_layer.capacity() + layer_num.capacity() + next_layer_num.capacity()) * sizeof(u64);
     if (o.fingerprint)
         r.fingerprint = 0;  // closed states are not kept: no per-id fingerprint
+    ctl.finish(r, true);
     return r;
 }
 
@@ -499,17 +641,28 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
 struct alignas(64) ThreadState
 {
     Successors* succ = nullptr;
+    search::SearchObserver* obs = nullptr;  // the thread's observer (BrfsOptions::observer, make_worker)
     std::vector<u64> next;
     u64 generated = 0, goals = 0, expanded = 0;
+    u64 next_progress = 0;
+    u32 tick = 0;
 };
 
 class ParallelBrfs
 {
 public:
-    ParallelBrfs(const Task& task, const BrfsOptions& o, u32 threads)
-        : m_task(task), m_o(o), m_T(threads), m_team(threads), m_store(threads, task.numeric_words()), m_ws(threads)
+    /// workers: thread t's observer (empty without an observer; with one thread, the root observer)
+    ParallelBrfs(const Task& task, const BrfsOptions& o, u32 threads, Control& ctl,
+                 std::span<search::SearchObserver* const> workers)
+        : m_task(task), m_o(o), m_ctl(ctl), m_T(threads), m_team(threads), m_store(threads, task.numeric_words()),
+          m_ws(threads)
     {
         m_team.run([&](u32 t) { m_ws[t].succ = &task.workspace().successors(); });
+        for (u32 t = 0; t < m_T && !workers.empty(); ++t)
+        {
+            m_ws[t].obs = workers[t];
+            m_ws[t].next_progress = std::max<u64>(1, o.progress_interval);
+        }
         m_partial.assign(m_T + 1, 0);
         m_pend_lo.assign(m_T, 0);
         m_pend_hi.assign(m_T, 0);
@@ -523,6 +676,7 @@ public:
         const auto t0 = Clock::now();
         const State& s0 = m_task.initial_state();
         m_loc.push_back(m_store.insert(0, s0.data(), s0.size_words(), ~u64{0}, s0.numeric().data()).first);
+        m_ctl.start(s0.view());
         m_store.begin_layer();
         m_layer_lo = 0;
         m_layer_hi = 1;
@@ -533,11 +687,14 @@ public:
                 x[0] += w.expanded, x[1] += w.generated;
             return x;
         };
+        search::SearchObserver* const obs = m_ctl.observer();
+        const bool log_layers = m_o.layer_stats || obs;
         while (m_layer_lo < m_layer_hi && m_layer_hi < m_o.max_states && !m_stop.load(std::memory_order_relaxed) &&
-               r.layers < m_o.max_depth)
+               !m_halt.load(std::memory_order_relaxed) && r.layers < m_o.max_depth && m_ctl.check())
         {
             ++r.layers;
-            const std::array<u64, 2> before = m_o.layer_stats ? totals() : std::array<u64, 2>{0, 0};
+            const std::array<u64, 2> before = log_layers ? totals() : std::array<u64, 2>{0, 0};
+            const auto layer_t0 = Clock::now();
             const u64 stored = m_layer_hi;
             const u64 L = m_layer_hi - m_layer_lo;
             m_chunk = std::clamp<u64>(L / (static_cast<u64>(m_T) * 32), 1, 256);
@@ -552,15 +709,29 @@ public:
                 m_store.rehash(m_team);
                 m_resize.store(false, std::memory_order_relaxed);
             }
-            if (m_stop.load(std::memory_order_relaxed))
+            if (m_stop.load(std::memory_order_relaxed) || m_halt.load(std::memory_order_relaxed))
+            {
+                if (obs)  // the partly expanded last layer (its new states get no ids)
+                {
+                    const std::array<u64, 2> after = totals();
+                    obs->on_pass(r.layers - 1, {.expanded = after[0] - before[0], .generated = after[1] - before[1],
+                                                .seconds = seconds_since(layer_t0)});
+                }
                 break;
+            }
             finalize_layer();
-            if (m_o.layer_stats)
+            if (log_layers)
             {
                 const std::array<u64, 2> after = totals();
-                r.layer_counts.push_back({after[0] - before[0], after[1] - before[1], m_layer_hi - stored});
+                if (m_o.layer_stats)
+                    r.layer_counts.push_back({after[0] - before[0], after[1] - before[1], m_layer_hi - stored});
+                if (obs)
+                    obs->on_pass(r.layers - 1, {.expanded = after[0] - before[0], .generated = after[1] - before[1],
+                                                .states = m_layer_hi - stored, .seconds = seconds_since(layer_t0)});
             }
         }
+        if (const u8 why = m_halt.load(std::memory_order_relaxed); why != 0)
+            m_ctl.stop(static_cast<search::SearchStatus>(why - 1));
         r.search_s = seconds_since(t0);
         r.solved = m_stop.load(std::memory_order_relaxed);
         r.exhausted = !r.solved && m_layer_lo == m_layer_hi;
@@ -592,6 +763,7 @@ public:
         for (u64 id = m_layer_hi > 64 ? m_layer_hi - 64 : 0; id < m_layer_hi; ++id)
             maxw = std::max(maxw, m_store.record(m_loc[id]).nw);
         r.words = maxw;
+        m_ctl.finish(r, false);
         return r;
     }
 
@@ -603,7 +775,8 @@ private:
         {
             if (lo >= hi)
             {
-                if (m_resize.load(std::memory_order_relaxed) || m_stop.load(std::memory_order_relaxed))
+                if (m_resize.load(std::memory_order_relaxed) || m_stop.load(std::memory_order_relaxed) ||
+                    m_halt.load(std::memory_order_relaxed))
                     break;
                 const u64 c = m_chunk_ctr.fetch_add(1, std::memory_order_relaxed);
                 lo = m_layer_lo + c * m_chunk;
@@ -611,6 +784,8 @@ private:
                     break;
                 hi = std::min(m_layer_hi, lo + m_chunk);
             }
+            if (!keep_going(t))
+                break;
             expand(t, lo++);
             if (m_store.wants_rehash())
                 m_resize.store(true, std::memory_order_relaxed);
@@ -619,6 +794,36 @@ private:
         }
         m_pend_lo[t] = lo;
         m_pend_hi[t] = hi;
+    }
+
+    /// Thread t, before an expansion: the time, the token and its observer's on_progress (checked every few
+    /// expansions); false once one of them, or another thread, stopped the search.
+    bool keep_going(u32 t)
+    {
+        ThreadState& w = m_ws[t];
+        if (m_halt.load(std::memory_order_relaxed))
+            return false;
+        if ((w.tick++ & 7) == 0)
+        {
+            if (m_ctl.timed() && Clock::now() >= m_ctl.deadline())
+                return halt(search::SearchStatus::OutOfTime);
+            if (m_o.cancel.requested())
+                return halt(search::SearchStatus::Cancelled);
+        }
+        if (w.obs && w.expanded >= w.next_progress)
+        {
+            w.next_progress = w.expanded + std::max<u64>(1, m_o.progress_interval);
+            if (!w.obs->on_progress(m_ctl.statistics(w.expanded, w.generated, 0)))
+                return halt(search::SearchStatus::Cancelled);
+        }
+        return true;
+    }
+
+    bool halt(search::SearchStatus why)
+    {
+        u8 none = 0;
+        m_halt.compare_exchange_strong(none, static_cast<u8>(static_cast<u8>(why) + 1), std::memory_order_relaxed);
+        return false;
     }
 
     void expand(u32 t, u64 id)
@@ -635,14 +840,19 @@ private:
             return;
         }
         ++w.expanded;
+        if (w.obs)
+            w.obs->on_expand(id, rec);
         u32 k = 0;
         succ.generate<false>(
-            [&](u32, const ObjectId*, const Delta& d)
+            [&](u32 s, const ObjectId* b, const Delta& d)
             {
                 const u32 kk = k++;
                 ++w.generated;
                 const u32 nn = apply_delta(rec.w, rec.nw, d, w.next);
-                m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num);
+                const bool fresh = m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num).second;
+                if (w.obs)  // ids are assigned when the layer ends
+                    w.obs->on_generate(id, action_of(succ, s, b), ~u64{0}, {w.next.data(), nn, d.num, m_task.numeric_words()},
+                                       fresh);
                 return true;
             },
             m_o.witness_pruning, m_o.canonical_order);
@@ -771,6 +981,7 @@ private:
 
     const Task& m_task;
     const BrfsOptions& m_o;
+    Control& m_ctl;
     u32 m_T;
     Team m_team;
     ConcurrentStateStore m_store;
@@ -781,6 +992,7 @@ private:
     u64 m_chunk = 1;
     std::atomic<bool> m_resize{false};
     std::atomic<bool> m_stop{false};
+    std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress)
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;
     u64 m_cursor_cap = 0;
@@ -815,9 +1027,28 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
     if (ordered && store != BrfsOptions::Store::Flat && store != BrfsOptions::Store::Chunked)
         throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store (single-threaded)");
     BrfsResult r;
+    Control ctl(options, options.observer);
     if (store == BrfsOptions::Store::Concurrent)
     {
-        ParallelBrfs search(task, options, T);
+        // the make_worker protocol (search/control.hpp): one observer per thread, else one thread
+        std::vector<std::shared_ptr<search::SearchObserver>> owned;
+        std::vector<search::SearchObserver*> workers;
+        if (options.observer && T > 1)
+        {
+            for (u32 t = 0; t < T; ++t)
+            {
+                owned.push_back(options.observer->make_worker(t));
+                if (!owned.back())
+                {
+                    T = 1;
+                    break;
+                }
+                workers.push_back(owned.back().get());
+            }
+        }
+        if (options.observer && T == 1)
+            workers.assign(1, options.observer);
+        ParallelBrfs search(task, options, T, ctl, workers);
         r = search.run();
     }
     else
@@ -826,12 +1057,12 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
         switch (store)
         {
             case BrfsOptions::Store::Flat:
-                r = ordered ? run_flat<true>(task, options, succ) : run_flat<false>(task, options, succ);
+                r = ordered ? run_flat<true>(task, options, succ, ctl) : run_flat<false>(task, options, succ, ctl);
                 break;
             case BrfsOptions::Store::Chunked:
-                r = ordered ? run_chunked<true>(task, options, succ) : run_chunked<false>(task, options, succ);
+                r = ordered ? run_chunked<true>(task, options, succ, ctl) : run_chunked<false>(task, options, succ, ctl);
                 break;
-            default: r = run_compact(task, options, succ); break;
+            default: r = run_compact(task, options, succ, ctl); break;
         }
     }
     r.fluent_slots = task.atoms().fluent_slots();

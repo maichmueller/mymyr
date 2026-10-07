@@ -77,8 +77,8 @@ def test_stubs_parse_and_are_typed():
                          ("lifted_fact_landmarks", "FactLandmarkGraph")):
         sig = next(line for line in search.splitlines() if line.startswith(f"def {name}("))
         assert sig.endswith(f") -> {result}:"), sig
-    # every parameter and result typed: observers are mymyr._typing.SearchObserver (duck-typed, all methods optional)
-    assert "observer: mymyr._typing.SearchObserver | None = None" in search
+    # every parameter and result typed: observers are mymyr.search.Observer (any object with some of its methods works)
+    assert "observer: mymyr.search.Observer | None = None" in search
     assert ": object" not in search.replace("def __eq__(self, other: object, /)", "")
     assert "-> object" not in search and "-> list:" not in search and "-> dict:" not in search
     core = (d / "__init__.pyi").read_text()
