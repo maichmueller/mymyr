@@ -59,7 +59,7 @@ arguments; unpickling builds it again.
 from mymyr import datasets
 from mymyr.rl import TaskTable
 
-tasks = TaskTable.from_pddl("tests/data/pddl/gripper/domain.pddl", "tests/data/pddl/gripper", atoms="frozen")
+tasks = TaskTable.from_pddl("tests/data/pddl/gripper/domain.pddl", "tests/data/pddl/gripper/p*.pddl", atoms="frozen")
 kb = datasets.KnowledgeBase(tasks, generalized=True, width=1)
 print([s.num_states for s in kb.state_spaces], kb.task_indices)   # [8, 28] [0, 1]
 classes = kb.generalized_state_space

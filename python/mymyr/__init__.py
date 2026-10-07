@@ -18,6 +18,7 @@
 import os as _os
 
 from mymyr import _core, formalism
+from mymyr._errors import PddlError
 from mymyr._core import (
     Action,
     ApplicableActions,
@@ -55,6 +56,7 @@ __all__ = [
     "GroundConjunctions",
     "GroundLiteral",
     "Literal",
+    "PddlError",
     "State",
     "Task",
     "TaskHandle",

@@ -72,24 +72,36 @@ Landmarks and relaxed reachability (as in mimir's pymimir.advanced.search):
 Every search runs with the thread state detached: other Python threads keep running, and any number of searches may
 run at once on one task (free-threaded CPython). Common keyword arguments:
 
-- budgets ``max_states``, ``max_expanded``, ``max_depth``, ``max_seconds`` (unset: unlimited);
+- budgets ``max_states``, ``max_expanded``, ``max_depth``, ``max_seconds`` (unset: unlimited; brfs takes
+  ``max_states`` and ``max_seconds``);
 - ``cancel``: a :class:`CancelToken`; ``token.request()`` from any thread stops the search (status CANCELLED);
 - ``goal``: ``None`` (the task's goal), a callable ``state -> bool``, a :class:`mymyr.GroundCondition`, or a sequence
   of goals, each a GroundCondition or a sequence of ground literals and atoms (anything ``task.ground_condition``
   takes: static, fluent and derived literals of either polarity, e.g. ``[["(on a b)", "(not (clear c))"]]``); any of
   them counts. ``task.ground_condition(literals, constraints=["(>= (fuel t) 10)"])`` adds numeric constraints;
 - ``blocked_states``: States the search never enters;
-- ``observer`` (:class:`mymyr._typing.SearchObserver`): an object with any of ``on_start(state)``,
+- ``observer``: a :class:`Observer` subclass that overrides the events it needs: ``on_start(state)``,
   ``on_expand(id, state)``, ``on_generate(parent, action, child, state, is_new)``, ``on_prune(parent, action, state)``,
   ``on_pass(arity, stats)``, ``on_solution(plan, cost)``, ``on_progress(stats) -> bool`` (False stops the search),
   ``on_end(status, stats)``, and for the IW family variants ``on_transition(parent, action, child, state, outcome)``
-  (a :class:`TransitionOutcome`).
+  (a :class:`TransitionOutcome`). Events it does not override are never called. Any object with some of these
+  methods works too:
+
+    class Counter(mymyr.search.Observer):
+        def __init__(self):
+            self.expanded = 0
+
+        def on_expand(self, id, state):
+            self.expanded += 1
+
+    r = mymyr.search.astar(task, observer=(c := Counter()))   # c.expanded == r.stats.expanded
 
 Callbacks (observer methods, a goal callable) run on the searching thread with the thread state attached. The first
 exception a callback raises requests the search's CancelToken and is re-raised when the search returns. The parallel
-searches (find_rollouts_parallel, atomic_goal_portfolio) run their workers on their own threads only when the observer
-and a callable goal have a ``make_worker(k)`` method returning worker k's own object (the make_worker protocol);
-otherwise they run on the calling thread alone.
+searches (brfs with ``threads > 1``, find_rollouts_parallel, atomic_goal_portfolio) run their workers on their own
+threads only when the observer and a callable goal have a ``make_worker(k)`` method returning worker k's own object
+(the make_worker protocol; brfs takes no callable goal with ``threads > 1``); otherwise they run on the calling thread
+alone.
 """
 
 from mymyr._core._search import (
@@ -148,6 +160,7 @@ from mymyr._core._search import (
     siw,
     verify_pi_plus_fact_landmarks,
 )
+from mymyr.search._observer import Observer
 
 __all__ = [
     "ActionOrdering",
@@ -167,6 +180,7 @@ __all__ = [
     "LandmarkTransitionScore",
     "LiftedLandmark",
     "MergedLandingStates",
+    "Observer",
     "ParallelRolloutsResult",
     "PortfolioResult",
     "ReachabilityDisambiguation",
