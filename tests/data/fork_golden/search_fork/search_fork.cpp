@@ -41,10 +41,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <map>
+#include <set>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <sys/resource.h>
 
 using namespace mimir;
 using namespace mimir::search;
@@ -544,6 +548,292 @@ int run_search(const std::string& domain, const std::string& problem_file, const
               << std::endl;
     return 0;
 }
+
+// ------------------------------------------------------------------------------------------------ tuple graphs
+std::string fluent_atom_str(const Problem& problem, Index index)
+{
+    const auto a = problem->get_repositories().get_ground_atom<FluentTag>(index);
+    std::string s = "(" + a->get_predicate()->get_name();
+    for (auto o : a->get_objects())
+        s += " " + o->get_name();
+    return s + ")";
+}
+
+/// FNV-1a-64 of the state's fluent atom strings, sorted and joined by newlines, followed by "\n=%.17g" per numeric
+/// variable (the state hash of the fork's state-space fingerprints in tests/cpp/datasets/fork_cases.inc), as 16 hex
+/// digits.
+std::string state_key(const Problem& problem, const State& state)
+{
+    std::vector<std::string> atoms;
+    for (const auto a : state.get_atoms<FluentTag>())
+        atoms.push_back(fluent_atom_str(problem, a));
+    std::sort(atoms.begin(), atoms.end());
+    std::string joined;
+    for (size_t i = 0; i < atoms.size(); ++i)
+        joined += (i ? "\n" : "") + atoms[i];
+    for (const double x : state.get_numeric_variables())
+    {
+        char b[64];
+        std::snprintf(b, sizeof b, "\n=%.17g", x);
+        joined += b;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(fnv1a64(joined)));
+    return buf;
+}
+
+long peak_rss_kb()
+{
+    rusage u {};
+    getrusage(RUSAGE_SELF, &u);
+    return u.ru_maxrss;
+}
+
+/// Per (distance, sorted problem vertices): every tuple of size <= width whose states of first novelty are these, by a
+/// breadth-first search from `root` over the state space graph with the fork's DynamicNoveltyTable (the tuples of the
+/// states of a layer are novel iff no state of an earlier layer has them).
+std::map<std::pair<size_t, IndexList>, std::vector<iw::AtomIndexList>> tuple_classes(const datasets::StateSpace& space, Index root, size_t width)
+{
+    const auto& graph = space->get_graph();
+    iw::DynamicNoveltyTable table(width);
+    std::map<iw::AtomIndexList, std::pair<size_t, std::set<Index>>> novel;
+    std::vector<Index> layer { root }, next;
+    std::set<Index> visited { root };
+    std::vector<iw::AtomIndexList> tuples;
+    for (size_t d = 0; !layer.empty(); ++d)
+    {
+        for (const auto s : layer)
+        {
+            table.compute_novel_tuples(graphs::get_state(graph.get_vertex(s)), tuples);
+            for (const auto& t : tuples)
+            {
+                auto& entry = novel[t];
+                entry.first = d;
+                entry.second.insert(s);
+            }
+        }
+        for (const auto s : layer)
+            table.test_novelty_and_update_table(graphs::get_state(graph.get_vertex(s)));
+        next.clear();
+        for (const auto s : layer)
+            for (const auto t : graph.get_adjacent_vertex_indices<graphs::ForwardTag>(s))
+                if (visited.insert(t).second)
+                    next.push_back(t);
+        std::swap(layer, next);
+    }
+    std::map<std::pair<size_t, IndexList>, std::vector<iw::AtomIndexList>> classes;
+    for (const auto& [t, entry] : novel)
+        classes[{ entry.first, IndexList(entry.second.begin(), entry.second.end()) }].push_back(t);
+    return classes;
+}
+
+/// The fork's tuple graphs (TupleGraphImpl::create) of the state space (remove_if_unsolvable = false, no symmetry
+/// pruning) for width 0, and widths 1 and 2 with and without dominance pruning, of every state-space vertex (every
+/// ceil(N / sample)-th when the space has more than `sample` vertices). With time_width >= 0: only that width and
+/// pruning, timed, without the graphs.
+int run_tuple_graphs(const std::string& domain, const std::string& problem_file, uint32_t max_states, size_t sample, size_t max_width,
+                     long time_width, bool time_pruning)
+{
+    Problem problem = ProblemImpl::create(domain, problem_file);
+    SearchContext context = SearchContextImpl::create(
+        problem,
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+    auto ss_options = datasets::StateSpaceImpl::Options();
+    ss_options.remove_if_unsolvable = false;
+    ss_options.max_num_states = max_states;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto result = datasets::StateSpaceImpl::create(context, ss_options);
+    if (!result)
+        throw std::runtime_error("no state space (max_states reached or a statically false goal)");
+    const auto space = result->first;
+    auto certificate_maps = result->second;
+    const double space_secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const auto& graph = space->get_graph();
+    const size_t N = graph.get_num_vertices();
+
+    if (time_width >= 0)
+    {
+        const long rss_before = peak_rss_kb();
+        const auto t1 = std::chrono::steady_clock::now();
+        const auto tuple_graphs =
+            datasets::TupleGraphImpl::create(space, certificate_maps, datasets::TupleGraphImpl::Options(static_cast<size_t>(time_width), time_pruning));
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+        size_t vertices = 0, edges = 0;
+        for (const auto& tg : tuple_graphs)
+        {
+            vertices += tg->get_graph().get_num_vertices();
+            edges += tg->get_graph().get_num_edges();
+        }
+        std::cout << "RESULT {\"states\":" << N << ",\"width\":" << time_width << ",\"pruning\":" << (time_pruning ? "true" : "false")
+                  << ",\"seconds\":" << jnum(secs) << ",\"state_space_seconds\":" << jnum(space_secs) << ",\"tuple_vertices\":" << vertices
+                  << ",\"tuple_edges\":" << edges << ",\"peak_rss_kb_before\":" << rss_before << ",\"peak_rss_kb_after\":" << peak_rss_kb()
+                  << "}" << std::endl;
+        return 0;
+    }
+
+    const size_t step = (sample > 0 && N > sample) ? (N + sample - 1) / sample : 1;
+    std::vector<Index> roots;
+    for (Index v = 0; v < N; v += step)
+        roots.push_back(v);
+    std::vector<std::string> keys(N);
+    for (Index v = 0; v < N; ++v)
+        keys[v] = state_key(problem, graphs::get_state(graph.get_vertex(v)));
+    std::string body = "\"states\":" + std::to_string(N) + ",\"sample_step\":" + std::to_string(step) + ",\"roots\":[";
+    for (size_t i = 0; i < roots.size(); ++i)
+        body += std::string(i ? "," : "") + jstr(keys[roots[i]]);
+    body += "]";
+
+    std::map<Index, std::string> atom_names;
+    auto atom_name = [&](Index a) -> const std::string&
+    {
+        auto it = atom_names.find(a);
+        if (it == atom_names.end())
+            it = atom_names.emplace(a, fluent_atom_str(problem, a)).first;
+        return it->second;
+    };
+    // a tuple as its atom names, sorted
+    auto names = [&](const iw::AtomIndexList& tuple)
+    {
+        std::vector<std::string> out;
+        for (const auto a : tuple)
+            out.push_back(atom_name(a));
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    auto concat = [](const std::vector<std::string>& v)
+    {
+        std::string s;
+        for (const auto& x : v)
+            s += x;
+        return s;
+    };
+    auto hex = [](uint64_t h)
+    {
+        char buf[17];
+        std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(h));
+        return std::string(buf);
+    };
+    auto set_hash = [&](const std::set<std::string>& items)
+    {
+        uint64_t h = 0;
+        for (const auto& s : items)
+            h += fnv1a64(s);
+        return hex(h);
+    };
+    auto counts_json = [](const std::vector<size_t>& v)
+    {
+        std::string s = "[";
+        for (size_t i = 0; i < v.size(); ++i)
+            s += std::string(i ? "," : "") + std::to_string(v[i]);
+        return s + "]";
+    };
+
+    std::vector<std::pair<size_t, bool>> configs = { { 0, true }, { 1, true }, { 1, false } };
+    if (max_width >= 2)
+    {
+        configs.emplace_back(2, true);
+        configs.emplace_back(2, false);
+    }
+    size_t dropped_duplicates = 0;
+    body += ",\"graphs\":{";
+    for (size_t c = 0; c < configs.size(); ++c)
+    {
+        const auto [width, pruning] = configs[c];
+        const auto tuple_graphs = datasets::TupleGraphImpl::create(space, certificate_maps, datasets::TupleGraphImpl::Options(width, pruning));
+        body += std::string(c ? "," : "") + "\"w" + std::to_string(width) + (width == 0 ? "" : (pruning ? "p1" : "p0")) + "\":[";
+        for (size_t r = 0; r < roots.size(); ++r)
+        {
+            const auto& tg = *tuple_graphs.at(roots[r]);
+            const auto& tgraph = tg.get_graph();
+            const auto& groups = tg.get_tuple_vertex_indices_grouped_by_distance();
+            std::vector<size_t> distance(tgraph.get_num_vertices(), 0);
+            for (size_t d = 0; d < groups.size(); ++d)
+                for (const auto v : groups[d])
+                    distance.at(v) = d;
+            std::map<std::pair<size_t, IndexList>, std::vector<iw::AtomIndexList>> classes;
+            if (pruning && width > 0)
+                classes = tuple_classes(space, roots[r], width);
+            // the vertex of a tuple graph by its distance and tuple: with dominance pruning the tuple is the smallest
+            // (fewest atoms, then lexicographically smallest sorted atom names) of its class
+            std::vector<std::string> vertex_id(tgraph.get_num_vertices());
+            std::set<std::string> vertex_items, edge_items, layer_items;
+            std::vector<std::set<std::string>> per_distance(groups.size()), per_layer_edges(groups.size());
+            for (Index v = 0; v < tgraph.get_num_vertices(); ++v)
+            {
+                const auto& vertex = tgraph.get_vertex(v);
+                auto tuple = names(graphs::get_atom_tuple(vertex));
+                if (pruning && width > 0)
+                {
+                    auto problem_vertices = graphs::get_problem_vertices(vertex);
+                    std::sort(problem_vertices.begin(), problem_vertices.end());
+                    const auto it = classes.find({ distance[v], problem_vertices });
+                    if (it == classes.end())
+                        throw std::runtime_error("a tuple vertex without a novelty class");
+                    const auto fork_tuple = tuple;
+                    bool member = false;
+                    for (const auto& t : it->second)
+                    {
+                        auto candidate = names(t);
+                        member = member || candidate == fork_tuple;
+                        if (&t == &it->second.front() || candidate.size() < tuple.size() || (candidate.size() == tuple.size() && candidate < tuple))
+                            tuple = std::move(candidate);
+                    }
+                    if (!member)
+                        throw std::runtime_error("the fork's tuple is not in its novelty class");
+                }
+                std::vector<std::string> problem_keys;
+                for (const auto p : graphs::get_problem_vertices(vertex))
+                    problem_keys.push_back(keys.at(p));
+                std::sort(problem_keys.begin(), problem_keys.end());
+                std::string pk;
+                for (size_t i = 0; i < problem_keys.size(); ++i)
+                    pk += (i ? "," : "") + problem_keys[i];
+                vertex_id[v] = std::to_string(distance[v]) + ":" + concat(tuple);
+                vertex_items.insert(vertex_id[v] + ":" + pk);
+                per_distance[distance[v]].insert(vertex_id[v]);
+            }
+            for (const auto& e : tgraph.get_edges())
+            {
+                const auto item = vertex_id[e.get_source()] + ">" + vertex_id[e.get_target()];
+                edge_items.insert(item);
+                per_layer_edges.at(distance[e.get_target()]).insert(item);
+            }
+            // the problem vertices by distance; the fork leaves the root out of distance 0 at width 0
+            const auto& pgroups = tg.get_problem_vertex_indices_grouped_by_distance();
+            std::vector<size_t> pcounts;
+            for (size_t d = 0; d < pgroups.size(); ++d)
+            {
+                std::set<std::string> layer;
+                for (const auto p : pgroups[d])
+                    layer.insert(std::to_string(d) + ":" + keys.at(p));
+                if (d == 0)
+                    layer.insert("0:" + keys.at(roots[r]));
+                pcounts.push_back(layer.size());
+                layer_items.insert(layer.begin(), layer.end());
+            }
+            std::vector<size_t> vcounts, ecounts;
+            for (size_t d = 0; d < groups.size(); ++d)
+            {
+                vcounts.push_back(per_distance[d].size());
+                if (d > 0)
+                    ecounts.push_back(per_layer_edges[d].size());
+            }
+            // width 0: the fork opens distance 1 also when the root has no successor
+            while (vcounts.size() > 1 && vcounts.back() == 0)
+                vcounts.pop_back();
+            pcounts.resize(vcounts.size());
+            ecounts.resize(vcounts.size() - 1);
+            dropped_duplicates += tgraph.get_num_vertices() - vertex_items.size();
+            body += std::string(r ? "," : "") + "{\"n\":" + counts_json(vcounts) + ",\"m\":" + counts_json(ecounts) + ",\"p\":" +
+                    counts_json(pcounts) + ",\"v\":" + jstr(set_hash(vertex_items)) + ",\"e\":" + jstr(set_hash(edge_items)) + ",\"q\":" +
+                    jstr(set_hash(layer_items)) + "}";
+        }
+        body += "]";
+    }
+    body += "},\"dropped_duplicates\":" + std::to_string(dropped_duplicates);
+    std::cout << "RESULT {\"algo\":\"tuple_graphs\"," << body << "}" << std::endl;
+    return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -552,6 +842,9 @@ int main(int argc, char** argv)
     uint32_t max_ms = 120000, max_states = UINT32_MAX, limit = UINT32_MAX, beam = UINT32_MAX;
     size_t k = 1, walks = 3, steps = 25;
     uint64_t seed = 1;
+    size_t sample = 0, max_width = 2;
+    long time_width = -1;
+    bool time_pruning = true;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -591,6 +884,14 @@ int main(int argc, char** argv)
             steps = std::stoul(v);
         else if (a == "--seed")
             seed = std::stoull(v);
+        else if (a == "--sample")
+            sample = std::stoul(v);
+        else if (a == "--max-width")
+            max_width = std::stoul(v);
+        else if (a == "--time-width")
+            time_width = std::stol(v);
+        else if (a == "--time-pruning")
+            time_pruning = v != "0";
         else
         {
             std::cerr << "unknown argument " << a << "\n";
@@ -598,7 +899,7 @@ int main(int argc, char** argv)
         }
     }
     const bool layered = algo == "iw" || algo == "brfs";
-    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && hname.empty()))
+    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && algo != "tuple_graphs" && hname.empty()))
     {
         std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L] [--beam W] [--beam-mode M]) --domain D --problem P [--max-ms T] "
                      "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
@@ -607,7 +908,9 @@ int main(int argc, char** argv)
     int rc = 2;
     try
     {
-        if (algo == "walk_ground")
+        if (algo == "tuple_graphs")
+            rc = run_tuple_graphs(domain, problem, max_states, sample, max_width, time_width, time_pruning);
+        else if (algo == "walk_ground")
             rc = run_walk_ground(domain, problem, walks, steps, seed);
         else if (algo == "walk_h")
             rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
