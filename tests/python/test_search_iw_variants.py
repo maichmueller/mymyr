@@ -631,7 +631,7 @@ def test_landmark_graphs(blocks, gripper):
             lifted.achievers(lifted.landmarks[0])
         for lm in lifted.lifted:
             assert str(lm).startswith(lm.predicate + "(") and (lm.fact is not None) == lm.is_fact
-            assert all(isinstance(m, mymyr.Atom) for m in lm.members)
+            assert all(isinstance(m, mymyr.GroundAtom) for m in lm.members)
     # a graph from given atoms, normalized as the fork does
     g = search.FactLandmarkGraph(blocks, ["(on a g)", "(on a g)", "(clear f)"], [["(on a g)", "(on b a)"],
                                                                                    ["(on c a)", "(on b a)"]],

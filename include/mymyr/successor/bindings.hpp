@@ -36,6 +36,7 @@
 #include "mymyr/core/types.hpp"
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/state/state.hpp"
+#include "mymyr/successor/conditions.hpp"
 
 #include <optional>
 #include <span>
@@ -49,59 +50,9 @@ namespace mymyr
 class Task;
 class Workspace;
 
-/// A lifted conjunctive condition over the predicates, objects, types and functions of one task (a value type).
-/// Terms use formalism::Term: >= 0 is a variable index, < 0 the object -(t + 1) (formalism::object_term).
-struct ConjunctiveCondition
-{
-    struct Variable
-    {
-        std::string name;           // without '?'; may be empty
-        std::vector<TypeId> types;  // the variable ranges over the objects of any of these types; empty: every object
-    };
-    struct Literal
-    {
-        PredicateId predicate;
-        bool positive = true;
-        std::vector<formalism::Term> terms;  // one per argument of the predicate
-    };
-    /// lhs == rhs (positive) or lhs != rhs, on object identity.
-    struct Equality
-    {
-        formalism::Term lhs = 0, rhs = 0;
-        bool positive = true;
-    };
-
-    std::vector<Variable> variables;
-    std::vector<Literal> literals;
-    std::vector<Equality> equalities;
-    /// Numeric constraints: comparisons of two expressions of `exprs` (flat trees as in formalism::TaskData; a
-    /// Function node takes its argument terms from `expr_terms`). Static and fluent functions only.
-    std::vector<formalism::NumericConstraint> constraints;
-    std::vector<formalism::Expr> exprs;
-    std::vector<formalism::Term> expr_terms;
-
-    [[nodiscard]] u32 arity() const noexcept { return static_cast<u32>(variables.size()); }
-
-    /// The precondition of a schema: its parameters (with their names and declared types), the literals (each once)
-    /// and the numeric constraints of its precondition. Its bindings are the bindings of the schema's precondition
-    /// alone (the schema's own bindings also apply the numeric effect rules).
-    [[nodiscard]] static ConjunctiveCondition precondition(const Task& task, SchemaId schema);
-    /// The task's goal: no variables; its single (empty) binding exists iff the goal holds (Task::is_goal).
-    [[nodiscard]] static ConjunctiveCondition goal(const Task& task);
-
-    /// Checks the condition against the task: predicate, object, type and function ids in range, literal and
-    /// function arities, variable indices below arity(), expression trees well formed (children in range, no cycles),
-    /// no total-cost function. Throws std::invalid_argument("mymyr: condition: ...") naming the first violation.
-    void validate(const Task& task) const;
-
-    /// PDDL-like text, e.g. "(?x ?y - block) (and (on ?x ?y) (not (clear ?y)) (!= ?x a) (>= (fuel ?x) 1))".
-    [[nodiscard]] std::string str(const Task& task) const;
-
-    friend bool operator==(const ConjunctiveCondition& a, const ConjunctiveCondition& b);
-};
-
-/// A ground literal of a binding (GroundConjunction); `objects` is valid during the callback that received it.
-struct GroundLiteral
+/// A ground literal of a binding (GroundConjunction); `objects` is valid during the callback that received it
+/// (GroundLiteral is the owning value).
+struct GroundLiteralView
 {
     PredicateId predicate;
     bool positive = true;
@@ -114,7 +65,7 @@ struct GroundLiteral
 struct GroundConjunction
 {
     std::span<const ObjectId> binding;
-    std::span<const GroundLiteral> static_literals, fluent_literals, derived_literals;
+    std::span<const GroundLiteralView> static_literals, fluent_literals, derived_literals;
 };
 
 /// Variables fixed in advance: one entry per variable (std::nullopt: free), or empty for none.

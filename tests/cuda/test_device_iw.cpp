@@ -20,8 +20,10 @@
 #include "mymyr/cuda/multi_iw.hpp"
 #include "mymyr/cuda/rollouts.hpp"
 #include "mymyr/cuda/runtime.hpp"
+#include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
 #include "mymyr/search/parallel_rollouts.hpp"
+#include "mymyr/successor/conditions.hpp"
 #include "mymyr/successor/successors.hpp"
 
 #include <gtest/gtest.h>
@@ -338,6 +340,29 @@ TEST_P(CudaMultiIwSuite, RolloutsEqualTheCpu)
 }
 
 INSTANTIATE_TEST_SUITE_P(Suite, CudaMultiIwSuite, ::testing::ValuesIn(params()), param_name);
+
+TEST(CudaGoals, DerivedLiteralsAndNumericConstraintsAreRefused)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = load("philosophers__p03-phil4", false);
+    const GroundCondition goal = GroundCondition::goal(*task);  // derived literals
+    const std::optional<search::GoalSpec::AtomGoal> g = search::atom_goal(*task, goal);
+    ASSERT_TRUE(g.has_value());
+    ASSERT_FALSE(g->fluent_only());
+    const std::vector<State> starts{task->initial_state()};
+    EXPECT_THROW((void)cuda::multi_iw(context(), task, starts, cuda::MultiIwOptions{}, std::span(&*g, 1)), std::invalid_argument);
+    cuda::DeviceRolloutOptions d;
+    d.seeds = {1};
+    d.goals = {*g};
+    EXPECT_THROW((void)cuda::find_rollouts(context(), task, d), std::invalid_argument);
+    // the same goal over fluent literals only runs
+    search::GoalSpec::AtomGoal fluent = *g;
+    fluent.derived_positive.clear();
+    fluent.derived_negative.clear();
+    fluent.positive.clear();
+    ASSERT_TRUE(fluent.fluent_only());
+    EXPECT_NO_THROW((void)cuda::multi_iw(context(), task, starts, cuda::MultiIwOptions{}, std::span(&fluent, 1)));
+}
 
 // ------------------------------------------------------------------------------------------------ gate 1: details
 

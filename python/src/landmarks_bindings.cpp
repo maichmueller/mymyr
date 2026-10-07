@@ -3,8 +3,8 @@
 // verify_pi_plus_fact_landmarks, RelaxedReachability with its tables, witness queries and conjunctive queries, and
 // LandmarkTransitionOrdering (the width-1 transition ordering that iw() takes).
 //
-// Atoms are mymyr Atoms (anything Task.atom accepts as input), actions mymyr Actions; the core's canonical ids stay
-// inside. Generators and fixpoints run with the thread state detached. Graphs, reachability engines and tables are
+// Atoms are GroundAtoms (as input, any ground atom Task.atom accepts), actions mymyr Actions; the core's canonical ids
+// stay inside. Generators and fixpoints run with the thread state detached. Graphs, reachability engines and tables are
 // immutable and safe to share between threads; a WitnessQuery serializes its calls (it memoizes).
 
 #include "py_landmarks.hpp"
@@ -41,10 +41,10 @@ using StateArg = Arg<PyState>;
 using AtomsArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 using AtomSetsArg = Arg<nb::typed<nb::iterable, nb::typed<nb::iterable, AtomLike>>>;
 using OrderingsArg = Arg<nb::typed<nb::iterable, nb::typed<nb::tuple, AtomLike, AtomLike>>>;
-using AtomList = nb::typed<nb::list, PyAtom>;
+using AtomList = nb::typed<nb::list, PyGroundAtom>;
 using ActionList = nb::typed<nb::list, PyAction>;
 using ReachabilityArg = Arg<PyRelaxedReachability>;
-using PredicateArg = Arg<std::variant<std::string, int>>;
+using PredicateArg = Arg<std::variant<std::string, int, PredicateView>>;
 /// A term of a conjunctive query: an int is a variable index, a str an object name.
 using TermArg = std::variant<int, std::string>;
 using QueryLiteralArg = std::variant<nb::typed<nb::tuple, std::string, nb::typed<nb::sequence, TermArg>>,
@@ -131,8 +131,16 @@ u32 predicate_arg(const Owner& o, nb::handle h)
             throw nb::index_error("mymyr: predicate index out of range");
         return static_cast<u32>(p);
     }
+    if (nb::isinstance<PredicateView>(h))
+    {
+        const PredicateView& v = *nb::inst_ptr<PredicateView>(h);
+        if (v.t.get() == o.core->data.get())
+            return v.i;
+        const auto n = v.d().str(v.d().predicates[v.i].name);
+        return predicate_arg(o, nb::str(n.data(), n.size()));
+    }
     if (!nb::isinstance<nb::str>(h))
-        throw nb::type_error("mymyr: a predicate is a name or an index");
+        throw nb::type_error("mymyr: a predicate is a name, an index or a mymyr.formalism.Predicate");
     const auto& names = o.core->names().predicates;
     const auto it = names.find(nb::cast<std::string>(h));
     if (it == names.end())
@@ -299,7 +307,7 @@ void bind_landmarks(nb::module_& m)
                      })
         .def_prop_ro("members", [](const PyLiftedLandmark& x) { return atom_list(x.o, x.l.members); })
         .def_prop_ro("fact",
-                     [](const PyLiftedLandmark& x) -> Arg<std::optional<PyAtom>> {
+                     [](const PyLiftedLandmark& x) -> Arg<std::optional<PyGroundAtom>> {
                          if (!x.l.is_fact())
                              return nb::none();
                          return atom_object(x.o, x.l.fact);
@@ -362,7 +370,7 @@ void bind_landmarks(nb::module_& m)
         .def_prop_ro("disjunctive_atoms", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->disjunctive_atoms()); })
         .def_prop_ro("orderings",
                      [](const PyFactLandmarkGraph& g) {
-                         nb::typed<nb::list, nb::typed<nb::tuple, PyAtom, PyAtom>> out{nb::list()};
+                         nb::typed<nb::list, nb::typed<nb::tuple, PyGroundAtom, PyGroundAtom>> out{nb::list()};
                          for (const auto& [a, b] : g.g->orderings())
                              out.append(nb::make_tuple(atom_object(g.o, a), atom_object(g.o, b)));
                          return out;
@@ -654,7 +662,7 @@ void bind_landmarks(nb::module_& m)
             [](const PyReachabilityTable& t, PredicateArg predicate) {
                 return atom_list(t.o, t.t->atoms(PredicateId{predicate_arg(t.o, predicate)}));
             },
-            "predicate"_a, "The reachable atoms of a fluent or derived predicate (name or index), in derivation order.")
+            "predicate"_a, "The reachable atoms of a fluent or derived predicate (name, index or Predicate), in derivation order.")
         .def_prop_ro("num_atoms", [](const PyReachabilityTable& t) { return t.t->num_atoms(); })
         .def_prop_ro("num_fluent_atoms", [](const PyReachabilityTable& t) { return t.t->num_fluent_atoms(); })
         .def_prop_ro("num_derived_atoms", [](const PyReachabilityTable& t) { return t.t->num_derived_atoms(); })
