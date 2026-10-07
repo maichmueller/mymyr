@@ -22,6 +22,7 @@ add_executable(mymyr_tests
     formalism/test_text_format.cpp
     task/test_task.cpp
     successor/test_successors.cpp
+    successor/test_bindings.cpp
     state/test_stores.cpp
     search/test_brfs.cpp
     novelty/test_novelty_table.cpp
@@ -44,7 +45,8 @@ add_executable(mymyr_tests
     search/test_rollouts.cpp
 )
 target_link_libraries(mymyr_tests PRIVATE mymyr::core mymyr_warnings GTest::gtest_main)
-target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    $<$<BOOL:${MYMYR_SANITIZE}>:MYMYR_SANITIZED>)
 include(GoogleTest)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 
