@@ -193,6 +193,8 @@ def test_binary_features_on_a_suite_task():
 
 @pytest.mark.parametrize("numeric", [False, True])
 def test_refuses_non_unit_and_numeric_tasks(numeric):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
     functions = "(fuel)" if numeric else "(total-cost) - number"
     change = "(decrease (fuel) 1)" if numeric else "(increase (total-cost) 2)"
     initial = "(= (fuel) 2)" if numeric else "(= (total-cost) 0)"
@@ -208,6 +210,8 @@ def test_refuses_non_unit_and_numeric_tasks(numeric):
 
 @pytest.mark.parametrize("conditional", [False, True])
 def test_accepts_unit_cost_expressions(conditional):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
     functions = "(total-cost) - number" if conditional else "(total-cost) - number (price) - number"
     cost = "(when (ready) (increase (total-cost) 1))" if conditional else "(increase (total-cost) (price))"
     requirement = ":conditional-effects" if conditional else ""
