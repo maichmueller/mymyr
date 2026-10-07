@@ -305,8 +305,8 @@ jobs:
             -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release"
       - name: Build
         run: cmake --build build/cpu 2>&1 | tee build/cpu/build.log
-      - name: Report warnings
-        run: ci/check_no_warnings.sh build/cpu/build.log --report-only
+      - name: Check for warnings
+        run: ci/check_no_warnings.sh build/cpu/build.log
       - name: ctest
         run: |
           cd build/cpu
@@ -330,8 +330,8 @@ jobs:
         env:
           CMAKE_ARGS: -DMYMYR_DEPS_PREFIX=${{ github.workspace }}/.ci-deps/release
         run: uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
-      - name: Report warnings
-        run: ci/check_no_warnings.sh build.log --report-only
+      - name: Check for warnings
+        run: ci/check_no_warnings.sh build.log
       - name: Test
         env:
           JAX_PLATFORMS: cpu
