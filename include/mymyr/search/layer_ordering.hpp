@@ -21,7 +21,7 @@
 //   - SurvivorsOnly (mimir's SURVIVORS_ONLY): during generation the novelty test only reads the table; at the layer
 //     boundary the kept entries are replayed in their order, each must add a tuple not already added by a better
 //     ranked entry of the same layer, and only those mark the table. The replay can leave fewer than beam_width
-//     entries. Searches whose novelty pruner has no read-only test refuse it (see each search).
+//     entries. search::liw refuses it (as mimir: its landmark novelty table has no read-only test).
 // search::brfs has no novelty table: there the two modes are the same (mimir's duplicate pruning).
 // The beam selects after the whole next layer was generated, unlike max_next_layer_states, which cuts the
 // generation; the two are mutually exclusive.

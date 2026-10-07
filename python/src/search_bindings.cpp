@@ -1272,7 +1272,7 @@ const char* k_layer_doc =
     "random tokens drawn from seed); the others are never expanded. beam_novelty (with beam_width): 'all_tested' "
     "(the novelty test marks every successor it admits, kept or not) or 'survivors_only' (successors are tested "
     "read-only; the kept ones are replayed in rank order and only those that still add a tuple stay and mark it, so "
-    "a layer can end up smaller than beam_width; not supported by liw, abstracted_iw and projective_iw; in brfs the "
+    "a layer can end up smaller than beam_width; not supported by liw; in brfs the "
     "two modes are the same).";
 }  // namespace
 
