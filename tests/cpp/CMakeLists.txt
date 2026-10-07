@@ -28,6 +28,7 @@ add_executable(mymyr_tests
     search/test_iw.cpp
     rl/test_expand.cpp
     search/test_best_first.cpp
+    heuristics/test_heuristics.cpp
     search/test_plan_file.cpp
     search/test_layer_orders_fork.cpp
     # device task layout (device_arrays version 2), host side

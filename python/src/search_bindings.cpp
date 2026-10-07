@@ -11,10 +11,13 @@
 // (search/control.hpp): an observer with a make_worker(k) method, or a goal callable with one, gives every worker its
 // own object, called from that worker's thread; without it the batch runs on the calling thread alone.
 
+#include "py_datasets.hpp"
 #include "py_landmarks.hpp"
 #include "py_task.hpp"
 
+#include "mymyr/datasets/state_space.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
+#include "mymyr/heuristics/perfect.hpp"
 #include "mymyr/search/aiw.hpp"
 #include "mymyr/search/best_first.hpp"
 #include "mymyr/search/brfs.hpp"
@@ -1023,6 +1026,27 @@ double py_evaluate(PyHeuristic& self, StateArg state)
     return self.h->evaluate(s.view());
 }
 
+/// heuristic='perfect': h* from the task's state space, generated within the search's state and time budgets.
+std::unique_ptr<heuristics::Heuristic> perfect_of_task(const Owner& o, heuristics::Costs costs, const search::Budget& budget)
+{
+    datasets::StateSpaceOptions so;
+    so.remove_if_unsolvable = false;
+    so.labels = false;
+    so.max_states = budget.max_states;
+    so.max_seconds = budget.max_seconds;
+    datasets::StateSpaceResult r;
+    {
+        nb::gil_scoped_release release;
+        r = datasets::generate_state_space(o.core->task, so);
+    }
+    if (!r.space)
+        throw nb::value_error((std::string("mymyr: heuristic='perfect' needs the task's whole state space, and its generation stopped (") +
+                               datasets::to_string(r.status) + " after " + std::to_string(r.states) +
+                               " states); raise max_states / max_seconds or pass Heuristic.perfect(space)")
+                                  .c_str());
+    return heuristics::perfect(std::move(r.space), costs);
+}
+
 // ------------------------------------------------------------------------------------------------ best-first
 
 template<class Search>
@@ -1041,7 +1065,13 @@ PyBestFirstResult best_first(Search search_fn, nb::handle task, nb::handle heuri
     opts.control = cs.control;
     PyHeuristic* shared = nullptr;
     std::unique_ptr<PyCallbackHeuristic> callback;
-    if (nb::isinstance<PyHeuristic>(heuristic))
+    std::unique_ptr<heuristics::Heuristic> perfect;
+    if (nb::isinstance<nb::str>(heuristic) && nb::cast<std::string>(heuristic) == "perfect")
+    {
+        perfect = perfect_of_task(o, parse_costs(costs), cs.control.budget);
+        opts.evaluator = perfect.get();
+    }
+    else if (nb::isinstance<PyHeuristic>(heuristic))
     {
         shared = nb::inst_ptr<PyHeuristic>(heuristic);
         if (shared->o.core->task->uid() != o.core->task->uid())
@@ -1602,8 +1632,12 @@ void bind_search(nb::module_& parent)
 
     // heuristics ------------------------------------------------------------------------------------------------------
     nb::class_<PyHeuristic>(m, "Heuristic",
-                            "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count', "
-                            "'max', 'add', 'ff'; costs: 'unit' or 'real'; evaluation: 'auto', 'grounded', 'lifted'. "
+                            "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count' "
+                            "('gc'), 'max' ('hmax'), 'add' ('hadd'), 'ff' ('hff'), 'set_additive' ('hsa', 'setadd'), "
+                            "'h2' (heuristics/heuristic.hpp has their definitions); the perfect heuristic h* comes from "
+                            "a state space: Heuristic.perfect(space). costs: 'unit' or 'real' (the task's action costs; "
+                            "set-additive then sums the costs of its achiever set, one per supported proposition); "
+                            "evaluation: 'auto', 'grounded', 'lifted' (set_additive and h2 are grounded only). "
                             "share=another Heuristic of the task reuses its grounding. Calls on one object are "
                             "serialized; use one object per thread for parallel evaluation.")
         .def(
@@ -1633,6 +1667,28 @@ void bind_search(nb::module_& parent)
             },
             "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "unit", "evaluation"_a = "auto",
             "share"_a = nb::none())
+        .def_static(
+            "perfect",
+            [](const PyStateSpace& space, StrArg costs) {
+                heuristics::Options opts;
+                opts.kind = heuristics::Kind::Perfect;
+                opts.costs = parse_costs(costs);
+                std::unique_ptr<heuristics::Heuristic> h;
+                try
+                {
+                    h = heuristics::perfect(space.space, opts.costs);
+                }
+                catch (const std::invalid_argument& e)
+                {
+                    throw nb::value_error(e.what());
+                }
+                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}});
+            },
+            "space"_a, nb::kw_only(), "costs"_a = "unit",
+            "The perfect heuristic h* of the task of a state space (mymyr.datasets.state_space(task, "
+            "remove_if_unsolvable=False), without symmetry pruning): the goal distance of a state, +inf where no goal "
+            "is reachable. costs: 'unit' (the number of actions) or 'real' (the transition costs). A state outside "
+            "the space raises ValueError, as does a search goal other than the task's.")
         .def("__call__", &py_evaluate, "state"_a, "h(state): the heuristic value (+inf for a dead end).")
         .def("evaluate", &py_evaluate, "state"_a)
         .def(
@@ -1648,7 +1704,9 @@ void bind_search(nb::module_& parent)
                 }
                 return plan_list(self.o, plan);
             },
-            "state"_a, "FF: the ground actions of the relaxed plan of `state` (empty for the other kinds).")
+            "state"_a,
+            "FF and set-additive: the ground actions of the relaxed plan of `state` (set-additive: those of its "
+            "achiever set); empty for the other kinds.")
         .def(
             "preferred_actions",
             [](PyHeuristic& self, StateArg state) {
@@ -1672,7 +1730,9 @@ void bind_search(nb::module_& parent)
                         out.append(applicable[i]);
                 return out;
             },
-            "state"_a, "FF: the applicable actions of `state` that are in its relaxed plan (mimir's preferred actions).")
+            "state"_a,
+            "FF and set-additive: the applicable actions of `state` that are in its relaxed plan (mimir's preferred "
+            "actions).")
         .def_prop_ro("kind", [](const PyHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); })
         .def_prop_ro("stats", [](PyHeuristic& self) {
             heuristics::HeuristicStats st;
@@ -1833,8 +1893,10 @@ void bind_search(nb::module_& parent)
         "max_seconds"_a = nb::none(), "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(),
         "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("A* (search/best_first.hpp), eager or lazy. heuristic: a kind ('blind', 'goal_count', 'max', "
-                     "'add', 'ff'), a Heuristic of the task, or a heuristic written in Python; costs: 'unit' or 'real' "
-                     "(the task's action costs). ") +
+                     "'add', 'ff', 'set_additive', 'h2', as for Heuristic), 'perfect' (h* from the task's state space, "
+                     "generated first within max_states and max_seconds; ValueError when they stop it), a Heuristic "
+                     "of the task, or a heuristic written in Python; costs: 'unit' or 'real' (the task's action "
+                     "costs). ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
 

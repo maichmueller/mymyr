@@ -471,7 +471,7 @@ private:
         return m_proj.emplace(key, std::move(v)).first->second;
     }
 
-    void push_op(u32 ga, const std::vector<u32>& pre, const std::vector<u32>& eff)
+    void push_op(u32 ga, const std::vector<u32>& pre, const std::vector<u32>& eff, bool unconditional)
     {
         u32 npos = 0;
         for (u32 e : pre)
@@ -482,6 +482,7 @@ private:
         m_raw_eff_begin.push_back(static_cast<u32>(m_raw_eff.size()));
         m_raw_npos.push_back(npos);
         m_raw_ga.push_back(ga);
+        m_raw_uncond.push_back(unconditional ? 1 : 0);
     }
 
     void ground_action(u32 s, const ObjectId* b)
@@ -564,7 +565,7 @@ private:
             const u32 a = atom_of(l, b);
             m_eff.push_back(l.positive ? a : (a | k_neg_bit));
         }
-        push_op(ga, m_pre, m_eff);
+        push_op(ga, m_pre, m_eff, T.literals_of(ce.condition).empty());
     }
 
     void ground_axiom(u32 x, const ObjectId* b)
@@ -574,7 +575,7 @@ private:
         if (!condition_entries(T.literals_of(ax.body), b, m_pre, true))
             return;
         m_eff.assign(1, atom_of(ax.head, b));
-        push_op(RelaxedTask::k_none, m_pre, m_eff);
+        push_op(RelaxedTask::k_none, m_pre, m_eff, true);
         ++m_out.m_stats.ground_axioms;
     }
 
@@ -644,6 +645,14 @@ private:
             if (R.m_eff.size() == eff0)
                 continue;
             R.m_eff_begin.push_back(static_cast<u32>(R.m_eff.size()));
+            for (usize i = m_raw_eff_begin[o]; i < m_raw_eff_begin[o + 1]; ++i)
+            {
+                const u32 e = m_raw_eff[i];
+                if ((e & k_neg_bit) && std::find(R.m_del.begin() + R.m_del_begin.back(), R.m_del.end(), e & ~k_neg_bit) == R.m_del.end())
+                    R.m_del.push_back(e & ~k_neg_bit);
+            }
+            R.m_del_begin.push_back(static_cast<u32>(R.m_del.size()));
+            R.m_uncond.push_back(m_raw_uncond[o]);
             u32 npos = 0;
             for (usize i = pb; i < pe; ++i)
             {
@@ -775,6 +784,7 @@ private:
     std::map<u64, std::vector<u8>> m_proj;
     // raw operators
     std::vector<u32> m_raw_pre_begin{0}, m_raw_pre, m_raw_eff_begin{0}, m_raw_eff, m_raw_npos, m_raw_ga;
+    std::vector<u8> m_raw_uncond;
     std::vector<u32> m_goal_raw;
     // scratch
     std::vector<u32> m_apre, m_pre, m_eff, m_negd;

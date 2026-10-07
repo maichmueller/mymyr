@@ -114,6 +114,7 @@ add_library(mymyr_core STATIC
     src/mymyr/heuristics/action_costs.cpp
     src/mymyr/heuristics/relaxed_task.cpp
     src/mymyr/heuristics/heuristics.cpp
+    src/mymyr/heuristics/h2.cpp
     src/mymyr/heuristics/lifted_relaxation.cpp
     src/mymyr/search/best_first.cpp
     src/mymyr/search/astar.cpp
@@ -151,6 +152,7 @@ target_link_libraries(mymyr_core PUBLIC Threads::Threads)
 # datasets: state spaces, generalized state spaces, samplers, object graphs, certificates
 target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/state_space.cpp
+    src/mymyr/heuristics/perfect.cpp
     src/mymyr/datasets/generalized_state_space.cpp
     src/mymyr/datasets/sampler.cpp
     src/mymyr/datasets/object_graph.cpp

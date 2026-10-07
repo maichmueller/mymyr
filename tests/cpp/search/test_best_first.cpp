@@ -544,6 +544,38 @@ TEST(Heuristics, AnyOfGoalsTakeTheCheapest)
         const std::vector<GoalSpec::AtomGoal> just_other = {other};
         EXPECT_GT(h->evaluate(s0, just_other), 0.0);
     }
+    // the grounded-only kinds: a negative literal over an atom of s0 that depot never uses negatively has no
+    // proposition in the grounding (refused); positive atoms of a later state do
+    Successors& succ = task->workspace().successors();
+    const BestFirstResult plan = astar_eager(*task, with_h(heuristics::Kind::Max));
+    ASSERT_GE(plan.plan.size(), 3u);
+    State s3 = s0;
+    for (int i = 0; i < 3; ++i)
+        s3 = succ.apply(s3, plan.plan[i].label());
+    GoalSpec::AtomGoal later;
+    for (u32 slot = 0; slot < s3.size_words() * 64; ++slot)
+        if (s3.view().contains(SlotId{slot}) && !s0.view().contains(SlotId{slot}))
+            later.positive.push_back(SlotId{slot});
+    ASSERT_FALSE(later.positive.empty());
+    for (const auto k : {heuristics::Kind::SetAdditive, heuristics::Kind::H2})
+    {
+        SCOPED_TRACE(heuristics::to_string(k));
+        heuristics::Options o;
+        o.kind = k;
+        auto h = heuristics::make_heuristic(*task, o);
+        const std::vector<GoalSpec::AtomGoal> both = {later, holds};
+        EXPECT_EQ(h->evaluate(s0, both), 0.0);
+        const std::vector<GoalSpec::AtomGoal> just_later = {later};
+        const double v = h->evaluate(s0, just_later);
+        EXPECT_GT(v, 0.0);
+        if (k == heuristics::Kind::H2)
+        {
+            EXPECT_LE(v, 3.0);  // admissible: s3 is 3 steps away
+        }
+        EXPECT_EQ(h->evaluate(s3, just_later), 0.0);
+        const std::vector<GoalSpec::AtomGoal> just_other = {other};
+        EXPECT_THROW((void)h->evaluate(s0, just_other), std::runtime_error);
+    }
 }
 
 TEST(Heuristics, InterruptStopsTheLiftedFallback)

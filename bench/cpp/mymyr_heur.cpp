@@ -9,7 +9,7 @@
 // ALGO: astar (eager), astar_lazy, gbfs (eager), gbfs_lazy, beam: one search;
 //       h0: h of the initial state for every heuristic, grounded and lifted;
 //       evalbench: evaluation cost of --h over the first --samples states of a BrFS, grounded and lifted.
-// options: --h blind|gc|max|add|ff (default: max for astar*, ff otherwise)  --hcosts unit|real
+// options: --h blind|gc|max|add|ff|set_additive|h2 (default: max for astar*, ff otherwise)  --hcosts unit|real
 //          --impl auto|grounded|lifted  --store auto|flat|chunked|compact  --queue auto|bucket|heap
 //          --timeout S  --max-states N  --max-expanded N  --beam-width B  --no-requeue  --no-preferred
 //          --witness  --atoms auto|lazy|frozen  --samples N  --instance NAME  --plan (plan lines on stderr)
@@ -62,7 +62,7 @@ double peak_rss_mb()
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_heur (task.txt | --domain D --problem P) --algo "
                  "astar|astar_lazy|gbfs|gbfs_lazy|beam|h0|evalbench\n"
-                 "       [--h blind|gc|max|add|ff] [--hcosts unit|real] [--impl auto|grounded|lifted]\n"
+                 "       [--h blind|gc|max|add|ff|set_additive|h2] [--hcosts unit|real] [--impl auto|grounded|lifted]\n"
                  "       [--store auto|flat|chunked|compact] [--queue auto|bucket|heap] [--timeout S] [--max-states N]\n"
                  "       [--max-expanded N] [--beam-width B] [--no-requeue] [--no-preferred] [--witness]\n"
                  "       [--atoms auto|lazy|frozen] [--samples N] [--instance NAME] [--plan]\n",
@@ -278,6 +278,8 @@ int main(int argc, char** argv)
             j.u("samples", states.size());
             for (const auto ev : {heuristics::Evaluation::Auto, heuristics::Evaluation::Lifted})
             {
+                if (ev == heuristics::Evaluation::Lifted && (ho.kind == heuristics::Kind::SetAdditive || ho.kind == heuristics::Kind::H2))
+                    continue;  // grounded only
                 heuristics::Options o = ho;
                 o.evaluation = ev;
                 auto h = heuristics::make_heuristic(*task, o);
