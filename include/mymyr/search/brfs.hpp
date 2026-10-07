@@ -18,6 +18,7 @@
 // deduplicates on both.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/search/control.hpp"
 #include "mymyr/search/layer_ordering.hpp"
 #include "mymyr/successor/action.hpp"
 
@@ -49,6 +50,9 @@ struct BrfsOptions
     u32 max_depth = ~u32{0};         // expand only states of depth < max_depth (depth-max_depth states are stored)
     bool layer_stats = false;        // fill BrfsResult::layer_counts
     bool stop_at_goal = false;
+    /// What counts as a goal state (stop_at_goal, BrfsResult::goal_states): the task's goal by default. A custom test
+    /// (GoalSpec::Kind::Custom) needs threads == 1.
+    search::GoalSpec goal{};
     bool fingerprint = false;        // hash over (id, canonical state) of the whole store (tests, determinism gates)
     /// The order in which a layer is expanded (search/layer_ordering.hpp; default: the queued BrFS). An ordered kind
     /// needs the flat or chunked store (single-threaded); state ids then follow the expansion order. With a beam the

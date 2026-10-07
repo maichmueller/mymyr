@@ -18,6 +18,11 @@
 #include <span>
 #include <vector>
 
+namespace mymyr
+{
+struct GroundCondition;
+}
+
 namespace mymyr::search
 {
 enum class SearchStatus : u8
@@ -74,12 +79,24 @@ struct GoalSpec
     enum class Kind : u8
     {
         Task,    // the task's goal condition
-        AnyOf,   // any of several atom-set goals (mimir's ProblemMultiGoalStrategy); `goals` holds them
+        AnyOf,   // any of several goals (mimir's ProblemMultiGoalStrategy); `goals` holds them
         Custom,  // `test` decides
     };
+    /// One goal of AnyOf: a ground conjunctive condition resolved against the task (search/goal.hpp makes one from a
+    /// GroundCondition, deciding its static literals there). Heuristics estimate the fluent literals only.
     struct AtomGoal
     {
-        std::vector<SlotId> positive, negative;  // fluent atom slots that must hold / must not hold
+        std::vector<SlotId> positive{}, negative{};  // fluent atom slots that must hold / must not hold
+        /// Derived atoms (canonical ids) that must hold / must not hold in the state's closure under the axioms.
+        std::vector<CanonicalAtom> derived_positive{}, derived_negative{};
+        /// Numeric constraints over ground expressions: those of this condition (its literals are not read), on the
+        /// state's numeric values. Null: none.
+        std::shared_ptr<const GroundCondition> numeric{};
+
+        /// Whether the goal reads derived atoms: the state's axiom closure must be prepared to test it.
+        [[nodiscard]] bool needs_view() const noexcept { return !derived_positive.empty() || !derived_negative.empty(); }
+        /// Whether the goal consists of fluent literals only (what the CUDA searches can test).
+        [[nodiscard]] bool fluent_only() const noexcept { return !needs_view() && !numeric; }
     };
 
     Kind kind = Kind::Task;

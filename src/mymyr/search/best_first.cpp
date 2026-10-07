@@ -3,6 +3,8 @@
 
 #include "best_first_detail.hpp"
 
+#include "mymyr/search/goal.hpp"
+
 #include <cmath>
 #include <limits>
 
@@ -26,6 +28,8 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     start = o.start ? *o.start : task.initial_state();
     if (o.control.goal.kind == GoalSpec::Kind::Custom && !o.control.goal.test)
         throw std::invalid_argument("mymyr best-first search: GoalSpec::Custom without a test");
+    goal_view = o.control.goal.kind == GoalSpec::Kind::AnyOf &&
+                std::ranges::any_of(o.control.goal.goals, &GoalSpec::AtomGoal::needs_view);
     try
     {
         m_costs = std::make_unique<heuristics::ActionCosts>(task);
@@ -123,16 +127,11 @@ bool Context::is_goal(StateView s)
     {
         case GoalSpec::Kind::Task: return succ.is_goal(s);
         case GoalSpec::Kind::AnyOf:
+            if (goal_view)
+                succ.prepare(s);
             for (const GoalSpec::AtomGoal& a : g.goals)
-            {
-                bool holds = true;
-                for (SlotId p : a.positive)
-                    holds = holds && s.contains(p);
-                for (SlotId p : a.negative)
-                    holds = holds && !s.contains(p);
-                if (holds)
+                if (holds(a, succ, s))
                     return true;
-            }
             return false;
         case GoalSpec::Kind::Custom: return g.test(s);
     }

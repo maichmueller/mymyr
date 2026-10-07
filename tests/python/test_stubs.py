@@ -62,11 +62,11 @@ def test_stubs_parse_and_are_typed():
     assert f"def rollout_iw({task}, *, ordering: ActionOrdering | str = ActionOrdering.IN_ORDER, seed: int = 0," in search
     assert f"def find_rollouts_parallel({task}, seeds: Sequence[int], *, max_arity: int = 2, num_threads: int = 0," in search
     rollouts = "results: ParallelRolloutsResult | Sequence[RolloutResult]"
-    assert f"def intersect_co_occurrence({rollouts}) -> dict[mymyr._core.Atom, list[mymyr._core.Atom]]" in search
+    assert f"def intersect_co_occurrence({rollouts}) -> dict[mymyr._core._formalism.GroundAtom, list[mymyr._core._formalism.GroundAtom]]" in search
     assert f"def merge_landing_states({rollouts}) -> MergedLandingStates" in search
     assert "rollout_orderings: Sequence[ActionOrdering | str | tuple[ActionOrdering | str, int]] | None = None" in search
-    assert "def co_occurrence(self) -> dict[mymyr._core.Atom, list[mymyr._core.Atom]]" in search
-    assert "def landing_state_by_atom(self) -> dict[mymyr._core.Atom, int]" in search
+    assert "def co_occurrence(self) -> dict[mymyr._core._formalism.GroundAtom, list[mymyr._core._formalism.GroundAtom]]" in search
+    assert "def landing_state_by_atom(self) -> dict[mymyr._core._formalism.GroundAtom, int]" in search
     assert "def rollout_statuses(self) -> list[Status | None]" in search
     assert "def winning_worker(self) -> int | None" in search
     assert f"def lifted_fact_landmarks({task}, *, reachability: RelaxedReachability | None = None," in search
@@ -88,18 +88,32 @@ def test_stubs_parse_and_are_typed():
     assert "def __eq__(self, arg" not in core and "def __reduce__(self) -> object" not in core
     # the task API (typing.hpp, py_task.hpp): states as States or DLPack word arrays, typed results
     assert "import mymyr._typing" in core
-    partial = ("partial: dict[int | str, _formalism.Object | str | int | None] | "
+    partial = ("partial: dict[int | str | _formalism.Variable, _formalism.Object | str | int | None] | "
                "Sequence[_formalism.Object | str | int | None] | None = None")
     assert (f"def applicable_actions(self, state: State | mymyr._typing.SupportsDLPack, *, schema: str | int | None = None, "
             f"{partial}) -> list[Action]") in core
     # binding generators (task_bindings.cpp)
-    target = "target: str | int | ConjunctiveCondition, state: State | mymyr._typing.SupportsDLPack"
+    target = ("target: str | int | _formalism.ConjunctiveCondition | _formalism.GroundCondition, "
+              "state: State | mymyr._typing.SupportsDLPack")
     assert f"def bindings(self, {target}, {partial}, limit: int | None = None) -> Bindings" in core
     assert f"def ground_conjunctions(self, {target}, {partial}, limit: int | None = None) -> GroundConjunctions" in core
     assert "def __next__(self) -> Action | tuple[_formalism.Object, ...]" in core
-    assert "def precondition(self, schema: str | int) -> ConjunctiveCondition" in core
+    assert "def precondition(self, schema: str | int) -> _formalism.ConjunctiveCondition" in core
+    assert "def goal_condition(self) -> _formalism.GroundCondition" in core
     assert "def successors(self, state: State | mymyr._typing.SupportsDLPack) -> list[tuple[Action, State]]" in core
-    assert "def atom(self, atom: Atom | str | int | tuple[str | int | Sequence[str | int], ...]) -> Atom" in core
+    # formulas (formula_bindings.cpp): constructors on the task, values in mymyr._core._formalism
+    head = ("predicate: str | int | _formalism.Predicate | _formalism.GroundAtom | _formalism.Atom | "
+            "_formalism.GroundLiteral | _formalism.Literal | tuple[str | int | Sequence[str | int], ...], *terms")
+    assert f"def atom(self, {head}) -> _formalism.GroundAtom | _formalism.Atom" in core
+    assert f"def literal(self, {head}, positive: bool = True) -> _formalism.GroundLiteral | _formalism.Literal" in core
+    assert ") -> _formalism.ConjunctiveCondition:" in core and "constraints: Iterable[str | _formalism.NumericConstraint] = ()" in core
+    assert ("def holds(self, formula: _formalism.GroundAtom | _formalism.GroundLiteral | _formalism.GroundCondition | str | int | "
+            "tuple[str | int | Sequence[str | int], ...]) -> bool") in core
+    fm = (d / "_formalism.pyi").read_text()
+    assert "def holds(self, state: mymyr._core.State) -> bool" in fm
+    assert "def lift(self, add_inequalities: bool = False) -> ConjunctiveCondition" in fm
+    assert "def ground(self, state: mymyr._core.State, limit: int | None = None, partial: " in fm
+    assert ") -> list[GroundCondition]:" in fm
     assert "framework: Literal['numpy', 'torch', 'jax', 'dlpack'] | None = None) -> Any" in core
     assert "def owner(self) -> Task | TaskHandle" in core
     assert "state: object" not in core and "action: object" not in core and "-> list:" not in core

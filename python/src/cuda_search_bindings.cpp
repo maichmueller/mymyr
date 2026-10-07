@@ -6,12 +6,14 @@
 #include "arrays.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
+#include "py_formula.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/multi_iw.hpp"
 #include "mymyr/cuda/rollouts.hpp"
+#include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
 
 #include <nanobind/stl/optional.h>
@@ -65,8 +67,9 @@ using FloatArg = Arg<double>;
 using StrArg = Arg<std::string>;
 using StateArg = Arg<PyState>;
 using Slots = nb::typed<nb::sequence, int>;
-/// One goal: (positive fluent slots, negative fluent slots) (State.atom_slots(), Atom.slot).
-using GoalArg = nb::typed<nb::tuple, Slots, Slots>;
+/// One goal: a GroundCondition of fluent literals, or (positive fluent slots, negative fluent slots)
+/// (State.atom_slots(), GroundAtom.slot).
+using GoalArg = std::variant<PyGroundCondition, nb::typed<nb::tuple, Slots, Slots>>;
 using GoalsArg = Arg<nb::typed<nb::sequence, GoalArg>>;
 using SeedsArg = nb::typed<nb::sequence, int>;
 /// Start states: host states (a State, a sequence of States, a host word array) or, for batched_iw1, a CUDA device
@@ -145,8 +148,30 @@ cuda::MultiIwOptions options_of(u32 max_arity, nb::handle width_zero, bool optim
 
 search::GoalSpec::AtomGoal goal_of(nb::handle g, const Task& task)
 {
+    if (nb::isinstance<PyGroundCondition>(g))
+    {
+        const PyGroundCondition& c = *nb::inst_ptr<PyGroundCondition>(g);
+        if (c.o.core && c.o.core->task->fingerprint() != task.fingerprint())
+            throw nb::value_error("mymyr: the goal belongs to another task");
+        std::optional<search::GoalSpec::AtomGoal> a;
+        try
+        {
+            a = search::atom_goal(task, *c.c);
+        }
+        catch (const std::invalid_argument& e)
+        {
+            throw nb::value_error(e.what());
+        }
+        if (!a)
+            throw nb::value_error("mymyr: the goal can never hold (a positive literal outside the reachable atoms or a "
+                                  "false static literal); the CUDA searches take goals that can");
+        if (!a->fluent_only())
+            throw nb::value_error("mymyr: the CUDA searches take goals of fluent literals only (no derived literals, no "
+                                  "numeric constraints); run a CPU search (mymyr.search) for those");
+        return *a;
+    }
     if (!nb::isinstance<nb::tuple>(g) || nb::len(g) != 2)
-        throw nb::type_error("mymyr: a goal is a tuple (positive slots, negative slots)");
+        throw nb::type_error("mymyr: a goal is a GroundCondition or a tuple (positive slots, negative slots)");
     search::GoalSpec::AtomGoal out;
     const u32 slots = task.atoms().fluent_slots();
     auto fill = [&](nb::handle seq, std::vector<SlotId>& dst)
@@ -502,7 +527,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "search.iw from every start state, all searches at once on the device: search i equals "
         "mymyr.search.iw(task, start=starts[i], ...) (status, plan, goal state, per-pass counts) for every group and "
         "chunk size (exact batch novelty; exact=False is relaxed novelty: valid IW, but the kept states depend on "
-        "timing). goals: None (the task's goal) or one (positive slots, negative slots) per start. Budgets apply per "
+        "timing). goals: None (the task's goal) or one per start, a GroundCondition of fluent literals or (positive slots, negative slots). Budgets apply per "
         "search and pass as in search.iw; max_seconds spans the call. Numeric tasks raise ValueError. "
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
@@ -550,7 +575,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "Randomized IW rollouts on the device, one per seed: rollout k equals the CPU rollout of the same seed "
         "(search/parallel_rollouts.hpp: every next layer shuffled by the rollout's SplitMix64 stream, "
         "max_next_layer_states truncates it): status, plan, per-pass counts and the reached fluent atoms "
-        "(IwBatch.reached_atoms). goal: None (the task's goal) or (positive slots, negative slots). Not reported: "
+        "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition of fluent literals, or (positive slots, negative slots). Not reported: "
         "derived atoms, landing states, co-occurrence.");
 
     m.def(

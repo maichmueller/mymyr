@@ -702,6 +702,7 @@ public:
     bool witness = false, canonical = true;
     bool stop_on_states = false;  // max_states is finite: stop generating once it is exceeded
     bool batched = false;         // the heuristic evaluates batches (Heuristic::batched)
+    bool goal_view = false;       // a GoalSpec::AnyOf goal reads derived atoms: is_goal prepares the state
     u32 nn = 0;                   // numeric words per state
     u64 max_states = ~u64{0};
 

@@ -220,7 +220,7 @@ void run_row(const Task& task, const json::Value& row)
         const auto c = names.parse(row["goal_atom"].str);
         ASSERT_TRUE(c) << what << ": unknown goal atom " << row["goal_atom"].str;
         control.goal.kind = GoalSpec::Kind::AnyOf;
-        control.goal.goals.push_back({{SlotId{task.atoms().intern(*c)}}, {}});
+        control.goal.goals.push_back({.positive = {SlotId{task.atoms().intern(*c)}}});
     }
     LandmarkNovelty lm;
     if (row.has("landmarks"))

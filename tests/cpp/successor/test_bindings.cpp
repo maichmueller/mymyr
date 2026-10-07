@@ -1,4 +1,4 @@
-// Binding generators (successor/bindings.hpp).
+// Binding generators (successor/bindings.hpp) and ground conditions (successor/conditions.hpp, search/goal.hpp).
 //
 // Walk oracle: on the fork's golden walks (tests/data/expected, replayed on the text exports of tests/data/tasks and
 // tests/data/tasks_iw by the names of the actions taken), for every applicable action of every walk state, enumerating
@@ -14,10 +14,21 @@
 // matchers (oracle atom sets, the axioms closed by test::Oracle, numeric values by slot), with and without partial
 // bindings; ground conjunctions instantiate the literals. Concurrent enumeration over one shared task from 8 threads
 // gives the single-threaded results.
+//
+// Ground conditions: random conditions grounded under their bindings and under random tuples hold exactly when the
+// brute-force oracle says so (as a whole and literal by literal), and lift back; the goal as a ground condition holds
+// in the goal states of the walks; atoms outside the reachable domains, unseen atoms (lazy slots), static facts,
+// derived atoms (the axiom closure, also from inside a successor enumeration) and numeric constraints written in PDDL;
+// goals made of ground conditions in IW, BrFS and A* (the task's goal, a derived literal, a numeric constraint); and
+// one evaluation per thread over a shared task.
 
 #include "../support/json.hpp"
 #include "../support/suite.hpp"
 #include "mymyr/formalism/text_format.hpp"
+#include "mymyr/search/best_first.hpp"
+#include "mymyr/search/brfs.hpp"
+#include "mymyr/search/goal.hpp"
+#include "mymyr/search/iw.hpp"
 #include "mymyr/successor/bindings.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
@@ -693,12 +704,12 @@ TEST_P(BindingsRandom, ConditionsMatchBruteForce)
                                         [&](const GroundConjunction& g)
                                         {
                                             usize at[3] = {0, 0, 0};
-                                            const std::span<const GroundLiteral> by[3] = {g.static_literals, g.fluent_literals,
+                                            const std::span<const GroundLiteralView> by[3] = {g.static_literals, g.fluent_literals,
                                                                                           g.derived_literals};
                                             for (const auto& l : c.literals)
                                             {
                                                 const u32 k = static_cast<u32>(task->data().predicates[l.predicate.v].kind);
-                                                const GroundLiteral& x = by[k][at[k]++];
+                                                const GroundLiteralView& x = by[k][at[k]++];
                                                 EXPECT_EQ(x.predicate, l.predicate);
                                                 EXPECT_EQ(x.positive, l.positive);
                                                 for (usize j = 0; j < l.terms.size(); ++j)
@@ -1044,4 +1055,476 @@ TEST(Bindings, ConcurrentEnumerationOverOneTask)
     for (u32 t = 0; t < 8; ++t)
         EXPECT_EQ(got[t], ref) << "thread " << t;
 }
+// ------------------------------------------------------------------------------------------------ ground conditions
+
+/// A ground condition as a condition without variables (its terms objects), for the brute-force oracle.
+ConjunctiveCondition as_condition(const GroundCondition& g)
+{
+    ConjunctiveCondition c;
+    for (const GroundLiteral& l : g.literals)
+    {
+        ConjunctiveCondition::Literal x{l.atom.predicate, l.positive, {}};
+        for (ObjectId o : l.atom.objects)
+            x.terms.push_back(formalism::object_term(o));
+        c.literals.push_back(std::move(x));
+    }
+    c.constraints = g.constraints;
+    c.exprs = g.exprs;
+    c.expr_terms = g.expr_terms;
+    return c;
+}
+
+/// The objects of a ground condition in order of first appearance (literals, then constraints): GroundCondition::lift's
+/// variables.
+Tuple appearance(const GroundCondition& g)
+{
+    Tuple out;
+    auto add = [&](ObjectId o)
+    {
+        if (std::find(out.begin(), out.end(), o) == out.end())
+            out.push_back(o);
+    };
+    for (const GroundLiteral& l : g.literals)
+        for (ObjectId o : l.atom.objects)
+            add(o);
+    for (formalism::Term t : g.expr_terms)
+        add(formalism::term_object(t));
+    return out;
+}
+
+bool violates_equality(const ConjunctiveCondition& c, const Tuple& b)
+{
+    auto obj = [&](formalism::Term t) { return formalism::is_object(t) ? formalism::term_object(t) : b[t]; };
+    return std::ranges::any_of(c.equalities, [&](const auto& e) { return (obj(e.lhs) == obj(e.rhs)) != e.positive; });
+}
+
+TEST_P(BindingsRandom, GroundConditionsHoldAsTheBruteForce)
+{
+    // random conditions grounded under their bindings and under random tuples: holds() of the ground condition and of
+    // each of its literals agrees with the brute-force oracle (static facts, the state's atoms, the axiom closure,
+    // numeric values), and lifting gives a condition that grounds back to it
+    const auto task = Task::from_text_file((data_dir() / (GetParam() + ".txt")).string());
+    Workspace& ws = task->workspace();
+    Oracle oracle(task->data());
+    BruteForce brute(*task, oracle);
+    const u32 n = task->num_objects();
+    u32 max_vars = 0;
+    for (u64 p = n; n > 0 && max_vars < 2 && p <= 3000; p *= n)
+        ++max_vars;
+    std::mt19937_64 rng(13);
+    u64 checked = 0, held = 0;
+    for (const State& s : random_states(*task, 2, k_sanitized ? 3 : 6, 21))
+    {
+        brute.set_state(s.view());
+        const std::vector<test::Atom> truths = brute.truths();
+        for (int r = 0; r < (k_sanitized ? 8 : 30); ++r)
+        {
+            const ConjunctiveCondition c = random_condition(*task, rng, max_vars, r % 2 ? &truths : nullptr);
+            std::vector<Tuple> tuples = brute.solve(c);
+            if (tuples.size() > 4)
+                tuples.resize(4);
+            for (int k = 0; k < 4; ++k)
+            {
+                Tuple b(c.arity());
+                for (auto& o : b)
+                    o = ObjectId{static_cast<u32>(rng() % n)};
+                tuples.push_back(b);
+            }
+            for (const Tuple& b : tuples)
+            {
+                if (violates_equality(c, b))
+                {
+                    EXPECT_THROW((void) c.ground(b), std::invalid_argument);
+                    continue;
+                }
+                const GroundCondition g = c.ground(b);
+                ASSERT_NO_THROW(g.validate(*task)) << g.str(*task);
+                const bool want = !brute.solve(as_condition(g)).empty();
+                ++checked;
+                held += want;
+                EXPECT_EQ(holds(*task, s.view(), g), want) << GetParam() << ": " << g.str(*task);
+                for (const GroundLiteral& l : g.literals)
+                {
+                    GroundCondition one;
+                    one.literals.push_back(l);
+                    const bool lw = !brute.solve(as_condition(one)).empty();
+                    EXPECT_EQ(holds(*task, s.view(), l), lw) << one.str(*task);
+                    EXPECT_EQ(holds(*task, s.view(), l.atom), lw == l.positive) << one.str(*task);
+                }
+                const ConjunctiveCondition lifted = g.lift();
+                ASSERT_NO_THROW(lifted.validate(*task));
+                EXPECT_EQ(lifted.ground(appearance(g)), g) << g.str(*task);
+                if (want && lifted.arity() <= 2)
+                {
+                    // the lifted condition's bindings in s contain the one that grounds back to g
+                    const auto bs = bindings(*task, ws, lifted, s.view());
+                    EXPECT_NE(std::find(bs.begin(), bs.end(), appearance(g)), bs.end()) << lifted.str(*task);
+                }
+            }
+        }
+    }
+    EXPECT_GT(held, 0u);
+    EXPECT_GT(checked, held);
+}
+
+TEST_P(BindingsWalk, TheGoalAsAGroundConditionHoldsInTheGoalStates)
+{
+    const std::string name = GetParam();
+    const auto txt = text_of(name);
+    if (!txt)
+        GTEST_SKIP() << "no text export of " << name;
+    const auto doc = test::json::parse_file((data_dir() / "expected" / (name + ".json")).string());
+    const auto task = Task::from_text_file(txt->string());
+    const GroundCondition goal = GroundCondition::goal(*task);
+    const auto spec = search::any_of(*task, std::span(&goal, 1));
+    Successors& succ = task->workspace().successors();
+    for (const State& s : walk_states(*task, doc))
+    {
+        EXPECT_EQ(holds(*task, s.view(), goal), task->is_goal(s.view())) << name;
+        bool any = false;
+        for (const auto& g : spec.goals)
+        {
+            succ.prepare(s.view());
+            any = any || search::holds(g, succ, s.view());
+        }
+        EXPECT_EQ(any, task->is_goal(s.view())) << name;
+    }
+}
+
+TEST(Conditions, AtomsOutsideTheIndexAndStaticLiterals)
+{
+    TaskOptions lazy;
+    lazy.atoms = TaskOptions::Atoms::Lazy;
+    const auto task = Task::from_text_file((data_dir() / "tasks" / "gripper__prob05.txt").string(), lazy);
+    const auto& T = task->data();
+    const plan::Compiled& C = task->compiled();
+    const State s0 = task->initial_state();
+    // a fluent atom outside the reachable domains of its predicate, and one inside that no state has produced
+    std::optional<GroundAtom> outside, unseen;
+    for (u32 p = 0; p < T.predicates.size() && !(outside && unseen); ++p)
+    {
+        if (C.kinds[p] != formalism::PredKind::Fluent || T.predicates[p].arity != 2)
+            continue;
+        for (u32 a = 0; a < T.num_objects(); ++a)
+            for (u32 b = 0; b < T.num_objects(); ++b)
+            {
+                const u32 args[2] = {a, b};
+                const CanonicalAtom c = C.layout.encode(p, args);
+                if (c >= C.layout.total && !outside)
+                    outside = GroundAtom{PredicateId{p}, {ObjectId{a}, ObjectId{b}}};
+                else if (c < C.layout.total && task->atoms().find(c) == AtomIndex::k_empty && !unseen)
+                    unseen = GroundAtom{PredicateId{p}, {ObjectId{a}, ObjectId{b}}};
+            }
+    }
+    ASSERT_TRUE(outside && unseen);
+    for (const GroundAtom& a : {*outside, *unseen})
+    {
+        EXPECT_FALSE(holds(*task, s0.view(), a));
+        EXPECT_FALSE(holds(*task, s0.view(), GroundLiteral{a, true}));
+        EXPECT_TRUE(holds(*task, s0.view(), GroundLiteral{a, false}));
+    }
+    // as goals: a positive literal outside the domains can never hold, a negative one always does
+    GroundCondition g;
+    g.literals.push_back({*outside, true});
+    EXPECT_FALSE(search::atom_goal(*task, g).has_value());
+    g.literals[0].positive = false;
+    const auto never_false = search::atom_goal(*task, g);
+    ASSERT_TRUE(never_false.has_value());
+    EXPECT_TRUE(never_false->positive.empty() && never_false->negative.empty());
+    // an unseen atom gets a slot (lazy slots: assigned now) and is false until a state contains it
+    g.literals = {{*unseen, true}};
+    const auto later = search::atom_goal(*task, g);
+    ASSERT_TRUE(later.has_value());
+    ASSERT_EQ(later->positive.size(), 1u);
+    EXPECT_NE(task->atoms().find(C.layout.encode(unseen->predicate.v, std::vector<u32>{unseen->objects[0].v, unseen->objects[1].v}.data())),
+              AtomIndex::k_empty);
+    // static literals: the static facts hold, other static atoms do not
+    std::set<std::vector<u32>> facts;
+    for (const auto& a : T.static_init)
+    {
+        GroundAtom x{a.pred, {}};
+        std::vector<u32> key{a.pred.v};
+        for (ObjectId o : T.objects_of(a))
+        {
+            x.objects.push_back(o);
+            key.push_back(o.v);
+        }
+        facts.insert(key);
+        EXPECT_TRUE(holds(*task, s0.view(), x));
+        EXPECT_FALSE(holds(*task, s0.view(), GroundLiteral{x, false}));
+    }
+    u64 non_facts = 0;
+    for (u32 p = 0; p < T.predicates.size(); ++p)
+        if (C.kinds[p] == formalism::PredKind::Static && T.predicates[p].arity == 1)
+            for (u32 o = 0; o < T.num_objects(); ++o)
+                if (!facts.contains({p, o}))
+                {
+                    ++non_facts;
+                    EXPECT_FALSE(holds(*task, s0.view(), GroundAtom{PredicateId{p}, {ObjectId{o}}}));
+                    GroundCondition impossible;
+                    impossible.literals.push_back({{PredicateId{p}, {ObjectId{o}}}, true});
+                    EXPECT_FALSE(search::atom_goal(*task, impossible).has_value());
+                }
+    EXPECT_GT(non_facts, 0u);
+    // invalid atoms throw
+    EXPECT_THROW((void) holds(*task, s0.view(), GroundAtom{PredicateId{static_cast<u32>(T.predicates.size())}, {}}), std::invalid_argument);
+    EXPECT_THROW((void) holds(*task, s0.view(), GroundAtom{outside->predicate, {ObjectId{0}}}), std::invalid_argument);
+    EXPECT_THROW((void) holds(*task, s0.view(), GroundAtom{outside->predicate, {ObjectId{0}, ObjectId{T.num_objects()}}}),
+                 std::invalid_argument);
+}
+
+TEST(Conditions, DerivedLiteralsFollowTheAxioms)
+{
+    const auto task = suite_task("philosophers__p03-phil4");
+    ASSERT_TRUE(task->has_axioms());
+    Oracle oracle(task->data());
+    const auto& T = task->data();
+    u64 derived_true = 0, derived_false = 0;
+    for (const State& s : random_states(*task, 2, 10, 3))
+    {
+        const test::AtomSet derived = oracle.derive(atoms_of(*task, s.view()));
+        for (u32 p = 0; p < T.predicates.size(); ++p)
+        {
+            if (T.predicates[p].kind != formalism::PredKind::Derived || T.predicates[p].arity > 2)
+                continue;
+            const u32 ar = T.predicates[p].arity;
+            const u32 count = ar == 0 ? 1 : ar == 1 ? T.num_objects() : T.num_objects() * T.num_objects();
+            for (u32 i = 0; i < count; ++i)
+            {
+                GroundAtom a{PredicateId{p}, {}};
+                test::Atom key{p};
+                for (u32 j = 0, x = i; j < ar; ++j, x /= T.num_objects())
+                {
+                    a.objects.push_back(ObjectId{x % T.num_objects()});
+                    key.push_back(x % T.num_objects());
+                }
+                const bool want = derived.contains(key);
+                (want ? derived_true : derived_false) += 1;
+                EXPECT_EQ(holds(*task, s.view(), a), want);
+                if (i % 5 != 0)
+                    continue;
+                // inside a successor enumeration on this thread's workspace: holds runs in the evaluation workspace
+                bool inside = !want;
+                task->workspace().successors().for_each_applicable(s.view(), [&](const ActionLabel&, const Delta&) -> bool
+                                                                   {
+                                                                       inside = holds(*task, s.view(), a);
+                                                                       return false;
+                                                                   });
+                if (task->workspace().successors().any_applicable(s.view()))
+                {
+                    EXPECT_EQ(inside, want);
+                }
+            }
+        }
+    }
+    EXPECT_GT(derived_true, 0u);
+    EXPECT_GT(derived_false, 0u);
+}
+
+/// An object whose (value o) is a numeric slot of a counters task, and the slot.
+std::pair<std::string, u32> counter_object(const Task& task)
+{
+    const plan::Numeric& N = task.numeric();
+    const auto& T = task.data();
+    for (u32 i = 0; i < N.slots; ++i)
+        if (T.str(T.functions[N.slot_function[i]].name) == "value" && N.slot_args_begin[i + 1] == N.slot_args_begin[i] + 1)
+            return {std::string(T.str(T.objects[N.slot_args[N.slot_args_begin[i]].v].name)), i};
+    ADD_FAILURE() << "no (value o) slot";
+    return {"", 0};
+}
+
+TEST(Conditions, NumericConstraintsFromPddl)
+{
+    const auto task = Task::from_text_file((data_dir() / "numeric_tasks" / "cs-counters.txt").string());
+    const auto& T = task->data();
+    ConjunctiveCondition c;
+    c.variables = {{"c", {}}, {"d", {}}};
+    c.add_constraint(*task, "(< (value ?c) (value ?D))");
+    c.add_constraint(*task, "(<= (+ (value ?d) 1.5 (* 2 (value ?c))) (- 100 (- 3)))");
+    ASSERT_NO_THROW(c.validate(*task));
+    EXPECT_NE(c.str(*task).find("(< (value ?c) (value ?d))"), std::string::npos) << c.str(*task);
+    EXPECT_NE(c.str(*task).find("(<= (+ (+ (value ?d) 1.5) (* 2 (value ?c))) (- 100 (- 3)))"), std::string::npos) << c.str(*task);
+    // the text reads back to the same constraints
+    ConjunctiveCondition again;
+    again.variables = c.variables;
+    const std::string text = c.str(*task);
+    for (usize at = text.find("(<"); at != std::string::npos; at = text.find("(<", at + 1))
+    {
+        int depth = 0;
+        usize end = at;
+        do
+            depth += text[end] == '(' ? 1 : text[end] == ')' ? -1 : 0;
+        while (depth > 0 && ++end < text.size());
+        again.add_constraint(*task, text.substr(at, end - at + 1));
+    }
+    EXPECT_EQ(again, c);
+    // errors name the problem and leave the condition unchanged
+    const ConjunctiveCondition before = c;
+    for (const char* bad : {"(< (value ?c))", "(<< (value ?c) 1)", "(< (nope ?c) 1)", "(< (value ?x) 1)", "(< (value o_nope) 1)",
+                            "(< value 1)", "(< (value ?c) 1) extra", "(< (value ?c ?d) 1)", "(< (+ 1) 2)"})
+    {
+        EXPECT_THROW(c.add_constraint(*task, bad), std::invalid_argument) << bad;
+        EXPECT_EQ(c, before) << bad;
+    }
+    // ground constraints: evaluated on the state's values
+    GroundCondition g;
+    EXPECT_THROW(g.add_constraint(*task, "(< (value ?c) 1)"), std::invalid_argument);
+    u32 value = ~u32{0};
+    for (u32 f = 0; f < T.functions.size(); ++f)
+        if (T.str(T.functions[f].name) == "value")
+            value = f;
+    ASSERT_NE(value, ~u32{0});
+    const std::string obj = counter_object(*task).first;
+    Oracle oracle(T);
+    BruteForce brute(*task, oracle);
+    u64 changed = 0;
+    for (const State& s : random_states(*task, 2, 12, 9))
+    {
+        brute.set_state(s.view());
+        GroundCondition k;
+        k.add_constraint(*task, "(>= (value " + obj + ") 1)");
+        const bool want = !brute.solve(as_condition(k)).empty();
+        changed += want;
+        EXPECT_EQ(holds(*task, s.view(), k), want);
+    }
+    EXPECT_GT(changed, 0u);
+}
+
+TEST(Conditions, GoalsFromGroundConditionsInTheSearches)
+{
+    // one goal atom: the same IW plan as the atom's slot
+    const auto gripper = suite_task("gripper__prob05");
+    const GroundCondition gripper_goal = GroundCondition::goal(*gripper);
+    GroundCondition one;
+    one.literals.push_back(gripper_goal.literals.front());
+    const auto spec = search::any_of(*gripper, std::span(&one, 1));
+    ASSERT_EQ(spec.goals.size(), 1u);
+    ASSERT_EQ(spec.goals[0].positive.size(), 1u);
+    search::IwOptions io;
+    io.control.goal.kind = search::GoalSpec::Kind::AnyOf;
+    io.control.goal.goals.push_back({.positive = spec.goals[0].positive});
+    const search::IwResult iw0 = search::iw(*gripper, io);
+    io.control.goal = spec;
+    const search::IwResult iw1 = search::iw(*gripper, io);
+    ASSERT_EQ(iw0.status, search::SearchStatus::Solved);
+    EXPECT_EQ(iw1.status, iw0.status);
+    EXPECT_EQ(iw1.plan, iw0.plan);
+    // the task's goal as a ground condition: the same plans as the task's goal
+    const auto task = suite_task("depot__p02");
+    const GroundCondition goal = GroundCondition::goal(*task);
+    BrfsOptions bo;
+    bo.stop_at_goal = true;
+    const BrfsResult b0 = brfs(*task, bo);
+    bo.goal = search::any_of(*task, std::span(&goal, 1));
+    const BrfsResult b1 = brfs(*task, bo);
+    ASSERT_TRUE(b0.solved);
+    EXPECT_TRUE(b1.solved);
+    EXPECT_EQ(b1.plan, b0.plan);
+    search::BestFirstOptions ao;
+    const auto a0 = search::astar_eager(*task, ao);
+    ao.control.goal = search::any_of(*task, std::span(&goal, 1));
+    const auto a1 = search::astar_eager(*task, ao);
+    ASSERT_EQ(a0.status, search::SearchStatus::Solved);
+    EXPECT_EQ(a1.plan, a0.plan);
+    // impossible goals: no state is a goal
+    GroundCondition never = goal;
+    for (u32 p = 0; p < task->data().predicates.size(); ++p)
+        if (task->compiled().kinds[p] == formalism::PredKind::Static && task->data().predicates[p].arity == 1)
+        {
+            never.literals.push_back({{PredicateId{p}, {ObjectId{0}}}, !holds(*task, task->initial_state().view(),
+                                                                                 GroundAtom{PredicateId{p}, {ObjectId{0}}})});
+            break;
+        }
+    EXPECT_TRUE(search::any_of(*task, std::span(&never, 1)).goals.empty());
+
+    // a derived goal literal: philosophers, a derived atom that becomes true on a walk
+    const auto phil = suite_task("philosophers__p03-phil4");
+    Oracle oracle(phil->data());
+    const test::AtomSet initial = oracle.derive(atoms_of(*phil, phil->initial_state().view()));
+    std::optional<GroundCondition> derived;
+    for (const State& s : random_states(*phil, 4, 12, 17))
+    {
+        for (const test::Atom& a : oracle.derive(atoms_of(*phil, s.view())))
+            if (!initial.contains(a))
+            {
+                GroundCondition d;
+                d.literals.push_back({{PredicateId{a[0]}, {}}, true});
+                for (usize j = 1; j < a.size(); ++j)
+                    d.literals[0].atom.objects.push_back(ObjectId{a[j]});
+                derived = d;
+                break;
+            }
+        if (derived)
+            break;
+    }
+    ASSERT_TRUE(derived.has_value());
+    search::IwOptions po;
+    po.control.goal = search::any_of(*phil, std::span(&*derived, 1));
+    const search::IwResult pr = search::iw(*phil, po);
+    ASSERT_EQ(pr.status, search::SearchStatus::Solved) << derived->str(*phil);
+    ASSERT_TRUE(pr.goal_state.has_value());
+    EXPECT_TRUE(holds(*phil, pr.goal_state->view(), *derived));
+    EXPECT_FALSE(holds(*phil, phil->initial_state().view(), *derived));
+    // its negation holds in the initial state
+    GroundCondition negated = *derived;
+    negated.literals[0].positive = false;
+    po.control.goal = search::any_of(*phil, std::span(&negated, 1));
+    EXPECT_TRUE(search::iw(*phil, po).plan.empty());
+
+    // a numeric goal constraint: counters, a value that grows on a walk
+    const auto counters = Task::from_text_file((data_dir() / "numeric_tasks" / "cs-counters.txt").string());
+    GroundCondition num;
+    const auto [counter, slot] = counter_object(*counters);
+    const f64 v0 = counters->numeric_value(counters->initial_state().view(), slot);
+    num.add_constraint(*counters, "(> (value " + counter + ") " + std::to_string(static_cast<long long>(v0)) + ")");
+    ASSERT_FALSE(holds(*counters, counters->initial_state().view(), num));
+    search::BestFirstOptions co;
+    co.control.goal = search::any_of(*counters, std::span(&num, 1));
+    const auto cr = search::astar_eager(*counters, co);
+    ASSERT_EQ(cr.status, search::SearchStatus::Solved);
+    EXPECT_TRUE(holds(*counters, cr.goal_state->view(), num));
+    BrfsOptions cb;
+    cb.stop_at_goal = true;
+    cb.goal = co.control.goal;
+    const BrfsResult cbr = brfs(*counters, cb);
+    ASSERT_TRUE(cbr.solved);
+    EXPECT_EQ(cbr.plan.size(), cr.plan.size());  // both shortest (unit costs)
+}
+
+TEST(Conditions, ConcurrentEvaluationOverOneTask)
+{
+    // one evaluation per thread over a shared task (derived literals use each thread's evaluation workspace)
+    const auto task = suite_task("philosophers__p03-phil4");
+    const std::vector<State> states = random_states(*task, 2, k_sanitized ? 4 : 10, 4);
+    std::mt19937_64 rng(5);
+    std::vector<GroundCondition> conds;
+    for (int i = 0; i < 16; ++i)
+    {
+        const ConjunctiveCondition c = random_condition(*task, rng, 2);
+        Tuple b(c.arity());
+        for (auto& o : b)
+            o = ObjectId{static_cast<u32>(rng() % task->num_objects())};
+        if (!violates_equality(c, b))
+            conds.push_back(c.ground(b));
+    }
+    conds.push_back(GroundCondition::goal(*task));
+    auto run = [&]
+    {
+        std::vector<u8> out;
+        for (const State& s : states)
+            for (const GroundCondition& g : conds)
+                out.push_back(holds(*task, s.view(), g) ? 1 : 0);
+        return out;
+    };
+    const std::vector<u8> ref = run();
+    std::vector<std::vector<u8>> got(8);
+    std::vector<std::thread> threads;
+    for (u32 t = 0; t < 8; ++t)
+        threads.emplace_back([&, t] { got[t] = run(); });
+    for (auto& th : threads)
+        th.join();
+    for (u32 t = 0; t < 8; ++t)
+        EXPECT_EQ(got[t], ref) << "thread " << t;
+}
+
 }  // namespace

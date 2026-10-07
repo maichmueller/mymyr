@@ -215,7 +215,7 @@ def test_custom_and_any_of_goals(gripper):
     r2 = search.astar(gripper, heuristic="blind", goal=[[target]])
     assert r2.status == Status.SOLVED and r2.cost == 3
     # width 2: moving back to roomb with the ball makes no new single atom true
-    r3 = search.iw(gripper, max_arity=2, goal=[{"positive": [target], "negative": ["(at-robby rooma)"]}])
+    r3 = search.iw(gripper, max_arity=2, goal=[[target, "(not (at-robby rooma))"]])
     assert r3.status == Status.SOLVED and target in atom_strs(r3.goal_state)
     assert "(at-robby rooma)" not in atom_strs(r3.goal_state)
 

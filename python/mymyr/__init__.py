@@ -7,6 +7,8 @@
     for a in task.bindings("stack", s, partial={"x": "a"}):  # one schema's actions with parameters fixed
         ...
     s2 = task.state(["(on a b)", "(clear a)"])                 # a state from its atoms (values= for numeric tasks)
+    g = task.ground_condition(["(on a b)", "(not (clear c))"])  # formulas: atoms, literals, conditions
+    r = mymyr.search.astar(task, goal=g)                       # goal=: ground conditions, any of which counts
     h = task.local()                                           # per-thread handle for hot Python loops
     exp = mymyr.rl.expand(task, states)                        # batched: flat CSR + padded view, zero-copy arrays
     r = mymyr.search.iw(task, max_arity=2)                     # searches: iw, siw, brfs, astar, gbfs, beam
@@ -19,12 +21,9 @@ from mymyr import _core, formalism
 from mymyr._core import (
     Action,
     ApplicableActions,
-    Atom,
     Bindings,
-    ConjunctiveCondition,
     DLArray,
     GroundConjunctions,
-    GroundLiteral,
     State,
     Task,
     TaskHandle,
@@ -32,6 +31,15 @@ from mymyr._core import (
     build_info,
     free_threaded_build,
     hash_rows,
+)
+from mymyr._core._formalism import (
+    Atom,
+    ConjunctiveCondition,
+    GroundAtom,
+    GroundCondition,
+    GroundLiteral,
+    Literal,
+    Variable,
 )
 from mymyr import datasets, rl, search
 
@@ -42,11 +50,15 @@ __all__ = [
     "Bindings",
     "ConjunctiveCondition",
     "DLArray",
+    "GroundAtom",
+    "GroundCondition",
     "GroundConjunctions",
     "GroundLiteral",
+    "Literal",
     "State",
     "Task",
     "TaskHandle",
+    "Variable",
     "__version__",
     "build_info",
     "datasets",

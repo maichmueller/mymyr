@@ -12,6 +12,7 @@
 // own object, called from that worker's thread; without it the batch runs on the calling thread alone.
 
 #include "py_datasets.hpp"
+#include "py_formula.hpp"
 #include "py_landmarks.hpp"
 #include "py_task.hpp"
 
@@ -23,6 +24,7 @@
 #include "mymyr/search/best_first.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/search/control.hpp"
+#include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
 #include "mymyr/search/iw_family.hpp"
 #include "mymyr/search/liw.hpp"
@@ -374,31 +376,21 @@ struct ControlScope
     std::unique_ptr<PyObserver> observer;
 };
 
-/// Slot of a fluent atom given as anything Task.atom accepts, assigning one under lazy slots. std::nullopt when the
-/// atom lies outside the reachable domains (it can never hold). Raises ValueError for static or derived atoms.
-std::optional<SlotId> goal_slot(const Owner& o, nb::handle atom)
+/// A goal of goal=: a GroundCondition, or a sequence of ground literals and atoms as Task.ground_condition takes them.
+GroundCondition goal_condition(const Owner& o, nb::handle g)
 {
-    nb::object a = task_object(o.obj).attr("atom")(atom);
-    const PyAtom& pa = nb::cast<const PyAtom&>(a);
-    const Task& task = *o.core->task;
-    if (task.compiled().kinds[pa.pred] != formalism::PredKind::Fluent)
-        throw nb::value_error("mymyr: goal atoms must be fluent atoms (static and derived atoms are not supported)");
-    const CanonicalAtom c = task.compiled().layout.encode(pa.pred, pa.args.data());
-    if (c >= task.compiled().layout.total)
-        return std::nullopt;
-    return SlotId{task.atoms().intern(c)};
-}
-
-void atom_list(const Owner& o, nb::handle atoms, std::vector<SlotId>& out, bool& impossible, bool positive)
-{
-    for (nb::handle x : atoms)
+    if (!nb::isinstance<PyGroundCondition>(g))
     {
-        const std::optional<SlotId> s = goal_slot(o, x);
-        if (s)
-            out.push_back(*s);
-        else if (positive)
-            impossible = true;  // an unreachable atom never holds; a negative one always holds and is dropped
+        if (nb::isinstance<nb::str>(g) || nb::isinstance<PyGroundAtom>(g) || nb::isinstance<PyGroundLiteral>(g) ||
+            !nb::isinstance<nb::sequence>(g))
+            throw nb::type_error("mymyr: goal= takes a GroundCondition or a sequence of goals, each a GroundCondition or "
+                                 "a sequence of ground literals and atoms (any goal reached is a goal)");
+        return *nb::cast<const PyGroundCondition&>(task_object(o.obj).attr("ground_condition")(g)).c;
     }
+    const PyGroundCondition& c = *nb::inst_ptr<PyGroundCondition>(g);
+    if (c.o.data.get() != o.core->data.get())
+        throw nb::value_error("mymyr: the goal belongs to another task");
+    return *c.c;
 }
 
 /// The goal test calling a Python callable (the thread state attached for the call).
@@ -473,31 +465,24 @@ search::GoalSpec parse_goal(const Owner& o, nb::handle goal, CallbackErrors& err
         }
         return spec;
     }
-    spec.kind = search::GoalSpec::Kind::AnyOf;
-    for (nb::handle g : goal)
+    std::vector<GroundCondition> goals;
+    if (nb::isinstance<PyGroundCondition>(goal))
+        goals.push_back(goal_condition(o, goal));
+    else
     {
-        search::GoalSpec::AtomGoal ag;
-        bool impossible = false;
-        if (nb::isinstance<nb::dict>(g))
-        {
-            nb::dict d = nb::borrow<nb::dict>(g);
-            for (auto [k, v] : d)
-            {
-                const std::string key = nb::cast<std::string>(k);
-                if (key == "positive")
-                    atom_list(o, v, ag.positive, impossible, true);
-                else if (key == "negative")
-                    atom_list(o, v, ag.negative, impossible, false);
-                else
-                    throw nb::value_error("mymyr: a goal dict has the keys 'positive' and 'negative'");
-            }
-        }
-        else
-            atom_list(o, g, ag.positive, impossible, true);
-        if (!impossible)
-            spec.goals.push_back(std::move(ag));
+        if (nb::isinstance<nb::str>(goal) || !nb::isinstance<nb::sequence>(goal))
+            throw nb::type_error("mymyr: goal= takes a GroundCondition, a sequence of goals or a callable");
+        for (nb::handle g : goal)
+            goals.push_back(goal_condition(o, g));
     }
-    return spec;
+    try
+    {
+        return search::any_of(*o.core->task, goals);
+    }
+    catch (const std::invalid_argument& e)
+    {
+        throw nb::value_error(e.what());
+    }
 }
 
 /// Fills the control block from the common keyword arguments.
@@ -646,9 +631,9 @@ public:
             it->second = atom_object(m_o, c);
         return it->second;
     }
-    nb::typed<nb::list, PyAtom> list(std::span<const CanonicalAtom> atoms)
+    nb::typed<nb::list, PyGroundAtom> list(std::span<const CanonicalAtom> atoms)
     {
-        nb::typed<nb::list, PyAtom> out{nb::list()};
+        nb::typed<nb::list, PyGroundAtom> out{nb::list()};
         for (CanonicalAtom c : atoms)
             out.append(get(c));
         return out;
@@ -660,7 +645,7 @@ private:
 };
 
 using CoOccurrence = std::vector<std::pair<CanonicalAtom, std::vector<CanonicalAtom>>>;
-using CoOccurrenceDict = nb::typed<nb::dict, PyAtom, nb::typed<nb::list, PyAtom>>;
+using CoOccurrenceDict = nb::typed<nb::dict, PyGroundAtom, nb::typed<nb::list, PyGroundAtom>>;
 
 CoOccurrenceDict co_occurrence_dict(const Owner& o, const CoOccurrence& rows)
 {
@@ -1018,9 +1003,9 @@ using IntArg = Arg<u64>;
 using FloatArg = Arg<double>;
 using CancelArg = Arg<PyCancelToken>;
 using AtomsArg = nb::typed<nb::sequence, AtomLike>;
-using LiteralsArg = nb::typed<nb::dict, std::string, AtomsArg>;  // {"positive": [...], "negative": [...]}
-using GoalArg = Arg<std::variant<nb::typed<nb::callable, bool(PyState)>,
-                                 nb::typed<nb::sequence, std::variant<AtomsArg, LiteralsArg>>>>;
+/// One goal: a GroundCondition, or the ground literals and atoms of one (Task.ground_condition).
+using OneGoal = std::variant<PyGroundCondition, nb::typed<nb::sequence, GroundLiteralLike>>;
+using GoalArg = Arg<std::variant<nb::typed<nb::callable, bool(PyState)>, PyGroundCondition, nb::typed<nb::sequence, OneGoal>>>;
 using StatesArg = Arg<nb::typed<nb::iterable, PyState>>;
 using ObserverArg = Arg<ann::Observer>;  // duck-typed: every on_* method is optional
 using HeuristicArg =
@@ -1036,7 +1021,7 @@ using OrderingsArg =
     Arg<nb::typed<nb::sequence, std::variant<search::ActionOrdering, std::string,
                                              nb::typed<nb::tuple, std::variant<search::ActionOrdering, std::string>, int>>>>;
 using RolloutsArg = Arg<std::variant<PyParallelRollouts, nb::typed<nb::sequence, PyRolloutResult>>>;
-using AtomList = nb::typed<nb::list, PyAtom>;
+using AtomList = nb::typed<nb::list, PyGroundAtom>;
 
 double py_evaluate(PyHeuristic& self, StateArg state)
 {
@@ -1243,8 +1228,9 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
 const char* k_control_doc =
     "Common keyword arguments (search/control.hpp): max_states, max_expanded, max_depth, max_seconds (budgets; unset = "
     "unlimited), cancel (a CancelToken, requestable from any thread), goal (None: the task's goal; a callable "
-    "state -> bool; or a list of goals, each a list of fluent atoms or a dict {'positive': [...], 'negative': [...]}, "
-    "any of which counts), blocked_states (States never entered), observer (an object with any of on_start(state), "
+    "state -> bool; a GroundCondition; or a sequence of goals, each a GroundCondition or a sequence of ground literals "
+    "and atoms as Task.ground_condition takes them, any of which counts: static, fluent and derived literals of either "
+    "polarity and numeric constraints), blocked_states (States never entered), observer (an object with any of on_start(state), "
     "on_expand(id, state), on_generate(parent, action, child, state, is_new), on_prune(parent, action, state), "
     "on_pass(arity, stats), on_solution(plan, cost), on_progress(stats) -> bool, on_end(status, stats)), "
     "progress_interval (expansions between on_progress calls). The search runs with the thread state detached; "
@@ -1528,7 +1514,7 @@ void bind_search(nb::module_& parent)
 
     nb::class_<PyRolloutResult>(m, "RolloutResult",
                                 "One rollout of find_rollouts_parallel: its IW ladder and what its private state "
-                                "repository recorded (mimir's IWRolloutResult). Atoms are mymyr Atoms, equal "
+                                "repository recorded (mimir's IWRolloutResult). Atoms are GroundAtoms, equal "
                                 "across rollouts and thread counts.")
         .def_prop_ro("seed", [](const PyRolloutResult& x) { return x.seed; })
         .def_prop_ro("search", [](const PyRolloutResult& x) { return PyIwResult{x.get().search, x.o}; },
@@ -1552,7 +1538,7 @@ void bind_search(nb::module_& parent)
                      "first-achieved atom.")
         .def_prop_ro("landing_state_by_atom",
                      [](const PyRolloutResult& x) {
-                         nb::typed<nb::dict, PyAtom, int> out{nb::dict()};
+                         nb::typed<nb::dict, PyGroundAtom, int> out{nb::dict()};
                          for (const auto& [c, i] : x.get().landing_state_by_atom)
                              out[atom_object(x.o, c)] = nb::int_(i);
                          return out;
@@ -1885,9 +1871,11 @@ void bind_search(nb::module_& parent)
         [](TaskArg task, u32 threads, StrArg store, bool witness_pruning, bool canonical_order,
            bool deterministic_ids, IntArg max_states, bool stop_at_goal, bool fingerprint, LayerArg layer_order,
            u64 seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, GoalArg goal) {
             const Owner o = owner_of(task);
+            ControlScope cs;
             BrfsOptions opts;
+            opts.goal = parse_goal(o, goal, *cs.errors);
             opts.threads = threads;
             const std::string st = str_arg(store, "store");
             if (st == "auto")
@@ -1912,19 +1900,16 @@ void bind_search(nb::module_& parent)
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
-            BrfsResult r;
-            {
-                nb::gil_scoped_release release;
-                r = brfs(t, opts);
-            }
+            BrfsResult r = run_detached(cs, [&] { return brfs(t, opts); });
             return PyBrfsResult{std::move(r), o};
         },
         "task"_a, nb::kw_only(), "threads"_a = 1, "store"_a = "auto", "witness_pruning"_a = true,
         "canonical_order"_a = true, "deterministic_ids"_a = true, "max_states"_a = nb::none(), "stop_at_goal"_a = false,
-        "fingerprint"_a = false, MYMYR_LAYER_ARGS,
+        "fingerprint"_a = false, MYMYR_LAYER_ARGS, "goal"_a = nb::none(),
         (std::string("Breadth-first search over the reachable states (search/brfs.hpp): single-threaded, or "
                      "layer-synchronous on `threads` threads with ids independent of the thread count. stop_at_goal "
-                     "returns the first goal state's plan (single-threaded). fingerprint: the result's fingerprint "
+                     "returns the first goal state's plan (single-threaded). goal: the goal states, as the common "
+                     "keyword argument of the other searches (a callable needs threads=1). fingerprint: the result's fingerprint "
                      "hashes (id, canonical state) over the whole store (determinism checks; 0 when off). An ordered "
                      "layer_order needs the 'flat' or 'chunked' store ('auto' picks one of them with one thread). ") +
          k_layer_doc)

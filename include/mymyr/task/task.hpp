@@ -153,6 +153,9 @@ public:
 
     /// This thread's workspace (created on first use, owned by the task).
     [[nodiscard]] Workspace& workspace() const;
+    /// This thread's workspace for evaluating single states (is_goal, holds in successor/conditions.hpp): separate
+    /// from workspace(), so that an evaluation may run inside a successor or binding enumeration there.
+    [[nodiscard]] Workspace& evaluation_workspace() const;
 
     // names (API, debugging)
     [[nodiscard]] std::string schema_name(SchemaId s) const;
@@ -176,7 +179,7 @@ private:
     AtomIndex m_atoms;
     State m_initial;
     mutable PerThread<Workspace> m_workspaces;
-    mutable PerThread<Workspace> m_goal_workspaces;  // derived goals (is_goal must not clobber m_workspaces)
+    mutable PerThread<Workspace> m_eval_workspaces;  // evaluation_workspace()
     mutable std::once_flag m_fingerprint_once;
     mutable u64 m_fingerprint = 0;
 };

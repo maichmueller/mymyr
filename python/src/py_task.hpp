@@ -7,7 +7,7 @@
 //   - State (PyState): a value (the C++ State) plus its owner (the Task or handle it came from) for names and
 //     convenience methods. Equality and hashing use the task uid plus the content, never the owner.
 //   - Action (PyAction): the label (schema, binding) plus its owner, for printing.
-//   - Atom (PyAtom): a ground atom (predicate, objects) with its slot, if it has one.
+//   - The formulas (atoms, literals, conditions) are in py_formula.hpp.
 
 #include "formalism_task.hpp"
 #include "typing.hpp"
@@ -139,15 +139,6 @@ struct PyAction
     }
 };
 
-struct PyAtom
-{
-    u32 pred = 0;
-    std::vector<u32> args;
-    i64 slot = -1;  // fluent slot, -1 if none (static, derived, or not assigned yet under lazy slots)
-    nb::object owner;
-    PyTaskCore* core = nullptr;
-};
-
 // ------------------------------------------------------------------------------------------------ argument types
 // What the task API accepts (typing.hpp: rendered in the stubs, checked by the bindings).
 
@@ -160,9 +151,6 @@ using StateLike = Arg<std::variant<PyState, ann::ArrayLike>>;
 using StatesLike = Arg<std::variant<PyState, nb::typed<nb::sequence, PyState>, ann::ArrayLike>>;
 /// An action: an Action, '(stack a b)', or (schema, objects) with a schema name or index.
 using ActionLike = Arg<std::variant<PyAction, std::string, nb::typed<nb::tuple, ObjectKey, ObjectKeys>>>;
-/// A ground atom: an Atom, '(on a b)', ('on', 'a', 'b'), ('on', ['a', 'b']), or a fluent slot.
-using AtomTuple = nb::typed<nb::tuple, std::variant<std::string, int, nb::typed<nb::sequence, ObjectKey>>, nb::ellipsis>;
-using AtomLike = Arg<std::variant<PyAtom, std::string, int, AtomTuple>>;
 using FrameworkArg = Arg<ann::Framework>;
 
 /// The core and owner object of a Task, TaskHandle, State or Action. Throws TypeError otherwise.

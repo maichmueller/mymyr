@@ -73,6 +73,6 @@ public:
     std::vector<u32> resume;  // resume_after as u32 (empty: none)
     std::vector<ObjectId> binding;
     std::vector<ObjectId> lit_objects;
-    std::vector<GroundLiteral> lits[3];
+    std::vector<GroundLiteralView> lits[3];
 };
 }  // namespace mymyr::detail

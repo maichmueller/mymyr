@@ -6,6 +6,8 @@ can store by reference (native nanobind functions cannot be pickled).
 - A State pickles as its task, the fingerprint and its atoms: raw words under frozen slots (slot = canonical id), the
   canonical ids of its atoms under lazy slots (lazy slot numbers depend on the order of first touch).
 - An Action pickles as its task, the fingerprint and its label (schema, binding).
+- A formula (Variable, Atom, Literal, GroundAtom, GroundLiteral, ConjunctiveCondition, GroundCondition) made by a Task
+  pickles as that task, the fingerprint and its content in ids; loading checks it against the task.
 """
 
 from mymyr import _core
@@ -21,6 +23,10 @@ def _restore_state(task, fingerprint, kind, payload):
 
 def _restore_action(task, fingerprint, schema, binding):
     return _core._restore_action(task, fingerprint, schema, binding)
+
+
+def _restore_formula(task, fingerprint, kind, payload):
+    return _core._restore_formula(task, fingerprint, kind, payload)
 
 
 def _restore_handle(task):

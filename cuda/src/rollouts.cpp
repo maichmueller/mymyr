@@ -35,6 +35,10 @@ MultiIwBatch DeviceRollouts::run(std::span<const u64> seeds, const State* start,
     if (!goals.empty() && goals.size() != seeds.size())
         throw std::invalid_argument("mymyr: device rollouts: " + std::to_string(goals.size()) + " goals for " +
                                     std::to_string(seeds.size()) + " seeds (pass none, or one per seed)");
+    for (const search::GoalSpec::AtomGoal& g : goals)
+        if (!g.fluent_only())
+            throw std::invalid_argument("mymyr: device rollouts: a goal with derived literals or numeric constraints (the device "
+                                        "searches test fluent literals only)");
     const State s = start ? *start : m_task->initial_state();
     if (s.numeric_words())
         throw std::invalid_argument("mymyr: device rollouts: a start state with numeric values (numeric tasks are not supported)");

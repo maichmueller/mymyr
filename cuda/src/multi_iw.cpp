@@ -677,6 +677,10 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     if (!goals.empty() && goals.size() != n)
         throw std::invalid_argument("mymyr: device IW: " + std::to_string(goals.size()) + " goals for " + std::to_string(n) +
                                     " searches (pass none, or one per search)");
+    for (const search::GoalSpec::AtomGoal& g : goals)
+        if (!g.fluent_only())
+            throw std::invalid_argument("mymyr: device IW: a goal with derived literals or numeric constraints (the device "
+                                        "searches test fluent literals only)");
     if (!seeds.empty() && seeds.size() != n)
         throw std::invalid_argument("mymyr: device IW: " + std::to_string(seeds.size()) + " seeds for " + std::to_string(n) +
                                     " searches (pass none, or one per search)");

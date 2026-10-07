@@ -98,7 +98,7 @@ def test_goal_condition_agrees_with_is_goal():
     for name in SMALL_TASKS:
         task = text_task(name)
         g = task.goal_condition
-        assert g.arity == 0 and g.variables == []
+        assert isinstance(g, mymyr.GroundCondition) and len(g.literals) > 0
         for s in walk(task, steps=6, walks=1):
             assert list(task.bindings(g, s)) == ([()] if task.is_goal(s) else [])
 

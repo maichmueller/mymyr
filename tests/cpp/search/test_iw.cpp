@@ -824,8 +824,8 @@ TEST(IwControl, GoalSpecs)
     // AnyOf: an unreachable atom goal (a slot no state has), or the target atom
     GoalSpec any;
     any.kind = GoalSpec::Kind::AnyOf;
-    any.goals.push_back({{SlotId{task->atoms().max_fluent_slots() + 5}}, {}});
-    any.goals.push_back({{atom}, {}});
+    any.goals.push_back({.positive = {SlotId{task->atoms().max_fluent_slots() + 5}}});
+    any.goals.push_back({.positive = {atom}});
     IwOptions o = with_k(2);
     o.control.goal = any;
     const IwResult r = iw(*task, o);
@@ -850,7 +850,7 @@ TEST(IwControl, GoalSpecs)
     // a negative atom goal: the start state's first atom false
     GoalSpec neg;
     neg.kind = GoalSpec::Kind::AnyOf;
-    neg.goals.push_back({{}, {task->initial_state().slots().front()}});
+    neg.goals.push_back({.negative = {task->initial_state().slots().front()}});
     o.control.goal = neg;
     const IwResult n = iw(*task, o);
     ASSERT_EQ(n.status, SearchStatus::Solved);

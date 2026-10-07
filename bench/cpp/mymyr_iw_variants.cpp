@@ -497,7 +497,7 @@ int main(int argc, char** argv)
             if (!c)
                 usage("unknown goal atom " + goal_atom);
             control.goal.kind = GoalSpec::Kind::AnyOf;
-            control.goal.goals.push_back({{SlotId{task->atoms().intern(*c)}}, {}});
+            control.goal.goals.push_back({.positive = {SlotId{task->atoms().intern(*c)}}});
         }
         LandmarkNovelty lm;
         u64 lm_unknown = 0, lm_facts = 0, lm_sets = 0;

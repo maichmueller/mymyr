@@ -107,7 +107,7 @@ def test_goal_equals_its_literals(name):
     task = text_task(name)
     goal = task.formalism.goal.literals
     for s in walk(task, steps=15, seed=3, walks=3):
-        expected = all(s.holds((lit.predicate.name, *[str(o) for o in lit.terms])) == lit.positive for lit in goal)
+        expected = all(s.holds((lit.predicate.name, *[str(o) for o in lit.objects])) == lit.positive for lit in goal)
         assert s.is_goal() == task.is_goal(s) == expected
 
 
@@ -128,7 +128,7 @@ def test_states_are_values(blocks):
     assert [a.slot for a in s.atoms()] == s.atom_slots()
     atom = blocks.atom("(on d h)")
     assert atom.kind == "fluent" and atom.slot in s.atom_slots() and s.holds(atom) and s.holds(atom.slot)
-    assert blocks.atom(atom.slot) == atom and str(atom) == "(on d h)" and atom.objects == ["d", "h"]
+    assert blocks.atom(atom.slot) == atom and str(atom) == "(on d h)" and [str(o) for o in atom.objects] == ["d", "h"]
     with pytest.raises(ValueError):
         other.applicable_actions(s)  # a state of another task
     with pytest.raises(ValueError):

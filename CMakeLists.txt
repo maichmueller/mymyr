@@ -92,8 +92,10 @@ add_library(mymyr_core STATIC
     src/mymyr/successor/engine.cpp
     src/mymyr/successor/successors.cpp
     src/mymyr/successor/bindings.cpp
+    src/mymyr/successor/conditions.cpp
     src/mymyr/axioms/evaluator.cpp
     src/mymyr/search/brfs.cpp
+    src/mymyr/search/goal.cpp
     # IW family
     src/mymyr/novelty/novelty_table.cpp
     src/mymyr/search/iw.cpp

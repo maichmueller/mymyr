@@ -114,9 +114,9 @@ def test_table_metadata_round_trips_by_name(sets, name):
         for j in range(task.num_atoms):
             atom = task.atom(j)
             row = off[i] + j
-            assert names[m["atom_pred"][row]] == atom.predicate
+            assert names[m["atom_pred"][row]] == atom.predicate.name
             args = [a for a in m["atom_args"][row] if a >= 0]
-            assert [objects[a] for a in args] == atom.objects
+            assert [objects[a] for a in args] == [str(o) for o in atom.objects]
     assert m["object_offsets"].tolist() == [0] + np.cumsum(t.num_objects).tolist()
     ids = np.array([3, 0, 2, 2, 1], np.int32)
     assert rl.object_offsets(t, ids).tolist() == [0] + np.cumsum(np.asarray(t.num_objects)[ids]).tolist()

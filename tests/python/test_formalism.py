@@ -16,7 +16,7 @@ NUMERIC = sorted((ROOT / "tests/data/numeric_tasks").glob("*.txt"))
 def walk(obj, seen, counts):
     """Visit every field of every reachable view (depth-first), counting visits per class."""
     cls = type(obj)
-    if cls in fm.VIEW_CLASSES:
+    if cls in fm.CLASSES:
         key = (cls.__name__, str(obj), getattr(obj, "index", None))
         if key in seen:
             return
@@ -51,13 +51,13 @@ def test_structure_openstacks():
     derived = [p for p in t.predicates if p.kind == "derived"]
     assert len(derived) == 2
     for a in t.axioms:
-        pred, terms = a.head
+        pred, terms = a.head.predicate, a.head.terms
         assert pred.kind == "derived" and len(terms) == pred.arity
         assert all(isinstance(x, fm.Variable) for x in terms)
     goal = t.goal
     assert len(goal) == len(goal.literals) > 0
     for lit in goal.literals:
-        assert lit.is_ground and all(isinstance(x, fm.Object) for x in lit.terms)
+        assert isinstance(lit, fm.GroundLiteral) and all(isinstance(x, fm.Object) for x in lit.objects)
 
 
 def test_terms_resolve_to_scope():

@@ -23,8 +23,7 @@ def test_state_from_atoms_equals_the_state(name):
 
 def test_state_atoms_are_validated():
     task = text_task("philosophers__p03-phil4")
-    kinds = {p.name: p.kind for p in task.formalism.predicates}
-    derived = next(a for a in task.initial_state.derived_atoms() if kinds[a.predicate] == "derived")
+    derived = next(a for a in task.initial_state.derived_atoms() if a.kind == "derived")
     with pytest.raises(ValueError, match="not a fluent atom"):
         task.state([str(derived)])
     static = task.formalism.static_init[0]

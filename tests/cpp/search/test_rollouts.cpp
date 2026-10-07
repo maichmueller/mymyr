@@ -66,7 +66,7 @@ GoalSpec atom_goal(const Task& task, CanonicalAtom c)
 {
     GoalSpec g;
     g.kind = GoalSpec::Kind::AnyOf;
-    g.goals.push_back({{SlotId{task.atoms().intern(c)}}, {}});
+    g.goals.push_back({.positive = {SlotId{task.atoms().intern(c)}}});
     return g;
 }
 
