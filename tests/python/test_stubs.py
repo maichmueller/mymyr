@@ -176,9 +176,11 @@ def test_cuda_stubs_are_typed():
     assert "def status(self) -> mymyr._core._search.Status" in cuda
     assert "def stats(self) -> dict[str, float | int]" in cuda
     # multi-search IW, rollouts, batched IW(1)
-    goals = "goals: Sequence[tuple[Sequence[int], Sequence[int]]] | None = None"
+    goal = "mymyr._core._formalism.GroundCondition | tuple[Sequence[int], Sequence[int]]"
+    goals = f"goals: Sequence[{goal}] | None = None"
     assert f"starts: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack, *, ctx: Context | None = None, {goals}" in cuda
     assert "def rollouts(task: mymyr._core.Task | mymyr._core.TaskHandle, seeds: Sequence[int], *, ctx: Context | None = None" in cuda
+    assert f"start: mymyr._core.State | None = None, goal: {goal} | None = None" in cuda
     assert f"ctx: Context | None = None, {stream}, {goals}, exact: bool = True" in cuda
     assert "-> IwBatch:" in cuda
     assert "def status(self) -> list[mymyr._core._search.Status]" in cuda
