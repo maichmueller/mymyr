@@ -2,8 +2,9 @@
 // the numeric best-first test (tests/data/numeric_tasks/fork_best_first.json, made by run_numeric.py), the layer
 // ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py), the beam test
 // (tests/data/beam/fork_beam.json, made by run_beam.py) and the heuristics test
-// (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py) and the binding generator test
-// (tests/data/bindings/fork_bindings.json, made by run_bindings.py).
+// (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py), the binding generator test
+// (tests/data/bindings/fork_bindings.json, made by run_bindings.py) and the tuple graph tests
+// (tests/data/tuple_graphs/fork_tuple_graphs.json, made by run_tuple_graphs.py).
 //
 //   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
 //               --problem P [--max-ms T] [--max-states N]
@@ -14,6 +15,8 @@
 //   search_fork --algo walk_h --h setadd|h2|perfect --domain D --problem P [--walks W] [--steps S] [--seed B]
 //               [--max-states N]
 //   search_fork --algo walk_ground --domain D --problem P [--walks W] [--steps S] [--seed B]
+//   search_fork --algo tuple_graphs --domain D --problem P [--max-states N] [--sample S] [--max-width W]
+//               [--time-width W [--time-pruning 0|1]]
 //
 // Prints one line "RESULT {...}" with status, plan_cost, plan_length, plan (ground action strings), expanded and
 // generated (best-first: also deadends; iw: also per-pass statistics), or "ERROR <message>". Successor generation is
@@ -30,6 +33,10 @@
 // literals per kind) of the goal literals as a ConjunctiveCondition and, per action schema in domain order, of its
 // precondition (ConjunctiveConditionSatisficingBindingGenerator) and of the action (ActionSatisficingBindingGenerator),
 // and the action taken.
+// tuple_graphs prints the state space's size and the digests of the fork's tuple graphs (TupleGraphImpl::create) of
+// width 0, and of widths 1 and 2 (up to --max-width) with and without dominance pruning, of every
+// ceil(N / S)-th vertex (tests/data/fork_golden/README.md, "Tuple graphs"); with --time-width only that width and
+// pruning, timed over every vertex, with the peak RSS before and after.
 
 #include <mimir/mimir.hpp>
 #include <mimir/search/algorithms/astar_iw.hpp>

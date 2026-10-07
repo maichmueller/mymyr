@@ -183,3 +183,32 @@ classical widths 1 and 2, and abstracted width 1, each with blind and h_max. `se
 `--algo astar_iw --h blind|hmax --width K --features classical|abstracted|base_abstracted`.
 The JSON retains cost refusals and resource failures; the comparison excludes instances with known successor-order
 differences, because generation order determines tuple ownership and state ids.
+
+## Tuple graphs
+
+`search_fork/run_tuple_graphs.py` runs `search_fork --algo tuple_graphs` on the state-space suite
+(`tests/cpp/datasets/fork_cases.inc`) and writes `tests/data/tuple_graphs/fork_tuple_graphs.json`
+(`"format": "mymyr-fork-tuple-graphs/1"`), which `tests/cpp/datasets/test_tuple_graphs.cpp` and
+`tests/python/test_tuple_graphs.py` compare with mymyr's tuple graphs:
+
+    env MYMYR_FORK_DATA=<fork>/data python3 tests/data/fork_golden/search_fork/run_tuple_graphs.py --build-dir <dir> --jobs 6
+
+Per task: `states` (the space with `remove_if_unsolvable = false`, no symmetry pruning), `sample_step` and `roots`
+(every `sample_step`-th vertex, `sample_step = ceil(states / 64)`, as state keys), and `graphs`, keyed `w0`, `w1p1`,
+`w1p0`, `w2p1`, `w2p0` (width, dominance pruning), each a list with one digest per root:
+
+- `n`, `m`, `p`: per distance the number of vertices, of edges into that distance (from distance 1), and of problem
+  vertices.
+- `v`, `e`, `q`: set hashes (the sum mod 2^64 of the FNV-1a-64 of the items, 16 hex digits) of the vertices
+  (`"<d>:<atoms>:<keys>"`: the distance, the tuple's sorted atom strings concatenated, the sorted keys of its problem
+  vertices joined by commas), of the edges (`"<u>><t>"` with `u` and `t` the `"<d>:<atoms>"` parts) and of the problem
+  vertices per distance (`"<d>:<key>"`).
+
+A state key is the FNV-1a-64 (16 hex digits) of the state's sorted fluent atom strings (`(pred o1 o2)`) joined by
+newlines, followed by `"\n=%.17g"` per numeric value. The driver normalizes what the fork leaves unspecified or gets
+wrong: the vertex and edge lists become sets (`dropped_duplicates` counts the duplicates: width-0 vertices of
+parallel transitions), the root is a problem vertex at distance 0 of width 0, trailing empty distances are removed,
+and under dominance pruning the tuple kept for a set of problem vertices is the canonical smallest of its class (fewer
+atoms, then the sorted atom strings in lexicographic order; the classes come from the fork's own novelty table, and
+the driver checks that the fork's tuple belongs to it). On deadend the fork crashes at width 2 (states without
+fluent atoms); such tasks record `fork_failed_widths: [2]` and have width 0 and 1 only.
