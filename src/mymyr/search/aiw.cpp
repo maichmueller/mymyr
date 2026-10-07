@@ -4,6 +4,7 @@
 #include "mymyr/search/aiw.hpp"
 
 #include "iw_family_detail.hpp"
+#include "abstracted_features.hpp"
 
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -18,17 +19,6 @@ namespace detail
 {
 namespace
 {
-struct KeyHash
-{
-    usize operator()(const std::vector<u32>& k) const noexcept
-    {
-        u64 h = k.size();
-        for (u32 x : k)
-            h = hash::combine(h, x);
-        return static_cast<usize>(h);
-    }
-};
-
 struct AbstractedConfig
 {
     u32 width = 1;
@@ -43,29 +33,9 @@ class AbstractedPruner
 public:
     /// coords: the landmark coordinates of abstracted LIW, or null.
     AbstractedPruner(const Task& task, const AbstractedConfig& cfg, const novelty::LandmarkCoordinates* coords)
-        : m_task(task), m_cfg(cfg), m_coords(coords), m_single(coords ? coords->num_ranks() : 1)
+        : m_features(task, cfg.base_abstracted, cfg.preserve_goal_atoms, coords, cfg.preserve_landmark_atoms), m_cfg(cfg),
+          m_coords(coords), m_single(coords ? coords->num_ranks() : 1)
     {
-        if (cfg.preserve_goal_atoms)
-        {
-            const formalism::TaskData& t = task.data();
-            const CanonicalLayout& L = task.atoms().layout();
-            std::vector<u32> args;
-            for (const formalism::Literal& l : t.literals_of(t.goal))
-            {
-                if (!l.positive || t.predicate(l.pred).kind != formalism::PredKind::Fluent)
-                    continue;
-                args.clear();
-                for (formalism::Term x : t.terms_of(l))
-                    args.push_back(formalism::term_object(x).v);
-                const CanonicalAtom c = L.encode(l.pred.v, args.data());
-                if (c < L.fluent_count)
-                    m_preserved.push_back(task.atoms().intern(c));
-            }
-        }
-        if (coords && cfg.preserve_landmark_atoms)
-            m_preserved.insert(m_preserved.end(), coords->atoms().begin(), coords->atoms().end());
-        std::sort(m_preserved.begin(), m_preserved.end());
-        m_preserved.erase(std::unique(m_preserved.begin(), m_preserved.end()), m_preserved.end());
         if (coords)
         {
             m_pmask.resize(coords->mask_words());
@@ -114,8 +84,7 @@ public:
         u64 b = m_pairs.bytes() + m_triples.bytes() + m_by_feature.capacity() * 8 + m_dense_bytes;
         for (const auto& s : m_single)
             b += s.capacity() * 8;
-        for (const auto& f : m_features)
-            b += f.capacity() * 4;
+        b += m_features.bytes();
         return b;
     }
 
@@ -175,64 +144,7 @@ private:
     }
 
     // ------------------------------------------------------------------ features
-    u32 intern(const std::vector<u32>& key)
-    {
-        const auto [it, inserted] = m_ids.emplace(key, static_cast<u32>(m_ids.size()));
-        return it->second;
-    }
-    void append_signature(u32 object, std::vector<u32>& out) const
-    {
-        const formalism::TaskData& t = m_task.data();
-        const formalism::Range r = t.objects[object].types;
-        if (r.count == 0)
-        {
-            out.push_back(1);
-            out.push_back(~u32{0});
-            return;
-        }
-        out.push_back(r.count);
-        for (u32 i = 0; i < r.count; ++i)
-            out.push_back(t.type_ids[r.begin + i].v);
-    }
-    std::vector<u32> compute(u32 slot)
-    {
-        const AtomIndex& ix = m_task.atoms();
-        const u32 pred = ix.predicate(SlotId{slot}).v;
-        const std::span<const u32> args = ix.arguments(SlotId{slot});
-        std::vector<u32> out;
-        auto full = [&]()
-        {
-            m_key.assign({1u, pred});
-            m_key.insert(m_key.end(), args.begin(), args.end());
-            return intern(m_key);
-        };
-        if (std::binary_search(m_preserved.begin(), m_preserved.end(), slot))
-        {
-            out.push_back(full());
-            if (args.size() <= 1)
-                return out;
-        }
-        if (args.empty())
-            return {full()};
-        for (u32 i = 0; i < args.size(); ++i)
-        {
-            m_key.assign({0u, pred, i, args[i]});
-            if (!m_cfg.base_abstracted)
-                for (u32 j = 0; j < args.size(); ++j)
-                    if (j != i)
-                        append_signature(args[j], m_key);
-            out.push_back(intern(m_key));
-        }
-        return out;
-    }
-    std::span<const u32> features(u32 slot)
-    {
-        if (slot >= m_features.size())
-            m_features.resize(slot + 1);
-        if (m_features[slot].empty())
-            m_features[slot] = compute(slot);
-        return m_features[slot];
-    }
+    std::span<const u32> features(u32 slot) { return m_features.features(slot); }
 
     // ------------------------------------------------------------------ tables (one per rank)
     bool insert1(u32 rank, u32 f)
@@ -394,7 +306,7 @@ private:
     bool dense_pairs(u32 rank)
     {
         const u32 G = static_cast<u32>(m_gatoms.size());
-        const u32 F = static_cast<u32>(m_ids.size());  // every loaded feature is interned
+        const u32 F = m_features.size();  // every loaded feature is interned
         const u32 W = bits::words_for(F);
         m_u.assign(W, 0);
         if (m_cnt.size() < F)
@@ -475,7 +387,7 @@ private:
                 if (m_gadded[g])
                     for (u32 f : m_gfeat[g])
                         insert1(rank, f);
-            const u32 F = static_cast<u32>(m_ids.size());
+            const u32 F = m_features.size();
             if (rows.size() < F)
                 rows.resize(F);
             for (u32 ia = 0; ia < G; ++ia)
@@ -514,7 +426,7 @@ private:
         bits::for_each(w, n, [&](u64 a) { m_patoms.push_back(static_cast<u32>(a)); });
         for (u32 a : m_patoms)
             features(a);  // interns first: the ids below are final
-        const u32 F = static_cast<u32>(m_ids.size());
+        const u32 F = m_features.size();
         if (m_cnt.size() < F)
             m_cnt.resize(F, 0);
         m_pu.assign(bits::words_for(F), 0);
@@ -539,7 +451,7 @@ private:
                 m_dels.push_back(x.v);
         for (u32 a : add)
             features(a);  // interns first
-        const u32 F = static_cast<u32>(m_ids.size());
+        const u32 F = m_features.size();
         if (m_cnt.size() < F)
             m_cnt.resize(F, 0);
         if (m_pu.size() < bits::words_for(F))
@@ -652,13 +564,9 @@ private:
         return group_tuples<Mark>(rank);
     }
 
-    const Task& m_task;
+    AbstractedFeatures m_features;
     AbstractedConfig m_cfg;
     const novelty::LandmarkCoordinates* m_coords;
-    std::vector<u32> m_preserved;  // sorted slots with a full-identity feature
-    std::unordered_map<std::vector<u32>, u32, KeyHash> m_ids;
-    std::vector<u32> m_key;
-    std::vector<std::vector<u32>> m_features;  // per slot (empty: not computed yet)
     std::vector<std::vector<u64>> m_single;    // per rank: bitset over feature ids
     novelty::TupleSet m_pairs, m_triples;
     // scratch

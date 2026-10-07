@@ -28,6 +28,8 @@ add_executable(mymyr_tests
     novelty/test_novelty_table.cpp
     search/test_iw.cpp
     rl/test_expand.cpp
+    search/test_astar_iw.cpp
+    search/test_astar_iw_fork.cpp
     search/test_best_first.cpp
     heuristics/test_heuristics.cpp
     search/test_plan_file.cpp
@@ -113,7 +115,7 @@ endif()
 # ------------------------------------------------------------------------------------------------ best-first search
 if(TARGET mymyr_frontend)
     # A* plan costs equal the fork's golden optimal costs and 0.13.60's (tests/data/expected).
-    add_executable(mymyr_search_golden_tests search/test_best_first_golden.cpp frontend/golden.cpp)
+    add_executable(mymyr_search_golden_tests search/test_best_first_golden.cpp search/test_astar_iw_pddl.cpp frontend/golden.cpp)
     target_link_libraries(mymyr_search_golden_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_search_golden_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
