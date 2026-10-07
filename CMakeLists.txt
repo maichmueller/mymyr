@@ -185,7 +185,7 @@ if(MYMYR_FRONTEND)
         PUBLIC mymyr::core
         PRIVATE $<BUILD_INTERFACE:loki::parsers> $<BUILD_INTERFACE:absl::flat_hash_map>
                 $<BUILD_INTERFACE:absl::flat_hash_set> $<BUILD_INTERFACE:absl::inlined_vector>
-                $<BUILD_INTERFACE:absl::hash> $<BUILD_INTERFACE:mymyr_warnings>)
+                $<BUILD_INTERFACE:absl::hash> $<BUILD_INTERFACE:absl::strings> $<BUILD_INTERFACE:mymyr_warnings>)
     target_compile_definitions(mymyr_frontend PUBLIC MYMYR_HAS_FRONTEND=1)
     # GCC 16 at -O3 reports -Wmaybe-uninitialized inside abseil's InlinedVector/raw_hash_set once they are inlined
     # into the front end (false positives; the headers are -isystem, the warning is issued after inlining).

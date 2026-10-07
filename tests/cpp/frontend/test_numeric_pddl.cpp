@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -209,4 +210,50 @@ TEST(NumericPddl, TasksWithNumericFunctionsKeepTheirStateSpace)
         EXPECT_EQ(r.generated, c.generated) << c.dir;
         EXPECT_EQ(r.goal_states, c.goals) << c.dir;
     }
+}
+
+namespace
+{
+/// The initial value of the numeric fluent (x) of a problem that writes `token` as its value, or nullopt if the
+/// front end rejects the problem.
+std::optional<f64> init_value(const std::string& token)
+{
+    static const char* domain_text = R"(
+(define (domain nv)
+ (:requirements :strips :numeric-fluents)
+ (:predicates (p))
+ (:functions (x))
+ (:action inc :parameters () :precondition (and) :effect (and (increase (x) 1)))
+))";
+    const auto domain = frontend::Domain::from_string(domain_text, "nv.pddl");
+    const std::string problem = "(define (problem nv1) (:domain nv) (:init (= (x) " + token + ")) (:goal (p)))";
+    try
+    {
+        const auto task = Task::create(*domain->instantiate_string(problem, "nv1.pddl"));
+        return value(*task, task->initial_state().view(), "(x)");
+    }
+    catch (const std::exception&)
+    {
+        return std::nullopt;
+    }
+}
+}  // namespace
+
+TEST(NumericPddl, InitialValuesAreParsedExactly)
+{
+    EXPECT_EQ(init_value("0"), 0.0);
+    EXPECT_EQ(init_value("7"), 7.0);
+    EXPECT_EQ(init_value("-3"), -3.0);
+    EXPECT_EQ(init_value("2.5"), 2.5);
+    EXPECT_EQ(init_value("-0.125"), -0.125);
+    EXPECT_EQ(init_value("3."), 3.0);
+    EXPECT_EQ(init_value(".5"), 0.5);
+    EXPECT_EQ(init_value("1e3"), 1000.0);
+    EXPECT_EQ(init_value("1.5e-2"), 0.015);
+    EXPECT_EQ(init_value("-2.5E+1"), -25.0);
+    EXPECT_EQ(init_value("0.1"), 0.1);  // correctly rounded
+    EXPECT_EQ(init_value("123456789012345678"), 123456789012345678.0);
+    EXPECT_EQ(init_value("4.9406564584124654e-324"), 4.9406564584124654e-324);  // the smallest subnormal
+    for (const char* bad : {"", "abc", "1.2.3", "1e", "--1", "+1", "0x10", "1 2", "1e999", "5x", "-"})
+        EXPECT_FALSE(init_value(bad).has_value()) << "'" << bad << "' was accepted";
 }
