@@ -166,6 +166,7 @@ target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/object_graph.cpp
     src/mymyr/datasets/certificates.cpp
     src/mymyr/datasets/tuple_graph.cpp
+    src/mymyr/datasets/knowledge_base.cpp
 )
 
 # ------------------------------------------------------------------------------------------------ PDDL front end

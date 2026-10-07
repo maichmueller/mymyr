@@ -264,8 +264,9 @@ endif()
 if(TARGET mymyr_frontend)
     # state spaces against the fork on its own test instances (fork_cases.inc), determinism across thread counts,
     # options, costs, numeric tasks, the pool, generalized state spaces, samplers, object graphs and certificates;
-    # tuple graphs against the fork
-    add_executable(mymyr_datasets_tests datasets/test_datasets.cpp datasets/test_tuple_graphs.cpp frontend/golden.cpp)
+    # tuple graphs against the fork, knowledge bases
+    add_executable(mymyr_datasets_tests datasets/test_datasets.cpp datasets/test_tuple_graphs.cpp datasets/test_knowledge_base.cpp
+        frontend/golden.cpp)
     target_link_libraries(mymyr_datasets_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_datasets_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
