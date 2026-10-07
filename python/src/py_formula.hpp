@@ -111,6 +111,11 @@ using AtomLike = Arg<std::variant<PyGroundAtom, std::string, int, AtomTuple>>;
 /// A ground literal: a GroundLiteral, a ground atom (positive), or '(not (on a b))'.
 using GroundLiteralLike = std::variant<PyGroundLiteral, PyGroundAtom, std::string, AtomTuple>;
 
+/// An object: a mymyr.formalism.Object, a name, or an index.
+using ObjectLike = std::variant<ObjectView, std::string, int>;
+/// A partial binding: {variable index or name: object}, or one entry per variable with None for the free ones.
+using PartialArg = Arg<std::variant<nb::typed<nb::dict, std::variant<int, std::string, PyVariable>, std::optional<ObjectLike>>,
+                                     nb::typed<nb::sequence, std::optional<ObjectLike>>>>;
 // ------------------------------------------------------------------------------------------------ makers
 
 [[nodiscard]] FormulaOwner bare_owner(DataPtr data);

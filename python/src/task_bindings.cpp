@@ -1085,11 +1085,6 @@ using SchemaArg = Arg<std::variant<std::string, int>>;
 /// What Task.bindings enumerates: a schema (name or index), a ConjunctiveCondition, or a GroundCondition (as a
 /// condition without variables).
 using TargetArg = Arg<std::variant<std::string, int, PyConjunctiveCondition, PyGroundCondition>>;
-/// An object: a mymyr.formalism.Object, a name, or an index.
-using ObjectLike = std::variant<ObjectView, std::string, int>;
-/// A partial binding: {variable index or name: object}, or one entry per variable with None for the free ones.
-using PartialArg = Arg<std::variant<nb::typed<nb::dict, std::variant<int, std::string, PyVariable>, std::optional<ObjectLike>>,
-                                     nb::typed<nb::sequence, std::optional<ObjectLike>>>>;
 /// A limit (None: no limit).
 using LimitArg = Arg<int>;
 using ObjectTuple = nb::typed<nb::tuple, ObjectView, nb::ellipsis>;
@@ -1422,6 +1417,8 @@ Arg<PyConjunctiveCondition> make_condition(const Owner& o, ConjunctiveCondition&
 using HoldsArg = Arg<std::variant<PyGroundAtom, PyGroundLiteral, PyGroundCondition, std::string, int, AtomTuple>>;
 /// A term: an Object, an object name or index, a variable '?x', or a Variable.
 using TermArg = std::variant<ObjectView, PyVariable, std::string, int>;
+/// The first argument of Task.atom / Task.literal: a predicate (then the terms follow), or a whole atom or literal.
+using FormulaHead = Arg<std::variant<std::string, int, PredicateView, PyGroundAtom, PyLiftedAtom, PyGroundLiteral, PyLiteral, AtomTuple>>;
 /// A parameter of Task.condition: '?x', a Variable, or (name, type) / (name, [types]).
 using ParameterArg = std::variant<std::string, PyVariable, nb::typed<nb::tuple, std::string, std::variant<std::string, TypeView>>,
                                   nb::typed<nb::tuple, std::string, nb::typed<nb::sequence, std::variant<std::string, TypeView>>>>;
@@ -1601,7 +1598,7 @@ void bind_task_api(nb::class_<C>& cls)
             "applicability.")
         .def(
             "atom",
-            [owner](Self self, nb::handle predicate, nb::args terms) {
+            [owner](Self self, FormulaHead predicate, nb::args terms) {
                 const LiteralSpec l = formula_args(*self.p->core, predicate, terms);
                 if (!l.positive)
                     throw nb::value_error("mymyr: atom() takes an atom; literal() makes a negative literal");
@@ -1614,7 +1611,7 @@ void bind_task_api(nb::class_<C>& cls)
             "(numbered by first appearance). Arities are checked; whether the atom holds anywhere is not.")
         .def(
             "literal",
-            [owner](Self self, nb::handle predicate, nb::args terms, bool positive) {
+            [owner](Self self, FormulaHead predicate, nb::args terms, bool positive) {
                 LiteralSpec l = formula_args(*self.p->core, predicate, terms);
                 l.positive = l.positive == positive;
                 return Arg<std::variant<PyGroundLiteral, PyLiteral>>(make_formula(task_owner(owner(self)), l, true));

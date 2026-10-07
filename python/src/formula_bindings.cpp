@@ -144,28 +144,39 @@ u64 ground_atom_hash(const GroundAtom& a)
 
 // ------------------------------------------------------------------------------------------------ views
 
-nb::tuple type_tuple(const DataPtr& t, std::span<const TypeId> types)
+/// A tuple typed as tuple[T, ...] in the stubs.
+template<class T>
+using TupleOf = nb::typed<nb::tuple, T, nb::ellipsis>;
+template<class T>
+TupleOf<T> tuple_of(const nb::list& l)
+{
+    return TupleOf<T>(nb::tuple(l));
+}
+using Term = std::variant<ObjectView, PyVariable>;
+
+
+TupleOf<TypeView> type_tuple(const DataPtr& t, std::span<const TypeId> types)
 {
     nb::list l;
     for (TypeId ty : types)
         l.append(TypeView{{t, ty.v}});
-    return nb::tuple(l);
+    return tuple_of<TypeView>(l);
 }
 
-nb::tuple object_tuple(const DataPtr& t, std::span<const ObjectId> objects)
+TupleOf<ObjectView> object_tuple(const DataPtr& t, std::span<const ObjectId> objects)
 {
     nb::list l;
     for (ObjectId o : objects)
         l.append(ObjectView{{t, o.v}});
-    return nb::tuple(l);
+    return tuple_of<ObjectView>(l);
 }
 
-nb::tuple term_tuple(const FormulaOwner& o, std::span<const fm::Term> terms, const VariablesPtr& vars)
+TupleOf<Term> term_tuple(const FormulaOwner& o, std::span<const fm::Term> terms, const VariablesPtr& vars)
 {
     nb::list l;
     for (fm::Term x : terms)
         l.append(term_object(o, x, vars));
-    return nb::tuple(l);
+    return tuple_of<Term>(l);
 }
 
 bool all_objects(std::span<const fm::Term> terms)
@@ -186,32 +197,32 @@ ExprPool condition_pool(const FormulaOwner& o, const std::shared_ptr<const Groun
     return ExprPool{o, c, &c->exprs, &c->expr_terms, &c->constraints, nullptr};
 }
 
-nb::tuple constraint_tuple(const ExprPool& p)
+TupleOf<PyNumericConstraint> constraint_tuple(const ExprPool& p)
 {
     nb::list l;
     for (u32 i = 0; i < p.constraints->size(); ++i)
         l.append(PyNumericConstraint{p, i});
-    return nb::tuple(l);
+    return tuple_of<PyNumericConstraint>(l);
 }
 
 /// The literals of a condition whose predicate has the kind (all with `any`).
-nb::tuple literal_tuple(const PyConjunctiveCondition& c, std::optional<fm::PredKind> kind)
+TupleOf<PyLiteral> literal_tuple(const PyConjunctiveCondition& c, std::optional<fm::PredKind> kind)
 {
     const VariablesPtr vars(c.c, &c.c->variables);
     nb::list l;
     for (const auto& x : c.c->literals)
         if (!kind || c.o.data->predicates[x.predicate.v].kind == *kind)
             l.append(make_literal(c.o, x.predicate, x.positive, x.terms, vars));
-    return nb::tuple(l);
+    return tuple_of<PyLiteral>(l);
 }
 
-nb::tuple ground_literal_tuple(const PyGroundCondition& c, std::optional<fm::PredKind> kind)
+TupleOf<PyGroundLiteral> ground_literal_tuple(const PyGroundCondition& c, std::optional<fm::PredKind> kind)
 {
     nb::list l;
     for (const GroundLiteral& x : c.c->literals)
         if (!kind || c.o.data->predicates[x.atom.predicate.v].kind == *kind)
             l.append(make_ground_literal(c.o, x));
-    return nb::tuple(l);
+    return tuple_of<PyGroundLiteral>(l);
 }
 
 template<class V>
@@ -593,7 +604,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                 "The state bit of a fluent atom of a Task, or None (static and derived atoms, atoms without a slot yet "
                 "under lazy slots, atoms of a NormalizedTask).")
             .def(
-                "holds", [](const PyGroundAtom& a, nb::handle state) {
+                "holds", [](const PyGroundAtom& a, Arg<PyState> state) {
                     const PyState& s = formula_state(a.o, state);
                     return mymyr::holds(*s.core->task, s.s.view(), a.a);
                 },
@@ -619,7 +630,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
             .def_prop_ro("positive", [](const PyGroundLiteral& l) { return l.l.positive; })
             .def_prop_ro("objects", [](const PyGroundLiteral& l) { return object_tuple(l.o.data, l.l.atom.objects); })
             .def(
-                "holds", [](const PyGroundLiteral& l, nb::handle state) {
+                "holds", [](const PyGroundLiteral& l, Arg<PyState> state) {
                     const PyState& s = formula_state(l.o, state);
                     return mymyr::holds(*s.core->task, s.s.view(), l.l);
                 },
@@ -671,7 +682,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
             .def_prop_ro("terms", [](const PyExpression& e) {
                 const auto& x = (*e.p.exprs)[e.i];
                 if (x.op != fm::ExprOp::Function)
-                    return nb::tuple();
+                    return tuple_of<Term>(nb::list());
                 return term_tuple(e.p.o, std::span(*e.p.terms).subspan(x.terms.begin, x.terms.count), e.p.vars);
             })
             .def_prop_ro("children", [](const PyExpression& e) {
@@ -684,7 +695,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                     l.append(PyExpression{e.p, x.a});
                     l.append(PyExpression{e.p, x.b});
                 }
-                return nb::tuple(l);
+                return tuple_of<PyExpression>(l);
             })
             .def("__eq__",
                  [](const PyExpression& a, nb::handle b) -> nb::object {
@@ -725,7 +736,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                           nb::list l;
                           for (u32 v = 0; v < x.c->arity(); ++v)
                               l.append(term_object(x.o, static_cast<fm::Term>(v), vars));
-                          return nb::tuple(l);
+                          return tuple_of<PyVariable>(l);
                       })
             .def_prop_ro("arity", [](const PyConjunctiveCondition& x) { return x.c->arity(); }, "The number of variables.")
             .def_prop_ro("literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, std::nullopt); })
@@ -739,13 +750,13 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                     nb::list l;
                     for (const auto& e : x.c->equalities)
                         l.append(nb::make_tuple(term_object(x.o, e.lhs, vars), term_object(x.o, e.rhs, vars), e.positive));
-                    return nb::tuple(l);
+                    return tuple_of<nb::typed<nb::tuple, Term, Term, bool>>(l);
                 },
                 "(lhs, rhs, positive) per (in)equality of two terms: lhs == rhs if positive, else lhs != rhs")
             .def_prop_ro("numeric_constraints", [](const PyConjunctiveCondition& x) { return constraint_tuple(condition_pool(x.o, x.c)); })
             .def(
                 "ground",
-                [](const PyConjunctiveCondition& x, nb::handle state, nb::handle limit, nb::handle partial) {
+                [](const PyConjunctiveCondition& x, Arg<PyState> state, Arg<int> limit, PartialArg partial) {
                     const PyState& s = formula_state(x.o, state);
                     const Task& task = *s.core->task;
                     const std::vector<std::optional<ObjectId>> fixed = condition_partial(*s.core, x.c, partial);
@@ -757,7 +768,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                             return found.size() < cap;
                         });
                     const FormulaOwner o = x.o.task.is_none() ? task_owner(Owner{s.core, s.owner}) : x.o;
-                    nb::list out;
+                    nb::typed<nb::list, PyGroundCondition> out{nb::list()};
                     for (GroundCondition& g : found)
                         out.append(make_ground_condition(o, std::move(g)));
                     return out;
@@ -809,7 +820,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
             .def_prop_ro("numeric_constraints", [](const PyGroundCondition& x) { return constraint_tuple(condition_pool(x.o, x.c)); })
             .def(
                 "holds",
-                [](const PyGroundCondition& x, nb::handle state) {
+                [](const PyGroundCondition& x, Arg<PyState> state) {
                     const PyState& s = formula_state(x.o, state);
                     return mymyr::holds(*s.core->task, s.s.view(), *x.c);
                 },
@@ -817,7 +828,7 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                 "Truth in a state: static literals by the task's static facts, fluent ones by the state, derived ones by "
                 "the axioms, numeric constraints by the state's values (an undefined value makes a comparison false).")
             .def(
-                "lift", [](const PyGroundCondition& x, bool add_inequalities) { return make_conjunctive_condition(x.o, x.c->lift(add_inequalities)); },
+                "lift", [](const PyGroundCondition& x, bool add_inequalities) { return Arg<PyConjunctiveCondition>(make_conjunctive_condition(x.o, x.c->lift(add_inequalities))); },
                 "add_inequalities"_a = false,
                 "The ConjunctiveCondition with every object replaced by a variable ?x<i>, numbered by first appearance "
                 "(literals, then numeric constraints), untyped. With add_inequalities, every pair of variables gets an "

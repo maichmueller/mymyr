@@ -98,7 +98,7 @@ std::string term_str(const TaskData& d, fm::Term x, const Variables& vars)
 }
 
 /// The literals of a pool range as Literal values over `vars`; `positive`: only those of that polarity.
-nb::tuple literal_tuple(const DataPtr& t, fm::Range r, const VariablesPtr& vars, std::optional<bool> positive)
+nb::typed<nb::tuple, PyLiteral, nb::ellipsis> literal_tuple(const DataPtr& t, fm::Range r, const VariablesPtr& vars, std::optional<bool> positive)
 {
     nb::list l;
     const FormulaOwner o = bare_owner(t);
@@ -110,7 +110,7 @@ nb::tuple literal_tuple(const DataPtr& t, fm::Range r, const VariablesPtr& vars,
         const auto terms = t->terms_of(x);
         l.append(make_literal(o, x.pred, x.positive, std::vector<fm::Term>(terms.begin(), terms.end()), vars));
     }
-    return nb::tuple(l);
+    return nb::typed<nb::tuple, PyLiteral, nb::ellipsis>(nb::tuple(l));
 }
 
 // ------------------------------------------------------------------------------------------------ descriptor table
@@ -181,7 +181,7 @@ nb::list object_list(const DataPtr& t, fm::Range r)
         l.append(ObjectV{{t, o.v}});
     return l;
 }
-nb::tuple ground_atoms(const DataPtr& t, const std::vector<fm::GroundAtom>& atoms)
+nb::typed<nb::tuple, PyGroundAtom, nb::ellipsis> ground_atoms(const DataPtr& t, const std::vector<fm::GroundAtom>& atoms)
 {
     nb::list l;
     const FormulaOwner o = bare_owner(t);
@@ -190,7 +190,7 @@ nb::tuple ground_atoms(const DataPtr& t, const std::vector<fm::GroundAtom>& atom
         const auto objects = t->objects_of(a);
         l.append(make_ground_atom(o, GroundAtom{a.pred, std::vector<ObjectId>(objects.begin(), objects.end())}));
     }
-    return nb::tuple(l);
+    return nb::typed<nb::tuple, PyGroundAtom, nb::ellipsis>(nb::tuple(l));
 }
 }  // namespace
 
@@ -297,7 +297,7 @@ void bind_formalism(nb::module_& parent)
                 return parameter_list(v.t, v.d().conditional_effects[v.i].extra_params, v.schema_params.count);
             }, "forall parameters (positions continue after the schema's)")
             .field("condition", [](const ConditionalEffectV& v) {
-                return make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::effect_condition(v.d(), SchemaId{v.schema}, v.i));
+                return Arg<PyConjunctiveCondition>(make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::effect_condition(v.d(), SchemaId{v.schema}, v.i)));
             }, "a ConjunctiveCondition over the schema's parameters followed by the forall parameters")
             .field("add_effects", [vars_of](const ConditionalEffectV& v) {
                 return literal_tuple(v.t, v.d().conditional_effects[v.i].effects, vars_of(v), true);
@@ -332,7 +332,7 @@ void bind_formalism(nb::module_& parent)
                    "parameters written in the PDDL; the rest were introduced by normalization")
             .field("parameters", [](const SchemaV& v) { return parameter_list(v.t, v.d().schemas[v.i].params); })
             .field("precondition", [](const SchemaV& v) {
-                return make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::precondition(v.d(), SchemaId{v.i}));
+                return Arg<PyConjunctiveCondition>(make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::precondition(v.d(), SchemaId{v.i})));
             }, "a ConjunctiveCondition over the parameters")
             .field("effects", [](const SchemaV& v) {
                 nb::list l;
@@ -356,11 +356,11 @@ void bind_formalism(nb::module_& parent)
             .field("head", [](const AxiomV& v) {
                 const auto& a = v.d().axioms[v.i];
                 const auto terms = v.d().terms_of(a.head);
-                return make_lifted_atom(bare_owner(v.t), a.head.pred, std::vector<fm::Term>(terms.begin(), terms.end()),
-                                        scope_variables(v.d(), a.params));
+                return Arg<PyLiftedAtom>(make_lifted_atom(bare_owner(v.t), a.head.pred, std::vector<fm::Term>(terms.begin(), terms.end()),
+                                                          scope_variables(v.d(), a.params)));
             }, "an Atom of a derived predicate over the parameters")
             .field("body", [](const AxiomV& v) {
-                return make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::axiom_body(v.d(), v.i));
+                return Arg<PyConjunctiveCondition>(make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::axiom_body(v.d(), v.i)));
             }, "a ConjunctiveCondition over the parameters")
             .field("from_problem", [](const AxiomV& v) { return v.d().axioms[v.i].from_problem; })
             .finish();
@@ -407,7 +407,7 @@ void bind_formalism(nb::module_& parent)
                 return l;
             })
             .field("auxiliary_initial", [](const FormalismTask& v) { return v.t->auxiliary_initial; })
-            .field("goal", [](const FormalismTask& v) { return make_ground_condition(bare_owner(v.t), GroundCondition::goal(*v.t)); },
+            .field("goal", [](const FormalismTask& v) { return Arg<PyGroundCondition>(make_ground_condition(bare_owner(v.t), GroundCondition::goal(*v.t))); },
                    "a GroundCondition")
             .field("metric", [](const FormalismTask& v) -> nb::object {
                 if (!v.t->metric)

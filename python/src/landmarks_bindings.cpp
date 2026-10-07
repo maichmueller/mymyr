@@ -44,7 +44,7 @@ using OrderingsArg = Arg<nb::typed<nb::iterable, nb::typed<nb::tuple, AtomLike, 
 using AtomList = nb::typed<nb::list, PyGroundAtom>;
 using ActionList = nb::typed<nb::list, PyAction>;
 using ReachabilityArg = Arg<PyRelaxedReachability>;
-using PredicateArg = Arg<std::variant<std::string, int>>;
+using PredicateArg = Arg<std::variant<std::string, int, PredicateView>>;
 /// A term of a conjunctive query: an int is a variable index, a str an object name.
 using TermArg = std::variant<int, std::string>;
 using QueryLiteralArg = std::variant<nb::typed<nb::tuple, std::string, nb::typed<nb::sequence, TermArg>>,
@@ -131,8 +131,16 @@ u32 predicate_arg(const Owner& o, nb::handle h)
             throw nb::index_error("mymyr: predicate index out of range");
         return static_cast<u32>(p);
     }
+    if (nb::isinstance<PredicateView>(h))
+    {
+        const PredicateView& v = *nb::inst_ptr<PredicateView>(h);
+        if (v.t.get() == o.core->data.get())
+            return v.i;
+        const auto n = v.d().str(v.d().predicates[v.i].name);
+        return predicate_arg(o, nb::str(n.data(), n.size()));
+    }
     if (!nb::isinstance<nb::str>(h))
-        throw nb::type_error("mymyr: a predicate is a name or an index");
+        throw nb::type_error("mymyr: a predicate is a name, an index or a mymyr.formalism.Predicate");
     const auto& names = o.core->names().predicates;
     const auto it = names.find(nb::cast<std::string>(h));
     if (it == names.end())
@@ -654,7 +662,7 @@ void bind_landmarks(nb::module_& m)
             [](const PyReachabilityTable& t, PredicateArg predicate) {
                 return atom_list(t.o, t.t->atoms(PredicateId{predicate_arg(t.o, predicate)}));
             },
-            "predicate"_a, "The reachable atoms of a fluent or derived predicate (name or index), in derivation order.")
+            "predicate"_a, "The reachable atoms of a fluent or derived predicate (name, index or Predicate), in derivation order.")
         .def_prop_ro("num_atoms", [](const PyReachabilityTable& t) { return t.t->num_atoms(); })
         .def_prop_ro("num_fluent_atoms", [](const PyReachabilityTable& t) { return t.t->num_fluent_atoms(); })
         .def_prop_ro("num_derived_atoms", [](const PyReachabilityTable& t) { return t.t->num_derived_atoms(); })
