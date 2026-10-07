@@ -1,6 +1,8 @@
 // BrFS: state, generated and goal-state counts equal the probe's on the suite in every mode and with every store
 // (the full suite with MYMYR_TEST_FULL_SUITE=1, otherwise the tasks up to 100k states), deterministic ids
-// independent of the thread count (gate 4), and plans that reach the goal.
+// independent of the thread count (gate 4), and plans that reach the goal (shortest ones at every thread count); the
+// observer's events equal the statistics, per worker with make_worker; budgets, cancellation and on_progress set the
+// status.
 
 #include "../support/suite.hpp"
 #include "mymyr/search/brfs.hpp"
@@ -8,6 +10,16 @@
 #include "mymyr/task/workspace.hpp"
 
 #include <gtest/gtest.h>
+
+#include <array>
+#include <atomic>
+#include <limits>
+#include <memory>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 using namespace mymyr;
 using namespace mymyr::test;
@@ -277,5 +289,203 @@ TEST(Brfs, TruncatedLayers)
     o.layers = {};
     o.layers.max_next_layer_states = 5;  // Queue
     EXPECT_THROW((void)brfs(*task, o), std::invalid_argument);
+}
+
+TEST(Brfs, ThreadsReturnAShortestPlan)
+{
+    for (const char* name : {"gripper__prob05", "depot__p02", "philosophers__p03-phil4"})
+    {
+        const auto task = Task::from_text_file(task_path(name));
+        BrfsOptions bo;
+        bo.stop_at_goal = true;
+        const BrfsResult one = brfs(*task, bo);
+        ASSERT_TRUE(one.solved) << name;
+        bo.store = BrfsOptions::Store::Concurrent;
+        for (u32 T : {1u, 2u, 4u})
+        {
+            bo.threads = T;
+            const BrfsResult r = brfs(*task, bo);
+            EXPECT_EQ(r.status, search::SearchStatus::Solved) << name << " T=" << T;
+            EXPECT_EQ(r.plan.size(), one.plan.size()) << name << " T=" << T;
+            EXPECT_TRUE(replays(*task, r.plan)) << name << " T=" << T;
+        }
+    }
+}
+
+/// Counts the events it receives; worker observers are made per thread and summed by the root.
+struct Counting : search::SearchObserver
+{
+    u64 starts = 0, expanded = 0, generated = 0, fresh = 0, passes = 0, solutions = 0, ends = 0;
+    u64 pass_expanded = 0, pass_generated = 0, pass_states = 0;
+    search::SearchStatus status = search::SearchStatus::Failed;
+    std::vector<Action> plan;
+    bool parallel = false;
+    std::vector<std::shared_ptr<Counting>> workers;
+
+    void on_start(StateView) override { ++starts; }
+    void on_expand(u64, StateView) override { ++expanded; }
+    void on_generate(u64, const Action&, u64, StateView, bool is_new) override
+    {
+        ++generated;
+        fresh += is_new;
+    }
+    void on_pass(u32, const search::SearchStatistics& s) override
+    {
+        ++passes;
+        pass_expanded += s.expanded;
+        pass_generated += s.generated;
+        pass_states += s.states;
+    }
+    void on_solution(std::span<const Action> p, double) override
+    {
+        ++solutions;
+        plan.assign(p.begin(), p.end());
+    }
+    void on_end(search::SearchStatus s, const search::SearchStatistics&) override
+    {
+        ++ends;
+        status = s;
+    }
+    std::shared_ptr<SearchObserver> make_worker(u32) override
+    {
+        if (!parallel)
+            return nullptr;
+        workers.push_back(std::make_shared<Counting>());
+        return workers.back();
+    }
+    [[nodiscard]] std::array<u64, 3> hot() const
+    {
+        std::array<u64, 3> n{expanded, generated, fresh};
+        for (const auto& w : workers)
+            n = {n[0] + w->expanded, n[1] + w->generated, n[2] + w->fresh};
+        return n;
+    }
+};
+
+TEST(Brfs, ObserverEventsEqualTheStatistics)
+{
+    const auto task = Task::from_text_file(task_path("depot__p02"));
+    using S = BrfsOptions::Store;
+    const std::tuple<S, u32, bool> cases[] = {{S::Flat, 1, false},       {S::Chunked, 1, false},
+                                              {S::Compact, 1, false},    {S::Concurrent, 1, false},
+                                              {S::Concurrent, 4, false}, {S::Concurrent, 2, true},
+                                              {S::Concurrent, 4, true}};
+    for (const auto& [store, threads, parallel] : cases)
+        for (bool stop : {false, true})
+        {
+            Counting o;
+            o.parallel = parallel;
+            BrfsOptions bo;
+            bo.store = store;
+            bo.threads = threads;
+            bo.stop_at_goal = stop;
+            bo.observer = &o;
+            const BrfsResult r = brfs(*task, bo);
+            const std::string where = std::string(r.store) + " T=" + std::to_string(threads)
+                                      + (parallel ? " workers" : "") + (stop ? " stop" : "");
+            // without make_worker the search runs on one thread and sends everything to the root
+            EXPECT_EQ(r.threads, parallel ? threads : 1u) << where;
+            EXPECT_EQ(o.workers.size(), parallel ? threads : 0u) << where;
+            if (parallel)
+            {
+                EXPECT_EQ(o.expanded + o.generated, 0u) << where;
+            }
+            const auto [expanded, generated, fresh] = o.hot();
+            EXPECT_EQ(expanded, r.expanded) << where;
+            EXPECT_EQ(generated, r.generated) << where;
+            EXPECT_EQ(o.starts, 1u) << where;
+            EXPECT_EQ(o.ends, 1u) << where;
+            EXPECT_EQ(o.status, r.status) << where;
+            EXPECT_EQ(o.passes, r.layers) << where;
+            EXPECT_EQ(o.pass_expanded, r.expanded) << where;
+            EXPECT_EQ(o.pass_generated, r.generated) << where;
+            if (stop)
+            {
+                EXPECT_EQ(r.status, search::SearchStatus::Solved) << where;
+                ASSERT_EQ(o.solutions, 1u) << where;
+                EXPECT_EQ(o.plan.size(), r.plan.size()) << where;
+                EXPECT_TRUE(replays(*task, o.plan)) << where;
+            }
+            else
+            {
+                EXPECT_EQ(r.status, search::SearchStatus::Exhausted) << where;
+                EXPECT_EQ(o.solutions, 0u) << where;
+                EXPECT_EQ(fresh, r.states - 1) << where;
+                EXPECT_EQ(o.pass_states, r.states - 1) << where;
+            }
+        }
+}
+
+TEST(Brfs, BudgetsCancelAndProgressSetTheStatus)
+{
+    const auto task = Task::from_text_file(task_path("gripper__prob05"));
+    using S = BrfsOptions::Store;
+    using search::SearchStatus;
+    const std::pair<S, u32> cases[] = {{S::Flat, 1}, {S::Chunked, 1}, {S::Compact, 1}, {S::Concurrent, 3}};
+    for (const auto& [store, threads] : cases)
+    {
+        const std::string where = "store " + std::to_string(static_cast<int>(store));
+        BrfsOptions bo;
+        bo.store = store;
+        bo.threads = threads;
+        bo.max_seconds = 0;
+        EXPECT_EQ(brfs(*task, bo).status, SearchStatus::OutOfTime) << where;
+        bo.max_seconds = std::numeric_limits<double>::infinity();
+        bo.cancel.request();
+        BrfsResult r = brfs(*task, bo);
+        EXPECT_EQ(r.status, SearchStatus::Cancelled) << where;
+        EXPECT_FALSE(r.exhausted) << where;
+        bo.cancel = {};
+        bo.max_states = 1000;
+        EXPECT_EQ(brfs(*task, bo).status, SearchStatus::OutOfStates) << where;
+        bo.max_states = std::numeric_limits<u64>::max();
+        struct Stop : search::SearchObserver
+        {
+            u64 calls = 0;
+            bool on_progress(const search::SearchStatistics& s) override
+            {
+                ++calls;
+                return s.expanded < 500;
+            }
+            std::shared_ptr<SearchObserver> make_worker(u32) override { return std::make_shared<Stop>(); }
+        } stop;
+        bo.observer = &stop;
+        bo.progress_interval = 100;
+        r = brfs(*task, bo);
+        EXPECT_EQ(r.status, SearchStatus::Cancelled) << where;
+        EXPECT_LT(r.expanded, (500u + 100u + 64u) * threads) << where;  // on_progress sees each worker's counts
+        bo.observer = nullptr;
+        EXPECT_EQ(brfs(*task, bo).status, SearchStatus::Exhausted) << where;
+    }
+}
+
+TEST(Brfs, CancelFromAnotherThread)
+{
+    const auto task = Task::from_text_file(task_path("gripper__prob05"));
+    for (u32 T : {1u, 4u})
+    {
+        BrfsOptions bo;
+        bo.store = BrfsOptions::Store::Concurrent;
+        bo.threads = T;
+        std::atomic<bool> started{false};
+        std::thread canceller([&started, token = bo.cancel] {
+            while (!started.load())
+                std::this_thread::yield();
+            token.request();
+        });
+        struct Start : search::SearchObserver
+        {
+            std::atomic<bool>* started;
+            void on_start(StateView) override { started->store(true); }
+        } start;
+        start.started = &started;
+        bo.observer = &start;
+        const BrfsResult r = brfs(*task, bo);
+        canceller.join();
+        // the search may finish before the request lands; when it does not, it stops as cancelled
+        EXPECT_TRUE(r.status == search::SearchStatus::Cancelled || r.status == search::SearchStatus::Exhausted)
+            << search::to_string(r.status);
+        EXPECT_EQ(r.exhausted, r.status == search::SearchStatus::Exhausted);
+    }
 }
 }  // namespace
