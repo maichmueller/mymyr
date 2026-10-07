@@ -1,7 +1,8 @@
 #pragma once
 // Conditions as values over the predicates, objects, types and functions of one task: lifted conjunctive conditions
 // (ConjunctiveCondition) and ground ones (GroundAtom, GroundLiteral, GroundCondition), with their evaluation in a
-// state.
+// state. Making one from the normalized task and printing it need the task's data only (formalism::TaskData); the
+// overloads taking a Task read its data.
 //
 //   GroundCondition g;
 //   g.literals.push_back({{on, {a, b}}, true});            // (on a b)
@@ -69,13 +70,17 @@ struct ConjunctiveCondition
     /// The precondition of a schema: its parameters (with their names and declared types), the literals (each once)
     /// and the numeric constraints of its precondition. Its bindings are the bindings of the schema's precondition
     /// alone (the schema's own bindings also apply the numeric effect rules).
+    [[nodiscard]] static ConjunctiveCondition precondition(const formalism::TaskData& task, SchemaId schema);
     [[nodiscard]] static ConjunctiveCondition precondition(const Task& task, SchemaId schema);
     /// The condition of a schema's conditional effect (effect: index into the task's conditional effects, one of the
     /// schema's): the schema's parameters followed by the effect's forall parameters, and the effect's condition.
+    [[nodiscard]] static ConjunctiveCondition effect_condition(const formalism::TaskData& task, SchemaId schema, u32 effect);
     [[nodiscard]] static ConjunctiveCondition effect_condition(const Task& task, SchemaId schema, u32 effect);
     /// The body of an axiom over its parameters.
+    [[nodiscard]] static ConjunctiveCondition axiom_body(const formalism::TaskData& task, u32 axiom);
     [[nodiscard]] static ConjunctiveCondition axiom_body(const Task& task, u32 axiom);
     /// The task's goal: no variables; its single (empty) binding exists iff the goal holds (Task::is_goal).
+    [[nodiscard]] static ConjunctiveCondition goal(const formalism::TaskData& task);
     [[nodiscard]] static ConjunctiveCondition goal(const Task& task);
 
     /// Appends the numeric constraint written in PDDL, e.g. "(>= (fuel ?x) (* 2 (distance ?x a)))": a comparator
@@ -97,6 +102,7 @@ struct ConjunctiveCondition
 
     /// PDDL-like text, e.g. "(?x ?y - block) (and (on ?x ?y) (not (clear ?y)) (!= ?x a) (>= (fuel ?x) 1))". Numbers
     /// are written in their shortest exact form, so add_constraint() reads a constraint back unchanged.
+    [[nodiscard]] std::string str(const formalism::TaskData& task) const;
     [[nodiscard]] std::string str(const Task& task) const;
 
     friend bool operator==(const ConjunctiveCondition& a, const ConjunctiveCondition& b);
@@ -132,6 +138,7 @@ struct GroundCondition
     std::vector<formalism::Term> expr_terms;
 
     /// The task's goal (each literal once, then its numeric constraints).
+    [[nodiscard]] static GroundCondition goal(const formalism::TaskData& task);
     [[nodiscard]] static GroundCondition goal(const Task& task);
 
     /// Appends a ground numeric constraint written in PDDL (ConjunctiveCondition::add_constraint without variables).
@@ -149,6 +156,7 @@ struct GroundCondition
     void validate(const Task& task) const;
 
     /// PDDL text, e.g. "(and (on a b) (not (clear c)) (>= (fuel a) 1))".
+    [[nodiscard]] std::string str(const formalism::TaskData& task) const;
     [[nodiscard]] std::string str(const Task& task) const;
 
     friend bool operator==(const GroundCondition& a, const GroundCondition& b);

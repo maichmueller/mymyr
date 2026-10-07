@@ -508,9 +508,8 @@ private:
 
 // ================================================================================================ ConjunctiveCondition
 
-ConjunctiveCondition ConjunctiveCondition::precondition(const Task& task, SchemaId schema)
+ConjunctiveCondition ConjunctiveCondition::precondition(const TaskData& T, SchemaId schema)
 {
-    const TaskData& T = task.data();
     if (schema.v >= T.schemas.size())
         throw std::invalid_argument("mymyr: precondition: schema index out of range");
     const Schema& S = T.schemas[schema.v];
@@ -520,9 +519,8 @@ ConjunctiveCondition ConjunctiveCondition::precondition(const Task& task, Schema
     return c;
 }
 
-ConjunctiveCondition ConjunctiveCondition::effect_condition(const Task& task, SchemaId schema, u32 effect)
+ConjunctiveCondition ConjunctiveCondition::effect_condition(const TaskData& T, SchemaId schema, u32 effect)
 {
-    const TaskData& T = task.data();
     if (schema.v >= T.schemas.size())
         throw std::invalid_argument("mymyr: effect_condition: schema index out of range");
     const Schema& S = T.schemas[schema.v];
@@ -537,9 +535,8 @@ ConjunctiveCondition ConjunctiveCondition::effect_condition(const Task& task, Sc
     return c;
 }
 
-ConjunctiveCondition ConjunctiveCondition::axiom_body(const Task& task, u32 axiom)
+ConjunctiveCondition ConjunctiveCondition::axiom_body(const TaskData& T, u32 axiom)
 {
-    const TaskData& T = task.data();
     if (axiom >= T.axioms.size())
         throw std::invalid_argument("mymyr: axiom_body: axiom index out of range");
     ConjunctiveCondition c;
@@ -548,10 +545,10 @@ ConjunctiveCondition ConjunctiveCondition::axiom_body(const Task& task, u32 axio
     return c;
 }
 
-ConjunctiveCondition ConjunctiveCondition::goal(const Task& task)
+ConjunctiveCondition ConjunctiveCondition::goal(const TaskData& T)
 {
     ConjunctiveCondition c;
-    copy_condition(task.data(), task.data().goal, c);
+    copy_condition(T, T.goal, c);
     return c;
 }
 
@@ -630,9 +627,8 @@ void ConjunctiveCondition::validate(const Task& task) const
     check_exprs(task, constraints, exprs, expr_terms, term_ok);
 }
 
-std::string ConjunctiveCondition::str(const Task& task) const
+std::string ConjunctiveCondition::str(const TaskData& T) const
 {
-    const TaskData& T = task.data();
     auto var = [&](u32 v)
     { return "?" + (v < variables.size() && !variables[v].name.empty() ? variables[v].name : "x" + std::to_string(v)); };
     auto term = [&](Term t) { return is_object(t) ? object_text(T, term_object(t)) : var(term_parameter(t)); };
@@ -689,11 +685,22 @@ bool operator==(const ConjunctiveCondition& a, const ConjunctiveCondition& b)
     return true;
 }
 
+ConjunctiveCondition ConjunctiveCondition::precondition(const Task& task, SchemaId schema) { return precondition(task.data(), schema); }
+ConjunctiveCondition ConjunctiveCondition::effect_condition(const Task& task, SchemaId schema, u32 effect)
+{
+    return effect_condition(task.data(), schema, effect);
+}
+ConjunctiveCondition ConjunctiveCondition::axiom_body(const Task& task, u32 axiom) { return axiom_body(task.data(), axiom); }
+ConjunctiveCondition ConjunctiveCondition::goal(const Task& task) { return goal(task.data()); }
+std::string ConjunctiveCondition::str(const Task& task) const { return str(task.data()); }
+
 // ================================================================================================ GroundCondition
 
-GroundCondition GroundCondition::goal(const Task& task)
+GroundCondition GroundCondition::goal(const Task& task) { return goal(task.data()); }
+std::string GroundCondition::str(const Task& task) const { return str(task.data()); }
+
+GroundCondition GroundCondition::goal(const TaskData& T)
 {
-    const TaskData& T = task.data();
     GroundCondition g;
     for (const Literal& l : T.literals_of(T.goal))
     {
@@ -765,9 +772,8 @@ void GroundCondition::validate(const Task& task) const
     check_exprs(task, constraints, exprs, expr_terms, term_ok);
 }
 
-std::string GroundCondition::str(const Task& task) const
+std::string GroundCondition::str(const TaskData& T) const
 {
-    const TaskData& T = task.data();
     auto term = [&](Term t) { return is_object(t) ? object_text(T, term_object(t)) : "?" + std::to_string(t); };
     std::string out = "(and";
     for (const GroundLiteral& l : literals)
