@@ -1473,6 +1473,14 @@ public:
     TaskData& t;
 };
 
+/// The canonical order of type names: the built-in types `object` and `number` first, the others by name.
+int type_name_class(std::string_view name) { return name == "object" ? 0 : name == "number" ? 1 : 2; }
+bool type_name_less(std::string_view a, std::string_view b)
+{
+    const int ca = type_name_class(a), cb = type_name_class(b);
+    return ca != cb ? ca < cb : a < b;
+}
+
 void add_types(DomainState& ds, TaskData& t, loki::Type ty)
 {
     if (ds.type_of.contains(ty))
@@ -1482,13 +1490,15 @@ void add_types(DomainState& ds, TaskData& t, loki::Type ty)
         ds.type_of.emplace(ty, it->second);
         return;
     }
-    for (const auto& b : ty->get_bases())
+    loki::TypeList sorted_bases = ty->get_bases();  // loki's order of the bases of one type is a hash-table order
+    std::sort(sorted_bases.begin(), sorted_bases.end(), [](const loki::Type& a, const loki::Type& b) { return type_name_less(a->get_name(), b->get_name()); });
+    for (const auto& b : sorted_bases)
         add_types(ds, t, b);
     const u32 id = static_cast<u32>(t.types.size());
     Type out;
     out.name = t.intern_string(ty->get_name());
     std::vector<TypeId> bases;
-    for (const auto& b : ty->get_bases())
+    for (const auto& b : sorted_bases)
         bases.push_back(TypeId{ds.type_of.at(b)});
     out.bases = TaskData::append<TypeId>(t.type_ids, bases);
     t.types.push_back(out);
@@ -1542,7 +1552,9 @@ Kinds domain_kinds(const DomainState& ds)
 
 std::vector<u32> hierarchy_ranks(const formalism::TaskData& t, std::span<const TypeId> declared)
 {
-    // loki: collect_types_from_hierarchy_recursively inserts each type, then recurses into its bases
+    // visit the declared types in the canonical name order, each followed by its bases (in the same order)
+    auto by_name = [&](std::vector<u32>& ids)
+    { std::sort(ids.begin(), ids.end(), [&](u32 a, u32 b) { return type_name_less(t.str(t.types[a].name), t.str(t.types[b].name)); }); };
     std::vector<u32> order;
     std::vector<bool> seen(t.types.size(), false);
     auto visit = [&](auto&& self, u32 ty) -> void
@@ -1551,11 +1563,20 @@ std::vector<u32> hierarchy_ranks(const formalism::TaskData& t, std::span<const T
             return;
         seen[ty] = true;
         order.push_back(ty);
+        std::vector<u32> bases;
         for (TypeId b : TaskData::slice(t.type_ids, t.types[ty].bases))
-            self(self, b.v);
+            bases.push_back(b.v);
+        by_name(bases);
+        for (u32 b : bases)
+            self(self, b);
     };
+    std::vector<u32> roots;
     for (TypeId ty : declared)
-        visit(visit, ty.v);
+        if (ty.v < t.types.size())
+            roots.push_back(ty.v);
+    by_name(roots);
+    for (u32 ty : roots)
+        visit(visit, ty);
     std::vector<u32> rank(t.types.size(), ~0u);
     for (size_t i = 0; i < order.size(); ++i)
         rank[order[order.size() - 1 - i]] = static_cast<u32>(i);  // reverse insertion order
@@ -1603,8 +1624,14 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
     t.domain_name = dl->get_name();
     t.requirements = requirement_strings(dl->get_requirements());
 
-    for (const auto& ty : dl->get_types())
-        add_types(*ds, t, ty);
+    {
+        // type ids in the canonical name order: loki lists the types in the iteration order of a hash table of type names, which differs
+        // between standard libraries
+        loki::TypeList types = dl->get_types();
+        std::sort(types.begin(), types.end(), [](const loki::Type& a, const loki::Type& b) { return type_name_less(a->get_name(), b->get_name()); });
+        for (const auto& ty : types)
+            add_types(*ds, t, ty);
+    }
 
     Classifier{ds->fluent_predicates, ds->derived_predicates, ds->effect_functions}.domain(dl);
 
