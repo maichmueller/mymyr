@@ -79,7 +79,7 @@ public:
     /// The tuple of vertex v: fluent atom slots of the space's task, ascending (empty for the empty tuple).
     [[nodiscard]] std::span<const u32> tuple(u32 v) const;
     /// The problem vertices of vertex v: the state-space vertices at its distance in which its tuple is novel,
-    /// ascending.
+    /// ascending (over a symmetry-reduced space: the class vertices of those states).
     [[nodiscard]] std::span<const u32> problem_vertices(u32 v) const;
     /// The edges out of / into vertex v (to distance(v) + 1 / from distance(v) - 1), ascending.
     [[nodiscard]] std::span<const u32> successors(u32 v) const;
@@ -90,7 +90,7 @@ public:
     /// The flat arrays behind the accessors: per vertex v, tuple(v) = tuple_atoms()[tuple_offsets()[v] ..
     /// tuple_offsets()[v + 1]), and likewise problem_vertices (problem_offsets(), problem_vertex_ids()), successors
     /// (successor_offsets(), successor_ids()) and predecessors; problem_vertices_at(d) is
-    /// layer_vertex_ids()[distance_offsets-like layer_offsets()[d] .. layer_offsets()[d + 1]).
+    /// layer_vertex_ids()[layer_offsets()[d] .. layer_offsets()[d + 1]).
     [[nodiscard]] std::span<const u32> tuple_offsets() const noexcept { return m_tuple_offsets; }
     [[nodiscard]] std::span<const u32> tuple_atoms() const noexcept { return m_tuple_atoms; }
     [[nodiscard]] std::span<const u32> problem_offsets() const noexcept { return m_problem_offsets; }

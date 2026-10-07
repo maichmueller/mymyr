@@ -17,6 +17,7 @@
 #include "arrays.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
+#include "py_domain.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 #include "rl_imports.hpp"
@@ -28,18 +29,26 @@
 #include "mymyr/task/workspace.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/filesystem.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string_view>
+#include <thread>
+#include <variant>
 
 namespace mymyr::python
 {
@@ -733,6 +742,117 @@ struct TaskList
     }
 };
 
+#if defined(MYMYR_HAS_FRONTEND)
+/// The problem files of TaskTable.from_pddl: a list in its order; a directory's regular *.pddl files, sorted by path;
+/// the sorted matches of a glob pattern (any of *?[ in it; ** spans directories); or one file. The domain file is never
+/// one of the problems.
+std::vector<std::filesystem::path> problem_files(const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
+                                                 const std::string& domain_path)
+{
+    namespace fs = std::filesystem;
+    const auto is_domain = [&](const fs::path& p) {
+        std::error_code ec;
+        return !domain_path.empty() && fs::equivalent(p, domain_path, ec);
+    };
+    std::vector<fs::path> files;
+    if (const auto* list = std::get_if<std::vector<fs::path>>(&problems))
+        files = *list;
+    else
+    {
+        const fs::path& p = std::get<fs::path>(problems);
+        const std::string text = p.string();
+        if (fs::is_directory(p))
+        {
+            for (const auto& entry : fs::directory_iterator(p))
+                if (entry.is_regular_file() && entry.path().extension() == ".pddl" && !is_domain(entry.path()))
+                    files.push_back(entry.path());
+            std::ranges::sort(files);
+            if (files.empty())
+                throw nb::value_error(("mymyr: TaskTable.from_pddl: no problem files (*.pddl) in '" + text + "'").c_str());
+        }
+        else if (text.find_first_of("*?[") != std::string::npos)
+        {
+            for (nb::handle h : nb::module_::import_("glob").attr("glob")(text, "recursive"_a = true))
+            {
+                fs::path f = nb::cast<fs::path>(h);
+                if (fs::is_regular_file(f) && !is_domain(f))
+                    files.push_back(std::move(f));
+            }
+            std::ranges::sort(files);
+            if (files.empty())
+                throw nb::value_error(("mymyr: TaskTable.from_pddl: no problem files match '" + text + "'").c_str());
+        }
+        else
+            files.push_back(p);
+    }
+    return files;
+}
+
+/// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads.
+nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
+                           const TaskOptions& options, u32 threads)
+{
+    PyDomain dom;
+    if (nb::isinstance<PyDomain>(domain))
+        dom = *nb::inst_ptr<PyDomain>(domain);
+    else
+    {
+        const auto path = nb::cast<std::filesystem::path>(domain);
+        nb::gil_scoped_release release;
+        dom = PyDomain{frontend::Domain::from_file(path), std::make_shared<const std::string>(read_file(path.string())), path.string()};
+    }
+    const std::vector<std::filesystem::path> files = problem_files(problems, dom.path);
+    const usize n = files.size();
+    std::vector<std::shared_ptr<const formalism::TaskData>> data(n);
+    std::vector<std::shared_ptr<const TaskSource>> sources(n);
+    std::vector<TaskPtr> tasks(n);
+    {
+        nb::gil_scoped_release release;
+        std::vector<std::exception_ptr> errors(n);
+        std::atomic<usize> next{0};
+        const u32 hw = std::max(1u, std::thread::hardware_concurrency());
+        ThreadPool pool(static_cast<u32>(std::min<usize>(threads == 0 ? hw : threads, n)));
+        pool.run([&](u32) {
+            for (usize i; (i = next.fetch_add(1, std::memory_order_relaxed)) < n;)
+            {
+                try
+                {
+                    auto source = std::make_shared<TaskSource>();
+                    source->kind = TaskSource::Kind::Pddl;
+                    source->domain = dom.text ? *dom.text : std::string();
+                    source->domain_path = dom.path;
+                    source->problem = read_file(files[i].string());
+                    source->problem_path = files[i].string();
+                    data[i] = dom.d->instantiate_file(files[i]);
+                    tasks[i] = Task::create(formalism::TaskData(*data[i]), options);
+                    sources[i] = std::move(source);
+                }
+                catch (...)
+                {
+                    errors[i] = std::current_exception();
+                }
+            }
+        });
+        for (const std::exception_ptr& e : errors)
+            if (e)
+                std::rethrow_exception(e);
+    }
+    std::vector<CorePtr> cores;
+    std::vector<nb::object> objs;
+    for (usize i = 0; i < n; ++i)
+    {
+        cores.push_back(std::make_shared<PyTaskCore>(tasks[i], std::move(data[i]), std::move(sources[i])));
+        objs.push_back(nb::cast(PyTask{cores.back()}));
+    }
+    rl::TaskTablePtr table;
+    {
+        nb::gil_scoped_release release;
+        table = rl::TaskTable::create(std::move(tasks));
+    }
+    return new_table(std::move(table), std::move(cores), std::move(objs));
+}
+#endif
+
 /// A TaskSuite's pickled state: its tasks in global order (unpickled as TaskSuite.group of them).
 using SuiteState = nb::typed<nb::tuple, nb::typed<nb::list, PyTask>>;
 
@@ -1093,6 +1213,23 @@ void bind_rl(nb::module_& parent)
             "tasks"_a,
             "A table of the tasks' instances (instance i = tasks[i]). Raises ValueError for an empty list or tasks "
             "of different domains (TaskSuite.group mixes domains).")
+#if defined(MYMYR_HAS_FRONTEND)
+        .def_static(
+            "from_pddl",
+            [](Arg<std::variant<PyDomain, std::filesystem::path>> domain,
+               const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems, std::string_view atoms,
+               std::string_view matching, u32 fc, u32 fmw, u32 pilot, u32 threads) {
+                return nb::typed<nb::object, PyTable>(
+                    table_from_pddl(domain, problems, make_options(atoms, matching, fc, fmw, pilot), threads));
+            },
+            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 0,
+            "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "
+            "once). problems is a list of problem files (kept in its order), a directory (its *.pddl files sorted by "
+            "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; the domain file "
+            "is never one of the problems. The problems are instantiated and compiled on `threads` threads (0: the "
+            "hardware concurrency); instance i is the same task as Task(domain.instantiate(files[i])) with these "
+            "options. Raises ValueError when a directory or pattern has no problem files.")
+#endif
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
         .def(
             "__getitem__",
