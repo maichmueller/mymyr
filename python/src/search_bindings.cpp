@@ -191,16 +191,20 @@ struct CallbackErrors
 };
 
 /// A SearchObserver forwarding to the on_* methods a Python object defines (the others are skipped for free), and to
-/// its make_worker(k) for the parallel searches.
+/// its make_worker(k) for the parallel searches. The methods of mymyr.search.Observer that a subclass does not
+/// override carry the attribute `_mymyr_default_event` and count as not defined.
 class PyObserver final : public search::SearchObserver
 {
 public:
     PyObserver(nb::handle obj, Owner owner, CallbackErrors& errors) : m_owner(std::move(owner)), m_errors(errors)
     {
         auto get = [&](const char* name) -> nb::object {
-            if (nb::hasattr(obj, name))
-                return nb::getattr(obj, name);
-            return {};
+            if (!nb::hasattr(obj, name))
+                return {};
+            nb::object fn = nb::getattr(obj, name);
+            if (nb::hasattr(fn, "_mymyr_default_event"))
+                return {};
+            return fn;
         };
         m_start = get("on_start");
         m_expand = get("on_expand");
@@ -228,6 +232,16 @@ public:
         m_transition.reset();
         m_make_worker.reset();
         m_owner.obj.reset();
+    }
+
+    /// Whether the object defines any event or make_worker (an observer that defines none is not installed).
+    [[nodiscard]] bool defines_any() const
+    {
+        for (const nb::object* f : {&m_start, &m_expand, &m_generate, &m_prune, &m_pass, &m_solution, &m_progress,
+                                    &m_end, &m_transition, &m_make_worker})
+            if (f->is_valid())
+                return true;
+        return false;
     }
 
     void on_transition(u64 parent, const Action& action, u64 child, StateView child_state,
@@ -513,7 +527,10 @@ void fill_control(ControlScope& cs, const Owner& o, nb::handle max_states, nb::h
     if (!observer.is_none())
     {
         cs.observer = std::make_unique<PyObserver>(observer, o, *cs.errors);
-        c.observer = cs.observer.get();
+        if (cs.observer->defines_any())
+            c.observer = cs.observer.get();
+        else
+            cs.observer.reset();  // nothing to call: the search runs as without an observer
     }
     if (auto v = opt<u64>(progress_interval))
         c.progress_interval = *v == 0 ? 1 : *v;
@@ -1431,9 +1448,7 @@ void bind_search(nb::module_& parent)
         });
 
     nb::class_<PyBrfsResult>(m, "BrfsResult")
-        .def_prop_ro("status", [](const PyBrfsResult& x) {
-            return x.r.solved ? SearchStatus::Solved : (x.r.exhausted ? SearchStatus::Exhausted : SearchStatus::OutOfStates);
-        })
+        .def_prop_ro("status", [](const PyBrfsResult& x) { return x.r.status; })
         .def_prop_ro("solved", [](const PyBrfsResult& x) { return x.r.solved; })
         .def_prop_ro("exhausted", [](const PyBrfsResult& x) { return x.r.exhausted; })
         .def_prop_ro("plan", [](const PyBrfsResult& x) { return plan_list(x.o, x.r.plan); })
@@ -1871,11 +1886,18 @@ void bind_search(nb::module_& parent)
         [](TaskArg task, u32 threads, StrArg store, bool witness_pruning, bool canonical_order,
            bool deterministic_ids, IntArg max_states, bool stop_at_goal, bool fingerprint, LayerArg layer_order,
            u64 seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, GoalArg goal) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, GoalArg goal, FloatArg max_seconds, CancelArg cancel,
+           ObserverArg observer, IntArg progress_interval) {
             const Owner o = owner_of(task);
             ControlScope cs;
+            fill_control(cs, o, nb::none(), nb::none(), nb::none(), max_seconds, cancel, goal, nb::none(), observer,
+                         progress_interval);
             BrfsOptions opts;
-            opts.goal = parse_goal(o, goal, *cs.errors);
+            opts.goal = std::move(cs.control.goal);
+            opts.max_seconds = cs.control.budget.max_seconds;
+            opts.cancel = cs.control.cancel;
+            opts.observer = cs.control.observer;
+            opts.progress_interval = cs.control.progress_interval;
             opts.threads = threads;
             const std::string st = str_arg(store, "store");
             if (st == "auto")
@@ -1905,13 +1927,20 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "threads"_a = 1, "store"_a = "auto", "witness_pruning"_a = true,
         "canonical_order"_a = true, "deterministic_ids"_a = true, "max_states"_a = nb::none(), "stop_at_goal"_a = false,
-        "fingerprint"_a = false, MYMYR_LAYER_ARGS, "goal"_a = nb::none(),
+        "fingerprint"_a = false, MYMYR_LAYER_ARGS, "goal"_a = nb::none(), "max_seconds"_a = nb::none(),
+        "cancel"_a = nb::none(), "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("Breadth-first search over the reachable states (search/brfs.hpp): single-threaded, or "
                      "layer-synchronous on `threads` threads with ids independent of the thread count. stop_at_goal "
                      "returns the first goal state's plan (single-threaded). goal: the goal states, as the common "
                      "keyword argument of the other searches (a callable needs threads=1). fingerprint: the result's fingerprint "
                      "hashes (id, canonical state) over the whole store (determinism checks; 0 when off). An ordered "
-                     "layer_order needs the 'flat' or 'chunked' store ('auto' picks one of them with one thread). ") +
+                     "layer_order needs the 'flat' or 'chunked' store ('auto' picks one of them with one thread). "
+                     "max_seconds, cancel, observer and progress_interval as for the other searches: the observer gets "
+                     "on_start, on_expand, on_generate, on_pass(depth, layer stats) per layer, on_progress, "
+                     "on_solution and on_end. With threads > 1 it follows the make_worker protocol: make_worker(k) "
+                     "gives thread k its own observer for on_expand, on_generate (child None: ids are assigned when "
+                     "the layer ends) and on_progress, called from that thread; without make_worker (or when it "
+                     "returns None) the search runs on one thread. ") +
          k_layer_doc)
             .c_str());
 
