@@ -14,9 +14,9 @@ For a source install, build the project and run `cmake --install build --prefix 
 package; `mymyr.get_include()` returns its header directory and `mymyr.get_cmake_dir()` returns its CMake package
 directory. These paths may not contain the installed SDK in an editable or in-tree install.
 
-The C++ interface is source-level, not a stable binary ABI. Consumers need C++26 (GCC 16 or Clang 22 with libc++) and
-the standard library used to build the package, and should rebuild when mymyr changes. The plain-C interface in
-[`mymyr/ext.h`](../include/mymyr/ext.h) is the stable binary interface.
+The package's C++ headers and static libraries are a source-level interface. Build consumers with C++26 (GCC 16 or
+Clang 22 with libc++) and the standard library used to build the package, then rebuild them when mymyr changes. The
+plain-C interface in [`mymyr/ext.h`](../include/mymyr/ext.h) provides the stable binary interface.
 
 The checked-in [C++ consumer project](../tests/cmake_consumer/) uses `find_package`, links `mymyr::core` and
 `mymyr::frontend`, parses a PDDL task, then prints “IW ... plan length ...” from its result. It also has a core-only
