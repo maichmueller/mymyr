@@ -29,6 +29,13 @@ next one holds that many states:
 
     r = mymyr.search.brfs(task, stop_at_goal=True, layer_order="goal_count", max_next_layer_states=100)
 
+With ``beam_width`` an ordered search keeps only the best ``beam_width`` states of every next layer (equal scores in
+generation order, or randomly by ``seed`` with ``randomize_ties=True``); ``beam_novelty`` decides whether the
+successors the beam drops still mark the novelty table (``"all_tested"``) or only the kept ones do
+(``"survivors_only"``):
+
+    r = mymyr.search.iw(task, max_arity=2, layer_order="goal_count", beam_width=32, beam_novelty="survivors_only")
+
 The IW family variants:
 
     r = mymyr.search.liw(task, max_arity=1, landmarks="lifted")       # LIW(k): landmark-restricted novelty
