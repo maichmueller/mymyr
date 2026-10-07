@@ -160,6 +160,12 @@ enumerates a state's actions in the order of its clique search (fewest candidate
 binding) order; on the tasks where the two differ, reversed and truncated layers diverge, and the test compares only
 what does not depend on that order there.
 
+Its `--beam W --beam-mode all_tested|survivors_only` options run the fork's beam over the goal-count layers:
+`search_fork/run_beam.py` runs IW(2) and BrFS with widths 1, 4 and 32 and both novelty modes on the BrFS suite tasks
+(without philosophers, pegsol and organic-synthesis) and writes `tests/data/beam/fork_beam.json`, checked by
+`tests/cpp/search/test_beam_fork.cpp`. A beam keeps ties in generation order, so it depends on the action order
+everywhere: the test skips the tasks where the fork's order differs from mymyr's.
+
 Fork behaviour worth knowing when matching h values: on philosophers (derived goals `blocked`) the fork's h_max,
 h_add and h_FF are 0 in non-goal states (`blocked` is defined with universal quantifiers, which normalization turns
 into negated introduced derived atoms, and the relaxation ignores negative conditions); on
