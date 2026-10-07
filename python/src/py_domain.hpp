@@ -17,7 +17,7 @@ struct PyDomain
     std::string path;
 };
 
-/// Reads a whole file (throws std::runtime_error).
+/// Reads a whole file (throws std::filesystem::filesystem_error).
 [[nodiscard]] std::string read_file(const std::string& path);
 }  // namespace mymyr::python
 #endif

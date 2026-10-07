@@ -131,6 +131,14 @@ void bind_frontend(nb::module_& m)
                 return FormalismTask{std::move(data), pddl_source(self, std::move(copy), "")};
             },
             "text"_a, nb::kw_only(), "fast_init"_a = true, "Instantiate problem PDDL text.")
+        .def_prop_ro(
+            "formalism",
+            [](const PyDomain& self) {
+                // shares the domain's ownership: the TaskData lives inside it
+                return FormalismTask{std::shared_ptr<const formalism::TaskData>(self.d, &self.d->domain_data()), nullptr};
+            },
+            "The normalized domain alone (mymyr.formalism.NormalizedTask): types, constants (as its objects), "
+            "predicates, functions, schemas and the domain's axioms; no initial state and no goal.")
         .def_prop_ro("name", [](const PyDomain& self) { return self.d->name(); })
         .def_prop_ro("path", [](const PyDomain& self) { return self.d->path(); })
         .def("__repr__", [](const PyDomain& self) { return "Domain(" + self.d->name() + ")"; });
