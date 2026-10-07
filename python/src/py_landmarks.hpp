@@ -50,6 +50,9 @@ struct LandmarkSource  // how LIW / abstracted IW compute a landmark graph when 
 struct LayerOrder
 {
 };
+struct BeamNovelty  // LayerOrdering::BeamNovelty
+{
+};
 struct WidthZero  // the IW family's arity-0 pass
 {
 };
@@ -152,6 +155,11 @@ template<>
 struct type_caster<mymyr::python::ann::LayerOrder>
 {
     static constexpr auto Name = const_name("typing.Literal['queue', 'in_order', 'reverse', 'randomized', 'goal_count']");
+};
+template<>
+struct type_caster<mymyr::python::ann::BeamNovelty>
+{
+    static constexpr auto Name = const_name("typing.Literal['all_tested', 'survivors_only']");
 };
 template<>
 struct type_caster<mymyr::python::ann::WidthZero>

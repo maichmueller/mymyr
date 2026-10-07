@@ -202,6 +202,8 @@ public:
     [[nodiscard]] const u64* words(u32 id) const noexcept { return m_words.data() + static_cast<usize>(id) * row(); }
     [[nodiscard]] u32 depth(u32 id) const noexcept { return m_depth[id]; }
     [[nodiscard]] bool skip(u32 id) const noexcept { return m_skip[id] != 0; }
+    void set_skip(u32 id, bool skip) noexcept { m_skip[id] = skip ? 1 : 0; }
+    [[nodiscard]] u32 parent(u32 id) const noexcept { return m_parent[id]; }
 
     void push(const u64* w, u32 n, const u64* num, u32 parent, u32 schema, const ObjectId* binding, u32 arity, u32 depth,
               bool skip)
@@ -289,11 +291,13 @@ struct PassOut
     u64 node_bytes = 0;
 };
 
-/// Distinct successors of the root (width 0 and the optimized IW(1) root rule deduplicate them), by content.
-class RootSeen
+/// Distinct states of the tree, by content: the successors of the root (width 0 and the optimized IW(1) root rule
+/// deduplicate them) and, in a beam with BeamNovelty::SurvivorsOnly, every candidate (mimir's "is new" test: a
+/// candidate the beam dropped has marked nothing, so it could pass the read-only novelty test again).
+class SeenStates
 {
 public:
-    /// The id of an earlier root successor equal to w, or k_none.
+    /// The id of an earlier state equal to s, or k_none.
     [[nodiscard]] u32 find(const Tree& tree, StateView s) const
     {
         const auto range = m_map.equal_range(s.hash());
@@ -338,7 +342,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         table->reserve(std::max<u32>(task.atoms().fluent_slots(), 1));
         table->mark_state(root.w, root.nw);
     }
-    RootSeen root_seen;
+    SeenStates seen;
 
     std::vector<u64> cur, next;
     std::vector<u32> add;
@@ -357,6 +361,12 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     // and are skipped once their node is closed). Otherwise the tree itself is the queue.
     LayerOrderer* const lo = c.layers.get();
     const bool limit_layer = lo && lo->limited();
+    // A beam (LayerOrdering::beam_width): candidates enter the tree and the next layer as they are generated; at the
+    // boundary the layer is ordered and cut, generated_in_tree then counts only the kept entries. SurvivorsOnly:
+    // the novelty test only reads the table during generation (`seen` stands in for mimir's "is new" test) and the
+    // kept entries are replayed through the marking test (replay below).
+    const bool beam = lo && lo->beam();
+    const bool survivors = lo && lo->survivors_only();
     std::vector<u32> layer{0}, next_layer;
     std::vector<u8> closed;
     usize lpos = 0;
@@ -467,6 +477,43 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         succ.generate<true>(process, witness, canonical);
     };
 
+    // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
+    // better ranked ones (mimir's finalize_beam_layer and on_end_beam_replay: marking as it goes is the same as its
+    // delta set committed at the end). One that adds no tuple leaves the layer; a root successor of the optimized
+    // IW(1) pass stays and is only marked as not to be expanded.
+    std::vector<u64> rparent, rchild;
+    auto replay = [&]()
+    {
+        usize kept = 0;
+        for (u32 e : next_layer)
+        {
+            const u32 p = tree.parent(e);
+            const u32 W = tree.stride();
+            rparent.assign(tree.words(p), tree.words(p) + W);
+            rchild.assign(tree.words(e), tree.words(e) + W);
+            const u32 pn = bits::trimmed_size(rparent.data(), W), cn = bits::trimmed_size(rchild.data(), W);
+            add.clear();
+            for (u32 i = 0; i < cn; ++i)
+                for (u64 x = rchild[i] & ~(i < pn ? rparent[i] : u64{0}); x; x &= x - 1)
+                    add.push_back(i * 64 + static_cast<u32>(bits::ctz64(x)));
+            bool novel = false;
+            if (!add.empty())
+            {
+                reserve_for_add();
+                novel = table->test<true>(rparent.data(), pn, rchild.data(), cn, add);
+            }
+            if (p == 0 && ps.root_continuation)
+                tree.set_skip(e, !novel);
+            else if (!novel)
+            {
+                --st.generated_in_tree;
+                continue;
+            }
+            next_layer[kept++] = e;
+        }
+        next_layer.resize(kept);
+    };
+
     for (u32 step = 0;; ++step)
     {
         u32 id = step;
@@ -476,10 +523,16 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             {
                 if (next_layer.empty())
                     break;
-                lo->order(next_layer, succ, [&](u32 e) {
+                st.generated_in_tree -= lo->select(next_layer, succ, [&](u32 e) {
                     const u64* r = tree.words(e);
                     return StateView{r, tree.stride(), NN ? r + tree.stride() : nullptr, NN};
                 });
+                if (survivors && k >= 1)
+                {
+                    replay();
+                    if (next_layer.empty())
+                        break;
+                }
                 layer.swap(next_layer);
                 next_layer.clear();
                 lpos = 0;
@@ -577,9 +630,11 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         }
                     if (child == cv)
                         return reject();  // self loop
-                    const u32 dup = root_seen.find(tree, child);
+                    const u32 dup = seen.find(tree, child);
                     if (k == 0)
                     {
+                        if (dup != k_none && survivors)
+                            return reject();  // mimir's ArityZero beam selection: not new
                         if (dup != k_none)
                         {
                             // mimir admits it again (counted in the tree) but pops it as closed: no second node
@@ -590,7 +645,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                             return !lo || enter(dup);
                         }
                         const u32 nid = tree.size();
-                        root_seen.insert(child, nid);
+                        seen.insert(child, nid);
                         if constexpr (Slow)
                             if (obs)
                                 obs->on_generate(id, action_of(s, b), nid, child, true);
@@ -604,10 +659,11 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     if (!add.empty())
                     {
                         reserve_for_add();
-                        novel = table->test<true>(cur.data(), n, next.data(), nn, add);
+                        novel = survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
+                                          : table->test<true>(cur.data(), n, next.data(), nn, add);
                     }
                     const u32 nid = tree.size();
-                    root_seen.insert(child, nid);
+                    seen.insert(child, nid);
                     if constexpr (Slow)
                         if (obs)
                             obs->on_generate(id, action_of(s, b), nid, child, true);
@@ -654,14 +710,23 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         {
                             if (!table->any_new1(add))
                                 return true;  // add-effect precheck: the successor is never materialized
-                            table->mark1(add);
+                            if (!survivors) [[likely]]
+                                table->mark1(add);
                             nn = apply_delta(cur.data(), n, d, next);
                         }
                         else
                         {
                             nn = apply_delta(cur.data(), n, d, next);
-                            if (!table->test<true>(cur.data(), n, next.data(), nn, add))
+                            if (!(survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
+                                            : table->test<true>(cur.data(), n, next.data(), nn, add)))
                                 return true;
+                        }
+                        if (survivors) [[unlikely]]
+                        {
+                            const StateView child{next.data(), nn, d.num, NN};
+                            if (seen.find(tree, child) != k_none)
+                                return true;
+                            seen.insert(child, tree.size());
                         }
                         return admit(next.data(), nn, d.num, id, s, b, cdepth, false);
                     }
@@ -675,7 +740,14 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         else if (!add.empty())
                         {
                             reserve_for_add();
-                            admitted = table->test<true>(cur.data(), n, next.data(), nn, add);
+                            admitted = survivors ? table->test<false>(cur.data(), n, next.data(), nn, add)
+                                                 : table->test<true>(cur.data(), n, next.data(), nn, add);
+                            if (admitted && survivors)
+                            {
+                                admitted = seen.find(tree, child) == k_none;
+                                if (admitted)
+                                    seen.insert(child, tree.size());
+                            }
                         }
                         if (!admitted)
                         {
@@ -700,6 +772,8 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     }
     if (!status_set)
         st.status = SearchStatus::Exhausted;
+    if (beam)
+        st.generated_in_tree -= next_layer.size();  // candidates of a next layer that was never selected
     st.seconds = seconds_since(t0);
     out.table_bytes = table ? table->bytes() : 0;
     out.node_bytes = tree.bytes();

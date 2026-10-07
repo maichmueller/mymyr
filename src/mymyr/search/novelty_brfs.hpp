@@ -16,6 +16,9 @@
 // and optionally
 //   bool quick_reject(std::span<const u32> add, const Delta& d);  true: certainly not novel (nothing is marked), so
 //                                                          the successor need not be materialized
+//   bool peek(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d);
+//                                                          test() without marking (a beam with
+//                                                          BeamNovelty::SurvivorsOnly needs it)
 // `add` holds the atoms the transition adds (true in the child, false in the parent), each once, in effect order.
 //
 // Root rules (mimir's pruning strategies): Normal (the novelty test applies at the root too); ArityZero (the
@@ -28,6 +31,14 @@
 // marked when it enters), so, as in the IW pass, no duplicate-detection table is needed: mimir's "is new" test is
 // implied. Width-0 duplicates are queue entries that point to the node of their first occurrence; popping a closed
 // node is skipped, as mimir skips CLOSED search nodes.
+//
+// Beam (LayerOrdering::beam_width): candidates enter the tree and the next layer as they are generated; at the
+// boundary the layer is ordered and cut, and generated_in_tree counts only the kept entries. With
+// BeamNovelty::SurvivorsOnly the candidates are tested with peek() (nothing is marked, so a set of the candidates
+// stands in for mimir's "is new" test) and the kept ones are replayed in rank order through test(): one that adds
+// nothing beyond the better ranked ones leaves the layer (a Continuation root successor stays, marked as not to be
+// expanded unless keep_depth_one). Observers see the transitions as they are generated: a successor reported as
+// Opened can be dropped by the beam or the replay and is then never expanded.
 
 #include "iw_detail.hpp"
 #include "layer_order_detail.hpp"
@@ -43,6 +54,7 @@
 #include <cstring>
 #include <functional>
 #include <span>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -263,6 +275,7 @@ struct NullPruner
     bool init(const u64*, u32) { return true; }
     void begin(const u64*, u32) {}
     bool test(const u64*, u32, const u64*, u32, std::span<const u32>, const Delta&) { return false; }
+    bool peek(const u64*, u32, const u64*, u32, std::span<const u32>, const Delta&) { return false; }
     [[nodiscard]] u64 bytes() const { return 0; }
 };
 
@@ -278,6 +291,7 @@ public:
     [[nodiscard]] const u64* words(u32 id) const noexcept { return m_words.data() + static_cast<usize>(id) * m_W; }
     [[nodiscard]] u32 depth(u32 id) const noexcept { return m_depth[id]; }
     [[nodiscard]] bool skip(u32 id) const noexcept { return (m_flags[id] & 1) != 0; }
+    void set_skip(u32 id, bool skip) noexcept { m_flags[id] = static_cast<u8>((m_flags[id] & ~1) | (skip ? 1 : 0)); }
     [[nodiscard]] bool closed(u32 id) const noexcept { return (m_flags[id] & 2) != 0; }
     void close(u32 id) noexcept { m_flags[id] |= 2; }
     [[nodiscard]] u32 parent(u32 id) const noexcept { return m_parent[id]; }
@@ -345,8 +359,9 @@ private:
     std::vector<ObjectId> m_binding;
 };
 
-/// Distinct successors of the root, by content.
-class RootSeen
+/// Distinct states of the tree, by content: the successors of the root and, in a beam with
+/// BeamNovelty::SurvivorsOnly, every candidate.
+class SeenStates
 {
 public:
     [[nodiscard]] u32 find(const NodeTree& tree, const u64* w, u32 n) const
@@ -422,6 +437,11 @@ private:
 };
 
 template<class P>
+concept Peeking = requires(P& p, const u64* w, u32 n, std::span<const u32> add, const Delta& d) {
+    { p.peek(w, n, w, n, add, d) } -> std::convertible_to<bool>;
+};
+
+template<class P>
 concept QuickRejecting = requires(P& p, std::span<const u32> add, const Delta& d) {
     { p.quick_reject(add, d) } -> std::convertible_to<bool>;
 };
@@ -440,6 +460,10 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     const bool slow = env.slow();
     const bool ordered = env.layers && env.layers->ordered();
     const bool limit_layer = ordered && env.layers->limited();
+    const bool beam = ordered && env.layers->beam();
+    const bool survivors = ordered && env.layers->survivors_only();
+    if (survivors && !Peeking<Pruner>)
+        throw std::invalid_argument("mymyr: BeamNovelty::SurvivorsOnly needs a novelty pruner with a read-only test");
 
     NodeTree tree(std::max(task.words(), root.nw));
     const u32 rn = bits::trimmed_size(root.w, root.nw);
@@ -450,7 +474,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         env.tracker->flush_derived(succ);
     }
     const bool root_enters = pruner.init(root.w, rn);  // false: mimir's brfs returns FAILED (the ladder goes on)
-    RootSeen root_seen;
+    SeenStates seen;
     Driver driver;
 
     std::vector<u32> cur, next;
@@ -472,13 +496,68 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
 
     auto action_of = [&](u32 s, const ObjectId* b) { return Action(SchemaId{s}, std::vector<ObjectId>(b, b + succ.arity(s))); };
 
+    // SurvivorsOnly: the kept entries of `next` in rank order through the marking test (mimir's finalize_beam_layer and
+    // on_end_beam_replay: marking as it goes is the same as its delta set committed at the end).
+    std::vector<u64> rparent, rchild;
+    std::vector<u32> radd;
+    std::vector<SlotId> rslots;
+    auto replay = [&]()
+    {
+        usize kept = 0;
+        for (u32 e : next)
+        {
+            const u32 p = tree.parent(e);
+            const u32 W = tree.stride();
+            rparent.assign(tree.words(p), tree.words(p) + W);
+            rchild.assign(tree.words(e), tree.words(e) + W);
+            const u32 pn = bits::trimmed_size(rparent.data(), W), cn = bits::trimmed_size(rchild.data(), W);
+            radd.clear();
+            rslots.clear();
+            for (u32 i = 0; i < W; ++i)
+                for (u64 x = rchild[i] & ~rparent[i]; x; x &= x - 1)
+                    radd.push_back(i * 64 + static_cast<u32>(bits::ctz64(x)));
+            for (u32 a : radd)
+                rslots.push_back(SlotId{a});
+            const usize nadd = rslots.size();
+            for (u32 i = 0; i < W; ++i)
+                for (u64 x = rparent[i] & ~rchild[i]; x; x &= x - 1)
+                    rslots.push_back(SlotId{i * 64 + static_cast<u32>(bits::ctz64(x))});
+            const Delta d{{rslots.data(), nadd}, {rslots.data() + nadd, rslots.size() - nadd}};
+            pruner.begin(rparent.data(), pn);
+            const bool novel = !radd.empty() && pruner.test(rparent.data(), pn, rchild.data(), cn, radd, d);
+            if (p == 0 && pc.root == RootRule::Continuation)
+                tree.set_skip(e, !novel && !pc.keep_depth_one);
+            else if (!novel)
+            {
+                --st.generated_in_tree;
+                continue;
+            }
+            next[kept++] = e;
+        }
+        next.resize(kept);
+    };
+    // the novelty of a candidate: read-only with SurvivorsOnly
+    auto novelty = [&](const u64* pw, u32 pn, const u64* w, u32 nn, std::span<const u32> a, const Delta& d) -> bool
+    {
+        if constexpr (Peeking<Pruner>)
+            if (survivors)
+                return pruner.peek(pw, pn, w, nn, a, d);
+        return pruner.test(pw, pn, w, nn, a, d);
+    };
+
     while (!stop)
     {
         if (pos == cur.size())
         {
             if (!ordered || next.empty())
                 break;
-            env.layers->order(next, succ, [&](u32 e) { return StateView{tree.words(e), tree.stride(), nullptr, 0}; });
+            st.generated_in_tree -= env.layers->select(next, succ, [&](u32 e) { return StateView{tree.words(e), tree.stride(), nullptr, 0}; });
+            if (survivors && pc.root != RootRule::ArityZero)
+            {
+                replay();
+                if (next.empty())
+                    break;
+            }
             cur.swap(next);
             next.clear();
             pos = 0;
@@ -634,7 +713,9 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                 return reject(s, b, w, nn);  // self loop: Pruned, as control.hpp documents
             if (rule == RootRule::ArityZero)
             {
-                const u32 dup = root_seen.find(tree, w, nn);
+                const u32 dup = seen.find(tree, w, nn);
+                if (dup != k_no_node && survivors)
+                    return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // mimir's ArityZero beam selection: not new
                 if (dup != k_no_node)
                 {
                     // mimir admits it again (a queue entry) and skips it when popped: it is closed by then
@@ -648,21 +729,27 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                     }
                     return true;
                 }
-                root_seen.insert(w, nn, tree.size());
+                seen.insert(w, nn, tree.size());
                 report(s, b, w, nn, tree.size(), TransitionOutcome::Opened);
                 return admit_node(s, b, w, nn, pc.root_only);
             }
             if (rule == RootRule::Continuation)
             {
-                if (root_seen.find(tree, w, nn) != k_no_node)
+                if (seen.find(tree, w, nn) != k_no_node)
                     return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // not new
-                const bool novel = pruner.test(cw, n, w, nn, add, d);
-                root_seen.insert(w, nn, tree.size());
+                const bool novel = novelty(cw, n, w, nn, add, d);
+                seen.insert(w, nn, tree.size());
                 report(s, b, w, nn, tree.size(), TransitionOutcome::Opened);
                 return admit_node(s, b, w, nn, !novel && !pc.keep_depth_one);
             }
-            if (!pruner.test(cw, n, w, nn, add, d))
+            if (!novelty(cw, n, w, nn, add, d))
                 return reject(s, b, w, nn);
+            if (survivors)
+            {
+                if (seen.find(tree, w, nn) != k_no_node)
+                    return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // a candidate before (mimir: not new)
+                seen.insert(w, nn, tree.size());
+            }
             report(s, b, w, nn, tree.size(), TransitionOutcome::Opened);
             return admit_node(s, b, w, nn, false);
         };
@@ -678,6 +765,8 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         if (env.coord)
             env.coord->invalidate_lower_bound();
     }
+    if (beam)
+        st.generated_in_tree -= next.size();  // candidates of a next layer that was never selected
     st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
     out.table_bytes = pruner.bytes();
     out.node_bytes = tree.bytes();
@@ -805,6 +894,13 @@ public:
             return false;
         reserve(add);
         return m_table.test<true>(pw, pn, cw, cn, add);
+    }
+    bool peek(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta&)
+    {
+        if (add.empty())
+            return false;
+        reserve(add);
+        return m_table.test<false>(pw, pn, cw, cn, add);
     }
     [[nodiscard]] u64 bytes() const { return m_table.bytes(); }
 

@@ -660,6 +660,9 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
     detail::LayerOrderer layers;
     if (std::string e = detail::apply_layers(env, o.layers, layers); !e.empty())
         return detail::failed(std::move(e));
+    if (o.layers.beam() && o.layers.beam_novelty == LayerOrdering::BeamNovelty::SurvivorsOnly)
+        return detail::failed("abstracted and projective IW support only LayerOrdering::BeamNovelty::AllTested (the abstracted "
+                              "novelty tables have no read-only test)");
     std::optional<novelty::LandmarkCoordinates> coords;
     try
     {

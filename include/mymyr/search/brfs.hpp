@@ -51,7 +51,9 @@ struct BrfsOptions
     bool stop_at_goal = false;
     bool fingerprint = false;        // hash over (id, canonical state) of the whole store (tests, determinism gates)
     /// The order in which a layer is expanded (search/layer_ordering.hpp; default: the queued BrFS). An ordered kind
-    /// needs the flat or chunked store (single-threaded); state ids then follow the expansion order.
+    /// needs the flat or chunked store (single-threaded); state ids then follow the expansion order. With a beam the
+    /// states it drops stay stored (counted in BrfsResult::states, never expanded, never entered again: mimir's
+    /// duplicate pruning), and both novelty modes behave alike (there is no novelty table).
     search::LayerOrdering layers{};
 };
 
