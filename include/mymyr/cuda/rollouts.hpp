@@ -18,7 +18,7 @@
 //
 // Differences from search::find_rollouts_parallel (documented, tested in tests/cuda/test_device_iw.cpp):
 //   - reached derived atoms, num_states, landing states and co-occurrence rows are not reported (fluent atoms only);
-//   - numeric tasks are refused (std::invalid_argument); custom goals, blocked states, observers and successor-order
+//   - custom goals, blocked states, observers and successor-order
 //     hooks are not offered; goals are the task's or one conjunction of fluent atoms per rollout;
 //   - max_seconds is checked between chunks, not between pops.
 

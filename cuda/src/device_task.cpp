@@ -11,10 +11,6 @@ std::shared_ptr<DeviceTask> DeviceTask::upload(ContextPtr ctx, std::shared_ptr<c
 {
     if (!ctx || !bundle)
         throw std::invalid_argument("mymyr: DeviceTask::upload: null context or bundle");
-    // the device kernels read atom words only: a numeric task's states also carry values, and the device
-    // format has no numeric section yet
-    if (bundle->scalar("numeric_slots", 0) > 0)
-        throw std::invalid_argument("mymyr: DeviceTask: tasks with numeric fluents are not supported on the device yet");
     DeviceGuard g(ctx->device());  // the events below belong to the context's device
     return std::make_shared<DeviceTask>(Private{}, std::move(ctx), std::move(bundle));
 }

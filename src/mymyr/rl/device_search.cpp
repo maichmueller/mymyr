@@ -305,7 +305,7 @@ DeviceSearchCosts device_search_costs(const Task& task)
     for (const plan::Stratum& st : C.strata)
         out.axioms.resize(out.axioms.size() + st.axioms.size());
     if (task.numeric_slots() > 0)
-        return out;  // no device kernels for numeric tasks
+        return out;  // numeric plans use the compiled matcher's search order
     // a workspace of its own: the caller's (Task::workspace) may hold a prepared state
     const auto ws = std::make_unique<Workspace>(task);
     Successors& succ = ws->successors();

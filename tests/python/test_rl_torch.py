@@ -487,8 +487,7 @@ def test_device_planning_env(blocks):
 def test_device_refusals():
     dev = gpu()
     numeric = mymyr.Task.from_text(str(NUMERIC / "cs-counters.txt"))
-    with pytest.raises(ValueError, match="numeric"):
-        rt.BatchedEnv(numeric, 4, device=dev)
+    assert rt.BatchedEnv(numeric, 4, device=dev).core.numeric_words == numeric.numeric_words
     lazy = text_task("blocks__probBLOCKS-8-0", atoms="lazy")
     assert "lazy" in rt.fast_unsupported(lazy)
     with pytest.raises(ValueError, match="lazy"):
@@ -618,3 +617,17 @@ def test_collector():
     want = env3.rollout(5, last_successor, break_when_any_done=False)
     for key in ["action", "state", ("next", "state"), ("next", "reward"), ("next", "done")]:
         assert torch.equal(got[key], want[key]), key
+
+
+def test_numeric_device_env_equals_cpu():
+    dev = gpu()
+    for name in ("cs-counters", "cs-hydropower"):
+        task = mymyr.Task.from_text(str(NUMERIC / f"{name}.txt"))
+        cpu = rt.BatchedEnv(task, 8, device="cpu", max_steps=7, seed=17)
+        device = rt.BatchedEnv(task, 8, device=dev, max_steps=7, seed=17)
+        for _ in range(20):
+            a = cpu.step()
+            b = device.step()
+            for key in ("reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "count"):
+                assert torch.equal(getattr(a, key), getattr(b, key).cpu()), key
+            assert torch.equal(cpu.states, device.states.cpu())

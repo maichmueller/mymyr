@@ -727,12 +727,9 @@ TEST(CudaMultiIw, ReusedAcrossRunsWhileLazySlotsGrow)
     }
 }
 
-TEST(CudaMultiIw, RefusesNumericTasksAndBadArguments)
+TEST(CudaMultiIw, RejectsInvalidArguments)
 {
     SKIP_WITHOUT_GPU();
-    const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
-    EXPECT_FALSE(cuda::multi_iw_unsupported(*numeric, {}).empty());
-    EXPECT_THROW((void)cuda::DeviceMultiIw(context(), numeric), std::invalid_argument);
     const auto task = load("depot__p02", true);
     cuda::MultiIwOptions o;
     o.max_arity = 3;

@@ -56,6 +56,7 @@ struct StateRef
     u32 nw;
     const u64* derived;
     u32 dw;
+    const u64* numeric = nullptr;
 };
 
 __device__ __forceinline__ bool check(const TaskView& t, u32 c, const u32* bind, const StateRef& s)
@@ -120,12 +121,20 @@ __device__ __forceinline__ bool emit_more(Emit& emit, const u32* b)
 /// pruning is on (callers of Split must not mind). Exact: the split level lies above the witness levels (none:
 /// lane 0 searches alone), so that the lanes emit the bindings of one search exactly once (a lane's candidates of the
 /// split level each search their whole subtree, witness cut-offs included).
-template<u32 OW, u32 MaxD = k_max_depth, bool Split = false, bool Exact = false, class Emit>
+template<u32 OW, u32 MaxD = k_max_depth, bool Split = false, bool Exact = false, bool Numeric = false, class Emit>
 __device__ __forceinline__ void run_fixed(const TaskView& t, const u32* mx, const StateRef& s, const u64* view, u32* bind,
                                           Emit& emit, u32 split_n = 1, u32 split_i = 0)
 {
     if (!prologue(t, mx, bind, s))
         return;
+    const u32* nm = nullptr;
+    if constexpr (Numeric)
+    {
+        nm = t.numeric.matcher + ((mx - t.matcher) / k_mc_count) * 8;
+        for (u32 i = 0; i < nm[1]; ++i)
+            if (!numeric_holds(t.numeric, nm[0] + i, s.numeric, bind, t.num_objects))
+                return;
+    }
     const u32 nd = mx[k_mc_steps_n];
     if (nd == 0)
     {
@@ -209,6 +218,12 @@ __device__ __forceinline__ void run_fixed(const TaskView& t, const u32* mx, cons
         bool ok = true;
         for (u32 c = sp[3]; c < sp[4] && ok; ++c)
             ok = check(t, checks0 + step_checks[c], bind, s);
+        if constexpr (Numeric)
+        {
+            const u32* ns = t.numeric.steps + u64{nm[4] + static_cast<u32>(d)} * 2;
+            for (u32 j = ns[0]; j < ns[1] && ok; ++j)
+                ok = numeric_holds(t.numeric, t.numeric.index[j], s.numeric, bind, t.num_objects);
+        }
         if (!ok)
             continue;
         if (d == last)
@@ -239,12 +254,20 @@ __device__ __forceinline__ void run_fixed(const TaskView& t, const u32* mx, cons
 /// level l are D[l][param], `total` parameters per level (the touched part of the stack stays small); a level holds the
 /// domains of the parameters not bound above it (the others are never read again). The candidates still to try at
 /// level l are rem[l]. Split, Exact: as in run_fixed (Exact: the split level is entered before the witness search).
-template<u32 OW, bool Split = false, bool Exact = false, class Emit>
+template<u32 OW, bool Split = false, bool Exact = false, bool Numeric = false, class Emit>
 __device__ __forceinline__ void run_fc(const TaskView& t, const u32* mx, const StateRef& s, const u64* view, u32* bind,
                                        Emit& emit, u32 split_n = 1, u32 split_i = 0)
 {
     if (!prologue(t, mx, bind, s))
         return;
+    const u32* nm = nullptr;
+    if constexpr (Numeric)
+    {
+        nm = t.numeric.matcher + ((mx - t.matcher) / k_mc_count) * 8;
+        for (u32 i = 0; i < nm[1]; ++i)
+            if (!numeric_holds(t.numeric, nm[0] + i, s.numeric, bind, t.num_objects))
+                return;
+    }
     const u32 nd = mx[k_mc_steps_n];
     if (nd == 0)
     {
@@ -372,6 +395,10 @@ __device__ __forceinline__ void run_fc(const TaskView& t, const u32* mx, const S
             if (all)
                 ok = check(t, checks0 + c, bind, s);
         }
+        if constexpr (Numeric)
+            for (u32 j = 0; j < nm[3] && ok; ++j)
+                if ((t.numeric.masks[nm[5] + j] & bound) == t.numeric.masks[nm[5] + j])
+                    ok = numeric_holds(t.numeric, nm[2] + j, s.numeric, bind, t.num_objects);
         if (!ok)
             continue;
         for (u32 v = 0; v < total; ++v)

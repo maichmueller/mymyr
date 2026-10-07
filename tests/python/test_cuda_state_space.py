@@ -173,12 +173,17 @@ def test_generation_outputs_and_statuses(ctx):
         mc.state_space(task, ctx=ctx, device=1)
 
 
-def test_numeric_tasks_are_refused(ctx):
+def test_numeric_state_spaces_equal_cpu(ctx):
     task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError, match="numeric"):
-        mc.state_space(task, ctx=ctx)
-    with pytest.raises(ValueError, match="numeric"):
-        datasets.state_spaces([task], device=ctx)
+    expected = datasets.state_space(task, remove_if_unsolvable=False)
+    actual = mc.state_space(task, ctx=ctx, remove_if_unsolvable=False)
+    assert actual.numeric_words == task.numeric_words
+    assert actual.row_words == actual.words + actual.numeric_words
+    assert actual.state(0) == task.initial_state
+    assert actual.num_states == expected.num_states
+    for name, rows in expected.arrays().items():
+        assert np.array_equal(actual.to_host().arrays()[name], rows)
+    assert len(datasets.state_spaces([task], device=ctx)) == 1
 
 
 def test_device_arrays_frameworks_and_streams(ctx):

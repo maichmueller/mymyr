@@ -32,7 +32,9 @@
 // cancellation between chunks; max_depth), unit and state-independent integral action costs (total-cost; evaluated on
 // the device by cost programs, mymyr/cuda/cost_program.hpp: any number of cost parameters, any static function key
 // space; an undefined or negative cost, or one of 2^31 or more, throws std::domain_error), witness pruning and
-// canonical order as the CPU. Refused with std::invalid_argument ("mymyr: ..."): numeric fluents, tasks the successor
+// canonical order as the CPU. Numeric tasks carry canonical double tails and evaluate fluent costs, ordered total-cost
+// effects and state metrics in flat device programs. Their F64 priorities use a host heap, one parent per step, with
+// eager CPU tie order; numeric searches do not capture graphs. Refused with std::invalid_argument ("mymyr: ..."): tasks the successor
 // kernels cannot run (ChunkGenerator::unsupported), heuristics other than blind, max, add and ff (and
 // groundings beyond the budget), other goals, blocked states, observers and caller-owned evaluators.
 

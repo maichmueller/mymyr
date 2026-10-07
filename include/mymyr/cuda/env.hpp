@@ -71,7 +71,7 @@ public:
         General,  // always the flat expand
     };
 
-    /// Throws std::invalid_argument for suites the device cannot run (numeric tasks, a domain's
+    /// Throws std::invalid_argument for suites the device cannot run (a domain's
     /// DeviceTaskTable::unsupported, rows wider than lifted::k_max_words).
     DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig& config, Path path = Path::Auto,
               cudaStream_t stream = nullptr);
@@ -121,6 +121,9 @@ public:
 
     /// Row width in atom words (TaskSuite::words(): the widest domain's).
     [[nodiscard]] u32 words() const noexcept;
+    /// Numeric words per row, in the CPU encoding of each instance.
+    [[nodiscard]] u32 numeric_words() const noexcept { return suite()->numeric_words(); }
+    [[nodiscard]] u32 row_words() const noexcept { return words() + numeric_words(); }
     /// Largest schema arity (at least 1): the label width of step().
     [[nodiscard]] u32 label_width() const noexcept;
     /// Columns of the fast path's cache arrays: EnvBatch::counts [rows, cache_schemas()] (u32 words of the count cache,

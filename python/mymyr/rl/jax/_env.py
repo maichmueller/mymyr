@@ -148,8 +148,7 @@ class Env:
     reproduces ``rl::HostEnv`` / ``cuda::DeviceEnv`` with that seed; per-step keys are fine too.
 
     ``device``: None (JAX's default device; the CPU for numeric tables), a ``jax.Device``, ``"cpu"``, ``"cuda[:i]"`` or
-    a CUDA index; the arrays of a jitted rollout must live there. Numeric tables run on the CPU only (ValueError on a
-    CUDA device). ``path`` chooses the device path ('auto': the fast path where the table allows it; 'general': the
+    a CUDA index; the arrays of a jitted rollout must live there. Numeric tables use the general expansion path on a CUDA device. ``path`` chooses the device path ('auto': the fast path where the table allows it; 'general': the
     device expansion, which synchronizes on the successor count every step). ``labels=False`` skips the binding labels
     and ``final_state=False`` the final states (both are written every step otherwise).
     """
@@ -177,9 +176,6 @@ class Env:
         numeric = _numeric(table)
         self.device: jax.Device = _jax_device(device, numeric)
         on_gpu = self.device.platform in ("gpu", "cuda")
-        if numeric and on_gpu:
-            raise ValueError("mymyr: numeric tables run on the CPU only (device='cpu'); the device environment does not "
-                             "evaluate numeric fluents")
         index = getattr(self.device, "local_hardware_id", None)
         if index is None:
             index = self.device.id
