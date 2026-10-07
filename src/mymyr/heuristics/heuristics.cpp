@@ -1,10 +1,13 @@
-// Heuristic evaluators: blind, goal count, and h_max / h_add / h_FF over mimir's delete relaxation, grounded
-// (relaxed_task.hpp: GroundedEval extended with negative propositions, axiom rules and relaxed-plan extraction) or
-// lifted (lifted_relaxation.hpp: a cost-bucketed semi-naive fixpoint over the relaxed reachability matchers).
+// Heuristic evaluators: blind, goal count, and h_max / h_add / h_FF / set-additive over mimir's delete relaxation,
+// grounded (relaxed_task.hpp: GroundedEval extended with negative propositions, axiom rules and relaxed-plan
+// extraction) or lifted (lifted_relaxation.hpp: a cost-bucketed semi-naive fixpoint over the relaxed reachability
+// matchers; not for set-additive). h² is in h2.cpp.
 
 #include "mymyr/heuristics/heuristic.hpp"
 
+#include "h2.hpp"
 #include "lifted_relaxation.hpp"
+#include "relaxation_detail.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
@@ -34,6 +37,9 @@ const char* to_string(Kind k) noexcept
         case Kind::Add: return "add";
         case Kind::FF: return "ff";
         case Kind::Custom: return "custom";
+        case Kind::SetAdditive: return "set_additive";
+        case Kind::H2: return "h2";
+        case Kind::Perfect: return "perfect";
     }
     return "?";
 }
@@ -50,6 +56,13 @@ Kind parse_kind(std::string_view n)
         return Kind::Add;
     if (n == "ff" || n == "hff" || n == "h_ff")
         return Kind::FF;
+    if (n == "set_additive" || n == "hsa" || n == "setadd")
+        return Kind::SetAdditive;
+    if (n == "h2")
+        return Kind::H2;
+    if (n == "perfect")
+        throw std::invalid_argument("mymyr: the perfect heuristic needs a state space: build it with heuristics::perfect "
+                                    "(Python: Heuristic.perfect(state_space), or heuristic='perfect' on a search)");
     throw std::invalid_argument("mymyr: unknown heuristic '" + std::string(n) + "'");
 }
 
@@ -60,76 +73,11 @@ std::shared_ptr<const RelaxedTask> ground(const Task& task, const GroundingBudge
 
 namespace
 {
-constexpr u32 k_inf = ~u32{0};
-constexpr u32 k_none = ~u32{0};
-constexpr u32 k_unknown = ~u32{0} - 1;
-
-[[nodiscard]] inline u32 sat_add(u32 a, u32 b) noexcept
-{
-    const u64 s = static_cast<u64>(a) + b;
-    return s >= k_inf ? k_inf - 1 : static_cast<u32>(s);
-}
-[[nodiscard]] inline Value to_value(u64 h) noexcept { return h >= k_inf ? k_dead_end : static_cast<Value>(h); }
-
-/// Monotone priority queue of the relaxed exploration: buckets for small keys, a binary heap beyond.
-class RelaxedQueue
-{
-public:
-    static constexpr u32 k_buckets = 1024;
-
-    RelaxedQueue() : m_b(k_buckets) {}
-    void clear()
-    {
-        if (m_size)
-            for (u32 i = m_cur; i <= m_top; ++i)
-                m_b[i].clear();
-        m_cur = 0;
-        m_top = 0;
-        m_size = 0;
-        m_heap.clear();
-    }
-    void push(u32 key, u32 x)
-    {
-        if (key < k_buckets)
-        {
-            m_b[key].push_back(x);
-            m_top = std::max(m_top, key);
-            m_cur = std::min(m_cur, key);
-            ++m_size;
-        }
-        else
-        {
-            m_heap.push_back((static_cast<u64>(key) << 32) | x);
-            std::push_heap(m_heap.begin(), m_heap.end(), std::greater<u64>());
-        }
-    }
-    bool pop(u32& key, u32& x)
-    {
-        if (m_size)
-        {
-            while (m_b[m_cur].empty())
-                ++m_cur;
-            x = m_b[m_cur].back();
-            m_b[m_cur].pop_back();
-            key = m_cur;
-            --m_size;
-            return true;
-        }
-        if (m_heap.empty())
-            return false;
-        std::pop_heap(m_heap.begin(), m_heap.end(), std::greater<u64>());
-        key = static_cast<u32>(m_heap.back() >> 32);
-        x = static_cast<u32>(m_heap.back());
-        m_heap.pop_back();
-        return true;
-    }
-
-private:
-    std::vector<std::vector<u32>> m_b;
-    u32 m_cur = 0, m_top = 0;
-    u64 m_size = 0;
-    std::vector<u64> m_heap;
-};
+using detail::k_inf;
+using detail::k_none;
+using detail::RelaxedQueue;
+using detail::sat_add;
+using detail::to_value;
 
 // ================================================================================================ blind
 class BlindHeuristic final : public Heuristic
@@ -209,8 +157,11 @@ class RelaxationHeuristic final : public Heuristic
 {
 public:
     RelaxationHeuristic(const Task& task, const Options& o)
-        : m_task(task), m_kind(o.kind), m_real(o.costs == Costs::Real), m_grounded_only(o.evaluation == Evaluation::Grounded)
+        : m_task(task), m_kind(o.kind), m_real(o.costs == Costs::Real),
+          m_grounded_only(o.evaluation == Evaluation::Grounded || o.kind == Kind::SetAdditive)
     {
+        if (m_kind == Kind::SetAdditive && o.evaluation == Evaluation::Lifted)
+            throw std::invalid_argument("mymyr: the set-additive heuristic has no lifted evaluation (use Evaluation::Auto or Grounded)");
         if (m_real)
         {
             const ActionCosts costs(task);
@@ -240,7 +191,10 @@ public:
 
     [[nodiscard]] Kind kind() const noexcept override { return m_kind; }
     [[nodiscard]] std::shared_ptr<const RelaxedTask> relaxed() const override { return m_R; }
-    [[nodiscard]] bool provides_preferred() const noexcept override { return m_kind == Kind::FF && m_R != nullptr; }
+    [[nodiscard]] bool provides_preferred() const noexcept override
+    {
+        return (m_kind == Kind::FF || m_kind == Kind::SetAdditive) && m_R != nullptr;
+    }
 
     Value evaluate(StateView s) override
     {
@@ -340,61 +294,30 @@ private:
         m_ga_mark.assign(R.num_ground_actions(), 0);
     }
 
-    /// Maps the state's atoms to propositions; false if an atom lies outside the grounded relaxation.
-    bool convert(StateView s)
-    {
-        const AtomIndex& A = m_task.atoms();
-        m_state_pos.clear();
-        m_state_neg.clear();
-        bool ok = true;
-        bits::for_each(s.w, s.nw,
-                       [&](u64 slot)
-                       {
-                           if (slot >= m_slot_pos.size())
-                           {
-                               m_slot_pos.resize(slot + 1, k_unknown);
-                               m_slot_neg.resize(slot + 1, k_unknown);
-                           }
-                           if (m_slot_pos[slot] == k_unknown)
-                           {
-                               const auto [pp, np] = m_R->fluent_props(A.canonical(AtomKind::Fluent, static_cast<u32>(slot)));
-                               m_slot_pos[slot] = pp;
-                               m_slot_neg[slot] = np;
-                           }
-                           const u32 p = m_slot_pos[slot];
-                           if (p == k_none)
-                           {
-                               ok = false;
-                               return;
-                           }
-                           m_state_pos.push_back(p);
-                           if (m_slot_neg[slot] != k_none)
-                               m_state_neg.push_back(m_slot_neg[slot]);
-                       });
-        return ok;
-    }
+    bool convert(StateView s) { return m_props.convert(m_task, *m_R, s); }
 
     /// Generalized Dijkstra from the converted state until every proposition of `targets` is settled. A proposition of
     /// cost 0 is settled from the start (costs never drop below 0).
     void explore(std::span<const u32> targets)
     {
         const RelaxedTask& R = *m_R;
-        const bool add = m_kind == Kind::Add, ff = m_kind == Kind::FF;
+        const bool add = m_kind == Kind::Add, ff = m_kind == Kind::FF, sa = m_kind == Kind::SetAdditive;
+        const bool track = ff || sa;  // best supporters
         const u32 P = R.num_props(), O = R.num_ops();
         // copy_n / fill_n, not memcpy / memset: the buffers are empty for a task without propositions or operators,
         // and memcpy must not receive their null data() even for a zero size
         std::copy_n(m_cost_init.data(), P, m_cost.data());
         std::copy_n(m_npos.data(), O, m_cnt.data());
         std::fill_n(m_acc.data(), O, u32{0});
-        if (ff)
+        if (track)
             std::fill(m_supp.begin(), m_supp.end(), k_none);
         m_q.clear();
-        for (u32 p : m_state_pos)
+        for (u32 p : m_props.pos)
         {
             m_cost[p] = 0;
             m_q.push(0, p);
         }
-        for (u32 np : m_state_neg)
+        for (u32 np : m_props.neg)
         {
             m_cost[np] = k_inf;
             for (u32 o : R.pre_of(np))
@@ -407,14 +330,16 @@ private:
                 if (val < m_cost[q])
                 {
                     m_cost[q] = val;
-                    if (ff)
+                    if (track)
                         m_supp[q] = sup;
                     m_q.push(val, q);
                 }
         };
+        // h_FF: an axiom forwards the supporter of its last settled precondition (mimir's FF); set-additive: every
+        // operator supports what it reaches, so that the achiever sets pass through axioms
         for (u32 o : R.zero_ops())
             if (m_cnt[o] == 0)
-                fire(o, 0, m_axiom[o] ? k_none : o);
+                fire(o, 0, m_axiom[o] && !sa ? k_none : o);
         ++m_stamp;
         u32 left = 0;
         for (u32 g : targets)
@@ -442,12 +367,14 @@ private:
                 if (ff && m_axiom[o])
                     m_last[o] = m_supp[p];
                 if (--m_cnt[o] == 0)
-                    fire(o, m_acc[o], m_axiom[o] ? (ff ? m_last[o] : k_none) : o);
+                    fire(o, m_acc[o], m_axiom[o] && !sa ? (ff ? m_last[o] : k_none) : o);
             }
         }
     }
 
-    /// h of one goal from the explored costs; h_FF extracts the relaxed plan and marks its ground actions.
+    /// h of one goal from the explored costs. h_FF and set-additive walk the best supporters back from the goal and mark
+    /// the ground actions met; h_FF counts each ground action once, set-additive each supported proposition (the union
+    /// of the achiever sets has one member per proposition and supporter: mimir's unary actions).
     u64 fold(std::span<const u32> goal)
     {
         u64 h = 0;
@@ -458,9 +385,10 @@ private:
                 return k_inf;
             h = m_kind == Kind::Add ? h + c : std::max<u64>(h, c);
         }
-        if (m_kind != Kind::FF)
+        if (m_kind != Kind::FF && m_kind != Kind::SetAdditive)
             return h;
         const RelaxedTask& R = *m_R;
+        const bool sa = m_kind == Kind::SetAdditive;
         ++m_pstamp;
         m_plan.clear();
         m_plan_stamp = m_pstamp;
@@ -478,13 +406,19 @@ private:
                 continue;
             for (u32 q : R.pre(o))
                 m_stack.push_back(q);
+            if (m_axiom[o])
+                continue;  // set-additive: an axiom adds its preconditions' sets, nothing itself
             const u32 ga = R.ground_action(o);
+            const u32 cost = m_real ? R.real_cost(ga) : 1;
             if (m_ga_mark[ga] != m_pstamp)
             {
                 m_ga_mark[ga] = m_pstamp;
                 m_plan.push_back(ga);
-                hc += m_real ? R.real_cost(ga) : 1;
+                if (!sa)
+                    hc += cost;
             }
+            if (sa)
+                hc += cost;  // the member (o, x) of the union: one per supported proposition
         }
         m_plan_valid = true;
         return hc;
@@ -554,7 +488,7 @@ private:
             }
         }
         m_plan_valid = false;
-        if (m_kind == Kind::FF && best_g != k_none && best < k_inf)
+        if ((m_kind == Kind::FF || m_kind == Kind::SetAdditive) && best_g != k_none && best < k_inf)
             (void) fold(goal(best_g));  // leave the best goal's relaxed plan marked
         return to_value(best);
     }
@@ -562,6 +496,9 @@ private:
     // ------------------------------------------------------------------------------------ lifted fallback
     LiftedRelaxation& lifted()
     {
+        if (m_kind == Kind::SetAdditive)
+            throw std::runtime_error("mymyr: the state or goal lies outside the grounded relaxation, and the set-additive heuristic has no "
+                                     "lifted evaluation");
         if (m_grounded_only)
             throw std::runtime_error("mymyr: the state lies outside the grounded relaxation (Evaluation::Grounded)");
         if (!m_lifted)
@@ -597,7 +534,7 @@ private:
     // grounded scratch
     std::vector<u32> m_cost_init, m_cost, m_supp, m_gmark, m_pmark, m_cnt, m_acc, m_last, m_npos, m_opcost;
     std::vector<u8> m_axiom;
-    std::vector<u32> m_slot_pos, m_slot_neg, m_state_pos, m_state_neg;
+    detail::StateProps m_props;
     std::vector<u32> m_stack, m_plan, m_ga_mark;
     std::vector<u32> m_goal_props, m_goal_begin, m_union;
     std::vector<u8> m_goal_dead;
@@ -619,6 +556,9 @@ std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& optio
         case Kind::Custom:
             throw std::invalid_argument("mymyr: Kind::Custom names a caller's Heuristic (BestFirstOptions::evaluator); make_heuristic "
                                         "builds the library's kinds only");
+        case Kind::Perfect:
+            throw std::invalid_argument("mymyr: Kind::Perfect needs a state space: build it with heuristics::perfect (heuristics/perfect.hpp)");
+        case Kind::H2: return detail::make_h2(task, options);
         default: return std::make_unique<RelaxationHeuristic>(task, options);
     }
 }

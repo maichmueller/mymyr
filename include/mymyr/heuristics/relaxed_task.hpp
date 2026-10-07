@@ -100,6 +100,14 @@ public:
     {
         return {m_eff.data() + m_eff_begin[op], m_eff_begin[op + 1] - m_eff_begin[op]};
     }
+    /// The "true" propositions of the atoms the operator deletes (each once; h² needs them, the delete relaxation
+    /// ignores them).
+    [[nodiscard]] std::span<const u32> del(u32 op) const noexcept
+    {
+        return {m_del.data() + m_del_begin[op], m_del_begin[op + 1] - m_del_begin[op]};
+    }
+    /// Whether the operator's effect has no condition, i.e. applies whenever its ground action does (axioms: true).
+    [[nodiscard]] bool unconditional(u32 op) const noexcept { return m_uncond[op] != 0; }
     /// Precondition entries that are not "false" propositions (the counter of unsatisfied entries starts here).
     [[nodiscard]] u32 npos(u32 op) const noexcept { return m_npos[op]; }
     [[nodiscard]] bool is_axiom(u32 op) const noexcept { return m_ga[op] == k_none; }
@@ -146,7 +154,8 @@ private:
     std::vector<u32> m_cid_pos, m_cid_neg;
     u64 m_cid_mask = 0;
     // operators
-    std::vector<u32> m_pre_begin{0}, m_pre, m_eff_begin{0}, m_eff, m_npos, m_ga;
+    std::vector<u32> m_pre_begin{0}, m_pre, m_eff_begin{0}, m_eff, m_del_begin{0}, m_del, m_npos, m_ga;
+    std::vector<u8> m_uncond;
     std::vector<u32> m_pre_of_begin, m_pre_of, m_zero_ops;
     // ground actions
     std::vector<u32> m_ga_schema;

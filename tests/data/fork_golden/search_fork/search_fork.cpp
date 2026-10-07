@@ -1,20 +1,28 @@
 // search_fork: one search of the mimir fork (0.16.x) on a PDDL task, for the expectations of mymyr's parity tests:
-// the numeric best-first test (tests/data/numeric_tasks/fork_best_first.json, made by run_numeric.py) and the layer
-// ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py).
+// the numeric best-first test (tests/data/numeric_tasks/fork_best_first.json, made by run_numeric.py), the layer
+// ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py) and the heuristics test
+// (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py).
 //
-//   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff --domain D --problem P
-//               [--max-ms T] [--max-states N]
+//   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
+//               --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo iw|brfs --order in_order|reverse|goal_count|goal_count_fewer [--k K] [--limit L]
 //               --domain D --problem P [--max-ms T] [--max-states N]
+//   search_fork --algo walk_h --h setadd|h2|perfect --domain D --problem P [--walks W] [--steps S] [--seed B]
+//               [--max-states N]
 //
 // Prints one line "RESULT {...}" with status, plan_cost, plan_length, plan (ground action strings), expanded and
 // generated (best-first: also deadends; iw: also per-pass statistics), or "ERROR <message>". Successor generation is
-// lifted KPKC with symmetry pruning off; h_max, h_add and h_FF are the fork's grounded heuristics over a
-// LiftedGrounder (unit action costs), blind is its BlindHeuristic; the searches use the fork's default event handlers
-// and strategies. iw is iw::find_solution with max_arity K and the layer ordering strategy (max_next_layer_states L);
-// brfs is brfs::find_solution with stop_if_goal and the same ordering.
+// lifted KPKC with symmetry pruning off; h_max, h_add, h_FF, set-additive and h² are the fork's grounded heuristics
+// over a LiftedGrounder (unit action costs), blind is its BlindHeuristic, perfect its PerfectHeuristic over the
+// search context's state space (built first with --max-states as its limit: a larger space is an ERROR); the searches
+// use the fork's default event handlers and strategies. iw is iw::find_solution with max_arity K and the layer
+// ordering strategy (max_next_layer_states L); brfs is brfs::find_solution with stop_if_goal and the same ordering.
+// walk_h evaluates the heuristic on the states of the seeded random walks of tests/data/fork_golden/README.md (walk w
+// uses seed B + w, the next action is sorted_applicable[splitmix64() % count]; W = 3, S = 25, B = 1 as in the
+// golden files) and prints per walk and step the fluent atom count, the set hash of their strings and h.
 
 #include <mimir/mimir.hpp>
+#include <mimir/search/heuristics/h2.hpp>  // not in mimir.hpp
 
 #include <chrono>
 #include <cmath>
@@ -87,6 +95,116 @@ std::string action_str(GroundAction a)
     for (auto o : a->get_objects())
         s += " " + o->get_name();
     return s + ")";
+}
+
+uint64_t fnv1a64(const std::string& s)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (unsigned char c : s)
+    {
+        h ^= c;
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+struct SplitMix64
+{
+    uint64_t x;
+    uint64_t next()
+    {
+        uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+        return z ^ (z >> 31);
+    }
+};
+
+/// The number of fluent atoms of a state and the set hash of their strings (README.md: sum of FNV-1a-64).
+std::pair<size_t, std::string> fluent_hash(const State& state)
+{
+    const auto& repos = state.get_problem().get_repositories();
+    uint64_t h = 0;
+    size_t n = 0;
+    for (auto a : repos.get_ground_atoms_from_indices<FluentTag>(state.get_atoms<FluentTag>()))
+    {
+        std::string str = "(" + a->get_predicate()->get_name();
+        for (auto o : a->get_objects())
+            str += " " + o->get_name();
+        h += fnv1a64(str + ")");
+        ++n;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(h));
+    return {n, buf};
+}
+
+/// The fork's PerfectHeuristic, after checking that the state space has fewer than max_states states.
+Heuristic perfect_heuristic(const SearchContext& context, uint32_t max_states)
+{
+    auto options = datasets::StateSpaceImpl::Options();
+    options.remove_if_unsolvable = false;
+    options.max_num_states = max_states;
+    if (!datasets::StateSpaceImpl::create(context, options))
+        throw std::runtime_error("the state space has at least " + std::to_string(max_states) + " states");
+    return PerfectHeuristicImpl::create(context);
+}
+
+int run_walk_h(const std::string& domain, const std::string& problem_file, const std::string& hname, size_t walks, size_t steps,
+               uint64_t seed_base, uint32_t max_states)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    Problem problem = ProblemImpl::create(domain, problem_file);
+    SearchContext context = SearchContextImpl::create(
+        problem,
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+    std::unique_ptr<LiftedGrounder> grounder;
+    Heuristic h;
+    if (hname == "perfect")
+        h = perfect_heuristic(context, max_states);
+    else
+    {
+        grounder = std::make_unique<LiftedGrounder>(problem);
+        if (hname == "setadd")
+            h = SetAddHeuristicImpl::create(*grounder);
+        else if (hname == "h2")
+            h = H2HeuristicImpl::create(*grounder);
+        else
+        {
+            std::cerr << "unknown heuristic " << hname << "\n";
+            return 2;
+        }
+    }
+    auto& aag = *context->get_applicable_action_generator();
+    auto& repo = *context->get_state_repository();
+    std::string body = "\"walks\":[";
+    for (size_t w = 0; w < walks; ++w)
+    {
+        SplitMix64 rng { seed_base + w };
+        auto [state, metric] = repo.get_or_create_initial_state();
+        body += std::string(w ? "," : "") + "{\"seed\":" + std::to_string(seed_base + w) + ",\"steps\":[";
+        for (size_t i = 0; i <= steps; ++i)
+        {
+            const auto [n, hash] = fluent_hash(state);
+            body += std::string(i ? "," : "") + "{\"atoms\":" + std::to_string(n) + ",\"hash\":" + jstr(hash) +
+                    ",\"h\":" + jnum(h->compute_heuristic(state)) + "}";
+            std::vector<std::pair<std::string, GroundAction>> acts;
+            for (auto a : aag.create_applicable_action_generator(state))
+                acts.emplace_back(action_str(a), a);
+            std::stable_sort(acts.begin(), acts.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
+            if (i == steps || acts.empty())
+                break;
+            const auto& action = acts[rng.next() % acts.size()].second;
+            auto [succ, succ_metric] = repo.get_or_create_successor_state(state, action, metric);
+            state = succ;
+            metric = succ_metric;
+        }
+        body += "]}";
+    }
+    body += "]";
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << "RESULT {\"algo\":\"walk_h\",\"h\":" << jstr(hname) << "," << body << ",\"seconds\":" << jnum(secs) << "}" << std::endl;
+    return 0;
 }
 
 template<typename Options, typename Handler, typename Find>
@@ -221,6 +339,8 @@ int run_search(const std::string& domain, const std::string& problem_file, const
     Heuristic h;
     if (hname == "blind")
         h = BlindHeuristicImpl::create(problem);
+    else if (hname == "perfect")
+        h = perfect_heuristic(context, max_states);
     else
     {
         grounder = std::make_unique<LiftedGrounder>(problem);
@@ -230,6 +350,8 @@ int run_search(const std::string& domain, const std::string& problem_file, const
             h = AddHeuristicImpl::create(*grounder);
         else if (hname == "ff")
             h = FFHeuristicImpl::create(*grounder);
+        else if (hname == "setadd")
+            h = SetAddHeuristicImpl::create(*grounder);
         else
         {
             std::cerr << "unknown heuristic " << hname << "\n";
@@ -265,7 +387,8 @@ int main(int argc, char** argv)
 {
     std::string algo, hname, domain, problem, order;
     uint32_t max_ms = 120000, max_states = UINT32_MAX, limit = UINT32_MAX;
-    size_t k = 1;
+    size_t k = 1, walks = 3, steps = 25;
+    uint64_t seed = 1;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -293,6 +416,12 @@ int main(int argc, char** argv)
             k = std::stoul(v);
         else if (a == "--limit")
             limit = static_cast<uint32_t>(std::stoul(v));
+        else if (a == "--walks")
+            walks = std::stoul(v);
+        else if (a == "--steps")
+            steps = std::stoul(v);
+        else if (a == "--seed")
+            seed = std::stoull(v);
         else
         {
             std::cerr << "unknown argument " << a << "\n";
@@ -303,14 +432,17 @@ int main(int argc, char** argv)
     if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : hname.empty()))
     {
         std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L]) --domain D --problem P [--max-ms T] "
-                     "[--max-states N]\n";
+                     "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
         return 2;
     }
     int rc = 2;
     try
     {
-        rc = layered ? run_layered(domain, problem, algo, order, k, limit, max_ms, max_states)
-                     : run_search(domain, problem, algo, hname, max_ms, max_states);
+        if (algo == "walk_h")
+            rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
+        else
+            rc = layered ? run_layered(domain, problem, algo, order, k, limit, max_ms, max_states)
+                         : run_search(domain, problem, algo, hname, max_ms, max_states);
     }
     catch (const std::exception& ex)
     {

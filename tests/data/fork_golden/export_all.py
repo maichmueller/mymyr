@@ -38,9 +38,9 @@ FORMAT = "mymyr-fork-golden/1"
 MAX_BYTES = 1_950_000  # every file stays below 2 MB
 
 
-def inst(tag, prob, root=BENCH):
-    """{"name", "tag", "domain", "problem"} for one BENCH-relative (or root-relative) instance."""
-    d = os.path.join(root, tag.split("/", 1)[1] if tag.startswith("data/") else tag)
+def inst(tag, prob, root=BENCH, d=None):
+    """{"name", "tag", "domain", "problem"} for one BENCH-relative (or root-relative, or directory d) instance."""
+    d = d or os.path.join(root, tag.split("/", 1)[1] if tag.startswith("data/") else tag)
     stem = os.path.splitext(prob)[0]
     dom = None
     for cand in (f"domain_{stem}.pddl", f"domain-{stem}.pddl", "domain.pddl"):
@@ -75,7 +75,7 @@ BFS_INSTANCES = [
     inst("adl/pathways", "p02.pddl"),
     inst("adl/folding-opt23-adl", "p01.pddl"),
     inst("adl/openstacks-opt08-adl", "p03.pddl"),
-    inst("adl/philosophers", "p03-phil4.pddl", root=os.path.join(REPO, "tests", "data", "pddl")),
+    inst("adl/philosophers", "p03-phil4.pddl", d=os.path.join(REPO, "tests", "data", "pddl", "philosophers")),
     # extreme lifted case (large action schemas); the C++ lifted generator is expected to time out
     inst("strips/organic-synthesis-opt18-strips", "p20.pddl"),
 ]

@@ -425,11 +425,13 @@ TEST(CudaHeuristic, RefusesNumericTasksOtherKindsAndLargeGroundings)
     EXPECT_FALSE(cuda::DeviceHeuristic::unsupported(*numeric, {}).empty());
     EXPECT_THROW((void)cuda::DeviceHeuristic(ctx, numeric), std::invalid_argument);
     const TaskPtr task = load("depot__p02", true);
-    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount})
+    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount, heuristics::Kind::SetAdditive,
+                               heuristics::Kind::H2, heuristics::Kind::Perfect})
     {
         cuda::DeviceHeuristicOptions o;
         o.kind = k;
-        EXPECT_FALSE(cuda::DeviceHeuristic::unsupported(*task, o).empty());
+        const std::string why = cuda::DeviceHeuristic::unsupported(*task, o);
+        EXPECT_NE(why.find(std::string("'") + heuristics::to_string(k) + "'"), std::string::npos) << why;
         EXPECT_THROW((void)cuda::DeviceHeuristic(ctx, task, o), std::invalid_argument);
     }
     cuda::DeviceHeuristicOptions small;

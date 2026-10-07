@@ -16,14 +16,38 @@
 //              precondition, every ground action counts once. Among equally cheap supporters mimir picks by the
 //              order of a binary heap over its atom numbering; mymyr picks by its own operator order, so h_FF can
 //              differ from mimir's where such ties exist.
+//   SetAdditive  mimir's set-additive heuristic (after Keyder and Geffner 2008): every proposition gets the achiever
+//              set of its h_max best supporter (the first operator reaching its h_max cost, as for h_FF) plus the
+//              member (supporter, proposition), mimir's unary action; an operator's set is the union of its
+//              preconditions' sets, and an axiom adds no member of its own. h is the number of members of the union of
+//              the goal's sets (unit costs) or the sum of the costs of their actions (real costs). An action that
+//              supports two needed propositions is two members, so h >= h_FF for the same supporters; the relaxed plan
+//              (preferred operators) is the set of the members' ground actions. Ties among equally cheap supporters
+//              are broken as for h_FF.
+//   H2         h² (Haslum and Geffner 2000): the cost of the most expensive pair of goal literals, from a fixpoint over the
+//              costs of all pairs of propositions in which a pair is reached by an operator adding both, or adding one
+//              while the other held before and is not deleted (mutexes count). Admissible, and h_max <= h² <= h*. Over the
+//              same grounding as h_max: negative literals are the "false" propositions, axioms are 0-cost operators,
+//              and a conditional effect is an operator of its own whose pairs also combine with the effects of the same
+//              action (a pair added by two effects needs both conditions; only effects without a condition count as
+//              deleting for sure). mimir's H2Heuristic differs where its encoding errs: it ignores axioms and effect
+//              conditions, never reaches a negative literal the state does not satisfy, and its delete check excludes
+//              the negation of a deleted atom instead of the atom. Grounded only: memory and time grow with the
+//              square of the number of propositions (make_heuristic refuses more than 8191).
+//   Perfect    h* from a state space (heuristics/perfect.hpp: heuristics::perfect); make_heuristic refuses it.
 //   Custom     a Heuristic subclass of the caller (BestFirstOptions::evaluator), e.g. a learned value function.
-// Numeric tasks. As mimir's delete relaxation (DeleteRelaxTranslator), h_max, h_add and h_FF ignore numeric conditions
+// Numeric tasks. As mimir's delete relaxation (DeleteRelaxTranslator), the relaxation heuristics ignore numeric conditions
 // (of actions, effects and the goal) and numeric effects: they see the task's atoms only. Goal count counts the
 // fluent and derived goal literals; numeric goal constraints are not counted.
 // Costs. Unit: every action costs 1 and every axiom 0 (mimir's heuristics). Real: the task's action costs
 // (heuristics/action_costs.hpp); they must be non-negative integers.
 // Evaluation. Grounded (the relaxed task is built on first use, within the budget) or lifted (a cost-bucketed semi-naive
-// fixpoint over lifted matchers; the fallback beyond the budget and for states outside the grounded relaxation).
+// fixpoint over lifted matchers; the fallback beyond the budget and for states outside the grounded relaxation). h_max,
+// h_add and h_FF have both; set-additive and h² are grounded only: make_heuristic throws std::invalid_argument for
+// Evaluation::Lifted and std::runtime_error when the grounding exceeds the budget, and an evaluation throws
+// std::runtime_error for a state outside the grounding (which only a state not reachable from the initial state is)
+// and for a goal of evaluate(s, goals) with a negative literal over an atom that holds in s and that no operator or goal
+// of the task uses negatively (the grounding has no proposition for its negation).
 //
 // A Heuristic holds per-thread scratch: create one per search thread. Heuristics made from the same Options share the
 // grounding when Options::relaxed is set (use ground() to build it once).
@@ -61,6 +85,9 @@ enum class Kind : u8
     Add,
     FF,
     Custom,  // a Heuristic the caller implements (a learned value function, a Python callable); make_heuristic refuses it
+    SetAdditive,
+    H2,
+    Perfect,  // h* from a state space: heuristics::perfect (heuristics/perfect.hpp); make_heuristic refuses it
 };
 
 enum class Costs : u8
@@ -77,7 +104,8 @@ enum class Evaluation : u8
 };
 
 [[nodiscard]] const char* to_string(Kind k) noexcept;
-/// "blind", "goal_count" (or "gc"), "max" (or "hmax"), "add" (or "hadd"), "ff" (or "hff"). Throws std::invalid_argument.
+/// "blind", "goal_count" (or "gc"), "max" (or "hmax"), "add" (or "hadd"), "ff" (or "hff"), "set_additive" (or "hsa",
+/// "setadd"), "h2". Throws std::invalid_argument for other names, including "perfect" (made by heuristics::perfect).
 [[nodiscard]] Kind parse_kind(std::string_view name);
 
 struct Options
@@ -130,8 +158,9 @@ public:
     /// expansion, beam search those of each layer. False for the library's heuristics (one call per state).
     [[nodiscard]] virtual bool batched() const noexcept { return false; }
 
-    /// FF: the ground actions of the relaxed plan of the last evaluation. An applicable action is a preferred operator
-    /// when it is one of them (mimir's preferred actions).
+    /// FF and set-additive: the ground actions of the relaxed plan of the last evaluation (set-additive: those of the
+    /// members of the union of the goal's achiever sets). An applicable action is a preferred operator when it is one
+    /// of them (mimir's preferred actions).
     [[nodiscard]] virtual bool provides_preferred() const noexcept { return false; }
     [[nodiscard]] virtual bool preferred(const ActionLabel& /*action*/) const { return false; }
     [[nodiscard]] virtual std::vector<Action> relaxed_plan() const { return {}; }
@@ -148,6 +177,7 @@ protected:
     std::function<bool()> m_interrupt;
 };
 
-/// Throws std::invalid_argument for unsupported combinations (real costs on a task whose costs are not integral).
+/// Throws std::invalid_argument for unsupported combinations (real costs on a task whose costs are not integral, h² or
+/// set-additive without a grounding) and for Kind::Custom and Kind::Perfect.
 [[nodiscard]] std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& options = {});
 }  // namespace mymyr::heuristics
