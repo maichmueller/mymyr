@@ -400,7 +400,7 @@ private:
                         if (visited_states.insert(t).second)
                             curr_states.push_back(std::move(t));
                 }
-                std::swap(prev_states, curr_states);  // prev_states now holds this layer's states
+                std::swap(prev_states, curr_states);  // prev_states: this layer's states
             }
             if (m_next_layer.empty())
                 return;
