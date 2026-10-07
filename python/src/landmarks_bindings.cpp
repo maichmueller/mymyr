@@ -3,8 +3,8 @@
 // verify_pi_plus_fact_landmarks, RelaxedReachability with its tables, witness queries and conjunctive queries, and
 // LandmarkTransitionOrdering (the width-1 transition ordering that iw() takes).
 //
-// Atoms are mymyr Atoms (anything Task.atom accepts as input), actions mymyr Actions; the core's canonical ids stay
-// inside. Generators and fixpoints run with the thread state detached. Graphs, reachability engines and tables are
+// Atoms are GroundAtoms (as input, any ground atom Task.atom accepts), actions mymyr Actions; the core's canonical ids
+// stay inside. Generators and fixpoints run with the thread state detached. Graphs, reachability engines and tables are
 // immutable and safe to share between threads; a WitnessQuery serializes its calls (it memoizes).
 
 #include "py_landmarks.hpp"

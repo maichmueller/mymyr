@@ -72,7 +72,7 @@ def test_multi_iw_equals_cpu_iw(ctx, name, arity):
         batch = mc.multi_iw(task, starts, ctx=ctx, goals=goals, max_arity=arity, max_states=3000)
         assert len(batch) == len(starts)
         for i, s in enumerate(starts):
-            kw = {} if goals is None else {"goal": [{"positive": list(goals[i][0]), "negative": []}]}
+            kw = {} if goals is None else {"goal": [[task.atom(k) for k in goals[i][0]]]}
             cpu = mymyr.search.iw(task, max_arity=arity, start=s, max_states=3000, **kw)
             assert_equal(batch, i, cpu)
         assert batch.stats["candidates"] > 0
@@ -116,7 +116,7 @@ def test_batched_iw1_from_torch_rows(ctx):
     assert [batch.goal_state(i) == host.goal_state(i) for i in range(len(host))] == [True] * len(host)
     assert sum(batch.solved) > 0
     for i, s in enumerate(starts):
-        goal = [{"positive": list(goals[i][0]), "negative": []}]
+        goal = [[task.atom(k) for k in goals[i][0]]]
         assert_equal(batch, i, mymyr.search.iw(task, max_arity=1, start=s, goal=goal))
 
 
@@ -152,6 +152,31 @@ def test_rollouts_with_a_goal_solve_and_replay(ctx):
             s = task.apply(s, a)
         assert s == batch.goal_state(i)
         assert set(goal[0]) <= set(s.atom_slots())
+
+
+def test_ground_condition_goals(ctx):
+    """A GroundCondition of fluent literals is a device goal, the same as its slots; derived literals and numeric
+    constraints are refused."""
+    task = text_task("depot__p02")
+    starts = walk(task, steps=10, seed=5, walks=2)
+    slots = walk_goals(starts, 2)
+    conditions = [task.ground_condition([task.atom(k) for k in pos]) for pos, _ in slots]
+    a = mc.multi_iw(task, starts, ctx=ctx, goals=slots, max_arity=2, max_states=3000)
+    b = mc.multi_iw(task, starts, ctx=ctx, goals=conditions, max_arity=2, max_states=3000)
+    assert a.status == b.status and a.plan_length == b.plan_length
+    for i, s in enumerate(starts):
+        assert_equal(b, i, mymyr.search.iw(task, max_arity=2, start=s, max_states=3000, goal=conditions[i]))
+    # a negative literal
+    held = next(iter(task.initial_state.atoms()))
+    neg = task.ground_condition([task.literal(held, positive=False)])
+    r = mc.rollouts(task, list(range(8)), ctx=ctx, goal=neg)
+    assert sum(r.solved) > 0
+    phil = text_task("philosophers__p03-phil4")
+    with pytest.raises(ValueError, match="fluent literals only"):
+        mc.multi_iw(phil, [phil.initial_state], ctx=ctx, goals=[phil.goal_condition])
+    counters = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    with pytest.raises(ValueError):
+        mc.multi_iw(counters, [counters.initial_state], ctx=ctx, goals=[counters.goal_condition])
 
 
 def test_errors(ctx):

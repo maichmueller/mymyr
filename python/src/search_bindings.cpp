@@ -1492,7 +1492,7 @@ void bind_search(nb::module_& parent)
 
     nb::class_<PyRolloutResult>(m, "RolloutResult",
                                 "One rollout of find_rollouts_parallel: its IW ladder and what its private state "
-                                "repository recorded (mimir's IWRolloutResult). Atoms are mymyr Atoms, equal "
+                                "repository recorded (mimir's IWRolloutResult). Atoms are GroundAtoms, equal "
                                 "across rollouts and thread counts.")
         .def_prop_ro("seed", [](const PyRolloutResult& x) { return x.seed; })
         .def_prop_ro("search", [](const PyRolloutResult& x) { return PyIwResult{x.get().search, x.o}; },
