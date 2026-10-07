@@ -203,14 +203,6 @@ StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
     return b;
 }
 
-namespace
-{
-// ------------------------------------------------------------------------------------------------ helpers
-
-std::string name_of(const formalism::TaskData& D, formalism::Str s) { return std::string(D.str(s)); }
-
-const char* atoms_name(AtomMode m) { return m == AtomMode::Frozen ? "frozen" : "lazy"; }
-
 TaskOptions make_options(std::string_view atoms, std::string_view matching, u32 fc_free_params, u32 frozen_max_words,
                          u32 pilot_expansions)
 {
@@ -237,6 +229,14 @@ TaskOptions make_options(std::string_view atoms, std::string_view matching, u32 
     return o;
 }
 
+namespace
+{
+// ------------------------------------------------------------------------------------------------ helpers
+
+std::string name_of(const formalism::TaskData& D, formalism::Str s) { return std::string(D.str(s)); }
+
+const char* atoms_name(AtomMode m) { return m == AtomMode::Frozen ? "frozen" : "lazy"; }
+
 nb::tuple options_tuple(const TaskOptions& o)
 {
     const char* atoms = o.atoms == TaskOptions::Atoms::Auto ? "auto" : o.atoms == TaskOptions::Atoms::Lazy ? "lazy" : "frozen";
@@ -256,10 +256,6 @@ CorePtr build_core(std::shared_ptr<const formalism::TaskData> data, std::shared_
     }
     return std::make_shared<PyTaskCore>(std::move(task), std::move(data), std::move(source));
 }
-
-#define MYMYR_TASK_OPTION_ARGS                                                                                         \
-    nb::kw_only(), "atoms"_a = "auto", "matching"_a = "auto", "fc_free_params"_a = 4, "frozen_max_words"_a = 8,         \
-        "pilot_expansions"_a = 1024
 
 constexpr const char* k_options_doc =
     "Options: atoms ('auto': frozen slots when the dense state width is small, else lazy; 'lazy'; 'frozen'), "
