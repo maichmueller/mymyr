@@ -40,9 +40,11 @@ algorithms also handle numeric conditions, effects and metric costs. AStarIW doe
 ## Goals, budgets and callbacks
 
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and
-`max_seconds=`. A goal can be the task goal (`None`), a callable `state -> bool`, or an any-of list of fluent atom
-lists / `{"positive": ..., "negative": ...}` conditions. `search.CancelToken` supports cancellation from another
-thread.
+`max_seconds=`. On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
+`mymyr.formalism.GroundCondition`, or a sequence of goals. Each goal in that sequence is a `GroundCondition` or a
+sequence of ground atoms and literals; any one that holds ends the search. See [Formula values](formulas.md) for
+construction examples. CUDA searches accept `GroundCondition` goals containing fluent literals only; they reject
+derived literals and numeric constraints. `search.CancelToken` supports cancellation from another thread.
 
 An `observer` may implement `on_start`, `on_expand`, `on_generate`, `on_prune`, `on_pass`, `on_solution`,
 `on_progress` and `on_end`; IW-family algorithms also call `on_transition`. A false return from `on_progress` stops

@@ -12,7 +12,9 @@ cap it. Arrays and device tasks keep their context alive.
 At this revision, CUDA entry points accept classical tasks only. Numeric fluent values, numeric preconditions/effects
 and metric costs are not available on the device. CPU search, datasets and RL paths have numeric-task support where
 their API permits it. The device heuristic kinds are `"max"`, `"add"` and `"ff"`; `"blind"` is also accepted by device
-A* and GBFS.
+A* and GBFS. CUDA search accepts `(positive_slots, negative_slots)` tuples and `GroundCondition` goals with fluent
+literals only; goals with derived literals or numeric constraints require a CPU search. See [Formula values](formulas.md)
+for CPU goal construction.
 
 This BrFS example runs the repository's classical blocks fixture on device 0:
 

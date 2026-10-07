@@ -4,6 +4,7 @@ These pages describe the Python package, optional CUDA backend, plain-C API and 
 
 - [Getting started](getting-started.md): install a wheel or build from source, parse a task and run a search.
 - [Parsing and tasks](parsing-and-tasks.md): PDDL, task and state values, formalism views, actions and binding generators.
+- [Formula values](formulas.md): atoms, literals, conditions, state checks, pickling and search goals.
 - [Search](search.md): breadth-first search, the IW family, best-first search, heuristics, goals, budgets and observers.
 - [Heuristics](heuristics.md): relaxation heuristics, h², set-additive and perfect heuristics.
 - [Datasets](datasets.md): state spaces, generalized state spaces, samplers and certificates.

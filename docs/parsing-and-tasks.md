@@ -34,11 +34,14 @@ print(action, next_state.numeric_values())
 
 ## Binding generators
 
-`task.precondition(schema)` and `task.goal_condition` return lifted conjunction views. `task.bindings(target, state)` lazily
-enumerates parameter bindings whose conditions hold in that state. `target` can be a schema name/index or one of those
-condition views. `partial=` accepts a mapping from parameter index/name to object, or a sequence with `None` for
-unbound parameters; `limit=` caps the number of yielded bindings. `task.ground_conjunctions` yields the binding and its
-ground static, fluent and derived literals.
+`task.precondition(schema)` returns a `ConjunctiveCondition`; `task.goal_condition` is a `GroundCondition`.
+`task.bindings(target, state)` lazily enumerates parameter bindings whose conditions hold in that state. `target` can
+be a schema name/index or a `ConjunctiveCondition`. `partial=` accepts a mapping from parameter index/name to object,
+or a sequence with `None` for unbound parameters; `limit=` caps the number of yielded bindings.
+`task.ground_conjunctions` yields the binding and its ground static, fluent and derived literals.
+
+See [Formula values](formulas.md) for creating atoms, literals and conditions, checking them against states, and using
+ground conditions as search goals.
 
 ```python
 condition = task.precondition("inc")
