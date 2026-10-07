@@ -105,6 +105,8 @@ batch = pool.step()
 print(batch.states.shape, batch.reward, batch.terminated)
 ```
 
+User guides and tested scripts are in [docs/](docs/README.md) and [examples/](examples/).
+
 ## License
 
 mymyr is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
