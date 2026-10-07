@@ -124,9 +124,10 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& translated_dom
 /// sorted by variable name unless `origin.argument_order` names an order.
 std::vector<u32> generated_predicate_perm(const loki::Predicate& p, const PredicateOrigin& origin);
 
-/// The canonical order of the types in a type hierarchy (see domain.hpp): the reverse of the order in which loki's
-/// `collect_types_from_hierarchy` inserts them (each declared type, then its bases, depth first), which is the order
-/// loki's std::unordered_set yields whenever no two of them share a hash bucket. Returns rank[type] (~0u if absent).
+/// The canonical order of the types in a type hierarchy (see domain.hpp): the reverse of a depth-first visit that
+/// takes the declared types in the canonical name order (`object`, `number`, then by name) and puts each type before
+/// its bases (in the same order), so it depends on the names and the hierarchy only. Returns rank[type] (~0u if
+/// absent).
 std::vector<u32> hierarchy_ranks(const formalism::TaskData& t, std::span<const TypeId> declared);
 
 using ObjectMap = absl::flat_hash_map<const loki::ObjectImpl*, u32>;

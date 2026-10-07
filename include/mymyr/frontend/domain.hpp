@@ -17,9 +17,10 @@
 //   - loki visits a type hierarchy through an std::unordered_set of type pointers (`collect_types_from_hierarchy`),
 //     so in typed domains the order of the type predicates, of the type literals of one object in the initial state
 //     and of the type literals of one parameter in a condition depends on heap addresses (and differs between runs
-//     of mimir). mymyr puts each such group in hierarchy order instead: the reverse of the order in which loki
-//     inserts the types into the set, which is what the set yields whenever no two types share a hash bucket (always
-//     for two types, e.g. {T, object});
+//     of mimir). mymyr puts each such group in hierarchy order instead, a function of the type names and the
+//     hierarchy alone (translate.hpp, hierarchy_ranks). The types themselves are numbered in that name order
+//     (`object`, `number`, then alphabetical), because loki lists them in the iteration order of a hash table of
+//     type names, which differs between standard libraries;
 //   - loki's ToEffectNormalForm sums the numeric effects per (operator, function) in an unordered_map keyed by
 //     pointers; mymyr orders each run of such effects by (function name, arguments, operator);
 //   - the arguments of the derived predicates that loki generates for universal quantifiers ("axiom_<k>") are the
@@ -30,7 +31,12 @@
 //     most two groups libc++ iterates in reverse insertion order (reproduced), for three or more the order depends
 //     on heap addresses (we keep reverse insertion order);
 //   - parameters that normalization appends to a schema (moved existentials) are sorted by pointer value; we sort
-//     by creation order, which is what the allocator produces in practice.
+//     by creation order, which is what the allocator produces in practice;
+//   - loki de-duplicates the branches of a disjunction (disjunctive normal form) and the literal and `when` effects
+//     of an effect conjunction (ToEffectNormalForm) through an std::unordered_set. The order of the schemas that one
+//     `or` splits into and of the literal effects of one schema follows the hash function and the bucket policy of
+//     the standard library: it is the same on every run of one build, but not between libstdc++ and libc++, and
+//     mymyr does not canonicalize it.
 // Conditions list each nullary literal twice, as mimir's ConjunctiveCondition does (once as a lifted literal,
 // once as a "nullary ground literal"); consumers may dedupe.
 //

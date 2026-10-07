@@ -74,7 +74,10 @@ def records(task):
         arr(datasets.StateSpaceSampler(ss.space, seed=3).sample_states(64)),
     ]
     return {
-        "task": [task.fingerprint, task.num_atoms, [str(a) for a in s0.atoms()], arr(task.encode([s0]))],
+        "task.fingerprint": task.fingerprint,
+        "task.num_atoms": task.num_atoms,
+        "task.atoms": [str(a) for a in s0.atoms()],
+        "task.encoding": arr(task.encode([s0])),
         "applicable": [str(a) for a in task.applicable_actions(s0)],
         "expand": [arr(exp.succ), arr(exp.offsets), arr(exp.schema), arr(exp.binding), arr(exp.parent)],
         "brfs": [brfs.states, brfs.expanded, brfs.generated, brfs.layers, brfs.fingerprint],
@@ -106,7 +109,8 @@ def test_order_hashes(case, expected):
         pytest.skip(f"{case} not in {DATA.name}")
     got = digests(load(case))
     differ = sorted(k for k in expected[case] if got.get(k) != expected[case][k])
-    assert not differ, f"{case}: {differ} differ from {DATA.name} (written on {json.loads(DATA.read_text())['platform']})"
+    detail = ", ".join(f"{k} (got {got.get(k)}, expected {expected[case][k]})" for k in differ)
+    assert not differ, f"{case}: {detail} differ from {DATA.name} (written on {json.loads(DATA.read_text())['platform']})"
 
 
 def main():

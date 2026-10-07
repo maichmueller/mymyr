@@ -11,7 +11,10 @@
    "gbfs_lazy": "2b2e0e1e4272dcd3",
    "iw": "3fdcb1c4b4d125ab",
    "siw": "46d34c6ee8a58a2b",
-   "task": "d129f712909c6c7a",
+   "task.atoms": "f89d6f748e25d681",
+   "task.encoding": "39d2f007ef82569c",
+   "task.fingerprint": "9368b987c4c7bc77",
+   "task.num_atoms": "cd70bea023f752a0",
    "walks": "4459dfe4a419b38e"
   },
   "pddl:logistics00": {
@@ -25,7 +28,10 @@
    "gbfs_lazy": "1016e4053fdc7cc0",
    "iw": "0d8afe323bbd662a",
    "siw": "99e407985cb21afc",
-   "task": "f9f03616b794fc5c",
+   "task.atoms": "28241f6f5b5cc877",
+   "task.encoding": "822c682de7a58c85",
+   "task.fingerprint": "1583c00b51986d16",
+   "task.num_atoms": "2fca346db6561871",
    "walks": "63f95cbbb5225663"
   },
   "pddl:philosophers": {
@@ -39,7 +45,10 @@
    "gbfs_lazy": "533658e969de1f13",
    "iw": "f0626950bc81be28",
    "siw": "44f35946a81f7014",
-   "task": "3fe2731ecd8381ef",
+   "task.atoms": "ea3f0dfddcd01ea7",
+   "task.encoding": "409f212e01fbc342",
+   "task.fingerprint": "fee57e872cb58f82",
+   "task.num_atoms": "9537f32ec7599e1a",
    "walks": "ed75c6c0e8da8c34"
   },
   "text:blocks__probBLOCKS-8-0": {
@@ -53,7 +62,10 @@
    "gbfs_lazy": "afd4d1e9d4f7059e",
    "iw": "3fdcb1c4b4d125ab",
    "siw": "170c3bf39253d232",
-   "task": "cf0c15b097c4ecf2",
+   "task.atoms": "361d386e7ef09581",
+   "task.encoding": "39d2f007ef82569c",
+   "task.fingerprint": "1ca29b86209cabde",
+   "task.num_atoms": "cd70bea023f752a0",
    "walks": "4459dfe4a419b38e"
   },
   "text:depot__p02": {
@@ -67,7 +79,10 @@
    "gbfs_lazy": "ba5b6c5518535dc6",
    "iw": "826a46e26ae1a204",
    "siw": "ab163e7d45915cfa",
-   "task": "f790bdb8b4f1c3c1",
+   "task.atoms": "accd966dcc195feb",
+   "task.encoding": "97c1f9741f20732f",
+   "task.fingerprint": "5adc63dc8e0e9dd5",
+   "task.num_atoms": "e3d6c4d4599e0088",
    "walks": "659c92af0af37f64"
   },
   "text:gripper__prob05": {
@@ -81,7 +96,10 @@
    "gbfs_lazy": "e9c7a72df86b0e20",
    "iw": "81b31a651bd46e88",
    "siw": "05de7dbdc3519e70",
-   "task": "5c72cf9dcefe9576",
+   "task.atoms": "0a33dcba377b81b7",
+   "task.encoding": "3f2eec1466c3b0a3",
+   "task.fingerprint": "488a9dca3171da82",
+   "task.num_atoms": "41cfc0d1f2d127b0",
    "walks": "ed935b32255e4187"
   },
   "text:logistics00__probLOGISTICS-6-1": {
@@ -95,7 +113,10 @@
    "gbfs_lazy": "aa537fbee403c353",
    "iw": "0d8afe323bbd662a",
    "siw": "a2b3f63c770ad54d",
-   "task": "8cba9a39fb01ecb7",
+   "task.atoms": "248203ff7786b79e",
+   "task.encoding": "822c682de7a58c85",
+   "task.fingerprint": "d27370ebc6459e66",
+   "task.num_atoms": "2fca346db6561871",
    "walks": "63f95cbbb5225663"
   },
   "text:miconic-simpleadl__s10-2": {
@@ -109,7 +130,10 @@
    "gbfs_lazy": "533658e969de1f13",
    "iw": "ab70c1c8cc27227f",
    "siw": "cd8415644565a9c3",
-   "task": "2a38f20f41add657",
+   "task.atoms": "2f44ac5d303a1a7c",
+   "task.encoding": "6e8fa5c2dc3f6e93",
+   "task.fingerprint": "82e53b7df87b7509",
+   "task.num_atoms": "d59eced1ded07f84",
    "walks": "d974e13c27068e46"
   },
   "text:openstacks-opt08-adl__p03": {
@@ -123,7 +147,10 @@
    "gbfs_lazy": "052c9511527c1ea3",
    "iw": "3a68f73fd9c57d77",
    "siw": "ca5b12870ed5e0e2",
-   "task": "605616f36656607d",
+   "task.atoms": "0f492fbd74ec99c1",
+   "task.encoding": "2b89de7a4c085f29",
+   "task.fingerprint": "7314c5c985c5af5f",
+   "task.num_atoms": "76a50887d8f1c2e9",
    "walks": "a53f3f5338f4fe27"
   },
   "text:philosophers__p03-phil4": {
@@ -137,7 +164,10 @@
    "gbfs_lazy": "533658e969de1f13",
    "iw": "f0626950bc81be28",
    "siw": "d5471838e6898d91",
-   "task": "8fd581e4f77bff43",
+   "task.atoms": "ad70aff8162c263b",
+   "task.encoding": "409f212e01fbc342",
+   "task.fingerprint": "dbf03a4f9330d0cb",
+   "task.num_atoms": "9537f32ec7599e1a",
    "walks": "ed75c6c0e8da8c34"
   }
  },

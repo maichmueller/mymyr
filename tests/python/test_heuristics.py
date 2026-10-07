@@ -97,6 +97,8 @@ COST_PROBLEM = """(define (problem route-1) (:domain route)
 
 
 def test_perfect_with_real_costs(tmp_path):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
     (tmp_path / "domain.pddl").write_text(COST_DOMAIN)
     (tmp_path / "problem.pddl").write_text(COST_PROBLEM)
     task = mymyr.Task.from_pddl(tmp_path / "domain.pddl", tmp_path / "problem.pddl")

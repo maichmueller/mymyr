@@ -353,6 +353,35 @@ TEST(Frontend, StringInputAndDomainData)
     EXPECT_TRUE(empty->fluent_init.empty());
 }
 
+// loki lists the types in the order of a hash table of type names, which differs between standard libraries; the
+// numbering of the types and the order of the type predicates must follow the names only.
+TEST(Frontend, TypeOrderFollowsTheTypeNamesOnly)
+{
+    const std::vector<std::string> declared = {"truck", "plane", "ship", "crate", "depot", "yard", "pier", "gate", "lift", "belt", "arm", "cart"};
+    std::string types;
+    for (const auto& n : declared)
+        types += n + " ";
+    const std::string text = "(define (domain ty) (:requirements :strips :typing) (:types " + types + "- object) (:predicates (p ?x - truck)))";
+    const auto domain = frontend::Domain::from_string(text, "ty.pddl");
+    const auto task = domain->instantiate_string("(define (problem q) (:domain ty) (:objects a - truck) (:init (p a)) (:goal (p a)))");
+
+    std::vector<std::string> sorted = declared;
+    std::sort(sorted.begin(), sorted.end());
+    std::vector<std::string> want_ids = {"object", "number"};
+    want_ids.insert(want_ids.end(), sorted.begin(), sorted.end());
+    std::vector<std::string> ids;
+    for (const auto& ty : task->types)
+        ids.emplace_back(task->str(ty.name));
+    EXPECT_EQ(ids, want_ids);
+
+    // the type predicates come first, in the reverse of the visiting order of the types
+    std::vector<std::string> want_preds(want_ids.rbegin(), want_ids.rend());
+    std::vector<std::string> preds;
+    for (size_t i = 0; i < want_preds.size(); ++i)
+        preds.emplace_back(task->str(task->predicates[i].name));
+    EXPECT_EQ(preds, want_preds);
+}
+
 TEST(Frontend, StringInputIsPreprocessedLikeFiles)
 {
     // PDDL is case-insensitive and ';' starts a comment: the string entry points must read text exactly as the file

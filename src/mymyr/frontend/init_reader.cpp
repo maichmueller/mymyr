@@ -1,12 +1,12 @@
 #include "init_reader.hpp"
 
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/charconv.h>
 #include <boost/hana.hpp>
 #include <loki/details/pddl/repositories.hpp>
 
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -110,8 +110,11 @@ private:
 
 std::optional<f64> parse_number(std::string_view s)
 {
+    // absl::from_chars also reads a "0x" hexadecimal float under chars_format::general; a number is decimal here
+    if (s.find_first_of("xX") != std::string_view::npos)
+        return std::nullopt;
     f64 v = 0;
-    auto [p, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    auto [p, ec] = absl::from_chars(s.data(), s.data() + s.size(), v);
     if (ec != std::errc{} || p != s.data() + s.size())
         return std::nullopt;
     return v;
