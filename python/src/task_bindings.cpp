@@ -8,12 +8,14 @@
 
 #include "arrays.hpp"
 #include "formalism_task.hpp"
+#include "formalism_views.hpp"
 #include "py_domain.hpp"
 #include "py_task.hpp"
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/successor/bindings.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -25,7 +27,9 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -730,6 +734,367 @@ Arg<PyState> apply(const Owner& o, StateView s, nb::handle action)
     return make_state(o, b.build());
 }
 
+// ------------------------------------------------------------------------------------------------ binding generators
+
+i64 py_hash(u64 h);
+
+/// A lifted conjunctive condition of a task (successor/bindings.hpp): a schema's precondition or the goal.
+struct PyCondition
+{
+    std::shared_ptr<const ConjunctiveCondition> c;
+    nb::object owner;  // a Task or TaskHandle object: keeps `core` alive
+    PyTaskCore* core = nullptr;
+};
+
+/// A ground literal of a binding (Task.ground_conjunctions).
+struct PyGroundLiteral
+{
+    u32 pred = 0;
+    bool positive = true;
+    std::vector<u32> args;
+    nb::object owner;
+    PyTaskCore* core = nullptr;
+};
+
+/// A schema name or index.
+using SchemaArg = Arg<std::variant<std::string, int>>;
+/// What Task.bindings enumerates: a schema (name or index) or a ConjunctiveCondition.
+using TargetArg = Arg<std::variant<std::string, int, PyCondition>>;
+/// An object: a mymyr.formalism.Object, a name, or an index.
+using ObjectLike = std::variant<ObjectView, std::string, int>;
+/// A partial binding: {variable index or name: object}, or one entry per variable with None for the free ones.
+using PartialArg = Arg<std::variant<nb::typed<nb::dict, std::variant<int, std::string>, std::optional<ObjectLike>>,
+                                     nb::typed<nb::sequence, std::optional<ObjectLike>>>>;
+/// A limit (None: no limit).
+using LimitArg = Arg<int>;
+using ObjectTuple = nb::typed<nb::tuple, ObjectView, nb::ellipsis>;
+using BindingItem = Arg<std::variant<PyAction, ObjectTuple>>;
+using GroundLiteralList = nb::typed<nb::list, PyGroundLiteral>;
+using ConjunctionItem = Arg<nb::typed<nb::tuple, std::variant<PyAction, ObjectTuple>, GroundLiteralList, GroundLiteralList,
+                                      GroundLiteralList>>;
+
+u32 schema_index(PyTaskCore& core, nb::handle h)
+{
+    if (nb::isinstance<nb::int_>(h))
+    {
+        const i64 v = nb::cast<i64>(h);
+        if (v < 0 || v >= static_cast<i64>(core.data->schemas.size()))
+            throw nb::index_error("mymyr: schema index out of range");
+        return static_cast<u32>(v);
+    }
+    const std::string n = nb::cast<std::string>(nb::str(h));
+    const auto it = core.names().schemas.find(n);
+    if (it == core.names().schemas.end())
+        throw nb::key_error(("mymyr: no schema named '" + n + "'").c_str());
+    return it->second;
+}
+
+/// A binding target: a schema, or a condition (cond set).
+struct Target
+{
+    u32 schema = 0;
+    std::shared_ptr<const ConjunctiveCondition> cond;
+    u32 arity = 0;
+};
+
+Target target_arg(PyTaskCore& core, nb::handle h)
+{
+    if (nb::isinstance<PyCondition>(h))
+    {
+        const PyCondition& c = *nb::inst_ptr<PyCondition>(h);
+        if (c.core->task->uid() != core.task->uid())
+            throw nb::value_error("mymyr: the condition belongs to another task");
+        return {0, c.c, c.c->arity()};
+    }
+    const u32 s = schema_index(core, h);
+    return {s, nullptr, core.data->schemas[s].arity()};
+}
+
+/// The variable names of a target, without '?'.
+std::vector<std::string> variable_names(PyTaskCore& core, const Target& t)
+{
+    std::vector<std::string> out;
+    if (t.cond)
+        for (const auto& v : t.cond->variables)
+            out.push_back(v.name);
+    else
+        for (const formalism::Parameter& p : formalism::TaskData::slice(core.data->params, core.data->schemas[t.schema].params))
+            out.push_back(name_of(*core.data, p.name));
+    return out;
+}
+
+/// An object argument: an Object of this task's problem (by name if it comes from another parse), a name, or an index.
+u32 object_value(PyTaskCore& core, nb::handle h)
+{
+    if (nb::isinstance<ObjectView>(h))
+    {
+        const ObjectView& v = *nb::inst_ptr<ObjectView>(h);
+        if (v.t.get() == core.data.get())
+            return v.i;
+        return object_index(core, nb::str(v.d().str(v.d().objects[v.i].name).data(), v.d().str(v.d().objects[v.i].name).size()));
+    }
+    return object_index(core, h);
+}
+
+std::vector<std::optional<ObjectId>> partial_arg(PyTaskCore& core, const Target& t, nb::handle h)
+{
+    std::vector<std::optional<ObjectId>> out;
+    if (h.is_none())
+        return out;
+    out.resize(t.arity);
+    if (nb::isinstance<nb::dict>(h))
+    {
+        std::vector<std::string> names;
+        for (auto [k, v] : nb::borrow<nb::dict>(h))
+        {
+            u32 var = 0;
+            if (nb::isinstance<nb::int_>(k))
+            {
+                const i64 i = nb::cast<i64>(k);
+                if (i < 0 || i >= static_cast<i64>(t.arity))
+                    throw nb::index_error(("mymyr: partial: variable index " + std::to_string(i) + " out of range (arity " +
+                                           std::to_string(t.arity) + ")")
+                                              .c_str());
+                var = static_cast<u32>(i);
+            }
+            else if (nb::isinstance<nb::str>(k))
+            {
+                if (names.empty())
+                    names = variable_names(core, t);
+                std::string n = nb::cast<std::string>(k);
+                if (!n.empty() && n[0] == '?')
+                    n.erase(0, 1);
+                u32 found = 0, hits = 0;
+                for (u32 i = 0; i < names.size(); ++i)
+                    if (names[i] == n)
+                        found = i, ++hits;
+                if (hits != 1)
+                    throw nb::key_error(("mymyr: partial: " + std::string(hits ? "more than one variable" : "no variable") +
+                                         " named '?" + n + "'")
+                                            .c_str());
+                var = found;
+            }
+            else
+                throw nb::type_error("mymyr: partial: the keys are variable indices or names");
+            if (!v.is_none())
+                out[var] = ObjectId{object_value(core, v)};
+        }
+        return out;
+    }
+    if (nb::isinstance<nb::str>(h) || !nb::isinstance<nb::sequence>(h))
+        throw nb::type_error("mymyr: partial: expected a dict {variable: object} or a sequence with None for the free variables");
+    nb::sequence seq = nb::borrow<nb::sequence>(h);
+    if (nb::len(seq) != t.arity)
+        throw nb::value_error(("mymyr: partial: expected " + std::to_string(t.arity) + " entries (one per variable), got " +
+                               std::to_string(nb::len(seq)))
+                                  .c_str());
+    for (u32 i = 0; i < t.arity; ++i)
+    {
+        nb::object v = seq[i];
+        if (!v.is_none())
+            out[i] = ObjectId{object_value(core, v)};
+    }
+    return out;
+}
+
+u64 limit_arg(nb::handle h)
+{
+    if (h.is_none())
+        return ~u64{0};
+    const i64 v = nb::cast<i64>(h);
+    if (v < 0)
+        throw nb::value_error("mymyr: limit must be >= 0");
+    return static_cast<u64>(v);
+}
+
+ObjectTuple object_tuple(PyTaskCore& core, const ObjectId* b, u32 n)
+{
+    PyObject* t = PyTuple_New(static_cast<Py_ssize_t>(n));
+    if (!t)
+        throw nb::python_error();
+    nb::tuple out = nb::steal<nb::tuple>(t);
+    for (u32 i = 0; i < n; ++i)
+        PyTuple_SET_ITEM(t, static_cast<Py_ssize_t>(i), nb::cast(ObjectView{{core.data, b[i].v}}).release().ptr());
+    return ObjectTuple(std::move(out));
+}
+
+/// The lazy bindings of a target in a state (Task.bindings, Task.ground_conjunctions). Chunks of bindings are
+/// enumerated with the thread state released, holding no Python objects, on the calling thread's workspace; the
+/// next chunk resumes after the last binding of the previous one (BindingOptions::resume_after).
+struct PyBindingsIter
+{
+    Owner o;
+    State s;
+    Target t;
+    std::vector<std::optional<ObjectId>> partial;
+    bool ground = false;
+    u64 remaining = 0;  // the limit left
+    u64 chunk = 16;     // grows to k_max_chunk
+    bool done = false;  // no binding after the buffered ones
+    bool busy = false;  // a chunk is being enumerated (the thread state is released)
+    std::vector<ObjectId> buf;   // the bindings of the chunk
+    std::vector<u32> lits;       // ground: per binding, per kind (static, fluent, derived) a count, then the literals
+    std::vector<usize> lit_at;   // ground: where each binding's literals start in `lits`
+    std::vector<ObjectId> last;  // the last binding enumerated
+    usize pos = 0, count = 0;
+    nb::ft_mutex m;
+
+    static constexpr u64 k_max_chunk = 4096;
+};
+
+struct PyGroundConjunctionsIter : PyBindingsIter
+{
+};
+
+void refill(PyBindingsIter& it)
+{
+    it.buf.clear();
+    it.lits.clear();
+    it.lit_at.clear();
+    it.pos = it.count = 0;
+    const u64 want = std::min(it.chunk, it.remaining);
+    if (want == 0)
+    {
+        it.done = true;
+        return;
+    }
+    const Task& task = *it.o.core->task;
+    it.busy = true;
+    struct Busy
+    {
+        bool& b;
+        ~Busy() { b = false; }
+    } busy{it.busy};
+    u64 n = 0;
+    {
+        nb::gil_scoped_release release;
+        BindingOptions opt;
+        opt.limit = want;
+        opt.resume_after = it.last;
+        const PartialBinding partial(it.partial);
+        Workspace& ws = task.workspace();
+        if (it.ground)
+        {
+            auto keep = [&](const GroundConjunction& g)
+            {
+                it.buf.insert(it.buf.end(), g.binding.begin(), g.binding.end());
+                it.lit_at.push_back(it.lits.size());
+                for (std::span<const GroundLiteral> part : {g.static_literals, g.fluent_literals, g.derived_literals})
+                {
+                    it.lits.push_back(static_cast<u32>(part.size()));
+                    for (const GroundLiteral& l : part)
+                    {
+                        it.lits.push_back(l.predicate.v);
+                        it.lits.push_back(l.positive ? 1 : 0);
+                        for (ObjectId o : l.objects)
+                            it.lits.push_back(o.v);
+                    }
+                }
+            };
+            n = it.t.cond ? for_each_ground_conjunction(task, ws, *it.t.cond, it.s.view(), partial, keep, opt)
+                          : for_each_ground_conjunction(task, ws, SchemaId{it.t.schema}, it.s.view(), partial, keep, opt);
+        }
+        else
+        {
+            auto keep = [&](std::span<const ObjectId> b) { it.buf.insert(it.buf.end(), b.begin(), b.end()); };
+            n = it.t.cond ? for_each_binding(task, ws, *it.t.cond, it.s.view(), partial, keep, opt)
+                          : for_each_binding(task, ws, SchemaId{it.t.schema}, it.s.view(), partial, keep, opt);
+        }
+    }
+    it.count = static_cast<usize>(n);
+    it.remaining -= n;
+    if (n < want || it.t.arity == 0)
+        it.done = true;  // a condition without variables has at most one binding
+    if (n > 0)
+        it.last.assign(it.buf.end() - it.t.arity, it.buf.end());
+    it.chunk = std::min(it.chunk * 2, PyBindingsIter::k_max_chunk);
+}
+
+GroundLiteralList ground_literals(PyBindingsIter& it, const u32*& p)
+{
+    const formalism::TaskData& D = *it.o.core->data;
+    GroundLiteralList out{nb::list()};
+    const u32 n = *p++;
+    for (u32 j = 0; j < n; ++j)
+    {
+        PyGroundLiteral l;
+        l.pred = *p++;
+        l.positive = *p++ != 0;
+        const u32 ar = D.predicates[l.pred].arity;
+        l.args.assign(p, p + ar);
+        p += ar;
+        l.owner = it.o.obj;
+        l.core = it.o.core;
+        out.append(nb::cast(std::move(l), nb::rv_policy::move));
+    }
+    return out;
+}
+
+/// The next binding: an Action for a schema, a tuple of Objects for a condition; with ground literals, the tuple
+/// (binding, static, fluent, derived).
+nb::object bindings_next(PyBindingsIter& it)
+{
+    nb::ft_lock_guard lock(it.m);
+    if (it.busy)
+        throw std::runtime_error("mymyr: the binding iterator is being advanced by another thread");
+    if (it.pos == it.count)
+    {
+        if (it.done)
+            throw nb::stop_iteration();
+        refill(it);
+        if (it.count == 0)
+            throw nb::stop_iteration();
+    }
+    const usize i = it.pos++;
+    const ObjectId* b = it.buf.data() + i * it.t.arity;
+    nb::object item = it.t.cond ? nb::object(object_tuple(*it.o.core, b, it.t.arity))
+                                : nb::object(make_action(it.o, it.t.schema, b, it.t.arity));
+    if (!it.ground)
+        return item;
+    const u32* p = it.lits.data() + it.lit_at[i];
+    GroundLiteralList st = ground_literals(it, p);
+    GroundLiteralList fl = ground_literals(it, p);
+    GroundLiteralList de = ground_literals(it, p);
+    return nb::make_tuple(item, st, fl, de);
+}
+
+template<class Iter>
+nb::object make_bindings_iter(const Owner& o, StateView s, nb::handle target, nb::handle partial, nb::handle limit, bool ground)
+{
+    auto it = std::make_unique<Iter>();
+    it->o = o;
+    it->s = State(s);
+    it->t = target_arg(*o.core, target);
+    it->partial = partial_arg(*o.core, it->t, partial);
+    it->remaining = limit_arg(limit);
+    it->ground = ground;
+    return nb::cast(it.release(), nb::rv_policy::take_ownership);
+}
+
+/// The applicable actions of one schema with some parameters fixed, in canonical order (by binding).
+ActionList schema_actions(const Owner& o, StateView s, u32 schema, const std::vector<std::optional<ObjectId>>& partial)
+{
+    const Task& task = *o.core->task;
+    std::vector<std::vector<ObjectId>> found = mymyr::bindings(task, task.workspace(), SchemaId{schema}, s, partial);
+    std::ranges::sort(found, [](const std::vector<ObjectId>& a, const std::vector<ObjectId>& b)
+                      { return std::ranges::lexicographical_compare(a, b, {}, &ObjectId::v, &ObjectId::v); });
+    ActionList out{nb::list()};
+    for (const auto& b : found)
+        out.append(make_action(o, schema, b.data(), static_cast<u32>(b.size())));
+    return out;
+}
+
+Arg<PyCondition> make_condition(const Owner& o, ConjunctiveCondition&& c)
+{
+    return nb::cast(PyCondition{std::make_shared<const ConjunctiveCondition>(std::move(c)), o.obj, o.core}, nb::rv_policy::move);
+}
+
+std::string ground_literal_str(const PyGroundLiteral& l)
+{
+    const std::string a = atom_str(*l.core->data, l.pred, l.args);
+    return l.positive ? a : "(not " + a + ")";
+}
+
 /// Methods shared by Task and TaskHandle (the owner of what they return is `self`).
 template<class C>
 void bind_task_api(nb::class_<C>& cls)
@@ -741,12 +1106,65 @@ void bind_task_api(nb::class_<C>& cls)
            "The initial state.")
         .def(
             "applicable_actions",
-            [owner](Self self, StateLike state) {
+            [owner](Self self, StateLike state, SchemaArg schema, PartialArg partial) {
                 StateArg s = state_arg(*self.p->core, state);
-                return applicable_actions(owner(self), s.view);
+                if (schema.is_none())
+                {
+                    if (!partial.is_none())
+                        throw nb::value_error("mymyr: partial= needs schema=");
+                    return applicable_actions(owner(self), s.view);
+                }
+                const Target t = target_arg(*self.p->core, schema);
+                return schema_actions(owner(self), s.view, t.schema, partial_arg(*self.p->core, t, partial));
             },
-            "state"_a,
-            "The applicable ground actions of a state in canonical order (schema, then binding), witness pruning off.")
+            "state"_a, nb::kw_only(), "schema"_a = nb::none(), "partial"_a = nb::none(),
+            "The applicable ground actions of a state in canonical order (schema, then binding), witness pruning off. "
+            "With schema= (a name or index), the actions of that schema only; partial= then fixes some of its "
+            "parameters, as in bindings().")
+        .def(
+            "bindings",
+            [owner](Self self, TargetArg target, StateLike state, PartialArg partial, LimitArg limit) {
+                StateArg s = state_arg(*self.p->core, state);
+                return Arg<PyBindingsIter>(make_bindings_iter<PyBindingsIter>(owner(self), s.view, target, partial, limit, false));
+            },
+            "target"_a, "state"_a, "partial"_a = nb::none(), "limit"_a = nb::none(),
+            "The bindings of a schema or a ConjunctiveCondition in a state, as a lazy iterator (Bindings).\n\n"
+            "A schema (name or index) yields its applicable Actions (every parameter enumerated, the numeric "
+            "applicability rules included); a condition (precondition(), goal_condition) yields tuples of "
+            "mymyr.formalism.Object, one per variable, such that every literal, equality and numeric constraint "
+            "holds in the state (derived atoms by the axioms).\n\n"
+            "partial fixes variables in advance: a dict {index or name ('?x' or 'x'): object} or a sequence with one "
+            "entry per variable and None for the free ones; an object is a mymyr.formalism.Object, a name or an "
+            "index. A fixed object that violates the variable's type or the condition gives no binding. limit caps "
+            "the number of bindings.\n\n"
+            "Order: deterministic, lexicographic by object index over the free variables in an order chosen per "
+            "(target, fixed variables), the same in every state and thread (applicable_actions(state, schema=...) "
+            "sorts canonically instead). The iterator enumerates chunks of bindings natively with the thread state "
+            "released and continues each chunk after the previous one, so stopping early saves the rest.")
+        .def(
+            "ground_conjunctions",
+            [owner](Self self, TargetArg target, StateLike state, PartialArg partial, LimitArg limit) {
+                StateArg s = state_arg(*self.p->core, state);
+                return Arg<PyGroundConjunctionsIter>(
+                    make_bindings_iter<PyGroundConjunctionsIter>(owner(self), s.view, target, partial, limit, true));
+            },
+            "target"_a, "state"_a, "partial"_a = nb::none(), "limit"_a = nb::none(),
+            "The bindings of bindings() with the condition's literals grounded under each: an iterator "
+            "(GroundConjunctions) of (binding, static, fluent, derived), the GroundLiterals split by predicate kind in "
+            "the condition's literal order. Equalities and numeric constraints are not literals and do not appear.")
+        .def(
+            "precondition",
+            [owner](Self self, SchemaArg schema) {
+                const u32 k = schema_index(*self.p->core, schema);
+                return make_condition(owner(self), ConjunctiveCondition::precondition(*self.p->core->task, SchemaId{k}));
+            },
+            "schema"_a,
+            "The precondition of a schema (name or index) as a ConjunctiveCondition over its parameters. Its "
+            "bindings are those of the precondition alone; bindings(schema) also applies the numeric effect rules.")
+        .def_prop_ro(
+            "goal_condition",
+            [owner](Self self) { return make_condition(owner(self), ConjunctiveCondition::goal(*self.p->core->task)); },
+            "The goal as a ConjunctiveCondition without variables: one (empty) binding in a goal state, none otherwise.")
         .def(
             "iter_applicable_actions",
             [owner](Self self, StateLike state) {
@@ -1086,6 +1504,77 @@ void bind_task(nb::module_& m)
                                  "canonical order. It may be advanced from any thread.")
         .def("__iter__", [](nb::handle self) { return Arg<PyApplicableIter>(nb::borrow(self)); })
         .def("__next__", &applicable_next);
+
+    nb::class_<PyCondition>(m, "ConjunctiveCondition",
+                            "A lifted conjunctive condition of a task: variables, literals over static, fluent and derived "
+                            "predicates, equalities and numeric constraints (Task.precondition, Task.goal_condition). "
+                            "Task.bindings enumerates its bindings in a state.")
+        .def_prop_ro("arity", [](const PyCondition& c) { return c.c->arity(); }, "The number of variables.")
+        .def_prop_ro("variables",
+                     [](const PyCondition& c) {
+                         std::vector<std::string> v;
+                         for (u32 i = 0; i < c.c->arity(); ++i)
+                             v.push_back("?" + (c.c->variables[i].name.empty() ? "x" + std::to_string(i) : c.c->variables[i].name));
+                         return v;
+                     },
+                     "The variable names ('?x'; an unnamed variable is '?x<index>').")
+        .def("__eq__",
+             [](const PyCondition& a, nb::handle b) -> nb::object {
+                 if (!nb::isinstance<PyCondition>(b))
+                     return nb::borrow(Py_NotImplemented);
+                 const PyCondition& o = *nb::inst_ptr<PyCondition>(b);
+                 return nb::bool_(a.core->task->uid() == o.core->task->uid() && *a.c == *o.c);
+             })
+        .def("__hash__",
+             [](const PyCondition& c) {
+                 return py_hash(hash::combine(c.core->task->uid(), std::hash<std::string>{}(c.c->str(*c.core->task))));
+             })
+        .def("__str__", [](const PyCondition& c) { return c.c->str(*c.core->task); })
+        .def("__repr__", [](const PyCondition& c) { return "ConjunctiveCondition" + c.c->str(*c.core->task); });
+
+    nb::class_<PyGroundLiteral>(m, "GroundLiteral", "A ground literal: an atom and its polarity (Task.ground_conjunctions).")
+        .def_prop_ro("atom",
+                     [](const PyGroundLiteral& l) {
+                         i64 slot = -1;
+                         if (l.core->task->compiled().kinds[l.pred] == formalism::PredKind::Fluent)
+                         {
+                             std::vector<ObjectId> args(l.args.size());
+                             for (usize i = 0; i < args.size(); ++i)
+                                 args[i] = ObjectId{l.args[i]};
+                             const SlotId s = l.core->task->find_atom(PredicateId{l.pred}, args);
+                             slot = s.valid() ? static_cast<i64>(s.v) : -1;
+                         }
+                         return make_atom(Owner{l.core, l.owner}, l.pred, l.args, slot);
+                     })
+        .def_prop_ro("positive", [](const PyGroundLiteral& l) { return l.positive; })
+        .def("__eq__",
+             [](const PyGroundLiteral& a, nb::handle b) -> nb::object {
+                 if (!nb::isinstance<PyGroundLiteral>(b))
+                     return nb::borrow(Py_NotImplemented);
+                 const PyGroundLiteral& o = *nb::inst_ptr<PyGroundLiteral>(b);
+                 return nb::bool_(a.core->task->uid() == o.core->task->uid() && a.pred == o.pred &&
+                                  a.positive == o.positive && a.args == o.args);
+             })
+        .def("__hash__",
+             [](const PyGroundLiteral& l) {
+                 u64 h = hash::combine(l.core->task->uid(), l.pred * 2ULL + (l.positive ? 1 : 0));
+                 for (u32 o : l.args)
+                     h = hash::combine(h, o);
+                 return py_hash(h);
+             })
+        .def("__str__", [](const PyGroundLiteral& l) { return ground_literal_str(l); })
+        .def("__repr__", [](const PyGroundLiteral& l) { return "GroundLiteral" + ground_literal_str(l); });
+
+    nb::class_<PyBindingsIter>(m, "Bindings",
+                               "An iterator over the bindings of a schema (Actions) or a condition (tuples of Objects) "
+                               "in a state (Task.bindings). It may be advanced from any thread, one at a time.")
+        .def("__iter__", [](nb::handle self) { return Arg<PyBindingsIter>(nb::borrow(self)); })
+        .def("__next__", [](PyBindingsIter& it) { return BindingItem(bindings_next(it)); });
+    nb::class_<PyGroundConjunctionsIter>(m, "GroundConjunctions",
+                                         "An iterator over (binding, static, fluent, derived) ground literals "
+                                         "(Task.ground_conjunctions). It may be advanced from any thread, one at a time.")
+        .def("__iter__", [](nb::handle self) { return Arg<PyGroundConjunctionsIter>(nb::borrow(self)); })
+        .def("__next__", [](PyGroundConjunctionsIter& it) { return ConjunctionItem(bindings_next(it)); });
 
     // --- Task
     nb::class_<PyTask> task(m, "Task",

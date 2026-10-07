@@ -46,12 +46,18 @@ u32 copy_expr(const TaskData& T, u32 e, ConjunctiveCondition& c)
     return static_cast<u32>(c.exprs.size() - 1);
 }
 
+/// The literals (each once: normalization lists a nullary literal both as a literal and as a nullary ground literal)
+/// and numeric constraints of a normalized condition.
 void copy_condition(const TaskData& T, const Condition& cond, ConjunctiveCondition& c)
 {
     for (const Literal& l : T.literals_of(cond))
     {
         const auto terms = T.terms_of(l);
-        c.literals.push_back({l.pred, l.positive, std::vector<Term>(terms.begin(), terms.end())});
+        ConjunctiveCondition::Literal lit{l.pred, l.positive, std::vector<Term>(terms.begin(), terms.end())};
+        const bool seen = std::ranges::any_of(c.literals, [&](const ConjunctiveCondition::Literal& o)
+                                              { return o.predicate == lit.predicate && o.positive == lit.positive && o.terms == lit.terms; });
+        if (!seen)
+            c.literals.push_back(std::move(lit));
     }
     for (const NumericConstraint& k : T.constraints_of(cond))
     {
@@ -699,7 +705,7 @@ u64 enumerate_bindings(const Task& task, Workspace& ws, const BindingTarget& tar
     }
     BindingQuery& q = *it->second;
     if (resuming && q.order.empty())
-        return 0;  // every variable is fixed: the only binding was resume_after itself
+        return 0;  // every variable is fixed: the only binding is resume_after itself
     if (resuming && !q.has_resume)
         compile_resume(sc, q);
     const reach::Plan& plan = resuming ? q.resume : q.plan;

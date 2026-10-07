@@ -99,6 +99,15 @@ if(TARGET mymyr_frontend)
         MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}"
         $<$<BOOL:${MYMYR_SANITIZE}>:MYMYR_SANITIZED>)
     gtest_discover_tests(mymyr_heuristics_golden_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 3600)
+
+    # Binding generators against the fork's along seeded walks (tests/data/bindings/fork_bindings.json).
+    add_executable(mymyr_bindings_golden_tests successor/test_bindings_fork.cpp frontend/golden.cpp)
+    target_link_libraries(mymyr_bindings_golden_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
+    target_compile_definitions(mymyr_bindings_golden_tests PRIVATE
+        MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+        MYMYR_WORK_DIR="${MYMYR_WORK_DIR}"
+        MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
+    gtest_discover_tests(mymyr_bindings_golden_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 endif()
 
 # ------------------------------------------------------------------------------------------------ best-first search

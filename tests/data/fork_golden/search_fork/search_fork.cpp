@@ -2,7 +2,8 @@
 // the numeric best-first test (tests/data/numeric_tasks/fork_best_first.json, made by run_numeric.py), the layer
 // ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py), the beam test
 // (tests/data/beam/fork_beam.json, made by run_beam.py) and the heuristics test
-// (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py).
+// (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py) and the binding generator test
+// (tests/data/bindings/fork_bindings.json, made by run_bindings.py).
 //
 //   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
 //               --problem P [--max-ms T] [--max-states N]
@@ -10,6 +11,7 @@
 //               [--beam W [--beam-mode all_tested|survivors_only]] --domain D --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo walk_h --h setadd|h2|perfect --domain D --problem P [--walks W] [--steps S] [--seed B]
 //               [--max-states N]
+//   search_fork --algo walk_ground --domain D --problem P [--walks W] [--steps S] [--seed B]
 //
 // Prints one line "RESULT {...}" with status, plan_cost, plan_length, plan (ground action strings), expanded and
 // generated (best-first: also deadends; iw: also per-pass statistics), or "ERROR <message>". Successor generation is
@@ -22,6 +24,10 @@
 // walk_h evaluates the heuristic on the states of the seeded random walks of tests/data/fork_golden/README.md (walk w
 // uses seed B + w, the next action is sorted_applicable[splitmix64() % count]; W = 3, S = 25, B = 1 as in the
 // golden files) and prints per walk and step the fluent atom count, the set hash of their strings and h.
+// walk_ground prints on the same walks, per step, the groundings (count, set hash of the binding strings, ground
+// literals per kind) of the goal literals as a ConjunctiveCondition and, per action schema in domain order, of its
+// precondition (ConjunctiveConditionSatisficingBindingGenerator) and of the action (ActionSatisficingBindingGenerator),
+// and the action taken.
 
 #include <mimir/mimir.hpp>
 #include <mimir/search/heuristics/h2.hpp>  // not in mimir.hpp
@@ -206,6 +212,122 @@ int run_walk_h(const std::string& domain, const std::string& problem_file, const
     body += "]";
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::cout << "RESULT {\"algo\":\"walk_h\",\"h\":" << jstr(hname) << "," << body << ",\"seconds\":" << jnum(secs) << "}" << std::endl;
+    return 0;
+}
+
+template<typename P>
+LiteralList<P> lift_literals(const Problem& problem, const GroundLiteralList<P>& ground)
+{
+    LiteralList<P> out;
+    for (const auto& l : ground)
+    {
+        TermList terms;
+        for (auto o : l->get_atom()->get_objects())
+            terms.push_back(problem->get_or_create_term(o));
+        out.push_back(problem->get_or_create_literal(l->get_polarity(), problem->get_or_create_atom(l->get_atom()->get_predicate(), terms)));
+    }
+    return out;
+}
+
+/// The goal's literals as a ConjunctiveCondition without parameters (numeric goal constraints left out).
+ConjunctiveCondition goal_condition(const Problem& problem)
+{
+    LiteralList<StaticTag> st = lift_literals<StaticTag>(problem, problem->get_goal_literals<StaticTag>());
+    LiteralList<FluentTag> fl = lift_literals<FluentTag>(problem, problem->get_goal_literals<FluentTag>());
+    LiteralList<DerivedTag> de = lift_literals<DerivedTag>(problem, problem->get_goal_literals<DerivedTag>());
+    return problem->get_or_create_conjunctive_condition(
+        ParameterList {},
+        boost::hana::make_map(boost::hana::make_pair(boost::hana::type_c<StaticTag>, std::move(st)),
+                              boost::hana::make_pair(boost::hana::type_c<FluentTag>, std::move(fl)),
+                              boost::hana::make_pair(boost::hana::type_c<DerivedTag>, std::move(de))),
+        NumericConstraintList {});
+}
+
+/// The number of groundings of a binding generator in a state, the set hash of the strings "(name o1 ... ok)" of the
+/// bindings, and the number of static, fluent and derived ground literals summed over the groundings.
+template<typename Generator>
+std::string ground_counts(Generator& g, const State& state, const std::string& name)
+{
+    size_t n = 0, lits[3] = { 0, 0, 0 };
+    uint64_t h = 0;
+    for (const auto& [binding, literals] : g.create_ground_conjunction_generator(state))
+    {
+        std::string s = "(" + name;
+        for (auto o : binding)
+            s += " " + o->get_name();
+        h += fnv1a64(s + ")");
+        lits[0] += std::get<0>(literals).size();
+        lits[1] += std::get<1>(literals).size();
+        lits[2] += std::get<2>(literals).size();
+        ++n;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(h));
+    return "{\"n\":" + std::to_string(n) + ",\"hash\":" + jstr(buf) + ",\"literals\":[" + std::to_string(lits[0]) + "," +
+           std::to_string(lits[1]) + "," + std::to_string(lits[2]) + "]}";
+}
+
+/// walk_ground: along the seeded walks of walk_h, per step the groundings of the goal (as a ConjunctiveCondition) and,
+/// per action schema, of its precondition (ConjunctiveConditionSatisficingBindingGenerator) and of the action itself
+/// (ActionSatisficingBindingGenerator: also the numeric effect checks).
+int run_walk_ground(const std::string& domain, const std::string& problem_file, size_t walks, size_t steps, uint64_t seed_base)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    Problem problem = ProblemImpl::create(domain, problem_file);
+    SearchContext context = SearchContextImpl::create(
+        problem,
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+    const ActionList& actions = problem->get_domain()->get_actions();
+    std::vector<ConjunctiveConditionSatisficingBindingGenerator> pre;
+    std::vector<ActionSatisficingBindingGenerator> act;
+    for (const auto& a : actions)
+    {
+        pre.emplace_back(a->get_conjunctive_condition(), problem);
+        act.emplace_back(a, problem);
+    }
+    ConjunctiveConditionSatisficingBindingGenerator goal(goal_condition(problem), problem);
+    auto& aag = *context->get_applicable_action_generator();
+    auto& repo = *context->get_state_repository();
+    std::string body = "\"schemas\":[";
+    for (size_t i = 0; i < actions.size(); ++i)
+        body += std::string(i ? "," : "") + jstr(actions[i]->get_name());
+    body += "],\"walks\":[";
+    for (size_t w = 0; w < walks; ++w)
+    {
+        SplitMix64 rng { seed_base + w };
+        auto [state, metric] = repo.get_or_create_initial_state();
+        body += std::string(w ? "," : "") + "{\"seed\":" + std::to_string(seed_base + w) + ",\"steps\":[";
+        for (size_t i = 0; i <= steps; ++i)
+        {
+            const auto [n, hash] = fluent_hash(state);
+            body += std::string(i ? "," : "") + "{\"atoms\":" + std::to_string(n) + ",\"hash\":" + jstr(hash) +
+                    ",\"goal\":" + ground_counts(goal, state, "goal") + ",\"pre\":[";
+            for (size_t k = 0; k < actions.size(); ++k)
+                body += std::string(k ? "," : "") + ground_counts(pre[k], state, actions[k]->get_name());
+            body += "],\"act\":[";
+            for (size_t k = 0; k < actions.size(); ++k)
+                body += std::string(k ? "," : "") + ground_counts(act[k], state, actions[k]->get_name());
+            body += "]";
+            std::vector<std::pair<std::string, GroundAction>> acts;
+            for (auto a : aag.create_applicable_action_generator(state))
+                acts.emplace_back(action_str(a), a);
+            std::stable_sort(acts.begin(), acts.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
+            if (i == steps || acts.empty())
+            {
+                body += "}";
+                break;
+            }
+            const auto& [label, action] = acts[rng.next() % acts.size()];
+            body += ",\"action\":" + jstr(label) + "}";
+            auto [succ, succ_metric] = repo.get_or_create_successor_state(state, action, metric);
+            state = succ;
+            metric = succ_metric;
+        }
+        body += "]}";
+    }
+    body += "]";
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << "RESULT {\"algo\":\"walk_ground\"," << body << ",\"seconds\":" << jnum(secs) << "}" << std::endl;
     return 0;
 }
 
@@ -450,7 +572,7 @@ int main(int argc, char** argv)
         }
     }
     const bool layered = algo == "iw" || algo == "brfs";
-    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : hname.empty()))
+    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && hname.empty()))
     {
         std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L] [--beam W] [--beam-mode M]) --domain D --problem P [--max-ms T] "
                      "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
@@ -459,7 +581,9 @@ int main(int argc, char** argv)
     int rc = 2;
     try
     {
-        if (algo == "walk_h")
+        if (algo == "walk_ground")
+            rc = run_walk_ground(domain, problem, walks, steps, seed);
+        else if (algo == "walk_h")
             rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
         else
             rc = layered ? run_layered(domain, problem, algo, order, k, limit, beam, mode, max_ms, max_states)

@@ -36,6 +36,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -799,7 +800,8 @@ TEST(Bindings, DeclaredTypes)
         data.objects[o].types = formalism::TaskData::append(data.type_ids, std::span<const TypeId>(types[o]));
     const auto task = Task::create(std::move(data));
     Workspace& ws = task->workspace();
-    const StateView s = task->initial_state().view();
+    const State init = task->initial_state();
+    const StateView s = init.view();
     ConjunctiveCondition c;
     c.variables = {{"x", {TypeId{0}}}};
     EXPECT_EQ(count_bindings(*task, ws, c, s), 12u);
@@ -989,7 +991,14 @@ TEST(Bindings, PreconditionAndGoalConditions)
     {
         const ConjunctiveCondition c = ConjunctiveCondition::precondition(*task, SchemaId{sc});
         EXPECT_EQ(c.arity(), T.schemas[sc].arity());
-        EXPECT_EQ(c.literals.size(), T.schemas[sc].precondition.literals.count);
+        // each literal once (normalization lists the nullary (handempty) twice)
+        std::set<std::tuple<u32, bool, std::vector<formalism::Term>>> distinct;
+        for (const formalism::Literal& l : T.literals_of(T.schemas[sc].precondition))
+        {
+            const auto terms = T.terms_of(l);
+            distinct.emplace(l.pred.v, l.positive, std::vector<formalism::Term>(terms.begin(), terms.end()));
+        }
+        EXPECT_EQ(c.literals.size(), distinct.size());
         EXPECT_NO_THROW(c.validate(*task));
         EXPECT_TRUE(c == ConjunctiveCondition::precondition(*task, SchemaId{sc}));
     }

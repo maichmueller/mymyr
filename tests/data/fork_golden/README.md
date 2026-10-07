@@ -166,6 +166,13 @@ Its `--beam W --beam-mode all_tested|survivors_only` options run the fork's beam
 `tests/cpp/search/test_beam_fork.cpp`. A beam keeps ties in generation order, so it depends on the action order
 everywhere: the test skips the tasks where the fork's order differs from mymyr's.
 
+Its `--algo walk_ground` mode records the fork's binding generators along two seeded walks of 15 steps: per step the
+groundings (count, set hash of the binding strings, ground literals per kind) of the goal literals as a
+`ConjunctiveCondition`, and per action schema of its precondition (`ConjunctiveConditionSatisficingBindingGenerator`)
+and of the action (`ActionSatisficingBindingGenerator`). `search_fork/run_bindings.py` runs it on the BrFS suite (without
+organic-synthesis) and the numeric tasks and writes `tests/data/bindings/fork_bindings.json`, checked by
+`tests/cpp/successor/test_bindings_fork.cpp`. The walks carry the actions taken, so numeric tasks are covered too.
+
 Fork behaviour worth knowing when matching h values: on philosophers (derived goals `blocked`) the fork's h_max,
 h_add and h_FF are 0 in non-goal states (`blocked` is defined with universal quantifiers, which normalization turns
 into negated introduced derived atoms, and the relaxation ignores negative conditions); on

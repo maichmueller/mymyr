@@ -82,9 +82,9 @@ struct ConjunctiveCondition
 
     [[nodiscard]] u32 arity() const noexcept { return static_cast<u32>(variables.size()); }
 
-    /// The precondition of a schema: its parameters (with their names and declared types), the literals and the
-    /// numeric constraints of its precondition. Its bindings are the bindings of the schema's precondition alone
-    /// (the schema's own bindings also apply the numeric effect rules).
+    /// The precondition of a schema: its parameters (with their names and declared types), the literals (each once)
+    /// and the numeric constraints of its precondition. Its bindings are the bindings of the schema's precondition
+    /// alone (the schema's own bindings also apply the numeric effect rules).
     [[nodiscard]] static ConjunctiveCondition precondition(const Task& task, SchemaId schema);
     /// The task's goal: no variables; its single (empty) binding exists iff the goal holds (Task::is_goal).
     [[nodiscard]] static ConjunctiveCondition goal(const Task& task);
