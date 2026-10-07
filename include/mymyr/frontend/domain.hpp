@@ -19,9 +19,8 @@
 //     and of the type literals of one parameter in a condition depends on heap addresses (and differs between runs
 //     of mimir). mymyr puts each such group in hierarchy order instead, a function of the type names and the
 //     hierarchy alone (translate.hpp, hierarchy_ranks). The types themselves are numbered in that name order
-//     (`object`, `number`, then alphabetical),
-//     because loki lists them in the iteration order of a hash table of type names, which differs between standard
-//     libraries;
+//     (`object`, `number`, then alphabetical), because loki lists them in the iteration order of a hash table of
+//     type names, which differs between standard libraries;
 //   - loki's ToEffectNormalForm sums the numeric effects per (operator, function) in an unordered_map keyed by
 //     pointers; mymyr orders each run of such effects by (function name, arguments, operator);
 //   - the arguments of the derived predicates that loki generates for universal quantifiers ("axiom_<k>") are the

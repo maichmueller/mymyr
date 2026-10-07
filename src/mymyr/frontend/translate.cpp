@@ -1625,8 +1625,8 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
     t.requirements = requirement_strings(dl->get_requirements());
 
     {
-        // type ids in the canonical name order: loki lists the types in the iteration order of a hash table of type names, which differs
-        // between standard libraries
+        // type ids in the canonical name order: loki lists the types in the iteration order of a hash table of
+        // type names, which differs between standard libraries
         loki::TypeList types = dl->get_types();
         std::sort(types.begin(), types.end(), [](const loki::Type& a, const loki::Type& b) { return type_name_less(a->get_name(), b->get_name()); });
         for (const auto& ty : types)
