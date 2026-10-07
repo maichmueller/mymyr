@@ -31,7 +31,7 @@
 // flagged in `invalid`); a stuck environment does not move either.
 //
 // Rows are `words` atom words wide (at least the suite's words(), so no successor is ever too wide), plus the suite's
-// numeric words ([bits | slots]; the host supports numeric tables, the device does not). Every step of a row is a
+// numeric words ([bits | slots]; the numeric encoding follows each instance's storage mode). Every step of a row is a
 // function of that row's state, action and RNG stream alone, so results do not depend on the batch composition, the
 // batch split or the thread count.
 

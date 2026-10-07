@@ -318,8 +318,14 @@ def test_numeric_tasks_on_the_cpu():
         check_equal(ref, out, state, None, t)
         state = out[0]
     if "cuda" in devices():
-        with pytest.raises(ValueError, match="numeric"):
-            rj.Env(task, device="cuda")
+        device = rj.Env(task, device="cuda", max_steps=10)
+        state, _ = device.reset(key, 8)
+        ref = HostRef(task, 8, 4, max_steps=10)
+        for t in range(12):
+            ref.last = ref.step()
+            out = jax.jit(device.step)(key, state)
+            check_equal(ref, out, state, None, t)
+            state = out[0]
 
 
 # ------------------------------------------------------------------------------------------------ mctx, flashbax

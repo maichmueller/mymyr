@@ -486,7 +486,7 @@ TEST(DeviceEnvStep, Refusals)
     SKIP_WITHOUT_GPU();
     auto ctx = context();
     const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
-    EXPECT_THROW(cuda::DeviceEnv(ctx, rl::TaskTable::single(numeric), {}), std::invalid_argument);
+    EXPECT_NO_THROW(cuda::DeviceEnv(ctx, rl::TaskTable::single(numeric), {}));
     const auto lazy = load("gripper__prob05", false);
     EXPECT_FALSE(cuda::DeviceEnv::fast_unsupported(*rl::TaskTable::single(lazy), {}).empty());
     EXPECT_THROW(cuda::DeviceEnv(ctx, rl::TaskTable::single(lazy), {}, cuda::DeviceEnv::Path::Fast), std::invalid_argument);

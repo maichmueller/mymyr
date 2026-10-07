@@ -207,9 +207,6 @@ public:
             if (m_device < 0)
                 throw nb::value_error("mymyr: device must be a CUDA device index (>= 0) or None (the CPU)");
 #if defined(MYMYR_HAS_CUDA)
-            if (e->NN)
-                throw nb::value_error("mymyr: numeric tables run on the CPU only (device=None): the device environment "
-                                      "does not evaluate numeric fluents");
             cuda::ContextPtr c = table_device_context(m_ref.obj, ctx, m_device);
             nb::gil_scoped_release release;
             auto d = e->device(m_device, std::move(c));
@@ -1045,8 +1042,6 @@ ffi::Error env_init_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffe
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        if (e->NN)
-            fail("numeric tables run on the CPU only");
         ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg};
         const StateBufs s = state_results(*e, res, nullptr, Fields{}, OnStream{st});
         const u64 N = s.states.rows;
@@ -1074,8 +1069,6 @@ ffi::Error env_reset_cuda(cudaStream_t st, i32 ordinal, i64 handle, bool keep_go
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        if (e->NN)
-            fail("numeric tables run on the CPU only");
         ffi::Result<ffi::AnyBuffer> res[] = {states, steps, count, counts, views, goal_pos, goal_neg};
         const ffi::AnyBuffer args[] = {states_in, steps_in, count_in, counts_in, views_in, goal_pos_in, goal_neg_in};
         const StateBufs s = state_results(*e, res, args, Fields{}, OnStream{st});
@@ -1098,8 +1091,6 @@ ffi::Error env_refresh_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBu
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        if (e->NN)
-            fail("numeric tables run on the CPU only");
         StateBufs s;
         s.states = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         s.count = view(*count, "count", ffi::DataType::S32, true);
@@ -1123,8 +1114,6 @@ ffi::Error env_step_cuda(cudaStream_t st, i32 ordinal, i64 handle, MYMYR_STEP_PA
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        if (e->NN)
-            fail("numeric tables run on the CPU only");
         const StepCall c = step_call(*e, states_in, task_ids_in, steps_in, draws_in, count_in, counts_in, views_in,
                                      goal_pos_in, goal_neg_in, env_id, seed, action, next_task_ids, states, task_ids,
                                      steps, draws, count, counts, views, goal_pos, goal_neg, reward, terminated,
@@ -1158,12 +1147,13 @@ rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i3
     opt.canonical_order = e.cfg.canonical_order;
     opt.witness_pruning = e.cfg.witness_pruning;
     const u64 N = st.rows;
-    const u64 total = x0.count(rl::StateBatchView{st.as<u64>(), N, e.W, 0, 0}, ids, opt);
+    const u64 total = x0.count(rl::StateBatchView{st.as<u64>(), N, e.W, 0, e.NN}, ids, opt);
     rl::Expansion x;
     x.capacity = total;
     x.words = e.W;
+    x.numeric_words = e.NN;
     x.label_width = e.L;
-    x.succ = static_cast<u64*>(d.succ.ensure(d.ctx, std::max<u64>(total, 1) * e.W * 8, s));
+    x.succ = static_cast<u64*>(d.succ.ensure(d.ctx, std::max<u64>(total, 1) * e.row_words() * 8, s));
     x.schema = static_cast<i32*>(d.schema.ensure(d.ctx, std::max<u64>(total, 1) * 4, s));
     x.binding = static_cast<i32*>(d.binding.ensure(d.ctx, std::max<u64>(total, 1) * e.L * 4, s));
     x.goal = static_cast<u8*>(d.goal.ensure(d.ctx, std::max<u64>(total, 1), s));
@@ -1181,8 +1171,6 @@ ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer 
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        if (e->NN)
-            fail("numeric tables run on the CPU only");
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
         const PaddedBufs p = padded_results(*e, sv.rows, succ, schema, binding, goal, mask, count);
@@ -1204,8 +1192,6 @@ ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBu
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
-        if (e->NN)
-            fail("numeric tables run on the CPU only");
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
         const FlatBufs f = flat_results(*e, sv.rows, succ, parent, schema, binding, goal, offsets);
@@ -1224,7 +1210,7 @@ ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBu
         opt.canonical_order = e->cfg.canonical_order;
         opt.witness_pruning = e->cfg.witness_pruning;
         rl::Expansion x = make_flat(*e, f);
-        x0.expand(rl::StateBatchView{sv.as<u64>(), sv.rows, e->W, 0, 0}, ids, x, opt);
+        x0.expand(rl::StateBatchView{sv.as<u64>(), sv.rows, e->W, 0, e->NN}, ids, x, opt);
     });
 }
 
