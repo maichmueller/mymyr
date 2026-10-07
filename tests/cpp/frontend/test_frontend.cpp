@@ -407,15 +407,82 @@ TEST(Frontend, StringInputIsPreprocessedLikeFiles)
 TEST(Frontend, FastInitReportsErrors)
 {
     const auto domain = frontend::Domain::from_string(kDomain, "d.pddl");
-    EXPECT_THROW((void) domain->instantiate_string(problem("(at t1 nowhere)")), std::exception);       // undefined object
-    EXPECT_THROW((void) domain->instantiate_string(problem("(at t1)")), std::exception);              // arity
-    EXPECT_THROW((void) domain->instantiate_string(problem("(at x t1)")), std::exception);            // types
-    EXPECT_THROW((void) domain->instantiate_string(problem("(fly t1 x)")), std::exception);           // predicate
-    EXPECT_THROW((void) domain->instantiate_string(problem("(not (road x y))")), std::exception);      // negative
-    EXPECT_THROW((void) domain->instantiate_string(problem("(at 5 (road x y))")), std::exception);    // timed
+    using frontend::PddlError;
+    EXPECT_THROW((void) domain->instantiate_string(problem("(at t1 nowhere)")), PddlError);       // undefined object
+    EXPECT_THROW((void) domain->instantiate_string(problem("(at t1)")), PddlError);              // arity
+    EXPECT_THROW((void) domain->instantiate_string(problem("(at x t1)")), PddlError);            // types
+    EXPECT_THROW((void) domain->instantiate_string(problem("(fly t1 x)")), PddlError);           // predicate
+    EXPECT_THROW((void) domain->instantiate_string(problem("(not (road x y))")), PddlError);      // negative
+    EXPECT_THROW((void) domain->instantiate_string(problem("(at 5 (road x y))")), PddlError);    // timed
     frontend::InstantiateOptions full;
     full.fast_init = false;
-    EXPECT_THROW((void) domain->instantiate_string(problem("(at t1 nowhere)"), "", full), std::exception);
+    EXPECT_THROW((void) domain->instantiate_string(problem("(at t1 nowhere)"), "", full), PddlError);
+}
+
+namespace
+{
+/// The PddlError that `f` throws.
+template <class F>
+frontend::PddlError error_of(F&& f)
+{
+    try
+    {
+        f();
+    }
+    catch (const frontend::PddlError& e)
+    {
+        return e;
+    }
+    ADD_FAILURE() << "no PddlError";
+    return frontend::PddlError("");
+}
+
+std::string with(std::string text, const std::string& from, const std::string& to)
+{
+    text.replace(text.find(from), from.size(), to);
+    return text;
+}
+}  // namespace
+
+TEST(Frontend, PddlErrorsNameTheFileLineAndAction)
+{
+    // an unsupported construct
+    auto e = error_of([] { (void) frontend::Domain::from_string(with(kDomain, "(:action", "(:durative-action"), "d.pddl"); });
+    EXPECT_EQ(e.path(), "d.pddl");
+    EXPECT_EQ(e.line(), 6u);
+    EXPECT_EQ(e.message(), "durative actions are not supported (:durative-action drive)");
+    EXPECT_STREQ(e.what(), "d.pddl:6: durative actions are not supported (:durative-action drive)");
+    // an undefined predicate inside an action
+    e = error_of([] { (void) frontend::Domain::from_string(with(kDomain, "(ready) (not", "(parked ?t) (not"), "d.pddl"); });
+    EXPECT_EQ(e.line(), 8u);
+    EXPECT_EQ(e.action(), "drive");
+    EXPECT_EQ(e.message(), "undefined predicate 'parked'");
+    EXPECT_STREQ(e.what(), "d.pddl:8: undefined predicate 'parked' (in action drive)");
+    // a requirement mymyr does not support, and one PDDL does not define
+    e = error_of([] { (void) frontend::Domain::from_string(with(kDomain, ":equality", ":equality :preferences")); });
+    EXPECT_EQ(e.path(), "");
+    EXPECT_EQ(e.line(), 2u);
+    EXPECT_NE(std::string(e.what()).find("line 2: requirement :preferences is not supported"), std::string::npos)
+        << e.what();
+    e = error_of([] { (void) frontend::Domain::from_string(with(kDomain, ":equality", ":equality :teleportation")); });
+    EXPECT_EQ(e.message(), "unknown requirement :teleportation");
+    // the problem's :init (the fast reader) and its goal (loki) report the line in the problem file
+    const auto domain = frontend::Domain::from_string(kDomain, "d.pddl");
+    e = error_of([&] { (void) domain->instantiate_string(problem("(at t1 x)\n (at t2 nowhere)"), "p.pddl"); });
+    EXPECT_EQ(e.path(), "p.pddl");
+    EXPECT_EQ(e.line(), 4u);
+    EXPECT_EQ(e.message(), "undefined object 'nowhere'");
+    e = error_of([&] { (void) domain->instantiate_string(with(problem("(at t1 x)"), "(at t1 y)", "(at t1 z)"), "p.pddl"); });
+    EXPECT_EQ(e.line(), 4u);
+    EXPECT_EQ(e.message(), "undefined object 'z'");
+    // trajectory constraints in a problem are refused, not dropped
+    e = error_of([&] {
+        (void) domain->instantiate_string(with(problem("(at t1 x)"), "\n (:goal", "\n (:constraints (always (ready)))\n (:goal"), "p.pddl");
+    });
+    EXPECT_EQ(e.line(), 4u);
+    EXPECT_EQ(e.message(), "trajectory constraints are not supported (:constraints)");
+    // a file that does not exist is a filesystem error, not a PddlError
+    EXPECT_THROW((void) frontend::Domain::from_file("/nonexistent/domain.pddl"), std::filesystem::filesystem_error);
 }
 
 // The canonical comparison must forgive exactly the address-dependent orders and nothing else.

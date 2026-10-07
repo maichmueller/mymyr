@@ -56,7 +56,7 @@ struct BeamNovelty  // LayerOrdering::BeamNovelty
 struct WidthZero  // the IW family's arity-0 pass
 {
 };
-/// A search observer (mymyr._typing.SearchObserver): any object; the searches call whichever on_* methods it has.
+/// A search observer (mymyr.search.Observer, or any object with some of its methods).
 struct Observer
 {
 };
@@ -163,7 +163,7 @@ struct type_caster<mymyr::python::ann::WidthZero>
 template<>
 struct type_caster<mymyr::python::ann::Observer>
 {
-    static constexpr auto Name = const_name("mymyr._typing.SearchObserver");
+    static constexpr auto Name = const_name("mymyr.search.Observer");
 };
 template<>
 struct type_caster<mymyr::python::ann::HeuristicObject>
