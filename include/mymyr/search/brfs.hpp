@@ -11,7 +11,8 @@
 // successor index) plus a per-layer counting sort reproduces the single-threaded ids at every thread count.
 //
 // Every expanded state is goal-tested (goal_states counts them); stop_at_goal ends the search at the first goal
-// state expanded and, single-threaded, returns the plan. max_depth caps the expanded layers: with max_depth = D the
+// state expanded and returns its plan, a shortest one (multi-threaded: the goal state of the smallest id among those
+// the threads reached before they stopped, so which plan of that length can depend on the timing). max_depth caps the expanded layers: with max_depth = D the
 // states of depth < D are expanded and those of depth D stored (exhausted then says whether depth D was empty).
 //
 // Numeric tasks: states are [bits | slots] rows; every store keeps the numeric words next to the atom part and

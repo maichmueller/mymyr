@@ -150,8 +150,8 @@ public:
         return {.expanded = expanded, .generated = generated, .states = states, .seconds = seconds_since(m_t0)};
     }
 
-    /// Sets r.status and sends on_solution (when r carries the plan) and on_end.
-    void finish(BrfsResult& r, bool has_plan) const
+    /// Sets r.status and sends on_solution (when solved) and on_end.
+    void finish(BrfsResult& r) const
     {
         if (r.solved)
             r.status = search::SearchStatus::Solved;
@@ -161,7 +161,7 @@ public:
             r.status = r.exhausted ? search::SearchStatus::Exhausted : search::SearchStatus::OutOfStates;
         if (!m_obs)
             return;
-        if (r.solved && has_plan)
+        if (r.solved)
             m_obs->on_solution(r.plan, static_cast<double>(r.plan.size()));
         m_obs->on_end(r.status, statistics(r.expanded, r.generated, r.states));
     }
@@ -326,7 +326,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
     if (o.fingerprint)
         for (u32 i = 0; i < store.size(); ++i)
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash(store[StateId{i}]));
-    ctl.finish(r, true);
+    ctl.finish(r);
     return r;
 }
 
@@ -462,7 +462,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash({w.data(), store.words(), NN ? curnum.data() : nullptr, NN}));
         }
     }
-    ctl.finish(r, true);
+    ctl.finish(r);
     return r;
 }
 
@@ -633,7 +633,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                     (layer.capacity() + next_layer.capacity() + layer_num.capacity() + next_layer_num.capacity()) * sizeof(u64);
     if (o.fingerprint)
         r.fingerprint = 0;  // closed states are not kept: no per-id fingerprint
-    ctl.finish(r, true);
+    ctl.finish(r);
     return r;
 }
 
@@ -734,6 +734,8 @@ public:
             m_ctl.stop(static_cast<search::SearchStatus>(why - 1));
         r.search_s = seconds_since(t0);
         r.solved = m_stop.load(std::memory_order_relaxed);
+        if (r.solved)
+            r.plan = plan_to(m_goal.load(std::memory_order_relaxed));
         r.exhausted = !r.solved && m_layer_lo == m_layer_hi;
         r.states = m_layer_hi;
         for (const ThreadState& w : m_ws)
@@ -763,7 +765,7 @@ public:
         for (u64 id = m_layer_hi > 64 ? m_layer_hi - 64 : 0; id < m_layer_hi; ++id)
             maxw = std::max(maxw, m_store.record(m_loc[id]).nw);
         r.words = maxw;
-        m_ctl.finish(r, false);
+        m_ctl.finish(r);
         return r;
     }
 
@@ -794,6 +796,34 @@ private:
         }
         m_pend_lo[t] = lo;
         m_pend_hi[t] = hi;
+    }
+
+    /// The plan to state `goal`, on the calling thread: every state's discoverer key names its parent and the index of
+    /// the transition among the parent's successors, which are generated again in the same order.
+    std::vector<Action> plan_to(u64 goal)
+    {
+        Successors& succ = *m_ws[0].succ;  // member 0 is the calling thread
+        std::vector<Action> plan;
+        for (u64 v = goal; v != 0;)
+        {
+            const u64 key = m_store.key(m_loc[v]);
+            const u64 parent = key >> 24;
+            const u32 k = static_cast<u32>(key & 0xFFFFFFULL);
+            succ.prepare(m_store.record(m_loc[parent]));
+            u32 i = 0;
+            succ.generate<false>(
+                [&](u32 s, const ObjectId* b, const Delta&)
+                {
+                    if (i++ != k)
+                        return true;
+                    plan.push_back(action_of(succ, s, b));
+                    return false;
+                },
+                m_o.witness_pruning, m_o.canonical_order);
+            v = parent;
+        }
+        std::reverse(plan.begin(), plan.end());
+        return plan;
     }
 
     /// Thread t, before an expansion: the time, the token and its observer's on_progress (checked every few
@@ -836,6 +866,10 @@ private:
         w.goals += goal;
         if (goal && m_o.stop_at_goal)
         {
+            u64 g = m_goal.load(std::memory_order_relaxed);
+            while (id < g && !m_goal.compare_exchange_weak(g, id, std::memory_order_relaxed))
+            {
+            }
             m_stop.store(true, std::memory_order_relaxed);
             return;
         }
@@ -992,6 +1026,7 @@ private:
     u64 m_chunk = 1;
     std::atomic<bool> m_resize{false};
     std::atomic<bool> m_stop{false};
+    std::atomic<u64> m_goal{~u64{0}};  // stop_at_goal: the smallest id of a goal state expanded
     std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress)
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;

@@ -351,6 +351,8 @@ std::string reword(const LokiMessage& m)
             return "the problem is for domain '" + std::string(names.substr(ne + 4)) + "', not for domain '" +
                    std::string(names.substr(0, ne)) + "'";
     }
+    if (h.starts_with("Undefined requirement: "))
+        return "requirement " + std::string(h.substr(23)) + " is used but not declared in :requirements";
     if (h.starts_with("Unsupported requirement: "))
         return "requirement " + std::string(h.substr(25)) + " is not supported";
     if (!h.empty())
