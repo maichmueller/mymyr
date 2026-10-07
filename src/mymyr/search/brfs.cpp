@@ -34,20 +34,23 @@ namespace
 {
 using Clock = std::chrono::steady_clock;
 
-/// Goal test of a state `succ` was prepared on: the task's goal, or BrfsOptions::goal.
-bool is_goal(const search::GoalSpec& g, Successors& succ, StateView s)
+/// BrfsOptions::goal other than the task's goal, in a state `succ` was prepared on.
+[[gnu::noinline]] bool other_goal(const search::GoalSpec& g, Successors& succ, StateView s)
 {
-    switch (g.kind)
-    {
-        case search::GoalSpec::Kind::Task: return succ.goal_holds();
-        case search::GoalSpec::Kind::AnyOf:
-            for (const search::GoalSpec::AtomGoal& a : g.goals)
-                if (search::holds(a, succ, s))
-                    return true;
-            return false;
-        case search::GoalSpec::Kind::Custom: return g.test(s);
-    }
+    if (g.kind == search::GoalSpec::Kind::Custom)
+        return g.test(s);
+    for (const search::GoalSpec::AtomGoal& a : g.goals)
+        if (search::holds(a, succ, s))
+            return true;
     return false;
+}
+
+/// Goal test of a state `succ` was prepared on: the task's goal, or BrfsOptions::goal.
+inline bool is_goal(const search::GoalSpec& g, Successors& succ, StateView s)
+{
+    if (g.kind == search::GoalSpec::Kind::Task) [[likely]]
+        return succ.goal_holds();
+    return other_goal(g, succ, s);
 }
 double seconds_since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
 
