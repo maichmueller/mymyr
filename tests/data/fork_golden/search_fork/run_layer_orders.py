@@ -50,9 +50,19 @@ def limit_memory(gb):
     return f
 
 
-def run_one(exe, name, domain, problem, algo, order, k, limit, a):
+def build_search_fork(work, build, fork_cxx):
+    """Configures and builds search_fork into `build` against the fork installed in `work`."""
+    cfg = ["cmake", "-S", str(HERE), "-B", str(build), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+           f"-DCMAKE_PREFIX_PATH={work / 'install-fork'};{work / 'install-fork-deps'}"]
+    if fork_cxx:
+        cfg.append(f"-DCMAKE_CXX_COMPILER={fork_cxx}")
+    subprocess.run(cfg, check=True)
+    subprocess.run(["cmake", "--build", str(build), "-j", "8"], check=True)
+
+
+def run_one(exe, name, domain, problem, algo, order, k, limit, a, extra=()):
     cmd = [str(exe), "--algo", algo, "--order", order, "--k", str(k), "--domain", str(domain), "--problem",
-           str(problem), "--max-ms", str(a.seconds * 1000), "--max-states", str(a.max_states)]
+           str(problem), "--max-ms", str(a.seconds * 1000), "--max-states", str(a.max_states), *extra]
     if limit is not None:
         cmd += ["--limit", str(limit)]
     rec = {"task": name, "algo": algo, "order": order, "k": k, "limit": limit}
@@ -91,12 +101,7 @@ def main():
     work = pathlib.Path(a.work)
     build = pathlib.Path(a.build_dir) if a.build_dir else work / "build-search-fork"
     if a.build:
-        cfg = ["cmake", "-S", str(HERE), "-B", str(build), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
-               f"-DCMAKE_PREFIX_PATH={work / 'install-fork'};{work / 'install-fork-deps'}"]
-        if a.fork_cxx:
-            cfg.append(f"-DCMAKE_CXX_COMPILER={a.fork_cxx}")
-        subprocess.run(cfg, check=True)
-        subprocess.run(["cmake", "--build", str(build), "-j", "8"], check=True)
+        build_search_fork(work, build, a.fork_cxx)
     exe = build / "search_fork"
     todo = [(n, d, p, *run) for n, (d, p) in sorted(tasks().items()) if a.only in n for run in RUNS]
     results = json.loads(OUT.read_text())["runs"] if OUT.exists() else []

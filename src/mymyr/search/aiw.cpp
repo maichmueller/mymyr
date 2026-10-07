@@ -87,10 +87,10 @@ public:
             const bool any = m_coords->mask(w, n, m_pmask.data());
             m_coords->collect(m_pmask.data(), any, m_ranks);
             for (u32 r : m_ranks)
-                state_update(w, n, r);
+                state_update<true>(w, n, r);
             return true;
         }
-        state_update(w, n, 0);
+        state_update<true>(w, n, 0);
         return true;  // mimir's test_prune_initial_state returns false (never prunes the start state)
     }
     void begin(const u64* w, u32 n)
@@ -102,10 +102,32 @@ public:
     }
     bool test(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d)
     {
+        return run<true>(pw, pn, cw, cn, add, d);
+    }
+    /// test() without marking (BeamNovelty::SurvivorsOnly).
+    bool peek(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d)
+    {
+        return run<false>(pw, pn, cw, cn, add, d);
+    }
+    [[nodiscard]] u64 bytes() const
+    {
+        u64 b = m_pairs.bytes() + m_triples.bytes() + m_by_feature.capacity() * 8 + m_dense_bytes;
+        for (const auto& s : m_single)
+            b += s.capacity() * 8;
+        for (const auto& f : m_features)
+            b += f.capacity() * 4;
+        return b;
+    }
+
+private:
+    /// The novelty of a transition; with Mark, marks its tuples.
+    template<bool Mark>
+    bool run(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d)
+    {
         if (!m_coords && incremental())
-            return test_incremental(pw, pn, cw, cn, add, d);
+            return test_incremental<Mark>(pw, pn, cw, cn, add, d);
         if (!m_coords)
-            return transition_update(pw, pn, cw, cn, add, 0);
+            return transition_update<Mark>(pw, pn, cw, cn, add, 0);
         const bool sany = m_coords->child_mask(m_pmask.data(), cw, cn, add, d.del, m_smask.data());
         if (m_cfg.width == 1)
         {
@@ -117,7 +139,7 @@ public:
             if (flipped)
                 apply_delta_features(pw, pn, cw, cn, add, d);  // m_pu: the successor's features
             const bool novel = novel1(add, flipped);
-            if (novel)
+            if (Mark && novel)
             {
                 if (flipped)
                     bits::for_each(m_fmask.data(), m_rw,
@@ -146,22 +168,12 @@ public:
         m_coords->split(m_pmask.data(), m_pany, m_smask.data(), sany, m_flipped, m_kept);
         bool novel = false;
         for (u32 r : m_flipped)
-            novel = state_update(cw, cn, r) || novel;
+            novel = state_update<Mark>(cw, cn, r) || novel;
         for (u32 r : m_kept)
-            novel = transition_update(pw, pn, cw, cn, add, r) || novel;
+            novel = transition_update<Mark>(pw, pn, cw, cn, add, r) || novel;
         return novel;
     }
-    [[nodiscard]] u64 bytes() const
-    {
-        u64 b = m_pairs.bytes() + m_triples.bytes() + m_by_feature.capacity() * 8 + m_dense_bytes;
-        for (const auto& s : m_single)
-            b += s.capacity() * 8;
-        for (const auto& f : m_features)
-            b += f.capacity() * 4;
-        return b;
-    }
 
-private:
     // ------------------------------------------------------------------ features
     u32 intern(const std::vector<u32>& key)
     {
@@ -269,6 +281,29 @@ private:
     }
     bool insert2(u32 rank, u32 a, u32 b) { return m_pairs.insert({(u64{a} << 32) | b, rank}); }
     bool insert3(u32 rank, u32 a, u32 b, u32 c) { return m_triples.insert({(u64{a} << 32) | b, (u64{c} << 32) | rank}); }
+    /// With Mark: insert; without: whether the tuple is unmarked (nothing changes).
+    template<bool Mark>
+    bool touch1(u32 rank, u32 f)
+    {
+        if constexpr (Mark)
+            return insert1(rank, f);
+        const std::vector<u64>& s = m_single[rank];
+        return (f >> 6) >= s.size() || ((s[f >> 6] >> (f & 63)) & 1) == 0;
+    }
+    template<bool Mark>
+    bool touch2(u32 rank, u32 a, u32 b)
+    {
+        if constexpr (Mark)
+            return insert2(rank, a, b);
+        return !m_pairs.contains({(u64{a} << 32) | b, rank});
+    }
+    template<bool Mark>
+    bool touch3(u32 rank, u32 a, u32 b, u32 c)
+    {
+        if constexpr (Mark)
+            return insert3(rank, a, b, c);
+        return !m_triples.contains({(u64{a} << 32) | b, (u64{c} << 32) | rank});
+    }
 
     /// Loads the successor's atoms as groups; `parent` null: every atom counts as added.
     void load_groups(const u64* w, u32 n, const u64* pw, u32 pn)
@@ -288,16 +323,17 @@ private:
             m_gfeat.push_back(features(a));
     }
     /// Mimir's generate_tuples + insert over the loaded groups, for one rank.
+    template<bool Mark>
     bool group_tuples(u32 rank)
     {
         if (m_dense2)
-            return dense_pairs(rank);
+            return dense_pairs<Mark>(rank);
         const u32 G = static_cast<u32>(m_gatoms.size());
         bool novel = false;
         for (u32 g = 0; g < G; ++g)
             if (m_gadded[g])
                 for (u32 f : m_gfeat[g])
-                    novel = insert1(rank, f) || novel;
+                    novel = touch1<Mark>(rank, f) || novel;
         if (m_cfg.width < 2)
             return novel;
         auto other = [&](u32 ia, u32 o) { return o != ia && !(o < ia && m_gadded[o]); };
@@ -312,7 +348,7 @@ private:
                 for (u32 fa : m_gfeat[ia])
                     for (u32 fo : m_gfeat[o])
                         if (fa != fo)
-                            novel = insert2(rank, std::min(fa, fo), std::max(fa, fo)) || novel;
+                            novel = touch2<Mark>(rank, std::min(fa, fo), std::max(fa, fo)) || novel;
             }
         }
         if (m_cfg.width < 3)
@@ -342,7 +378,7 @@ private:
                                     std::swap(t[0], t[1]);
                                 if (t[0] == t[1] || t[1] == t[2])
                                     continue;
-                                novel = insert3(rank, t[0], t[1], t[2]) || novel;
+                                novel = touch3<Mark>(rank, t[0], t[1], t[2]) || novel;
                             }
                 }
             }
@@ -354,6 +390,7 @@ private:
     /// fa a feature of ia and U_ia the features of the other groups (the loaded features minus those only ia has), so
     /// the test is word-parallel; all tuples are marked only if one is new (marking tuples that are all marked changes
     /// nothing). Above max_dense_bytes the tables move to the pair set for good.
+    template<bool Mark>
     bool dense_pairs(u32 rank)
     {
         const u32 G = static_cast<u32>(m_gatoms.size());
@@ -371,7 +408,7 @@ private:
                     lo = std::min(lo, f >> 6);
                     hi = std::max(hi, (f >> 6) + 1);
                 }
-        const bool novel = dense_core(rank, m_u.data(), W, lo, hi);
+        const bool novel = dense_core<Mark>(rank, m_u.data(), W, lo, hi);
         for (u32 g = 0; g < G; ++g)
             for (u32 f : m_gfeat[g])
                 m_cnt[f] = 0;
@@ -381,6 +418,7 @@ private:
     }
     /// The test and marking of dense_pairs: U (W words, bits only in [lo, hi)) and m_cnt hold the successor's
     /// features and, per feature, how many of its atoms have it; the added groups are those of m_gfeat with m_gadded.
+    template<bool Mark>
     bool dense_core(u32 rank, u64* U, u32 W, u32 lo, u32 hi)
     {
         const u32 G = static_cast<u32>(m_gfeat.size());
@@ -431,7 +469,7 @@ private:
             }
             unique_off(ia, false);
         }
-        if (novel)
+        if (Mark && novel)
         {
             for (u32 g = 0; g < G; ++g)
                 if (m_gadded[g])
@@ -532,6 +570,7 @@ private:
                 if (m_cnt[f]++ == 0)
                     bits::set(m_pu.data(), f);
     }
+    template<bool Mark>
     bool test_incremental(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d)
     {
         apply_delta_features(pw, pn, cw, cn, add, d);
@@ -542,7 +581,7 @@ private:
             m_gfeat.push_back(features(a));
             m_gadded.push_back(1);
         }
-        const bool novel = dense_core(0, m_pu.data(), static_cast<u32>(m_pu.size()), m_lo, m_hi);
+        const bool novel = dense_core<Mark>(0, m_pu.data(), static_cast<u32>(m_pu.size()), m_lo, m_hi);
         revert_delta_features(add);
         if (m_dense_bytes > m_cfg.max_dense_bytes)
         {
@@ -580,6 +619,7 @@ private:
         m_dense2 = false;
     }
     /// Every tuple of a state (mimir's test_state_novelty_and_update_table).
+    template<bool Mark>
     bool state_update(const u64* w, u32 n, u32 rank)
     {
         if (m_cfg.width == 1)
@@ -589,14 +629,15 @@ private:
                            [&](u64 a)
                            {
                                for (u32 f : features(static_cast<u32>(a)))
-                                   novel = insert1(rank, f) || novel;
+                                   novel = touch1<Mark>(rank, f) || novel;
                            });
             return novel;
         }
         load_groups(w, n, nullptr, 0);
-        return group_tuples(rank);
+        return group_tuples<Mark>(rank);
     }
     /// The tuples of a transition that contain an added atom (mimir's test_transition_novelty_and_update_table).
+    template<bool Mark>
     bool transition_update(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, u32 rank)
     {
         if (m_cfg.width == 1)
@@ -604,11 +645,11 @@ private:
             bool novel = false;
             for (u32 a : add)
                 for (u32 f : features(a))
-                    novel = insert1(rank, f) || novel;
+                    novel = touch1<Mark>(rank, f) || novel;
             return novel;
         }
         load_groups(cw, cn, pw, pn);
-        return group_tuples(rank);
+        return group_tuples<Mark>(rank);
     }
 
     const Task& m_task;

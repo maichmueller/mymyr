@@ -66,6 +66,9 @@ IwResult liw(const Task& task, const LiwOptions& o)
     detail::LayerOrderer layers;
     if (std::string e = detail::apply_layers(env, o.layers, layers); !e.empty())
         return detail::failed(std::move(e));
+    if (o.layers.beam() && o.layers.beam_novelty == LayerOrdering::BeamNovelty::SurvivorsOnly)
+        return detail::failed("LIW supports only LayerOrdering::BeamNovelty::AllTested (as in mimir: the landmark novelty table "
+                              "has no read-only test)");
     novelty::LandmarkCoordinates coords;
     try
     {

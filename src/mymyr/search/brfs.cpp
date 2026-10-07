@@ -113,6 +113,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
     u32 pos = 0;
     LayerLog log{o.layer_stats ? &r.layer_counts : nullptr};
     // Ordered layers (BrfsOptions::layers): the layer [layer_begin, layer_end) of ids is expanded in the order `order`
+    // (with a beam, only its first beam_width ids; the others stay stored and are never expanded)
     [[maybe_unused]] search::detail::LayerOrderer lo;
     [[maybe_unused]] std::vector<u32> order;
     [[maybe_unused]] u32 layer_begin = 0;
@@ -135,7 +136,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
                 order.resize(layer_end - layer_begin);
                 std::iota(order.begin(), order.end(), layer_begin);
                 if (layer_begin > 0)
-                    lo.order(order, succ, [&](u32 e) {
+                    lo.select(order, succ, [&](u32 e) {
                         const u64* w = store.words(StateId{e});
                         return StateView{w, store.stride(), NN ? w + store.stride() : nullptr, NN};
                     });
@@ -176,8 +177,8 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
             },
             witness, canonical);
         if constexpr (Ordered)
-            if (truncated)
-                pos = layer_end - 1;  // mimir drops the rest of the layer once the next one is full
+            if (truncated || pos + 1 - layer_begin == order.size())
+                pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);
@@ -210,6 +211,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
     u32 pos = 0;
     LayerLog log{o.layer_stats ? &r.layer_counts : nullptr};
     // Ordered layers (BrfsOptions::layers): the layer [layer_begin, layer_end) of ids is expanded in the order `order`
+    // (with a beam, only its first beam_width ids; the others stay stored and are never expanded)
     [[maybe_unused]] search::detail::LayerOrderer lo;
     [[maybe_unused]] std::vector<u32> order;
     [[maybe_unused]] u32 layer_begin = 0;
@@ -232,7 +234,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
                 order.resize(layer_end - layer_begin);
                 std::iota(order.begin(), order.end(), layer_begin);
                 if (layer_begin > 0)
-                    lo.order(order, succ, [&](u32 e) {
+                    lo.select(order, succ, [&](u32 e) {
                         scratch.resize(store.words());
                         store.decode(StateId{e}, scratch.data(), curnum.data());
                         return StateView{scratch.data(), store.words(), NN ? curnum.data() : nullptr, NN};
@@ -293,8 +295,8 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
             },
             witness, canonical);
         if constexpr (Ordered)
-            if (truncated)
-                pos = layer_end - 1;  // mimir drops the rest of the layer once the next one is full
+            if (truncated || pos + 1 - layer_begin == order.size())
+                pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);

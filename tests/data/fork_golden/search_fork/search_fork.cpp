@@ -1,12 +1,13 @@
 // search_fork: one search of the mimir fork (0.16.x) on a PDDL task, for the expectations of mymyr's parity tests:
 // the numeric best-first test (tests/data/numeric_tasks/fork_best_first.json, made by run_numeric.py), the layer
-// ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py) and the heuristics test
+// ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py), the beam test
+// (tests/data/beam/fork_beam.json, made by run_beam.py) and the heuristics test
 // (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py).
 //
 //   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
 //               --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo iw|brfs --order in_order|reverse|goal_count|goal_count_fewer [--k K] [--limit L]
-//               --domain D --problem P [--max-ms T] [--max-states N]
+//               [--beam W [--beam-mode all_tested|survivors_only]] --domain D --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo walk_h --h setadd|h2|perfect --domain D --problem P [--walks W] [--steps S] [--seed B]
 //               [--max-states N]
 //
@@ -16,7 +17,8 @@
 // over a LiftedGrounder (unit action costs), blind is its BlindHeuristic, perfect its PerfectHeuristic over the
 // search context's state space (built first with --max-states as its limit: a larger space is an ERROR); the searches
 // use the fork's default event handlers and strategies. iw is iw::find_solution with max_arity K and the layer
-// ordering strategy (max_next_layer_states L); brfs is brfs::find_solution with stop_if_goal and the same ordering.
+// ordering strategy (max_next_layer_states L, or beam_width W with beam_novelty_mode); brfs is brfs::find_solution
+// with stop_if_goal and the same ordering.
 // walk_h evaluates the heuristic on the states of the seeded random walks of tests/data/fork_golden/README.md (walk w
 // uses seed B + w, the next action is sorted_applicable[splitmix64() % count]; W = 3, S = 25, B = 1 as in the
 // golden files) and prints per walk and step the fluent atom count, the set hash of their strings and h.
@@ -264,8 +266,17 @@ std::string plan_json(const SearchResult& result)
     return o + "]";
 }
 
+BeamNoveltyMode beam_mode(const std::string& m)
+{
+    if (m == "all_tested")
+        return BeamNoveltyMode::ALL_TESTED;
+    if (m == "survivors_only")
+        return BeamNoveltyMode::SURVIVORS_ONLY;
+    throw std::invalid_argument("unknown beam mode " + m);
+}
+
 int run_layered(const std::string& domain, const std::string& problem_file, const std::string& algo, const std::string& order, size_t k,
-                uint32_t limit, uint32_t max_ms, uint32_t max_states)
+                uint32_t limit, uint32_t beam, const std::string& mode, uint32_t max_ms, uint32_t max_states)
 {
     const auto t0 = std::chrono::steady_clock::now();
     Problem problem = ProblemImpl::create(domain, problem_file);
@@ -283,6 +294,8 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
         opts.brfs_event_handler = brfs_eh;
         opts.layer_ordering_strategy = make_order(problem, order);
         opts.max_next_layer_states = limit;
+        opts.beam_width = beam;
+        opts.beam_novelty_mode = beam_mode(mode);
         opts.max_time_in_ms = max_ms;
         opts.max_num_states = max_states;
         auto result = iw::find_solution(context, opts);
@@ -308,6 +321,8 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
         opts.stop_if_goal = true;
         opts.layer_ordering_strategy = make_order(problem, order);
         opts.max_next_layer_states = limit;
+        opts.beam_width = beam;
+        opts.beam_novelty_mode = beam_mode(mode);
         opts.max_time_in_ms = max_ms;
         opts.max_num_states = max_states;
         auto result = brfs::find_solution(context, opts);
@@ -322,8 +337,10 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::cout << "RESULT {\"algo\":" << jstr(algo) << ",\"order\":" << jstr(order) << ",\"k\":" << k << ",\"limit\":"
-              << (limit == UINT32_MAX ? std::string("null") : std::to_string(limit)) << "," << body << ",\"seconds\":" << jnum(secs) << "}"
-              << std::endl;
+              << (limit == UINT32_MAX ? std::string("null") : std::to_string(limit));
+    if (beam != UINT32_MAX)
+        std::cout << ",\"beam\":" << beam << ",\"beam_mode\":" << jstr(mode);
+    std::cout << "," << body << ",\"seconds\":" << jnum(secs) << "}" << std::endl;
     return 0;
 }
 
@@ -385,8 +402,8 @@ int run_search(const std::string& domain, const std::string& problem_file, const
 
 int main(int argc, char** argv)
 {
-    std::string algo, hname, domain, problem, order;
-    uint32_t max_ms = 120000, max_states = UINT32_MAX, limit = UINT32_MAX;
+    std::string algo, hname, domain, problem, order, mode = "all_tested";
+    uint32_t max_ms = 120000, max_states = UINT32_MAX, limit = UINT32_MAX, beam = UINT32_MAX;
     size_t k = 1, walks = 3, steps = 25;
     uint64_t seed = 1;
     for (int i = 1; i < argc; ++i)
@@ -416,6 +433,10 @@ int main(int argc, char** argv)
             k = std::stoul(v);
         else if (a == "--limit")
             limit = static_cast<uint32_t>(std::stoul(v));
+        else if (a == "--beam")
+            beam = static_cast<uint32_t>(std::stoul(v));
+        else if (a == "--beam-mode")
+            mode = v;
         else if (a == "--walks")
             walks = std::stoul(v);
         else if (a == "--steps")
@@ -431,7 +452,7 @@ int main(int argc, char** argv)
     const bool layered = algo == "iw" || algo == "brfs";
     if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : hname.empty()))
     {
-        std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L]) --domain D --problem P [--max-ms T] "
+        std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L] [--beam W] [--beam-mode M]) --domain D --problem P [--max-ms T] "
                      "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
         return 2;
     }
@@ -441,7 +462,7 @@ int main(int argc, char** argv)
         if (algo == "walk_h")
             rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
         else
-            rc = layered ? run_layered(domain, problem, algo, order, k, limit, max_ms, max_states)
+            rc = layered ? run_layered(domain, problem, algo, order, k, limit, beam, mode, max_ms, max_states)
                          : run_search(domain, problem, algo, hname, max_ms, max_states);
     }
     catch (const std::exception& ex)

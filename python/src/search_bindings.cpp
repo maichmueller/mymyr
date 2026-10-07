@@ -688,7 +688,8 @@ search::ActionOrdering parse_ordering(nb::handle h)
 }
 
 search::LayerOrdering parse_layers(nb::handle kind, u64 seed, nb::handle max_next_layer_states,
-                                   bool prefer_more_satisfied_goals)
+                                   bool prefer_more_satisfied_goals, nb::handle beam_width, nb::handle beam_novelty,
+                                   bool randomize_ties)
 {
     search::LayerOrdering l;
     const std::string k = str_arg(kind, "layer_order");
@@ -709,6 +710,16 @@ search::LayerOrdering parse_layers(nb::handle kind, u64 seed, nb::handle max_nex
     l.prefer_more_satisfied_goals = prefer_more_satisfied_goals;
     if (auto v = opt<u32>(max_next_layer_states))
         l.max_next_layer_states = *v;  // checked by the search (0, or a limit with 'queue', is an error)
+    if (auto v = opt<u32>(beam_width))
+        l.beam_width = *v;  // checked by the search, as above
+    const std::string bn = str_arg(beam_novelty, "beam_novelty");
+    if (bn == "all_tested")
+        l.beam_novelty = search::LayerOrdering::BeamNovelty::AllTested;
+    else if (bn == "survivors_only")
+        l.beam_novelty = search::LayerOrdering::BeamNovelty::SurvivorsOnly;
+    else
+        throw nb::value_error("mymyr: beam_novelty must be 'all_tested' or 'survivors_only'");
+    l.randomize_ties = randomize_ties;
     return l;
 }
 
@@ -1012,6 +1023,7 @@ using TransitionArg = Arg<PyLandmarkOrdering>;
 using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, ann::LandmarkSource>>;
 using FluentAtomsArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 using LayerArg = Arg<ann::LayerOrder>;
+using BeamNoveltyArg = Arg<ann::BeamNovelty>;
 using OrderingArg = Arg<std::variant<search::ActionOrdering, std::string>>;
 using OrderingsArg =
     Arg<nb::typed<nb::sequence, std::variant<search::ActionOrdering, std::string,
@@ -1179,6 +1191,7 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
                                         bool disjunctive, bool all_private, nb::handle unshared_atoms,
                                         nb::handle max_dense_bytes, bool preserve_landmark_atoms, nb::handle layer_order,
                                         u64 seed, nb::handle max_next_layer_states, bool prefer_more_satisfied_goals,
+                                        nb::handle beam_width, nb::handle beam_novelty, bool randomize_ties,
                                         bool witness_pruning, bool canonical_order, nb::handle start)
 {
     search::AbstractedIwOptions opts;
@@ -1186,7 +1199,8 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
     opts.keep_depth_one_novel = keep_depth_one_novel;
     opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
     opts.preserve_landmark_atoms = preserve_landmark_atoms;
-    opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals);
+    opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
+                                       beam_novelty, randomize_ties);
     opts.witness_pruning = witness_pruning;
     opts.canonical_order = canonical_order;
     if (!start.is_none())
@@ -1210,7 +1224,8 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
 
 #define MYMYR_LAYER_ARGS                                                                                               \
     "layer_order"_a = "queue", "seed"_a = 0, "max_next_layer_states"_a = nb::none(),                                  \
-        "prefer_more_satisfied_goals"_a = true
+        "prefer_more_satisfied_goals"_a = true, "beam_width"_a = nb::none(), "beam_novelty"_a = "all_tested",         \
+        "randomize_ties"_a = false
 
 const char* k_control_doc =
     "Common keyword arguments (search/control.hpp): max_states, max_expanded, max_depth, max_seconds (budgets; unset = "
@@ -1251,7 +1266,14 @@ const char* k_layer_doc =
     "layer by layer, each next layer reordered before it is expanded: 'in_order' (as generated), 'reverse', "
     "'randomized' (seed: the SplitMix64 seed) or 'goal_count' (stable, by the number of satisfied goal literals, most "
     "first; prefer_more_satisfied_goals=False: fewest first). max_next_layer_states (ordered kinds only): once the "
-    "next layer holds that many states, the rest of the current layer is not expanded.";
+    "next layer holds that many states, the rest of the current layer is not expanded. beam_width (ordered kinds "
+    "only, not with max_next_layer_states): the whole next layer is generated, ordered, and only its first "
+    "beam_width states are kept (goal_count: the best scores, ties in generation order or, with randomize_ties, by "
+    "random tokens drawn from seed); the others are never expanded. beam_novelty (with beam_width): 'all_tested' "
+    "(the novelty test marks every successor it admits, kept or not) or 'survivors_only' (successors are tested "
+    "read-only; the kept ones are replayed in rank order and only those that still add a tuple stay and mark it, so "
+    "a layer can end up smaller than beam_width; not supported by liw; in brfs the "
+    "two modes are the same).";
 }  // namespace
 
 void bind_search(nb::module_& parent)
@@ -1761,14 +1783,16 @@ void bind_search(nb::module_& parent)
            bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals) {
+           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::IwOptions opts = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning,
                                                 canonical_order, start, transition_ordering);
-            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals);
+            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
+                                       beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -1787,14 +1811,16 @@ void bind_search(nb::module_& parent)
            StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals) {
+           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::IwOptions opts =
                 iw_options(cs, o, arity, width_zero, false, witness_pruning, canonical_order, start, transition_ordering);
-            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals);
+            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
+                                       beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw_pass(t, arity, opts); });
             return PyIwResult{std::move(r), o};
@@ -1809,14 +1835,16 @@ void bind_search(nb::module_& parent)
            bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals) {
+           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::SiwOptions opts = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning,
                                                  canonical_order, start, transition_ordering);
-            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals);
+            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
+                                       beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
             search::SiwResult r = run_detached(cs, [&] { return search::siw(t, opts); });
             return PySiwResult{std::move(r), o};
@@ -1831,7 +1859,8 @@ void bind_search(nb::module_& parent)
         "brfs",
         [](TaskArg task, u32 threads, StrArg store, bool witness_pruning, bool canonical_order,
            bool deterministic_ids, IntArg max_states, bool stop_at_goal, bool fingerprint, LayerArg layer_order,
-           u64 seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals) {
+           u64 seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties) {
             const Owner o = owner_of(task);
             BrfsOptions opts;
             opts.threads = threads;
@@ -1855,7 +1884,8 @@ void bind_search(nb::module_& parent)
                 opts.max_states = *v;
             opts.stop_at_goal = stop_at_goal;
             opts.fingerprint = fingerprint;
-            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals);
+            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
+                                       beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
             BrfsResult r;
             {
@@ -1999,7 +2029,8 @@ void bind_search(nb::module_& parent)
         "liw",
         [](TaskArg task, u32 max_arity, LandmarksArg landmarks, bool disjunctive, bool all_private,
            FluentAtomsArg unshared_atoms, IntArg max_dense_bytes, LayerArg layer_order, u64 seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, WidthZeroArg width_zero,
+           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, WidthZeroArg width_zero,
            bool witness_pruning, bool canonical_order,
            StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
@@ -2011,7 +2042,8 @@ void bind_search(nb::module_& parent)
             search::LiwOptions opts;
             static_cast<search::IwOptions&>(opts) =
                 iw_options(cs, o, max_arity, width_zero, true, witness_pruning, canonical_order, start);
-            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals);
+            opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
+                                       beam_novelty, randomize_ties);
             opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::liw(t, opts); });
@@ -2032,7 +2064,8 @@ void bind_search(nb::module_& parent)
         [](TaskArg task, u32 width, bool base_abstracted, bool preserve_goal_atoms, bool keep_depth_one_novel,
            LandmarksArg landmarks, bool disjunctive, bool all_private, FluentAtomsArg unshared_atoms,
            IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, u64 seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, bool witness_pruning,
+           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, bool witness_pruning,
            bool canonical_order, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
            GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
@@ -2043,7 +2076,8 @@ void bind_search(nb::module_& parent)
             search::AbstractedIwOptions opts =
                 aiw_options(cs, o, keep_depth_one_novel, landmarks, disjunctive, all_private, unshared_atoms,
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
-                            prefer_more_satisfied_goals, witness_pruning, canonical_order, start);
+                            prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
+                            witness_pruning, canonical_order, start);
             opts.width = width;
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
@@ -2068,7 +2102,8 @@ void bind_search(nb::module_& parent)
         [](TaskArg task, bool typed_projection, bool keep_goal_nonunary_atoms, bool keep_depth_one_novel,
            LandmarksArg landmarks, bool disjunctive, bool all_private, FluentAtomsArg unshared_atoms,
            IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, u64 seed,
-           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, bool witness_pruning,
+           IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, bool witness_pruning,
            bool canonical_order, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
            GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
@@ -2080,7 +2115,8 @@ void bind_search(nb::module_& parent)
             static_cast<search::AbstractedIwOptions&>(opts) =
                 aiw_options(cs, o, keep_depth_one_novel, landmarks, disjunctive, all_private, unshared_atoms,
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
-                            prefer_more_satisfied_goals, witness_pruning, canonical_order, start);
+                            prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
+                            witness_pruning, canonical_order, start);
             opts.typed_projection = typed_projection;
             opts.keep_goal_nonunary_atoms = keep_goal_nonunary_atoms;
             const Task& t = *o.core->task;
