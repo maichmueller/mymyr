@@ -95,7 +95,7 @@ def test_errors(problems_dir, tmp_path_factory):
         TaskTable.from_pddl(problems_dir / "domain.pddl", empty)
     with pytest.raises(ValueError, match="no problem files match"):
         TaskTable.from_pddl(problems_dir / "domain.pddl", str(problems_dir / "*.nothing"))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(FileNotFoundError, match="missing.pddl"):  # as Task.from_pddl
         TaskTable.from_pddl(problems_dir / "domain.pddl", [problems_dir / "missing.pddl"])
     with pytest.raises(TypeError):
         TaskTable.from_pddl(problems_dir / "domain.pddl", 3)
