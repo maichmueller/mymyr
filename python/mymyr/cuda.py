@@ -25,6 +25,8 @@ Only in CUDA builds of mymyr (``-C cmake.define.MYMYR_CUDA=ON``); importing this
   group and chunk sizes (exact batch novelty); ``rollouts`` are the CPU's randomized rollouts of the same seeds,
   reached atoms included; ``batched_iw1`` runs optimized IW(1) from host states or from CUDA word arrays read in
   place. All return an :class:`IwBatch`.
+  Goals may be ground conjunctions of fluent/derived literals and numeric constraints, one per start; rollouts share
+  one conjunction across their seeds. Callable goals and any-of alternatives within one search require CPU search.
 - :class:`Heuristic`, :func:`astar`, :func:`gbfs`: batched grounded h_max, h_add and h_FF on the device
   (``Heuristic.evaluate``: host states give NumPy float64 values, CUDA word arrays uint32 device values in the input's
   framework, ``Heuristic.DEAD_END`` for dead ends; h_max and h_add equal ``mymyr.search.Heuristic``'s, h_FF breaks

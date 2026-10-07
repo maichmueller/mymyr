@@ -19,6 +19,7 @@
 #include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/search/iw.hpp"
+#include "mymyr/search/goal.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -814,5 +815,174 @@ TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
             EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->state_words(), expected.space->state_words()));
             EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->costs(), expected.space->costs()));
         }
+    }
+}
+
+namespace
+{
+TaskPtr ground_goal_task(bool numeric_axiom, TaskOptions options)
+{
+    std::string domain = R"(
+(define (domain steps)
+ (:requirements :strips :numeric-fluents :derived-predicates :negative-preconditions)
+ (:predicates (p) (q) (r) (ready))
+ (:functions (x) (limit) (unknown))
+ (:action first :parameters () :precondition (and (= (x) 0)) :effect (and (p) (increase (x) 1)))
+ (:action second :parameters () :precondition (and (= (x) 1)) :effect (and (q) (increase (x) 1)))
+ (:action third :parameters () :precondition (and (= (x) 2)) :effect (and (r) (increase (x) 1)))
+ (:derived (ready) (and (p) )";
+    domain += numeric_axiom ? "(>= (x) 2)" : "(q)";
+    domain += ")) )";
+    const auto d = frontend::Domain::from_string(domain, "steps.pddl");
+    return Task::create(*d->instantiate_string(R"(
+(define (problem s) (:domain steps) (:init (= (x) 0) (= (limit) 3)) (:goal (and (r))))
+)", "s.pddl"), options);
+}
+
+void user_goals_equal_cpu(const cuda::ContextPtr& ctx, const TaskPtr& task,
+                          const std::vector<State>& starts, const std::vector<search::GoalSpec::AtomGoal>& goals)
+{
+    cuda::MultiIwOptions options; options.max_arity = 2; options.budget.max_states = 5000;
+    options.max_searches = 2; options.chunk_states = 3;
+    cuda::DeviceMultiIw run(ctx, task, options);
+    const auto actual = run.run(starts, goals);
+    EXPECT_EQ(actual.stats.captures, 0u);
+    EXPECT_EQ(actual.stats.device_loops, 0u);
+    for (u32 i = 0; i < starts.size(); ++i)
+    {
+        search::IwOptions cpu; cpu.max_arity = 2; cpu.control.budget = options.budget; cpu.start = starts[i];
+        cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf; cpu.control.goal.goals = {goals[i]};
+        const auto expected = search::iw(*task, cpu);
+        const auto result = actual.result(i, *task, starts[i], true);
+        EXPECT_EQ(result.status, expected.status); EXPECT_EQ(result.plan, expected.plan);
+        EXPECT_EQ(result.goal_state, expected.goal_state); EXPECT_EQ(result.cost, expected.cost);
+        ASSERT_EQ(result.passes.size(), expected.passes.size());
+        for (u32 j = 0; j < result.passes.size(); ++j)
+        {
+            EXPECT_EQ(result.passes[j].expanded, expected.passes[j].expanded);
+            EXPECT_EQ(result.passes[j].generated, expected.passes[j].generated);
+        }
+    }
+    const auto table = rl::TaskTable::create({task, task});
+    const std::vector<u32> ids{0, 1, 0, 1, 0, 1, 0, 1};
+    cuda::DeviceTableIw table_run(ctx, table, options);
+    const auto batched = table_run.run(starts, ids, goals);
+    EXPECT_EQ(batched.status, actual.status); EXPECT_EQ(batched.plan_length, actual.plan_length);
+    const u32 width = std::max<u32>(1, task->words()) + task->numeric_slots();
+    std::vector<u64> rows(u64{starts.size()} * width);
+    for (u32 i = 0; i < starts.size(); ++i)
+        cuda::numeric::encode(*task, starts[i].view(), rows.data() + u64{i} * width, width);
+    auto device_rows = test::to_device(ctx, rows, ctx->stream());
+    const auto from_device = run.run({static_cast<const u64*>(device_rows.data()), width, width,
+                                      static_cast<u32>(starts.size())}, goals);
+    EXPECT_EQ(from_device.status, actual.status); EXPECT_EQ(from_device.goal_rows, actual.goal_rows);
+    const auto table_device = table_run.run({static_cast<const u64*>(device_rows.data()), width, width,
+                                            static_cast<u32>(starts.size())}, ids, goals);
+    EXPECT_EQ(table_device.status, batched.status); EXPECT_EQ(table_device.goal_rows, batched.goal_rows);
+    const std::vector<u64> seeds{7, 17, 37, 47};
+    const std::vector<search::GoalSpec::AtomGoal> rollout_goals(goals.begin(), goals.begin() + 4);
+    for (u32 truncation : {2u, ~u32{0}})
+    {
+        cuda::MultiIwOptions randomized = options; randomized.max_next_layer_states = truncation;
+        cuda::DeviceRollouts batch(ctx, task, randomized);
+        const auto result = batch.run(seeds, nullptr, rollout_goals);
+        for (u32 i = 0; i < seeds.size(); ++i)
+        {
+            search::IwOptions cpu; cpu.max_arity = 2; cpu.control.budget = options.budget;
+            cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf; cpu.control.goal.goals = {rollout_goals[i]};
+            cpu.layers = {.kind = search::LayerOrdering::Kind::Randomized, .seed = seeds[i], .max_next_layer_states = truncation};
+            const auto expected = search::iw(*task, cpu);
+            const auto actual_rollout = result.result(i, *task, task->initial_state(), true);
+            EXPECT_EQ(actual_rollout.status, expected.status); EXPECT_EQ(actual_rollout.plan, expected.plan);
+            EXPECT_EQ(actual_rollout.goal_state, expected.goal_state); EXPECT_EQ(actual_rollout.cost, expected.cost);
+        }
+    }
+    const auto task_goals = run.run(starts);
+    EXPECT_EQ(task_goals.status, cuda::DeviceMultiIw(ctx, task, options).run(starts).status);
+}
+}  // namespace
+
+TEST(DeviceNumericRules, UserGroundGoalsEqualCpu)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    for (bool numeric_axiom : {false, true})
+        for (auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+            for (auto storage : {TaskOptions::NumericStorageMode::Auto, TaskOptions::NumericStorageMode::F64})
+            {
+                TaskOptions options; options.atoms = atoms; options.numeric_storage = storage;
+                const auto task = ground_goal_task(numeric_axiom, options);
+                cuda::ChunkGenerator generator(ctx, task);
+                EXPECT_EQ(generator.device_axioms(), !numeric_axiom);
+                u32 ready = 0;
+                while (ready < task->data().predicates.size() && task->data().str(task->data().predicates[ready].name) != "ready") ++ready;
+                ASSERT_LT(ready, task->data().predicates.size());
+                std::vector<GroundCondition> conditions(8);
+                conditions[0].add_constraint(*task, "(>= (x) 2)");
+                conditions[1].literals = {{{PredicateId{ready}, {}}, true}};
+                conditions[2].literals = {{{PredicateId{ready}, {}}, false}};
+                conditions[3] = conditions[1]; conditions[3].add_constraint(*task, "(= (x) (limit))");
+                conditions[4].add_constraint(*task, "(!= (+ (x) 0.125) (/ (limit) 2))");
+                conditions[5].add_constraint(*task, "(> (x) (unknown))");
+                conditions[6].add_constraint(*task, "(= (/ (x) 0) 0)");
+                conditions[7].add_constraint(*task, "(<= (- (x)) -2)");
+                std::vector<search::GoalSpec::AtomGoal> goals;
+                for (const auto& condition : conditions)
+                {
+                    const auto goal = search::atom_goal(*task, condition);
+                    ASSERT_TRUE(goal);
+                    goals.push_back(*goal);
+                }
+                user_goals_equal_cpu(ctx, task, walks(*task), goals);
+            }
+}
+
+TEST(DeviceNumericRules, UserGoalProgramLimits)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto task = ground_goal_task(false, {});
+    GroundCondition condition;
+    std::string expression = "(x)";
+    for (u32 i = 0; i < 63; ++i) expression = "(+ (x) " + expression + ")";
+    condition.add_constraint(*task, "(>= " + expression + " 0)");
+    const auto accepted = search::atom_goal(*task, condition);
+    ASSERT_TRUE(accepted);
+    const auto results = cuda::multi_iw(context(), task, std::vector<State>{task->initial_state()}, {}, std::span(&*accepted, 1));
+    EXPECT_EQ(results[0].status, search::SearchStatus::Solved);
+    EXPECT_TRUE(results[0].plan.empty());
+    condition = GroundCondition{};
+    expression = "(+ (x) " + expression + ")";
+    condition.add_constraint(*task, "(>= " + expression + " 0)");
+    EXPECT_TRUE(holds(*task, task->initial_state().view(), condition));
+    const auto goal = search::atom_goal(*task, condition);
+    ASSERT_TRUE(goal);
+    EXPECT_THROW((void)cuda::multi_iw(context(), task, std::vector<State>{task->initial_state()}, {}, std::span(&*goal, 1)),
+                 std::invalid_argument);
+}
+
+TEST(DeviceNumericRules, StaticFunctionGoalsWithoutFluents)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto d = frontend::Domain::from_string(R"(
+(define (domain constants) (:requirements :strips :numeric-fluents)
+ (:predicates (p)) (:functions (limit))
+ (:action set :parameters () :precondition (and) :effect (and (p))))
+)", "constants.pddl");
+    const auto task = Task::create(*d->instantiate_string(R"(
+(define (problem c) (:domain constants) (:init (= (limit) 3)) (:goal (and (p))))
+)", "c.pddl"));
+    ASSERT_EQ(task->numeric_slots(), 0u);
+    std::vector<search::GoalSpec::AtomGoal> goals;
+    for (const char* text : {"(= (limit) 3)", "(< (limit) 0)"})
+    {
+        GroundCondition condition; condition.add_constraint(*task, text);
+        goals.push_back(*search::atom_goal(*task, condition));
+    }
+    const auto results = cuda::multi_iw(context(), task, std::vector<State>(2, task->initial_state()), {}, goals);
+    for (u32 i = 0; i < goals.size(); ++i)
+    {
+        search::IwOptions cpu; cpu.max_arity = 1;
+        cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf; cpu.control.goal.goals = {goals[i]};
+        EXPECT_EQ(results[i].status, search::iw(*task, cpu).status);
     }
 }

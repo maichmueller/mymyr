@@ -28,7 +28,7 @@ class PlanningEnv(EnvBase):
     ``goal_pos`` / ``goal_neg``. The environments never autoreset themselves.
 
     ``device="cpu"`` runs the host environments (any table, numeric ones included; ``threads`` splits a batch),
-    ``"cuda[:i]"`` the device ones (classical tables), with identical trajectories for the same actions. Random actions
+    ``"cuda[:i]"`` the device ones, including numeric tables, with identical trajectories for the same actions. Random actions
     (:meth:`rand_action`, used by ``rollout`` without a policy) are the environments' counter-based random policy (the
     seed of ``set_seed``, env id, draw counter; rl/rng.hpp) through the custom op ``mymyr::random_actions``: uniform over
     the current successors (the first ``max_actions`` of them), so a rollout without a policy equals

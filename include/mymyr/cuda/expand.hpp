@@ -19,7 +19,7 @@
 //   - Multi: one pass of the multi-instance kernels over the mixed batch (each thread resolves its row's instance;
 //     launches per object-bitset width group, concurrently on the expander's auxiliary streams, and row-width bucket,
 //     set_launch; rows grouped by instance), when every
-//     instance runs completely on the device kernels (no CPU-fallback schema, no conditional effects, no axioms, frozen
+//     instance runs completely on the multi-instance kernels (no numeric fluents, CPU-fallback schema, conditional effects or axioms; frozen
 //     slots: detail::multi_unsupported);
 //   - PerInstance: otherwise each instance's rows are gathered and expanded apart by the single-instance path (below),
 //     and the results are scattered back into batch order (one synchronization per instance in count() and write()).

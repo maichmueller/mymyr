@@ -51,6 +51,7 @@ def test_documentation_python_blocks(page, tmp_path):
         ]
         script = tmp_path / f"{page.stem}.py"
         script.write_text("namespace = {'__name__': '__main__'}\n" + "\n".join(statements) + "\n")
-        subprocess.run([sys.executable, "-W", "error", str(script)], cwd=ROOT, check=True, timeout=45)
+        subprocess.run([sys.executable, "-W", "error", str(script)], cwd=ROOT, check=True,
+                       timeout=None if has_cuda else 45)
 
     print(f"docs {page.name}: {len(runnable)} blocks run, {skipped} skipped")

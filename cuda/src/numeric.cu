@@ -1,4 +1,5 @@
 #include "mymyr/cuda/numeric_kernels.hpp"
+#include "mymyr/cuda/goal_kernels.hpp"
 
 #include "lifted_device.cuh"
 
@@ -498,3 +499,46 @@ cudaError_t launch_convert(TaskView t, const u64* src, u64 ss, u32 sw, u64* dst,
     return cudaGetLastError();
 }
 }  // namespace mymyr::cuda::numeric
+
+namespace mymyr::cuda::goal
+{
+namespace
+{
+__global__ void flags(View goals, lifted::Parents parents, const u32* row_goals, const u32* order,
+                      u64 row_count, u64 n, u8* out)
+{
+    const u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = 0;
+    const u64 row_id = order ? order[i] : i;
+    if (row_id >= row_count) return;
+    const u32 id = row_goals[row_id];
+    if (id >= goals.count) return;
+    const u64* row = parents.data + i * parents.stride;
+    for (u32 w = 0; w < goals.words; ++w)
+    {
+        const u64 value = w < parents.words ? row[w] : 0;
+        const u64 pos = goals.positive[u64{id} * goals.words + w], neg = goals.negative[u64{id} * goals.words + w];
+        if ((value & pos) != pos || (value & neg)) return;
+    }
+    for (u32 w = 0; w < goals.derived_words; ++w)
+    {
+        const u64 value = parents.derived && w < parents.derived_words ? parents.derived[i * parents.derived_words + w] : 0;
+        const u64 pos = goals.derived_positive[u64{id} * goals.derived_words + w],
+                  neg = goals.derived_negative[u64{id} * goals.derived_words + w];
+        if ((value & pos) != pos || (value & neg)) return;
+    }
+    for (u32 check = goals.offsets[id]; check < goals.offsets[id + 1]; ++check)
+        if (!rl::dev::numeric_holds(goals.numeric, check, row + parents.words, nullptr, 0)) return;
+    out[i] = 1;
+}
+}  // namespace
+
+cudaError_t launch_flags(View goals, lifted::Parents parents, const u32* row_goals, const u32* order,
+                          u64 row_count, u64 n, u8* out, cudaStream_t stream)
+{
+    if (n && (!row_goals || !out)) return cudaErrorInvalidValue;
+    if (n) flags<<<static_cast<unsigned>((n + 127) / 128), 128, 0, stream>>>(goals, parents, row_goals, order, row_count, n, out);
+    return cudaGetLastError();
+}
+}  // namespace mymyr::cuda::goal

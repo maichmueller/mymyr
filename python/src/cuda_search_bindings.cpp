@@ -67,7 +67,7 @@ using FloatArg = Arg<double>;
 using StrArg = Arg<std::string>;
 using StateArg = Arg<PyState>;
 using Slots = nb::typed<nb::sequence, int>;
-/// One goal: a GroundCondition of fluent literals, or (positive fluent slots, negative fluent slots)
+/// One goal: a GroundCondition, or (positive fluent slots, negative fluent slots).
 /// (State.atom_slots(), GroundAtom.slot).
 using GoalArg = std::variant<PyGroundCondition, nb::typed<nb::tuple, Slots, Slots>>;
 using GoalsArg = Arg<nb::typed<nb::sequence, GoalArg>>;
@@ -165,9 +165,6 @@ search::GoalSpec::AtomGoal goal_of(nb::handle g, const Task& task)
         if (!a)
             throw nb::value_error("mymyr: the goal can never hold (a positive literal outside the reachable atoms or a "
                                   "false static literal); the CUDA searches take goals that can");
-        if (!a->fluent_only())
-            throw nb::value_error("mymyr: the CUDA searches take goals of fluent literals only (no derived literals, no "
-                                  "numeric constraints); run a CPU search (mymyr.search) for those");
         return *a;
     }
     if (!nb::isinstance<nb::tuple>(g) || nb::len(g) != 2)
@@ -538,8 +535,9 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "search.iw from every start state, all searches at once on the device: search i equals "
         "mymyr.search.iw(task, start=starts[i], ...) (status, plan, goal state, per-pass counts) for every group and "
         "chunk size (exact batch novelty; exact=False is relaxed novelty: valid IW, but the kept states depend on "
-        "timing). goals: None (the task's goal) or one per start, a GroundCondition of fluent literals or (positive slots, negative slots). Budgets apply per "
-        "search and pass as in search.iw; max_seconds spans the call. Numeric tasks raise ValueError. "
+        "timing). goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
+        "numeric constraints, or (positive slots, negative slots). Numeric tasks preserve CPU I32/F64 encodings. "
+        "Budgets apply per search and pass as in search.iw; max_seconds spans the call. "
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
         "instance's task; the searches of an instance run together, the instances one after the other.");
@@ -586,7 +584,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "Randomized IW rollouts on the device, one per seed: rollout k equals the CPU rollout of the same seed "
         "(search/parallel_rollouts.hpp: every next layer shuffled by the rollout's SplitMix64 stream, "
         "max_next_layer_states truncates it): status, plan, per-pass counts and the reached fluent atoms "
-        "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition of fluent literals, or (positive slots, negative slots). Not reported: "
+        "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition with fluent/derived literals and "
+        "numeric constraints, or (positive slots, negative slots). Not reported: "
         "derived atoms, landing states, co-occurrence.");
 
     m.def(

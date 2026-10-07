@@ -18,8 +18,8 @@
 //
 // Differences from search::find_rollouts_parallel (documented, tested in tests/cuda/test_device_iw.cpp):
 //   - reached derived atoms, num_states, landing states and co-occurrence rows are not reported (fluent atoms only);
-//   - custom goals, blocked states, observers and successor-order
-//     hooks are not offered; goals are the task's or one conjunction of fluent atoms per rollout;
+//   - callable goals, blocked states, observers and successor-order hooks are not offered; goals are the task's or
+//     one ground conjunction of fluent/derived literals and numeric constraints per rollout (cuda/multi_iw.hpp);
 //   - max_seconds is checked between chunks, not between pops.
 
 #include "mymyr/cuda/multi_iw.hpp"
