@@ -291,8 +291,8 @@ TEST(Heuristics, AStarWithThePerfectHeuristicExpandsOnePlan)
         const auto r = search::astar_eager(*task, o);
         ASSERT_EQ(r.status, search::SearchStatus::Solved);
         EXPECT_EQ(static_cast<i32>(r.plan.size()), sp->unit_goal_distances()[0]);
-        // the states of the plan but the goal, which is returned when popped without being expanded (mimir counts
-        // its expansion: plan length + 1)
+        // the states of the plan but the goal, which is returned when popped without being expanded (mimir's A*
+        // counts the goal as expanded and does not break ties among equal f by h, so it expands more states)
         EXPECT_EQ(r.stats.expanded, r.plan.size());
     }
 }
