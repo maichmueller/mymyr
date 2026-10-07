@@ -88,8 +88,10 @@ On CPU, search `goal=` accepts `None` (the task's goal), a callable `state -> bo
 sequence whose entries are each a `GroundCondition` or a sequence of ground atoms/literals. Any one goal in that
 sequence counts. A flat sequence of atoms is interpreted as multiple goals, so group conjunctions in a nested sequence
 or make each one a `GroundCondition`. CUDA search also accepts `(positive_slots, negative_slots)` tuples;
-`GroundCondition` goals there must contain fluent literals only, so use CPU search for goals with derived literals or
-numeric constraints.
+CUDA multi-IW, batched IW(1) and rollouts also accept `GroundCondition` goals with derived literals and numeric
+constraints. The goal list of a device batch supplies one conjunction per search; any-of alternatives within one
+search and callable goals require CPU search. Numeric goal programs need at most 64 stack values; unsupported axiom
+plans use the CPU fallback. Device A*/GBFS use the task's goal.
 
 Pickle task-made formulas together with their `Task`, for example `pickle.dumps((task, task.goal_condition))`. Values
 read directly from `task.formalism` do not carry a `Task` owner and cannot be pickled on their own.

@@ -9,7 +9,7 @@ core, with free-threaded Python bindings and an optional CUDA backend.
 
 - Flat POD data with no global repositories: states are values, and containers are local and droppable.
 - Free-threaded CPython (3.14t and 3.15t) is the only Python target.
-- A CUDA backend and RL/JAX/PyTorch interop are core features.
+- A CUDA backend with classical and numeric tasks, and RL/JAX/PyTorch interop are core features.
 
 ## Installing from PyPI
 

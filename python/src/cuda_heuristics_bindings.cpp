@@ -390,8 +390,10 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                                   "A batched grounded heuristic on the device: h_max, h_add or h_FF of many states "
                                   "per launch over the relaxed grounding, uploaded once. h_max and h_add equal "
                                   "mymyr.search.Heuristic's; h_FF breaks ties among equally cheap supporters by BFS level "
-                                  "and operator id (reference() is the CPU implementation of that rule). Numeric tasks "
-                                  "and groundings beyond the budget raise ValueError.")
+                                  "and operator id (reference() is the CPU implementation of that rule). Numeric values "
+                                  "and constraints are ignored in relaxation, as on the CPU. Real costs must be "
+                                  "state-independent, non-negative integers below 2^31; unsupported costs and groundings "
+                                  "beyond the budget raise ValueError.")
         .def_ro_static("DEAD_END", &cuda::DeviceHeuristic::k_dead_end, "The uint32 value of a dead end on the device.")
         .def(
             "__init__",
@@ -504,8 +506,9 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
         "task"_a, nb::kw_only(), "heuristic"_a = "max", MYMYR_DEVICE_SEARCH_ARGS,
         "A* on the device with batched expansion: every step expands up to `batch` open nodes of the lowest bucket "
         "(f, h; single_bucket=False: the whole lowest f layer), the heuristic of the new states in one batch. With "
-        "'max' or 'blind' the plan is optimal (mymyr.search.astar's cost); at batch=1 the search is mymyr.search.astar "
-        "(same statistics and plan). Numeric tasks raise ValueError.");
+        "an admissible heuristic and non-negative additive costs the plan is optimal; at batch=1 it is mymyr.search.astar "
+        "(same statistics and plan). Numeric tasks evaluate fluent costs and state metrics on the device and use a "
+        "host double-priority heap, one parent per step, with CPU eager tie ordering; they do not capture graphs.");
 
     m.def(
         "gbfs",
@@ -518,7 +521,8 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
         "task"_a, nb::kw_only(), "heuristic"_a = "ff", MYMYR_DEVICE_SEARCH_ARGS,
         "Greedy best-first search on the device with batched expansion: every step expands the `batch` open nodes "
         "of the smallest (h, g); at batch=1 with 'max' or 'add' it is mymyr.search.gbfs. A batch expands many "
-        "more states than the sequential search would, so mymyr.search.gbfs stays the default.");
+        "more states than the sequential search would. Numeric tasks use one parent per step with a host double-priority "
+        "heap and device fluent/conditional cost and state-metric programs.");
 #undef MYMYR_DEVICE_SEARCH_ARGS
 }
 }  // namespace mymyr::python

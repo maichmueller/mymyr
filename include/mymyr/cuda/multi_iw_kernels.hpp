@@ -242,7 +242,7 @@ struct Chunk
     u32* live_scan = nullptr;       // [rows + 1] exclusive scan of the live flags; null when a search's rows
                                     // are all live from its first live row to its last (no dead entries: dense)
     u32* gen_scan = nullptr;        // [rows + 1] exclusive scan of the generate flags
-    const u8* host_goal = nullptr;  // [rows] goal flags of goals with derived literals (CPU, or ChunkGenerator::goal_flags), or null
+    const u8* host_goal = nullptr;  // [rows] derived/numeric goal flags (CPU, or ChunkGenerator::goal_flags), or null
     const u32* abort = nullptr;     // nonzero: the chunk is redone (the committing kernels do nothing)
     u32* ctl = nullptr;             // the control block (search_update writes the kept counts)
 };

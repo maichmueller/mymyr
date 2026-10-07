@@ -24,7 +24,7 @@
 // key) gives the new states ids by a scan in candidate order, so each instance's states are numbered in its own BrFS
 // order within the shared (interleaved) numbering, whatever the chunk size, the wave or the stream. After the wave a
 // stable partition by instance gives every instance its local ids, equal to a run of its own.
-//   - A single task, and tables that the multi-instance kernels cannot run (conditional effects, axioms, lazy slots,
+//   - A single task, and tables that the multi-instance kernels cannot run (numeric fluents, conditional effects, axioms, lazy slots,
 //     CPU-fallback schemas: rl's multi_unsupported), use cuda::ChunkGenerator per instance (conditional effects and
 //     axioms on the device, lazy interning in canonical-id order with widening, the CPU fallback), one instance after
 //     the other;

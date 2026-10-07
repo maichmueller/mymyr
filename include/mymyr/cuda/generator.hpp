@@ -32,6 +32,7 @@
 
 #include "mymyr/cuda/device_task.hpp"
 #include "mymyr/cuda/lifted.hpp"
+#include "mymyr/cuda/goal_kernels.hpp"
 #include "mymyr/cuda/numeric.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/task/task.hpp"
@@ -225,6 +226,10 @@ public:
     /// literals evaluate the axioms of the rows on the device (views and axioms in chunks, in scratch of their own: the
     /// chunk's views stay). Needs device_axioms() or a goal without derived literals.
     void goal_flags(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out);
+    /// Per-search conjunctions, selected by row_goals[order[i]] (row_goals[i] without order). Numeric programs read
+    /// internal double tails; derived masks use the same axiom closure as task goals. Absent rows receive flag zero.
+    void goal_flags(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out,
+                    goal::View goals, const u32* row_goals);
 
     /// Records the device time of the axiom kernels (events per chunk; GeneratorStats::device_axiom_ms).
     void set_timing(bool on) noexcept { m_timing = on; }
@@ -251,6 +256,8 @@ public:
 
 private:
     void upload();
+    void goal_flags_impl(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out,
+                         const goal::View* goals, const u32* row_goals);
     /// The schema lists, sorts() and the axioms' matcher kinds from the current export.
     void build_lists();
     void host_work(const ChunkInput& in, bool witness, bool canonical);

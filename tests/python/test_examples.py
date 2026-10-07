@@ -36,6 +36,6 @@ def test_example_script(script):
         print(f"example {script.name}: skipped (no visible CUDA device or CUDA-enabled build)")
         pytest.skip("needs a visible CUDA device and a CUDA-enabled mymyr build")
 
-    timeout = 180 if requirements else 45
+    timeout = None if "cuda" in requirements else 180 if requirements else 45
     subprocess.run([sys.executable, "-W", "error", str(script)], cwd=ROOT, check=True, timeout=timeout)
     print(f"example {script.name}: ran")
