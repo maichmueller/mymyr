@@ -10,6 +10,7 @@ find_package(nanobind 3.1 CONFIG REQUIRED)
 nanobind_add_module(_core FREE_THREADED NB_STATIC
     src/module.cpp
     src/formalism_bindings.cpp
+    src/formula_bindings.cpp
     src/ext_api.cpp
     src/arrays.cpp
     src/task_bindings.cpp

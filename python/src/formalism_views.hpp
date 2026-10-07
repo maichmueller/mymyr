@@ -19,4 +19,16 @@ struct FormalismView
 struct ObjectView : FormalismView
 {
 };
+/// mymyr.formalism.Type
+struct TypeView : FormalismView
+{
+};
+/// mymyr.formalism.Predicate
+struct PredicateView : FormalismView
+{
+};
+/// mymyr.formalism.Function
+struct FunctionView : FormalismView
+{
+};
 }  // namespace mymyr::python

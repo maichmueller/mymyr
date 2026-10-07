@@ -10,6 +10,7 @@
 #include "formalism_task.hpp"
 #include "formalism_views.hpp"
 #include "py_domain.hpp"
+#include "py_formula.hpp"
 #include "py_task.hpp"
 
 #include "mymyr/core/bitset.hpp"
@@ -416,26 +417,156 @@ std::string action_str(const PyAction& a)
     return s + ")";
 }
 
-std::string atom_str(const formalism::TaskData& D, u32 pred, const std::vector<u32>& args)
+/// The object of a name, an index or an Object; a lowercase name.
+std::string lower(std::string s)
 {
-    std::string s = "(" + name_of(D, D.predicates[pred].name);
-    for (u32 o : args)
-        s += " " + name_of(D, D.objects[o].name);
-    return s + ")";
+    for (char& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
 }
 
-Arg<PyAtom> make_atom(const Owner& o, u32 pred, std::vector<u32> args, i64 slot)
+u32 predicate_index(PyTaskCore& core, nb::handle h)
 {
-    return nb::cast(PyAtom{pred, std::move(args), slot, o.obj, o.core}, nb::rv_policy::move);
-}
-
-/// (pred, args) of an Atom, "(on a b)", ("on", "a", "b"), ("on", ["a", "b"]), or a fluent slot (int).
-std::pair<u32, std::vector<u32>> atom_key(PyTaskCore& core, nb::handle x)
-{
-    if (nb::isinstance<PyAtom>(x))
+    if (nb::isinstance<PredicateView>(h))
     {
-        const PyAtom& a = *nb::inst_ptr<PyAtom>(x);
-        return {a.pred, a.args};
+        const PredicateView& v = *nb::inst_ptr<PredicateView>(h);
+        if (v.t.get() == core.data.get())
+            return v.i;
+        return predicate_index(core, nb::str(v.d().str(v.d().predicates[v.i].name).data(), v.d().str(v.d().predicates[v.i].name).size()));
+    }
+    if (nb::isinstance<nb::int_>(h))
+    {
+        const i64 v = nb::cast<i64>(h);
+        if (v < 0 || v >= static_cast<i64>(core.data->predicates.size()))
+            throw nb::index_error("mymyr: predicate index out of range");
+        return static_cast<u32>(v);
+    }
+    if (!nb::isinstance<nb::str>(h))
+        throw nb::type_error("mymyr: a predicate is a name, an index or a mymyr.formalism.Predicate");
+    const std::string name = lower(nb::cast<std::string>(h));
+    const auto it = core.names().predicates.find(name);
+    if (it == core.names().predicates.end())
+        throw nb::key_error(("mymyr: no predicate named '" + name + "'").c_str());
+    return it->second;
+}
+
+/// A term as the formula constructors take it: an object, or a variable by name (with the types of a Variable).
+struct TermSpec
+{
+    bool variable = false;
+    u32 object = 0;
+    std::string name;  // variable: without '?'
+    std::vector<TypeId> types;
+};
+
+/// An atom or literal as the formula constructors take it.
+struct LiteralSpec
+{
+    u32 pred = 0;
+    bool positive = true;
+    std::vector<TermSpec> terms;
+    [[nodiscard]] bool ground() const
+    {
+        return std::ranges::none_of(terms, [](const TermSpec& t) { return t.variable; });
+    }
+};
+
+u32 object_value(PyTaskCore& core, nb::handle h);
+
+TermSpec term_spec(PyTaskCore& core, nb::handle h)
+{
+    if (nb::isinstance<PyVariable>(h))
+    {
+        const PyVariable& v = *nb::inst_ptr<PyVariable>(h);
+        return {true, 0, v.name, v.types};
+    }
+    if (nb::isinstance<nb::str>(h))
+    {
+        const std::string t = nb::cast<std::string>(h);
+        if (!t.empty() && t[0] == '?')
+        {
+            if (t.size() == 1)
+                throw nb::value_error("mymyr: a variable needs a name ('?x')");
+            return {true, 0, lower(t.substr(1)), {}};
+        }
+    }
+    return {false, object_value(core, h), {}, {}};
+}
+
+void check_arity(PyTaskCore& core, const LiteralSpec& l)
+{
+    const auto& p = core.data->predicates[l.pred];
+    if (l.terms.size() != p.arity)
+        throw nb::value_error(("mymyr: predicate '" + name_of(*core.data, p.name) + "' takes " + std::to_string(p.arity) +
+                               " arguments, got " + std::to_string(l.terms.size()))
+                                  .c_str());
+}
+
+void check_data(PyTaskCore& core, const FormulaOwner& o, const char* what)
+{
+    if (o.data.get() != core.data.get())
+        throw nb::value_error((std::string("mymyr: the ") + what + " belongs to another task").c_str());
+}
+
+LiteralSpec lifted_spec(const PyLiftedAtom& a, bool positive)
+{
+    LiteralSpec l{a.predicate.v, positive, {}};
+    for (formalism::Term x : a.terms)
+    {
+        if (formalism::is_object(x))
+            l.terms.push_back({false, formalism::term_object(x).v, {}, {}});
+        else
+        {
+            const u32 v = formalism::term_parameter(x);
+            TermSpec t{true, 0, "x" + std::to_string(v), {}};
+            if (a.vars && v < a.vars->size())
+            {
+                if (!(*a.vars)[v].name.empty())
+                    t.name = (*a.vars)[v].name;
+                t.types = (*a.vars)[v].types;
+            }
+            l.terms.push_back(std::move(t));
+        }
+    }
+    return l;
+}
+
+LiteralSpec ground_spec(const GroundAtom& a, bool positive)
+{
+    LiteralSpec l{a.predicate.v, positive, {}};
+    for (ObjectId o : a.objects)
+        l.terms.push_back({false, o.v, {}, {}});
+    return l;
+}
+
+/// An atom or literal: a GroundAtom, GroundLiteral, Atom or Literal; '(on a ?x)' or '(not (on a ?x))'; a fluent slot;
+/// or a tuple ('on', 'a', '?x') / ('on', ['a', '?x']). Terms are object names, '?name' variables, Objects or Variables.
+LiteralSpec literal_spec(PyTaskCore& core, nb::handle x)
+{
+    LiteralSpec l;
+    if (nb::isinstance<PyGroundAtom>(x))
+    {
+        const PyGroundAtom& a = *nb::inst_ptr<PyGroundAtom>(x);
+        check_data(core, a.o, "atom");
+        return ground_spec(a.a, true);
+    }
+    if (nb::isinstance<PyGroundLiteral>(x))
+    {
+        const PyGroundLiteral& a = *nb::inst_ptr<PyGroundLiteral>(x);
+        check_data(core, a.o, "literal");
+        return ground_spec(a.l.atom, a.l.positive);
+    }
+    if (nb::isinstance<PyLiftedAtom>(x))
+    {
+        const PyLiftedAtom& a = *nb::inst_ptr<PyLiftedAtom>(x);
+        check_data(core, a.o, "atom");
+        return lifted_spec(a, true);
+    }
+    if (nb::isinstance<PyLiteral>(x))
+    {
+        const PyLiteral& a = *nb::inst_ptr<PyLiteral>(x);
+        check_data(core, a.atom.o, "literal");
+        return lifted_spec(a.atom, a.positive);
     }
     if (nb::isinstance<nb::int_>(x))
     {
@@ -443,83 +574,291 @@ std::pair<u32, std::vector<u32>> atom_key(PyTaskCore& core, nb::handle x)
         if (s < 0 || s >= core.task->atoms().fluent_slots())
             throw nb::index_error("mymyr: atom slot out of range");
         const auto args = core.task->atoms().arguments(SlotId{static_cast<u32>(s)});
-        return {core.task->atoms().predicate(SlotId{static_cast<u32>(s)}).v, std::vector<u32>(args.begin(), args.end())};
+        l.pred = core.task->atoms().predicate(SlotId{static_cast<u32>(s)}).v;
+        for (u32 o : args)
+            l.terms.push_back({false, o, {}, {}});
+        return l;
     }
-    std::vector<std::string> t;
-    std::vector<nb::handle> objs;
-    std::pair<u32, std::vector<u32>> out;
-    std::string pred;
     if (nb::isinstance<nb::str>(x))
     {
-        t = tokens(nb::cast<std::string_view>(x));
-        if (t.empty())
+        std::vector<std::string> t = tokens(nb::cast<std::string_view>(x));
+        usize at = 0;
+        if (!t.empty() && t[0] == "not")
+        {
+            l.positive = false;
+            at = 1;
+        }
+        if (at >= t.size())
             throw nb::value_error("mymyr: empty atom string");
-        pred = t[0];
-        for (usize i = 1; i < t.size(); ++i)
-            out.second.push_back(object_index(core, nb::str(t[i].c_str())));
+        l.pred = predicate_index(core, nb::str(t[at].c_str()));
+        for (usize i = at + 1; i < t.size(); ++i)
+            l.terms.push_back(term_spec(core, nb::str(t[i].c_str())));
     }
     else
     {
+        if (!nb::isinstance<nb::sequence>(x))
+            throw nb::type_error("mymyr: expected an atom or literal: a GroundAtom, GroundLiteral, Atom or Literal, "
+                                 "'(on a b)', '(not (on a b))', ('on', 'a', 'b') or a fluent slot");
         nb::sequence seq = nb::borrow<nb::sequence>(x);
         const usize n = nb::len(seq);
         if (n == 0)
             throw nb::value_error("mymyr: empty atom");
-        pred = nb::cast<std::string>(nb::str(seq[0]));
-        if (n == 2 && !nb::isinstance<nb::str>(seq[1]) && !nb::isinstance<nb::int_>(seq[1]))
+        l.pred = predicate_index(core, seq[0]);
+        if (n == 2 && !nb::isinstance<nb::str>(seq[1]) && !nb::isinstance<nb::int_>(seq[1]) && !nb::isinstance<ObjectView>(seq[1]) &&
+            !nb::isinstance<PyVariable>(seq[1]))
             for (nb::handle o : nb::borrow<nb::iterable>(seq[1]))
-                out.second.push_back(object_index(core, o));
+                l.terms.push_back(term_spec(core, o));
         else
             for (usize i = 1; i < n; ++i)
-                out.second.push_back(object_index(core, seq[i]));
+                l.terms.push_back(term_spec(core, seq[i]));
     }
-    auto it = core.names().predicates.find(pred);
-    if (it == core.names().predicates.end())
-        throw nb::key_error(("mymyr: no predicate named '" + pred + "'").c_str());
-    out.first = it->second;
-    if (out.second.size() != core.data->predicates[out.first].arity)
-        throw nb::value_error(("mymyr: predicate '" + pred + "' takes " + std::to_string(core.data->predicates[out.first].arity) +
-                               " objects")
-                                  .c_str());
+    check_arity(core, l);
+    return l;
+}
+
+GroundAtom ground_atom(const LiteralSpec& l)
+{
+    GroundAtom a{PredicateId{l.pred}, {}};
+    for (const TermSpec& t : l.terms)
+        a.objects.push_back(ObjectId{t.object});
+    return a;
+}
+
+/// A ground atom given as anything Task.atom takes (a lifted one raises ValueError).
+GroundAtom atom_key(PyTaskCore& core, nb::handle x)
+{
+    const LiteralSpec l = literal_spec(core, x);
+    if (!l.positive)
+        throw nb::value_error("mymyr: expected an atom, got a negative literal");
+    if (!l.ground())
+        throw nb::value_error("mymyr: expected a ground atom, got one with variables");
+    return ground_atom(l);
+}
+
+/// A lifted atom or literal over its own variables (numbered by first appearance), or a ground one.
+nb::object make_formula(const FormulaOwner& o, const LiteralSpec& l, bool literal)
+{
+    if (l.ground())
+    {
+        if (literal)
+            return make_ground_literal(o, GroundLiteral{ground_atom(l), l.positive});
+        return make_ground_atom(o, ground_atom(l));
+    }
+    auto vars = std::make_shared<Variables>();
+    std::vector<formalism::Term> terms;
+    for (const TermSpec& t : l.terms)
+    {
+        if (!t.variable)
+        {
+            terms.push_back(formalism::object_term(ObjectId{t.object}));
+            continue;
+        }
+        u32 v = 0;
+        while (v < vars->size() && (*vars)[v].name != t.name)
+            ++v;
+        if (v == vars->size())
+            vars->push_back({t.name, t.types});
+        terms.push_back(static_cast<formalism::Term>(v));
+    }
+    if (literal)
+        return make_literal(o, PredicateId{l.pred}, l.positive, std::move(terms), std::move(vars));
+    return make_lifted_atom(o, PredicateId{l.pred}, std::move(terms), std::move(vars));
+}
+
+/// A predicate with its terms (atom(predicate, *terms)), or one atom or literal argument.
+LiteralSpec formula_args(PyTaskCore& core, nb::handle first, nb::args rest)
+{
+    const bool predicate_alone = nb::isinstance<PredicateView>(first);
+    if (rest.size() == 0 && !predicate_alone)
+        return literal_spec(core, first);
+    LiteralSpec l{predicate_index(core, first), true, {}};
+    for (nb::handle t : rest)
+        l.terms.push_back(term_spec(core, t));
+    check_arity(core, l);
+    return l;
+}
+
+TypeId type_index(PyTaskCore& core, nb::handle h)
+{
+    const formalism::TaskData& D = *core.data;
+    if (nb::isinstance<TypeView>(h))
+    {
+        const TypeView& v = *nb::inst_ptr<TypeView>(h);
+        if (v.t.get() == core.data.get())
+            return TypeId{v.i};
+        return type_index(core, nb::str(v.d().str(v.d().types[v.i].name).data(), v.d().str(v.d().types[v.i].name).size()));
+    }
+    if (nb::isinstance<nb::int_>(h))
+    {
+        const i64 v = nb::cast<i64>(h);
+        if (v < 0 || v >= static_cast<i64>(D.types.size()))
+            throw nb::index_error("mymyr: type index out of range");
+        return TypeId{static_cast<u32>(v)};
+    }
+    const std::string name = lower(nb::cast<std::string>(nb::str(h)));
+    for (u32 i = 0; i < D.types.size(); ++i)
+        if (D.str(D.types[i].name) == name)
+            return TypeId{i};
+    throw nb::key_error(("mymyr: no type named '" + name + "'").c_str());
+}
+
+/// The variables of Task.condition: '?x', a Variable, or (name, type) / (name, [types]).
+Variables parameters_arg(PyTaskCore& core, nb::handle parameters)
+{
+    Variables out;
+    for (nb::handle p : nb::borrow<nb::iterable>(parameters))
+    {
+        ConjunctiveCondition::Variable v;
+        if (nb::isinstance<PyVariable>(p))
+        {
+            const PyVariable& x = *nb::inst_ptr<PyVariable>(p);
+            v = {x.name, x.types};
+        }
+        else if (nb::isinstance<nb::str>(p))
+            v.name = lower(nb::cast<std::string>(p));
+        else if (nb::isinstance<nb::sequence>(p) && nb::len(p) == 2)
+        {
+            v.name = lower(nb::cast<std::string>(nb::str(p[0])));
+            nb::object ts = p[1];
+            if (nb::isinstance<nb::str>(ts) || nb::isinstance<nb::int_>(ts) || nb::isinstance<TypeView>(ts))
+                v.types.push_back(type_index(core, ts));
+            else
+                for (nb::handle t : nb::borrow<nb::iterable>(ts))
+                    v.types.push_back(type_index(core, t));
+        }
+        else
+            throw nb::type_error("mymyr: a parameter is '?x', a Variable, or (name, type) / (name, [types])");
+        if (!v.name.empty() && v.name[0] == '?')
+            v.name.erase(0, 1);
+        if (v.name.empty())
+            throw nb::value_error("mymyr: a parameter needs a name");
+        for (const auto& w : out)
+            if (w.name == v.name)
+                throw nb::value_error(("mymyr: the parameter '?" + v.name + "' appears twice").c_str());
+        out.push_back(std::move(v));
+    }
     return out;
 }
 
-/// Truth of pred(args) in a state: fluent atoms from the words, static ones from the static relation, derived ones by
-/// evaluating the axioms.
-bool holds(PyTaskCore& core, StateView s, u32 pred, const std::vector<u32>& args)
+formalism::Term condition_term(const Variables& vars, const TermSpec& t)
 {
-    const Task& T = *core.task;
-    const plan::Compiled& C = T.compiled();
-    switch (C.kinds[pred])
+    if (!t.variable)
+        return formalism::object_term(ObjectId{t.object});
+    for (u32 v = 0; v < vars.size(); ++v)
+        if (vars[v].name == t.name)
+            return static_cast<formalism::Term>(v);
+    throw nb::value_error(("mymyr: the variable '?" + t.name + "' is not a parameter of the condition").c_str());
+}
+
+/// A constraint as PDDL text: a string, or a NumericConstraint (its text).
+std::string constraint_arg(nb::handle k)
+{
+    if (nb::isinstance<nb::str>(k) || nb::isinstance<PyNumericConstraint>(k))
+        return nb::cast<std::string>(nb::str(k));
+    throw nb::type_error("mymyr: a numeric constraint is PDDL text, e.g. '(>= (fuel ?x) 1)', or a NumericConstraint");
+}
+
+/// Converts the library's invalid_argument into ValueError with its message.
+template<class F>
+auto checked(F&& f)
+{
+    try
     {
-        case formalism::PredKind::Fluent:
-        {
-            std::vector<ObjectId> a(args.size());
-            for (usize i = 0; i < args.size(); ++i)
-                a[i] = ObjectId{args[i]};
-            const SlotId slot = T.find_atom(PredicateId{pred}, a);
-            return slot.valid() && s.contains(slot);
-        }
-        case formalism::PredKind::Static:
-        {
-            const plan::StaticRelation& R = C.statics[pred];
-            u64 key = 0;
-            for (u32 i = 0; i < args.size(); ++i)
-                key += R.position_table(i, C.num_objects)[args[i]];
-            return R.contains(key);
-        }
-        case formalism::PredKind::Derived:
-        {
-            const u64 cid = C.layout.encode(pred, args.data());
-            const u32 slot = T.atoms().find(cid);
-            if (slot == AtomIndex::k_empty)
-                return false;
-            Successors& succ = T.workspace().successors();
-            succ.prepare(s);
-            const detail::Engine& e = succ.engine();
-            return bits::test(e.derived(), e.derived_words(), slot);
-        }
+        return f();
     }
-    return false;
+    catch (const std::invalid_argument& e)
+    {
+        throw nb::value_error(e.what());
+    }
+}
+
+ConjunctiveCondition make_condition_value(PyTaskCore& core, nb::handle parameters, nb::handle literals, nb::handle equalities,
+                                          nb::handle constraints)
+{
+    ConjunctiveCondition c;
+    c.variables = parameters_arg(core, parameters);
+    for (nb::handle x : nb::borrow<nb::iterable>(literals))
+    {
+        const LiteralSpec l = literal_spec(core, x);
+        ConjunctiveCondition::Literal lit{PredicateId{l.pred}, l.positive, {}};
+        for (const TermSpec& t : l.terms)
+            lit.terms.push_back(condition_term(c.variables, t));
+        c.literals.push_back(std::move(lit));
+    }
+    for (nb::handle e : nb::borrow<nb::iterable>(equalities))
+    {
+        ConjunctiveCondition::Equality q;
+        if (nb::isinstance<nb::str>(e))
+        {
+            std::vector<std::string> t = tokens(nb::cast<std::string_view>(e));
+            usize at = 0;
+            if (!t.empty() && t[0] == "not")
+            {
+                q.positive = false;
+                at = 1;
+            }
+            if (t.size() != at + 3 || (t[at] != "=" && t[at] != "!="))
+                throw nb::value_error("mymyr: an equality is '(= t1 t2)', '(!= t1 t2)' or '(not (= t1 t2))'");
+            if (t[at] == "!=")
+                q.positive = !q.positive;
+            q.lhs = condition_term(c.variables, term_spec(core, nb::str(t[at + 1].c_str())));
+            q.rhs = condition_term(c.variables, term_spec(core, nb::str(t[at + 2].c_str())));
+        }
+        else
+        {
+            const usize n = nb::len(e);
+            if (n != 2 && n != 3)
+                throw nb::type_error("mymyr: an equality is (lhs, rhs), (lhs, rhs, positive) or '(= t1 t2)'");
+            q.lhs = condition_term(c.variables, term_spec(core, e[0]));
+            q.rhs = condition_term(c.variables, term_spec(core, e[1]));
+            if (n == 3)
+                q.positive = nb::cast<bool>(e[2]);
+        }
+        c.equalities.push_back(q);
+    }
+    checked([&] {
+        for (nb::handle k : nb::borrow<nb::iterable>(constraints))
+            c.add_constraint(*core.task, constraint_arg(k));
+        c.validate(*core.task);
+        return 0;
+    });
+    return c;
+}
+
+GroundCondition make_ground_condition_value(PyTaskCore& core, nb::handle literals, nb::handle constraints)
+{
+    GroundCondition g;
+    for (nb::handle x : nb::borrow<nb::iterable>(literals))
+    {
+        const LiteralSpec l = literal_spec(core, x);
+        if (!l.ground())
+            throw nb::value_error("mymyr: a ground condition takes ground literals (this one has variables)");
+        g.literals.push_back({ground_atom(l), l.positive});
+    }
+    checked([&] {
+        for (nb::handle k : nb::borrow<nb::iterable>(constraints))
+            g.add_constraint(*core.task, constraint_arg(k));
+        g.validate(*core.task);
+        return 0;
+    });
+    return g;
+}
+
+/// A ground condition as a condition without variables (a binding target).
+ConjunctiveCondition as_condition(const GroundCondition& g)
+{
+    ConjunctiveCondition c;
+    for (const GroundLiteral& l : g.literals)
+    {
+        ConjunctiveCondition::Literal x{l.atom.predicate, l.positive, {}};
+        for (ObjectId o : l.atom.objects)
+            x.terms.push_back(formalism::object_term(o));
+        c.literals.push_back(std::move(x));
+    }
+    c.constraints = g.constraints;
+    c.exprs = g.exprs;
+    c.expr_terms = g.expr_terms;
+    return c;
 }
 
 // ------------------------------------------------------------------------------------------------ per-state API
@@ -527,7 +866,7 @@ bool holds(PyTaskCore& core, StateView s, u32 pred, const std::vector<u32>& args
 using ActionList = nb::typed<nb::list, PyAction>;
 using StateList = nb::typed<nb::list, PyState>;
 using SuccessorList = nb::typed<nb::list, nb::typed<nb::tuple, PyAction, PyState>>;
-using AtomList = nb::typed<nb::list, PyAtom>;
+using AtomList = nb::typed<nb::list, PyGroundAtom>;
 /// A schema: a name or an index, or the whole action as action() takes it without objects.
 using SchemaLike = Arg<std::variant<PyAction, std::string, int, nb::typed<nb::tuple, ObjectKey, ObjectKeys>>>;
 using ObjectsArg = Arg<ObjectKeys>;
@@ -677,7 +1016,10 @@ AtomList derived_atoms(const Owner& o, StateView s)
     for (u32 slot : slots)
     {
         const u32* r = t.atoms().record(AtomKind::Derived, slot);
-        out.append(make_atom(o, r[0], std::vector<u32>(r + 1, r + 1 + L.arity[r[0]]), -1));
+        GroundAtom a{PredicateId{r[0]}, {}};
+        for (u32 k = 0; k < L.arity[r[0]]; ++k)
+            a.objects.push_back(ObjectId{r[1 + k]});
+        out.append(make_ground_atom(task_owner(o), std::move(a)));
     }
     return out;
 }
@@ -738,32 +1080,15 @@ Arg<PyState> apply(const Owner& o, StateView s, nb::handle action)
 
 i64 py_hash(u64 h);
 
-/// A lifted conjunctive condition of a task (successor/bindings.hpp): a schema's precondition or the goal.
-struct PyCondition
-{
-    std::shared_ptr<const ConjunctiveCondition> c;
-    nb::object owner;  // a Task or TaskHandle object: keeps `core` alive
-    PyTaskCore* core = nullptr;
-};
-
-/// A ground literal of a binding (Task.ground_conjunctions).
-struct PyGroundLiteral
-{
-    u32 pred = 0;
-    bool positive = true;
-    std::vector<u32> args;
-    nb::object owner;
-    PyTaskCore* core = nullptr;
-};
-
 /// A schema name or index.
 using SchemaArg = Arg<std::variant<std::string, int>>;
-/// What Task.bindings enumerates: a schema (name or index) or a ConjunctiveCondition.
-using TargetArg = Arg<std::variant<std::string, int, PyCondition>>;
+/// What Task.bindings enumerates: a schema (name or index), a ConjunctiveCondition, or a GroundCondition (as a
+/// condition without variables).
+using TargetArg = Arg<std::variant<std::string, int, PyConjunctiveCondition, PyGroundCondition>>;
 /// An object: a mymyr.formalism.Object, a name, or an index.
 using ObjectLike = std::variant<ObjectView, std::string, int>;
 /// A partial binding: {variable index or name: object}, or one entry per variable with None for the free ones.
-using PartialArg = Arg<std::variant<nb::typed<nb::dict, std::variant<int, std::string>, std::optional<ObjectLike>>,
+using PartialArg = Arg<std::variant<nb::typed<nb::dict, std::variant<int, std::string, PyVariable>, std::optional<ObjectLike>>,
                                      nb::typed<nb::sequence, std::optional<ObjectLike>>>>;
 /// A limit (None: no limit).
 using LimitArg = Arg<int>;
@@ -799,12 +1124,17 @@ struct Target
 
 Target target_arg(PyTaskCore& core, nb::handle h)
 {
-    if (nb::isinstance<PyCondition>(h))
+    if (nb::isinstance<PyConjunctiveCondition>(h))
     {
-        const PyCondition& c = *nb::inst_ptr<PyCondition>(h);
-        if (c.core->task->uid() != core.task->uid())
-            throw nb::value_error("mymyr: the condition belongs to another task");
+        const PyConjunctiveCondition& c = *nb::inst_ptr<PyConjunctiveCondition>(h);
+        check_data(core, c.o, "condition");
         return {0, c.c, c.c->arity()};
+    }
+    if (nb::isinstance<PyGroundCondition>(h))
+    {
+        const PyGroundCondition& c = *nb::inst_ptr<PyGroundCondition>(h);
+        check_data(core, c.o, "condition");
+        return {0, std::make_shared<const ConjunctiveCondition>(as_condition(*c.c)), 0};
     }
     const u32 s = schema_index(core, h);
     return {s, nullptr, core.data->schemas[s].arity()};
@@ -857,11 +1187,11 @@ std::vector<std::optional<ObjectId>> partial_arg(PyTaskCore& core, const Target&
                                               .c_str());
                 var = static_cast<u32>(i);
             }
-            else if (nb::isinstance<nb::str>(k))
+            else if (nb::isinstance<nb::str>(k) || nb::isinstance<PyVariable>(k))
             {
                 if (names.empty())
                     names = variable_names(core, t);
-                std::string n = nb::cast<std::string>(k);
+                std::string n = nb::isinstance<PyVariable>(k) ? nb::inst_ptr<PyVariable>(k)->name : nb::cast<std::string>(k);
                 if (!n.empty() && n[0] == '?')
                     n.erase(0, 1);
                 u32 found = 0, hits = 0;
@@ -875,7 +1205,7 @@ std::vector<std::optional<ObjectId>> partial_arg(PyTaskCore& core, const Target&
                 var = found;
             }
             else
-                throw nb::type_error("mymyr: partial: the keys are variable indices or names");
+                throw nb::type_error("mymyr: partial: the keys are variable indices, names or Variables");
             if (!v.is_none())
                 out[var] = ObjectId{object_value(core, v)};
         }
@@ -1017,15 +1347,14 @@ GroundLiteralList ground_literals(PyBindingsIter& it, const u32*& p)
     const u32 n = *p++;
     for (u32 j = 0; j < n; ++j)
     {
-        PyGroundLiteral l;
-        l.pred = *p++;
+        GroundLiteral l;
+        l.atom.predicate = PredicateId{*p++};
         l.positive = *p++ != 0;
-        const u32 ar = D.predicates[l.pred].arity;
-        l.args.assign(p, p + ar);
+        const u32 ar = D.predicates[l.atom.predicate.v].arity;
+        for (u32 k = 0; k < ar; ++k)
+            l.atom.objects.push_back(ObjectId{p[k]});
         p += ar;
-        l.owner = it.o.obj;
-        l.core = it.o.core;
-        out.append(nb::cast(std::move(l), nb::rv_policy::move));
+        out.append(make_ground_literal(task_owner(it.o), std::move(l)));
     }
     return out;
 }
@@ -1084,15 +1413,36 @@ ActionList schema_actions(const Owner& o, StateView s, u32 schema, const std::ve
     return out;
 }
 
-Arg<PyCondition> make_condition(const Owner& o, ConjunctiveCondition&& c)
+Arg<PyConjunctiveCondition> make_condition(const Owner& o, ConjunctiveCondition&& c)
 {
-    return nb::cast(PyCondition{std::make_shared<const ConjunctiveCondition>(std::move(c)), o.obj, o.core}, nb::rv_policy::move);
+    return Arg<PyConjunctiveCondition>(make_conjunctive_condition(task_owner(o), std::move(c)));
 }
 
-std::string ground_literal_str(const PyGroundLiteral& l)
+/// What State.holds takes: a ground atom (as Task.atom takes it), a GroundLiteral or a GroundCondition.
+using HoldsArg = Arg<std::variant<PyGroundAtom, PyGroundLiteral, PyGroundCondition, std::string, int, AtomTuple>>;
+/// A term: an Object, an object name or index, a variable '?x', or a Variable.
+using TermArg = std::variant<ObjectView, PyVariable, std::string, int>;
+/// A parameter of Task.condition: '?x', a Variable, or (name, type) / (name, [types]).
+using ParameterArg = std::variant<std::string, PyVariable, nb::typed<nb::tuple, std::string, std::variant<std::string, TypeView>>,
+                                  nb::typed<nb::tuple, std::string, nb::typed<nb::sequence, std::variant<std::string, TypeView>>>>;
+/// A literal of Task.condition: a literal or atom (lifted or ground), or its PDDL text.
+using LiteralArg = std::variant<PyLiteral, PyGroundLiteral, PyLiftedAtom, PyGroundAtom, std::string, AtomTuple>;
+using EqualityArg = std::variant<std::string, nb::typed<nb::tuple, TermArg, TermArg>, nb::typed<nb::tuple, TermArg, TermArg, bool>>;
+using ConstraintArg = std::variant<std::string, PyNumericConstraint>;
+
+bool holds_arg(const PyState& s, nb::handle x)
 {
-    const std::string a = atom_str(*l.core->data, l.pred, l.args);
-    return l.positive ? a : "(not " + a + ")";
+    if (nb::isinstance<PyGroundCondition>(x))
+        return nb::cast<bool>(x.attr("holds")(nb::cast(s)));
+    if (nb::isinstance<PyGroundLiteral>(x))
+        return nb::cast<bool>(x.attr("holds")(nb::cast(s)));
+    if (nb::isinstance<PyConjunctiveCondition>(x) || nb::isinstance<PyLiteral>(x) || nb::isinstance<PyLiftedAtom>(x))
+        throw nb::type_error("mymyr: holds takes ground atoms, literals and conditions; ground a lifted condition first "
+                             "(ConjunctiveCondition.ground(state))");
+    const LiteralSpec l = literal_spec(*s.core, x);
+    if (!l.ground())
+        throw nb::type_error("mymyr: holds takes ground atoms, literals and conditions (this one has variables)");
+    return mymyr::holds(*s.core->task, s.s.view(), GroundLiteral{ground_atom(l), l.positive});
 }
 
 /// Methods shared by Task and TaskHandle (the owner of what they return is `self`).
@@ -1128,12 +1478,13 @@ void bind_task_api(nb::class_<C>& cls)
                 return Arg<PyBindingsIter>(make_bindings_iter<PyBindingsIter>(owner(self), s.view, target, partial, limit, false));
             },
             "target"_a, "state"_a, "partial"_a = nb::none(), "limit"_a = nb::none(),
-            "The bindings of a schema or a ConjunctiveCondition in a state, as a lazy iterator (Bindings).\n\n"
+            "The bindings of a schema, a ConjunctiveCondition or a GroundCondition (no variables) in a state, as a "
+            "lazy iterator (Bindings).\n\n"
             "A schema (name or index) yields its applicable Actions (every parameter enumerated, the numeric "
             "applicability rules included); a condition (precondition(), goal_condition) yields tuples of "
             "mymyr.formalism.Object, one per variable, such that every literal, equality and numeric constraint "
             "holds in the state (derived atoms by the axioms).\n\n"
-            "partial fixes variables in advance: a dict {index or name ('?x' or 'x'): object} or a sequence with one "
+            "partial fixes variables in advance: a dict {index, name ('?x' or 'x') or Variable: object} or a sequence with one "
             "entry per variable and None for the free ones; an object is a mymyr.formalism.Object, a name or an "
             "index. A fixed object that violates the variable's type or the condition gives no binding. limit caps "
             "the number of bindings.\n\n"
@@ -1163,8 +1514,10 @@ void bind_task_api(nb::class_<C>& cls)
             "bindings are those of the precondition alone; bindings(schema) also applies the numeric effect rules.")
         .def_prop_ro(
             "goal_condition",
-            [owner](Self self) { return make_condition(owner(self), ConjunctiveCondition::goal(*self.p->core->task)); },
-            "The goal as a ConjunctiveCondition without variables: one (empty) binding in a goal state, none otherwise.")
+            [owner](Self self) {
+                return Arg<PyGroundCondition>(make_ground_condition(task_owner(owner(self)), GroundCondition::goal(*self.p->core->task)));
+            },
+            "The goal as a GroundCondition (each literal once, then the numeric constraints).")
         .def(
             "iter_applicable_actions",
             [owner](Self self, StateLike state) {
@@ -1248,20 +1601,50 @@ void bind_task_api(nb::class_<C>& cls)
             "applicability.")
         .def(
             "atom",
-            [owner](Self self, AtomLike atom) {
-                const auto [p, a] = atom_key(*self.p->core, atom);
-                i64 slot = -1;
-                if (self.p->core->task->compiled().kinds[p] == formalism::PredKind::Fluent)
-                {
-                    std::vector<ObjectId> args(a.size());
-                    for (usize i = 0; i < a.size(); ++i)
-                        args[i] = ObjectId{a[i]};
-                    const SlotId s = self.p->core->task->find_atom(PredicateId{p}, args);
-                    slot = s.valid() ? static_cast<i64>(s.v) : -1;
-                }
-                return make_atom(owner(self), p, a, slot);
+            [owner](Self self, nb::handle predicate, nb::args terms) {
+                const LiteralSpec l = formula_args(*self.p->core, predicate, terms);
+                if (!l.positive)
+                    throw nb::value_error("mymyr: atom() takes an atom; literal() makes a negative literal");
+                return Arg<std::variant<PyGroundAtom, PyLiftedAtom>>(make_formula(task_owner(owner(self)), l, false));
             },
-            "atom"_a, "A ground atom: atom('(on a b)'), atom(('on', 'a', 'b')), or atom(slot).")
+            "predicate"_a, "terms"_a,
+            "An atom: atom('on', 'a', 'b') (terms are object names, Objects, indices, variables '?x' or Variables; the "
+            "predicate a name, an index or a Predicate), or one argument: '(on a b)', ('on', 'a', 'b'), "
+            "('on', ['a', 'b']) or a fluent slot. A GroundAtom without variables, else an Atom over its variables "
+            "(numbered by first appearance). Arities are checked; whether the atom holds anywhere is not.")
+        .def(
+            "literal",
+            [owner](Self self, nb::handle predicate, nb::args terms, bool positive) {
+                LiteralSpec l = formula_args(*self.p->core, predicate, terms);
+                l.positive = l.positive == positive;
+                return Arg<std::variant<PyGroundLiteral, PyLiteral>>(make_formula(task_owner(owner(self)), l, true));
+            },
+            "predicate"_a, "terms"_a, "positive"_a = true,
+            "A literal: the arguments of atom(), or an atom or literal (lifted or ground), or '(not (on a b))'; "
+            "positive=False negates it. A GroundLiteral without variables, else a Literal.")
+        .def(
+            "condition",
+            [owner](Self self, nb::typed<nb::iterable, ParameterArg> parameters, nb::typed<nb::iterable, LiteralArg> literals,
+                    nb::typed<nb::iterable, EqualityArg> equalities, nb::typed<nb::iterable, ConstraintArg> constraints) {
+                return make_condition(owner(self), make_condition_value(*self.p->core, parameters, literals, equalities, constraints));
+            },
+            "parameters"_a, "literals"_a, nb::kw_only(), "equalities"_a = nb::tuple(), "constraints"_a = nb::tuple(),
+            "A ConjunctiveCondition over the parameters ('?x', a Variable, or (name, type) / (name, [types]); "
+            "untyped ranges over every object). literals: atoms and literals as literal() takes them, their variables "
+            "among the parameters; equalities: (lhs, rhs) or (lhs, rhs, positive), or '(= ?x ?y)' / '(!= ?x a)'; "
+            "constraints: numeric constraints as PDDL, e.g. '(>= (fuel ?x) (* 2 (distance ?x a)))' (comparators "
+            "= != < <= > >=, operators + - * /), or NumericConstraints. Raises ValueError for unknown names, wrong "
+            "arities and variables that are no parameters.")
+        .def(
+            "ground_condition",
+            [owner](Self self, nb::typed<nb::iterable, GroundLiteralLike> literals, nb::typed<nb::iterable, ConstraintArg> constraints) {
+                return Arg<PyGroundCondition>(
+                    make_ground_condition(task_owner(owner(self)), make_ground_condition_value(*self.p->core, literals, constraints)));
+            },
+            "literals"_a = nb::tuple(), nb::kw_only(), "constraints"_a = nb::tuple(),
+            "A GroundCondition: ground literals and atoms as literal() takes them (static, fluent and derived, either "
+            "polarity), and ground numeric constraints as PDDL, e.g. '(>= (fuel truck1) 10)'. A goal of the searches "
+            "(goal=).")
         .def(
             "state",
             [owner](Self self, AtomsOrWords x, ValuesArg values) {
@@ -1269,19 +1652,12 @@ void bind_task_api(nb::class_<C>& cls)
                 if (nb::isinstance<nb::list>(x) || nb::isinstance<nb::tuple>(x) || nb::isinstance<nb::set>(x) ||
                     nb::isinstance<nb::frozenset>(x))
                 {
-                    std::vector<u32> preds;
-                    std::vector<std::vector<ObjectId>> objects;
+                    std::vector<GroundAtom> given;
                     for (nb::handle item : nb::borrow<nb::iterable>(x))
-                    {
-                        const auto [p, a] = atom_key(core, item);
-                        preds.push_back(p);
-                        objects.emplace_back(a.size());
-                        for (usize i = 0; i < a.size(); ++i)
-                            objects.back()[i] = ObjectId{a[i]};
-                    }
-                    std::vector<AtomArgs> atoms(preds.size());
+                        given.push_back(atom_key(core, item));
+                    std::vector<AtomArgs> atoms(given.size());
                     for (usize i = 0; i < atoms.size(); ++i)
-                        atoms[i] = AtomArgs{PredicateId{preds[i]}, objects[i]};
+                        atoms[i] = AtomArgs{given[i].predicate, given[i].objects};
                     const std::vector<f64> v = numeric_values_arg(core, values);
                     return make_state(owner(self), core.task->make_state(atoms, v));  // invalid_argument -> ValueError
                 }
@@ -1291,7 +1667,7 @@ void bind_task_api(nb::class_<C>& cls)
                 return make_state(owner(self), State(s.view));
             },
             "atoms_or_words"_a, "values"_a = nb::none(),
-            "A state from its fluent atoms (strings, tuples or Atoms) and, for a numeric task, the values of its numeric "
+            "A state from its fluent atoms (strings, tuples or GroundAtoms) and, for a numeric task, the values of its numeric "
             "slots (a sequence in the order of numeric_names, or a dict from those names to values, every slot given); or "
             "a copy of a State; or a state from state words (one [W + NN] row of an array). Derived atoms follow from the "
             "axioms (State.derived_atoms, State.holds). Raises ValueError for static or derived atoms, atoms outside the "
@@ -1494,6 +1870,16 @@ i64 py_hash(u64 h)
 }
 }  // namespace
 
+std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const std::shared_ptr<const ConjunctiveCondition>& c,
+                                                       nb::handle partial)
+{
+    return partial_arg(core, Target{0, c, c->arity()}, partial);
+}
+
+u64 limit_value(nb::handle limit) { return limit_arg(limit); }
+
+GroundAtom ground_atom_of(const Owner& o, nb::handle atom) { return atom_key(*o.core, atom); }
+
 // ------------------------------------------------------------------------------------------------ bindings
 
 void bind_task(nb::module_& m)
@@ -1504,66 +1890,6 @@ void bind_task(nb::module_& m)
                                  "canonical order. It may be advanced from any thread.")
         .def("__iter__", [](nb::handle self) { return Arg<PyApplicableIter>(nb::borrow(self)); })
         .def("__next__", &applicable_next);
-
-    nb::class_<PyCondition>(m, "ConjunctiveCondition",
-                            "A lifted conjunctive condition of a task: variables, literals over static, fluent and derived "
-                            "predicates, equalities and numeric constraints (Task.precondition, Task.goal_condition). "
-                            "Task.bindings enumerates its bindings in a state.")
-        .def_prop_ro("arity", [](const PyCondition& c) { return c.c->arity(); }, "The number of variables.")
-        .def_prop_ro("variables",
-                     [](const PyCondition& c) {
-                         std::vector<std::string> v;
-                         for (u32 i = 0; i < c.c->arity(); ++i)
-                             v.push_back("?" + (c.c->variables[i].name.empty() ? "x" + std::to_string(i) : c.c->variables[i].name));
-                         return v;
-                     },
-                     "The variable names ('?x'; an unnamed variable is '?x<index>').")
-        .def("__eq__",
-             [](const PyCondition& a, nb::handle b) -> nb::object {
-                 if (!nb::isinstance<PyCondition>(b))
-                     return nb::borrow(Py_NotImplemented);
-                 const PyCondition& o = *nb::inst_ptr<PyCondition>(b);
-                 return nb::bool_(a.core->task->uid() == o.core->task->uid() && *a.c == *o.c);
-             })
-        .def("__hash__",
-             [](const PyCondition& c) {
-                 return py_hash(hash::combine(c.core->task->uid(), std::hash<std::string>{}(c.c->str(*c.core->task))));
-             })
-        .def("__str__", [](const PyCondition& c) { return c.c->str(*c.core->task); })
-        .def("__repr__", [](const PyCondition& c) { return "ConjunctiveCondition" + c.c->str(*c.core->task); });
-
-    nb::class_<PyGroundLiteral>(m, "GroundLiteral", "A ground literal: an atom and its polarity (Task.ground_conjunctions).")
-        .def_prop_ro("atom",
-                     [](const PyGroundLiteral& l) {
-                         i64 slot = -1;
-                         if (l.core->task->compiled().kinds[l.pred] == formalism::PredKind::Fluent)
-                         {
-                             std::vector<ObjectId> args(l.args.size());
-                             for (usize i = 0; i < args.size(); ++i)
-                                 args[i] = ObjectId{l.args[i]};
-                             const SlotId s = l.core->task->find_atom(PredicateId{l.pred}, args);
-                             slot = s.valid() ? static_cast<i64>(s.v) : -1;
-                         }
-                         return make_atom(Owner{l.core, l.owner}, l.pred, l.args, slot);
-                     })
-        .def_prop_ro("positive", [](const PyGroundLiteral& l) { return l.positive; })
-        .def("__eq__",
-             [](const PyGroundLiteral& a, nb::handle b) -> nb::object {
-                 if (!nb::isinstance<PyGroundLiteral>(b))
-                     return nb::borrow(Py_NotImplemented);
-                 const PyGroundLiteral& o = *nb::inst_ptr<PyGroundLiteral>(b);
-                 return nb::bool_(a.core->task->uid() == o.core->task->uid() && a.pred == o.pred &&
-                                  a.positive == o.positive && a.args == o.args);
-             })
-        .def("__hash__",
-             [](const PyGroundLiteral& l) {
-                 u64 h = hash::combine(l.core->task->uid(), l.pred * 2ULL + (l.positive ? 1 : 0));
-                 for (u32 o : l.args)
-                     h = hash::combine(h, o);
-                 return py_hash(h);
-             })
-        .def("__str__", [](const PyGroundLiteral& l) { return ground_literal_str(l); })
-        .def("__repr__", [](const PyGroundLiteral& l) { return "GroundLiteral" + ground_literal_str(l); });
 
     nb::class_<PyBindingsIter>(m, "Bindings",
                                "An iterator over the bindings of a schema (Actions) or a condition (tuples of Objects) "
@@ -1844,20 +2170,17 @@ void bind_task(nb::module_& m)
                                 [&](u64 b) {
                                     const SlotId slot{static_cast<u32>(b)};
                                     const auto args = s.core->task->atoms().arguments(slot);
-                                    out.append(make_atom(o, s.core->task->atoms().predicate(slot).v,
-                                                         std::vector<u32>(args.begin(), args.end()), static_cast<i64>(b)));
+                                    out.append(make_ground_atom(task_owner(o), GroundAtom{s.core->task->atoms().predicate(slot),
+                                                                                          std::vector<ObjectId>(args.begin(), args.end())}));
                                 });
                  return out;
              },
              "The true fluent atoms (slot order).")
         .def("holds",
-             [](const PyState& s, AtomLike atom) {
-                 const auto [p, a] = atom_key(*s.core, atom);
-                 return holds(*s.core, s.s.view(), p, a);
-             },
-             "atom"_a,
-             "Truth of a ground atom (an Atom, '(on a b)', ('on', 'a', 'b') or a slot): fluent atoms from the state, "
-             "static ones from the task, derived ones by evaluating the axioms.")
+             [](const PyState& s, HoldsArg formula) { return holds_arg(s, formula); }, "formula"_a,
+             "Truth of a ground atom (a GroundAtom, '(on a b)', ('on', 'a', 'b') or a slot), a GroundLiteral or "
+             "'(not (on a b))', or a GroundCondition: fluent atoms from the state, static ones from the task, derived "
+             "ones by evaluating the axioms, numeric constraints by the state's values.")
         .def("is_goal", [](const PyState& s) { return s.core->task->is_goal(s.s.view()); })
         .def("applicable_actions", [](const PyState& s) { return applicable_actions(Owner{s.core, s.owner}, s.s.view()); })
         .def("iter_applicable_actions",
@@ -1954,43 +2277,6 @@ void bind_task(nb::module_& m)
         })
         .def("__str__", [](const PyAction& a) { return action_str(a); })
         .def("__repr__", [](const PyAction& a) { return "Action" + action_str(a); });
-
-    // --- Atom
-    nb::class_<PyAtom>(m, "Atom", "A ground atom (predicate, objects).")
-        .def_prop_ro("predicate", [](const PyAtom& a) { return name_of(*a.core->data, a.core->data->predicates[a.pred].name); })
-        .def_prop_ro("predicate_index", [](const PyAtom& a) { return a.pred; })
-        .def_prop_ro("objects", [](const PyAtom& a) {
-            std::vector<std::string> v;
-            for (u32 o : a.args)
-                v.push_back(name_of(*a.core->data, a.core->data->objects[o].name));
-            return v;
-        })
-        .def_prop_ro("object_indices", [](const PyAtom& a) { return a.args; })
-        .def_prop_ro("slot", [](const PyAtom& a) -> Arg<std::optional<i64>> {
-            if (a.slot < 0)
-                return nb::none();
-            return nb::int_(a.slot);
-        },
-                     "The fluent slot (the state bit), or None.")
-        .def_prop_ro("kind", [](const PyAtom& a) {
-            const auto k = a.core->data->predicates[a.pred].kind;
-            return k == formalism::PredKind::Static ? "static" : k == formalism::PredKind::Fluent ? "fluent" : "derived";
-        })
-        .def("__eq__",
-             [](const PyAtom& a, nb::handle b) -> nb::object {
-                 if (!nb::isinstance<PyAtom>(b))
-                     return nb::borrow(Py_NotImplemented);
-                 const PyAtom& o = *nb::inst_ptr<PyAtom>(b);
-                 return nb::bool_(a.core->task->uid() == o.core->task->uid() && a.pred == o.pred && a.args == o.args);
-             })
-        .def("__hash__", [](const PyAtom& a) {
-            u64 h = hash::combine(a.core->task->uid(), a.pred + 0x9e37ULL);
-            for (u32 o : a.args)
-                h = hash::combine(h, o);
-            return py_hash(h);
-        })
-        .def("__str__", [](const PyAtom& a) { return atom_str(*a.core->data, a.pred, a.args); })
-        .def("__repr__", [](const PyAtom& a) { return "Atom" + atom_str(*a.core->data, a.pred, a.args); });
 
     // --- pickling helpers (module-level, so pickle can find them by name)
     m.def("_restore_task", &restore_task);

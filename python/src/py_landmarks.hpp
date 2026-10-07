@@ -7,7 +7,7 @@
 // A FactLandmarkGraph names its atoms by canonical id (task/atom_index.hpp), which is a property of one task: every
 // object keeps its task's owner (Task or TaskHandle) and checks that arguments come from the same task.
 
-#include "py_task.hpp"
+#include "py_formula.hpp"
 
 #include "mymyr/landmarks/fact_landmark_graph.hpp"
 #include "mymyr/landmarks/transition_ordering.hpp"
@@ -79,30 +79,22 @@ struct HeuristicObject
     return nb::cast(std::move(p), nb::rv_policy::move);
 }
 
-/// The Atom of a canonical id (fluent or derived) of `o`'s task. Fluent atoms carry their slot if they have one.
-[[nodiscard]] inline Arg<PyAtom> atom_object(const Owner& o, CanonicalAtom c)
+/// The GroundAtom of a canonical id (fluent or derived) of `o`'s task.
+[[nodiscard]] inline Arg<PyGroundAtom> atom_object(const Owner& o, CanonicalAtom c)
 {
-    const Task& t = *o.core->task;
-    const CanonicalLayout& L = t.atoms().layout();
-    PyAtom a;
+    const CanonicalLayout& L = o.core->task->atoms().layout();
     std::vector<u32> args(std::max<u32>(1, L.max_arity));
-    a.pred = L.decode(c, args.data());
-    args.resize(L.arity[a.pred]);
-    a.args = std::move(args);
-    if (c < L.fluent_count)
-    {
-        const u32 slot = t.atoms().find(c);
-        a.slot = slot == AtomIndex::k_empty ? -1 : static_cast<i64>(slot);
-    }
-    a.owner = o.obj;
-    a.core = o.core;
-    return nb::cast(std::move(a), nb::rv_policy::move);
+    GroundAtom a;
+    a.predicate = PredicateId{L.decode(c, args.data())};
+    for (u32 i = 0; i < L.arity[a.predicate.v]; ++i)
+        a.objects.push_back(ObjectId{args[i]});
+    return Arg<PyGroundAtom>(make_ground_atom(task_owner(o), std::move(a)));
 }
 
-/// Canonical ids as Atoms, in the given order.
-[[nodiscard]] inline nb::typed<nb::list, PyAtom> atom_list(const Owner& o, std::span<const CanonicalAtom> atoms)
+/// Canonical ids as GroundAtoms, in the given order.
+[[nodiscard]] inline nb::typed<nb::list, PyGroundAtom> atom_list(const Owner& o, std::span<const CanonicalAtom> atoms)
 {
-    nb::typed<nb::list, PyAtom> out{nb::list()};
+    nb::typed<nb::list, PyGroundAtom> out{nb::list()};
     for (CanonicalAtom c : atoms)
         out.append(atom_object(o, c));
     return out;
@@ -113,15 +105,17 @@ struct HeuristicObject
 /// ValueError for static atoms, and for derived ones unless `derived` is set.
 [[nodiscard]] inline std::optional<CanonicalAtom> canonical_atom(const Owner& o, nb::handle atom, bool derived)
 {
-    nb::object a = task_object(o.obj).attr("atom")(atom);
-    const PyAtom& pa = nb::cast<const PyAtom&>(a);
+    const GroundAtom a = ground_atom_of(o, atom);
     const Task& task = *o.core->task;
-    const formalism::PredKind kind = task.compiled().kinds[pa.pred];
+    const formalism::PredKind kind = task.compiled().kinds[a.predicate.v];
     if (kind == formalism::PredKind::Static || (kind == formalism::PredKind::Derived && !derived))
         throw nb::value_error(derived ? "mymyr: expected a fluent or derived atom (static atoms have no canonical id)"
                                       : "mymyr: expected a fluent atom (static and derived atoms are not supported)");
     const CanonicalLayout& L = task.atoms().layout();
-    const CanonicalAtom c = L.encode(pa.pred, pa.args.data());
+    std::vector<u32> args(a.objects.size());
+    for (usize i = 0; i < args.size(); ++i)
+        args[i] = a.objects[i].v;
+    const CanonicalAtom c = L.encode(a.predicate.v, args.data());
     if (c >= L.total)
         return std::nullopt;
     return c;

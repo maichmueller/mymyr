@@ -6,10 +6,13 @@
 //     and comparable by (task identity, kind, index), and are cheap to create. Nothing is interned or cached.
 //   - Each class is declared once in a descriptor table (class name, then named fields with getters). The table
 //     drives the property registration, __repr__, and the `fields` class attribute that the coverage test walks.
-//   - Terms render as Object views (constants/objects) or Variable (parameter index + name from the enclosing scope).
+//   - Conditions, literals, atoms and expressions are the formula values of py_formula.hpp (formula_bindings.cpp):
+//     a schema's precondition is a ConjunctiveCondition, the goal a GroundCondition, the initial atoms GroundAtoms.
+//     Terms render as Object views or Variables (position, name and types from the enclosing parameter list).
 
 #include "formalism_task.hpp"
 #include "formalism_views.hpp"
+#include "py_formula.hpp"
 
 #include "mymyr/formalism/task_data.hpp"
 #include "mymyr/formalism/text_format.hpp"
@@ -32,7 +35,6 @@ using namespace nb::literals;
 namespace mymyr::python
 {
 using formalism::TaskData;
-using TaskPtr = std::shared_ptr<const TaskData>;
 
 namespace
 {
@@ -42,10 +44,10 @@ namespace fm = formalism;
 
 using View = FormalismView;
 
-struct TypeV : View {};
+using TypeV = TypeView;
 using ObjectV = ObjectView;
-struct PredicateV : View {};
-struct FunctionV : View {};
+using PredicateV = PredicateView;
+using FunctionV = FunctionView;
 struct SchemaV : View {};
 struct AxiomV : View {};
 
@@ -55,61 +57,16 @@ struct ParameterV : View
     u32 position = 0;
 };
 
-/// A variable term: position in the enclosing scope, with the scope's parameter range for its name.
-struct VariableV
-{
-    TaskPtr t;
-    u32 position = 0;
-    std::string name;
-};
-
-/// Parameter scope of an expression/literal: schema params followed by (optionally) a conditional effect's extras.
-struct Scope
-{
-    fm::Range first, second;  // second may be empty
-    [[nodiscard]] std::string name(const TaskData& d, u32 pos) const
-    {
-        const fm::Range& r = pos < first.count ? first : second;
-        const u32 k = pos < first.count ? pos : pos - first.count;
-        if (k >= r.count)
-            return "?" + std::to_string(pos);
-        return std::string(d.str(d.params[r.begin + k].name));
-    }
-};
-
-struct LiteralV : View  // i = index into literals
-{
-    Scope scope;
-};
-struct ExprV : View  // i = index into exprs
-{
-    Scope scope;
-};
-struct ConstraintV : View  // i = index into constraints
-{
-    Scope scope;
-};
 struct NumericEffectV : View  // i = index into numeric_effects, or aux (stored inline)
 {
-    Scope scope;
+    VariablesPtr vars;  // the schema's parameters, then the conditional effect's
     std::optional<fm::NumericEffect> inline_effect;  // for auxiliary effects stored in ConditionalEffect
     [[nodiscard]] const fm::NumericEffect& e() const { return inline_effect ? *inline_effect : d().numeric_effects[i]; }
 };
-struct ConditionV
-{
-    TaskPtr t;
-    fm::Condition c;
-    Scope scope;
-    std::string owner;  // for repr
-};
 struct ConditionalEffectV : View  // i = index into conditional_effects
 {
+    u32 schema = 0;
     fm::Range schema_params;
-};
-struct GroundAtomV : View  // i = index into static_init or fluent_init
-{
-    bool fluent = false;
-    [[nodiscard]] const fm::GroundAtom& a() const { return fluent ? d().fluent_init[i] : d().static_init[i]; }
 };
 struct GroundValueV : View
 {
@@ -119,19 +76,6 @@ struct GroundValueV : View
 
 const char* kind_name(fm::PredKind k) { return k == fm::PredKind::Static ? "static" : k == fm::PredKind::Fluent ? "fluent" : "derived"; }
 const char* kind_name(fm::FuncKind k) { return k == fm::FuncKind::Static ? "static" : k == fm::FuncKind::Fluent ? "fluent" : "auxiliary"; }
-const char* cmp_name(fm::Comparator c)
-{
-    switch (c)
-    {
-        case fm::Comparator::Eq: return "=";
-        case fm::Comparator::Ne: return "!=";
-        case fm::Comparator::Lt: return "<";
-        case fm::Comparator::Le: return "<=";
-        case fm::Comparator::Gt: return ">";
-        case fm::Comparator::Ge: return ">=";
-    }
-    return "?";
-}
 const char* op_name(fm::AssignOp o)
 {
     switch (o)
@@ -145,58 +89,29 @@ const char* op_name(fm::AssignOp o)
     return "?";
 }
 
-nb::object term_object(const TaskPtr& t, fm::Term x, const Scope& s)
-{
-    if (fm::is_object(x))
-        return nb::cast(ObjectV{{t, fm::term_object(x).v}});
-    return nb::cast(VariableV{t, fm::term_parameter(x), s.name(*t, fm::term_parameter(x))});
-}
-
-std::string term_str(const TaskData& d, fm::Term x, const Scope& s)
+std::string term_str(const TaskData& d, fm::Term x, const Variables& vars)
 {
     if (fm::is_object(x))
         return std::string(d.str(d.objects[fm::term_object(x).v].name));
-    return "?" + s.name(d, fm::term_parameter(x));
+    const u32 p = fm::term_parameter(x);
+    return "?" + (p < vars.size() ? vars[p].name : std::to_string(p));
 }
 
-std::string literal_str(const TaskData& d, const fm::Literal& l, const Scope& s)
+/// The literals of a pool range as Literal values over `vars`; `positive`: only those of that polarity.
+nb::tuple literal_tuple(const DataPtr& t, fm::Range r, const VariablesPtr& vars, std::optional<bool> positive)
 {
-    std::string out = l.positive ? "(" : "(not (";
-    out += d.str(d.predicates[l.pred.v].name);
-    for (fm::Term x : d.terms_of(l))
-        out += " " + term_str(d, x, s);
-    out += l.positive ? ")" : "))";
-    return out;
-}
-
-std::string expr_str(const TaskData& d, u32 e, const Scope& s)
-{
-    const fm::Expr& x = d.exprs[e];
-    switch (x.op)
+    nb::list l;
+    const FormulaOwner o = bare_owner(t);
+    for (u32 k = 0; k < r.count; ++k)
     {
-        case fm::ExprOp::Number:
-        {
-            std::ostringstream o;
-            o << x.value;
-            return o.str();
-        }
-        case fm::ExprOp::Function:
-        {
-            std::string out = "(" + std::string(d.str(d.functions[x.func.v].name));
-            for (fm::Term tt : TaskData::slice(d.terms, x.terms))
-                out += " " + term_str(d, tt, s);
-            return out + ")";
-        }
-        case fm::ExprOp::Neg: return "(- " + expr_str(d, x.a, s) + ")";
-        default:
-        {
-            const char* op = x.op == fm::ExprOp::Add ? "+" : x.op == fm::ExprOp::Sub ? "-" : x.op == fm::ExprOp::Mul ? "*" : "/";
-            return std::string("(") + op + " " + expr_str(d, x.a, s) + " " + expr_str(d, x.b, s) + ")";
-        }
+        const fm::Literal& x = t->literals[r.begin + k];
+        if (positive && x.positive != *positive)
+            continue;
+        const auto terms = t->terms_of(x);
+        l.append(make_literal(o, x.pred, x.positive, std::vector<fm::Term>(terms.begin(), terms.end()), vars));
     }
+    return nb::tuple(l);
 }
-
-Scope schema_scope(const TaskData& d, u32 schema) { return Scope{d.schemas[schema].params, {}}; }
 
 // ------------------------------------------------------------------------------------------------ descriptor table
 
@@ -237,7 +152,7 @@ void identity_protocol(nb::class_<V>& cls, const char* kind)
 }
 
 template<class V, class Vec>
-nb::list views_of(const TaskPtr& t, const Vec& pool)
+nb::list views_of(const DataPtr& t, const Vec& pool)
 {
     nb::list l;
     for (u32 i = 0; i < pool.size(); ++i)
@@ -245,40 +160,37 @@ nb::list views_of(const TaskPtr& t, const Vec& pool)
     return l;
 }
 
-nb::list literal_list(const TaskPtr& t, fm::Range r, const Scope& s)
-{
-    nb::list l;
-    for (u32 k = 0; k < r.count; ++k)
-        l.append(LiteralV{{t, r.begin + k}, s});
-    return l;
-}
-nb::list constraint_list(const TaskPtr& t, fm::Range r, const Scope& s)
-{
-    nb::list l;
-    for (u32 k = 0; k < r.count; ++k)
-        l.append(ConstraintV{{t, r.begin + k}, s});
-    return l;
-}
-nb::list parameter_list(const TaskPtr& t, fm::Range r, u32 offset = 0)
+nb::list parameter_list(const DataPtr& t, fm::Range r, u32 offset = 0)
 {
     nb::list l;
     for (u32 k = 0; k < r.count; ++k)
         l.append(ParameterV{{t, r.begin + k}, offset + k});
     return l;
 }
-nb::list type_list(const TaskPtr& t, fm::Range r)
+nb::list type_list(const DataPtr& t, fm::Range r)
 {
     nb::list l;
     for (TypeId ty : TaskData::slice(t->type_ids, r))
         l.append(TypeV{{t, ty.v}});
     return l;
 }
-nb::list object_list(const TaskPtr& t, fm::Range r)
+nb::list object_list(const DataPtr& t, fm::Range r)
 {
     nb::list l;
     for (ObjectId o : TaskData::slice(t->object_ids, r))
         l.append(ObjectV{{t, o.v}});
     return l;
+}
+nb::tuple ground_atoms(const DataPtr& t, const std::vector<fm::GroundAtom>& atoms)
+{
+    nb::list l;
+    const FormulaOwner o = bare_owner(t);
+    for (const fm::GroundAtom& a : atoms)
+    {
+        const auto objects = t->objects_of(a);
+        l.append(make_ground_atom(o, GroundAtom{a.pred, std::vector<ObjectId>(objects.begin(), objects.end())}));
+    }
+    return nb::tuple(l);
 }
 }  // namespace
 
@@ -287,6 +199,7 @@ nb::list object_list(const TaskPtr& t, fm::Range r)
 void bind_formalism(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_formalism", "Read-only views of the normalized task (complete: every entity)");
+    bind_formulas(m, parent);
 
     // --- Type
     {
@@ -309,17 +222,6 @@ void bind_formalism(nb::module_& parent)
             .finish();
         c.def("__repr__", [](const ObjectV& v) { return "Object(" + std::string(v.d().str(v.d().objects[v.i].name)) + ")"; });
         c.def("__str__", [](const ObjectV& v) { return std::string(v.d().str(v.d().objects[v.i].name)); });
-    }
-    // --- Variable (a parameter reference inside a literal/expression)
-    {
-        nb::class_<VariableV> c(m, "Variable");
-        c.def_prop_ro("position", [](const VariableV& v) { return v.position; }, "index in the enclosing parameter list");
-        c.def_prop_ro("name", [](const VariableV& v) { return v.name; });
-        c.attr("fields") = nb::make_tuple("position", "name");
-        c.def("__repr__", [](const VariableV& v) { return "Variable(?" + v.name + ")"; });
-        c.def("__str__", [](const VariableV& v) { return "?" + v.name; });
-        c.def("__eq__", [](const VariableV& a, const VariableV& b) { return a.t.get() == b.t.get() && a.position == b.position && a.name == b.name; }, nb::is_operator());
-        c.def("__hash__", [](const VariableV& a) { return static_cast<nb::ssize_t>(std::hash<std::string>{}(a.name) ^ a.position); });
     }
     // --- Parameter
     {
@@ -362,93 +264,6 @@ void bind_formalism(nb::module_& parent)
             return "Function(" + std::string(v.d().str(f.name)) + "/" + std::to_string(f.arity) + ", " + kind_name(f.kind) + ")";
         });
     }
-    // --- Literal
-    {
-        nb::class_<LiteralV> c(m, "Literal");
-        identity_protocol(c, "literal");
-        ClassDescriptor<LiteralV>{c}
-            .field("predicate", [](const LiteralV& v) { return PredicateV{{v.t, v.d().literals[v.i].pred.v}}; })
-            .field("positive", [](const LiteralV& v) { return v.d().literals[v.i].positive; })
-            .field("terms", [](const LiteralV& v) {
-                nb::list l;
-                for (fm::Term x : v.d().terms_of(v.d().literals[v.i]))
-                    l.append(term_object(v.t, x, v.scope));
-                return l;
-            }, "Object or Variable per argument")
-            .field("is_ground", [](const LiteralV& v) {
-                for (fm::Term x : v.d().terms_of(v.d().literals[v.i]))
-                    if (!fm::is_object(x))
-                        return false;
-                return true;
-            })
-            .finish();
-        c.def("__repr__", [](const LiteralV& v) { return "Literal" + literal_str(v.d(), v.d().literals[v.i], v.scope); });
-        c.def("__str__", [](const LiteralV& v) { return literal_str(v.d(), v.d().literals[v.i], v.scope); });
-    }
-    // --- Expression
-    {
-        nb::class_<ExprV> c(m, "Expression");
-        identity_protocol(c, "expr");
-        ClassDescriptor<ExprV>{c}
-            .field("op", [](const ExprV& v) {
-                switch (v.d().exprs[v.i].op)
-                {
-                    case fm::ExprOp::Number: return std::string("number");
-                    case fm::ExprOp::Function: return std::string("function");
-                    case fm::ExprOp::Add: return std::string("+");
-                    case fm::ExprOp::Sub: return std::string("-");
-                    case fm::ExprOp::Mul: return std::string("*");
-                    case fm::ExprOp::Div: return std::string("/");
-                    case fm::ExprOp::Neg: return std::string("neg");
-                }
-                return std::string("?");
-            })
-            .field("value", [](const ExprV& v) -> std::optional<f64> {
-                const auto& e = v.d().exprs[v.i];
-                return e.op == fm::ExprOp::Number ? std::optional<f64>(e.value) : std::nullopt;
-            })
-            .field("function", [](const ExprV& v) -> nb::object {
-                const auto& e = v.d().exprs[v.i];
-                return e.op == fm::ExprOp::Function ? nb::cast(FunctionV{{v.t, e.func.v}}) : nb::none();
-            })
-            .field("terms", [](const ExprV& v) {
-                nb::list l;
-                const auto& e = v.d().exprs[v.i];
-                if (e.op == fm::ExprOp::Function)
-                    for (fm::Term x : TaskData::slice(v.d().terms, e.terms))
-                        l.append(term_object(v.t, x, v.scope));
-                return l;
-            })
-            .field("children", [](const ExprV& v) {
-                nb::list l;
-                const auto& e = v.d().exprs[v.i];
-                if (e.op == fm::ExprOp::Neg)
-                    l.append(ExprV{{v.t, e.a}, v.scope});
-                else if (e.op != fm::ExprOp::Number && e.op != fm::ExprOp::Function)
-                {
-                    l.append(ExprV{{v.t, e.a}, v.scope});
-                    l.append(ExprV{{v.t, e.b}, v.scope});
-                }
-                return l;
-            })
-            .finish();
-        c.def("__str__", [](const ExprV& v) { return expr_str(v.d(), v.i, v.scope); });
-        c.def("__repr__", [](const ExprV& v) { return "Expression" + expr_str(v.d(), v.i, v.scope); });
-    }
-    // --- NumericConstraint
-    {
-        nb::class_<ConstraintV> c(m, "NumericConstraint");
-        identity_protocol(c, "constraint");
-        ClassDescriptor<ConstraintV>{c}
-            .field("comparator", [](const ConstraintV& v) { return std::string(cmp_name(v.d().constraints[v.i].cmp)); })
-            .field("lhs", [](const ConstraintV& v) { return ExprV{{v.t, v.d().constraints[v.i].lhs}, v.scope}; })
-            .field("rhs", [](const ConstraintV& v) { return ExprV{{v.t, v.d().constraints[v.i].rhs}, v.scope}; })
-            .finish();
-        c.def("__str__", [](const ConstraintV& v) {
-            const auto& k = v.d().constraints[v.i];
-            return std::string("(") + cmp_name(k.cmp) + " " + expr_str(v.d(), k.lhs, v.scope) + " " + expr_str(v.d(), k.rhs, v.scope) + ")";
-        });
-    }
     // --- NumericEffect
     {
         nb::class_<NumericEffectV> c(m, "NumericEffect");
@@ -459,97 +274,50 @@ void bind_formalism(nb::module_& parent)
             .field("terms", [](const NumericEffectV& v) {
                 nb::list l;
                 for (fm::Term x : TaskData::slice(v.d().terms, v.e().terms))
-                    l.append(term_object(v.t, x, v.scope));
-                return l;
+                    l.append(term_object(bare_owner(v.t), x, v.vars));
+                return nb::tuple(l);
             })
-            .field("expression", [](const NumericEffectV& v) { return ExprV{{v.t, v.e().expr}, v.scope}; })
+            .field("expression", [](const NumericEffectV& v) { return PyExpression{task_pool(bare_owner(v.t), v.vars), v.e().expr}; })
             .finish();
         c.def("__str__", [](const NumericEffectV& v) {
             const auto& e = v.e();
             std::string out = std::string("(") + op_name(e.op) + " (" + std::string(v.d().str(v.d().functions[e.func.v].name));
             for (fm::Term x : TaskData::slice(v.d().terms, e.terms))
-                out += " " + term_str(v.d(), x, v.scope);
-            return out + ") " + expr_str(v.d(), e.expr, v.scope) + ")";
-        });
-    }
-    // --- Condition
-    {
-        nb::class_<ConditionV> c(m, "Condition");
-        ClassDescriptor<ConditionV>{c}
-            .field("literals", [](const ConditionV& v) { return literal_list(v.t, v.c.literals, v.scope); })
-            .field("static_literals", [](const ConditionV& v) {
-                nb::list l;
-                for (u32 k = 0; k < v.c.literals.count; ++k)
-                    if (v.t->predicates[v.t->literals[v.c.literals.begin + k].pred.v].kind == fm::PredKind::Static)
-                        l.append(LiteralV{{v.t, v.c.literals.begin + k}, v.scope});
-                return l;
-            })
-            .field("fluent_literals", [](const ConditionV& v) {
-                nb::list l;
-                for (u32 k = 0; k < v.c.literals.count; ++k)
-                    if (v.t->predicates[v.t->literals[v.c.literals.begin + k].pred.v].kind == fm::PredKind::Fluent)
-                        l.append(LiteralV{{v.t, v.c.literals.begin + k}, v.scope});
-                return l;
-            })
-            .field("derived_literals", [](const ConditionV& v) {
-                nb::list l;
-                for (u32 k = 0; k < v.c.literals.count; ++k)
-                    if (v.t->predicates[v.t->literals[v.c.literals.begin + k].pred.v].kind == fm::PredKind::Derived)
-                        l.append(LiteralV{{v.t, v.c.literals.begin + k}, v.scope});
-                return l;
-            })
-            .field("numeric_constraints", [](const ConditionV& v) { return constraint_list(v.t, v.c.constraints, v.scope); })
-            .finish();
-        c.def("__len__", [](const ConditionV& v) { return v.c.literals.count + v.c.constraints.count; });
-        c.def("__str__", [](const ConditionV& v) {
-            std::string out = "(and";
-            for (const auto& l : v.t->literals_of(v.c))
-                out += " " + literal_str(*v.t, l, v.scope);
-            for (const auto& k : v.t->constraints_of(v.c))
-                out += std::string(" (") + cmp_name(k.cmp) + " " + expr_str(*v.t, k.lhs, v.scope) + " " + expr_str(*v.t, k.rhs, v.scope) + ")";
-            return out + ")";
+                out += " " + term_str(v.d(), x, *v.vars);
+            return out + ") " + nb::cast<std::string>(nb::str(nb::cast(PyExpression{task_pool(bare_owner(v.t), v.vars), e.expr}))) + ")";
         });
     }
     // --- ConditionalEffect
     {
         nb::class_<ConditionalEffectV> c(m, "ConditionalEffect");
         identity_protocol(c, "conditional_effect");
-        auto scope_of = [](const ConditionalEffectV& v) { return Scope{v.schema_params, v.d().conditional_effects[v.i].extra_params}; };
+        auto vars_of = [](const ConditionalEffectV& v) { return scope_variables(v.d(), v.schema_params, v.d().conditional_effects[v.i].extra_params); };
         ClassDescriptor<ConditionalEffectV>{c}
             .field("parameters", [](const ConditionalEffectV& v) {
                 return parameter_list(v.t, v.d().conditional_effects[v.i].extra_params, v.schema_params.count);
             }, "forall parameters (positions continue after the schema's)")
-            .field("condition", [scope_of](const ConditionalEffectV& v) {
-                return ConditionV{v.t, v.d().conditional_effects[v.i].condition, scope_of(v), "effect"};
+            .field("condition", [](const ConditionalEffectV& v) {
+                return make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::effect_condition(v.d(), SchemaId{v.schema}, v.i));
+            }, "a ConjunctiveCondition over the schema's parameters followed by the forall parameters")
+            .field("add_effects", [vars_of](const ConditionalEffectV& v) {
+                return literal_tuple(v.t, v.d().conditional_effects[v.i].effects, vars_of(v), true);
             })
-            .field("add_effects", [scope_of](const ConditionalEffectV& v) {
-                nb::list l;
-                const auto r = v.d().conditional_effects[v.i].effects;
-                for (u32 k = 0; k < r.count; ++k)
-                    if (v.d().literals[r.begin + k].positive)
-                        l.append(LiteralV{{v.t, r.begin + k}, scope_of(v)});
-                return l;
+            .field("delete_effects", [vars_of](const ConditionalEffectV& v) {
+                return literal_tuple(v.t, v.d().conditional_effects[v.i].effects, vars_of(v), false);
             })
-            .field("delete_effects", [scope_of](const ConditionalEffectV& v) {
-                nb::list l;
-                const auto r = v.d().conditional_effects[v.i].effects;
-                for (u32 k = 0; k < r.count; ++k)
-                    if (!v.d().literals[r.begin + k].positive)
-                        l.append(LiteralV{{v.t, r.begin + k}, scope_of(v)});
-                return l;
-            })
-            .field("numeric_effects", [scope_of](const ConditionalEffectV& v) {
+            .field("numeric_effects", [vars_of](const ConditionalEffectV& v) {
                 nb::list l;
                 const auto r = v.d().conditional_effects[v.i].numeric_effects;
+                const VariablesPtr vars = vars_of(v);
                 for (u32 k = 0; k < r.count; ++k)
-                    l.append(NumericEffectV{{v.t, r.begin + k}, scope_of(v), std::nullopt});
+                    l.append(NumericEffectV{{v.t, r.begin + k}, vars, std::nullopt});
                 return l;
             })
-            .field("auxiliary_effect", [scope_of](const ConditionalEffectV& v) -> nb::object {
+            .field("auxiliary_effect", [vars_of](const ConditionalEffectV& v) -> nb::object {
                 const auto& ce = v.d().conditional_effects[v.i];
                 if (!ce.auxiliary)
                     return nb::none();
-                return nb::cast(NumericEffectV{{v.t, 0}, scope_of(v), ce.auxiliary});
+                return nb::cast(NumericEffectV{{v.t, 0}, vars_of(v), ce.auxiliary});
             }, "the total-cost effect, if any")
             .finish();
     }
@@ -564,13 +332,13 @@ void bind_formalism(nb::module_& parent)
                    "parameters written in the PDDL; the rest were introduced by normalization")
             .field("parameters", [](const SchemaV& v) { return parameter_list(v.t, v.d().schemas[v.i].params); })
             .field("precondition", [](const SchemaV& v) {
-                return ConditionV{v.t, v.d().schemas[v.i].precondition, schema_scope(v.d(), v.i), "schema"};
-            })
+                return make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::precondition(v.d(), SchemaId{v.i}));
+            }, "a ConjunctiveCondition over the parameters")
             .field("effects", [](const SchemaV& v) {
                 nb::list l;
                 const auto& s = v.d().schemas[v.i];
                 for (u32 k = 0; k < s.effects.count; ++k)
-                    l.append(ConditionalEffectV{{v.t, s.effects.begin + k}, s.params});
+                    l.append(ConditionalEffectV{{v.t, s.effects.begin + k}, v.i, s.params});
                 return l;
             }, "conditional effects; an unconditional effect has an empty condition and no parameters")
             .finish();
@@ -583,40 +351,24 @@ void bind_formalism(nb::module_& parent)
     {
         nb::class_<AxiomV> c(m, "Axiom");
         identity_protocol(c, "axiom");
-        auto scope_of = [](const AxiomV& v) { return Scope{v.d().axioms[v.i].params, {}}; };
         ClassDescriptor<AxiomV>{c}
             .field("parameters", [](const AxiomV& v) { return parameter_list(v.t, v.d().axioms[v.i].params); })
-            .field("head", [scope_of](const AxiomV& v) {
-                // the head is stored inline; expose it through a temporary one-literal view
+            .field("head", [](const AxiomV& v) {
                 const auto& a = v.d().axioms[v.i];
-                nb::list terms;
-                for (fm::Term x : v.d().terms_of(a.head))
-                    terms.append(term_object(v.t, x, scope_of(v)));
-                return nb::make_tuple(PredicateV{{v.t, a.head.pred.v}}, terms);
-            }, "(derived predicate, terms)")
-            .field("body", [scope_of](const AxiomV& v) { return ConditionV{v.t, v.d().axioms[v.i].body, scope_of(v), "axiom"}; })
+                const auto terms = v.d().terms_of(a.head);
+                return make_lifted_atom(bare_owner(v.t), a.head.pred, std::vector<fm::Term>(terms.begin(), terms.end()),
+                                        scope_variables(v.d(), a.params));
+            }, "an Atom of a derived predicate over the parameters")
+            .field("body", [](const AxiomV& v) {
+                return make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::axiom_body(v.d(), v.i));
+            }, "a ConjunctiveCondition over the parameters")
             .field("from_problem", [](const AxiomV& v) { return v.d().axioms[v.i].from_problem; })
             .finish();
-        c.def("__repr__", [scope_of](const AxiomV& v) {
+        c.def("__repr__", [](const AxiomV& v) {
             const auto& a = v.d().axioms[v.i];
-            return "Axiom(" + literal_str(v.d(), a.head, scope_of(v)) + ")";
+            const VariablesPtr vars = scope_variables(v.d(), a.params);
+            return "Axiom(" + literal_text(v.d(), a.head.pred, true, v.d().terms_of(a.head), vars.get()) + ")";
         });
-    }
-    // --- GroundAtom (initial state)
-    {
-        nb::class_<GroundAtomV> c(m, "GroundAtom");
-        c.def_prop_ro("index", [](const GroundAtomV& v) { return v.i; });
-        ClassDescriptor<GroundAtomV>{c}
-            .field("predicate", [](const GroundAtomV& v) { return PredicateV{{v.t, v.a().pred.v}}; })
-            .field("objects", [](const GroundAtomV& v) { return object_list(v.t, v.a().objects); })
-            .finish();
-        c.def("__str__", [](const GroundAtomV& v) {
-            std::string out = "(" + std::string(v.d().str(v.d().predicates[v.a().pred.v].name));
-            for (ObjectId o : v.d().objects_of(v.a()))
-                out += " " + std::string(v.d().str(v.d().objects[o.v].name));
-            return out + ")";
-        });
-        c.def("__repr__", [](const GroundAtomV& v) { return "GroundAtom(" + nb::cast<std::string>(nb::str(nb::cast(v))) + ")"; });
     }
     // --- GroundFunctionValue
     {
@@ -640,18 +392,8 @@ void bind_formalism(nb::module_& parent)
             .field("functions", [](const FormalismTask& v) { return views_of<FunctionV>(v.t, v.t->functions); })
             .field("schemas", [](const FormalismTask& v) { return views_of<SchemaV>(v.t, v.t->schemas); })
             .field("axioms", [](const FormalismTask& v) { return views_of<AxiomV>(v.t, v.t->axioms); })
-            .field("static_init", [](const FormalismTask& v) {
-                nb::list l;
-                for (u32 i = 0; i < v.t->static_init.size(); ++i)
-                    l.append(GroundAtomV{{v.t, i}, false});
-                return l;
-            })
-            .field("fluent_init", [](const FormalismTask& v) {
-                nb::list l;
-                for (u32 i = 0; i < v.t->fluent_init.size(); ++i)
-                    l.append(GroundAtomV{{v.t, i}, true});
-                return l;
-            })
+            .field("static_init", [](const FormalismTask& v) { return ground_atoms(v.t, v.t->static_init); }, "GroundAtoms")
+            .field("fluent_init", [](const FormalismTask& v) { return ground_atoms(v.t, v.t->fluent_init); }, "GroundAtoms")
             .field("static_values", [](const FormalismTask& v) {
                 nb::list l;
                 for (u32 i = 0; i < v.t->static_values.size(); ++i)
@@ -665,11 +407,13 @@ void bind_formalism(nb::module_& parent)
                 return l;
             })
             .field("auxiliary_initial", [](const FormalismTask& v) { return v.t->auxiliary_initial; })
-            .field("goal", [](const FormalismTask& v) { return ConditionV{v.t, v.t->goal, Scope{}, "goal"}; })
+            .field("goal", [](const FormalismTask& v) { return make_ground_condition(bare_owner(v.t), GroundCondition::goal(*v.t)); },
+                   "a GroundCondition")
             .field("metric", [](const FormalismTask& v) -> nb::object {
                 if (!v.t->metric)
                     return nb::none();
-                return nb::make_tuple(v.t->metric->minimize ? "minimize" : "maximize", ExprV{{v.t, v.t->metric->expr}, Scope{}});
+                return nb::make_tuple(v.t->metric->minimize ? "minimize" : "maximize",
+                                     PyExpression{task_pool(bare_owner(v.t), nullptr), v.t->metric->expr});
             }, "('minimize'|'maximize', Expression) or None")
             .finish();
         c.def("to_text", [](const FormalismTask& v) { return formalism::write_task_text(*v.t); },

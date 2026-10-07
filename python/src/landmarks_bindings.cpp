@@ -41,7 +41,7 @@ using StateArg = Arg<PyState>;
 using AtomsArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 using AtomSetsArg = Arg<nb::typed<nb::iterable, nb::typed<nb::iterable, AtomLike>>>;
 using OrderingsArg = Arg<nb::typed<nb::iterable, nb::typed<nb::tuple, AtomLike, AtomLike>>>;
-using AtomList = nb::typed<nb::list, PyAtom>;
+using AtomList = nb::typed<nb::list, PyGroundAtom>;
 using ActionList = nb::typed<nb::list, PyAction>;
 using ReachabilityArg = Arg<PyRelaxedReachability>;
 using PredicateArg = Arg<std::variant<std::string, int>>;
@@ -299,7 +299,7 @@ void bind_landmarks(nb::module_& m)
                      })
         .def_prop_ro("members", [](const PyLiftedLandmark& x) { return atom_list(x.o, x.l.members); })
         .def_prop_ro("fact",
-                     [](const PyLiftedLandmark& x) -> Arg<std::optional<PyAtom>> {
+                     [](const PyLiftedLandmark& x) -> Arg<std::optional<PyGroundAtom>> {
                          if (!x.l.is_fact())
                              return nb::none();
                          return atom_object(x.o, x.l.fact);
@@ -362,7 +362,7 @@ void bind_landmarks(nb::module_& m)
         .def_prop_ro("disjunctive_atoms", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->disjunctive_atoms()); })
         .def_prop_ro("orderings",
                      [](const PyFactLandmarkGraph& g) {
-                         nb::typed<nb::list, nb::typed<nb::tuple, PyAtom, PyAtom>> out{nb::list()};
+                         nb::typed<nb::list, nb::typed<nb::tuple, PyGroundAtom, PyGroundAtom>> out{nb::list()};
                          for (const auto& [a, b] : g.g->orderings())
                              out.append(nb::make_tuple(atom_object(g.o, a), atom_object(g.o, b)));
                          return out;
