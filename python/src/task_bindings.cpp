@@ -979,10 +979,10 @@ void refill(PyBindingsIter& it)
             {
                 it.buf.insert(it.buf.end(), g.binding.begin(), g.binding.end());
                 it.lit_at.push_back(it.lits.size());
-                for (std::span<const GroundLiteral> part : {g.static_literals, g.fluent_literals, g.derived_literals})
+                for (std::span<const GroundLiteralView> part : {g.static_literals, g.fluent_literals, g.derived_literals})
                 {
                     it.lits.push_back(static_cast<u32>(part.size()));
-                    for (const GroundLiteral& l : part)
+                    for (const GroundLiteralView& l : part)
                     {
                         it.lits.push_back(l.predicate.v);
                         it.lits.push_back(l.positive ? 1 : 0);

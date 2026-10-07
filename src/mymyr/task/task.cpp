@@ -148,6 +148,11 @@ Workspace& Task::workspace() const
     return m_workspaces.local([this] { return std::make_unique<Workspace>(*this); });
 }
 
+Workspace& Task::evaluation_workspace() const
+{
+    return m_eval_workspaces.local([this] { return std::make_unique<Workspace>(*this); });
+}
+
 State Task::make_state(std::span<const AtomArgs> atoms, std::span<const f64> values) const
 {
     const CanonicalLayout& L = m_compiled.layout;
@@ -206,7 +211,7 @@ bool Task::is_goal(StateView s) const
     if (g.uses_derived || !m_compiled.num.goal.empty())
         // A separate per-thread workspace, so a goal test inside a successor callback does not clobber the
         // enumeration running in workspace().
-        return m_goal_workspaces.local([this] { return std::make_unique<Workspace>(*this); }).successors().is_goal(s);
+        return evaluation_workspace().successors().is_goal(s);
     for (const plan::Check& c : g.lits)
     {
         const u32 slot = m_atoms.find(c.pat.base);  // ground pattern: the key is the base

@@ -693,12 +693,12 @@ TEST_P(BindingsRandom, ConditionsMatchBruteForce)
                                         [&](const GroundConjunction& g)
                                         {
                                             usize at[3] = {0, 0, 0};
-                                            const std::span<const GroundLiteral> by[3] = {g.static_literals, g.fluent_literals,
+                                            const std::span<const GroundLiteralView> by[3] = {g.static_literals, g.fluent_literals,
                                                                                           g.derived_literals};
                                             for (const auto& l : c.literals)
                                             {
                                                 const u32 k = static_cast<u32>(task->data().predicates[l.predicate.v].kind);
-                                                const GroundLiteral& x = by[k][at[k]++];
+                                                const GroundLiteralView& x = by[k][at[k]++];
                                                 EXPECT_EQ(x.predicate, l.predicate);
                                                 EXPECT_EQ(x.positive, l.positive);
                                                 for (usize j = 0; j < l.terms.size(); ++j)

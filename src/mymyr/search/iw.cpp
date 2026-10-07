@@ -5,6 +5,7 @@
 #include "iw_detail.hpp"
 #include "layer_order_detail.hpp"
 
+#include "mymyr/search/goal.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -46,7 +47,10 @@ GoalTest GoalTest::from_spec(const Task& task, const GoalSpec& spec)
             g.m_kind = Kind::Task;
             break;
         }
-        case GoalSpec::Kind::AnyOf: g.m_kind = Kind::AnyOf; break;
+        case GoalSpec::Kind::AnyOf:
+            g.m_kind = Kind::AnyOf;
+            g.m_view = std::ranges::any_of(spec.goals, &GoalSpec::AtomGoal::needs_view);
+            break;
         case GoalSpec::Kind::Custom:
             if (!spec.test)
                 throw std::invalid_argument("GoalSpec::Kind::Custom needs a test function");
@@ -108,16 +112,11 @@ bool GoalTest::test(Successors& succ, StateView s, bool prepared) const
             return true;
         }
         case Kind::AnyOf:
+            if (m_view)
+                point(succ, s, prepared);
             for (const GoalSpec::AtomGoal& g : m_spec->goals)
-            {
-                bool ok = true;
-                for (SlotId x : g.positive)
-                    ok = ok && bits::test(s.w, s.nw, x.v);
-                for (SlotId x : g.negative)
-                    ok = ok && !bits::test(s.w, s.nw, x.v);
-                if (ok)
+                if (holds(g, succ, s))
                     return true;
-            }
             return false;
         case Kind::Custom: return m_spec->test(s);
         case Kind::Counter: return unsatisfied(succ, s, prepared) < m_threshold;

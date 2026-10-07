@@ -7,6 +7,7 @@
 #include "layer_order_detail.hpp"
 
 #include "mymyr/core/team.hpp"
+#include "mymyr/search/goal.hpp"
 #include "mymyr/state/chunked_store.hpp"
 #include "mymyr/state/compact_store.hpp"
 #include "mymyr/state/concurrent_store.hpp"
@@ -32,6 +33,22 @@ u64 brfs_fingerprint_term(u64 id, u64 canonical_state_hash)
 namespace
 {
 using Clock = std::chrono::steady_clock;
+
+/// Goal test of a state `succ` was prepared on: the task's goal, or BrfsOptions::goal.
+bool is_goal(const search::GoalSpec& g, Successors& succ, StateView s)
+{
+    switch (g.kind)
+    {
+        case search::GoalSpec::Kind::Task: return succ.goal_holds();
+        case search::GoalSpec::Kind::AnyOf:
+            for (const search::GoalSpec::AtomGoal& a : g.goals)
+                if (search::holds(a, succ, s))
+                    return true;
+            return false;
+        case search::GoalSpec::Kind::Custom: return g.test(s);
+    }
+    return false;
+}
 double seconds_since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
 
 /// Per-layer counts (BrfsOptions::layer_stats): open() at the start of a layer, close() at its end.
@@ -148,8 +165,9 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ)
         const u64* rec = store.words(StateId{id});
         cur.assign(rec, rec + store.record_words());  // [bits | numeric]: the arena may move during the expansion
         const u32 n = bits::trimmed_size(cur.data(), W);
-        succ.prepare({cur.data(), n, NN ? cur.data() + W : nullptr, NN});
-        const bool goal = succ.goal_holds();
+        const StateView sv{cur.data(), n, NN ? cur.data() + W : nullptr, NN};
+        succ.prepare(sv);
+        const bool goal = is_goal(o.goal, succ, sv);
         r.goal_states += goal;
         if (goal && o.stop_at_goal)
         {
@@ -248,8 +266,9 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ)
         next.resize(W);
         store.decode(StateId{id}, cur.data(), curnum.data());
         const u32 n = bits::trimmed_size(cur.data(), W);
-        succ.prepare({cur.data(), n, NN ? curnum.data() : nullptr, NN});
-        const bool goal = succ.goal_holds();
+        const StateView sv{cur.data(), n, NN ? curnum.data() : nullptr, NN};
+        succ.prepare(sv);
+        const bool goal = is_goal(o.goal, succ, sv);
         r.goal_states += goal;
         if (goal && o.stop_at_goal)
         {
@@ -379,8 +398,9 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ)
             const Fingerprint128 cf = layer_f[li];
             const u32 pid = layer_first + static_cast<u32>(li);
             const u32 n = bits::trimmed_size(cur.data(), W);
-            succ.prepare({cur.data(), n, NN ? curnum.data() : nullptr, NN});
-            const bool goal = succ.goal_holds();
+            const StateView sv{cur.data(), n, NN ? curnum.data() : nullptr, NN};
+            succ.prepare(sv);
+            const bool goal = is_goal(o.goal, succ, sv);
             r.goal_states += goal;
             if (goal && o.stop_at_goal)
             {
@@ -604,7 +624,7 @@ private:
         Successors& succ = *w.succ;
         const StateView rec = m_store.record(m_loc[id]);  // records never move
         succ.prepare(rec);
-        const bool goal = succ.goal_holds();
+        const bool goal = is_goal(m_o.goal, succ, rec);
         w.goals += goal;
         if (goal && m_o.stop_at_goal)
         {
@@ -784,6 +804,8 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
     }
     if (store != BrfsOptions::Store::Concurrent && T > 1)
         throw std::invalid_argument("mymyr brfs: the flat, chunked and compact stores are single-threaded");
+    if (options.goal.kind == search::GoalSpec::Kind::Custom && (T > 1 || !options.goal.test))
+        throw std::invalid_argument("mymyr brfs: a custom goal test needs threads == 1 and a test function");
     if (std::string e = search::detail::check_layers(options.layers); !e.empty())
         throw std::invalid_argument("mymyr brfs: " + e);
     const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
