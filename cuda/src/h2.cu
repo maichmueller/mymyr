@@ -123,8 +123,8 @@ __global__ void k_evaluate_h2(Relaxed r, Rows rows, u64 group_bytes, void* scrat
             for (u32 o = tid; o < r.O; o += nt)
             {
                 u32 c = 0;
-                for (u32 i = r.pre_begin[o]; i < r.pre_begin[o + 1]; ++i)
-                    for (u32 j = i; j < r.pre_begin[o + 1]; ++j)
+                for (u32 i = r.pre_begin[o]; i < r.pre_begin[o + 1] && c != k_inf; ++i)
+                    for (u32 j = i; j < r.pre_begin[o + 1] && c != k_inf; ++j)
                     {
                         const u32 v = cost[pair_index(r.pre[i], r.pre[j])];
                         c = v > c ? v : c;
@@ -141,7 +141,7 @@ __global__ void k_evaluate_h2(Relaxed r, Rows rows, u64 group_bytes, void* scrat
                     for (u32 j = i; j < r.eff_begin[o + 1]; ++j)
                     {
                         const u32 p = r.eff[i], q = r.eff[j];
-                        if (r.complement[p] != q)
+                        if (r.complement[p] != q && v < cost[pair_index(p, q)])
                             atomicMin(next + pair_index(p, q), v);
                     }
                 if (!r.axiom[o])
@@ -158,33 +158,48 @@ __global__ void k_evaluate_h2(Relaxed r, Rows rows, u64 group_bytes, void* scrat
                             for (u32 k = r.eff_begin[other]; k < r.eff_begin[other + 1]; ++k)
                             {
                                 const u32 p = r.eff[i], q = r.eff[k];
-                                if (p != q && r.complement[p] != q)
+                                if (p != q && r.complement[p] != q && both < cost[pair_index(p, q)])
                                     atomicMin(next + pair_index(p, q), both);
                             }
                     }
                 }
             }
-            for (u64 i = tid; i < u64{r.O} * r.P; i += nt)
-            {
-                const u32 o = static_cast<u32>(i / r.P), p = static_cast<u32>(i % r.P);
-                u32 c = base[o];
-                if (c == k_inf || excludes(r, o, p))
-                    continue;
-                if (r.pre_begin[o] == r.pre_begin[o + 1])
-                    c = cost[pair_index(p, p)];
-                else
-                    for (u32 j = r.pre_begin[o]; j < r.pre_begin[o + 1]; ++j)
+            __syncthreads();
+            // A lane owns each pair's persistence minimum. Achiever lists avoid scanning operators that cannot
+            // change either endpoint, and the single writer avoids contention between their persistence updates.
+            for (u32 q = tid / 32; q < r.P; q += nt / 32)
+                for (u32 p = tid % 32; p < q; p += 32)
+                {
+                    if (r.complement[p] == q)
+                        continue;
+                    const u64 at = pair_index(p, q);
+                    u32 best = next[at];
+                    for (u32 side = 0; side < 2; ++side)
                     {
-                        const u32 v = cost[pair_index(r.pre[j], p)];
-                        c = v > c ? v : c;
+                        const u32 effect = side ? q : p, keep = side ? p : q;
+                        for (u32 i = r.ach_begin[effect]; i < r.ach_begin[effect + 1]; ++i)
+                        {
+                            const u32 o = r.ach[i];
+                            u32 c = base[o];
+                            if (c == k_inf || add_cost(c, r.opcost[o]) >= best || excludes(r, o, keep))
+                                continue;
+                            if (r.pre_begin[o] == r.pre_begin[o + 1])
+                                c = cost[pair_index(keep, keep)];
+                            else
+                                for (u32 j = r.pre_begin[o]; j < r.pre_begin[o + 1] && c != k_inf; ++j)
+                                {
+                                    const u32 v = cost[pair_index(r.pre[j], keep)];
+                                    c = v > c ? v : c;
+                                }
+                            if (c != k_inf)
+                            {
+                                const u32 v = add_cost(c, r.opcost[o]);
+                                best = v < best ? v : best;
+                            }
+                        }
                     }
-                if (c == k_inf)
-                    continue;
-                const u32 v = add_cost(c, r.opcost[o]);
-                for (u32 j = r.eff_begin[o]; j < r.eff_begin[o + 1]; ++j)
-                    if (r.complement[r.eff[j]] != p)
-                        atomicMin(next + pair_index(r.eff[j], p), v);
-            }
+                    next[at] = best;
+                }
             __syncthreads();
             for (u64 i = tid; i < pairs; i += nt)
             {
