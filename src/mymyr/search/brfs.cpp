@@ -100,7 +100,8 @@ public:
           m_next_progress(std::max<u64>(1, o.progress_interval))
     {
         if (m_timed)
-            m_deadline = m_t0 + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(std::max(0.0, o.max_seconds)));
+            m_deadline = m_t0 + std::chrono::duration_cast<Clock::duration>(
+                                    std::chrono::duration<double>(std::max(0.0, o.max_seconds)));
     }
 
     [[nodiscard]] search::SearchObserver* observer() const { return m_obs; }
@@ -885,8 +886,8 @@ private:
                 const u32 nn = apply_delta(rec.w, rec.nw, d, w.next);
                 const bool fresh = m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num).second;
                 if (w.obs)  // ids are assigned when the layer ends
-                    w.obs->on_generate(id, action_of(succ, s, b), ~u64{0}, {w.next.data(), nn, d.num, m_task.numeric_words()},
-                                       fresh);
+                    w.obs->on_generate(id, action_of(succ, s, b), ~u64{0},
+                                       {w.next.data(), nn, d.num, m_task.numeric_words()}, fresh);
                 return true;
             },
             m_o.witness_pruning, m_o.canonical_order);
@@ -1095,7 +1096,8 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
                 r = ordered ? run_flat<true>(task, options, succ, ctl) : run_flat<false>(task, options, succ, ctl);
                 break;
             case BrfsOptions::Store::Chunked:
-                r = ordered ? run_chunked<true>(task, options, succ, ctl) : run_chunked<false>(task, options, succ, ctl);
+                r = ordered ? run_chunked<true>(task, options, succ, ctl)
+                            : run_chunked<false>(task, options, succ, ctl);
                 break;
             default: r = run_compact(task, options, succ, ctl); break;
         }
