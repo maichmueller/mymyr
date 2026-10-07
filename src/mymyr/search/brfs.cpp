@@ -117,7 +117,10 @@ public:
     /// Before an expansion: false once max_seconds, the token or on_progress stops the search.
     bool keep_going(const BrfsResult& r, u64 states)
     {
-        if ((m_tick++ & 7) == 0 && !check())
+        if (--m_countdown != 0) [[likely]]
+            return true;
+        m_countdown = k_check_every;
+        if (!check())
             return false;
         if (m_obs && r.expanded >= m_next_progress)
         {
@@ -174,7 +177,8 @@ private:
     Clock::time_point m_deadline{};
     bool m_timed;
     u64 m_next_progress;
-    u32 m_tick = 0;
+    static constexpr u32 k_check_every = 8;  // expansions between checks of the time, the token and on_progress
+    u32 m_countdown = 1;
     std::optional<search::SearchStatus> m_stopped;
 };
 
@@ -223,7 +227,7 @@ struct Nodes
 };
 
 // ------------------------------------------------------------------------------------------------- flat
-template<bool Ordered>
+template<bool Ordered, bool Observed>
 BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Control& ctl)
 {
     BrfsResult r;
@@ -236,7 +240,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
     store.insert(s0.view());
     nodes.root();
     std::vector<u64> cur, next;
-    search::SearchObserver* const obs = ctl.observer();
+    search::SearchObserver* const obs = Observed ? ctl.observer() : nullptr;
     ctl.start(s0.view());
     const auto t0 = Clock::now();
     u32 layer_end = 0;
@@ -291,7 +295,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
             break;
         }
         ++r.expanded;
-        if (obs)
+        if constexpr (Observed)
             obs->on_expand(id, sv);
         succ.generate<Ordered>(
             [&](u32 s, const ObjectId* b, const Delta& d)
@@ -299,7 +303,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
                 ++r.generated;
                 const u32 nn = apply_delta(cur.data(), n, d, next);
                 const auto [child, fresh] = store.insert(next.data(), nn, d.num);
-                if (obs)
+                if constexpr (Observed)
                     obs->on_generate(id, action_of(succ, s, b), child.v, {next.data(), nn, d.num, NN}, fresh);
                 if (fresh)
                 {
@@ -332,7 +336,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
 }
 
 // ------------------------------------------------------------------------------------------------- chunked
-template<bool Ordered>
+template<bool Ordered, bool Observed>
 BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ, Control& ctl)
 {
     BrfsResult r;
@@ -345,7 +349,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
     store.insert(s0.view());
     nodes.root();
     std::vector<u64> cur, next, curnum(NN), scratch;
-    search::SearchObserver* const obs = ctl.observer();
+    search::SearchObserver* const obs = Observed ? ctl.observer() : nullptr;
     ctl.start(s0.view());
     const auto t0 = Clock::now();
     u32 layer_end = 0;
@@ -402,7 +406,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
             break;
         }
         ++r.expanded;
-        if (obs)
+        if constexpr (Observed)
             obs->on_expand(id, sv);
         succ.generate<Ordered>(
             [&](u32 s, const ObjectId* b, const Delta& d)
@@ -428,7 +432,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
                 for (SlotId x : d.add)
                     bits::set(next.data(), x.v);
                 const auto [child, fresh] = store.insert_successor(StateId{id}, cur.data(), next.data(), d);
-                if (obs)
+                if constexpr (Observed)
                     obs->on_generate(id, action_of(succ, s, b), child.v,
                                      {next.data(), bits::trimmed_size(next.data(), W), d.num, NN}, fresh);
                 if (fresh)
@@ -468,6 +472,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
 }
 
 // ------------------------------------------------------------------------------------------------- compact
+template<bool Observed>
 BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ, Control& ctl)
 {
     BrfsResult r;
@@ -512,7 +517,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
     closed.insert(key_of(f0, s0.numeric().data()));
     nodes.root();
     u32 layer_first = 0;
-    search::SearchObserver* const obs = ctl.observer();
+    search::SearchObserver* const obs = Observed ? ctl.observer() : nullptr;
     ctl.start(s0.view());
     const auto t0 = Clock::now();
     bool stopped = false;
@@ -549,7 +554,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                 break;
             }
             ++r.expanded;
-            if (obs)
+            if constexpr (Observed)
                 obs->on_expand(pid, sv);
             succ.generate<false>(
                 [&](u32 s, const ObjectId* b, const Delta& d)
@@ -606,7 +611,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                     for (u32 slot : changed)
                         bits::reset(tog.data(), slot);
                     const bool fresh = closed.size() < o.max_states && closed.insert(key_of(f, d.num));
-                    if (obs)  // a duplicate's id is not kept (closed states are fingerprints)
+                    if constexpr (Observed)  // a duplicate's id is not kept (closed states are fingerprints)
                         obs->on_generate(pid, action_of(succ, s, b), fresh ? closed.size() - 1 : ~u64{0},
                                          {next.data(), bits::trimmed_size(next.data(), W), d.num, NN}, fresh);
                     if (!fresh)
@@ -1093,13 +1098,21 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
         switch (store)
         {
             case BrfsOptions::Store::Flat:
-                r = ordered ? run_flat<true>(task, options, succ, ctl) : run_flat<false>(task, options, succ, ctl);
+                r = ordered ? (options.observer ? run_flat<true, true>(task, options, succ, ctl)
+                                                : run_flat<true, false>(task, options, succ, ctl))
+                            : (options.observer ? run_flat<false, true>(task, options, succ, ctl)
+                                                : run_flat<false, false>(task, options, succ, ctl));
                 break;
             case BrfsOptions::Store::Chunked:
-                r = ordered ? run_chunked<true>(task, options, succ, ctl)
-                            : run_chunked<false>(task, options, succ, ctl);
+                r = ordered ? (options.observer ? run_chunked<true, true>(task, options, succ, ctl)
+                                                : run_chunked<true, false>(task, options, succ, ctl))
+                            : (options.observer ? run_chunked<false, true>(task, options, succ, ctl)
+                                                : run_chunked<false, false>(task, options, succ, ctl));
                 break;
-            default: r = run_compact(task, options, succ, ctl); break;
+            default:
+                r = options.observer ? run_compact<true>(task, options, succ, ctl)
+                                     : run_compact<false>(task, options, succ, ctl);
+                break;
         }
     }
     r.fluent_slots = task.atoms().fluent_slots();
