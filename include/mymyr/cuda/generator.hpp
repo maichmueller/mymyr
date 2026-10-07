@@ -32,6 +32,7 @@
 
 #include "mymyr/cuda/device_task.hpp"
 #include "mymyr/cuda/lifted.hpp"
+#include "mymyr/cuda/numeric.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/task/task.hpp"
 
@@ -95,7 +96,7 @@ struct ChunkInput
 {
     const u64* states = nullptr;  // device rows
     u64 stride = 0;               // words between rows
-    u32 words = 0;
+    u32 words = 0;  // total row width: atom words followed by one double per numeric slot
     u32 rows = 0;
     const u64* host_states = nullptr;  // host copy (needed when needs_host())
     u64 host_stride = 0;
@@ -110,14 +111,14 @@ class ChunkGenerator
 {
 public:
     /// `stream` null: the context's stream. Throws std::invalid_argument for tasks the device cannot run at all
-    /// (supported() explains why).
+    /// (unsupported() explains why).
     ChunkGenerator(ContextPtr ctx, TaskPtr task, cudaStream_t stream = nullptr);
     ChunkGenerator(const ChunkGenerator&) = delete;
     ChunkGenerator& operator=(const ChunkGenerator&) = delete;
     ~ChunkGenerator();
 
-    /// Empty if the device can run the task (with CPU fallback for some schemas), otherwise the reason: numeric
-    /// fluents, object bitsets wider than lifted::k_max_ow words, or states wider than lifted::k_max_words words.
+    /// Empty if the device can run the task (with CPU fallback for some schemas), otherwise the reason: object
+    /// bitsets wider than lifted::k_max_ow words, or states wider than lifted::k_max_words words.
     [[nodiscard]] static std::string unsupported(const Task& task);
 
     [[nodiscard]] const ContextPtr& context() const noexcept { return m_ctx; }
@@ -232,9 +233,10 @@ public:
     // ------------------------------------------------------------------------------------------ capture
     /// Whether a chunk's launches (begin() .. write()) can be captured into a CUDA graph: no host work and no
     /// synchronization inside (the CPU fallback, host axioms and derived atoms under lazy slots have them).
+    /// Numeric tasks check overflow synchronously and cannot be captured.
     [[nodiscard]] bool capturable(bool witness) const noexcept
     {
-        return !needs_host(witness) && !(m_device_axioms && m_task->has_axioms() && m_missing_words);
+        return !m_task->numeric_slots() && !needs_host(witness) && !(m_device_axioms && m_task->has_axioms() && m_missing_words);
     }
     /// Sizes the scratch for chunks of up to `rows` parents and refreshes the upload, so that begin() .. write() of
     /// such a chunk allocate nothing (a capture must not).
@@ -296,6 +298,7 @@ private:
     bool m_host_pending = false;  // begin_device() ran, host_work() not yet
 
     lifted::Parents m_parents{};
+    Scratch m_numeric_error;
     Scratch m_views, m_counts, m_offsets, m_scan, m_derived, m_schema_sets;
     Scratch m_put_mask;  // [2, S] u8 per witness setting: the schema's rows are deferred (launch_put)
     Scratch m_deep_work;  // the deep launches' scratch (lifted::SchemaSet::work, deep_work_words)

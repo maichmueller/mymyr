@@ -174,6 +174,8 @@ DeviceTableIw::DeviceTableIw(ContextPtr ctx, rl::TaskTablePtr table, const Multi
 {
     if (!ctx || !table)
         throw std::invalid_argument("mymyr: DeviceTableIw: null context or table");
+    if (table->numeric())
+        throw std::invalid_argument("mymyr: device IW over numeric task tables is not supported");
     for (u32 i = 0; i < table->size(); ++i)
         if (const std::string why = multi_iw_unsupported(*table->task(i), options); !why.empty())
             throw std::invalid_argument("mymyr: the CUDA backend cannot run these searches: instance " + std::to_string(i) + ": " + why);

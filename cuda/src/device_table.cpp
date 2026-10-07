@@ -21,6 +21,8 @@ std::shared_ptr<DeviceTaskTable> DeviceTaskTable::upload(ContextPtr ctx, rl::Tas
 
 std::string DeviceTaskTable::unsupported(const rl::TaskTable& table)
 {
+    if (table.numeric())
+        return "numeric task tables: device multi-instance kernels require atom-only states";
     for (u32 i = 0; i < table.size(); ++i)
         if (const std::string why = ChunkGenerator::unsupported(*table.task(i)); !why.empty())
             return "instance " + std::to_string(i) + " of this table: " + why;

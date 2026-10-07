@@ -101,26 +101,41 @@ def test_rl_rows_carry_the_numeric_words(counters, hydropower):
             rl.expand(task, np.zeros((1, NN), dtype=np.uint64))  # no atom words
 
 
-def test_device_task_rejects_numeric_tasks(counters):
-    # the device format has no numeric section yet: uploading a numeric task must fail, not drop the values
+def test_device_numeric_expand_and_search(counters):
     try:
         import mymyr.cuda as mc
     except ImportError:
         pytest.skip("mymyr was built without the CUDA backend")
     if not mc.available():
         pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
-    ctx = mc.Context(0, max_bytes=1 << 28)
-    with pytest.raises(ValueError, match="numeric"):
-        mc.DeviceTask(counters, ctx)
-    # nor do the device kernels read the values: the device BrFS and the device expand refuse numeric tasks
-    with pytest.raises(ValueError, match="numeric"):
-        mc.brfs(counters, ctx=ctx)
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("torch has no CUDA device")
-    rows = torch.from_dlpack(counters.encode([counters.initial_state], framework="torch")).cuda()
-    with pytest.raises(ValueError, match="numeric"):
-        rl.expand(counters, rows)
+    from mymyr import search
+
+    ctx = mc.Context(0, max_bytes=1 << 28)
+    uploaded = mc.DeviceTask(counters, ctx)
+    assert uploaded.validate() == (0, 0)
+    cpu_brfs = search.brfs(counters)
+    gpu_brfs = mc.brfs(counters, ctx=ctx)
+    assert gpu_brfs.states == cpu_brfs.states
+    stored = torch.from_dlpack(gpu_brfs.state_words()).cpu().numpy()
+    decoded = counters.decode(stored)
+    assert len(decoded) == gpu_brfs.states and decoded[0] == counters.initial_state
+    assert len(set(decoded)) == gpu_brfs.states
+    starts = [counters.initial_state] + counters.successor_states(counters.initial_state)
+    arr, _ = rows(counters, starts)
+    device_rows = torch.from_numpy(arr).cuda()
+    expected = rl.expand(counters, arr, goal=True)
+    actual = rl.expand(counters, device_rows, goal=True, ctx=ctx)
+    assert actual.numeric_words == counters.numeric_words
+    assert np.array_equal(torch.from_dlpack(actual.succ).cpu().numpy(), expected.succ)
+    assert np.array_equal(torch.from_dlpack(actual.goal).cpu().numpy(), expected.goal)
+    padded = actual.pad()
+    assert padded.succ.shape[-1] == expected.words + counters.numeric_words
+    batch = mc.multi_iw(counters, starts, ctx=ctx)
+    for i, start in enumerate(starts):
+        want = search.iw(counters, start=start)
+        assert batch.status[i] == want.status
+        assert len(batch.plan(i)) == len(want.plan)
 
 
 def replay_to_goal(task, plan):
@@ -158,3 +173,22 @@ def test_python_heuristic_reads_the_values(counters):
 
     r = search.astar(counters, heuristic=h)
     assert r.status == search.Status.SOLVED and len(set(seen)) > 1
+
+
+def test_numeric_device_arrays_have_programs(counters, hydropower):
+    for task in (counters, hydropower):
+        arrays = task.device_arrays()
+        assert arrays["section_numeric"] == 1
+        assert arrays["numeric_slots"] == task.numeric_slots
+        assert arrays["num_code"].dtype == np.uint32 and arrays["num_code"].shape[1] == 4
+        assert arrays["num_effects"].shape[1] == 8
+        assert arrays["num_tables"].dtype == np.uint64
+        assert arrays["num_initial"].dtype == np.float64
+        assert np.array_equal(arrays["num_initial"], task.initial_state.numeric_values())
+        assert not arrays["num_code"].flags.writeable
+
+
+def test_classical_device_arrays_have_no_numeric_section():
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/tasks/gripper__prob05.txt"))
+    arrays = task.device_arrays()
+    assert "section_numeric" not in arrays and "num_code" not in arrays

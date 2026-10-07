@@ -11,6 +11,7 @@
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/generator.hpp"
+#include "mymyr/cuda/numeric_kernels.hpp"
 #include "mymyr/cuda/multi_iw_kernels.hpp"
 #include "mymyr/cuda/state_set.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
@@ -217,7 +218,8 @@ search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& star
     if (r.status == search::SearchStatus::Solved)
     {
         r.plan = plan(i, task);
-        r.goal_state = State(goal_rows.data() + static_cast<u64>(i) * words, words);
+        const u64* row = goal_rows.data() + static_cast<u64>(i) * (words + numeric_words);
+        r.goal_state = State(row, words, numeric_words ? row + words : nullptr, task.numeric_words());
         if (costs)
         {
             const heuristics::ActionCosts c(task);
@@ -601,22 +603,36 @@ void DeviceMultiIw::Impl::widen(u32 nw, u32 arity)
 {
     DevArray<u64> rows;
     rows.ensure(ctx, std::max<u64>(n_cap, 1) * nw, s);
-    check(state_set::launch_relayout(n_rows.data(), W, rows.data(), nw, n_tail, s), "launch_relayout");
+    if (task->numeric_slots())
+    {
+        auto view = gen->view();
+        view.numeric.storage = 0;
+        check(numeric::launch_convert(view, n_rows.data(), W, W - task->numeric_slots(), rows.data(), nw,
+                                       nw - task->numeric_slots(), n_tail, true, s), "numeric relayout");
+    }
+    else
+        check(state_set::launch_relayout(n_rows.data(), W, rows.data(), nw, n_tail, s), "launch_relayout");
     n_rows = std::move(rows);
     if (sv.reached)
     {
         DevArray<u64> r;
         r.ensure(ctx, u64{B} * nw, s);
-        check(state_set::launch_relayout(reached.data(), W, r.data(), nw, B, s), "launch_relayout");
+        check(state_set::launch_relayout(reached.data(), sv.reached_words, r.data(), nw - task->numeric_slots(), B, s), "launch_relayout");
         reached = std::move(r);
         sv.reached = reached.data();
-        sv.reached_words = nw;
+        sv.reached_words = nw - task->numeric_slots();
     }
     if (!h_rows.empty() || cpu_goal)
     {
         std::vector<u64> h(static_cast<u64>(n_tail) * nw, 0);
         for (u64 i = 0; i < n_tail && i * W < h_rows.size(); ++i)
-            std::copy_n(h_rows.begin() + static_cast<std::ptrdiff_t>(i * W), W, h.begin() + static_cast<std::ptrdiff_t>(i * nw));
+        {
+            const u32 slots = task->numeric_slots();
+            std::copy_n(h_rows.begin() + static_cast<std::ptrdiff_t>(i * W), W - slots,
+                        h.begin() + static_cast<std::ptrdiff_t>(i * nw));
+            std::copy_n(h_rows.begin() + static_cast<std::ptrdiff_t>((i + 1) * W - slots), slots,
+                        h.begin() + static_cast<std::ptrdiff_t>((i + 1) * nw - slots));
+        }
         h_rows.swap(h);
     }
     W = nw;
@@ -653,13 +669,14 @@ MultiIwBatch DeviceMultiIw::run(std::span<const State> starts, std::span<const s
     u32 w = std::max<u32>(1, m->task->words());
     for (const State& x : starts)
     {
-        if (x.numeric_words())
-            throw std::invalid_argument("mymyr: device IW: start states with numeric values (numeric tasks are not supported)");
+        if (x.numeric_words() != m->task->numeric_words())
+            throw std::invalid_argument("mymyr: device IW: start state has the wrong numeric width");
         w = std::max<u32>(w, x.size_words());
     }
+    w += m->task->numeric_slots();
     std::vector<u64> rows(starts.size() * static_cast<u64>(w), 0);
     for (usize i = 0; i < starts.size(); ++i)
-        std::copy_n(starts[i].data(), starts[i].size_words(), rows.begin() + static_cast<std::ptrdiff_t>(i * w));
+        numeric::encode(*m->task, starts[i].view(), rows.data() + i * w, w);
     DevArray<u64> dev;
     dev.ensure(m->ctx, std::max<u64>(rows.size(), 1), m->s);
     to_device(dev.data(), rows.data(), rows.size(), m->s);
@@ -684,8 +701,8 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
         throw std::invalid_argument("mymyr: device IW: malformed start rows");
     randomized = !seeds.empty();
     per_search_goals = !goals.empty();
-    host_goal = !per_search_goals && task->compiled().goal.uses_derived;
-    cpu_goal = host_goal && !gen->device_axioms();
+    host_goal = !per_search_goals && (task->compiled().goal.uses_derived || task->numeric_slots());
+    cpu_goal = host_goal && task->compiled().goal.uses_derived && !gen->device_axioms();
     const double secs = o.budget.max_seconds;
     timed = secs < 1e15;
     if (timed)
@@ -702,7 +719,24 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     out.num_passes.assign(n, 0);
     Host host;
     host.plan_at.assign(n, ~u64{0});
-    W = bucket(std::max({task->words(), starts.words, 1u}));
+    const u32 slots = task->numeric_slots();
+    if (starts.words < (starts.numeric_words ? starts.numeric_words : slots))
+        throw std::invalid_argument("mymyr: device IW: start rows have no numeric block");
+    const u32 input_atoms = starts.words - (starts.numeric_words ? starts.numeric_words : slots);
+    W = bucket(std::max({task->words(), input_atoms, 1u}) + slots);
+    DevArray<u64> numeric_starts;
+    if (slots)
+    {
+        auto view = gen->view();
+        if (!starts.numeric_words)
+            view.numeric.storage = 0;
+        else if (starts.numeric_words != task->numeric_words())
+            throw std::invalid_argument("mymyr: device IW: start rows have the wrong numeric width");
+        auto* converted = numeric_starts.ensure(ctx, std::max<u64>(u64{n} * W, 1), s);
+        check(numeric::launch_convert(view, starts.data, starts.stride, input_atoms, converted, W, W - slots, n, true, s),
+              "numeric starts");
+        starts = DeviceStarts{converted, W, W, n};
+    }
     // group size: the novelty tables of a group fit table_bytes
     const u64 tw = std::max<u32>(1, task->words());
     const u64 per = o.max_arity >= 2 ? u64{512} * tw * tw : o.max_arity == 1 ? 8 * tw : 8;
@@ -719,11 +753,20 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     }
     // flatten: goal rows at the final width, plans in search order
     out.words = std::max<u32>(1, task->words());
-    out.goal_rows.assign(static_cast<u64>(n) * out.words, 0);
+    out.numeric_words = task->numeric_words();
+    out.goal_rows.assign(static_cast<u64>(n) * (out.words + out.numeric_words), 0);
     if (host.goal_w)
         for (u32 i = 0; i < n; ++i)
-            std::copy_n(host.goal.begin() + static_cast<std::ptrdiff_t>(u64{i} * host.goal_w), std::min(host.goal_w, out.words),
-                        out.goal_rows.begin() + static_cast<std::ptrdiff_t>(u64{i} * out.words));
+        {
+            const u64* src = host.goal.data() + u64{i} * host.goal_w;
+            u64* dst = out.goal_rows.data() + u64{i} * (out.words + out.numeric_words);
+            std::copy_n(src, std::min(host.goal_w - slots, out.words), dst);
+            if (slots && out.status[i] == search::SearchStatus::Solved)
+            {
+                const State decoded = numeric::decode(*task, src, host.goal_w);
+                std::copy_n(decoded.numeric().data(), out.numeric_words, dst + out.words);
+            }
+        }
     out.plan_offsets.assign(static_cast<u64>(n) + 1, 0);
     for (u32 i = 0; i < n; ++i)
         out.plan_offsets[i + 1] = out.plan_offsets[i] + (host.plan_at[i] != ~u64{0} ? static_cast<u64>(out.plan_length[i]) : 0);
@@ -843,7 +886,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
             // every search's start state is created first: its atoms are reached (the roots are copied in by
             // run_pass, which knows the rows)
             sv.reached = reached.ensure(ctx, u64{count} * W, s);
-            sv.reached_words = W;
+            sv.reached_words = W - task->numeric_slots();
         }
         run_pass(starts, k, rule, pending, k == first);
         to_host(counters, sv.expanded, 4 * u64{count}, s);
@@ -887,9 +930,9 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     }
     if (o.track_reached && sv.reached)
     {
-        std::vector<u64> r(u64{count} * W);
+        std::vector<u64> r(u64{count} * sv.reached_words);
         to_host(r.data(), sv.reached, r.size(), s);  // (pageable: returns when the copy is done)
-        put_rows(host.reached, host.reached_w, out.n, g0, r.data(), count, W);
+        put_rows(host.reached, host.reached_w, out.n, g0, r.data(), count, sv.reached_words);
     }
 }
 
@@ -996,9 +1039,9 @@ bool DeviceMultiIw::Impl::recover(const u32* hc, u32 arity)
     const auto tm = Clock::now();
     (void)gen->resolve_missing();
     st.host_ms += ms_since(tm);
-    if (bucket(task->words()) > W)
+    if (bucket(task->words() + task->numeric_slots()) > W)
     {
-        widen(bucket(task->words()), arity);
+        widen(bucket(task->words() + task->numeric_slots()), arity);
         return true;
     }
     grow_table(arity);
@@ -1148,9 +1191,9 @@ bool DeviceMultiIw::Impl::enqueue_expansion(Expansion& x, const miw::Gathered& g
         else
             gen->begin(in, o.witness_pruning, o.canonical_order);
         st.host_ms += ms_since(th);
-        if (bucket(task->words()) > W)
+        if (bucket(task->words() + task->numeric_slots()) > W)
         {
-            widen(bucket(task->words()), arity);  // the CPU fallback interned atoms beyond the rows' width
+            widen(bucket(task->words() + task->numeric_slots()), arity);  // the CPU fallback interned atoms beyond the rows' width
             return false;
         }
         grow_table(arity);
@@ -1204,6 +1247,17 @@ bool DeviceMultiIw::Impl::enqueue_expansion(Expansion& x, const miw::Gathered& g
 
 void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule, const std::vector<u32>& roots, bool init_reached)
 {
+    DevArray<u64> resized_starts;
+    if (task->numeric_slots() && starts.words != W)
+    {
+        auto view = gen->view();
+        view.numeric.storage = 0;
+        const u32 slots = task->numeric_slots();
+        auto* converted = resized_starts.ensure(ctx, std::max<u64>(u64{starts.rows} * W, 1), s);
+        check(numeric::launch_convert(view, starts.data, starts.stride, starts.words - slots, converted, W,
+                                      W - slots, starts.rows, true, s), "numeric starts relayout");
+        starts = DeviceStarts{converted, W, W, starts.rows};
+    }
     const u32 R = static_cast<u32>(roots.size());
     n_tail = 0;
     ensure_nodes(std::max<u64>(R, 1024));
@@ -1216,7 +1270,11 @@ void DeviceMultiIw::Impl::run_pass(DeviceStarts starts, u32 arity, u32 root_rule
     if (init_reached && sv.reached)
     {
         // the first pass has every search as a root, in order: the roots are the start states
-        check(cudaMemcpyAsync(sv.reached, n_rows.data(), u64{R} * W * sizeof(u64), cudaMemcpyDeviceToDevice, s), "cudaMemcpyAsync");
+        if (task->numeric_slots())
+            check(cudaMemcpy2DAsync(sv.reached, u64{sv.reached_words} * sizeof(u64), n_rows.data(), u64{W} * sizeof(u64),
+                                    u64{sv.reached_words} * sizeof(u64), R, cudaMemcpyDeviceToDevice, s), "cudaMemcpy2DAsync");
+        else
+            check(cudaMemcpyAsync(sv.reached, n_rows.data(), u64{R} * W * sizeof(u64), cudaMemcpyDeviceToDevice, s), "cudaMemcpyAsync");
     }
     if (arity >= 1)
     {
@@ -1440,7 +1498,8 @@ bool DeviceMultiIw::Impl::enqueue_chunk(Run& r, u32 pb)
             if (node == miw::k_dead)
                 continue;
             const u64* row = h_rows.data() + u64{node} * W;
-            h_goal[i] = succ.is_goal(StateView{row, bits::trimmed_size(row, W), nullptr, 0}) ? 1 : 0;
+            const State decoded = numeric::decode(*task, row, W);
+            h_goal[i] = succ.is_goal(decoded.view()) ? 1 : 0;
         }
         to_device(const_cast<u8*>(ch.host_goal), h_goal.data(), P, s);
         st.host_ms += ms_since(th);

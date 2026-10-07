@@ -1,7 +1,7 @@
 """mymyr.cuda: many IW searches at once on the device. multi_iw and batched_iw1 against mymyr.search.iw from the
 same starts (status, plan, goal state, per-pass counts, cost), with per-search goals and budgets; batched_iw1 from
 torch CUDA rows read in place; rollouts are deterministic and independent of the launch configuration (their equality
-with the CPU rollouts is the C++ test's, tests/cuda/test_device_iw.cpp); numeric tasks and bad arguments raise.
+with the CPU rollouts is the C++ test's, tests/cuda/test_device_iw.cpp); numeric rollouts and bad arguments raise.
 
 Runs only when a GPU is made visible explicitly (conftest.py hides GPUs by default), e.g.
 
@@ -157,7 +157,7 @@ def test_rollouts_with_a_goal_solve_and_replay(ctx):
 def test_errors(ctx):
     numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
     with pytest.raises(ValueError, match="numeric"):
-        mc.multi_iw(numeric, [numeric.initial_state], ctx=ctx)
+        mc.rollouts(numeric, [0], ctx=ctx)
     task = text_task("depot__p02")
     s = task.initial_state
     with pytest.raises(ValueError, match="goals for"):

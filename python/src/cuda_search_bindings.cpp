@@ -184,12 +184,11 @@ std::vector<search::GoalSpec::AtomGoal> goals_of(nb::handle goals, const Task& t
 std::vector<State> host_starts(nb::handle obj, const Task& task)
 {
     const StateBatch sb = import_task_states(obj, task);
-    if (sb.view.numeric_words)
-        throw nb::value_error("mymyr: the CUDA backend cannot run numeric tasks");
     std::vector<State> out;
     out.reserve(sb.view.rows);
     for (u64 i = 0; i < sb.view.rows; ++i)
-        out.emplace_back(sb.view.row(i), sb.view.words);
+        out.emplace_back(sb.view.row(i), sb.view.words, sb.view.numeric_words ? sb.view.row(i) + sb.view.words : nullptr,
+                         sb.view.numeric_words);
     return out;
 }
 
@@ -197,7 +196,7 @@ std::vector<State> host_starts(nb::handle obj, const Task& task)
 std::vector<State> table_starts(nb::handle obj, const rl::TaskTable& table)
 {
     if (table.numeric())
-        throw nb::value_error("mymyr: the CUDA backend cannot run numeric tasks");
+        throw nb::value_error("mymyr: CUDA multi-instance IW does not support numeric task tables");
     const StateBatch sb = import_rows(obj, current_words(table), 0);
     std::vector<State> out;
     out.reserve(sb.view.rows);
@@ -372,8 +371,9 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                 const u32 k = checked_index(x, i);
                 if (x.b.status[k] != search::SearchStatus::Solved)
                     return Arg<std::optional<PyState>>(nb::none());
-                const u64* r = x.b.goal_rows.data() + u64{k} * x.b.words;
-                return Arg<std::optional<PyState>>(make_state(owner_of_search(x, k), State(r, bits::trimmed_size(r, x.b.words))));
+                const u64* r = x.b.goal_rows.data() + u64{k} * (x.b.words + x.b.numeric_words);
+                return Arg<std::optional<PyState>>(make_state(owner_of_search(x, k),
+                    State(r, bits::trimmed_size(r, x.b.words), x.b.numeric_words ? r + x.b.words : nullptr, x.b.numeric_words)));
             },
             "i"_a, "The goal state search i reached, or None.")
         .def(
@@ -644,7 +644,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
             {
                 nb::gil_scoped_release release;
                 cuda::DeviceMultiIw run(c, t, opts);
-                x.b = run.run(cuda::DeviceStarts{w.data, w.stride, w.words, static_cast<u32>(w.rows)}, g, {}, st);
+                x.b = run.run(cuda::DeviceStarts{w.data, w.stride, w.words, static_cast<u32>(w.rows), t->numeric_words()}, g, {}, st);
                 // the start states, for the plan costs (run() synchronized: the rows are final)
                 const cuda::DeviceGuard guard(c->device());
                 std::vector<u64> rows(w.rows * w.words);
@@ -654,7 +654,9 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                                 "cudaMemcpy2D (starts)");
                 x.starts.reserve(w.rows);
                 for (u64 i = 0; i < w.rows; ++i)
-                    x.starts.emplace_back(rows.data() + i * w.words, bits::trimmed_size(rows.data() + i * w.words, w.words));
+                    x.starts.emplace_back(rows.data() + i * w.words, w.words - t->numeric_words(),
+                                          t->numeric_words() ? rows.data() + (i + 1) * w.words - t->numeric_words() : nullptr,
+                                          t->numeric_words());
             }
             return x;
         },

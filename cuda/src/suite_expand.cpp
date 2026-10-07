@@ -227,6 +227,8 @@ struct SuiteExpander::Impl
 
 std::string SuiteExpander::unsupported(const rl::TaskSuite& suite)
 {
+    if (suite.single_domain() && suite.table(0)->size() == 1)
+        return ChunkGenerator::unsupported(*suite.table(0)->task(0));
     for (u32 d = 0; d < suite.num_domains(); ++d)
         if (const std::string why = DeviceTaskTable::unsupported(*suite.table(d)); !why.empty())
             return suite.single_domain() ? why : "domain " + std::to_string(d) + " (" + suite.domain_name(d) + "): " + why;

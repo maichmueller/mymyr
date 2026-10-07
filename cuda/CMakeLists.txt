@@ -47,6 +47,9 @@ target_sources(mymyr_cuda PRIVATE src/multi_iw_table.cpp)
 target_sources(mymyr_cuda PRIVATE src/suite.cu src/suite_expand.cpp)
 # device action costs (cuda/cost_program.hpp: programs over static functions, the state spaces and A*)
 target_sources(mymyr_cuda PRIVATE src/cost_program.cpp)
+# Numeric programs use the CPU's operation order and rounding at every arithmetic instruction.
+target_sources(mymyr_cuda PRIVATE src/numeric.cu)
+set_source_files_properties(src/numeric.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
 set_target_properties(mymyr_cuda PROPERTIES
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON

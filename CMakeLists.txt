@@ -139,6 +139,8 @@ add_library(mymyr_core STATIC
     src/mymyr/search/portfolio.cpp
 )
 add_library(mymyr::core ALIAS mymyr_core)
+# Postfix numeric evaluation rounds each instruction separately.
+target_compile_options(mymyr_core PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>)
 set_target_properties(mymyr_core PROPERTIES EXPORT_NAME core)
 target_include_directories(mymyr_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

@@ -790,6 +790,8 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     I.cfg = config;
     I.home = I.ctx->stream();
     I.s = I.home;  // the setup runs on the context's stream; set_stream(stream) at the end
+    if (I.suite->numeric())
+        throw std::invalid_argument("mymyr: device environments with numeric fluents are not supported");
     if (const std::string why = SuiteExpander::unsupported(*I.suite); !why.empty())
         throw std::invalid_argument("mymyr: the CUDA backend cannot run " + why);
     I.I = I.suite->size();
