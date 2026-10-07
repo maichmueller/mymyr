@@ -3,6 +3,7 @@ reachability/*.hpp in the C++ core).
 
     r = mymyr.search.iw(task, max_arity=2)              # IW(k) ladder, mimir's conventions
     r = mymyr.search.siw(task, max_arity=2)             # serialized IW
+    r = mymyr.search.astar_iw(task, heuristic="max", width=2, features="classical")
     r = mymyr.search.astar(task, heuristic="max")       # A* (eager; lazy=True for lazy)
     r = mymyr.search.gbfs(task, heuristic="ff", lazy=True)
     r = mymyr.search.beam(task, width=100)
@@ -12,6 +13,13 @@ reachability/*.hpp in the C++ core).
 
     h = mymyr.search.Heuristic(task, "ff")              # h(state) -> float (+inf: dead end)
     r = mymyr.search.astar(task, heuristic=lambda s: my_estimate(s))   # a heuristic written in Python
+
+``astar_iw`` runs weighted A* with minimum-g novelty pruning. It requires unit-cost actions and no numeric
+fluents. ``features='classical'`` supports widths 1..5; ``'abstracted'`` and ``'base_abstracted'`` support 1..3.
+``landmarks=`` restricts novelty to concrete landmark coordinates, and abstracted modes preserve goal and landmark
+atom identities by default. ``weight`` is finite and nonnegative. A successor must lower a tuple label, and a
+popped state must still own one at its g; root goals may bypass novelty. The result extends ``BestFirstResult``
+with ``novelty`` statistics. Novelty pruning does not guarantee optimality.
 
 A heuristic written in Python (``heuristic=`` of astar, gbfs and beam) is a callable ``state -> float`` or an object
 (:class:`mymyr._typing.HeuristicObject`) with ``evaluate(state)``; ``math.inf`` marks a dead end. Optionally the object
@@ -85,6 +93,8 @@ otherwise they run on the calling thread alone.
 from mymyr._core._search import (
     ActionOrdering,
     BestFirstResult,
+    AStarIwResult,
+    AStarIwNoveltyStatistics,
     BrfsResult,
     CancelToken,
     CompleteFactLandmarks,
@@ -117,6 +127,7 @@ from mymyr._core._search import (
     abstracted_iw,
     approximate_fact_landmarks,
     astar,
+    astar_iw,
     atomic_goal_portfolio,
     beam,
     brfs,
@@ -139,6 +150,8 @@ from mymyr._core._search import (
 __all__ = [
     "ActionOrdering",
     "BestFirstResult",
+    "AStarIwResult",
+    "AStarIwNoveltyStatistics",
     "BrfsResult",
     "CancelToken",
     "CompleteFactLandmarks",
@@ -171,6 +184,7 @@ __all__ = [
     "abstracted_iw",
     "approximate_fact_landmarks",
     "astar",
+    "astar_iw",
     "atomic_goal_portfolio",
     "beam",
     "brfs",

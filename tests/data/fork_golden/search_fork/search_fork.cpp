@@ -9,6 +9,8 @@
 //               --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo iw|brfs --order in_order|reverse|goal_count|goal_count_fewer [--k K] [--limit L]
 //               [--beam W [--beam-mode all_tested|survivors_only]] --domain D --problem P [--max-ms T] [--max-states N]
+//   search_fork --algo astar_iw --h blind|hmax --width K --features classical|abstracted|base_abstracted
+//               --domain D --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo walk_h --h setadd|h2|perfect --domain D --problem P [--walks W] [--steps S] [--seed B]
 //               [--max-states N]
 //   search_fork --algo walk_ground --domain D --problem P [--walks W] [--steps S] [--seed B]
@@ -30,6 +32,8 @@
 // and the action taken.
 
 #include <mimir/mimir.hpp>
+#include <mimir/search/algorithms/astar_iw.hpp>
+#include <mimir/search/algorithms/astar_iw/event_handlers/default.hpp>
 #include <mimir/search/heuristics/h2.hpp>  // not in mimir.hpp
 
 #include <chrono>
@@ -467,7 +471,7 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
 }
 
 int run_search(const std::string& domain, const std::string& problem_file, const std::string& algo, const std::string& hname, uint32_t max_ms,
-           uint32_t max_states)
+           uint32_t max_states, size_t width, const std::string& features)
 {
     const auto t0 = std::chrono::steady_clock::now();
     Problem problem = ProblemImpl::create(domain, problem_file);
@@ -483,7 +487,7 @@ int run_search(const std::string& domain, const std::string& problem_file, const
     else
     {
         grounder = std::make_unique<LiftedGrounder>(problem);
-        if (hname == "max")
+        if (hname == "max" || hname == "hmax")
             h = MaxHeuristicImpl::create(*grounder);
         else if (hname == "add")
             h = AddHeuristicImpl::create(*grounder);
@@ -498,7 +502,27 @@ int run_search(const std::string& domain, const std::string& problem_file, const
         }
     }
     std::string body;
-    if (algo == "astar_eager")
+    if (algo == "astar_iw")
+    {
+        astar_iw::NoveltyFeatureMode feature_mode;
+        if (features == "classical")
+            feature_mode = astar_iw::NoveltyFeatureMode::CLASSICAL;
+        else if (features == "abstracted")
+            feature_mode = astar_iw::NoveltyFeatureMode::ABSTRACTED;
+        else if (features == "base_abstracted")
+            feature_mode = astar_iw::NoveltyFeatureMode::BASE_ABSTRACTED;
+        else
+            throw std::invalid_argument("unknown features " + features);
+        body = run<astar_iw::Options>(context, h, astar_iw::DefaultEventHandlerImpl::create(problem, true), max_ms, max_states,
+            [&](auto&& c, auto&& hh, auto o)
+            {
+                o.width = width;
+                o.novelty_feature_mode = feature_mode;
+                return astar_iw::find_solution(c, hh, o);
+            });
+        body += ",\"width\":" + std::to_string(width) + ",\"features\":" + jstr(features);
+    }
+    else if (algo == "astar_eager")
         body = run<astar_eager::Options>(context, h, astar_eager::DefaultEventHandlerImpl::create(problem, true), max_ms, max_states,
                                          [](auto&& c, auto&& hh, auto&& o) { return astar_eager::find_solution(c, hh, o); });
     else if (algo == "astar_lazy")
@@ -524,7 +548,7 @@ int run_search(const std::string& domain, const std::string& problem_file, const
 
 int main(int argc, char** argv)
 {
-    std::string algo, hname, domain, problem, order, mode = "all_tested";
+    std::string algo, hname, domain, problem, order, mode = "all_tested", features = "classical";
     uint32_t max_ms = 120000, max_states = UINT32_MAX, limit = UINT32_MAX, beam = UINT32_MAX;
     size_t k = 1, walks = 3, steps = 25;
     uint64_t seed = 1;
@@ -551,7 +575,9 @@ int main(int argc, char** argv)
             max_states = static_cast<uint32_t>(std::stoul(v));
         else if (a == "--order")
             order = v;
-        else if (a == "--k")
+        else if (a == "--features")
+            features = v;
+        else if (a == "--k" || a == "--width")
             k = std::stoul(v);
         else if (a == "--limit")
             limit = static_cast<uint32_t>(std::stoul(v));
@@ -587,7 +613,7 @@ int main(int argc, char** argv)
             rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
         else
             rc = layered ? run_layered(domain, problem, algo, order, k, limit, beam, mode, max_ms, max_states)
-                         : run_search(domain, problem, algo, hname, max_ms, max_states);
+                         : run_search(domain, problem, algo, hname, max_ms, max_states, k, features);
     }
     catch (const std::exception& ex)
     {
