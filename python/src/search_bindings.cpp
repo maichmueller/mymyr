@@ -19,6 +19,7 @@
 #include "mymyr/heuristics/heuristic.hpp"
 #include "mymyr/heuristics/perfect.hpp"
 #include "mymyr/search/aiw.hpp"
+#include "mymyr/search/astar_iw.hpp"
 #include "mymyr/search/best_first.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/search/control.hpp"
@@ -33,6 +34,8 @@
 #include "mymyr/landmarks/approximate.hpp"
 #include "mymyr/landmarks/lifted.hpp"
 #include "mymyr/task/task.hpp"
+
+#include <type_traits>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
@@ -564,6 +567,10 @@ struct PyBestFirstResult
     search::BestFirstResult r;
     Owner o;
 };
+struct PyAStarIwResult : PyBestFirstResult
+{
+    search::AStarIwNoveltyStatistics novelty;
+};
 struct PyBrfsResult
 {
     BrfsResult r;
@@ -1063,7 +1070,7 @@ std::unique_ptr<heuristics::Heuristic> perfect_of_task(const Owner& o, heuristic
 // ------------------------------------------------------------------------------------------------ best-first
 
 template<class Search>
-PyBestFirstResult best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::handle costs,
+auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::handle costs,
                              nb::handle evaluation, nb::handle store, nb::handle queue, nb::handle start, bool reopen,
                              bool lazy_requeue, bool preferred_operators, u32 preferred_weight, u32 standard_weight,
                              u32 beam_width, bool witness_pruning, nb::handle max_states, nb::handle max_expanded,
@@ -1130,13 +1137,19 @@ PyBestFirstResult best_first(Search search_fn, nb::handle task, nb::handle heuri
     opts.beam_width = beam_width;
     opts.witness_pruning = witness_pruning;
     const Task& t = *o.core->task;
-    search::BestFirstResult r = run_detached(cs, [&] {
+    auto r = run_detached(cs, [&] {
         std::unique_lock<std::mutex> lock;
         if (shared)
             lock = std::unique_lock(shared->m);
         return search_fn(t, opts);
     });
-    return PyBestFirstResult{std::move(r), o};
+    if constexpr (std::is_same_v<decltype(r), search::AStarIwResult>)
+    {
+        const auto novelty = r.novelty;
+        return PyAStarIwResult{{std::move(r), o}, novelty};
+    }
+    else
+        return PyBestFirstResult{std::move(r), o};
 }
 
 using BfFn = search::BestFirstResult (*)(const Task&, const search::BestFirstOptions&);
@@ -1396,6 +1409,15 @@ void bind_search(nb::module_& parent)
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
                    ", subproblems=" + std::to_string(x.r.subproblems.size()) + ", " + stats_repr(x.r.total) + ")";
         });
+
+    nb::class_<search::AStarIwNoveltyStatistics>(m, "AStarIwNoveltyStatistics")
+        .def_ro("rejected", &search::AStarIwNoveltyStatistics::rejected)
+        .def_ro("stale", &search::AStarIwNoveltyStatistics::stale)
+        .def_ro("stale_g", &search::AStarIwNoveltyStatistics::stale_g)
+        .def_ro("probes", &search::AStarIwNoveltyStatistics::probes)
+        .def_ro("updates", &search::AStarIwNoveltyStatistics::updates)
+        .def_ro("pop_tests", &search::AStarIwNoveltyStatistics::pop_tests)
+        .def_ro("table_bytes", &search::AStarIwNoveltyStatistics::table_bytes);
 
     nb::class_<PyBestFirstResult>(m, "BestFirstResult")
         .def_prop_ro("status", [](const PyBestFirstResult& x) { return x.r.status; })
@@ -1776,6 +1798,9 @@ void bind_search(nb::module_& parent)
             return g;
         });
 
+    nb::class_<PyAStarIwResult, PyBestFirstResult>(m, "AStarIwResult")
+        .def_prop_ro("novelty", [](const PyAStarIwResult& r) { return r.novelty; });
+
     // searches --------------------------------------------------------------------------------------------------------
     m.def(
         "iw",
@@ -1930,6 +1955,62 @@ void bind_search(nb::module_& parent)
                      "costs). ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
+
+    m.def(
+        "astar_iw",
+        [](TaskArg task, HeuristicArg heuristic, u32 width, StrArg features, LandmarksArg landmarks,
+           double weight, bool preserve_goal_atoms, bool preserve_landmark_atoms,
+           bool allow_non_novel_root_goal, bool probe_novelty_before_heuristic, StrArg costs,
+           StrArg evaluation, StrArg store, StateArg start, bool witness_pruning, bool canonical_order,
+           IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
+           CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+            const Owner owner = owner_of(task);
+            search::AStarIwOptions options;
+            options.width = width;
+            const std::string mode = str_arg(features, "features");
+            if (mode == "classical")
+                options.features = search::AStarIwFeatures::Classical;
+            else if (mode == "abstracted")
+                options.features = search::AStarIwFeatures::Abstracted;
+            else if (mode == "base_abstracted")
+                options.features = search::AStarIwFeatures::BaseAbstracted;
+            else
+                throw nb::value_error("mymyr: features must be 'classical', 'abstracted' or 'base_abstracted'");
+            options.landmarks = parse_landmarks(owner, landmarks, false, false, nb::none(), nb::none());
+            options.weight = weight;
+            options.preserve_goal_atoms = preserve_goal_atoms;
+            options.preserve_landmark_atoms = preserve_landmark_atoms;
+            options.allow_non_novel_root_goal = allow_non_novel_root_goal;
+            options.probe_novelty_before_heuristic = probe_novelty_before_heuristic;
+            options.canonical_order = canonical_order;
+            return best_first([&](const Task& t, const search::BestFirstOptions& base) {
+                options.control = base.control;
+                options.heuristic = base.heuristic;
+                options.evaluator = base.evaluator;
+                options.store = base.store;
+                options.start = base.start;
+                options.witness_pruning = base.witness_pruning;
+                return search::astar_iw(t, options);
+            }, task, heuristic, costs, evaluation, store, nb::str("heap"), start, true, true, false, 0, 1,
+                1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                blocked_states, observer, progress_interval);
+        },
+        "task"_a, nb::kw_only(), "heuristic"_a = "max", "width"_a = 1, "features"_a = "classical",
+        "landmarks"_a = nb::none(), "weight"_a = 1.0, "preserve_goal_atoms"_a = true,
+        "preserve_landmark_atoms"_a = true, "allow_non_novel_root_goal"_a = true,
+        "probe_novelty_before_heuristic"_a = true, "costs"_a = "unit", "evaluation"_a = "auto",
+        "store"_a = "auto", "start"_a = nb::none(), "witness_pruning"_a = false, "canonical_order"_a = true,
+        MYMYR_CONTROL_ARGS,
+        (std::string("Weighted A* with minimum-g novelty pruning (search/astar_iw.hpp). Priority is "
+                     "(g + weight*h, h, g, state id). Unit-cost actions and no numeric fluents are required. "
+                     "features: 'classical' (width 1..5), 'abstracted' or 'base_abstracted' (width 1..3). "
+                     "landmarks: a fact landmark graph, 'approximate', 'lifted', or None. Abstracted modes "
+                     "preserve positive goal atoms and landmark atoms by default. Non-novel root successors "
+                     "are admitted with allow_non_novel_root_goal; only goals bypass the pop novelty test. "
+                     "The read-only probe skips heuristic work without changing the search. Invalid widths "
+                     "and weights return FAILED with a message. Novelty statistics are in result.novelty. "
+                     "heuristic and costs: as for astar; novelty pruning does not guarantee optimality. ") +
+         k_heuristic_doc + k_control_doc).c_str());
 
     m.def(
         "gbfs",

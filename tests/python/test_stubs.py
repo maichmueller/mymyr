@@ -48,6 +48,11 @@ def test_stubs_parse_and_are_typed():
     landmarks = "landmarks: FactLandmarkGraph | Literal['approximate', 'lifted'] | None = None"
     assert f"def liw({task}, *, max_arity: int = 2, {landmarks}, disjunctive: bool = False," in search
     assert f"def abstracted_iw({task}, *, width: int = 1, base_abstracted: bool = False," in search
+    assert f"def astar_iw({task}, *, heuristic:" in search
+    assert "features: str = 'classical'" in search
+    assert "allow_non_novel_root_goal: bool = True" in search
+    assert "probe_novelty_before_heuristic: bool = True" in search
+    assert "class AStarIwResult(BestFirstResult):" in search
     assert f"def projective_iw({task}, *, typed_projection: bool = False," in search
     assert "layer_order: Literal['queue', 'in_order', 'reverse', 'randomized', 'goal_count'] = 'queue'" in search
     assert "max_next_layer_states: int | None = None, prefer_more_satisfied_goals: bool = True" in search
@@ -66,7 +71,7 @@ def test_stubs_parse_and_are_typed():
     assert "def winning_worker(self) -> int | None" in search
     assert f"def lifted_fact_landmarks({task}, *, reachability: RelaxedReachability | None = None," in search
     assert ") -> WitnessQuery: ..." in search
-    for name, result in (("liw", "IwResult"), ("abstracted_iw", "IwResult"), ("projective_iw", "IwResult"),
+    for name, result in (("astar_iw", "AStarIwResult"), ("liw", "IwResult"), ("abstracted_iw", "IwResult"), ("projective_iw", "IwResult"),
                          ("rollout_iw", "RolloutIwResult"), ("find_rollouts_parallel", "ParallelRolloutsResult"),
                          ("atomic_goal_portfolio", "PortfolioResult"), ("approximate_fact_landmarks", "FactLandmarkGraph"),
                          ("lifted_fact_landmarks", "FactLandmarkGraph")):
