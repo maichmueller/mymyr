@@ -27,16 +27,21 @@
 //     free variables in the iteration order of an unordered_set of variable pointers; mymyr sorts them by variable
 //     name (DomainOptions::generated_argument_order reproduces a particular mimir run), and orders the type literals
 //     of those axioms' parameters by parameter;
-//   - conditional effects of one schema are grouped in an std::unordered_map keyed by a condition *pointer*; for at
-//     most two groups libc++ iterates in reverse insertion order (reproduced), for three or more the order depends
-//     on heap addresses (we keep reverse insertion order);
+//   - conditional effects of one schema are grouped in an std::unordered_map keyed by a condition *pointer*; with
+//     at most two groups it iterates in reverse insertion order (libstdc++, which mimir uses, and libc++ alike;
+//     reproduced), with three or more two conditions whose addresses share a bucket change that order, so it
+//     depends on heap addresses (we keep reverse insertion order);
 //   - parameters that normalization appends to a schema (moved existentials) are sorted by pointer value; we sort
 //     by creation order, which is what the allocator produces in practice;
-//   - loki de-duplicates the branches of a disjunction (disjunctive normal form) and the literal and `when` effects
-//     of an effect conjunction (ToEffectNormalForm) through an std::unordered_set. The order of the schemas that one
-//     `or` splits into and of the literal effects of one schema follows the hash function and the bucket policy of
-//     the standard library: it is the same on every run of one build, but not between libstdc++ and libc++, and
-//     mymyr does not canonicalize it.
+//   - loki's normalization passes create the parts of an action, axiom, condition or effect inside the argument list
+//     of one call (e.g. `get_or_create_action(..., translate(condition), translate(effect))`), and C++ leaves the
+//     evaluation order of function arguments unspecified: GCC evaluates them right to left (the effect is translated
+//     before the condition), Clang left to right. loki sorts every conjunction, disjunction and action list by
+//     creation index, so where a normalized part is shared between contexts (a negated literal of a precondition
+//     that recurs in a `when` condition, the branches of an `or`), the order of the literals of a condition and of
+//     the schemas that one `or` splits into depends on the compiler that built loki. mymyr takes these orders from
+//     loki as they are: they equal mimir's (built with GCC) when loki is built with GCC. The standard library does
+//     not affect them: loki's std::unordered_set de-duplications are always followed by such a sort.
 // Conditions list each nullary literal twice, as mimir's ConjunctiveCondition does (once as a lifted literal,
 // once as a "nullary ground literal"); consumers may dedupe.
 //

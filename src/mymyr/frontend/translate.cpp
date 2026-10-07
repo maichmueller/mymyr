@@ -736,8 +736,10 @@ public:
         else
             one(effect);
 
-        // libc++ iterates a small unordered_map in reverse insertion order (new nodes go to the list front; exact for
-        // up to two groups, address-dependent beyond), see domain.hpp.
+        // mimir's unordered_map (libstdc++; libc++ does the same) iterates at most two groups in reverse insertion
+        // order: a node for an empty bucket goes to the list front, a node for an occupied bucket in front of that
+        // bucket's nodes. With three or more groups a shared bucket changes the order (address-dependent), see
+        // domain.hpp.
         std::vector<u32> out;
         for (auto it = groups.rbegin(); it != groups.rend(); ++it)
             out.push_back(ce(it->cond, ceff(action_params, it->lits, it->nes, it->aux)));
