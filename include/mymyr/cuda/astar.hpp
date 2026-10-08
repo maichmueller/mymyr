@@ -18,8 +18,9 @@
 // loop of up to DeviceBestFirstOptions::loop_steps steps); the host takes over a step only where it must (CPU-fallback
 // schemas, derived goals, an explicit start state, lazy slots that met new atoms, a chunk past the capacities: the
 // same kernels, launched with reads between them). A goal state is recognized when generated and returned when it is
-// popped (its f is minimal), so the plan is optimal with an admissible heuristic (Max, Blind); h_add and h_FF run as
-// inadmissible options. The search stops after the expansion of the parent of the first goal of the current f layer (in candidate order), as
+// popped (its f is minimal), so the plan is optimal with an admissible heuristic (Max, H2, Blind); h_add, h_FF and
+// set-additive run as inadmissible options. The search stops after the expansion of the parent of the first goal of
+// the current f layer (in candidate order), as
 // the CPU's, which pops that goal next. Expanding a bucket at once costs expansions that the sequential search does
 // not make (the bucket's states after the goal's parent, in other chunks; the order in which the CPU interleaves
 // its pushes): stats.expanded reports them.
@@ -35,7 +36,7 @@
 // canonical order as the CPU. Numeric tasks carry canonical double tails and evaluate fluent costs, ordered total-cost
 // effects and state metrics in flat device programs. Their F64 priorities use a host heap, one parent per step, with
 // eager CPU tie order; numeric searches do not capture graphs. Refused with std::invalid_argument ("mymyr: ..."): tasks the successor
-// kernels cannot run (ChunkGenerator::unsupported), heuristics other than blind, max, add and ff (and
+// kernels cannot run (ChunkGenerator::unsupported), heuristics other than blind, max, add, ff, h2 and set_additive (and
 // groundings beyond the budget), other goals, blocked states, observers and caller-owned evaluators.
 
 #include "mymyr/cuda/heuristics.hpp"

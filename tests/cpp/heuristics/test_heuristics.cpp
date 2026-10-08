@@ -11,6 +11,7 @@
 //   - one heuristic per thread over one shared task and grounding gives the single-threaded values (TSan build).
 
 #include "../support/suite.hpp"
+#include "../support/heuristic_task.hpp"
 #include "h2_reference.hpp"
 #include "mymyr/datasets/state_space.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -335,4 +336,26 @@ TEST(Heuristics, OneHeuristicPerThreadOverASharedTask)
         for (usize k = 0; k < std::size(kinds); ++k)
             for (usize i = 0; i < ids.size(); ++i)
                 EXPECT_EQ(got[t][k][i], expected[k][(i + t * 7) % ids.size()]) << t << " " << k << " " << i;
+}
+
+TEST(Heuristics, H2RefusesPairTablesBeyondThePropositionLimit)
+{
+    const auto task = initial_proposition_task(8192);
+    const auto relaxed = H::ground(*task);
+    ASSERT_TRUE(relaxed);
+    ASSERT_EQ(relaxed->num_props(), 8192u);
+    H::Options o;
+    o.kind = H::Kind::H2;
+    o.relaxed = relaxed;
+    try
+    {
+        (void)H::make_heuristic(*task, o);
+        FAIL() << "accepted a pair table beyond the proposition limit";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("8192"), std::string::npos);
+        EXPECT_NE(msg.find("8191"), std::string::npos);
+    }
 }

@@ -1,8 +1,7 @@
 """mymyr.cuda: batched device heuristics, device A* and GBFS. Heuristic.evaluate against mymyr.search.Heuristic
-(h_max, h_add) and against Heuristic.reference (h_FF's supporter rule) on walk states, from host states and from torch
+(h_max, h_add, h²) and against Heuristic.reference (the h_FF/set-additive supporter rule) on walk states, from host states and from torch
 CUDA rows read in place (uint32 values on the caller's stream); astar / gbfs at batch 1 against mymyr.search.astar /
-gbfs (statistics and plan), larger batches against the optimal cost with replayed plans; refusals. The suite-wide
-gates are the C++ test's (tests/cuda/test_device_heuristics.cpp).
+gbfs (statistics and plan), larger batches against the optimal cost with replayed plans; refusals.
 
 Runs only when a GPU is made visible explicitly (conftest.py hides GPUs by default), e.g.
 
@@ -43,7 +42,7 @@ def replay(task, plan, start=None):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("kind", ["max", "add", "ff"])
+@pytest.mark.parametrize("kind", ["max", "add", "ff", "h2", "set_additive"])
 def test_heuristic_equals_cpu(ctx, name, kind):
     task = text_task(name)
     states = walk(task, steps=25, seed=5, walks=3)
@@ -52,7 +51,7 @@ def test_heuristic_equals_cpu(ctx, name, kind):
     assert isinstance(values, np.ndarray) and values.dtype == np.float64 and values.shape == (len(states),)
     ref = [h.reference(s) for s in states]
     assert list(values) == ref
-    if kind != "ff":
+    if kind not in ("ff", "set_additive"):
         cpu = mymyr.search.Heuristic(task, kind)
         assert ref == [cpu(s) for s in states]
     assert h.kind == kind
@@ -65,12 +64,13 @@ def test_heuristic_equals_cpu(ctx, name, kind):
 def test_heuristic_real_costs_and_one_state(ctx):
     task = text_task("depot__p02")
     s = walk(task, steps=10, seed=2, walks=1)[-1]
-    for kind in ("max", "add"):
+    for kind in ("max", "add", "h2", "set_additive"):
         h = mc.Heuristic(task, kind, ctx=ctx, costs="real")
-        assert list(h.evaluate(s)) == [mymyr.search.Heuristic(task, kind, costs="real")(s)]
+        assert list(h.evaluate(s)) == [h.reference(s)]
 
 
-def test_heuristic_from_torch_rows(ctx):
+@pytest.mark.parametrize("kind", ["ff", "h2", "set_additive"])
+def test_heuristic_from_torch_rows(ctx, kind):
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("torch has no CUDA device")
@@ -80,7 +80,7 @@ def test_heuristic_from_torch_rows(ctx):
     rows = np.zeros((len(states), W), dtype=np.uint64)
     for i, s in enumerate(states):
         rows[i, : s.num_words] = s.words
-    h = mc.Heuristic(task, "ff", ctx=ctx)
+    h = mc.Heuristic(task, kind, ctx=ctx)
     host = h.evaluate(states)
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
@@ -184,3 +184,50 @@ def test_errors(ctx):
     with pytest.raises(ValueError):
         mc.Heuristic(task, "ff", ctx=ctx, max_operators=10)
     assert mc.Heuristic(task, "max", ctx=ctx).evaluate([]).shape == (0,)
+
+
+@pytest.mark.parametrize("kind", ["h2", "set_additive"])
+@pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "cs-counters"])
+def test_pair_heuristics_search_plans(ctx, kind, name):
+    task = (
+        mymyr.Task.from_text(ROOT / "tests/data/numeric_tasks" / f"{name}.txt")
+        if name == "cs-counters"
+        else text_task(name)
+    )
+    cpu = mymyr.search.astar(task, heuristic="h2")
+    assert cpu.solved
+    for batch in (1, 64):
+        for search in (mc.astar, mc.gbfs):
+            result = search(task, heuristic=kind, ctx=ctx, batch=batch, max_expanded=100000)
+            assert result.solved and task.is_goal(replay(task, result.plan))
+            if search is mc.astar and kind == "h2":
+                assert result.cost == cpu.cost
+
+
+def test_pair_heuristic_aliases_and_scratch_budget(ctx):
+    task = text_task("depot__p02")
+    expected = mc.Heuristic(task, "set_additive", ctx=ctx).evaluate(task.initial_state)
+    for kind in ("hsa", "setadd"):
+        h = mc.Heuristic(task, kind, ctx=ctx)
+        assert h.kind == "set_additive" and np.array_equal(h.evaluate(task.initial_state), expected)
+    base = mc.Heuristic(task, "h2", ctx=ctx)
+    size = base.stats["group_bytes"]
+    with pytest.raises(ValueError, match=r"propositions.*limit is"):
+        mc.Heuristic(task, "h2", ctx=ctx, max_scratch_bytes=size - 1)
+    one = mc.Heuristic(task, "h2", ctx=ctx, max_scratch_bytes=size)
+    assert one.stats["blocks"] == 1 and not one.stats["shared"]
+    assert np.array_equal(one.evaluate(task.initial_state), base.evaluate(task.initial_state))
+
+
+def test_h2_proposition_limit_names_the_size_and_limit(ctx, tmp_path):
+    n = 8192
+    path = tmp_path / "initial-propositions.txt"
+    path.write_text(
+        f"O {n}\nP 1\nF 1 p\nSI 0\nFI {n}\n"
+        + "".join(f"0 {i}\n" for i in range(n))
+        + "G 0\nA 0\nX 0\n"
+    )
+    task = mymyr.Task.from_text(str(path))
+    with pytest.raises(ValueError) as caught:
+        mc.Heuristic(task, "h2", ctx=ctx)
+    assert "8192" in str(caught.value) and "8191" in str(caught.value)

@@ -98,7 +98,7 @@ __device__ Arrays carve(u32* base, const Relaxed& r)
         a.left = p;
         p += r.O;
     }
-    if constexpr (KIND == k_ff)
+    if constexpr (KIND == k_ff || KIND == k_set_additive)
     {
         if (!r.uniform_cost)
         {
@@ -157,7 +157,7 @@ __device__ void init_state(const Relaxed& r, const u64* row, u32 words, const Ar
         const u32 c0 = r.negative[p] ? 0 : k_inf;
         a.cost[p] = c0;
         a.nxt[p] = c0;
-        if (KIND == k_ff && !r.uniform_cost)
+        if ((KIND == k_ff || KIND == k_set_additive) && !r.uniform_cost)
         {
             a.lvl[p] = c0;
             a.cand[p] = k_none;
@@ -191,7 +191,7 @@ __device__ void init_state(const Relaxed& r, const u64* row, u32 words, const Ar
                 a.cost[neg] = k_inf;
                 a.nxt[neg] = k_inf;
             }
-            if (KIND == k_ff && !r.uniform_cost)
+            if ((KIND == k_ff || KIND == k_set_additive) && !r.uniform_cost)
             {
                 a.lvl[pos] = 0;
                 if (neg != k_none)
@@ -314,7 +314,7 @@ __device__ void costs_frontier(const Relaxed& r, const Arrays& a, GroupState& gs
         const u32 B = gs.bmin[cur];
         if (B == k_inf)
             break;  // the rest is unreachable
-        if (KIND == k_ff && gs.left == 0 && B > gs.goal_cost)
+        if ((KIND == k_ff || KIND == k_set_additive) && gs.left == 0 && B > gs.goal_cost)
             break;
         u32 m = k_inf;  // the cheapest cost left above B
         for (u32 p = tid; p < r.P; p += nt)
@@ -333,7 +333,7 @@ __device__ void costs_frontier(const Relaxed& r, const Arrays& a, GroupState& gs
             }
         warp_min_into(m, &gs.bmin[nx]);
         g.sync();
-        if (KIND != k_ff && gs.left == 0)
+        if (KIND != k_ff && KIND != k_set_additive && gs.left == 0)
             break;
         if (tid == 0)
         {
@@ -385,9 +385,10 @@ __device__ __forceinline__ u32 tight_achiever(const Relaxed& r, const u32* cost,
 }
 
 /// Level lv for the n propositions of `list` (their candidate supporters are final: the smallest tight achiever of the
-/// round), with their supporters: an axiom passes on the supporter of its precondition of level lv - 1 with the smallest
-/// id. The preconditions of a candidate have levels below lv already, so no thread reads a level this round sets.
-template<bool WARP>
+/// round), with their supporters: for FF an axiom passes on the supporter of its precondition of level lv - 1 with the
+/// smallest id; set-additive keeps the axiom itself. Candidate preconditions have levels below lv already, so no thread
+/// reads a level this round sets.
+template<u32 KIND, bool WARP>
 __device__ __forceinline__ void assign_levels(const Relaxed& r, const Arrays& a, GroupState& gs, const u32* list, u32 n,
                                               u32 lv, const Group<WARP>& g)
 {
@@ -397,7 +398,7 @@ __device__ __forceinline__ void assign_levels(const Relaxed& r, const Arrays& a,
         const u32 o = a.cand[e];
         a.lvl[e] = lv;
         u32 s = o;
-        if (r.axiom[o])
+        if (KIND == k_ff && r.axiom[o])
         {
             u32 best = k_none;
             for (u32 j = r.pre_begin[o]; j < r.pre_begin[o + 1]; ++j)
@@ -416,7 +417,7 @@ __device__ __forceinline__ void assign_levels(const Relaxed& r, const Arrays& a,
 
 /// h_FF's supporter levels by rounds over all operators (sweeps): round lv evaluates the operators whose preconditions
 /// all have levels, the largest lv - 1.
-template<bool WARP>
+template<u32 KIND, bool WARP>
 __device__ void levels_sweep(const Relaxed& r, const Arrays& a, GroupState& gs, const Group<WARP>& g)
 {
     const u32 tid = g.tid, nt = g.size;
@@ -457,7 +458,7 @@ __device__ void levels_sweep(const Relaxed& r, const Arrays& a, GroupState& gs, 
         const u32 n = gs.nT[cur];
         if (n == 0)
             break;
-        assign_levels(r, a, gs, a.T, n, lv, g);
+        assign_levels<KIND>(r, a, gs, a.T, n, lv, g);
         g.sync();
         if (gs.left == 0)
             break;
@@ -468,7 +469,7 @@ __device__ void levels_sweep(const Relaxed& r, const Arrays& a, GroupState& gs, 
 /// propositions leveled lv - 1 decrement them, and an operator whose counter reaches 0 (its preconditions leveled, the
 /// largest lv - 1) is evaluated once, in round lv, as the sweeps evaluate it there. Only settled propositions get
 /// levels (the others cost more than every goal: no supporter of the relaxed plan reads them).
-template<bool WARP>
+template<u32 KIND, bool WARP>
 __device__ void levels_frontier(const Relaxed& r, const Arrays& a, GroupState& gs, const Group<WARP>& g)
 {
     const u32 tid = g.tid, nt = g.size;
@@ -532,7 +533,7 @@ __device__ void levels_frontier(const Relaxed& r, const Arrays& a, GroupState& g
             break;
         if (tid == 0)
             gs.nT[prev] = 0;  // read above by every thread before the sync
-        assign_levels(r, a, gs, to, n, lv, g);
+        assign_levels<KIND>(r, a, gs, to, n, lv, g);
         g.sync();
         if (gs.left == 0)
             break;
@@ -586,7 +587,7 @@ __device__ u32 evaluate_one(const Relaxed& r, const u64* row, u32 words, const A
             atomicAdd(&gs.hsum, static_cast<unsigned long long>(c));
         else if (KIND == k_max)
             atomicMax(&gs.hmax, c);
-        if (KIND == k_ff && !r.uniform_cost && a.lvl[r.goal[i]] == k_inf)
+        if ((KIND == k_ff || KIND == k_set_additive) && !r.uniform_cost && a.lvl[r.goal[i]] == k_inf)
             atomicAdd(&gs.left, 1u);
     }
     if (tid == 0)
@@ -602,16 +603,16 @@ __device__ u32 evaluate_one(const Relaxed& r, const u64* row, u32 words, const A
     if constexpr (KIND == k_add)
         return gs.hsum >= k_inf ? k_inf : static_cast<u32>(gs.hsum);
 
-    if constexpr (KIND == k_ff)
+    if constexpr (KIND == k_ff || KIND == k_set_additive)
     {
         // -------------------------------------------------------------------------------------- supporter levels
         // (uniform costs: none, the relaxed plan looks the supporters up)
         if (!r.uniform_cost && gs.left > 0)
         {
             if constexpr (VARIANT == k_frontier)
-                levels_frontier(r, a, gs, g);
+                levels_frontier<KIND>(r, a, gs, g);
             else
-                levels_sweep(r, a, gs, g);
+                levels_sweep<KIND>(r, a, gs, g);
         }
 
         // -------------------------------------------------------------------------------------- relaxed plan
@@ -658,7 +659,7 @@ __device__ u32 evaluate_one(const Relaxed& r, const u64* row, u32 words, const A
                 if (o == k_none)
                     continue;
                 const u32 ga = r.op_ga[o];
-                if (tid % L == 0 && test_and_set(a.gbits, ga))
+                if (tid % L == 0 && (KIND == k_ff ? test_and_set(a.gbits, ga) : !r.axiom[o]))
                     atomicAdd(&gs.hsum, static_cast<unsigned long long>(r.ga_cost[ga]));
                 for (u32 j = r.pre_begin[o] + tid % L; j < r.pre_begin[o + 1]; j += L)
                 {
@@ -734,6 +735,8 @@ Kernel kernel_of(const Launch& l)
         case k_add * 2 + k_frontier: return pick<k_add, k_frontier>(sh, wp);
         case k_ff * 2 + k_sweep: return pick<k_ff, k_sweep>(sh, wp);
         case k_ff * 2 + k_frontier: return pick<k_ff, k_frontier>(sh, wp);
+        case k_set_additive * 2 + k_sweep: return pick<k_set_additive, k_sweep>(sh, wp);
+        case k_set_additive * 2 + k_frontier: return pick<k_set_additive, k_frontier>(sh, wp);
         default: return nullptr;
     }
 }
@@ -747,7 +750,7 @@ u64 dynamic_bytes(const Launch& l)
 
 bool valid(const Launch& l)
 {
-    return l.variant <= k_frontier && l.kind <= k_ff && l.threads >= 32 && l.threads % 32 == 0 && l.threads <= 1024 &&
+    return l.variant <= k_frontier && l.kind <= k_set_additive && l.threads >= 32 && l.threads % 32 == 0 && l.threads <= 1024 &&
            l.blocks > 0 && l.group_bytes % 16 == 0 && (l.shared || l.scratch) && (!l.warp || l.threads / 32 <= k_max_groups_per_block);
 }
 }  // namespace
@@ -756,6 +759,8 @@ cudaError_t launch_evaluate(const Relaxed& r, Rows rows, Launch l, Out out, cuda
 {
     if (rows.n == 0)
         return cudaSuccess;
+    if (l.kind == k_h2)
+        return launch_h2(r, rows, l, out, s);
     const Kernel k = kernel_of(l);
     if (!k || !valid(l) || !out.h || !out.counters)
         return cudaErrorInvalidValue;
@@ -782,6 +787,8 @@ cudaError_t launch_to_f64(const u32* h, u64 n, f64* out, cudaStream_t s)
 cudaError_t occupancy(const Launch& l, int* blocks_per_sm)
 {
     *blocks_per_sm = 0;
+    if (l.kind == k_h2)
+        return occupancy_h2(l, blocks_per_sm);
     const Kernel k = kernel_of(l);
     Launch v = l;
     v.blocks = 1;
