@@ -44,6 +44,7 @@ struct AbstractedIwOptions
     LandmarkNovelty landmarks;
     bool preserve_landmark_atoms = true;  // with a graph: landmark atoms keep their full identity (mimir's default)
     LayerOrdering layers;
+    u32 threads = 1;  // as IwOptions::threads
     bool witness_pruning = false;
     bool canonical_order = true;
     SymmetryPruning symmetry_pruning = SymmetryPruning::Off;  // as IwOptions::symmetry_pruning
