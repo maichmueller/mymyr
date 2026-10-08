@@ -191,10 +191,11 @@ def test_cuda_stubs_are_typed():
     assert "def passes(self, i: int) -> list[mymyr._core._search.IwPass]" in cuda
     assert "def goal_state(self, i: int) -> mymyr._core.State | None" in cuda
     # device heuristics, A*, GBFS
-    assert "kind: Literal['max', 'add', 'ff'] = 'ff', *, costs: Literal['unit', 'real'] = 'unit', ctx: Context | None = None" in cuda
+    assert "kind: Literal['max', 'add', 'ff', 'h2', 'set_additive'] = 'ff', *, costs: Literal['unit', 'real'] = 'unit', ctx: Context | None = None" in cuda
     assert f"def evaluate(self, states: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack, *, {stream}) -> Any" in cuda
     assert "def reference(self, state: mymyr._core.State) -> float" in cuda
-    assert "heuristic: Literal['blind', 'max', 'add', 'ff'] = 'max', costs: Literal['unit', 'real'] = 'unit'" in cuda
+    assert "max_scratch_bytes: int | None = None" in cuda
+    assert "heuristic: Literal['blind', 'max', 'add', 'ff', 'h2', 'set_additive'] = 'max', costs: Literal['unit', 'real'] = 'unit'" in cuda
     assert "variant: Literal['auto', 'sweep', 'frontier'] = 'auto') -> DeviceSearchResult" in cuda
     assert "def stats(self) -> mymyr._core._search.Statistics" in cuda
     assert "def device(self) -> dict[str, float | int | bool | str]" in cuda
