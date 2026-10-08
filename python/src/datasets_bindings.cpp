@@ -1,5 +1,5 @@
-// mymyr._core._datasets: state spaces, generalized state spaces, samplers, object graphs and certificates
-// (mymyr.datasets; datasets/*.hpp in the C++ core).
+// mymyr._core._datasets: state spaces, generalized state spaces, knowledge bases, tuple graphs, samplers, object graphs
+// and certificates (mymyr.datasets; datasets/*.hpp in the C++ core).
 //
 // Every generation releases the thread state while it runs. The results are immutable C++ objects shared by the
 // Python wrappers; their arrays are exported zero-copy (read-only views that keep the result alive) to NumPy, torch or
@@ -10,13 +10,17 @@
 
 #include "arrays.hpp"
 #include "py_datasets.hpp"
+#include "py_formula.hpp"
+#include "py_table.hpp"
 #include "py_task.hpp"
 
 #include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
+#include "mymyr/datasets/knowledge_base.hpp"
 #include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/datasets/sampler.hpp"
 #include "mymyr/datasets/state_space.hpp"
+#include "mymyr/datasets/tuple_graph.hpp"
 #include "mymyr/task/task.hpp"
 
 #include <nanobind/nanobind.h>
@@ -125,6 +129,24 @@ struct PyObjectGraphBuilder
     Owner owner;
     std::mutex mutex;  // the builder holds scratch
     ObjectGraphBuilder builder;
+};
+
+/// A tuple graph and the state space it is of (shared: a graph of a knowledge base aliases the knowledge base).
+struct PyTupleGraph
+{
+    std::shared_ptr<const TupleGraph> graph;
+    PyStateSpace space;
+};
+
+/// A knowledge base, its mymyr.rl.TaskTable, its state spaces (owned by the table's Task objects) and the arguments
+/// it was built with (its pickled state).
+struct PyKnowledgeBase
+{
+    KnowledgeBasePtr kb;
+    nb::object table;
+    std::vector<PyStateSpace> spaces;
+    std::optional<PyGeneralizedStateSpace> gss;
+    nb::tuple args;
 };
 
 // ------------------------------------------------------------------------------------------------ helpers
@@ -329,6 +351,80 @@ ArrayDict space_arrays(const PyStateSpace& P, Framework fw)
     return d;
 }
 
+u32 tuple_vertex(const TupleGraph& g, i64 v)
+{
+    if (v < 0 || v >= static_cast<i64>(g.num_vertices()))
+        throw nb::index_error("mymyr: tuple graph vertex out of range");
+    return static_cast<u32>(v);
+}
+
+u32 tuple_distance(const TupleGraph& g, i64 d)
+{
+    if (d < 0 || d >= static_cast<i64>(g.num_distances()))
+        throw nb::index_error("mymyr: tuple graph distance out of range");
+    return static_cast<u32>(d);
+}
+
+std::vector<u32> to_vector(std::span<const u32> s) { return {s.begin(), s.end()}; }
+
+/// The keyword arguments of KnowledgeBase(), in order (its pickled state is the table, then these).
+#define MYMYR_KB_ARGS                                                                                                      \
+    nb::kw_only(), "threads"_a = 0, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \
+        "remove_if_unsolvable"_a = true, "symmetry_pruning"_a = false, "certificate"_a = "kfwl", "k"_a = 2,             \
+        "labels"_a = true, "sort_by_size"_a = true, "generalized"_a = false, "width"_a = nb::none(),                    \
+        "dominance_pruning"_a = true
+
+using KbTasksArg = Arg<std::variant<PyTable, nb::typed<nb::sequence, std::variant<PyTask, PyHandle>>>>;
+using KbState = nb::typed<nb::tuple, PyTable, u32, std::optional<u64>, std::optional<double>, bool, bool, std::string, u32,
+                          bool, bool, bool, std::optional<u32>, bool>;
+
+void init_knowledge_base(PyKnowledgeBase* self, nb::handle tasks, u32 threads, nb::handle max_states, nb::handle max_seconds,
+                         bool remove_if_unsolvable, bool symmetry_pruning, nb::handle certificate, u32 k, bool labels,
+                         bool sort_by_size, bool generalized, std::optional<u32> width, bool dominance_pruning)
+{
+    nb::object table = nb::isinstance<PyTable>(tasks) ? nb::borrow(tasks) : nb::type<PyTable>()(tasks);
+    KnowledgeBaseOptions o;
+    o.state_space = make_options(1, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
+    o.sort_by_size = sort_by_size;
+    o.generalized = generalized;
+    if (width)
+        o.tuple_graphs = TupleGraphOptions{.width = *width, .dominance_pruning = dominance_pruning, .threads = threads};
+    o.threads = threads;
+    const PyTable& t = *nb::inst_ptr<PyTable>(table);
+    KnowledgeBasePtr kb;
+    {
+        nb::gil_scoped_release release;  // std::invalid_argument (a width above 5) becomes a ValueError
+        kb = KnowledgeBase::create(t.table, o);
+    }
+    auto* p = new (self) PyKnowledgeBase{};
+    p->kb = kb;
+    p->table = table;
+    for (usize i = 0; i < kb->state_spaces().size(); ++i)
+        p->spaces.push_back(PyStateSpace{kb->state_spaces()[i], owner_of(t.tasks[kb->task_indices()[i]])});
+    if (kb->generalized_state_space())
+        p->gss = PyGeneralizedStateSpace{kb->generalized_state_space(), p->spaces};
+    p->args = nb::make_tuple(table, threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k,
+                             labels, sort_by_size, generalized, width, dominance_pruning);
+}
+
+usize kb_space(const PyKnowledgeBase& kb, i64 i)
+{
+    if (i < 0 || i >= static_cast<i64>(kb.spaces.size()))
+        throw nb::index_error("mymyr: state space index out of range");
+    return static_cast<usize>(i);
+}
+
+void require_tuple_graphs(const PyKnowledgeBase& kb)
+{
+    if (!kb.kb->has_tuple_graphs())
+        throw nb::value_error("mymyr: this knowledge base has no tuple graphs (width=None)");
+}
+
+PyTupleGraph kb_tuple_graph(const PyKnowledgeBase& kb, usize i, u32 v)
+{
+    return PyTupleGraph{std::shared_ptr<const TupleGraph>(kb.kb, &kb.kb->tuple_graphs()[i][v]), kb.spaces[i]};
+}
+
 const char* k_space_doc =
     "The full transition model of a task as flat arrays (datasets/state_space.hpp), with the semantics of mimir's "
     "StateSpace: every reachable state (ids in breadth-first discovery order, the same at every thread count), every "
@@ -351,7 +447,8 @@ const char* k_options_doc =
 
 void bind_datasets(nb::module_& parent)
 {
-    nb::module_ m = parent.def_submodule("_datasets", "State spaces, samplers, object graphs and certificates (mymyr.datasets)");
+    nb::module_ m = parent.def_submodule(
+        "_datasets", "State spaces, knowledge bases, tuple graphs, samplers, object graphs and certificates (mymyr.datasets)");
 
     nb::enum_<StateSpaceStatus>(m, "Status", "Outcome of a state space generation.")
         .value("OK", StateSpaceStatus::Ok)
@@ -852,6 +949,215 @@ void bind_datasets(nb::module_& parent)
             return PyObjectGraph{std::move(g)};
         },
         "state"_a, "The object graph of a state (ObjectGraphBuilder for many states of one task).");
+
+    // ---------------------------------------------------------------------------------------------- tuple graphs
+    nb::class_<PyTupleGraph>(
+        m, "TupleGraph",
+        "The tuple graph of a state-space vertex (the root), as in mimir's TupleGraph (datasets/tuple_graph.hpp; "
+        "Lipovetzky and Geffner 2012): which tuples of at most `width` fluent atoms are first reached at each "
+        "breadth-first distance from the root, the problem vertices (states) at that distance in which each is novel, "
+        "and the edges u -> t between consecutive distances where every problem vertex of u has a successor among "
+        "those of t. Width 0: the root and one vertex per successor state. Vertices are ordered by distance; "
+        "dominance pruning (default) keeps the vertices with minimal problem-vertex sets. Over a symmetry-reduced space "
+        "the problem vertices are class vertices. The result does not depend on the thread count.")
+        .def_prop_ro("space", [](const PyTupleGraph& g) { return g.space; }, "The state space the root belongs to.")
+        .def_prop_ro("root", [](const PyTupleGraph& g) { return g.graph->root(); }, "The root's state id.")
+        .def_prop_ro("width", [](const PyTupleGraph& g) { return g.graph->width(); })
+        .def_prop_ro("dominance_pruning", [](const PyTupleGraph& g) { return g.graph->dominance_pruning(); })
+        .def_prop_ro("num_vertices", [](const PyTupleGraph& g) { return g.graph->num_vertices(); })
+        .def_prop_ro("num_edges", [](const PyTupleGraph& g) { return g.graph->num_edges(); })
+        .def_prop_ro("num_distances", [](const PyTupleGraph& g) { return g.graph->num_distances(); },
+                     "The number of distances with vertices (the largest distance + 1).")
+        .def_prop_ro("nbytes", [](const PyTupleGraph& g) { return g.graph->bytes(); })
+        .def(
+            "vertices_at",
+            [](const PyTupleGraph& g, i64 d) {
+                const u32 k = tuple_distance(*g.graph, d);
+                std::vector<u32> out;
+                for (const u32 v : g.graph->vertices_at(k))
+                    out.push_back(v);
+                return out;
+            },
+            "distance"_a, "The vertices at a distance (consecutive ids, ascending).")
+        .def("distance", [](const PyTupleGraph& g, i64 v) { return g.graph->distance(tuple_vertex(*g.graph, v)); }, "vertex"_a)
+        .def("tuple", [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->tuple(tuple_vertex(*g.graph, v))); },
+             "vertex"_a, "The vertex's tuple: fluent atom slots of the space's task, ascending (empty: the empty tuple).")
+        .def(
+            "atoms",
+            [](const PyTupleGraph& g, i64 v) {
+                const Owner& o = g.space.owner;
+                const Task& task = *o.core->task;
+                nb::typed<nb::list, PyGroundAtom> out{nb::list()};
+                for (const u32 s : g.graph->tuple(tuple_vertex(*g.graph, v)))
+                {
+                    const SlotId slot{s};
+                    const auto args = task.atoms().arguments(slot);
+                    out.append(make_ground_atom(mymyr::python::task_owner(o),
+                                                GroundAtom{task.atoms().predicate(slot), std::vector<ObjectId>(args.begin(), args.end())}));
+                }
+                return out;
+            },
+            "vertex"_a, "The vertex's tuple as GroundAtoms (slot order).")
+        .def("problem_vertices",
+             [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->problem_vertices(tuple_vertex(*g.graph, v))); }, "vertex"_a,
+             "The states at the vertex's distance in which its tuple is novel (state ids, ascending).")
+        .def("successors", [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->successors(tuple_vertex(*g.graph, v))); },
+             "vertex"_a, "The vertices at the next distance with an edge from this one (ascending).")
+        .def("predecessors",
+             [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->predecessors(tuple_vertex(*g.graph, v))); }, "vertex"_a,
+             "The vertices at the previous distance with an edge to this one (ascending).")
+        .def("problem_vertices_at",
+             [](const PyTupleGraph& g, i64 d) { return to_vector(g.graph->problem_vertices_at(tuple_distance(*g.graph, d))); },
+             "distance"_a, "The states at a breadth-first distance from the root (state ids, ascending).")
+        .def(
+            "arrays",
+            [](const PyTupleGraph& g, FrameworkArg framework) {
+                const Framework fw = parse_framework(framework);
+                const std::shared_ptr<const void> own = g.graph;
+                const TupleGraph& G = *g.graph;
+                ArrayDict d{nb::dict()};
+                d["distance_offsets"] = view<u32>(own, G.distance_offsets(), fw);
+                d["tuple_offsets"] = view<u32>(own, G.tuple_offsets(), fw);
+                d["tuple_atoms"] = view<u32>(own, G.tuple_atoms(), fw);
+                d["problem_offsets"] = view<u32>(own, G.problem_offsets(), fw);
+                d["problem_vertices"] = view<u32>(own, G.problem_vertex_ids(), fw);
+                d["successor_offsets"] = view<u32>(own, G.successor_offsets(), fw);
+                d["successors"] = view<u32>(own, G.successor_ids(), fw);
+                d["predecessor_offsets"] = view<u32>(own, G.predecessor_offsets(), fw);
+                d["predecessors"] = view<u32>(own, G.predecessor_ids(), fw);
+                d["layer_offsets"] = view<u32>(own, G.layer_offsets(), fw);
+                d["layer_vertices"] = view<u32>(own, G.layer_vertex_ids(), fw);
+                return d;
+            },
+            "framework"_a = nb::none(),
+            "Zero-copy views (uint32) of the CSR arrays: vertex v's tuple is tuple_atoms[tuple_offsets[v] : "
+            "tuple_offsets[v + 1]], and likewise its problem vertices (problem_offsets, problem_vertices), successors "
+            "and predecessors; the vertices at distance d are distance_offsets[d] .. distance_offsets[d + 1] - 1 and "
+            "the states at distance d are layer_vertices[layer_offsets[d] : layer_offsets[d + 1]].")
+        .def("__len__", [](const PyTupleGraph& g) { return g.graph->num_vertices(); })
+        .def("__eq__", [](const PyTupleGraph& a, const PyTupleGraph& b) { return *a.graph == *b.graph; }, nb::is_operator(),
+             "other"_a, "The same state space, root and options, and equal vertices, tuples, problem vertices and edges.")
+        .def("__repr__", [](const PyTupleGraph& g) {
+            return "TupleGraph(root=" + std::to_string(g.graph->root()) + ", width=" + std::to_string(g.graph->width()) +
+                   ", vertices=" + std::to_string(g.graph->num_vertices()) + ", edges=" + std::to_string(g.graph->num_edges()) +
+                   ", distances=" + std::to_string(g.graph->num_distances()) + ")";
+        });
+
+    m.def(
+        "tuple_graphs",
+        [](const PyStateSpace& space, u32 width, bool dominance_pruning, u32 threads) {
+            const TupleGraphOptions o{.width = width, .dominance_pruning = dominance_pruning, .threads = threads};
+            std::vector<TupleGraph> graphs;
+            {
+                nb::gil_scoped_release release;  // std::invalid_argument (a width above 5) becomes a ValueError
+                graphs = datasets::tuple_graphs(space.space, o);
+            }
+            nb::typed<nb::list, PyTupleGraph> out{nb::list()};
+            for (TupleGraph& g : graphs)
+                out.append(nb::cast(PyTupleGraph{std::make_shared<const TupleGraph>(std::move(g)), space}, nb::rv_policy::move));
+            return out;
+        },
+        "space"_a, nb::kw_only(), "width"_a = 0, "dominance_pruning"_a = true, "threads"_a = 0,
+        "The tuple graph of every vertex of a state space (index = state id), as mimir's TupleGraphFactory: width "
+        "0..5 (0: the root and its successor states), dominance_pruning, threads (0: all cores; the result is the "
+        "same at every count). Cost: a breadth-first search per vertex, enumerating the tuples of at most width atoms "
+        "of every state it reaches; tuple_graph() builds one.");
+
+    m.def(
+        "tuple_graph",
+        [](const PyStateSpace& space, i64 vertex, u32 width, bool dominance_pruning) {
+            if (vertex < 0 || vertex >= static_cast<i64>(space.space->num_states()))
+                throw nb::index_error("mymyr: state id out of range");
+            const TupleGraphOptions o{.width = width, .dominance_pruning = dominance_pruning, .threads = 1};
+            std::shared_ptr<const TupleGraph> g;
+            {
+                nb::gil_scoped_release release;
+                g = std::make_shared<const TupleGraph>(datasets::tuple_graph(space.space, static_cast<u32>(vertex), o));
+            }
+            return PyTupleGraph{std::move(g), space};
+        },
+        "space"_a, "vertex"_a, nb::kw_only(), "width"_a = 0, "dominance_pruning"_a = true,
+        "The tuple graph of one vertex of a state space (equal to tuple_graphs(space)[vertex]).");
+
+    // ---------------------------------------------------------------------------------------------- knowledge bases
+    nb::class_<PyKnowledgeBase>(
+        m, "KnowledgeBase",
+        "What is known about a set of tasks of one domain, as mimir's KnowledgeBase (datasets/knowledge_base.hpp): the "
+        "tasks (a mymyr.rl.TaskTable), the state space of every task whose generation succeeded (failures skipped; "
+        "max_states and max_seconds bound each one), sorted ascending by size unless sort_by_size=False (ties in task "
+        "order), optionally the generalized state space over them (generalized=True; with symmetry_pruning, problems "
+        "isomorphic to an earlier one are dropped from the knowledge base), and optionally the tuple graphs of every "
+        "vertex of every space (width=0..5; tuple graphs of large spaces are better built per vertex with "
+        "tuple_graph(space, vertex)). Every step runs on `threads` threads (0: all cores) with the same result at "
+        "every count. Pickling stores the tasks and the arguments, and unpickling builds the knowledge base again.")
+        .def(
+            "__init__",
+            [](PyKnowledgeBase* self, KbTasksArg tasks, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
+               bool symmetry_pruning, StrArg certificate, u32 k, bool labels, bool sort_by_size, bool generalized,
+               std::optional<u32> width, bool dominance_pruning) {
+                init_knowledge_base(self, tasks, threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate,
+                                    k, labels, sort_by_size, generalized, width, dominance_pruning);
+            },
+            "tasks"_a, MYMYR_KB_ARGS,
+            "The knowledge base of tasks of one domain: a TaskTable or a sequence of Tasks (made into a TaskTable). The "
+            "state space options are those of generate().")
+        .def_prop_ro("tasks", [](const PyKnowledgeBase& kb) { return nb::typed<nb::object, PyTable>(kb.table); },
+                     "The TaskTable of the tasks.")
+        .def_prop_ro("state_spaces", [](const PyKnowledgeBase& kb) { return kb.spaces; },
+                     "The state spaces in knowledge-base order.")
+        .def_prop_ro(
+            "task_indices",
+            [](const PyKnowledgeBase& kb) { return std::vector<u32>(kb.kb->task_indices().begin(), kb.kb->task_indices().end()); },
+            "Per state space: the index of its task in tasks.")
+        .def_prop_ro("generalized_state_space", [](const PyKnowledgeBase& kb) { return kb.gss; },
+                     "The generalized state space over state_spaces (problem i = state space i), or None unless "
+                     "generalized=True.")
+        .def_prop_ro("has_tuple_graphs", [](const PyKnowledgeBase& kb) { return kb.kb->has_tuple_graphs(); })
+        .def_prop_ro(
+            "width",
+            [](const PyKnowledgeBase& kb) {
+                return kb.kb->has_tuple_graphs() ? std::optional<u32>(kb.kb->options().tuple_graphs->width) : std::nullopt;
+            },
+            "The tuple graph width, or None without tuple graphs.")
+        .def(
+            "tuple_graphs",
+            [](const PyKnowledgeBase& kb, i64 i) {
+                require_tuple_graphs(kb);
+                const usize s = kb_space(kb, i);
+                nb::typed<nb::list, PyTupleGraph> out{nb::list()};
+                for (u32 v = 0; v < kb.kb->tuple_graphs()[s].size(); ++v)
+                    out.append(nb::cast(kb_tuple_graph(kb, s, v), nb::rv_policy::move));
+                return out;
+            },
+            "space"_a, "The tuple graphs of every vertex of state space i (index = state id).")
+        .def(
+            "tuple_graph",
+            [](const PyKnowledgeBase& kb, i64 i, i64 vertex) {
+                require_tuple_graphs(kb);
+                const usize s = kb_space(kb, i);
+                if (vertex < 0 || vertex >= static_cast<i64>(kb.kb->tuple_graphs()[s].size()))
+                    throw nb::index_error("mymyr: state id out of range");
+                return kb_tuple_graph(kb, s, static_cast<u32>(vertex));
+            },
+            "space"_a, "vertex"_a, "The tuple graph of a vertex of state space i.")
+        .def("__len__", [](const PyKnowledgeBase& kb) { return kb.spaces.size(); }, "The number of state spaces.")
+        .def("__getstate__", [](const PyKnowledgeBase& kb) { return KbState(kb.args); })
+        .def("__setstate__",
+             [](PyKnowledgeBase* self, KbState s) {
+                 init_knowledge_base(self, s[0], nb::cast<u32>(s[1]), s[2], s[3], nb::cast<bool>(s[4]), nb::cast<bool>(s[5]), s[6],
+                                     nb::cast<u32>(s[7]), nb::cast<bool>(s[8]), nb::cast<bool>(s[9]), nb::cast<bool>(s[10]),
+                                     nb::cast<std::optional<u32>>(s[11]), nb::cast<bool>(s[12]));
+             })
+        .def("__repr__", [](const PyKnowledgeBase& kb) {
+            std::string r = "KnowledgeBase(spaces=" + std::to_string(kb.spaces.size()) + " of " +
+                            std::to_string(kb.kb->tasks()->size()) + " tasks";
+            if (kb.gss)
+                r += ", generalized";
+            if (kb.kb->has_tuple_graphs())
+                r += ", width=" + std::to_string(kb.kb->options().tuple_graphs->width);
+            return r + ")";
+        });
 }
+#undef MYMYR_KB_ARGS
 #undef MYMYR_SS_ARGS
 }  // namespace mymyr::python
