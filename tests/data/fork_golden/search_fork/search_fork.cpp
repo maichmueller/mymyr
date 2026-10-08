@@ -4,7 +4,8 @@
 // (tests/data/beam/fork_beam.json, made by run_beam.py) and the heuristics test
 // (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py), the binding generator test
 // (tests/data/bindings/fork_bindings.json, made by run_bindings.py) and the tuple graph tests
-// (tests/data/tuple_graphs/fork_tuple_graphs.json, made by run_tuple_graphs.py).
+// (tests/data/tuple_graphs/fork_tuple_graphs.json, made by run_tuple_graphs.py) and the k-FWL certificate tests
+// (tests/data/kfwl/fork_kfwl.json, made by run_kfwl.py).
 //
 //   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
 //               --problem P [--max-ms T] [--max-states N]
@@ -17,6 +18,7 @@
 //   search_fork --algo walk_ground --domain D --problem P [--walks W] [--steps S] [--seed B]
 //   search_fork --algo tuple_graphs --domain D --problem P [--max-states N] [--sample S] [--max-width W]
 //               [--time-width W [--time-pruning 0|1]]
+//   search_fork --algo kfwl --domain D --problem P [--max-states N] [--sample S] [--max-n2 M] [--max-n3 M] [--max-n4 M]
 //
 // Prints one line "RESULT {...}" with status, plan_cost, plan_length, plan (ground action strings), expanded and
 // generated (best-first: also deadends; iw: also per-pass statistics), or "ERROR <message>". Successor generation is
@@ -37,12 +39,19 @@
 // width 0, and of widths 1 and 2 (up to --max-width) with and without dominance pruning, of every
 // ceil(N / S)-th vertex (tests/data/fork_golden/README.md, "Tuple graphs"); with --time-width only that width and
 // pruning, timed over every vertex, with the peak RSS before and after.
+// kfwl prints, for every ceil(N / S)-th vertex of the state space, the state key, the number of vertices of its object
+// graph (datasets::create_object_graph), its class among these states by nauty canonical form and by the fork's
+// k-FWL certificate for k = 2, 3, 4 (only on graphs of at most M vertices; M = 0 skips k), the seconds and peak RSS of
+// the certificates, and the size of the fork's symmetry-reduced state space (nauty).
 
 #include <mimir/mimir.hpp>
 #include <mimir/search/algorithms/astar_iw.hpp>
 #include <mimir/search/algorithms/astar_iw/event_handlers/default.hpp>
+#include <mimir/graphs/algorithms/folklore_weisfeiler_leman.hpp>
+#include <mimir/graphs/algorithms/nauty.hpp>
 #include <mimir/search/heuristics/h2.hpp>  // not in mimir.hpp
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -51,6 +60,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -841,6 +851,114 @@ int run_tuple_graphs(const std::string& domain, const std::string& problem_file,
     std::cout << "RESULT {\"algo\":\"tuple_graphs\"," << body << "}" << std::endl;
     return 0;
 }
+
+/// Class ids by first occurrence of each value.
+template<class T>
+std::vector<long> first_occurrence_classes(const std::vector<std::optional<T>>& values)
+{
+    std::map<T, long> ids;
+    std::vector<long> out;
+    for (const auto& v : values)
+        out.push_back(v ? ids.emplace(*v, static_cast<long>(ids.size())).first->second : -1);
+    return out;
+}
+
+std::string json_list(const std::vector<long>& v)
+{
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); ++i)
+        s += (i ? "," : "") + std::to_string(v[i]);
+    return s + "]";
+}
+
+/// The fork's k-FWL certificates (kfwl::compute_certificate<K>, one IsomorphismTypeCompressionFunction per K) of the
+/// object graphs of the sampled states with at most max_n vertices; a state is identified with the 64-bit loki hash of
+/// its certificate (the hash of its identifying members). Adds "k<K>" (class ids, -1 above max_n), "k<K>_max_n",
+/// "k<K>_seconds", "k<K>_state_seconds" (per state, null above max_n) and "k<K>_peak_rss_kb" to `body`.
+template<size_t K>
+void kfwl_classes(const std::vector<graphs::StaticGraph<graphs::Vertex<graphs::PropertyValue>, graphs::Edge<>>>& graphs, size_t max_n,
+                  std::string& body)
+{
+    auto iso = graphs::kfwl::IsomorphismTypeCompressionFunction();
+    std::vector<std::optional<size_t>> hashes;
+    std::string state_seconds = "[";
+    double secs = 0;
+    for (const auto& g : graphs)
+    {
+        if (g.get_num_vertices() > max_n)
+        {
+            hashes.emplace_back();
+            state_seconds += std::string(hashes.size() > 1 ? "," : "") + "null";
+            continue;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto certificate = graphs::kfwl::compute_certificate<K>(g, iso);
+        hashes.emplace_back(loki::Hash<graphs::kfwl::CertificateImpl<K>>()(*certificate));
+        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        secs += s;
+        state_seconds += std::string(hashes.size() > 1 ? "," : "") + jnum(s);
+    }
+    state_seconds += "]";
+    const std::string k = std::to_string(K);
+    body += ",\"k" + k + "\":" + json_list(first_occurrence_classes(hashes)) + ",\"k" + k + "_max_n\":" + std::to_string(max_n) + ",\"k" + k +
+            "_seconds\":" + jnum(secs) + ",\"k" + k + "_state_seconds\":" + state_seconds + ",\"k" + k + "_peak_rss_kb\":" + std::to_string(peak_rss_kb());
+}
+
+/// The fork's k-FWL (k = 2, 3, 4) and nauty classes of the object graphs (datasets::create_object_graph) of every
+/// ceil(N / sample)-th state of the state space (remove_if_unsolvable = false, no symmetry pruning), and the size of
+/// the fork's symmetry-reduced state space (nauty canonical forms).
+int run_kfwl(const std::string& domain, const std::string& problem_file, uint32_t max_states, size_t sample, const std::array<size_t, 5>& max_n)
+{
+    Problem problem = ProblemImpl::create(domain, problem_file);
+    auto options = SearchContextImpl::Options(
+        SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF)));
+    auto ss_options = datasets::StateSpaceImpl::Options();
+    ss_options.remove_if_unsolvable = false;
+    ss_options.max_num_states = max_states;
+    auto result = datasets::StateSpaceImpl::create(SearchContextImpl::create(problem, options), ss_options);
+    if (!result)
+        throw std::runtime_error("no state space (max_states reached or a statically false goal)");
+    const auto space = result->first;
+    const auto& graph = space->get_graph();
+    const size_t N = graph.get_num_vertices();
+    const size_t step = (sample > 0 && N > sample) ? (N + sample - 1) / sample : 1;
+
+    std::vector<std::string> keys;
+    std::vector<long> sizes;
+    std::vector<graphs::StaticGraph<graphs::Vertex<graphs::PropertyValue>, graphs::Edge<>>> object_graphs;
+    std::vector<std::optional<graphs::nauty::SparseGraph>> canonical;  // optional: SparseGraph is not copy-assignable
+    const auto t0 = std::chrono::steady_clock::now();
+    for (Index v = 0; v < N; v += step)
+    {
+        const auto& state = graphs::get_state(graph.get_vertex(v));
+        keys.push_back(state_key(problem, state));
+        object_graphs.push_back(datasets::create_object_graph(state, *problem));
+        sizes.push_back(static_cast<long>(object_graphs.back().get_num_vertices()));
+        canonical.emplace_back(graphs::nauty::SparseGraph(object_graphs.back()).canonize());
+    }
+    const double nauty_secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::string body = "\"states\":" + std::to_string(N) + ",\"sample_step\":" + std::to_string(step) + ",\"keys\":[";
+    for (size_t i = 0; i < keys.size(); ++i)
+        body += std::string(i ? "," : "") + jstr(keys[i]);
+    body += "],\"n\":" + json_list(sizes);
+    UnorderedMap<graphs::nauty::SparseGraph, long> nauty_ids;  // loki::Hash / loki::EqualTo of the canonical forms
+    std::vector<long> nauty_classes;
+    for (const auto& c : canonical)
+        nauty_classes.push_back(nauty_ids.emplace(*c, static_cast<long>(nauty_ids.size())).first->second);
+    body += ",\"nauty\":" + json_list(nauty_classes) + ",\"nauty_seconds\":" + jnum(nauty_secs);
+    if (max_n[2])
+        kfwl_classes<2>(object_graphs, max_n[2], body);
+    if (max_n[3])
+        kfwl_classes<3>(object_graphs, max_n[3], body);
+    if (max_n[4])
+        kfwl_classes<4>(object_graphs, max_n[4], body);
+    // the fork's symmetry-reduced state space (nauty)
+    ss_options.symmetry_pruning = true;
+    auto symmetric = datasets::StateSpaceImpl::create(SearchContextImpl::create(ProblemImpl::create(domain, problem_file), options), ss_options);
+    body += ",\"symmetric_states\":" + (symmetric ? std::to_string(symmetric->first->get_graph().get_num_vertices()) : std::string("null"));
+    std::cout << "RESULT {\"algo\":\"kfwl\"," << body << "}" << std::endl;
+    return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -852,6 +970,7 @@ int main(int argc, char** argv)
     size_t sample = 0, max_width = 2;
     long time_width = -1;
     bool time_pruning = true;
+    std::array<size_t, 5> max_n { 0, 0, 1000, 64, 24 };  // per k: object graphs above are not certified
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -899,6 +1018,8 @@ int main(int argc, char** argv)
             time_width = std::stol(v);
         else if (a == "--time-pruning")
             time_pruning = v != "0";
+        else if (a == "--max-n2" || a == "--max-n3" || a == "--max-n4")
+            max_n[a.back() - '0'] = std::stoul(v);
         else
         {
             std::cerr << "unknown argument " << a << "\n";
@@ -906,7 +1027,7 @@ int main(int argc, char** argv)
         }
     }
     const bool layered = algo == "iw" || algo == "brfs";
-    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && algo != "tuple_graphs" && hname.empty()))
+    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && algo != "tuple_graphs" && algo != "kfwl" && hname.empty()))
     {
         std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L] [--beam W] [--beam-mode M]) --domain D --problem P [--max-ms T] "
                      "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
@@ -915,7 +1036,9 @@ int main(int argc, char** argv)
     int rc = 2;
     try
     {
-        if (algo == "tuple_graphs")
+        if (algo == "kfwl")
+            rc = run_kfwl(domain, problem, max_states, sample, max_n);
+        else if (algo == "tuple_graphs")
             rc = run_tuple_graphs(domain, problem, max_states, sample, max_width, time_width, time_pruning);
         else if (algo == "walk_ground")
             rc = run_walk_ground(domain, problem, walks, steps, seed);
