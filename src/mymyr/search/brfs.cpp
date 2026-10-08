@@ -317,7 +317,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
                 }
                 return true;
             },
-            witness, canonical);
+            witness, canonical, o.symmetry_pruning);
         if constexpr (Ordered)
             if (truncated || pos + 1 - layer_begin == order.size())
                 pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
@@ -447,7 +447,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
                 }
                 return true;
             },
-            witness, canonical);
+            witness, canonical, o.symmetry_pruning);
         if constexpr (Ordered)
             if (truncated || pos + 1 - layer_begin == order.size())
                 pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
@@ -623,7 +623,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                     nodes.push(pid, s, b, succ.arity(s));
                     return true;
                 },
-                witness, canonical);
+                witness, canonical, o.symmetry_pruning);
         }
         log.close(r.expanded, r.generated, closed.size());
         layer_first += static_cast<u32>(layer_f.size());
@@ -825,7 +825,7 @@ private:
                     plan.push_back(action_of(succ, s, b));
                     return false;
                 },
-                m_o.witness_pruning, m_o.canonical_order);
+                m_o.witness_pruning, m_o.canonical_order, m_o.symmetry_pruning);
             v = parent;
         }
         std::reverse(plan.begin(), plan.end());
@@ -895,7 +895,7 @@ private:
                                        {w.next.data(), nn, d.num, m_task.numeric_words()}, fresh);
                 return true;
             },
-            m_o.witness_pruning, m_o.canonical_order);
+            m_o.witness_pruning, m_o.canonical_order, m_o.symmetry_pruning);
         if (k >= (u32{1} << 24))
             throw std::length_error("mymyr brfs: more than 2^24 successors of one state");
     }

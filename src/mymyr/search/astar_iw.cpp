@@ -278,6 +278,7 @@ AStarIwResult astar_iw(const Task& task, const AStarIwOptions& o)
     opts.start = o.start;
     opts.witness_pruning = o.witness_pruning;
     opts.canonical_order = o.canonical_order;
+    opts.symmetry_pruning = o.symmetry_pruning;
     std::unique_ptr<Context> c;
     try
     {
