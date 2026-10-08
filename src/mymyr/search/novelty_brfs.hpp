@@ -221,6 +221,7 @@ struct Env
     const SearchControl& control;
     bool witness = false;
     bool canonical = true;
+    SymmetryPruning symmetry = SymmetryPruning::Off;
     const SuccessorOrder* successor_order = nullptr;  // null or empty: generation order
     Clock::time_point deadline{};
     bool timed = false;
@@ -401,7 +402,7 @@ public:
                     m_slots.insert(m_slots.end(), d.del.begin(), d.del.end());
                     return true;
                 },
-                env.witness, env.canonical);
+                env.witness, env.canonical, env.symmetry);
             m_order.clear();
             (*env.successor_order)(cv, m_actions, m_order);
             const u32 m = static_cast<u32>(m_actions.size());
@@ -425,7 +426,7 @@ public:
             }
             return;
         }
-        succ.generate<true>(process, env.witness, env.canonical);
+        succ.generate<true>(process, env.witness, env.canonical, env.symmetry);
     }
 
 private:

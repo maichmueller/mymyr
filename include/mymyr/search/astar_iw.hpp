@@ -22,6 +22,7 @@ struct AStarIwOptions
     std::optional<State> start;
     bool witness_pruning = false;
     bool canonical_order = true;
+    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;  // as BestFirstOptions::symmetry_pruning
     u32 width = 1;  // classical: 1..5; abstracted modes: 1..3
     AStarIwFeatures features = AStarIwFeatures::Classical;
     LandmarkNovelty landmarks;

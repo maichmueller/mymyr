@@ -40,10 +40,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace mimir;
@@ -52,6 +55,9 @@ using namespace mimir::formalism;
 
 namespace
 {
+/// The symmetry pruning of every search context (--symmetry off|wl1).
+SearchContextImpl::SymmetryPruning g_symmetry = SearchContextImpl::SymmetryPruning::OFF;
+
 const char* status_name(SearchStatus s)
 {
     switch (s)
@@ -169,7 +175,7 @@ int run_walk_h(const std::string& domain, const std::string& problem_file, const
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
     std::unique_ptr<LiftedGrounder> grounder;
     Heuristic h;
     if (hname == "perfect")
@@ -280,7 +286,7 @@ int run_walk_ground(const std::string& domain, const std::string& problem_file, 
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
     const ActionList& actions = problem->get_domain()->get_actions();
     std::vector<ConjunctiveConditionSatisficingBindingGenerator> pre;
     std::vector<ActionSatisficingBindingGenerator> act;
@@ -392,6 +398,143 @@ std::string plan_json(const SearchResult& result)
     return o + "]";
 }
 
+/// symmetry_states: every state reachable without pruning (breadth-first, at most max_states), each with its fluent
+/// atoms (and fluent function values), its applicable actions under the WL1 symmetry pruning of the KPKC generator, and the WL1 colour class of
+/// every object (the colour refinement of the state's object graph, classes numbered by first occurrence in object
+/// order); then, with WL1 pruning, brfs exhaustively and stopping at a goal, and astar_eager with the blind
+/// heuristic.
+int run_symmetry_states(const std::string& domain, const std::string& problem_file, uint32_t max_ms, uint32_t max_states)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    Problem problem = ProblemImpl::create(domain, problem_file);
+    using Kpkc = SearchContextImpl::LiftedOptions::KPKCOptions;
+    SearchContext context = SearchContextImpl::create(
+        problem, SearchContextImpl::Options(SearchContextImpl::LiftedOptions(Kpkc(SearchContextImpl::SymmetryPruning::OFF))));
+    auto pruned = KPKCLiftedApplicableActionGeneratorImpl::create(problem, Kpkc(SearchContextImpl::SymmetryPruning::WL1));
+    auto& aag = *context->get_applicable_action_generator();
+    auto& repo = *context->get_state_repository();
+    const auto& objects = problem->get_problem_and_domain_objects();
+
+    std::vector<std::string> atom_names, action_names;
+    std::unordered_map<std::string, size_t> atom_ids, action_ids;
+    auto intern = [](std::vector<std::string>& names, std::unordered_map<std::string, size_t>& ids, const std::string& s)
+    {
+        const auto [it, fresh] = ids.emplace(s, names.size());
+        if (fresh)
+            names.push_back(s);
+        return it->second;
+    };
+    std::string states = "[";
+    std::unordered_set<Index> seen;
+    std::deque<std::pair<State, ContinuousCost>> queue;
+    queue.push_back(repo.get_or_create_initial_state());
+    seen.insert(queue.front().first.get_index());
+    size_t num_states = 0, sum_all = 0, sum_pruned = 0;
+    bool complete = true;
+    while (!queue.empty())
+    {
+        const auto [state, metric] = queue.front();
+        queue.pop_front();
+        std::vector<size_t> atoms, acts;
+        for (auto a : repo.get_problem()->get_repositories().get_ground_atoms_from_indices<FluentTag>(state.get_atoms<FluentTag>()))
+        {
+            std::string s = "(" + a->get_predicate()->get_name();
+            for (auto o : a->get_objects())
+                s += " " + o->get_name();
+            atoms.push_back(intern(atom_names, atom_ids, s + ")"));
+        }
+        // numeric tasks: the fluent function values, as "(f o1 ... ok)=v" (%.17g; undefined values are left out)
+        for (const auto& [f, v] : repo.get_problem()->get_repositories().get_ground_function_values<FluentTag>(state.get_numeric_variables()))
+        {
+            if (std::isnan(v))
+                continue;
+            std::string s = "(" + f->get_function_skeleton()->get_name();
+            for (auto o : f->get_objects())
+                s += " " + o->get_name();
+            char buf[40];
+            std::snprintf(buf, sizeof buf, "%.17g", v);
+            atoms.push_back(intern(atom_names, atom_ids, s + ")=" + buf));
+        }
+        for (auto a : pruned->create_applicable_action_generator(state))
+            acts.push_back(intern(action_names, action_ids, action_str(a)));
+        std::sort(atoms.begin(), atoms.end());
+        std::sort(acts.begin(), acts.end());
+        const auto graph = datasets::create_object_graph(state, *problem);
+        const auto certificate = graphs::color_refinement::compute_certificate(graph);
+        std::unordered_map<Index, size_t> class_of_color;
+        std::string classes = "[";
+        for (size_t o = 0; o < objects.size(); ++o)
+        {
+            const auto [it, fresh] = class_of_color.emplace(certificate->get_hash_to_color()[o], class_of_color.size());
+            classes += std::string(o ? "," : "") + std::to_string(it->second);
+        }
+        states += std::string(num_states ? "," : "") + "{\"atoms\":[";
+        for (size_t i = 0; i < atoms.size(); ++i)
+            states += std::string(i ? "," : "") + std::to_string(atoms[i]);
+        states += "],\"actions\":[";
+        for (size_t i = 0; i < acts.size(); ++i)
+            states += std::string(i ? "," : "") + std::to_string(acts[i]);
+        states += "],\"classes\":" + classes + "]}";
+        ++num_states;
+        sum_pruned += acts.size();
+        for (auto a : aag.create_applicable_action_generator(state))
+        {
+            ++sum_all;
+            auto next = repo.get_or_create_successor_state(state, a, metric);
+            if (seen.size() >= max_states && !seen.contains(next.first.get_index()))
+            {
+                complete = false;
+                continue;
+            }
+            if (seen.insert(next.first.get_index()).second)
+                queue.push_back(next);
+        }
+    }
+    states += "]";
+
+    // the searches with WL1 pruning, each on its own context
+    auto wl1_context = [&]
+    { return SearchContextImpl::create(problem, SearchContextImpl::Options(SearchContextImpl::LiftedOptions(Kpkc(SearchContextImpl::SymmetryPruning::WL1)))); };
+    std::string searches = "{";
+    for (const bool stop : { false, true })
+    {
+        auto eh = brfs::DefaultEventHandlerImpl::create(problem, true);
+        auto opts = brfs::Options();
+        opts.event_handler = eh;
+        opts.stop_if_goal = stop;
+        opts.max_time_in_ms = max_ms;
+        auto result = brfs::find_solution(wl1_context(), opts);
+        const auto& st = eh->get_statistics();
+        searches += std::string(stop ? ",\"brfs\":{" : "\"brfs_exhaustive\":{") + "\"status\":" + jstr(status_name(result.status)) +
+                    plan_json(result) + ",\"expanded\":" + std::to_string(st.get_num_expanded()) +
+                    ",\"generated\":" + std::to_string(st.get_num_generated()) + "}";
+    }
+    {
+        const auto ctx = wl1_context();
+        searches += ",\"astar_blind\":{" +
+                    run<astar_eager::Options>(ctx, BlindHeuristicImpl::create(problem), astar_eager::DefaultEventHandlerImpl::create(problem, true),
+                                              max_ms, UINT32_MAX,
+                                              [](auto&& c, auto&& hh, auto&& o) { return astar_eager::find_solution(c, hh, o); }) +
+                    "}";
+    }
+    searches += "}";
+
+    std::string names = "[";
+    for (size_t o = 0; o < objects.size(); ++o)
+        names += std::string(o ? "," : "") + jstr(objects[o]->get_name());
+    std::string atoms_json = "[", actions_json = "[";
+    for (size_t i = 0; i < atom_names.size(); ++i)
+        atoms_json += std::string(i ? "," : "") + jstr(atom_names[i]);
+    for (size_t i = 0; i < action_names.size(); ++i)
+        actions_json += std::string(i ? "," : "") + jstr(action_names[i]);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << "RESULT {\"algo\":\"symmetry_states\",\"complete\":" << (complete ? "true" : "false") << ",\"num_states\":" << num_states
+              << ",\"num_actions\":" << sum_all << ",\"num_pruned_actions\":" << sum_pruned << ",\"objects\":" << names
+              << "],\"atom_names\":" << atoms_json << "],\"action_names\":" << actions_json << "],\"states\":" << states
+              << ",\"searches\":" << searches << ",\"seconds\":" << jnum(secs) << "}" << std::endl;
+    return 0;
+}
+
 BeamNoveltyMode beam_mode(const std::string& m)
 {
     if (m == "all_tested")
@@ -408,7 +551,7 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
     std::string body;
     if (algo == "iw")
     {
@@ -477,7 +620,7 @@ int run_search(const std::string& domain, const std::string& problem_file, const
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
     std::unique_ptr<LiftedGrounder> grounder;
     Heuristic h;
     if (hname == "blind")
@@ -591,6 +734,18 @@ int main(int argc, char** argv)
             steps = std::stoul(v);
         else if (a == "--seed")
             seed = std::stoull(v);
+        else if (a == "--symmetry")
+        {
+            if (v == "off")
+                g_symmetry = SearchContextImpl::SymmetryPruning::OFF;
+            else if (v == "wl1")
+                g_symmetry = SearchContextImpl::SymmetryPruning::WL1;
+            else
+            {
+                std::cerr << "unknown symmetry pruning " << v << "\n";
+                return 2;
+            }
+        }
         else
         {
             std::cerr << "unknown argument " << a << "\n";
@@ -598,7 +753,7 @@ int main(int argc, char** argv)
         }
     }
     const bool layered = algo == "iw" || algo == "brfs";
-    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && hname.empty()))
+    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && algo != "symmetry_states" && hname.empty()))
     {
         std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L] [--beam W] [--beam-mode M]) --domain D --problem P [--max-ms T] "
                      "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
@@ -609,6 +764,8 @@ int main(int argc, char** argv)
     {
         if (algo == "walk_ground")
             rc = run_walk_ground(domain, problem, walks, steps, seed);
+        else if (algo == "symmetry_states")
+            rc = run_symmetry_states(domain, problem, max_ms, max_states);
         else if (algo == "walk_h")
             rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
         else

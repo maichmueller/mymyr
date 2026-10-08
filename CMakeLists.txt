@@ -93,6 +93,7 @@ add_library(mymyr_core STATIC
     src/mymyr/successor/successors.cpp
     src/mymyr/successor/bindings.cpp
     src/mymyr/successor/conditions.cpp
+    src/mymyr/successor/symmetry.cpp
     src/mymyr/axioms/evaluator.cpp
     src/mymyr/search/brfs.cpp
     src/mymyr/search/goal.cpp
