@@ -44,6 +44,15 @@ successors the beam drops still mark the novelty table (``"all_tested"``) or onl
 
     r = mymyr.search.iw(task, max_arity=2, layer_order="goal_count", beam_width=32, beam_novelty="survivors_only")
 
+``threads`` runs the beam's layer step (successor generation, scoring, read-only novelty tests) on that many threads
+with the single-threaded result. ``beam_novelty="relaxed_survivors_only"`` (goal_count only) splits each layer's
+transitions into ``min(threads, ceil(n / beam_chunk))`` parts and keeps the best ``beam_width`` of every part before
+merging, so its result depends on the thread count (deterministic for a thread count and seed):
+
+    r = mymyr.search.iw(task, max_arity=2, layer_order="goal_count", beam_width=32, threads=8)
+    r = mymyr.search.brfs(task, stop_at_goal=True, layer_order="goal_count", beam_width=32,
+                          beam_novelty="relaxed_survivors_only", threads=8)
+
 The IW family variants:
 
     r = mymyr.search.liw(task, max_arity=1, landmarks="lifted")       # LIW(k): landmark-restricted novelty

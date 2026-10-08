@@ -161,7 +161,7 @@ inline std::string check_layers(const LayerOrdering& lo)
     if (lo.beam() && lo.max_next_layer_states != ~u32{0})
         return "LayerOrdering::beam_width and LayerOrdering::max_next_layer_states are mutually exclusive";
     if (!lo.beam() && lo.beam_novelty != LayerOrdering::BeamNovelty::AllTested)
-        return "LayerOrdering::beam_novelty SurvivorsOnly and RelaxedSurvivorsOnly require a beam (beam_width)";
+        return "LayerOrdering::beam_novelty other than AllTested requires a beam (beam_width)";
     if (lo.randomize_ties && lo.kind != LayerOrdering::Kind::GoalCount)
         return "LayerOrdering::randomize_ties requires Kind::GoalCount (the only kind with scores)";
     if (lo.beam_novelty == LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly && lo.kind != LayerOrdering::Kind::GoalCount)

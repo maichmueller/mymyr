@@ -153,7 +153,7 @@ struct type_caster<mymyr::python::ann::LayerOrder>
 template<>
 struct type_caster<mymyr::python::ann::BeamNovelty>
 {
-    static constexpr auto Name = const_name("typing.Literal['all_tested', 'survivors_only']");
+    static constexpr auto Name = const_name("typing.Literal['all_tested', 'survivors_only', 'relaxed_survivors_only']");
 };
 template<>
 struct type_caster<mymyr::python::ann::WidthZero>

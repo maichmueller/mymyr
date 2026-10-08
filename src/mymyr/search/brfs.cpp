@@ -1347,7 +1347,8 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
 {
     u32 T = search::detail::resolve_threads(options.threads);
     // a beam runs on the flat or chunked store, with the layer step for threads > 1 or a relaxed selection
-    const bool beam = options.layers.kind != search::LayerOrdering::Kind::Queue && options.layers.beam();
+    const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
+    const bool beam = ordered && options.layers.beam();
     const bool relaxed = beam && options.layers.beam_novelty == search::LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly;
     if (beam && options.observer)
     {
@@ -1355,10 +1356,12 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
             throw std::invalid_argument("mymyr brfs: LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer");
         T = 1;  // an observer runs the beam on the calling thread
     }
+    if (ordered && !beam && T > 1)
+        throw std::invalid_argument("mymyr brfs: ordered layers without a beam are single-threaded (threads == 1)");
     BrfsOptions::Store store = options.store;
     if (store == BrfsOptions::Store::Auto)
     {
-        if (T > 1 && !beam)
+        if (T > 1 && !ordered)
             store = BrfsOptions::Store::Concurrent;
         else
         {
@@ -1374,11 +1377,8 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
         throw std::invalid_argument("mymyr brfs: a custom goal test needs threads == 1 and a test function");
     if (std::string e = search::detail::check_layers(options.layers); !e.empty())
         throw std::invalid_argument("mymyr brfs: " + e);
-    const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
     if (ordered && store != BrfsOptions::Store::Flat && store != BrfsOptions::Store::Chunked)
         throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store");
-    if (ordered && !beam && T > 1)
-        throw std::invalid_argument("mymyr brfs: ordered layers without a beam are single-threaded (threads == 1)");
     BrfsResult r;
     Control ctl(options, options.observer);
     if (beam && (T > 1 || relaxed))
