@@ -267,7 +267,7 @@ jobs:
           cd build/san
           ctest -j "$(nproc)" --timeout 1800 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
       - name: Check the ctest counts
-        run: python3 ci/check_ctest_log.py build/san/ctest.log
+        run: python3 ci/check_ctest_log.py --sanitized build/san/ctest.log
 
   # Apple Silicon: the CPU build, ctest and the Python suite.
   macos:
