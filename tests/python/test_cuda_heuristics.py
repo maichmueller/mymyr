@@ -1,8 +1,7 @@
 """mymyr.cuda: batched device heuristics, device A* and GBFS. Heuristic.evaluate against mymyr.search.Heuristic
-(h_max, h_add) and against Heuristic.reference (h_FF's supporter rule) on walk states, from host states and from torch
+(h_max, h_add, h²) and against Heuristic.reference (the h_FF/set-additive supporter rule) on walk states, from host states and from torch
 CUDA rows read in place (uint32 values on the caller's stream); astar / gbfs at batch 1 against mymyr.search.astar /
-gbfs (statistics and plan), larger batches against the optimal cost with replayed plans; refusals. The suite-wide
-gates are the C++ test's (tests/cuda/test_device_heuristics.cpp).
+gbfs (statistics and plan), larger batches against the optimal cost with replayed plans; refusals.
 
 Runs only when a GPU is made visible explicitly (conftest.py hides GPUs by default), e.g.
 
@@ -188,8 +187,13 @@ def test_errors(ctx):
 
 
 @pytest.mark.parametrize("kind", ["h2", "set_additive"])
-def test_pair_heuristics_search_plans(ctx, kind):
-    task = text_task("blocks__probBLOCKS-8-0")
+@pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "cs-counters"])
+def test_pair_heuristics_search_plans(ctx, kind, name):
+    task = (
+        mymyr.Task.from_text(ROOT / "tests/data/numeric_tasks" / f"{name}.txt")
+        if name == "cs-counters"
+        else text_task(name)
+    )
     cpu = mymyr.search.astar(task, heuristic="h2")
     assert cpu.solved
     for batch in (1, 64):
