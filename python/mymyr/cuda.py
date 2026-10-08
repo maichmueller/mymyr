@@ -27,11 +27,11 @@ Only in CUDA builds of mymyr (``-C cmake.define.MYMYR_CUDA=ON``); importing this
   place. All return an :class:`IwBatch`.
   Goals may be ground conjunctions of fluent/derived literals and numeric constraints, one per start; rollouts share
   one conjunction across their seeds. Callable goals and any-of alternatives within one search require CPU search.
-- :class:`Heuristic`, :func:`astar`, :func:`gbfs`: batched grounded h_max, h_add and h_FF on the device
+- :class:`Heuristic`, :func:`astar`, :func:`gbfs`: batched grounded h_max, h_add, h_FF, h² and set-additive on the device
   (``Heuristic.evaluate``: host states give NumPy float64 values, CUDA word arrays uint32 device values in the input's
-  framework, ``Heuristic.DEAD_END`` for dead ends; h_max and h_add equal ``mymyr.search.Heuristic``'s, h_FF breaks
+  framework, ``Heuristic.DEAD_END`` for dead ends; h_max, h_add and h² equal ``mymyr.search.Heuristic``'s, h_FF and set-additive break
   supporter ties by BFS level and operator id, ``Heuristic.reference`` is that rule on the CPU), and A* / GBFS with
-  batched expansion (a :class:`DeviceSearchResult`: with 'max' or 'blind' the plan cost of ``mymyr.search.astar``).
+  batched expansion (a :class:`DeviceSearchResult`: with 'max', 'h2' or 'blind' the plan cost of ``mymyr.search.astar``).
 - :func:`state_space`, :func:`state_spaces`, :func:`generate_state_space`, :func:`generate_state_spaces`:
   ``mymyr.datasets``' state spaces generated on the device, for one task or for every instance of a
   ``mymyr.rl.TaskTable`` in one pipeline (waves bound the device memory). A :class:`DeviceStateSpace` holds the
