@@ -215,6 +215,9 @@ void SymmetryPruner::build_graph(const Engine& e)
         m_count.resize(V, 0);
         m_used.resize(V, 0);
         m_stamp.resize(V, 0);
+        m_dirty.resize(V, 0);
+        m_work.reserve(V);
+        m_round.reserve(V);
     }
     m_V = V;
 
@@ -269,64 +272,104 @@ void SymmetryPruner::build_graph(const Engine& e)
     }
 }
 
-void SymmetryPruner::refine()
+bool SymmetryPruner::refine()
 {
-    // Colour refinement to the stable colouring: a vertex's next colour is the rank of (colour, sorted neighbour
-    // colours); stop when a round splits no class (the classes then equal the previous round's).
-    const u32 V = m_V;
+    // Colour refinement to the coarsest stable partition that refines the initial colours. The vertices are kept
+    // grouped by class in m_order; a class is named by the position of its first vertex there (m_color), and m_next
+    // holds, at that position, the end of the class. A class is split by its members' sorted neighbour colours; it can
+    // only split again when a neighbour of a member changed class, so each round re-examines just those classes. Any
+    // such sequence of splits ends in the same stable partition as the round-synchronous refinement.
+    const u32 V = m_V, n = m_n;
     u32* color = m_color.data();
-    u32* next = m_next.data();
+    u32* end = m_next.data();
     u32* order = m_order.data();
     const u32* off = m_offsets.data();
+    const u32* adj = m_adj.data();
     u32* sig = m_sig.data();
-    // dense initial colours and their number
     std::iota(order, order + V, 0u);
     std::sort(order, order + V, [&](u32 a, u32 b) { return color[a] < color[b]; });
-    u32 classes = 0;
-    for (u32 i = 0; i < V; ++i)
+    m_work.clear();
+    for (u32 i = 0; i < V;)
     {
-        if (i > 0 && color[order[i - 1]] != color[order[i]])
-            ++classes;
-        next[order[i]] = classes;
+        u32 j = i + 1;
+        while (j < V && color[order[j]] == color[order[i]])
+            ++j;
+        end[i] = j;
+        std::fill(m_dirty.begin() + i, m_dirty.begin() + j, u8{0});
+        if (j - i > 1)
+        {
+            m_dirty[i] = 1;
+            m_work.push_back(i);
+        }
+        i = j;
     }
-    classes = V == 0 ? 0 : classes + 1;
-    std::swap(color, next);
-    auto less = [&](u32 a, u32 b)
+    for (u32 i = 0; i < V;)
     {
-        if (color[a] != color[b])
-            return color[a] < color[b];
-        return std::lexicographical_compare(sig + off[a], sig + off[a + 1], sig + off[b], sig + off[b + 1]);
+        const u32 j = end[i];
+        for (u32 k = i; k < j; ++k)
+            color[order[k]] = i;
+        i = j;
+    }
+    auto discrete_objects = [&]
+    {
+        for (u32 o = 0; o < n; ++o)
+            if (end[color[o]] - color[o] > 1)
+                return false;
+        return true;
     };
-    while (classes < V)
+    auto less = [&](u32 a, u32 b) { return std::lexicographical_compare(sig + off[a], sig + off[a + 1], sig + off[b], sig + off[b + 1]); };
+    while (!m_work.empty())
     {
-        for (u32 v = 0; v < V; ++v)
+        if (discrete_objects())
+            return false;
+        m_round.swap(m_work);
+        m_work.clear();
+        for (u32 c : m_round)
+            m_dirty[c] = 0;
+        for (u32 c : m_round)
         {
-            for (u32 j = off[v]; j < off[v + 1]; ++j)
-                sig[j] = color[m_adj[j]];
-            std::sort(sig + off[v], sig + off[v + 1]);
+            const u32 e = end[c];
+            for (u32 k = c; k < e; ++k)
+            {
+                const u32 v = order[k];
+                for (u32 j = off[v]; j < off[v + 1]; ++j)
+                    sig[j] = color[adj[j]];
+                std::sort(sig + off[v], sig + off[v + 1]);
+            }
+            std::sort(order + c, order + e, less);
+            // the first part keeps the name c; the members of the others change class, so their neighbours' classes
+            // are re-examined
+            for (u32 k = c + 1, first = c; k <= e; ++k)
+            {
+                if (k < e && !less(order[k - 1], order[k]))
+                    continue;
+                end[first] = k;
+                if (first != c)
+                    for (u32 x = first; x < k; ++x)
+                    {
+                        const u32 v = order[x];
+                        color[v] = first;
+                        for (u32 j = off[v]; j < off[v + 1]; ++j)
+                        {
+                            const u32 d = color[adj[j]];
+                            if (!m_dirty[d] && end[d] - d > 1)
+                            {
+                                m_dirty[d] = 1;
+                                m_work.push_back(d);
+                            }
+                        }
+                    }
+                first = k;
+            }
         }
-        std::iota(order, order + V, 0u);
-        std::sort(order, order + V, less);
-        u32 c = 0;
-        for (u32 i = 0; i < V; ++i)
-        {
-            if (i > 0 && less(order[i - 1], order[i]))
-                ++c;
-            next[order[i]] = c;
-        }
-        std::swap(color, next);
-        if (c + 1 == classes)
-            break;
-        classes = c + 1;
     }
-    if (color != m_color.data())
-        std::copy(color, color + V, m_color.data());
+    return !discrete_objects();
 }
 
-void SymmetryPruner::compute(const Engine& e)
+bool SymmetryPruner::compute(const Engine& e)
 {
     build_graph(e);
-    refine();
+    return refine();
 }
 
 const u64* SymmetryPruner::masks(u32 schema)

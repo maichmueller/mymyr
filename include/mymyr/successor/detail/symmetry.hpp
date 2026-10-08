@@ -24,10 +24,12 @@ public:
     SymmetryPruner(const Task& task, u32 ow);
 
     /// Computes the colour classes of the objects in the engine's current state. The state must be prepared
-    /// (Successors::prepare: view built, derived atoms evaluated).
-    void compute(const Engine& e);
+    /// (Successors::prepare: view built, derived atoms evaluated). Returns false when every object is alone in its class
+    /// (pruning then keeps every action; refinement stops there, as it cannot split the objects further).
+    [[nodiscard]] bool compute(const Engine& e);
 
-    /// The colour class of every object (ids in [0, number of vertices)) of the state of the last compute().
+    /// The colour class of every object (ids in [0, number of vertices)) of the state of the last compute(). Class ids
+    /// name classes within one state only.
     [[nodiscard]] std::span<const u32> object_classes() const noexcept { return {m_color.data(), m_n}; }
 
     /// The kept objects of every parameter of `schema` in the state of the last compute(): arity * ow words, parameter
@@ -40,7 +42,7 @@ public:
 
 private:
     void build_graph(const Engine& e);
-    void refine();
+    bool refine();
 
     u32 m_n = 0;   // objects
     u32 m_ow = 0;  // words per object mask
@@ -64,6 +66,8 @@ private:
     std::vector<std::pair<u32, u32>> m_edges;
     std::vector<u32> m_offsets, m_adj, m_fill;
     std::vector<u32> m_color, m_next, m_order, m_sig;
+    std::vector<u32> m_work, m_round;  // classes to re-examine in this and the next round
+    std::vector<u8> m_dirty;
     // per-schema scratch
     std::vector<u32> m_count, m_used, m_stamp;
     u32 m_tick = 0;

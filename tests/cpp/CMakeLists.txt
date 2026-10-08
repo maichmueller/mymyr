@@ -46,6 +46,8 @@ add_executable(mymyr_tests
     # IW family variants
     search/test_iw_variants.cpp
     search/test_rollouts.cpp
+    # symmetry pruning
+    search/test_symmetry.cpp
 )
 target_link_libraries(mymyr_tests PRIVATE mymyr::core mymyr_warnings GTest::gtest_main)
 target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
