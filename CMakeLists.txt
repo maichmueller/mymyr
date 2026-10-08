@@ -158,7 +158,7 @@ target_link_libraries(mymyr_core PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
 find_package(Threads REQUIRED)
 target_link_libraries(mymyr_core PUBLIC Threads::Threads)
 
-# datasets: state spaces, generalized state spaces, samplers, object graphs, certificates
+# datasets: state spaces, generalized state spaces, samplers, object graphs, certificates, tuple graphs
 target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/state_space.cpp
     src/mymyr/heuristics/perfect.cpp
@@ -166,6 +166,8 @@ target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/sampler.cpp
     src/mymyr/datasets/object_graph.cpp
     src/mymyr/datasets/certificates.cpp
+    src/mymyr/datasets/tuple_graph.cpp
+    src/mymyr/datasets/knowledge_base.cpp
 )
 
 # ------------------------------------------------------------------------------------------------ PDDL front end

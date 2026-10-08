@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -176,6 +177,14 @@ struct StateBatch;  // arrays.hpp
 /// import_task_states for rows of at least `words` atom words (packed States) and NN numeric words (a task table's
 /// rows: words = TaskTable::words(), NN = TaskTable::numeric_words(); a State may carry fewer numeric words).
 [[nodiscard]] StateBatch import_rows(nb::handle obj, u32 words, u32 NN);
+
+/// The TaskOptions of the Python keyword arguments (MYMYR_TASK_OPTION_ARGS); raises ValueError for unknown names.
+[[nodiscard]] TaskOptions make_options(std::string_view atoms, std::string_view matching, u32 fc_free_params,
+                                       u32 frozen_max_words, u32 pilot_expansions);
+/// The keyword arguments of make_options (after the positional ones), with their defaults.
+#define MYMYR_TASK_OPTION_ARGS                                                                                         \
+    nb::kw_only(), "atoms"_a = "auto", "matching"_a = "auto", "fc_free_params"_a = 4, "frozen_max_words"_a = 8,         \
+        "pilot_expansions"_a = 1024
 
 void bind_task(nb::module_& m);
 void bind_rl(nb::module_& m);

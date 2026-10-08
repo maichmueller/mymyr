@@ -398,10 +398,11 @@ public:
         S.m_label_width = width;
         S.m_symmetry_reduced = symmetric;
     }
-    static void set_certificate(StateSpace& S, CertificateKind kind, u32 k)
+    static void set_certificate(StateSpace& S, CertificateKind kind, u32 k, const KfwlLimits& limits)
     {
         S.m_certificate = kind;
         S.m_fwl_k = k;
+        S.m_fwl_limits = limits;
     }
     static std::vector<u64>& states(StateSpace& S) { return S.m_states; }
     static std::vector<u64>& offsets(StateSpace& S) { return S.m_offsets; }
@@ -1089,7 +1090,8 @@ public:
         auto certificate = [&](StateView s)
         {
             ogb.build(s, graph);
-            return m_o.certificate == CertificateKind::KFwl ? kfwl_certificate(graph, m_o.fwl_k) : color_refinement_certificate(graph);
+            return m_o.certificate == CertificateKind::KFwl ? kfwl_certificate(graph, m_o.fwl_k, m_o.fwl_limits)
+                                                            : color_refinement_certificate(graph);
         };
         std::unordered_map<Certificate, u32, CertificateHash> class_of;
         std::unordered_map<State, u32> seen;  // every generated state -> its class
@@ -1199,7 +1201,7 @@ public:
         const u32 W = std::max<u32>(1, m_task.words());
         const u32 RW = W + NN;
         StateSpaceBuilder::set_basic(S, m_taskp, N, W, NN, m_o.labels, m_o.labels ? K : 0, true);
-        StateSpaceBuilder::set_certificate(S, m_o.certificate, m_o.fwl_k);
+        StateSpaceBuilder::set_certificate(S, m_o.certificate, m_o.fwl_k, m_o.fwl_limits);
         std::vector<u64>& rows = StateSpaceBuilder::states(S);
         rows.assign(static_cast<u64>(N) * RW, 0);
         for (u32 i = 0; i < N; ++i)
@@ -1251,8 +1253,8 @@ StateSpaceResult generate_state_space(TaskPtr task, const StateSpaceOptions& opt
         throw std::invalid_argument("mymyr: generate_state_space needs a task");
     if (options.symmetry_pruning)
     {
-        if (options.certificate == CertificateKind::KFwl && options.fwl_k != 2 && options.fwl_k != 3)
-            throw std::invalid_argument("mymyr: k-FWL certificates support k = 2 and k = 3");
+        if (options.certificate == CertificateKind::KFwl && (options.fwl_k < 2 || options.fwl_k > 4))
+            throw std::invalid_argument("mymyr: k-FWL certificates support k = 2, 3 and 4");
         SymmetricGenerator g(std::move(task), options);
         return g.run();
     }

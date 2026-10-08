@@ -1,10 +1,10 @@
 // Device heuristics tests (run on GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device):
-//   - heuristics: the device h_max and h_add equal heuristics::make_heuristic's on the states of random walks
+//   - heuristics: the device h_max, h_add and h² equal heuristics::make_heuristic's on the states of random walks
 //     and of CPU A* / GBFS frontiers of every suite task whose grounding fits the budget, frozen and lazy, unit and
-//     real costs; the device h_FF equals DeviceHeuristic::reference (the CPU implementation of the device's supporter
+//     real costs; the device h_FF and set-additive equal DeviceHeuristic::reference (the CPU implementation of the device's supporter
 //     rule; the agreement with the CPU's h_FF is printed as "FF_AGREE"); no value depends on the variant, the
 //     group size, the grid, the scratch placement or how the states are split into launches; states outside the
-//     grounding take the CPU fallback; numeric tasks, other kinds and groundings beyond the budget are refused;
+//     grounding use CPU evaluation; numeric tails are ignored, and unsupported kinds and groundings are refused;
 //   - searches: device A* and GBFS at batch 1 are search::astar_eager and gbfs_eager (every statistic, the
 //     plan); device A* (h_max, blind) finds the CPU's optimal cost with a valid plan on every suite task the CPU A*
 //     solves within the budget ("ASTAR" lines: expansions of both), device GBFS (h_FF, h_add) valid plans
@@ -12,10 +12,11 @@
 //     start states and refusals;
 //   - with the PDDL front end: heuristics and device A* on PDDL tasks with real action costs.
 // MYMYR_TEST_SANITIZER=1 shrinks the tests for compute-sanitizer.
-// MYMYR_TEST_FULL_SUITE=1 runs the gate's sizes.
+// MYMYR_TEST_FULL_SUITE=1 runs the larger samples and search budgets.
 
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
+#include "../cpp/support/heuristic_task.hpp"
 #include "../cpp/support/wide_costs.hpp"
 #include "mymyr/cuda/astar.hpp"
 #include "mymyr/cuda/gbfs.hpp"
@@ -372,7 +373,7 @@ TEST(CudaHeuristic, DoesNotDependOnTheLaunchConfigurationOrTheBatch)
 
 // ------------------------------------------------------------------------------------------------ fallbacks and refusals
 
-TEST(CudaHeuristic, StatesOutsideTheGroundingTakeTheCpuFallback)
+TEST(CudaHeuristic, StatesOutsideTheGroundingUseCpuEvaluation)
 {
     SKIP_WITHOUT_GPU();
     const cuda::ContextPtr ctx = context();
@@ -397,12 +398,20 @@ TEST(CudaHeuristic, StatesOutsideTheGroundingTakeTheCpuFallback)
         w[outside / 64] |= u64{1} << (outside % 64);
         const std::vector<State> states{s0, State(w.data(), static_cast<u32>(w.size())), s0};
         const DeviceRows rows = upload(ctx, *task, states);
-        for (heuristics::Kind k : {heuristics::Kind::Max, heuristics::Kind::Add, heuristics::Kind::FF})
+        for (heuristics::Kind k : {heuristics::Kind::Max, heuristics::Kind::Add, heuristics::Kind::FF, heuristics::Kind::H2, heuristics::Kind::SetAdditive})
         {
             cuda::DeviceHeuristicOptions o;
             o.kind = k;
             o.relaxed = R;
             cuda::DeviceHeuristic d(ctx, task, o);
+            if (k == heuristics::Kind::H2 || k == heuristics::Kind::SetAdditive)
+            {
+                EXPECT_THROW((void)eval_u32(d, rows), std::runtime_error);
+                EXPECT_THROW((void)d.reference(states[1].view()), std::runtime_error);
+                const std::vector<State> good{s0};
+                EXPECT_EQ(d.evaluate(good)[0], d.reference(s0.view()));
+                continue;
+            }
             auto cpu = cpu_heuristic(*task, k, heuristics::Costs::Unit, R);
             const std::vector<u32> got = eval_u32(d, rows);
             EXPECT_EQ(d.stats().fallbacks, 1u);
@@ -427,8 +436,7 @@ TEST(CudaHeuristic, IgnoresNumericValuesAndRefusesOtherKindsAndLargeGroundings)
     const std::vector<State> starts{numeric->initial_state()};
     EXPECT_EQ(nh.evaluate(starts)[0], nh.reference(starts[0].view()));
     const TaskPtr task = load("depot__p02", true);
-    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount, heuristics::Kind::SetAdditive,
-                               heuristics::Kind::H2, heuristics::Kind::Perfect})
+    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount, heuristics::Kind::Perfect})
     {
         cuda::DeviceHeuristicOptions o;
         o.kind = k;
@@ -913,3 +921,312 @@ TEST(DeviceHeuristicsPddl, CostProgramsEqualTheCpu)
 }
 #endif
 }  // namespace
+TEST_P(CudaHeuristicSuite, H2AndSetAdditiveEqualTheirReferences)
+{
+    SKIP_WITHOUT_GPU();
+    const auto& [name, frozen] = GetParam();
+    const TaskPtr task = load(name, frozen);
+    const auto R = grounding(*task);
+    if (!R)
+    {
+        for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+        {
+            cuda::DeviceHeuristicOptions o;
+            o.kind = k;
+            EXPECT_THROW((void)cuda::DeviceHeuristic(context(), task, o), std::invalid_argument);
+        }
+        GTEST_SKIP() << "grounding beyond the budget";
+    }
+    const auto ctx = context();
+    // Fixed seeded samples keep the quadratic evaluation bounded even for large groundings.
+    const auto states = device_ref_walks(*task, sanitizer_size() ? 1 : 4, sanitizer_size() ? 3 : 15, 1701);
+    const auto rows = upload(ctx, *task, states);
+    std::vector<heuristics::Costs> costs{heuristics::Costs::Unit};
+    if (!heuristics::ActionCosts(*task).unit() && R->real_costs_available())
+        costs.push_back(heuristics::Costs::Real);
+    for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+        for (auto c : costs)
+        {
+            SCOPED_TRACE(std::string(kind_name(k)) + (c == heuristics::Costs::Real ? " real" : " unit"));
+            cuda::DeviceHeuristicOptions o;
+            o.kind = k;
+            o.costs = c;
+            o.relaxed = R;
+            if (k == heuristics::Kind::H2 && R->num_props() > cuda::DeviceHeuristic::k_h2_max_props)
+            {
+                EXPECT_THROW((void)cuda::DeviceHeuristic(ctx, task, o), std::invalid_argument);
+                std::printf("PAIR_LIMIT %s %u propositions limit %u\n", name.c_str(), R->num_props(),
+                            cuda::DeviceHeuristic::k_h2_max_props);
+                continue;
+            }
+            cuda::DeviceHeuristic h(ctx, task, o);
+            auto cpu = cpu_heuristic(*task, k, c, R);
+            const auto got = eval_u32(h, rows);
+            const auto got64 = eval_f64(h, rows);
+            u64 mismatches = 0, cpu_differ = 0, dead = 0;
+            for (usize i = 0; i < states.size(); ++i)
+            {
+                const f64 v = cpu->evaluate(states[i].view());
+                const f64 ref = k == heuristics::Kind::H2 ? v : h.reference(states[i].view());
+                mismatches += got[i] != as_u32(ref) || got64[i] != ref;
+                cpu_differ += v != ref;
+                dead += ref == heuristics::k_dead_end;
+                EXPECT_EQ(got[i], as_u32(ref)) << i;
+                EXPECT_EQ(got64[i], ref) << i;
+            }
+            std::printf("PAIR_EQUAL %s %s %s %s P %u O %u states %zu mismatches %llu cpu_differ %llu dead %llu\n",
+                        name.c_str(), frozen ? "frozen" : "lazy", kind_name(k),
+                        c == heuristics::Costs::Real ? "real" : "unit", R->num_props(), R->num_ops(), states.size(),
+                        static_cast<unsigned long long>(mismatches), static_cast<unsigned long long>(cpu_differ),
+                        static_cast<unsigned long long>(dead));
+            EXPECT_EQ(h.evaluate(states), got64);
+            if (name == "folding-opt23-adl__p01" && k == heuristics::Kind::H2)
+                for (u32 repeat = 0; repeat < 8; ++repeat)
+                {
+                    EXPECT_EQ(eval_u32(h, rows), got);
+                }
+        }
+}
+
+TEST(CudaHeuristic, H2ScratchBudgetBoundsResidentStates)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("depot__p02", true);
+    cuda::DeviceHeuristicOptions o;
+    o.kind = heuristics::Kind::H2;
+    o.relaxed = grounding(*task);
+    cuda::DeviceHeuristic base(ctx, task, o);
+    const u64 bytes = base.stats().group_bytes;
+    o.max_scratch_bytes = bytes - 1;
+    try
+    {
+        (void)cuda::DeviceHeuristic(ctx, task, o);
+        FAIL() << "accepted a table beyond the scratch budget";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find(std::to_string(o.relaxed->num_props()) + " propositions"), std::string::npos);
+        EXPECT_NE(msg.find(std::to_string(bytes - 1)), std::string::npos);
+    }
+    o.max_scratch_bytes = bytes;
+    cuda::DeviceHeuristic one(ctx, task, o);
+    EXPECT_EQ(one.stats().blocks, 1u);
+    EXPECT_FALSE(one.stats().shared);
+    EXPECT_FALSE(one.stats().warp_groups);
+    const auto states = device_ref_walks(*task, 3, 6, 19);
+    EXPECT_EQ(one.evaluate(states), base.evaluate(states));
+    o.threads = 64;
+    o.warp_groups = 1;
+    o.variant = cuda::HeuristicVariant::Frontier;
+    cuda::DeviceHeuristic other(ctx, task, o);
+    EXPECT_EQ(other.evaluate(states), base.evaluate(states));
+}
+
+TEST(CudaBestFirst, H2AndSetAdditiveReturnValidPlansAndH2OptimalCosts)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    for (const char* name : {"depot__p02", "blocks__probBLOCKS-8-0", "pegsol-08-strips__p22"})
+    {
+        const auto task = load(name, false);
+        const auto R = grounding(*task);
+        auto co = cpu_search(heuristics::Kind::H2, sanitizer_size() ? 40 : 100000);
+        co.heuristic.relaxed = R;
+        const auto optimal = search::astar_eager(*task, co);
+        for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+            for (bool greedy : {false, true})
+                for (u32 batch : {1u, sanitizer_size() ? 8u : 64u})
+                {
+                    SCOPED_TRACE(std::string(name) + " " + kind_name(k) + (greedy ? " gbfs" : " astar"));
+                    auto o = device_search(k, batch, sanitizer_size() ? 40 : 100000);
+                    o.search.heuristic.relaxed = R;
+                    const auto r = greedy ? cuda::gbfs(ctx, task, o) : cuda::astar(ctx, task, o);
+                    if (r.result.status == search::SearchStatus::Solved)
+                    {
+                        EXPECT_EQ(replay(*task, task->initial_state(), r.result.plan), r.result.cost);
+                        if (!greedy && k == heuristics::Kind::H2)
+                        {
+                            EXPECT_EQ(optimal.status, search::SearchStatus::Solved);
+                            EXPECT_EQ(r.result.cost, optimal.cost);
+                        }
+                    }
+                    if (!sanitizer_size())
+                    {
+                        EXPECT_EQ(r.result.status, search::SearchStatus::Solved);
+                    }
+                    std::printf("PAIR_SEARCH %s %s %s batch %u solved %d cost %g cpu_h2 %g\n", name, kind_name(k),
+                                greedy ? "gbfs" : "astar", batch, r.result.status == search::SearchStatus::Solved,
+                                r.result.cost, optimal.cost);
+                }
+    }
+}
+
+TEST(CudaHeuristic, H2RefusesTooManyPropositions)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = initial_proposition_task(cuda::DeviceHeuristic::k_h2_max_props + 1);
+    cuda::DeviceHeuristicOptions o;
+    o.kind = heuristics::Kind::H2;
+    try
+    {
+        (void)cuda::DeviceHeuristic(context(), task, o);
+        FAIL() << "accepted too many propositions";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("8192 propositions"), std::string::npos);
+        EXPECT_NE(msg.find("8191"), std::string::npos);
+    }
+}
+
+#if defined(MYMYR_DEVICE_HEURISTICS_FRONTEND)
+TEST(CudaHeuristic, H2MutexesConditionalEffectsAndSetAdditiveAxiomUnions)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto domain = frontend::Domain::from_string(R"(
+(define (domain pairs)
+ (:requirements :strips :negative-preconditions :conditional-effects :derived-predicates :action-costs)
+ (:predicates (p) (q) (r) (s) (both))
+ (:functions (total-cost))
+ (:derived (both) (and (r) (s)))
+ (:action flip :parameters () :precondition (p)
+  :effect (and (q) (not (p)) (increase (total-cost) 2)))
+ (:action flop :parameters () :precondition (q)
+  :effect (and (p) (not (q)) (increase (total-cost) 0)))
+ (:action together :parameters () :precondition (p)
+  :effect (and (when (q) (r)) (when (p) (s)) (not (q)) (increase (total-cost) 3)))
+ (:action reach :parameters () :precondition (q)
+  :effect (and (r) (s) (increase (total-cost) 1))))
+)");
+    for (const char* goal : {"(and (p) (q))", "(both)", "(and (r) (s))", "(and (not (p)) (q))", "(and)"})
+    {
+        const auto task = Task::create(*domain->instantiate_string(std::string("(define (problem pair) (:domain pairs) ") +
+                "(:init (p) (= (total-cost) 0)) (:goal " + goal + ") (:metric minimize (total-cost)))"));
+        const auto states = device_ref_walks(*task, 5, 8, 1337);
+        const auto R = grounding(*task);
+        for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+            for (auto c : {heuristics::Costs::Unit, heuristics::Costs::Real})
+            {
+                SCOPED_TRACE(std::string(goal) + " " + kind_name(k));
+                auto cpu = cpu_heuristic(*task, k, c, R);
+                std::vector<f64> expected;
+                cuda::DeviceHeuristicOptions o;
+                o.kind = k;
+                o.costs = c;
+                o.relaxed = R;
+                cuda::DeviceHeuristic h(ctx, task, o);
+                for (const auto& state : states)
+                    expected.push_back(k == heuristics::Kind::H2 ? cpu->evaluate(state.view()) : h.reference(state.view()));
+                for (auto variant : {cuda::HeuristicVariant::Sweep, cuda::HeuristicVariant::Frontier})
+                    for (bool global : {false, true})
+                    {
+                        o.variant = variant;
+                        o.force_global = global;
+                        cuda::DeviceHeuristic other(ctx, task, o);
+                        EXPECT_EQ(other.evaluate(states), expected);
+                    }
+                if (std::string(goal) == "(and (p) (q))" && k == heuristics::Kind::H2)
+                {
+                    EXPECT_EQ(expected[0], heuristics::k_dead_end);
+                }
+            }
+    }
+}
+#endif
+
+TEST(CudaHeuristic, H2AndSetAdditiveHandleEmptyGroundings)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = initial_proposition_task(0);
+    const std::vector<State> states{task->initial_state()};
+    for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+    {
+        cuda::DeviceHeuristicOptions o;
+        o.kind = k;
+        cuda::DeviceHeuristic h(ctx, task, o);
+        EXPECT_EQ(h.evaluate(states), std::vector<f64>{0});
+        EXPECT_EQ(h.reference(states[0].view()), 0);
+        if (k == heuristics::Kind::H2)
+        {
+            EXPECT_GE(h.stats().group_bytes, 16u);
+        }
+    }
+}
+
+TEST(CudaHeuristic, H2AndSetAdditiveRejectInvalidSlotsAndIgnoreNumericTails)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = context();
+    const auto task = load("depot__p02", true);
+    const u32 slots = task->atoms().fluent_slots();
+    std::vector<u64> words(bits::words_for(slots + 1), 0);
+    words[slots / 64] |= u64{1} << (slots % 64);
+    const std::vector<State> bad{State(words.data(), static_cast<u32>(words.size()))};
+    const auto rows = upload(ctx, *task, bad);
+    const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
+    for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+    {
+        cuda::DeviceHeuristicOptions o;
+        o.kind = k;
+        cuda::DeviceHeuristic h(ctx, task, o);
+        EXPECT_THROW((void)eval_u32(h, rows), std::invalid_argument);
+        const std::vector<State> good{task->initial_state()};
+        EXPECT_EQ(h.evaluate(good)[0], h.reference(good[0].view()));
+        EXPECT_TRUE(cuda::DeviceHeuristic::unsupported(*numeric, o).empty());
+        cuda::DeviceHeuristic nh(ctx, numeric, o);
+        const std::vector<State> initial{numeric->initial_state()};
+        EXPECT_EQ(nh.evaluate(initial)[0], nh.reference(initial[0].view()));
+    }
+}
+
+#if defined(MYMYR_DEVICE_HEURISTICS_FRONTEND)
+TEST(CudaHeuristic, SetAdditiveMatchesCpuWithoutSupporterTies)
+{
+    SKIP_WITHOUT_GPU();
+    const auto domain = frontend::Domain::from_string(R"(
+(define (domain union)
+ (:requirements :strips :derived-predicates :action-costs)
+ (:predicates (p) (r) (s) (both)) (:functions (total-cost))
+ (:derived (both) (and (r) (s)))
+ (:action together :parameters () :precondition (p)
+  :effect (and (r) (s) (increase (total-cost) 3))))
+)");
+    const auto task = Task::create(*domain->instantiate_string(R"(
+(define (problem union) (:domain union)
+ (:init (p) (= (total-cost) 0)) (:goal (both)) (:metric minimize (total-cost)))
+)"));
+    const auto R = grounding(*task);
+    const auto ctx = context();
+    const std::vector<State> states{task->initial_state()};
+    for (auto c : {heuristics::Costs::Unit, heuristics::Costs::Real})
+    {
+        cuda::DeviceHeuristicOptions o;
+        o.kind = heuristics::Kind::SetAdditive;
+        o.costs = c;
+        o.relaxed = R;
+        cuda::DeviceHeuristic h(ctx, task, o);
+        auto cpu = cpu_heuristic(*task, o.kind, c, R);
+        EXPECT_EQ(h.evaluate(states)[0], cpu->evaluate(states[0].view()));
+        EXPECT_EQ(h.reference(states[0].view()), c == heuristics::Costs::Unit ? 2 : 6);
+    }
+    for (auto k : {heuristics::Kind::H2, heuristics::Kind::SetAdditive})
+        for (bool greedy : {false, true})
+        {
+            auto o = device_search(k, 8, 64);
+            o.search.heuristic.costs = heuristics::Costs::Real;
+            o.search.heuristic.relaxed = R;
+            const auto r = greedy ? cuda::gbfs(ctx, task, o) : cuda::astar(ctx, task, o);
+            ASSERT_EQ(r.result.status, search::SearchStatus::Solved);
+            EXPECT_EQ(replay(*task, states[0], r.result.plan), 3);
+            auto co = cpu_search(heuristics::Kind::H2, 64);
+            co.heuristic.costs = heuristics::Costs::Real;
+            co.heuristic.relaxed = R;
+            EXPECT_EQ(r.result.cost, search::astar_eager(*task, co).cost);
+        }
+}
+#endif
