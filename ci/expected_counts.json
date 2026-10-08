@@ -1,7 +1,7 @@
 {
-  "ctest_min_total": 1604,
+  "ctest_min_total": 1616,
   "ctest_max_skipped": 217,
-  "ctest_sanitized_min_total": 1593,
+  "ctest_sanitized_min_total": 1605,
   "ctest_sanitized_max_skipped": 224,
-  "pytest_min_passed": 962
+  "pytest_min_passed": 966
 }

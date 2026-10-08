@@ -50,8 +50,9 @@ struct BrfsOptions
     enum class Store : u8
     {
         Auto,        // Flat when the estimated width is at most 8 words, Chunked above; Concurrent if threads > 1
-        Flat,        // fixed-stride bitset arena (single-threaded)
-        Chunked,     // hash-consed 64 B chunks (single-threaded)
+                     // (but for ordered layers)
+        Flat,        // fixed-stride bitset arena (single-threaded, but for a beam's layer step)
+        Chunked,     // hash-consed 64 B chunks (single-threaded, but for a beam's layer step)
         Compact,     // 128-bit fingerprints of closed states plus two full layers (single-threaded; opt-in)
         Concurrent,  // per-thread arenas plus one lock-free table (any thread count)
     };
@@ -73,9 +74,11 @@ struct BrfsOptions
     search::GoalSpec goal{};
     bool fingerprint = false;        // hash over (id, canonical state) of the whole store (tests, determinism gates)
     /// The order in which a layer is expanded (search/layer_ordering.hpp; default: the queued BrFS). An ordered kind
-    /// needs the flat or chunked store (single-threaded); state ids then follow the expansion order. With a beam the
-    /// states it drops stay stored (counted in BrfsResult::states, never expanded, never entered again: mimir's
-    /// duplicate pruning), and both novelty modes behave alike (there is no novelty table).
+    /// needs the flat or chunked store and, without a beam, threads == 1; state ids then follow the expansion order.
+    /// With a beam the states it drops stay stored (counted in BrfsResult::states, never expanded, never entered
+    /// again: mimir's duplicate pruning), and AllTested and SurvivorsOnly behave alike (there is no novelty table).
+    /// threads > 1 runs the beam's layer step on that many threads, with the single-threaded result (ids included).
+    /// RelaxedSurvivorsOnly stores only the selected successors (search/layer_ordering.hpp).
     search::LayerOrdering layers{};
     double max_seconds = std::numeric_limits<double>::infinity();  // wall time of the search (status OutOfTime)
     search::CancelToken cancel{};               // request() from any thread stops the search (status Cancelled)

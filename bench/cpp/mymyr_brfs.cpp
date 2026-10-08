@@ -7,6 +7,8 @@
 //              [--store auto|flat|chunked|compact|concurrent] [--threads T] [--nondet] [--max-states N]
 //              [--depth D] [--layers] [--fp] [--stop-at-goal]
 //              [--numeric-storage auto|f64|i32] [--quantum Q] [--tolerant]
+//              [--order goal_count|goal_count_fewer] [--beam W] [--beam-mode all_tested|survivors_only|relaxed]
+//              [--tie-seed S] [--chunk C]: the layer ordering and beam (search/layer_ordering.hpp)
 
 #include "mymyr/formalism/text_format.hpp"
 #if defined(MYMYR_HAS_FRONTEND)
@@ -46,7 +48,8 @@ double peak_rss_mb()
                  "       [--match auto|fixed|fc] [--fc-arity K] [--no-witness] [--canonical|--no-canonical]\n"
                  "       [--store auto|flat|chunked|compact|concurrent] [--threads T] [--nondet] [--max-states N]\n"
                  "       [--depth D] [--layers] [--fp] [--stop-at-goal] [--numeric-storage auto|f64|i32] [--quantum Q]\n"
-                 "       [--tolerant]\n",
+                 "       [--tolerant] [--order goal_count|goal_count_fewer] [--beam W]\n"
+                 "       [--beam-mode all_tested|survivors_only|relaxed] [--tie-seed S] [--chunk C]\n",
                  msg);
     std::exit(2);
 }
@@ -124,6 +127,28 @@ int main(int argc, char** argv)
             to.numeric_quantum = std::stod(value());
         else if (a == "--tolerant")
             to.numeric_tolerant = true;
+        else if (a == "--order")
+        {
+            const std::string v = value();
+            bo.layers.kind = search::LayerOrdering::Kind::GoalCount;
+            bo.layers.prefer_more_satisfied_goals = v != "goal_count_fewer";
+        }
+        else if (a == "--beam")
+            bo.layers.beam_width = static_cast<u32>(std::stoul(value()));
+        else if (a == "--beam-mode")
+        {
+            const std::string v = value();
+            bo.layers.beam_novelty = v == "survivors_only" ? search::LayerOrdering::BeamNovelty::SurvivorsOnly
+                                : v == "relaxed"      ? search::LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly
+                                                      : search::LayerOrdering::BeamNovelty::AllTested;
+        }
+        else if (a == "--tie-seed")
+        {
+            bo.layers.randomize_ties = true;
+            bo.layers.seed = std::stoull(value());
+        }
+        else if (a == "--chunk")
+            bo.layers.beam_chunk = static_cast<u32>(std::stoul(value()));
         else if (!a.starts_with("--") && task_file.empty())
             task_file = a;
         else

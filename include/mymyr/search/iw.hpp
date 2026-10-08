@@ -99,6 +99,9 @@ struct IwOptions
     /// The order in which every pass expands a layer (search/layer_ordering.hpp; default: the queued BrFS). An
     /// ordered kind cannot be combined with transition_ordering.
     LayerOrdering layers{};
+    /// Threads of a beam's layer step (search/layer_ordering.hpp, "Threads"; 0: std::thread::hardware_concurrency()).
+    /// More than one needs a beam (layers.beam_width).
+    u32 threads = 1;
 };
 
 struct IwPassStatistics

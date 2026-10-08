@@ -52,9 +52,14 @@ public:
     /// The next 64-bit output.
     constexpr u64 next() noexcept
     {
-        m_state += 0x9e3779b97f4a7c15ULL;
+        m_state += k_gamma;
         return hash::mix64(m_state);
     }
+
+    /// Output i (from 0) of the coming ones, without advancing: what the (i + 1)-th next() would return.
+    [[nodiscard]] constexpr u64 output_at(u64 i) const noexcept { return hash::mix64(m_state + (i + 1) * k_gamma); }
+    /// Skips n outputs (as n calls of next()).
+    constexpr void discard(u64 n) noexcept { m_state += n * k_gamma; }
 
     /// A uniform value in [0, n); n must be positive.
     u64 bounded(u64 n) noexcept { return bounded_draw(*this, n); }

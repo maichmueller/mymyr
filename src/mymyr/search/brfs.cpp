@@ -4,6 +4,7 @@
 
 #include "mymyr/search/brfs.hpp"
 
+#include "beam_detail.hpp"
 #include "layer_order_detail.hpp"
 
 #include "mymyr/core/team.hpp"
@@ -18,12 +19,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 
 namespace mymyr
 {
@@ -465,6 +468,318 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
         {
             store.decode(StateId{i}, w.data(), curnum.data());
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash({w.data(), store.words(), NN ? curnum.data() : nullptr, NN}));
+        }
+    }
+    ctl.finish(r);
+    return r;
+}
+
+// ------------------------------------------------------------------------------------------------- beam layer step
+/// A beam over the flat or chunked store with the layer step of beam_detail.hpp: threads > 1, or
+/// LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly. Exact (threads > 1): the members generate every transition of a
+/// batch of the layer's states and the calling thread stores them in the serial order, so ids, counts and plans are
+/// the serial search's. Relaxed: the members score the successors, and only the parts' best ones are stored, in rank
+/// order, until beam_width new states are stored (they are the next layer).
+template<class Store>
+BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
+{
+    constexpr bool flat = std::is_same_v<Store, FlatStateStore>;
+    using search::detail::Candidates;
+    using search::detail::Expansion;
+    using search::detail::LayerOrderer;
+    BrfsResult r;
+    r.store = flat ? "flat" : "chunked";
+    const bool witness = o.witness_pruning, canonical = o.canonical_order;
+    const u32 NN = task.numeric_words();
+    Store store = [&]
+    {
+        if constexpr (flat)
+            return Store(std::max<u32>(1, task.words()), 16, NN);
+        else
+            return Store(std::max<u32>(1, task.words()), NN);
+    }();
+    Nodes nodes;
+    const State& s0 = task.initial_state();
+    store.insert(s0.view());
+    nodes.root();
+    ctl.start(s0.view());
+    const auto t0 = Clock::now();
+    LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, nullptr};
+    LayerOrderer lo(task, o.layers);
+    search::detail::BeamTeam team(task, T);
+    r.threads = team.size();
+    Successors& succ = team.succ(0);  // the calling thread's
+    const bool relaxed = lo.relaxed();
+    const bool concurrent_goal = o.goal.kind != search::GoalSpec::Kind::Custom;
+    const u32 members = team.size();
+
+    // a stored state's words (store width, zero-padded) and numeric words
+    auto decode = [&](u32 id, std::vector<u64>& w, std::vector<u64>& num) -> StateView
+    {
+        if constexpr (flat)
+        {
+            const u64* rec = store.words(StateId{id});
+            w.assign(rec, rec + store.stride());
+            num.assign(rec + store.stride(), rec + store.stride() + NN);
+        }
+        else
+        {
+            w.resize(store.words());
+            num.resize(NN);
+            store.decode(StateId{id}, w.data(), num.data());
+        }
+        return {w.data(), bits::trimmed_size(w.data(), static_cast<u32>(w.size())), NN ? num.data() : nullptr, NN};
+    };
+
+    std::vector<u32> order, keys;
+    std::vector<Expansion> exps;
+    std::vector<std::vector<u64>> mcur(members), mnum(members), mnext(members);
+    std::vector<std::vector<u32>> mids(members);  // chunked: find_successor's scratch
+    struct Ref
+    {
+        u32 member, cand, parent;
+    };
+    std::vector<LayerOrderer::Ranked> ranked;
+    std::vector<Ref> refs;
+    u64 layer_transitions = 0;
+    std::vector<u64> cur, curnum, next;
+
+    // phase 1, on member t: the expansion of order[i]
+    auto expand_one = [&](u32 t, usize i)
+    {
+        Expansion& x = exps[i];
+        x = Expansion{};
+        x.member = t;
+        Candidates& cs = team.candidates(t);
+        x.first = cs.size();
+        const u32 id = order[i];
+        Successors& sc = team.succ(t);
+        const StateView cv = decode(id, mcur[t], mnum[t]);
+        sc.prepare(cv);
+        if (concurrent_goal)
+        {
+            x.goal = is_goal(o.goal, sc, cv) ? 1 : 0;
+            if (x.goal && o.stop_at_goal)
+                return;
+        }
+        x.expanded = 1;
+        std::vector<u64>& nx = mnext[t];
+        if constexpr (!flat)
+            mids[t].resize(store.chunks_per_state());
+        sc.generate<true>(
+            [&](u32 s, const ObjectId* b, const Delta& d) -> bool
+            {
+                const u32 seq = x.transitions++;
+                const u32 nn = apply_delta(cv.w, cv.nw, d, nx);
+                if (!relaxed)
+                {
+                    // stored before the batch (the store is only read meanwhile): its insert would find it
+                    if constexpr (flat)
+                    {
+                        if (store.find(StateView{nx.data(), nn, d.num, NN}).valid())
+                            return true;
+                    }
+                    else if (store.find_successor(StateId{id}, cv.w, nx.data(), nn, d, mids[t].data()).valid())
+                        return true;
+                }
+                cs.push(seq, s, b, sc.arity(s), {}, flat ? nullptr : &d, nx.data(), nn, d.num, NN);
+                return true;
+            },
+            witness, canonical, o.symmetry_pruning);
+        x.count = cs.size() - x.first;
+        if (relaxed)
+            for (u32 j = x.first; j < cs.size(); ++j)
+                cs.set_value(j, lo.key(sc, StateView{cs.words(j), cs.nwords(j), cs.num(j, NN), NN}));
+    };
+    // phase 2, on this thread: the pop of order[i] (as the serial loop); false stops the search
+    auto pop_one = [&](usize i) -> bool
+    {
+        const Expansion& x = exps[i];
+        const u32 id = order[i];
+        bool goal;
+        if (concurrent_goal)
+            goal = x.goal != 0;
+        else
+        {
+            const StateView cv = decode(id, cur, curnum);
+            succ.prepare(cv);
+            goal = is_goal(o.goal, succ, cv);
+        }
+        r.goal_states += goal;
+        if (goal && o.stop_at_goal)
+        {
+            r.solved = true;
+            r.plan = nodes.plan(id, succ);
+            return false;
+        }
+        ++r.expanded;
+        return true;
+    };
+    // exact: the transitions of order[i] stored in their order
+    auto merge_exact = [&](usize i)
+    {
+        const Expansion& x = exps[i];
+        const u32 id = order[i];
+        const Candidates& cs = team.candidates(x.member);
+        if constexpr (flat)
+        {
+            for (u32 j = x.first; j < x.first + x.count; ++j)
+                if (store.insert(cs.words(j), cs.nwords(j), cs.num(j, NN)).second)
+                    nodes.push(id, cs.schema(j), cs.binding(j), succ.arity(cs.schema(j)));
+        }
+        else
+        {
+            // as run_chunked: only the chunks a delta touches are re-interned
+            u32 W = store.words();
+            cur.resize(W);
+            next.resize(W);
+            curnum.resize(NN);
+            store.decode(StateId{id}, cur.data(), curnum.data());
+            for (u32 j = x.first; j < x.first + x.count; ++j)
+            {
+                const Delta d = cs.delta(j, NN);
+                u32 need = 0;
+                for (SlotId a : d.add)
+                    need = std::max<u32>(need, bits::word_of(a.v) + 1);
+                if (need > W)
+                {
+                    store.widen(std::max(W * 2, need));
+                    W = store.words();
+                    cur.resize(W, 0);
+                    next.resize(W, 0);
+                }
+                std::memcpy(next.data(), cur.data(), W * sizeof(u64));
+                for (SlotId s : d.del)
+                    if (bits::word_of(s.v) < W)
+                        bits::reset(next.data(), s.v);
+                for (SlotId s : d.add)
+                    bits::set(next.data(), s.v);
+                if (store.insert_successor(StateId{id}, cur.data(), next.data(), d).second)
+                    nodes.push(id, cs.schema(j), cs.binding(j), succ.arity(cs.schema(j)));
+            }
+        }
+        r.generated += x.transitions;
+    };
+    // relaxed: the transitions of order[i] join the layer's ranking
+    auto collect_relaxed = [&](usize i)
+    {
+        const Expansion& x = exps[i];
+        const Candidates& cs = team.candidates(x.member);
+        for (u32 j = x.first; j < x.first + x.count; ++j)
+        {
+            ranked.push_back({cs.value(j), 0, layer_transitions + cs.seq(j), static_cast<u32>(refs.size())});
+            refs.push_back({x.member, j, order[i]});
+        }
+        layer_transitions += x.transitions;
+        r.generated += x.transitions;
+    };
+    // relaxed: the parts' best transitions in rank order, stored until beam_width new states are
+    auto select_relaxed = [&]()
+    {
+        const SplitMix64 ties = lo.draw_ties(layer_transitions);
+        if (lo.random_ties())
+            for (LayerOrderer::Ranked& e : ranked)
+                e.tie = ties.output_at(e.pos);
+        search::detail::relaxed_rank(ranked, layer_transitions, members, lo.beam_chunk(), lo.beam_width());
+        u32 kept = 0;
+        for (const LayerOrderer::Ranked& e : ranked)
+        {
+            if (kept >= lo.beam_width())
+                break;
+            const Ref& f = refs[e.entry];
+            const Candidates& cs = team.candidates(f.member);
+            if (store.insert(cs.words(f.cand), cs.nwords(f.cand), cs.num(f.cand, NN)).second)
+            {
+                nodes.push(f.parent, cs.schema(f.cand), cs.binding(f.cand), succ.arity(cs.schema(f.cand)));
+                ++kept;
+            }
+        }
+        ranked.clear();
+        refs.clear();
+        layer_transitions = 0;
+    };
+
+    u32 layer_begin = 0, layer_end = 0;
+    bool exhausted = false;
+    for (;;)
+    {
+        // the serial loop's head at the first state of a layer
+        if (layer_end >= store.size())
+        {
+            exhausted = true;
+            break;
+        }
+        if (store.size() >= o.max_states || !ctl.keep_going(r, store.size()))
+            break;
+        log.close(r.expanded, r.generated, store.size());
+        if (r.layers == o.max_depth)
+            break;
+        ++r.layers;
+        layer_begin = layer_end;
+        layer_end = store.size();
+        log.open(r.expanded, r.generated, layer_end);
+        order.resize(layer_end - layer_begin);
+        std::iota(order.begin(), order.end(), layer_begin);
+        if (layer_begin > 0 && !relaxed)
+        {
+            if (lo.scored())
+            {
+                keys.resize(order.size());
+                team.for_each(order.size(), 64,
+                              [&](u32 t, usize i)
+                              { keys[i] = lo.key(team.succ(t), decode(order[i], mcur[t], mnum[t])); });
+                lo.select_keyed(order, keys);
+            }
+            else
+                lo.select(order, succ, [&](u32 e) { return decode(e, cur, curnum); });
+        }
+        const usize L = order.size();
+        exps.resize(L);
+        const usize B = relaxed ? L : std::max<usize>(64, usize{16} * members);
+        bool stop = false;
+        for (usize a = 0; a < L && !stop; a += B)
+        {
+            const usize bend = std::min(L, a + B);
+            team.for_each(bend - a, 1, [&](u32 t, usize i) { expand_one(t, a + i); });
+            for (usize i = a; i < bend; ++i)
+            {
+                if (i > 0 && (store.size() >= o.max_states || !ctl.keep_going(r, store.size())))
+                {
+                    stop = true;
+                    break;
+                }
+                if (!pop_one(i))
+                {
+                    stop = true;
+                    break;
+                }
+                if (relaxed)
+                    collect_relaxed(i);
+                else
+                    merge_exact(i);
+            }
+        }
+        if (stop)
+            break;
+        if (relaxed)
+            select_relaxed();
+    }
+    log.close(r.expanded, r.generated, store.size());
+    r.search_s = seconds_since(t0);
+    r.exhausted = !r.solved && exhausted;
+    r.states = store.size();
+    if constexpr (flat)
+        r.words = store.stride();
+    else
+        r.words = store.words();
+    r.store_bytes = store.bytes() + nodes.bytes();
+    if (o.fingerprint)
+    {
+        std::vector<u64> w, num;
+        for (u32 i = 0; i < store.size(); ++i)
+        {
+            const StateView v = decode(i, w, num);
+            r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash({w.data(), static_cast<u32>(w.size()), v.num, NN}));
         }
     }
     ctl.finish(r);
@@ -1044,11 +1359,23 @@ private:
 
 BrfsResult brfs(const Task& task, const BrfsOptions& options)
 {
-    u32 T = options.threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : options.threads;
+    u32 T = search::detail::resolve_threads(options.threads);
+    // a beam runs on the flat or chunked store, with the layer step for threads > 1 or a relaxed selection
+    const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
+    const bool beam = ordered && options.layers.beam();
+    const bool relaxed = beam && options.layers.beam_novelty == search::LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly;
+    if (beam && options.observer)
+    {
+        if (relaxed)
+            throw std::invalid_argument("mymyr brfs: LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer");
+        T = 1;  // an observer runs the beam on the calling thread
+    }
+    if (ordered && !beam && T > 1)
+        throw std::invalid_argument("mymyr brfs: ordered layers without a beam are single-threaded (threads == 1)");
     BrfsOptions::Store store = options.store;
     if (store == BrfsOptions::Store::Auto)
     {
-        if (T > 1)
+        if (T > 1 && !ordered)
             store = BrfsOptions::Store::Concurrent;
         else
         {
@@ -1058,18 +1385,20 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
             store = w + task.numeric_words() <= 8 ? BrfsOptions::Store::Flat : BrfsOptions::Store::Chunked;
         }
     }
-    if (store != BrfsOptions::Store::Concurrent && T > 1)
-        throw std::invalid_argument("mymyr brfs: the flat, chunked and compact stores are single-threaded");
+    if (store != BrfsOptions::Store::Concurrent && T > 1 && !beam)
+        throw std::invalid_argument("mymyr brfs: the flat, chunked and compact stores are single-threaded (but for a beam)");
     if (options.goal.kind == search::GoalSpec::Kind::Custom && (T > 1 || !options.goal.test))
         throw std::invalid_argument("mymyr brfs: a custom goal test needs threads == 1 and a test function");
     if (std::string e = search::detail::check_layers(options.layers); !e.empty())
         throw std::invalid_argument("mymyr brfs: " + e);
-    const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
     if (ordered && store != BrfsOptions::Store::Flat && store != BrfsOptions::Store::Chunked)
-        throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store (single-threaded)");
+        throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store");
     BrfsResult r;
     Control ctl(options, options.observer);
-    if (store == BrfsOptions::Store::Concurrent)
+    if (beam && (T > 1 || relaxed))
+        r = store == BrfsOptions::Store::Flat ? run_beam<FlatStateStore>(task, options, T, ctl)
+                                              : run_beam<ChunkedStateStore>(task, options, T, ctl);
+    else if (store == BrfsOptions::Store::Concurrent)
     {
         // the make_worker protocol (search/control.hpp): one observer per thread, else one thread
         std::vector<std::shared_ptr<search::SearchObserver>> owned;
