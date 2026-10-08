@@ -17,7 +17,8 @@ import pytest
 import mymyr  # noqa: F401
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SUBMODULES = {"__init__.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi", "_search.pyi"}
+SUBMODULES = {"__init__.pyi", "_datasets.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi",
+              "_search.pyi"}
 
 
 def installed_stubs() -> pathlib.Path:
@@ -146,6 +147,25 @@ def test_stubs_parse_and_are_typed():
     rows = "states: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack"
     tids = "task_ids: mymyr._typing.SupportsDLPack | Sequence[int] | None = None"
     assert f"def expand(table: TaskSuite | TaskTable | mymyr._core.Task | mymyr._core.TaskHandle, {rows}, {tids}, *," in rl
+    # task sets: a table of a domain's problem files (front-end builds)
+    if "def from_pddl(" in rl:
+        assert ("def from_pddl(domain: mymyr._core.Domain | str | os.PathLike, problems: str | os.PathLike | "
+                "Sequence[str | os.PathLike], *, atoms: str = 'auto',") in rl
+        assert "pilot_expansions: int = 1024, threads: int = 0) -> TaskTable:" in rl
+    # knowledge bases and tuple graphs
+    ds = (d / "_datasets.pyi").read_text()
+    assert ("def tuple_graphs(space: StateSpace, *, width: int = 0, dominance_pruning: bool = True, threads: int = 0) -> "
+            "list[TupleGraph]:") in ds
+    assert "def tuple_graph(space: StateSpace, vertex: int, *, width: int = 0, dominance_pruning: bool = True) -> TupleGraph:" in ds
+    assert "def atoms(self, vertex: int) -> list[mymyr._core._formalism.GroundAtom]:" in ds
+    assert "def arrays(self, framework: Literal['numpy', 'torch', 'jax', 'dlpack'] | None = None) -> dict[str, Any]:" in ds
+    kb = ("def __init__(self, tasks: mymyr._core._rl.TaskTable | Sequence[mymyr._core.Task | mymyr._core.TaskHandle], *, "
+          "threads: int = 0, max_states: int | None = None,")
+    assert kb in ds
+    assert "generalized: bool = False, width: int | None = None, dominance_pruning: bool = True) -> None:" in ds
+    assert "def generalized_state_space(self) -> GeneralizedStateSpace | None:" in ds
+    assert "def tuple_graphs(self, space: int) -> list[TupleGraph]:" in ds
+    assert "def __getstate__(self) -> tuple[mymyr._core._rl.TaskTable, int," in ds
     # task suites (several domains), taken wherever a table is
     assert "class TaskSuite:" in rl and "def __init__(self, tables: Sequence[TaskTable]) -> None" in rl
     assert "def group(tasks: Sequence[mymyr._core.Task | mymyr._core.TaskHandle]) -> TaskSuite" in rl
