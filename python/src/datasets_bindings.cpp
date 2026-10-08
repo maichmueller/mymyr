@@ -200,8 +200,8 @@ StateSpaceOptions make_options(u32 threads, nb::handle max_states, nb::handle ma
     o.symmetry_pruning = symmetry_pruning;
     o.certificate = parse_certificate(certificate);
     o.fwl_k = k;
-    if (o.symmetry_pruning && o.certificate == CertificateKind::KFwl && k != 2 && k != 3)
-        throw nb::value_error("mymyr: k-FWL certificates support k = 2 and k = 3");
+    if (o.symmetry_pruning && o.certificate == CertificateKind::KFwl && (k < 2 || k > 4))
+        throw nb::value_error("mymyr: k-FWL certificates support k = 2, 3 and 4");
     o.labels = labels;
     return o;
 }
@@ -436,7 +436,7 @@ const char* k_options_doc =
     "Options: threads (0: all cores; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
     "or more, as in mimir), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
     "symmetry_pruning (one state per certificate class of its object graph; single-threaded), certificate "
-    "('kfwl', the default, or the cheaper but weaker 'color_refinement') and k (2 or 3) for symmetry pruning, labels (keep (schema, binding) per "
+    "('kfwl', the default, or the cheaper but weaker 'color_refinement') and k (2, 3 or 4) for symmetry pruning, labels (keep (schema, binding) per "
     "transition). State words are independent of the thread count when the task has frozen atoms (atoms='frozen').";
 
 #define MYMYR_SS_ARGS                                                                                                      \
@@ -888,17 +888,26 @@ void bind_datasets(nb::module_& parent)
             "A 128-bit certificate by colour refinement (1-WL): equal for isomorphic graphs.")
         .def(
             "kfwl_certificate",
-            [](const PyObjectGraph& g, u32 k) {
-                if (k != 2 && k != 3)
-                    throw nb::value_error("mymyr: k-FWL certificates support k = 2 and k = 3");
+            [](const PyObjectGraph& g, u32 k, std::optional<u64> max_tuples, std::optional<u64> max_round_work) {
+                if (k < 2 || k > 4)
+                    throw nb::value_error("mymyr: k-FWL certificates support k = 2, 3 and 4");
+                KfwlLimits limits;
+                if (max_tuples)
+                    limits.max_tuples = *max_tuples;
+                if (max_round_work)
+                    limits.max_round_work = *max_round_work;
                 Certificate c;
                 {
                     nb::gil_scoped_release release;
-                    c = kfwl_certificate(*g.graph, k);
+                    c = kfwl_certificate(*g.graph, k, limits);
                 }
                 return certificate_int(c);
             },
-            "k"_a = 2, "A 128-bit certificate by k-dimensional folklore Weisfeiler-Leman (k = 2 or 3).")
+            "k"_a = 2, "max_tuples"_a = nb::none(), "max_round_work"_a = nb::none(),
+            "A 128-bit certificate by k-dimensional folklore Weisfeiler-Leman (k = 2, 3 or 4): equal for isomorphic "
+            "graphs. With n vertices it holds n^k tuples of 28 bytes and hashes n^(k+1) colour k-tuples per round; "
+            "max_tuples (default 2^26) and max_round_work (default 2^30) bound them, and a larger graph raises "
+            "ValueError.")
         .def(
             "stable_colors",
             [](const PyObjectGraph& g) {

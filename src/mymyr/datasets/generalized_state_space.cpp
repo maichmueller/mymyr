@@ -116,7 +116,8 @@ std::shared_ptr<const GeneralizedStateSpace> GeneralizedStateSpace::create(std::
             for (u32 v = 0; v < S.num_states(); ++v)
             {
                 ogb.build(S.state(v), graph);
-                certs[v] = S.certificate() == CertificateKind::KFwl ? kfwl_certificate(graph, S.fwl_k()) : color_refinement_certificate(graph);
+                certs[v] = S.certificate() == CertificateKind::KFwl ? kfwl_certificate(graph, S.fwl_k(), S.fwl_limits())
+                                                                     : color_refinement_certificate(graph);
             }
             if (class_of.contains(certs[S.initial_state()]))
                 continue;  // isomorphic to an earlier problem

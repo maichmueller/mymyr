@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <map>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 
 namespace mymyr::datasets
@@ -177,91 +179,173 @@ Certificate color_refinement_certificate(const ObjectGraph& g, std::vector<u32>*
     return d.done();
 }
 
-Certificate kfwl_certificate(const ObjectGraph& g, u32 k)
+namespace
 {
-    if (k != 2 && k != 3)
-        throw std::invalid_argument("mymyr: k-FWL certificates support k = 2 and k = 3");
-    const u64 n = g.num_vertices();
-    u64 tuples = 1;
-    for (u32 i = 0; i < k; ++i)
-        tuples *= n;
-    if (tuples > (u64{1} << 26))
-        throw std::length_error("mymyr: k-FWL certificate of a graph with too many vertex tuples (n^k > 2^26)");
-    auto adjacent = [&](u32 a, u32 b)
+/// One k-tuple in a k-FWL round: its signature (a, b), its colour before the round and its index.
+struct KfwlEntry
+{
+    u64 a = 0, b = 0;
+    u32 old = 0, tuple = 0;
+};
+static_assert(sizeof(KfwlEntry) + sizeof(u32) == kfwl_bytes_per_tuple);
+
+/// n^e, saturated at 2^64 - 1.
+u64 saturated_power(u64 n, u32 e)
+{
+    u64 r = 1;
+    for (u32 i = 0; i < e; ++i)
     {
-        const auto adj = g.adjacent(a);
-        return std::binary_search(adj.begin(), adj.end(), b);
-    };
-    // tuple t <-> (v_0, ..., v_{k-1}) with v_0 least significant (as in mimir's tuple_to_hash)
-    auto decode = [&](u64 t, u32* v)
+        if (n != 0 && r > ~u64{0} / n)
+            return ~u64{0};
+        r *= n;
+    }
+    return r;
+}
+
+/// Sorts the entries by (old colour, signature), gives every distinct key a dense new colour in that order and
+/// digests the classes as (old colour, a, b, size). Returns the number of classes.
+u32 assign_classes(std::vector<KfwlEntry>& entries, std::vector<u32>& colors, Digest& d)
+{
+    std::sort(entries.begin(), entries.end(), [](const KfwlEntry& x, const KfwlEntry& y)
+              { return x.old != y.old ? x.old < y.old : x.a != y.a ? x.a < y.a : x.b < y.b; });
+    u32 classes = 0;
+    for (usize i = 0; i < entries.size();)
     {
-        for (u32 i = 0; i < k; ++i)
-        {
-            v[i] = static_cast<u32>(t % n);
-            t /= n;
-        }
-    };
-    std::vector<u64> weight(k, 1);
-    for (u32 i = 1; i < k; ++i)
+        usize j = i;
+        while (j < entries.size() && entries[j].old == entries[i].old && entries[j].a == entries[i].a && entries[j].b == entries[i].b)
+            colors[entries[j++].tuple] = classes;
+        d.add(entries[i].old);
+        d.add(entries[i].a);
+        d.add(entries[i].b);
+        d.add(j - i);
+        ++classes;
+        i = j;
+    }
+    d.add(classes);
+    return classes;
+}
+
+/// Adds the two 64-bit hashes of a colour k-tuple, packed as x = (c_0, c_1) and y = (c_2, c_3) (zero beyond k), to
+/// the signature lanes. The lanes use different seeds and orders, so a signature collision needs both 64-bit sums to
+/// collide.
+template<u32 K>
+inline void hash_item(u64 x, u64 y, u64& a, u64& b)
+{
+    if constexpr (K == 2)
+    {
+        (void)y;
+        a += hash::mix64(x ^ 0x243f6a8885a308d3ULL);
+        b += hash::mix64(x ^ 0x13198a2e03707344ULL);
+    }
+    else
+    {
+        a += hash::mix64(hash::mix64(x ^ 0xa4093822299f31d0ULL) ^ y);
+        b += hash::mix64(hash::mix64(y ^ 0x082efa98ec4e6c89ULL) ^ x ^ 0x452821e638d01377ULL);
+    }
+}
+
+template<u32 K>
+Certificate kfwl(const ObjectGraph& g)
+{
+    const u32 n = g.num_vertices();
+    const u64 T = saturated_power(n, K);
+    // tuple t <-> (v_0, ..., v_{K-1}) with v_0 least significant (as in mimir's tuple_to_hash)
+    std::array<u64, K> weight{};
+    weight[0] = 1;
+    for (u32 i = 1; i < K; ++i)
         weight[i] = weight[i - 1] * n;
-    // initial colours: the ordered isomorphism type (colours of the positions, equalities, adjacencies)
-    std::map<std::vector<u32>, u32> types;
-    std::vector<std::vector<u32>> type_of(tuples);
-    std::vector<u32> key;
-    for (u64 t = 0; t < tuples; ++t)
-    {
-        u32 v[3] = {0, 0, 0};
-        decode(t, v);
-        key.clear();
-        for (u32 i = 0; i < k; ++i)
-            key.push_back(g.color[v[i]]);
-        for (u32 i = 0; i < k; ++i)
-            for (u32 j = i + 1; j < k; ++j)
-                key.push_back((v[i] == v[j] ? 1u : 0u) | (adjacent(v[i], v[j]) ? 2u : 0u));
-        types.emplace(key, 0);
-        type_of[t] = key;
-    }
-    u32 next = 0;
-    for (auto& [kk, id] : types)
-        id = next++;
-    std::vector<u32> colors(tuples);
-    for (u64 t = 0; t < tuples; ++t)
-        colors[t] = types.at(type_of[t]);
-    std::vector<std::vector<u32>>().swap(type_of);
-    std::vector<u32> items;
-    std::vector<std::array<u32, 3>> runs(n);
-    auto f = refine(colors, k,
-                    [&](u32 t, std::vector<u32>& out)
-                    {
-                        u32 v[3] = {0, 0, 0};
-                        decode(t, v);
-                        items.clear();
-                        for (u32 u = 0; u < n; ++u)
-                            for (u32 i = 0; i < k; ++i)
-                            {
-                                // the tuple with position i replaced by u
-                                const u64 x = t + (static_cast<u64>(u) - v[i]) * weight[i];
-                                items.push_back(colors[x]);
-                            }
-                        // sort the k-tuples of colours (runs of k) lexicographically
-                        for (u32 u = 0; u < n; ++u)
-                            for (u32 i = 0; i < 3; ++i)
-                                runs[u][i] = i < k ? items[u * k + i] : 0;
-                        std::sort(runs.begin(), runs.end());
-                        for (const auto& r : runs)
-                            out.insert(out.end(), r.begin(), r.begin() + k);
-                    });
     Digest d;
-    d.add(100 + k);
+    d.add(100 + K);
     digest_palette(d, g);
-    d.add(types.size());
-    for (const auto& [kk, id] : types)
+    d.add(n);
+    std::vector<u32> colors(T);
+    std::vector<KfwlEntry> entries(T);
+    // initial colours: the ordered isomorphism type, packed as (colour of v_0, ..., colour of v_{K-1}, then per pair
+    // i < j: 1 if v_i = v_j, 2 if adjacent) with v_0's colour most significant, so that the packed keys sort as these
+    // sequences do
+    const u32 color_bits = static_cast<u32>(std::bit_width(std::max<u32>(g.num_colors(), 1) - 1));
+    if (color_bits * K + K * (K - 1) > 64)
+        throw std::length_error("mymyr: " + std::to_string(K) + "-FWL certificate of a graph with " + std::to_string(g.num_colors()) +
+                                " colours: the ordered isomorphism types do not fit 64 bits");
+    std::vector<u64> adjacency((static_cast<u64>(n) * n + 63) / 64, 0);  // n x n bit matrix
+    for (u32 x = 0; x < n; ++x)
+        for (u32 y : g.adjacent(x))
+        {
+            const u64 bit = static_cast<u64>(x) * n + y;
+            adjacency[bit / 64] |= u64{1} << (bit % 64);
+        }
+    auto adjacent = [&](u32 x, u32 y)
     {
-        d.add(kk.size());
-        for (u32 x : kk)
-            d.add(x);
+        const u64 bit = static_cast<u64>(x) * n + y;
+        return ((adjacency[bit / 64] >> (bit % 64)) & 1) != 0;
+    };
+    std::array<u32, K> v{};
+    for (u64 t = 0; t < T; ++t)
+    {
+        u64 key = 0;
+        for (u32 i = 0; i < K; ++i)
+            key = (key << color_bits) | g.color[v[i]];
+        for (u32 i = 0; i < K; ++i)
+            for (u32 j = i + 1; j < K; ++j)
+                key = (key << 2) | (v[i] == v[j] ? 1u : 0u) | (adjacent(v[i], v[j]) ? 2u : 0u);
+        entries[t] = {key, 0, 0, static_cast<u32>(t)};
+        for (u32 i = 0; i < K && ++v[i] == n; ++i)
+            v[i] = 0;
     }
-    digest_result(d, f, colors);
+    u32 classes = assign_classes(entries, colors, d);
+    // refinement: the signature of t is the multiset over u of (C(t[0 <- u]), ..., C(t[K-1 <- u]))
+    for (;;)
+    {
+        v.fill(0);
+        for (u64 t = 0; t < T; ++t)
+        {
+            std::array<const u32*, K> col{};  // col[i][u * weight[i]] = C(t[i <- u])
+            for (u32 i = 0; i < K; ++i)
+                col[i] = colors.data() + (t - v[i] * weight[i]);
+            u64 a = 0, b = 0;
+            for (u32 u = 0; u < n; ++u)
+            {
+                const u64 x = col[0][u] | (u64{col[1][u * weight[1]]} << 32);
+                u64 y = 0;
+                if constexpr (K >= 3)
+                    y = col[2][u * weight[2]];
+                if constexpr (K >= 4)
+                    y |= u64{col[3][u * weight[3]]} << 32;
+                hash_item<K>(x, y, a, b);
+            }
+            entries[t] = {a, b, colors[t], static_cast<u32>(t)};
+            for (u32 i = 0; i < K && ++v[i] == n; ++i)
+                v[i] = 0;
+        }
+        const u32 next = assign_classes(entries, colors, d);
+        if (next == classes)
+            break;  // no class split: the colouring is stable (and the colours are unchanged)
+        classes = next;
+    }
     return d.done();
+}
+}  // namespace
+
+Certificate kfwl_certificate(const ObjectGraph& g, u32 k, const KfwlLimits& limits)
+{
+    if (k < 2 || k > 4)
+        throw std::invalid_argument("mymyr: k-FWL certificates support k = 2, 3 and 4");
+    const u64 n = g.num_vertices();
+    const u64 tuples = saturated_power(n, k), work = saturated_power(n, k + 1);
+    const std::string what = "mymyr: " + std::to_string(k) + "-FWL certificate of a graph with n = " + std::to_string(n) + " vertices: ";
+    // tuple indices are u32
+    const u64 max_tuples = std::min<u64>(limits.max_tuples, u64{0xffffffff});
+    if (tuples > max_tuples)
+        throw std::length_error(what + "n^" + std::to_string(k) + " vertex tuples exceed the limit of " + std::to_string(max_tuples) +
+                                " (KfwlLimits::max_tuples; " + std::to_string(kfwl_bytes_per_tuple) + " bytes per tuple)");
+    if (work > limits.max_round_work)
+        throw std::length_error(what + "n^" + std::to_string(k + 1) + " colour tuples per round exceed the limit of " +
+                                std::to_string(limits.max_round_work) + " (KfwlLimits::max_round_work)");
+    switch (k)
+    {
+    case 2: return kfwl<2>(g);
+    case 3: return kfwl<3>(g);
+    default: return kfwl<4>(g);
+    }
 }
 }  // namespace mymyr::datasets
