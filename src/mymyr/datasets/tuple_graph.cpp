@@ -166,7 +166,7 @@ struct Shared
 Certificate certificate_of(const StateSpace& S, ObjectGraphBuilder& builder, ObjectGraph& graph, StateView s)
 {
     builder.build(s, graph);
-    return S.certificate() == CertificateKind::KFwl ? kfwl_certificate(graph, S.fwl_k()) : color_refinement_certificate(graph);
+    return S.certificate() == CertificateKind::KFwl ? kfwl_certificate(graph, S.fwl_k(), S.fwl_limits()) : color_refinement_certificate(graph);
 }
 }  // namespace
 

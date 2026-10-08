@@ -818,7 +818,8 @@ TEST(Certificates, WeisfeilerLemanHierarchy)
     ASSERT_EQ(stable.size(), 3u);
     EXPECT_EQ(stable[0], stable[2]);
     EXPECT_NE(stable[0], stable[1]);
-    EXPECT_THROW((void)kfwl_certificate(hexagon, 4), std::invalid_argument);
+    EXPECT_THROW((void)kfwl_certificate(hexagon, 5), std::invalid_argument);
+    EXPECT_THROW((void)kfwl_certificate(hexagon, 1), std::invalid_argument);
 }
 
 TEST(ObjectGraph, GripperStructureAndClasses)

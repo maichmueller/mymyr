@@ -150,7 +150,7 @@ def state_space(
     Options: max_states (fail when the space has max(max_states, 2) states or more, as in mimir), max_seconds,
     remove_if_unsolvable (no space when the initial state cannot reach a goal), symmetry_pruning (one state per
     certificate class of its object graph; CPU, single-threaded), certificate ('kfwl' or the cheaper but weaker
-    'color_refinement') and k (2 or 3) for symmetry pruning, labels (keep (schema, binding) per transition).
+    'color_refinement') and k (2, 3 or 4) for symmetry pruning, labels (keep (schema, binding) per transition).
     """
     if device is None:
         return _cpu_state_space(
