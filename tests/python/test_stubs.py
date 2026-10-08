@@ -59,6 +59,9 @@ def test_stubs_parse_and_are_typed():
     beam = ("beam_width: int | None = None, beam_novelty: Literal['all_tested', 'survivors_only'] = 'all_tested', "
             "randomize_ties: bool = False")
     assert search.count(beam) == 7  # iw, iw_pass, siw, brfs, liw, abstracted_iw, projective_iw
+    # iw, iw_pass, siw, brfs, astar, astar_iw, gbfs, beam, liw, abstracted_iw, projective_iw, rollout_iw,
+    # find_rollouts_parallel, atomic_goal_portfolio
+    assert search.count("symmetry_pruning: Literal['off', 'wl1'] = 'off'") == 14
     assert f"def rollout_iw({task}, *, ordering: ActionOrdering | str = ActionOrdering.IN_ORDER, seed: int = 0," in search
     assert f"def find_rollouts_parallel({task}, seeds: Sequence[int], *, max_arity: int = 2, num_threads: int = 0," in search
     rollouts = "results: ParallelRolloutsResult | Sequence[RolloutResult]"
@@ -94,8 +97,9 @@ def test_stubs_parse_and_are_typed():
     assert "import mymyr._typing" in core
     partial = ("partial: dict[int | str | _formalism.Variable, _formalism.Object | str | int | None] | "
                "Sequence[_formalism.Object | str | int | None] | None = None")
+    symmetry = "symmetry_pruning: Literal['off', 'wl1'] = 'off'"
     assert (f"def applicable_actions(self, state: State | mymyr._typing.SupportsDLPack, *, schema: str | int | None = None, "
-            f"{partial}) -> list[Action]") in core
+            f"{partial}, {symmetry}) -> list[Action]") in core
     # binding generators (task_bindings.cpp)
     target = ("target: str | int | _formalism.ConjunctiveCondition | _formalism.GroundCondition, "
               "state: State | mymyr._typing.SupportsDLPack")
@@ -104,7 +108,8 @@ def test_stubs_parse_and_are_typed():
     assert "def __next__(self) -> Action | tuple[_formalism.Object, ...]" in core
     assert "def precondition(self, schema: str | int) -> _formalism.ConjunctiveCondition" in core
     assert "def goal_condition(self) -> _formalism.GroundCondition" in core
-    assert "def successors(self, state: State | mymyr._typing.SupportsDLPack) -> list[tuple[Action, State]]" in core
+    assert f"def successors(self, state: State | mymyr._typing.SupportsDLPack, *, {symmetry}) -> list[tuple[Action, State]]" in core
+    assert f"def successor_states(self, *, {symmetry}) -> list[State]" in core
     # formulas (formula_bindings.cpp): constructors on the task, values in mymyr._core._formalism
     head = ("predicate: str | int | _formalism.Predicate | _formalism.GroundAtom | _formalism.Atom | "
             "_formalism.GroundLiteral | _formalism.Literal | tuple[str | int | Sequence[str | int], ...], *terms")
