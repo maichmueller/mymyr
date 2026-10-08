@@ -177,9 +177,7 @@ TEST(Kfwl, CaiFurerImmermanSeparates3From4)
     const ObjectGraph a = cfi(5, complete_graph(5), false), b = cfi(5, complete_graph(5), true);
     ASSERT_EQ(a.num_vertices(), 60u);
     EXPECT_EQ(kfwl_certificate(a, 3), kfwl_certificate(b, 3));
-#if defined(MYMYR_SANITIZED)
-    GTEST_SKIP() << "4-FWL on 60 vertices under sanitizers";
-#else
+#if !defined(MYMYR_SANITIZED)  // 4-FWL on 60 vertices takes minutes under sanitizers
     EXPECT_NE(kfwl_certificate(a, 4), kfwl_certificate(b, 4));
 #endif
 }
@@ -472,9 +470,32 @@ std::string case_name(const ::testing::TestParamInfo<SuiteCase>& info)
 INSTANTIATE_TEST_SUITE_P(ForkData, ForkKfwl, ::testing::ValuesIn(kSuite), case_name);
 
 // ----------------------------------------------------------------------------------------------- symmetry reduction
+/// Largest object graph of the symmetry-reduced state spaces with 4-FWL in this build.
+#if defined(MYMYR_SANITIZED)
+constexpr u64 kSymmetricMaxN = 11;
+#else
+constexpr u64 kSymmetricMaxN = 16;
+#endif
+
+/// The suite tasks whose sampled object graphs (the golden's n) have at most kSymmetricMaxN vertices.
+std::vector<SuiteCase> symmetric_cases()
+{
+    std::vector<SuiteCase> out;
+    for (const SuiteCase& c : kSuite)
+        if (const test::json::Value* rec = golden_task(c))
+        {
+            double n = 0;
+            for (const auto& x : (*rec)["n"].arr)
+                n = std::max(n, x.num);
+            if (n <= static_cast<double>(kSymmetricMaxN))
+                out.push_back(c);
+        }
+    return out;
+}
+
 /// The symmetry-reduced state space with 4-FWL: one state per class, as many as the fork's symmetry-reduced space
-/// (nauty canonical forms), and independent of the thread count. Tasks with a reachable object graph above the
-/// test's size bound (a KfwlLimits work bound) are skipped.
+/// (nauty canonical forms), and independent of the thread count, on the tasks of symmetric_cases(). The work bound
+/// of KfwlLimits enforces the size bound on every reachable object graph.
 class ForkSymmetricKfwl4 : public ::testing::TestWithParam<SuiteCase>
 {
 };
@@ -487,11 +508,7 @@ TEST_P(ForkSymmetricKfwl4, ClassCountMatchesTheFork)
     const TaskPtr task = fork_task(c.dir, c.problem);
     if (!task)
         GTEST_SKIP() << "fork data missing: " << data(c.dir);
-#if defined(MYMYR_SANITIZED)
-    const u64 n_max = 11;
-#else
-    const u64 n_max = 16;
-#endif
+    constexpr u64 n_max = kSymmetricMaxN;
     StateSpaceOptions o;
     o.remove_if_unsolvable = false;
     o.symmetry_pruning = true;
@@ -503,9 +520,9 @@ TEST_P(ForkSymmetricKfwl4, ClassCountMatchesTheFork)
     {
         r = generate_state_space(task, o);
     }
-    catch (const std::length_error&)
+    catch (const std::length_error& e)
     {
-        GTEST_SKIP() << "an object graph with more than " << n_max << " vertices";
+        FAIL() << "a reachable object graph above " << n_max << " vertices: " << e.what();
     }
     ASSERT_TRUE(r.space);
     EXPECT_TRUE(r.space->symmetry_reduced());
@@ -526,7 +543,7 @@ TEST_P(ForkSymmetricKfwl4, ClassCountMatchesTheFork)
             ASSERT_EQ(rt.space->state(v), r.space->state(v));
     }
 }
-INSTANTIATE_TEST_SUITE_P(ForkData, ForkSymmetricKfwl4, ::testing::ValuesIn(kSuite), case_name);
+INSTANTIATE_TEST_SUITE_P(ForkData, ForkSymmetricKfwl4, ::testing::ValuesIn(symmetric_cases()), case_name);
 
 /// The instance pool with 4-FWL symmetry pruning: equal spaces on 1, 4 and 8 worker threads (certificates computed
 /// concurrently), and the generalized state space over them.
