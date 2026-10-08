@@ -54,12 +54,12 @@ struct type_caster<mymyr::python::ann::CudaContext>
 template<>
 struct type_caster<mymyr::python::ann::DeviceKind>
 {
-    static constexpr auto Name = const_name("typing.Literal['blind', 'max', 'add', 'ff']");
+    static constexpr auto Name = const_name("typing.Literal['blind', 'max', 'add', 'ff', 'h2', 'set_additive']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EvalKind>
 {
-    static constexpr auto Name = const_name("typing.Literal['max', 'add', 'ff']");
+    static constexpr auto Name = const_name("typing.Literal['max', 'add', 'ff', 'h2', 'set_additive']");
 };
 template<>
 struct type_caster<mymyr::python::ann::HeuristicCosts>
@@ -387,9 +387,9 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
     g_lookup = lookup;
 
     nb::class_<PyDeviceHeuristic>(m, "Heuristic",
-                                  "A batched grounded heuristic on the device: h_max, h_add or h_FF of many states "
-                                  "per launch over the relaxed grounding, uploaded once. h_max and h_add equal "
-                                  "mymyr.search.Heuristic's; h_FF breaks ties among equally cheap supporters by BFS level "
+                                  "A batched grounded heuristic on the device: h_max, h_add, h_FF, h² or set-additive of many states "
+                                  "per launch over the relaxed grounding, uploaded once. h_max, h_add and h² equal "
+                                  "mymyr.search.Heuristic's; h_FF and set-additive break ties among equally cheap supporters by BFS level "
                                   "and operator id (reference() is the CPU implementation of that rule). Numeric values "
                                   "and constraints are ignored in relaxation, as on the CPU. Real costs must be "
                                   "state-independent, non-negative integers below 2^31; unsupported costs and groundings "
@@ -399,7 +399,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
             "__init__",
             [](PyDeviceHeuristic* self, TaskArg task, EvalKindArg kind, CostsArg costs, ContextArg ctx, VariantArg variant,
                IntArg threads, BoolArg warp_groups, IntArg max_blocks, bool force_global,
-               IntArg max_operators) {
+               IntArg max_operators, IntArg max_scratch_bytes) {
                 const Owner o = owner_of(task);
                 cuda::DeviceHeuristicOptions ho;
                 ho.kind = kind_of(kind, "kind");
@@ -412,6 +412,8 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                 if (!max_blocks.is_none())
                     ho.max_blocks = nb::cast<u32>(max_blocks);
                 ho.force_global = force_global;
+                if (!max_scratch_bytes.is_none())
+                    ho.max_scratch_bytes = nb::cast<u64>(max_scratch_bytes);
                 if (!max_operators.is_none())
                     ho.budget.max_operators = nb::cast<u64>(max_operators);
                 const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
@@ -426,9 +428,11 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
             },
             "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "unit", "ctx"_a = nb::none(), "variant"_a = "auto",
             "threads"_a = nb::none(), "warp_groups"_a = nb::none(), "max_blocks"_a = nb::none(), "force_global"_a = false,
-            "max_operators"_a = nb::none(),
-            "kind: 'max', 'add' or 'ff'; costs: 'unit' (every action 1) or 'real' (the task's action costs). The launch "
-            "configuration (variant, threads, warp_groups, max_blocks, force_global) changes no value.")
+            "max_operators"_a = nb::none(), "max_scratch_bytes"_a = nb::none(),
+            "kind: 'max', 'add', 'ff', 'h2' or 'set_additive'; costs: 'unit' (every action 1) or 'real' (the task's action costs). The launch "
+            "configuration (variant, threads, warp_groups, max_blocks, force_global) changes no value. h2 uses global "
+            "scratch and sweeps, at most 8191 propositions. max_scratch_bytes limits global scratch (default 512 MiB); "
+            "h2 raises ValueError when a single state needs more.")
         .def("evaluate", &evaluate, "states"_a, nb::kw_only(), "stream"_a = nb::none(),
              "h of every state. Host states (a State, a sequence of States, a host word array) give a NumPy float64 array "
              "(inf for dead ends). A CUDA word array [N, W] uint64 / [N, 2W] uint32 (torch, JAX, DLPack) is read in place "
@@ -443,7 +447,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                 return self.h->reference(s.view());
             },
             "state"_a,
-            "The CPU reference of the device's value (h_max, h_add: mymyr.search.Heuristic's; h_FF: the device's "
+            "The CPU reference of the device's value (h_max, h_add, h²: mymyr.search.Heuristic's; h_FF, set-additive: the device's "
             "supporter rule on the CPU); inf for dead ends.")
         .def_prop_ro("kind", [](const PyDeviceHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); })
         .def_prop_ro("stats", [](const PyDeviceHeuristic& self) { return heuristic_stats(self.h->stats()); },
