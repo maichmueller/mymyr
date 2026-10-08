@@ -24,6 +24,8 @@ from conftest import BLOCKS, ROOT
 FORK = ROOT / "tests/data/symmetry/fork_symmetry.json"
 FORK_DATA = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
 
+pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+
 
 def fork_records():
     if not FORK.exists():
@@ -123,8 +125,6 @@ def test_matches_the_fork(rec):
 
 @pytest.fixture(scope="module")
 def blocks_task():
-    if not hasattr(mymyr, "Domain"):
-        pytest.skip("built without the loki front end")
     return mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl")
 
 
