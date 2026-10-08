@@ -180,7 +180,7 @@ def test_options(tmp_path, depot):
     with pytest.raises(ValueError):
         s.label(0)
     with pytest.raises(ValueError):
-        datasets.generate(depot, symmetry_pruning=True, certificate="kfwl", k=4)
+        datasets.generate(depot, symmetry_pruning=True, certificate="kfwl", k=5)
     with pytest.raises(ValueError):
         datasets.generate(depot, certificate="nauty")
     with pytest.raises(TypeError):
@@ -290,7 +290,7 @@ def test_object_graphs_and_certificates():
     with pytest.raises(ValueError):
         builder.build(text_task("depot__p02").initial_state)
     with pytest.raises(ValueError):
-        builder.build(s.state(0)).kfwl_certificate(4)
+        builder.build(s.state(0)).kfwl_certificate(5)
     sym = datasets.state_space(task, symmetry_pruning=True)
     assert sym.symmetry_reduced and sym.num_states == 12
 
