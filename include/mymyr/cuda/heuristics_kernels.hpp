@@ -1,5 +1,5 @@
 #pragma once
-// The kernels of the batched grounded heuristics (cuda/heuristics.hpp): h_max, h_add and
+// The kernels of the batched grounded heuristics (cuda/heuristics.hpp): h_max, h_add, h², set-additive and
 // h_FF of B states per launch over the relaxed grounding of heuristics/relaxed_task.hpp, one group of threads per state
 // (a block per state; for small groundings a warp per state, several states per block), the groups looping
 // over the states of a launch. Destination-passing launchers over the arrays the host driver owns.
@@ -34,6 +34,11 @@
 //      achiever of e cost at most cost(e) - c, one of them exactly), so every tight achiever of e becomes ready in the
 //      same round and the supporter is the smallest tight achiever of e, which the relaxed plan looks up for the
 //      propositions it reaches (Relaxed::ach, ascending ids; the first tight one). Same values, no levels phase.
+// Set-additive uses the same tight-achiever levels and operator-id ties, retaining an axiom's own operator as its
+// supporter. The goal closure follows all preconditions; each visited proposition with an action supporter contributes
+// its action cost, and an axiom contributes zero. Thus it counts unary (operator, proposition) members instead of
+// ground actions. h² uses separate global triangular tables (h2.cu), with pair persistence exclusions and combined
+// conditional effects; its scratch and concurrency limits are in heuristics.hpp.
 // The scratch of a group (costs, levels, lists, the operators' counters, the bitsets of the relaxed plan's
 // propositions and ground actions) lives in dynamic shared memory when it fits, otherwise in global memory (one slice
 // per group). Nothing in it carries over from one state to the next.
@@ -58,6 +63,8 @@ enum : u32
     k_max = 0,
     k_add = 1,
     k_ff = 2,
+    k_set_additive = 3,
+    k_h2 = 4,
 };
 
 /// Cost variants of a launch.
@@ -109,6 +116,12 @@ struct Relaxed
     const u32* slot_neg = nullptr;  // [slots]: "false" proposition (k_none: none)
     u32 slots = 0;
     u32 goal_unreachable = 0;
+    // h²: complements, persistence exclusions, and operators sharing a ground action.
+    const u32* complement = nullptr;
+    const u32* excl_begin = nullptr;
+    const u32* excl = nullptr;
+    const u32* ga_ops_begin = nullptr;
+    const u32* ga_ops = nullptr;
 };
 
 /// Rows of fluent words (row i at data + i * stride).
@@ -150,11 +163,16 @@ struct Out
 /// is set (h_FF keeps no levels).
 [[nodiscard]] MYMYR_HD u64 scratch_bytes(u32 P, u32 O, u32 GA, u32 kind, u32 variant, bool uniform)
 {
+    if (kind == k_h2)
+    {
+        const u64 bytes = (u64{P} * (P + 1) + P + O) * sizeof(u32);
+        return bytes == 0 ? 16 : (bytes + 15) / 16 * 16;
+    }
     u64 w = 2 * u64{P};  // cost, nxt (sweeps: the next round's costs; frontier: the settled flags)
     w += P;              // list T (settled / newly leveled propositions, extraction frontier)
     if (variant == k_frontier)
         w += u64{P} + O;  // the second level list, the operators' counters
-    if (kind == k_ff)
+    if (kind == k_ff || kind == k_set_additive)
     {
         if (!uniform)
             w += 3 * u64{P};                            // level, candidate supporter, supporter
@@ -171,4 +189,8 @@ cudaError_t launch_evaluate(const Relaxed& r, Rows rows, Launch l, Out out, cuda
 cudaError_t launch_to_f64(const u32* h, u64 n, f64* out, cudaStream_t s);
 /// Resident blocks per SM of the launch's kernel with its dynamic shared memory (0 when it does not fit).
 cudaError_t occupancy(const Launch& l, int* blocks_per_sm);
+
+/// h² uses a block per state and global scratch, independent of the cost variant.
+cudaError_t launch_h2(const Relaxed& r, Rows rows, Launch l, Out out, cudaStream_t s);
+cudaError_t occupancy_h2(const Launch& l, int* blocks_per_sm);
 }  // namespace mymyr::cuda::hk

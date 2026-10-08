@@ -1,7 +1,7 @@
 // mymyr_device_heuristics_bench: the batched device heuristics against the CPU heuristic, and device A* / GBFS against the CPU
 // searches, printing one JSON line per batch size.
 //
-//   mymyr_device_heuristics_bench task.txt [--mode heur|astar|gbfs] [--h max|add|ff|blind] [--b 1000,10000,100000]
+//   mymyr_device_heuristics_bench task.txt [--mode heur|astar|gbfs] [--h max|add|ff|h2|set_additive|blind] [--b 1000,10000,100000]
 //                  [--variant auto|sweep|frontier] [--warp -1|0|1] [--threads T] [--global] [--reps R] [--sample S]
 //                  [--cpu-threads T] [--walk-steps S] [--atoms auto|lazy|frozen] [--distinct N]
 //                  [--budget N] [--seconds S] [--single-bucket] [--hcosts unit|real]
@@ -13,8 +13,8 @@
 // median of R timed runs after one warm-up (the grounding and upload are not included; the wall time includes the
 // launch and the synchronization). CPU: heuristics::make_heuristic (grounded, sharing the grounding) on the first S
 // distinct states on one core, and on T threads (0: every core) each evaluating the S states with its own heuristic.
-// The device values of the sampled states are checked against the CPU's (h_max, h_add) or DeviceHeuristic::reference
-// (h_FF): "equal" in the output. The load average and the core count are reported.
+// The device values of the sampled states are checked against the CPU's (h_max, h_add, h²) or DeviceHeuristic::reference
+// (h_FF, set-additive): "equal" in the output. The load average and the core count are reported.
 //
 // astar / gbfs: search::astar_eager / gbfs_eager on one core (max_expanded --budget, max_seconds --seconds), then the
 // device search (cuda::astar / cuda::gbfs) with the same budgets for each batch size B. Reported: status, expansions,
@@ -58,7 +58,7 @@ double since(Clock::time_point t0) { return std::chrono::duration<double>(Clock:
 [[noreturn]] void usage(const char* msg)
 {
     std::fprintf(stderr,
-                 "error: %s\nusage: mymyr_device_heuristics_bench task.txt [--h max|add|ff] [--b 1000,10000,100000] [--variant auto|sweep|frontier]\n"
+                 "error: %s\nusage: mymyr_device_heuristics_bench task.txt [--h max|add|ff|h2|set_additive] [--b 1000,10000,100000] [--variant auto|sweep|frontier]\n"
                  "       [--warp -1|0|1] [--threads T] [--global] [--reps R] [--sample S] [--cpu-threads T] [--walk-steps S]\n"
                  "       [--atoms auto|lazy|frozen] [--distinct N]\n",
                  msg);
@@ -407,13 +407,13 @@ int main(int argc, char** argv)
             u64 ff_equal_cpu = 0;
             for (u32 i = 0; i < sample; ++i)
             {
-                const f64 want = kind == heuristics::Kind::FF ? dh.reference(states[i].view()) : cpu_vals[i];
+                const f64 want = (kind == heuristics::Kind::FF || kind == heuristics::Kind::SetAdditive) ? dh.reference(states[i].view()) : cpu_vals[i];
                 const u32 w = want == heuristics::k_dead_end ? cuda::DeviceHeuristic::k_dead_end : static_cast<u32>(want);
                 equal = equal && got[i] == w;
                 ff_equal_cpu += cpu_vals[i] == want ? 1 : 0;
             }
-            if (kind == heuristics::Kind::FF)
-                std::fprintf(stderr, "h_FF equal to the CPU's on %llu of %u states\n", static_cast<unsigned long long>(ff_equal_cpu), sample);
+            if (kind == heuristics::Kind::FF || kind == heuristics::Kind::SetAdditive)
+                std::fprintf(stderr, "%s equal to the CPU's on %llu of %u states\n", hname.c_str(), static_cast<unsigned long long>(ff_equal_cpu), sample);
         }
         const cuda::DeviceHeuristicStats& S = dh.stats();
         for (u64 B : batch_sizes)
