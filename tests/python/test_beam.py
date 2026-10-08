@@ -1,5 +1,6 @@
-"""The beam over the layers of brfs and the IW family (beam_width, beam_novelty, randomize_ties): every search that
-takes the layer keywords, the two novelty modes on a hand-made task, random ties and the refusals."""
+"""The beam over the layers of brfs and the IW family (beam_width, beam_novelty, randomize_ties, beam_chunk, threads):
+every search that takes the layer keywords, the novelty modes on a hand-made task, random ties, the layer step on
+several threads, the relaxed survivors_only beam and the refusals."""
 
 import pytest
 
@@ -147,3 +148,66 @@ def test_a_beam_refuses_a_transition_ordering(gripper):
     order = search.LandmarkTransitionOrdering(search.approximate_fact_landmarks(gripper))
     r = search.iw(gripper, max_arity=1, transition_ordering=order, **beam(4))
     assert r.status == Status.FAILED and "transition ordering" in r.message
+
+
+def summary(r):
+    if isinstance(r, search.BrfsResult):
+        return r.solved, [str(a) for a in r.plan], r.expanded, r.generated, r.states
+    return repr(r), [str(a) for a in r.plan], passes(r) if hasattr(r, "passes") else None
+
+
+class Expansions(search.Observer):
+    def on_expand(self, id, state):
+        pass
+
+
+@pytest.mark.parametrize("mode", ["all_tested", "survivors_only"])
+def test_threads_give_the_single_threaded_result(blocks, mode):
+    kw = beam(4, mode, randomize_ties=True, seed=3)
+    runs = [lambda **t: search.iw(blocks, max_arity=2, **kw, **t),
+            lambda **t: search.iw_pass(blocks, 1, **kw, **t),
+            lambda **t: search.siw(blocks, max_arity=2, **kw, **t),
+            lambda **t: search.abstracted_iw(blocks, width=2, **kw, **t),
+            lambda **t: search.projective_iw(blocks, **kw, **t),
+            lambda **t: search.brfs(blocks, stop_at_goal=True, witness_pruning=False, **kw, **t)]
+    if mode == "all_tested":
+        runs.append(lambda **t: search.liw(blocks, max_arity=1, **kw, **t))
+    for run in runs:
+        one = summary(run(threads=1))
+        for t in (2, 4):
+            assert summary(run(threads=t)) == one
+    r = search.brfs(blocks, stop_at_goal=True, threads=4, **kw)
+    assert r.threads == 4
+
+
+def test_relaxed_survivors_only_beam(blocks, gripper):
+    kw = beam(4, "relaxed_survivors_only", beam_chunk=16)
+    for task in (blocks, gripper):
+        for t in (1, 2, 4):
+            r = search.iw(task, max_arity=2, threads=t, **kw)
+            assert summary(search.iw(task, max_arity=2, threads=t, **kw)) == summary(r)  # deterministic
+            assert not r.solved or replays(task, r.plan)
+            b = search.brfs(task, stop_at_goal=True, threads=t, **kw)
+            assert not b.solved or replays(task, b.plan)
+    # one part (beam_chunk above every layer's transitions): the same for every thread count
+    one = dict(kw, beam_chunk=1 << 30)
+    ref = summary(search.iw(gripper, max_arity=2, **one))
+    assert all(summary(search.iw(gripper, max_arity=2, threads=t, **one)) == ref for t in (2, 8))
+    a = search.abstracted_iw(blocks, width=1, **one)
+    assert summary(search.abstracted_iw(blocks, width=1, threads=4, **one)) == summary(a)
+
+
+def test_invalid_threads_and_relaxed_arguments(gripper):
+    for r in (search.iw(gripper, threads=2), search.siw(gripper, layer_order="goal_count", threads=2),
+              search.abstracted_iw(gripper, threads=2),
+              search.liw(gripper, **beam(4, "relaxed_survivors_only")),
+              search.iw(gripper, **beam(4, "relaxed_survivors_only", beam_chunk=0)),
+              search.iw(gripper, layer_order="reverse", beam_width=4, beam_novelty="relaxed_survivors_only"),
+              search.iw(gripper, observer=Expansions(), **beam(4, "relaxed_survivors_only"))):
+        assert r.status == Status.FAILED and r.message
+    with pytest.raises(ValueError, match="requires Kind::GoalCount"):
+        search.brfs(gripper, layer_order="in_order", beam_width=4, beam_novelty="relaxed_survivors_only")
+    with pytest.raises(ValueError, match="observer"):
+        search.brfs(gripper, observer=Expansions(), **beam(4, "relaxed_survivors_only"))
+    with pytest.raises(ValueError, match="single-threaded"):
+        search.brfs(gripper, layer_order="goal_count", threads=2)
