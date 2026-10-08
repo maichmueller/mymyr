@@ -57,9 +57,10 @@ def test_stubs_parse_and_are_typed():
     assert f"def projective_iw({task}, *, typed_projection: bool = False," in search
     assert "layer_order: Literal['queue', 'in_order', 'reverse', 'randomized', 'goal_count'] = 'queue'" in search
     assert "max_next_layer_states: int | None = None, prefer_more_satisfied_goals: bool = True" in search
-    beam = ("beam_width: int | None = None, beam_novelty: Literal['all_tested', 'survivors_only'] = 'all_tested', "
-            "randomize_ties: bool = False")
+    beam = ("beam_width: int | None = None, beam_novelty: Literal['all_tested', 'survivors_only', "
+            "'relaxed_survivors_only'] = 'all_tested', randomize_ties: bool = False, beam_chunk: int = 1024")
     assert search.count(beam) == 7  # iw, iw_pass, siw, brfs, liw, abstracted_iw, projective_iw
+    assert search.count("beam_chunk: int = 1024, threads: int = 1") == 6  # all but brfs (threads first)
     # iw, iw_pass, siw, brfs, astar, astar_iw, gbfs, beam, liw, abstracted_iw, projective_iw, rollout_iw,
     # find_rollouts_parallel, atomic_goal_portfolio
     assert search.count("symmetry_pruning: Literal['off', 'wl1'] = 'off'") == 14

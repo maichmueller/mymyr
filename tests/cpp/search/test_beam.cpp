@@ -842,10 +842,14 @@ TEST(BeamRefusals, InvalidOptionsAreRefused)
     l.layers = beam(4, Novelty::AllTested);
     l.control.coordination = &coord;
     EXPECT_EQ(liw(*task, l).status, SearchStatus::Failed);
-    // the multi-threaded and compact BrFS have no layers to order
+    // the multi-threaded BrFS orders layers only with a beam; the concurrent and compact stores order none
     BrfsOptions b;
     b.layers = beam(4, Novelty::AllTested);
+    b.layers.beam_width = ~u32{0};
     b.threads = 2;
+    EXPECT_THROW((void)brfs(*task, b), std::invalid_argument);
+    b.layers = beam(4, Novelty::AllTested);
+    b.store = BrfsOptions::Store::Concurrent;
     EXPECT_THROW((void)brfs(*task, b), std::invalid_argument);
     b.threads = 1;
     b.store = BrfsOptions::Store::Compact;

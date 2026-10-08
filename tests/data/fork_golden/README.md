@@ -166,6 +166,13 @@ Its `--beam W --beam-mode all_tested|survivors_only` options run the fork's beam
 `tests/cpp/search/test_beam_fork.cpp`. A beam keeps ties in generation order, so it depends on the action order
 everywhere: the test skips the tasks where the fork's order differs from mymyr's.
 
+The beam mode `relaxed` (with `--threads N` and `--chunk C`) is the fork's relaxed SurvivorsOnly beam;
+`--tie-seed S` randomizes equal-score ties and `--iw1-knobs precheck|atom_first|incremental` sets the fork's IW(1)
+options. By default the fork selects the relaxed beam per expanded state (a layer can then exceed the beam width);
+with the atom-first knobs its IW(1) pass selects per layer, as mymyr does. `search_fork/run_beam_relaxed.py` records
+that pass of IW(2) on 2, 4 and 8 threads, with the exact SurvivorsOnly runs with and without the knobs as a control,
+and writes `tests/data/beam/fork_beam_relaxed.json`, also checked by `tests/cpp/search/test_beam_fork.cpp`.
+
 Its `--algo walk_ground` mode records the fork's binding generators along two seeded walks of 15 steps: per step the
 groundings (count, set hash of the binding strings, ground literals per kind) of the goal literals as a
 `ConjunctiveCondition`, and per action schema of its precondition (`ConjunctiveConditionSatisficingBindingGenerator`)

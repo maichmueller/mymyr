@@ -209,7 +209,28 @@ public:
         }
         if (m_k == 2 && m_dense2)
             return test_dense2<Mark>(succ, ns, add);
-        return test_generic<Mark>(parent, np, succ, ns, add);
+        return test_generic<Mark>(*this, parent, np, succ, ns, add, m_scratch);
+    }
+
+    /// Scratch of a read-only test (peek); one per thread.
+    struct Scratch
+    {
+        std::vector<u32> atoms;
+        std::vector<u8> fresh;    // per atom of `atoms`: 1 if it is added
+        std::vector<u32> suffix;  // suffix[i]: added atoms among atoms[i..]
+    };
+    /// test<false> that touches nothing but `scratch`, so several threads can peek at once while nobody marks. The
+    /// slots of `add` may exceed capacity(): such an atom was never marked, so the transition is novel.
+    [[nodiscard]] bool peek(const u64* parent, u32 np, const u64* succ, u32 ns, std::span<const u32> add, Scratch& scratch) const
+    {
+        for (u32 a : add)
+            if (a >= m_cap || !seen1(a))
+                return true;
+        if (m_k == 1)
+            return false;
+        if (m_k == 2 && m_dense2)
+            return peek_dense2(succ, ns, add);
+        return test_generic<false>(*this, parent, np, succ, ns, add, scratch);
     }
 
 private:
@@ -253,8 +274,23 @@ private:
     }
     void mark_dense2(const u64* succ, u32 ns, std::span<const u32> add);
 
-    template<bool Mark>
-    bool test_generic(const u64* parent, u32 np, const u64* succ, u32 ns, std::span<const u32> add);
+    // read-only test_dense2 after the singletons were found seen (every atom of succ is then below capacity)
+    [[nodiscard]] bool peek_dense2(const u64* succ, u32 ns, std::span<const u32> add) const noexcept
+    {
+        const usize rw = m_row_words;
+        for (u32 a : add)
+        {
+            const u64* row = m_t2.data() + static_cast<usize>(a) * rw;
+            for (u32 i = 0; i < ns; ++i)
+                if (succ[i] & ~row[i])
+                    return true;
+        }
+        return false;
+    }
+
+    // Self: NoveltyTable, or const NoveltyTable without Mark (then only `s` is written).
+    template<bool Mark, class Self>
+    static bool test_generic(Self& self, const u64* parent, u32 np, const u64* succ, u32 ns, std::span<const u32> add, Scratch& s);
 
     void grow(u32 atoms);
     [[nodiscard]] TupleSet::Key pack(const u32* sorted, u32 j) const noexcept;
@@ -282,39 +318,36 @@ private:
     RankSet m_s2;            // sparse level 2: (min << 32 | max)
     std::array<Level, k_max_arity + 1> m_levels;
     std::vector<u64> m_binom;  // C(a, i) at [i * cap + a] for a < cap, i <= the largest dense or ranked level >= 3
-    // scratch of test_generic
-    std::vector<u32> m_atoms;
-    std::vector<u8> m_new;
-    std::vector<u32> m_suffix_new;
+    Scratch m_scratch;  // of test_generic
 };
 
 // ----------------------------------------------------------------------------------------------------- inline
-template<bool Mark>
-bool NoveltyTable::test_generic(const u64* parent, u32 np, const u64* succ, u32 ns, std::span<const u32> add)
+template<bool Mark, class Self>
+bool NoveltyTable::test_generic(Self& self, const u64* parent, u32 np, const u64* succ, u32 ns, std::span<const u32> add, Scratch& s)
 {
     // level 1
-    bool novel = any_new1(add);
+    bool novel = self.any_new1(add);
     if (novel && !Mark)
         return true;
     if constexpr (Mark)
-        mark1(add);
+        self.mark1(add);
     // the successor's atoms, in increasing order, with a flag for the added ones
-    m_atoms.clear();
-    m_new.clear();
+    s.atoms.clear();
+    s.fresh.clear();
     bits::for_each(succ, ns,
                    [&](u64 b)
                    {
-                       m_atoms.push_back(static_cast<u32>(b));
-                       m_new.push_back(bits::test(parent, np, b) ? 0 : 1);
+                       s.atoms.push_back(static_cast<u32>(b));
+                       s.fresh.push_back(bits::test(parent, np, b) ? 0 : 1);
                    });
-    const u32 n = static_cast<u32>(m_atoms.size());
-    m_suffix_new.assign(n + 1, 0);
+    const u32 n = static_cast<u32>(s.atoms.size());
+    s.suffix.assign(n + 1, 0);
     for (u32 i = n; i-- > 0;)
-        m_suffix_new[i] = m_suffix_new[i + 1] + m_new[i];
+        s.suffix[i] = s.suffix[i + 1] + s.fresh[i];
     // levels 2..k: every sorted j-subset of the successor's atoms with at least one added atom
     u32 tuple[k_max_arity];
     u32 idx[k_max_arity];
-    for (u32 j = 2; j <= m_k && j <= n; ++j)
+    for (u32 j = 2; j <= self.m_k && j <= n; ++j)
     {
         // iterative enumeration of index combinations idx[0] < ... < idx[j-1], pruned when no added atom can occur
         u32 depth = 0;
@@ -332,7 +365,7 @@ bool NoveltyTable::test_generic(const u64* parent, u32 np, const u64* succ, u32 
                 continue;
             }
             // prune: no added atom chosen so far and none left from idx[depth] on
-            if (news[depth] == 0 && m_suffix_new[idx[depth]] == 0)
+            if (news[depth] == 0 && s.suffix[idx[depth]] == 0)
             {
                 if (depth == 0)
                     break;
@@ -340,14 +373,18 @@ bool NoveltyTable::test_generic(const u64* parent, u32 np, const u64* succ, u32 
                 ++idx[depth];
                 continue;
             }
-            news[depth + 1] = news[depth] + m_new[idx[depth]];
+            news[depth + 1] = news[depth] + s.fresh[idx[depth]];
             if (depth + 1 == j)
             {
                 if (news[j] > 0)
                 {
                     for (u32 i = 0; i < j; ++i)
-                        tuple[i] = m_atoms[idx[i]];
-                    const bool unseen = j == 2 ? visit_pair(tuple[0], tuple[1], Mark) : visit_tuple(tuple, j, Mark);
+                        tuple[i] = s.atoms[idx[i]];
+                    bool unseen;
+                    if constexpr (Mark)
+                        unseen = j == 2 ? self.visit_pair(tuple[0], tuple[1], true) : self.visit_tuple(tuple, j, true);
+                    else
+                        unseen = !self.seen(std::span<const u32>(tuple, j));
                     if (unseen)
                     {
                         novel = true;

@@ -1,0 +1,10471 @@
+{
+ "format": "mymyr-fork-beam-relaxed/1",
+ "fork": {
+  "version": "0.16.3",
+  "successor_generator": "lifted KPKC, symmetry pruning off",
+  "parallel_beam_chunk_size": 1024
+ },
+ "budget": {
+  "seconds": 60,
+  "max_states": 1000000,
+  "mem_gb": 3
+ },
+ "runs": [
+  {
+   "task": "blocks__probBLOCKS-8-0",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      11,
+      10
+     ],
+     [
+      61,
+      60
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      11,
+      10
+     ],
+     [
+      61,
+      60
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       61,
+       60
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       61,
+       60
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       61,
+       60
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "blocks__probBLOCKS-8-0",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      307,
+      306
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      307,
+      306
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       492,
+       491
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       492,
+       491
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       492,
+       491
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "blocks__probBLOCKS-8-0",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      831,
+      830
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      831,
+      830
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       41,
+       40
+      ],
+      [
+       900,
+       899
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       41,
+       40
+      ],
+      [
+       900,
+       899
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       41,
+       40
+      ],
+      [
+       900,
+       899
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "blocks__probBLOCKS-8-0",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      13,
+      12
+     ],
+     [
+      23,
+      22
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      13,
+      12
+     ],
+     [
+      23,
+      22
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       13,
+       12
+      ],
+      [
+       21,
+       20
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       13,
+       12
+      ],
+      [
+       21,
+       20
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       13,
+       12
+      ],
+      [
+       21,
+       20
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "blocks__probBLOCKS-8-0",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      19,
+      18
+     ],
+     [
+      197,
+      196
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      19,
+      18
+     ],
+     [
+      197,
+      196
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       19,
+       18
+      ],
+      [
+       586,
+       585
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       19,
+       18
+      ],
+      [
+       586,
+       585
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       19,
+       18
+      ],
+      [
+       586,
+       585
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "blocks__probBLOCKS-8-0",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      43,
+      42
+     ],
+     [
+      912,
+      911
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      912,
+      911
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       43,
+       42
+      ],
+      [
+       899,
+       898
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       43,
+       42
+      ],
+      [
+       899,
+       898
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       43,
+       42
+      ],
+      [
+       899,
+       898
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "caldera-split-opt18-adl__p04",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      10,
+      9
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      10,
+      9
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       4,
+       3
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       4,
+       3
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       4,
+       3
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "caldera-split-opt18-adl__p04",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      40,
+      39
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      40,
+      39
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "caldera-split-opt18-adl__p04",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      67,
+      66
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      67,
+      66
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "caldera-split-opt18-adl__p04",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "caldera-split-opt18-adl__p04",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      17,
+      16
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      17,
+      16
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "caldera-split-opt18-adl__p04",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      69,
+      68
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      69,
+      68
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       7,
+       6
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "depot__p02",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      11,
+      10
+     ],
+     [
+      52,
+      51
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      52,
+      51
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       78,
+       77
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       78,
+       77
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       78,
+       77
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "depot__p02",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      107,
+      110
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      107,
+      110
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       127,
+       131
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       127,
+       131
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       127,
+       131
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "depot__p02",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      415,
+      414
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      415,
+      414
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       253,
+       252
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       253,
+       252
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       253,
+       252
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "depot__p02",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      11,
+      10
+     ],
+     [
+      54,
+      53
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      54,
+      53
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       61,
+       60
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       61,
+       60
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       61,
+       60
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "depot__p02",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      175,
+      174
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      175,
+      174
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       328,
+       327
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       328,
+       327
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       328,
+       327
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "depot__p02",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      313,
+      312
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      313,
+      312
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       377,
+       376
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       377,
+       376
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       377,
+       376
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "driverlog__p03",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      23,
+      22
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      23,
+      22
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       106,
+       105
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       106,
+       105
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       106,
+       105
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "driverlog__p03",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      129,
+      132
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      129,
+      132
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       369,
+       368
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       369,
+       368
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       369,
+       368
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "driverlog__p03",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      27,
+      26
+     ],
+     [
+      453,
+      452
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      453,
+      452
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       462,
+       461
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       462,
+       461
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       462,
+       461
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "driverlog__p03",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      27,
+      26
+     ],
+     [
+      217,
+      216
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      217,
+      216
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       134,
+       133
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       134,
+       133
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       134,
+       133
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "driverlog__p03",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      27,
+      26
+     ],
+     [
+      287,
+      286
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      13,
+      12
+     ],
+     [
+      287,
+      286
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       383,
+       382
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       383,
+       382
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       383,
+       382
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "driverlog__p03",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      27,
+      26
+     ],
+     [
+      379,
+      378
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      379,
+      378
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       477,
+       476
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       477,
+       476
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       477,
+       476
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "folding-opt23-adl__p01",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      16,
+      15
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      16,
+      15
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       16,
+       15
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       16,
+       15
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       16,
+       15
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "folding-opt23-adl__p01",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      49,
+      48
+     ],
+     [
+      49,
+      48
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      49,
+      48
+     ],
+     [
+      49,
+      48
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       49,
+       48
+      ],
+      [
+       49,
+       48
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       49,
+       48
+      ],
+      [
+       49,
+       48
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       49,
+       48
+      ],
+      [
+       49,
+       48
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "folding-opt23-adl__p01",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      92,
+      91
+     ],
+     [
+      127,
+      126
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      92,
+      91
+     ],
+     [
+      127,
+      126
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       92,
+       91
+      ],
+      [
+       127,
+       126
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       92,
+       91
+      ],
+      [
+       127,
+       126
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       92,
+       91
+      ],
+      [
+       127,
+       126
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "folding-opt23-adl__p01",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      16,
+      15
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      16,
+      15
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       16,
+       15
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       16,
+       15
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       16,
+       15
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "folding-opt23-adl__p01",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      49,
+      48
+     ],
+     [
+      49,
+      48
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      49,
+      48
+     ],
+     [
+      49,
+      48
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       49,
+       48
+      ],
+      [
+       49,
+       48
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       49,
+       48
+      ],
+      [
+       49,
+       48
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       49,
+       48
+      ],
+      [
+       49,
+       48
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "folding-opt23-adl__p01",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      92,
+      91
+     ],
+     [
+      127,
+      126
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      92,
+      91
+     ],
+     [
+      127,
+      126
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       92,
+       91
+      ],
+      [
+       127,
+       126
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       92,
+       91
+      ],
+      [
+       127,
+       126
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       92,
+       91
+      ],
+      [
+       127,
+       126
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "freecell__p02",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      29,
+      29
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      41,
+      41
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       33,
+       33
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       33,
+       33
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       33,
+       33
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "freecell__p02",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      137,
+      140
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      137,
+      140
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       471,
+       476
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       471,
+       476
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       471,
+       476
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "freecell__p02",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      9,
+      8
+     ],
+     [
+      43,
+      42
+     ],
+     [
+      419,
+      442
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      9,
+      8
+     ],
+     [
+      23,
+      22
+     ],
+     [
+      419,
+      442
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       9,
+       8
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       756,
+       758
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       9,
+       8
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       756,
+       758
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       9,
+       8
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       756,
+       758
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "freecell__p02",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      31,
+      31
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      23,
+      22
+     ],
+     [
+      49,
+      49
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       33,
+       33
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       33,
+       33
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       33,
+       33
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "freecell__p02",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      188,
+      188
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      188,
+      188
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       508,
+       508
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       508,
+       508
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       508,
+       508
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "freecell__p02",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      9,
+      8
+     ],
+     [
+      43,
+      42
+     ],
+     [
+      635,
+      635
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      9,
+      8
+     ],
+     [
+      23,
+      22
+     ],
+     [
+      635,
+      635
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       9,
+       8
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       746,
+       746
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       9,
+       8
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       746,
+       746
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       9,
+       8
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       746,
+       746
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "gripper__prob05",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "gripper__prob05",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      77,
+      76
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      77,
+      76
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       219,
+       218
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       219,
+       218
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       219,
+       218
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "gripper__prob05",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      26,
+      25
+     ],
+     [
+      26,
+      25
+     ],
+     [
+      228,
+      227
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      26,
+      25
+     ],
+     [
+      26,
+      25
+     ],
+     [
+      228,
+      227
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       26,
+       25
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       213,
+       212
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       26,
+       25
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       213,
+       212
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       26,
+       25
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       213,
+       212
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "gripper__prob05",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      1
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "gripper__prob05",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      56,
+      55
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      56,
+      55
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       145,
+       144
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       145,
+       144
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       145,
+       144
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "gripper__prob05",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      26,
+      25
+     ],
+     [
+      26,
+      25
+     ],
+     [
+      230,
+      229
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      26,
+      25
+     ],
+     [
+      26,
+      25
+     ],
+     [
+      230,
+      229
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       26,
+       25
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       213,
+       212
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       26,
+       25
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       213,
+       212
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       26,
+       25
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       213,
+       212
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "logistics00__probLOGISTICS-6-1",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      159,
+      158
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      159,
+      158
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       56,
+       55
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       56,
+       55
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       56,
+       55
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "logistics00__probLOGISTICS-6-1",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      70,
+      73
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      70,
+      73
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       414,
+       413
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       414,
+       413
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       9,
+       8
+      ],
+      [
+       414,
+       413
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "logistics00__probLOGISTICS-6-1",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      10,
+      9
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      325,
+      324
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      10,
+      9
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      325,
+      324
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       10,
+       9
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       323,
+       322
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       10,
+       9
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       323,
+       322
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       10,
+       9
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       323,
+       322
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "logistics00__probLOGISTICS-6-1",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      152,
+      151
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      152,
+      151
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       169,
+       168
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       169,
+       168
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       169,
+       168
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "logistics00__probLOGISTICS-6-1",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      11,
+      10
+     ],
+     [
+      203,
+      202
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      203,
+      202
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       356,
+       355
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       356,
+       355
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       11,
+       10
+      ],
+      [
+       356,
+       355
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "logistics00__probLOGISTICS-6-1",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      10,
+      9
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      337,
+      336
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      10,
+      9
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      337,
+      336
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       10,
+       9
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       331,
+       330
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       10,
+       9
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       331,
+       330
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       10,
+       9
+      ],
+      [
+       10,
+       9
+      ],
+      [
+       331,
+       330
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic-simpleadl__s10-2",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       32,
+       31
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       32,
+       31
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       32,
+       31
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic-simpleadl__s10-2",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      28,
+      27
+     ],
+     [
+      66,
+      65
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      28,
+      27
+     ],
+     [
+      66,
+      65
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic-simpleadl__s10-2",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      21,
+      20
+     ],
+     [
+      29,
+      28
+     ],
+     [
+      433,
+      432
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      21,
+      20
+     ],
+     [
+      29,
+      28
+     ],
+     [
+      433,
+      432
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       20,
+       19
+      ],
+      [
+       29,
+       28
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       20,
+       19
+      ],
+      [
+       29,
+       28
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       20,
+       19
+      ],
+      [
+       29,
+       28
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic-simpleadl__s10-2",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       28,
+       27
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       28,
+       27
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       28,
+       27
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic-simpleadl__s10-2",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      28,
+      27
+     ],
+     [
+      82,
+      81
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      28,
+      27
+     ],
+     [
+      82,
+      81
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic-simpleadl__s10-2",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      21,
+      20
+     ],
+     [
+      29,
+      28
+     ],
+     [
+      419,
+      418
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      21,
+      20
+     ],
+     [
+      29,
+      28
+     ],
+     [
+      419,
+      418
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       20,
+       19
+      ],
+      [
+       29,
+       28
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       20,
+       19
+      ],
+      [
+       29,
+       28
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       20,
+       19
+      ],
+      [
+       29,
+       28
+      ],
+      [
+       20,
+       19
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic__s7-4",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       44,
+       44
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       44,
+       44
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       44,
+       44
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic__s7-4",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      104,
+      103
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      104,
+      103
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       19,
+       18
+      ],
+      [
+       247,
+       246
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       19,
+       18
+      ],
+      [
+       247,
+       246
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       19,
+       18
+      ],
+      [
+       247,
+       246
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic__s7-4",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      241,
+      240
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      241,
+      240
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       282,
+       281
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       282,
+       281
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       282,
+       281
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic__s7-4",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      3,
+      2
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic__s7-4",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      105,
+      104
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      105,
+      104
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       207,
+       206
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       204,
+       203
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       204,
+       203
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "miconic__s7-4",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      195,
+      194
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      15,
+      14
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      195,
+      194
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       282,
+       281
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       282,
+       281
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       15,
+       14
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       282,
+       281
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "openstacks-opt08-adl__p03",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      23,
+      23
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      23,
+      23
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       23,
+       23
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       23,
+       23
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       23,
+       23
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "openstacks-opt08-adl__p03",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      85,
+      86
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      85,
+      86
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       204,
+       203
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       204,
+       203
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       204,
+       203
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "openstacks-opt08-adl__p03",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      224,
+      223
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      224,
+      223
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       270,
+       269
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       270,
+       269
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       270,
+       269
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "openstacks-opt08-adl__p03",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      29,
+      28
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      3,
+      2
+     ],
+     [
+      29,
+      28
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       29,
+       28
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       29,
+       28
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       29,
+       28
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "openstacks-opt08-adl__p03",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      107,
+      106
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      107,
+      106
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       214,
+       213
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       214,
+       213
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       20,
+       19
+      ],
+      [
+       214,
+       213
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "openstacks-opt08-adl__p03",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      289,
+      288
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      21,
+      20
+     ],
+     [
+      289,
+      288
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       319,
+       318
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       319,
+       318
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       25,
+       24
+      ],
+      [
+       319,
+       318
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "parcprinter-opt11-strips__p03",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      18,
+      17
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      18,
+      17
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       18,
+       17
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       18,
+       17
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       18,
+       17
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "parcprinter-opt11-strips__p03",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      28,
+      27
+     ],
+     [
+      59,
+      62
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      59,
+      62
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       503,
+       502
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       503,
+       502
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       503,
+       502
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "parcprinter-opt11-strips__p03",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      42,
+      41
+     ],
+     [
+      341,
+      368
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      341,
+      368
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       627,
+       626
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       627,
+       626
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       627,
+       626
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "parcprinter-opt11-strips__p03",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      14,
+      13
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      14,
+      13
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "parcprinter-opt11-strips__p03",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      181,
+      180
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      25,
+      24
+     ],
+     [
+      181,
+      180
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       396,
+       395
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       396,
+       395
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       21,
+       20
+      ],
+      [
+       396,
+       395
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "parcprinter-opt11-strips__p03",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      42,
+      41
+     ],
+     [
+      594,
+      593
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      20,
+      19
+     ],
+     [
+      594,
+      593
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       643,
+       642
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       643,
+       642
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       42,
+       41
+      ],
+      [
+       643,
+       642
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "pathways__p02",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      14,
+      13
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      14,
+      13
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "pathways__p02",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      40,
+      39
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      40,
+      39
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       70,
+       69
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       70,
+       69
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       70,
+       69
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "pathways__p02",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      13,
+      12
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      160,
+      159
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      13,
+      12
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      160,
+      159
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       13,
+       12
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       235,
+       234
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       13,
+       12
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       235,
+       234
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       13,
+       12
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       235,
+       234
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "pathways__p02",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      14,
+      13
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      14,
+      13
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       14,
+       13
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "pathways__p02",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      40,
+      39
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      40,
+      39
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       70,
+       69
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       70,
+       69
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       16,
+       15
+      ],
+      [
+       70,
+       69
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "pathways__p02",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      13,
+      12
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      160,
+      159
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      13,
+      12
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      160,
+      159
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       13,
+       12
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       235,
+       234
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       13,
+       12
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       235,
+       234
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       13,
+       12
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       235,
+       234
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "rovers__p02",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      4,
+      3
+     ],
+     [
+      10,
+      9
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      4,
+      3
+     ],
+     [
+      10,
+      9
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       4,
+       3
+      ],
+      [
+       9,
+       8
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       4,
+       3
+      ],
+      [
+       9,
+       8
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       4,
+       3
+      ],
+      [
+       9,
+       8
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "rovers__p02",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      15,
+      14
+     ],
+     [
+      48,
+      47
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      8,
+      7
+     ],
+     [
+      48,
+      47
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       135,
+       134
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       135,
+       134
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       135,
+       134
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "rovers__p02",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      204,
+      203
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      17,
+      16
+     ],
+     [
+      204,
+      203
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       217,
+       216
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       217,
+       216
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       217,
+       216
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "rovers__p02",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      4,
+      3
+     ],
+     [
+      10,
+      9
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      4,
+      3
+     ],
+     [
+      10,
+      9
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       4,
+       3
+      ],
+      [
+       9,
+       8
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       4,
+       3
+      ],
+      [
+       9,
+       8
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       4,
+       3
+      ],
+      [
+       9,
+       8
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "rovers__p02",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      15,
+      14
+     ],
+     [
+      122,
+      123
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      9,
+      8
+     ],
+     [
+      122,
+      123
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       96,
+       95
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       96,
+       95
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       96,
+       95
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "rovers__p02",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      22,
+      21
+     ],
+     [
+      202,
+      201
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      8,
+      7
+     ],
+     [
+      17,
+      16
+     ],
+     [
+      202,
+      201
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       205,
+       204
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       205,
+       204
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       8,
+       7
+      ],
+      [
+       22,
+       21
+      ],
+      [
+       205,
+       204
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "snake-opt18-strips__p05",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      33,
+      32
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      33,
+      32
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       31,
+       30
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       31,
+       30
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       31,
+       30
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "snake-opt18-strips__p05",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      176,
+      179
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      176,
+      179
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       58,
+       57
+      ],
+      [
+       637,
+       638
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       58,
+       57
+      ],
+      [
+       637,
+       638
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       58,
+       57
+      ],
+      [
+       637,
+       638
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "snake-opt18-strips__p05",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      86,
+      85
+     ],
+     [
+      936,
+      964
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      68,
+      67
+     ],
+     [
+      936,
+      964
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       86,
+       85
+      ],
+      [
+       943,
+       944
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       86,
+       85
+      ],
+      [
+       943,
+       944
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       86,
+       85
+      ],
+      [
+       943,
+       944
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "snake-opt18-strips__p05",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      64,
+      63
+     ],
+     [
+      33,
+      32
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      42,
+      41
+     ],
+     [
+      33,
+      32
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       31,
+       30
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       31,
+       30
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       31,
+       30
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "snake-opt18-strips__p05",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      662,
+      661
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      41,
+      40
+     ],
+     [
+      662,
+      661
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       58,
+       57
+      ],
+      [
+       994,
+       1002
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       58,
+       57
+      ],
+      [
+       994,
+       1002
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       58,
+       57
+      ],
+      [
+       994,
+       1002
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "snake-opt18-strips__p05",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      86,
+      85
+     ],
+     [
+      1853,
+      1854
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      68,
+      67
+     ],
+     [
+      1853,
+      1854
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       86,
+       85
+      ],
+      [
+       2242,
+       2241
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       86,
+       85
+      ],
+      [
+       2242,
+       2241
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       86,
+       85
+      ],
+      [
+       2242,
+       2241
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "sokoban-opt08-strips__p14",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      6,
+      5
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      6,
+      5
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       5,
+       4
+      ],
+      [
+       8,
+       7
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       5,
+       4
+      ],
+      [
+       8,
+       7
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       5,
+       4
+      ],
+      [
+       8,
+       7
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "sokoban-opt08-strips__p14",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      34,
+      33
+     ],
+     [
+      55,
+      54
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      55,
+      54
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       34,
+       33
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       34,
+       33
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       34,
+       33
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "sokoban-opt08-strips__p14",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      39,
+      38
+     ],
+     [
+      773,
+      772
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      773,
+      772
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       39,
+       38
+      ],
+      [
+       891,
+       890
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       39,
+       38
+      ],
+      [
+       891,
+       890
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       39,
+       38
+      ],
+      [
+       891,
+       890
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "sokoban-opt08-strips__p14",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      6,
+      5
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      6,
+      5
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       5,
+       4
+      ],
+      [
+       8,
+       7
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       5,
+       4
+      ],
+      [
+       8,
+       7
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       5,
+       4
+      ],
+      [
+       8,
+       7
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "sokoban-opt08-strips__p14",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      34,
+      33
+     ],
+     [
+      55,
+      54
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      55,
+      54
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       34,
+       33
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       34,
+       33
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       34,
+       33
+      ],
+      [
+       63,
+       62
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "sokoban-opt08-strips__p14",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      39,
+      38
+     ],
+     [
+      590,
+      589
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      3,
+      2
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      590,
+      589
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       39,
+       38
+      ],
+      [
+       872,
+       871
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       39,
+       38
+      ],
+      [
+       872,
+       871
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       3,
+       2
+      ],
+      [
+       39,
+       38
+      ],
+      [
+       872,
+       871
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "transport-opt08-strips__p23",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      11,
+      10
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      11,
+      10
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       40,
+       39
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       40,
+       39
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       40,
+       39
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "transport-opt08-strips__p23",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      461,
+      460
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      461,
+      460
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       622,
+       621
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       622,
+       621
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       622,
+       621
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "transport-opt08-strips__p23",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      7,
+      6
+     ],
+     [
+      27,
+      26
+     ],
+     [
+      895,
+      894
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      7,
+      6
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      895,
+      894
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       7,
+       6
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       1175,
+       1174
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       7,
+       6
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       1175,
+       1174
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       7,
+       6
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       1175,
+       1174
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "transport-opt08-strips__p23",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      11,
+      10
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      12,
+      11
+     ],
+     [
+      11,
+      10
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       40,
+       39
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       40,
+       39
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       12,
+       11
+      ],
+      [
+       40,
+       39
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "transport-opt08-strips__p23",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      284,
+      283
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      284,
+      283
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       727,
+       726
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       727,
+       726
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       15,
+       14
+      ],
+      [
+       727,
+       726
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "transport-opt08-strips__p23",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      7,
+      6
+     ],
+     [
+      27,
+      26
+     ],
+     [
+      625,
+      624
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      7,
+      6
+     ],
+     [
+      14,
+      13
+     ],
+     [
+      625,
+      624
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       7,
+       6
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       1048,
+       1047
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       7,
+       6
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       1048,
+       1047
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       7,
+       6
+      ],
+      [
+       27,
+       26
+      ],
+      [
+       1048,
+       1047
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "visitall__visitall_x-6_y-3_r-100",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      20,
+      20
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      20,
+      20
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       6,
+       5
+      ],
+      [
+       20,
+       20
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       6,
+       5
+      ],
+      [
+       20,
+       20
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       6,
+       5
+      ],
+      [
+       20,
+       20
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "visitall__visitall_x-6_y-3_r-100",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      90,
+      90
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      90,
+      90
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       129,
+       132
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       129,
+       132
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       129,
+       132
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "visitall__visitall_x-6_y-3_r-100",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      189,
+      188
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      189,
+      188
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       219,
+       218
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       219,
+       218
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       219,
+       218
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "visitall__visitall_x-6_y-3_r-100",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      91,
+      90
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      6,
+      5
+     ],
+     [
+      91,
+      90
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       6,
+       5
+      ],
+      [
+       135,
+       134
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       6,
+       5
+      ],
+      [
+       135,
+       134
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       6,
+       5
+      ],
+      [
+       135,
+       134
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "visitall__visitall_x-6_y-3_r-100",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      92,
+      91
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      92,
+      91
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "solved",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       176,
+       177
+      ]
+     ]
+    },
+    "4": {
+     "status": "solved",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       176,
+       177
+      ]
+     ]
+    },
+    "8": {
+     "status": "solved",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       176,
+       177
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "visitall__visitall_x-6_y-3_r-100",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      235,
+      234
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      4,
+      3
+     ],
+     [
+      18,
+      17
+     ],
+     [
+      235,
+      234
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       234,
+       233
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       234,
+       233
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       4,
+       3
+      ],
+      [
+       18,
+       17
+      ],
+      [
+       234,
+       233
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "zenotravel__p05",
+   "order": "goal_count",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      13,
+      12
+     ],
+     [
+      71,
+      70
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      7,
+      6
+     ],
+     [
+      71,
+      70
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       76,
+       75
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       76,
+       75
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       76,
+       75
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "zenotravel__p05",
+   "order": "goal_count",
+   "beam": 4,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      24,
+      23
+     ],
+     [
+      44,
+      47
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      11,
+      10
+     ],
+     [
+      44,
+      47
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       390,
+       389
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       390,
+       389
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       24,
+       23
+      ],
+      [
+       390,
+       389
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "zenotravel__p05",
+   "order": "goal_count",
+   "beam": 32,
+   "survivors_only": {
+    "status": "solved",
+    "passes": [
+     [
+      11,
+      10
+     ],
+     [
+      26,
+      25
+     ],
+     [
+      367,
+      379
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "solved",
+    "passes": [
+     [
+      11,
+      10
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      367,
+      379
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       11,
+       10
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       518,
+       517
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       11,
+       10
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       518,
+       517
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       11,
+       10
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       518,
+       517
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "zenotravel__p05",
+   "order": "goal_count_fewer",
+   "beam": 1,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      13,
+      12
+     ],
+     [
+      71,
+      70
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      2,
+      1
+     ],
+     [
+      7,
+      6
+     ],
+     [
+      71,
+      70
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       76,
+       75
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       76,
+       75
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       2,
+       1
+      ],
+      [
+       14,
+       13
+      ],
+      [
+       76,
+       75
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "zenotravel__p05",
+   "order": "goal_count_fewer",
+   "beam": 4,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      23,
+      22
+     ],
+     [
+      321,
+      320
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      5,
+      4
+     ],
+     [
+      10,
+      9
+     ],
+     [
+      321,
+      320
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       23,
+       22
+      ],
+      [
+       423,
+       422
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       23,
+       22
+      ],
+      [
+       423,
+       422
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       5,
+       4
+      ],
+      [
+       23,
+       22
+      ],
+      [
+       423,
+       422
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "task": "zenotravel__p05",
+   "order": "goal_count_fewer",
+   "beam": 32,
+   "survivors_only": {
+    "status": "failed",
+    "passes": [
+     [
+      11,
+      10
+     ],
+     [
+      26,
+      25
+     ],
+     [
+      480,
+      479
+     ]
+    ]
+   },
+   "survivors_only_atom_first": {
+    "status": "failed",
+    "passes": [
+     [
+      11,
+      10
+     ],
+     [
+      16,
+      15
+     ],
+     [
+      480,
+      479
+     ]
+    ]
+   },
+   "relaxed": {
+    "2": {
+     "status": "failed",
+     "passes": [
+      [
+       11,
+       10
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       512,
+       511
+      ]
+     ]
+    },
+    "4": {
+     "status": "failed",
+     "passes": [
+      [
+       11,
+       10
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       512,
+       511
+      ]
+     ]
+    },
+    "8": {
+     "status": "failed",
+     "passes": [
+      [
+       11,
+       10
+      ],
+      [
+       26,
+       25
+      ],
+      [
+       512,
+       511
+      ]
+     ]
+    }
+   }
+  }
+ ]
+}
