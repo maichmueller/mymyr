@@ -2,7 +2,8 @@
 // tests/data/fork_golden/search_fork/run_beam.py): IW(2) and BrFS with stop_if_goal under the goal-count ordering
 // (more and fewer satisfied goal literals first), beam widths 1, 4 and 32 and both beam novelty modes. Expectations:
 // the status, the plan (action for action) and the counts of every IW pass (expanded, generated, generated_in_tree)
-// and of BrFS (expanded, generated) equal the fork's.
+// and of BrFS (expanded, generated) equal the fork's, on one thread and with the layer step on four (two when
+// sanitized).
 //
 // A beam keeps the best entries of a layer with ties in generation order, so it depends on the order in which a
 // state's actions are enumerated. On depot, driverlog, gripper, logistics00 and zenotravel
@@ -110,38 +111,44 @@ TEST(BeamFork, IwAndBrfsEqualTheForks)
         const std::vector<std::string>& names = objects[name];
         const std::string what = name + " " + r["algo"].str + " " + r["order"].str + " beam " +
                                  std::to_string(static_cast<u32>(r["beam"].num)) + " " + r["beam_mode"].str;
-        if (r["algo"].str == "iw")
+        for (u32 threads : {1u, sanitized() ? 2u : 4u})
         {
-            IwOptions o;
-            o.max_arity = static_cast<u32>(r["k"].num);
-            o.layers = ordering(r);
-            const IwResult m = iw(task, o);
-            EXPECT_STREQ(mimir_status_name(m.status), status.c_str()) << what;
-            EXPECT_EQ(plan_strings(task, names, m.plan), fork_plan(r)) << what;
-            const auto& passes = r["passes"].arr;
-            ASSERT_EQ(m.passes.size(), passes.size()) << what;
-            for (usize i = 0; i < passes.size(); ++i)
+            const std::string at = what + " threads " + std::to_string(threads);
+            if (r["algo"].str == "iw")
             {
-                EXPECT_EQ(m.passes[i].expanded, static_cast<u64>(passes[i]["expanded"].num)) << what << " pass " << i;
-                EXPECT_EQ(m.passes[i].generated, static_cast<u64>(passes[i]["generated"].num)) << what << " pass " << i;
-                EXPECT_EQ(m.passes[i].generated_in_tree, static_cast<u64>(passes[i]["generated_in_tree"].num))
-                    << what << " pass " << i;
+                IwOptions o;
+                o.max_arity = static_cast<u32>(r["k"].num);
+                o.layers = ordering(r);
+                o.threads = threads;
+                const IwResult m = iw(task, o);
+                EXPECT_STREQ(mimir_status_name(m.status), status.c_str()) << at;
+                EXPECT_EQ(plan_strings(task, names, m.plan), fork_plan(r)) << at;
+                const auto& passes = r["passes"].arr;
+                ASSERT_EQ(m.passes.size(), passes.size()) << at;
+                for (usize i = 0; i < passes.size(); ++i)
+                {
+                    EXPECT_EQ(m.passes[i].expanded, static_cast<u64>(passes[i]["expanded"].num)) << at << " pass " << i;
+                    EXPECT_EQ(m.passes[i].generated, static_cast<u64>(passes[i]["generated"].num)) << at << " pass " << i;
+                    EXPECT_EQ(m.passes[i].generated_in_tree, static_cast<u64>(passes[i]["generated_in_tree"].num))
+                        << at << " pass " << i;
+                }
             }
+            else
+            {
+                BrfsOptions o;
+                o.witness_pruning = false;  // every applicable action is a transition (the fork's counts)
+                o.stop_at_goal = true;
+                o.layers = ordering(r);
+                o.threads = threads;
+                const BrfsResult m = brfs(task, o);
+                EXPECT_EQ(m.solved, status == "solved") << at;
+                EXPECT_EQ(m.exhausted, status == "exhausted") << at;
+                EXPECT_EQ(plan_strings(task, names, m.plan), fork_plan(r)) << at;
+                EXPECT_EQ(m.expanded, static_cast<u64>(r["expanded"].num)) << at;
+                EXPECT_EQ(m.generated, static_cast<u64>(r["generated"].num)) << at;
+            }
+            ++compared;
         }
-        else
-        {
-            BrfsOptions o;
-            o.witness_pruning = false;  // every applicable action is a transition (the fork's counts)
-            o.stop_at_goal = true;
-            o.layers = ordering(r);
-            const BrfsResult m = brfs(task, o);
-            EXPECT_EQ(m.solved, status == "solved") << what;
-            EXPECT_EQ(m.exhausted, status == "exhausted") << what;
-            EXPECT_EQ(plan_strings(task, names, m.plan), fork_plan(r)) << what;
-            EXPECT_EQ(m.expanded, static_cast<u64>(r["expanded"].num)) << what;
-            EXPECT_EQ(m.generated, static_cast<u64>(r["generated"].num)) << what;
-        }
-        ++compared;
     }
-    EXPECT_GE(compared, sanitized() ? 282u : 288u);
+    EXPECT_GE(compared, sanitized() ? 564u : 576u);
 }
