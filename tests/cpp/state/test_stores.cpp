@@ -115,6 +115,38 @@ TEST(ChunkedStore, SuccessorInsertReusesUntouchedChunks)
     EXPECT_FALSE(store.insert(b.data(), 24).second);
 }
 
+TEST(ChunkedStore, FindSuccessorFindsStoredStatesOnly)
+{
+    ChunkedStateStore store(24);
+    std::vector<u64> a(24, 0), b(24, 0), c(24, 0);
+    a[0] = 1;
+    a[20] = 9;
+    const StateId ia = store.insert(a.data(), 24).first;
+    std::vector<u32> x(store.chunks_per_state());
+    // b: a successor that is stored (as itself), c: one that is not, and one with a chunk nobody has
+    b = a;
+    b[10] = 4;
+    const SlotId add_b{10 * 64 + 2};
+    const Delta db{std::span<const SlotId>(&add_b, 1), {}};
+    EXPECT_FALSE(store.find_successor(ia, a.data(), b.data(), 24, db, x.data()).valid());
+    const StateId ib = store.insert(b.data(), 24).first;
+    EXPECT_EQ(store.find_successor(ia, a.data(), b.data(), 24, db, x.data()), ib);
+    EXPECT_EQ(store.find_successor(ia, a.data(), b.data(), 11, db, x.data()), ib);  // trailing words zero
+    c = a;
+    c[0] = 0;
+    const SlotId del_c{0};
+    const Delta dc{{}, std::span<const SlotId>(&del_c, 1)};
+    EXPECT_FALSE(store.find_successor(ia, a.data(), c.data(), 24, dc, x.data()).valid());
+    store.insert(c.data(), 24);
+    EXPECT_TRUE(store.find_successor(ia, a.data(), c.data(), 24, dc, x.data()).valid());
+    // the parent itself (an empty delta) and a successor wider than the store
+    EXPECT_EQ(store.find_successor(ia, a.data(), a.data(), 24, Delta{}, x.data()), ia);
+    std::vector<u64> wide(40, 0);
+    wide[39] = 1;
+    const SlotId add_w{39 * 64};
+    EXPECT_FALSE(store.find_successor(ia, a.data(), wide.data(), 40, Delta{std::span<const SlotId>(&add_w, 1), {}}, x.data()).valid());
+}
+
 TEST(CompactSet, InsertsFingerprints)
 {
     CompactStateSet set;
