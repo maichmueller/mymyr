@@ -46,6 +46,7 @@ struct AbstractedIwOptions
     LayerOrdering layers;
     bool witness_pruning = false;
     bool canonical_order = true;
+    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;  // as IwOptions::symmetry_pruning
     std::optional<State> start;
     /// As IwOptions::successor_order.
     std::function<void(StateView state, std::span<const Action> actions, std::vector<u32>& order)> successor_order;
