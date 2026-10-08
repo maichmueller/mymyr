@@ -109,7 +109,7 @@ u64 NoveltyTable::bytes() const noexcept
     u64 b = m_t1.capacity() * 8 + m_t2.capacity() * 8 + m_s2.bytes() + m_binom.capacity() * 8;
     for (const Level& l : m_levels)
         b += l.bits.capacity() * 8 + l.ranks.bytes() + l.packed.bytes();
-    b += m_atoms.capacity() * 4 + m_new.capacity() + m_suffix_new.capacity() * 4;
+    b += m_scratch.atoms.capacity() * 4 + m_scratch.fresh.capacity() + m_scratch.suffix.capacity() * 4;
     return b;
 }
 
@@ -361,7 +361,7 @@ bool NoveltyTable::mark_state(const u64* w, u32 n)
         mark_dense2(w, n, atoms);
     }
     else
-        novel = test_generic<true>(nullptr, 0, w, n, atoms);
+        novel = test_generic<true>(*this, nullptr, 0, w, n, atoms, m_scratch);
     return novel;
 }
 }  // namespace mymyr::novelty

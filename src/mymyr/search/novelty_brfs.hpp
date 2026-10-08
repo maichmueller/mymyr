@@ -40,6 +40,7 @@
 // expanded unless keep_depth_one). Observers see the transitions as they are generated: a successor reported as
 // Opened can be dropped by the beam or the replay and is then never expanded.
 
+#include "beam_detail.hpp"
 #include "iw_detail.hpp"
 #include "layer_order_detail.hpp"
 
@@ -230,6 +231,7 @@ struct Env
     SearchCoordination* coord = nullptr;
     StateTracker* tracker = nullptr;
     LayerOrderer* layers = nullptr;  // ordered layers (mimir's layer_ordering_strategy); null: the queued BrFS
+    BeamTeam* team = nullptr;        // the beam's layer step (threads > 1 or a relaxed beam; fast path only)
 
     Env(const Task& t, Successors& s, const GoalTest& g, const BlockedSet& b, const SearchControl& c)
         : task(t), succ(s), goal(g), blocked(b), control(c), obs(c.observer), root(c.observer), coord(c.coordination)
@@ -546,13 +548,302 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         return pruner.test(pw, pn, w, nn, a, d);
     };
 
+    // The beam's layer step on env.team (beam_detail.hpp), as in the IW pass (iw.cpp): exact below the root layer of
+    // passes without the width-0 rule, the members generating the successors and the pruner deciding on this thread
+    // in the serial order; relaxed on every layer (the pruner's read-only test, on this thread).
+    BeamTeam* const team = slow ? nullptr : env.team;
+    const bool relaxed = team && env.layers->relaxed();
+    const u32 members = team ? team->size() : 0;
+    std::vector<Expansion> exps;
+    std::vector<std::vector<u64>> mcur(members), mnext(members);
+    std::vector<std::vector<u32>> madd(members);
+    struct Ref
+    {
+        u32 member, cand, parent;
+    };
+    std::vector<LayerOrderer::Ranked> ranked;
+    std::vector<Ref> refs;
+    std::vector<u32> keys;
+    u64 layer_transitions = 0;
+    bool preselected = false;
+
+    auto expand_one = [&](u32 t, usize i)
+    {
+        Expansion& x = exps[i];
+        x = Expansion{};
+        x.member = t;
+        Candidates& cs = team->candidates(t);
+        x.first = cs.size();
+        const u32 e = cur[i];
+        Successors& sc = team->succ(t);
+        std::vector<u64>& pw = mcur[t];
+        std::vector<u64>& nx = mnext[t];
+        std::vector<u32>& ad = madd[t];
+        pw.assign(tree.words(e), tree.words(e) + tree.stride());
+        const u32 n = bits::trimmed_size(pw.data(), tree.stride());
+        const StateView cv{pw.data(), n, nullptr, 0};
+        bool prepared = false;
+        if (env.goal.concurrent())
+        {
+            if (env.goal.needs_view())
+            {
+                sc.prepare(cv);
+                prepared = true;
+            }
+            x.goal = env.goal.test(sc, cv, prepared) ? 1 : 0;
+            if (x.goal)
+                return;
+        }
+        if (tree.skip(e) || tree.depth(e) >= budget.max_depth)
+            return;
+        if (!prepared)
+            sc.prepare(cv);
+        x.expanded = 1;
+        const bool width0 = pc.root == RootRule::ArityZero && e != 0;
+        sc.generate<true>(
+            [&](u32 s, const ObjectId* b, const Delta& d) -> bool
+            {
+                const u32 seq = x.transitions++;
+                if (width0)
+                    return true;  // width 0 below the root: pruned
+                ad.clear();
+                for (SlotId a : d.add)
+                    if (!bits::test(pw.data(), n, a.v) && std::find(ad.begin(), ad.end(), a.v) == ad.end())
+                        ad.push_back(a.v);
+                const u32 nn = apply_delta(pw.data(), n, d, nx);
+                cs.push(seq, s, b, sc.arity(s), ad, &d, nx.data(), nn, nullptr, 0);
+                return true;
+            },
+            env.witness, env.canonical, env.symmetry);
+        x.count = cs.size() - x.first;
+        if (relaxed)
+            for (u32 j = x.first; j < cs.size(); ++j)
+                cs.set_value(j, env.layers->key(sc, StateView{cs.words(j), cs.nwords(j), nullptr, 0}));
+    };
+    // the pop of cur[i] on this thread (as the serial loop); false stops the pass; expanded: its successors follow
+    auto pop_one = [&](usize i, bool& expanded) -> bool
+    {
+        expanded = false;
+        const Expansion& x = exps[i];
+        const u32 e = cur[i];
+        if (env.out_of_time())
+        {
+            finish(SearchStatus::OutOfTime);
+            return false;
+        }
+        if (env.cancelled())
+        {
+            finish(SearchStatus::Cancelled);
+            return false;
+        }
+        if (tree.closed(e))
+            return true;
+        tree.close(e);
+        const u32 depth = tree.depth(e);
+        if (depth > g)
+            g = depth;  // no coordination with ordered layers (apply_layers)
+        const u32 W = tree.stride();
+        words.assign(tree.words(e), tree.words(e) + W);
+        const u32 n = bits::trimmed_size(words.data(), W);
+        const StateView cv{words.data(), n, nullptr, 0};
+        bool is_goal;
+        if (env.goal.concurrent())
+            is_goal = x.goal != 0;
+        else
+        {
+            bool prepared = false;
+            if (env.goal.needs_view())
+            {
+                succ.prepare(cv);
+                prepared = true;
+            }
+            is_goal = env.goal.test(succ, cv, prepared);
+        }
+        if (is_goal)
+        {
+            finish(SearchStatus::Solved);
+            out.plan = tree.plan(e, succ);
+            out.goal_state = State(words.data(), n);
+            out.goal_node = e;
+            return false;
+        }
+        if (st.expanded >= budget.max_expanded)
+        {
+            finish(SearchStatus::OutOfStates);
+            return false;
+        }
+        ++st.expanded;
+        if (!x.expanded)
+        {
+            ++st.skipped;
+            return true;
+        }
+        pruner.begin(words.data(), n);
+        expanded = true;
+        return true;
+    };
+    auto admit_at = [&](u32 parent, u32 s, const ObjectId* b, const u64* w, u32 nn, bool skip) -> bool
+    {
+        tree.push(w, nn, parent, s, b, succ.arity(s), tree.depth(parent) + 1, skip);
+        ++st.generated_in_tree;
+        target->push_back(tree.size() - 1);
+        if (tree.size() >= budget.max_states)
+        {
+            finish(SearchStatus::OutOfStates);
+            stop = true;
+            return false;
+        }
+        return true;
+    };
+    // exact: the serial step over the transitions of cur[i] (words: its state; begin() ran)
+    auto merge_exact = [&](usize i) -> bool
+    {
+        const Expansion& x = exps[i];
+        const u32 e = cur[i];
+        const u32 n = bits::trimmed_size(words.data(), static_cast<u32>(words.size()));
+        const Candidates& cs = team->candidates(x.member);
+        for (u32 j = x.first; j < x.first + x.count; ++j)
+        {
+            const std::span<const u32> a = cs.add(j);
+            const Delta d = cs.delta(j, 0);
+            if constexpr (QuickRejecting<Pruner>)
+                if (pruner.quick_reject(a, d))
+                    continue;
+            const u64* w = cs.words(j);
+            const u32 nn = cs.nwords(j);
+            if (a.empty() && bits::equal(w, nn, words.data(), n))
+                continue;  // self loop
+            if (!novelty(words.data(), n, w, nn, a, d))
+                continue;
+            if (survivors)
+            {
+                if (seen.find(tree, w, nn) != k_no_node)
+                    continue;
+                seen.insert(w, nn, tree.size());
+            }
+            if (!admit_at(e, cs.schema(j), cs.binding(j), w, nn, false))
+            {
+                st.generated += cs.seq(j) + 1;
+                return false;
+            }
+        }
+        st.generated += x.transitions;
+        return true;
+    };
+    // relaxed: the candidates of cur[i] (the pruner's read-only test) join the layer's ranking
+    auto collect_relaxed = [&](usize i)
+    {
+        const Expansion& x = exps[i];
+        const u32 e = cur[i];
+        const u32 n = bits::trimmed_size(words.data(), static_cast<u32>(words.size()));
+        const RootRule rule = e == 0 ? pc.root : RootRule::Normal;
+        const Candidates& cs = team->candidates(x.member);
+        for (u32 j = x.first; j < x.first + x.count; ++j)
+        {
+            const std::span<const u32> a = cs.add(j);
+            const Delta d = cs.delta(j, 0);
+            if constexpr (QuickRejecting<Pruner>)
+                if (rule == RootRule::Normal && pruner.quick_reject(a, d))
+                    continue;
+            const u64* w = cs.words(j);
+            const u32 nn = cs.nwords(j);
+            if (a.empty() && bits::equal(w, nn, words.data(), n))
+                continue;  // self loop
+            u8 flag = 0;
+            if (rule == RootRule::Continuation)
+                flag = novelty(words.data(), n, w, nn, a, d) ? 1 : 0;
+            else if (rule == RootRule::Normal && !novelty(words.data(), n, w, nn, a, d))
+                continue;
+            ranked.push_back({cs.value(j), 0, layer_transitions + cs.seq(j), static_cast<u32>(refs.size())});
+            refs.push_back({x.member, j, e});
+            if (flag)
+                ranked.back().entry |= 0x80000000u;
+        }
+        layer_transitions += x.transitions;
+        st.generated += x.transitions;
+    };
+    auto select_relaxed = [&]() -> bool
+    {
+        const SplitMix64 ties = env.layers->draw_ties(layer_transitions);
+        if (env.layers->random_ties())
+            for (LayerOrderer::Ranked& r : ranked)
+                r.tie = ties.output_at(r.pos);
+        relaxed_rank(ranked, layer_transitions, members, env.layers->beam_chunk(), env.layers->beam_width());
+        bool go = true;
+        for (const LayerOrderer::Ranked& r : ranked)
+        {
+            if (next.size() >= env.layers->beam_width())
+                break;
+            const bool novel = (r.entry & 0x80000000u) != 0;
+            const Ref& f = refs[r.entry & 0x7fffffffu];
+            const Candidates& cs = team->candidates(f.member);
+            const u64* w = cs.words(f.cand);
+            const u32 nn = cs.nwords(f.cand);
+            if (seen.find(tree, w, nn) != k_no_node)
+                continue;
+            seen.insert(w, nn, tree.size());
+            bool skip = false;
+            if (f.parent == 0 && pc.root == RootRule::Continuation)
+                skip = !novel && !pc.keep_depth_one;
+            else if (f.parent == 0 && pc.root == RootRule::ArityZero)
+                skip = pc.root_only;
+            if (!admit_at(f.parent, cs.schema(f.cand), cs.binding(f.cand), w, nn, skip))
+            {
+                go = false;
+                break;
+            }
+        }
+        ranked.clear();
+        refs.clear();
+        layer_transitions = 0;
+        preselected = true;
+        return go;
+    };
+    auto step_layer = [&]() -> bool
+    {
+        const usize L = cur.size();
+        exps.resize(L);
+        const usize B = relaxed ? L : std::max<usize>(64, usize{16} * members);
+        for (usize a = 0; a < L; a += B)
+        {
+            const usize bend = std::min(L, a + B);
+            team->for_each(bend - a, 1, [&](u32 t, usize i) { expand_one(t, a + i); });
+            for (usize i = a; i < bend; ++i)
+            {
+                bool expanded = false;
+                if (!pop_one(i, expanded))
+                    return false;
+                if (!expanded)
+                    continue;
+                if (relaxed)
+                    collect_relaxed(i);
+                else if (!merge_exact(i))
+                    return false;
+            }
+        }
+        return !relaxed || select_relaxed();
+    };
+
+    bool layer_start = ordered && root_enters;
+    bool root_layer = true;
     while (!stop)
     {
         if (pos == cur.size())
         {
             if (!ordered || next.empty())
                 break;
-            st.generated_in_tree -= env.layers->select(next, succ, [&](u32 e) { return StateView{tree.words(e), tree.stride(), nullptr, 0}; });
+            if (preselected)
+                preselected = false;
+            else if (team && env.layers->scored())
+            {
+                keys.resize(next.size());
+                team->for_each(next.size(), 64,
+                               [&](u32 t, usize i)
+                               { keys[i] = env.layers->key(team->succ(t), StateView{tree.words(next[i]), tree.stride(), nullptr, 0}); });
+                st.generated_in_tree -= env.layers->select_keyed(next, keys);
+            }
+            else
+                st.generated_in_tree -= env.layers->select(next, succ, [&](u32 e) { return StateView{tree.words(e), tree.stride(), nullptr, 0}; });
             if (survivors && pc.root != RootRule::ArityZero)
             {
                 replay();
@@ -563,6 +854,20 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             next.clear();
             pos = 0;
             truncated = false;
+            layer_start = true;
+            root_layer = false;
+        }
+        if (layer_start)
+        {
+            layer_start = false;
+            if (team && (relaxed || (pc.root != RootRule::ArityZero && !root_layer)))
+            {
+                const bool go = step_layer();
+                pos = cur.size();
+                if (!go)
+                    break;
+                continue;
+            }
         }
         const u32 id = cur[pos++];
         if (env.out_of_time())

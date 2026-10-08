@@ -36,6 +36,9 @@ public:
 
     /// Whether the test reads derived atoms: the caller prepares the state (axioms) first.
     [[nodiscard]] bool needs_view() const noexcept { return m_view; }
+    /// Whether test() may run on several threads at once (each with its own Successors): every kind but Custom,
+    /// whose user function runs on the calling thread.
+    [[nodiscard]] bool concurrent() const noexcept { return m_kind != Kind::Custom; }
     /// The task's goal contains a false static literal (as in mimir's test_static_goal() returning false). Custom and AnyOf
     /// goals are never statically false.
     [[nodiscard]] bool statically_false() const noexcept { return m_static_false; }
@@ -95,6 +98,7 @@ private:
 
 /// Everything a ladder needs besides the start state and the goal.
 class LayerOrderer;  // layer_order_detail.hpp
+class BeamTeam;      // beam_detail.hpp
 
 struct Context
 {
@@ -106,6 +110,8 @@ struct Context
     bool timed = false;
     SearchObserver* observer = nullptr;
     std::unique_ptr<LayerOrderer> layers;  // IwOptions::layers when ordered, else null
+    /// The members of the beam's layer step (beam_detail.hpp): with threads > 1 or a relaxed beam, on the fast path.
+    std::unique_ptr<BeamTeam> team;
     std::string error;                     // why the options cannot run (empty: they can)
 
     Context(const Task& t, const IwOptions& o, Successors& s);

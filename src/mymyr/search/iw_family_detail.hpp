@@ -6,6 +6,7 @@
 #include "mymyr/novelty/landmark_table.hpp"
 #include "mymyr/search/iw_family.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -37,12 +38,15 @@ inline novelty::LandmarkCoordinates make_coordinates(const Task& task, const Lan
                                               fluent_slots_of(task, ln.unshared_atoms));
 }
 
-/// Applies a layer ordering to an engine environment (`orderer` holds its state and must outlive the search);
-/// returns an error message, or an empty string.
-inline std::string apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer& orderer)
+/// Applies a layer ordering and a thread count (IwOptions::threads) to an engine environment (`orderer` and `team`
+/// hold their state and must outlive the search); returns an error message, or an empty string.
+inline std::string apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer& orderer, u32 threads, std::unique_ptr<BeamTeam>& team)
 {
     if (std::string e = check_layers(lo); !e.empty())
         return e;
+    const u32 T = resolve_threads(threads);
+    if (T > 1 && !lo.beam())
+        return "threads > 1 requires a beam (LayerOrdering::beam_width)";
     if (lo.kind == LayerOrdering::Kind::Queue)
         return {};
     if (env.coord)
@@ -50,6 +54,13 @@ inline std::string apply_layers(Env& env, const LayerOrdering& lo, LayerOrderer&
                "publish sound completed depths";
     orderer = LayerOrderer(env.task, lo);
     env.layers = &orderer;
+    if (orderer.relaxed() && env.slow())
+        return "LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly cannot be combined with an observer, blocked states or a successor order";
+    if (orderer.beam() && !env.slow() && (T > 1 || orderer.relaxed()))
+    {
+        team = std::make_unique<BeamTeam>(env.task, T);
+        env.team = team.get();
+    }
     return {};
 }
 
