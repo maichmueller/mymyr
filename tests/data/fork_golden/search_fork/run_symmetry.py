@@ -6,11 +6,11 @@ tests/cpp/successor/test_symmetry_fork.cpp and tests/python/test_symmetry.py.
     python3 tests/data/fork_golden/search_fork/run_symmetry.py --build      # build search_fork, then run
     python3 tests/data/fork_golden/search_fork/run_symmetry.py --only gripper
 
-Per task: the objects in the fork's order, and every state reachable without pruning with its fluent atoms (and fluent function values, "(f o1 ... ok)=v"), its
-applicable actions under the KPKC generator's WL1 pruning, and the WL1 colour class of every object (atoms and
-actions as indices into per-task name tables); then brfs (exhaustive, and stopping at a goal) and astar_eager with the
-blind heuristic, both with WL1 pruning. The fork's data directory comes from MYMYR_FORK_DATA; the fork install from
-MYMYR_WORK (as in run_layer_orders.py).
+Per task: the objects in the fork's order, and every state reachable without pruning with its fluent atoms (and
+fluent function values, "(f o1 ... ok)=v"), its applicable actions under the KPKC generator's WL1 pruning, and the WL1
+colour class of every object (atoms and actions as indices into per-task name tables); then brfs (exhaustive, and
+stopping at a goal) and astar_eager with the blind heuristic, both with WL1 pruning. The fork's data directory comes
+from MYMYR_FORK_DATA; the fork install from MYMYR_WORK (as in run_layer_orders.py).
 """
 
 import argparse
@@ -37,10 +37,11 @@ def tasks():
 
 def run_one(exe, data, d, p, a):
     name = f"{d}/{p}"
-    cmd = [str(exe), "--algo", "symmetry_states", "--domain", str(data / d / "domain.pddl"), "--problem", str(data / d / p),
-           "--max-ms", str(a.seconds * 1000), "--max-states", str(a.max_states)]
+    cmd = [str(exe), "--algo", "symmetry_states", "--domain", str(data / d / "domain.pddl"),
+           "--problem", str(data / d / p), "--max-ms", str(a.seconds * 1000), "--max-states", str(a.max_states)]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=a.seconds * 3 + 120, preexec_fn=limit_memory(a.mem_gb))
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=a.seconds * 3 + 120,
+                           preexec_fn=limit_memory(a.mem_gb))
     except subprocess.TimeoutExpired:
         return {"task": name, "killed": "timeout"}
     for line in r.stdout.splitlines():
