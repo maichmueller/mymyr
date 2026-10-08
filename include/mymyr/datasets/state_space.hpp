@@ -44,6 +44,7 @@
 // false has no state space (its BrFS ends as unsolvable before expanding anything), whatever remove_if_unsolvable.
 
 #include "mymyr/core/types.hpp"
+#include "mymyr/datasets/certificates.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
 #include "mymyr/task/task.hpp"
@@ -76,7 +77,8 @@ struct StateSpaceOptions
     // non-isomorphic states (a goal state with non-goal states in one block); colour refinement is much cheaper
     // (O((V + E) log V) against O(V^3) per round)
     CertificateKind certificate = CertificateKind::KFwl;
-    u32 fwl_k = 2;                                            // k of CertificateKind::KFwl (2 or 3)
+    u32 fwl_k = 2;                                            // k of CertificateKind::KFwl (2, 3 or 4)
+    KfwlLimits fwl_limits;                                    // n and work bounds of a k-FWL certificate
     bool labels = true;                                       // keep (schema, binding) per transition
 };
 
@@ -127,9 +129,11 @@ public:
     [[nodiscard]] u64 num_transitions() const noexcept { return m_targets.size(); }
     [[nodiscard]] u32 initial_state() const noexcept { return 0; }
     [[nodiscard]] bool symmetry_reduced() const noexcept { return m_symmetry_reduced; }
-    /// The certificate kind (and k) of the symmetry reduction; meaningful iff symmetry_reduced().
+    /// The certificate kind (and k, and the k-FWL limits) of the symmetry reduction; meaningful iff
+    /// symmetry_reduced().
     [[nodiscard]] CertificateKind certificate() const noexcept { return m_certificate; }
     [[nodiscard]] u32 fwl_k() const noexcept { return m_fwl_k; }
+    [[nodiscard]] const KfwlLimits& fwl_limits() const noexcept { return m_fwl_limits; }
 
     // ------------------------------------------------------------------------------------------ states
     /// Fluent words per state, numeric words per state, and the row width (their sum).
@@ -211,6 +215,7 @@ private:
     bool m_symmetry_reduced = false;
     CertificateKind m_certificate = CertificateKind::ColorRefinement;
     u32 m_fwl_k = 2;
+    KfwlLimits m_fwl_limits;
     bool m_has_labels = false;
     u32 m_label_width = 0;
     std::vector<u64> m_states;

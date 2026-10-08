@@ -8,22 +8,31 @@
 // The relaxed grounding of heuristics/relaxed_task.hpp (propositions, one operator per ground action and conditional
 // effect, preconditions, effects, action costs) is uploaded once; every launch evaluates a batch of states, a group of
 // threads per state (cuda/heuristics_kernels.hpp). Values:
-//   - h_max and h_add equal heuristics::make_heuristic's (grounded evaluation) exactly, dead ends (+inf) included;
+//   - h_max, h_add and h² equal heuristics::make_heuristic's (grounded evaluation) exactly, dead ends (+inf) included;
 //   - h_FF extracts the relaxed plan over h_max best supporters as the CPU does (a derived atom passes on its axiom's
 //     supporter, every ground action counts once), but it breaks ties among equally cheap supporters by the lowest BFS
 //     level and then the smallest operator id, where the CPU takes the first supporter its queue reaches. The two agree
 //     where no tie decides; reference() is the CPU implementation of the device's rule (tests compare against it).
-// Two variants of the cost computation: synchronous Jacobi sweeps over all operators, or the bucketed frontier
-// (a generalized Dijkstra over precondition counters that evaluates every operator once and stops when the goals
+//   - set-additive uses the same BFS-level and operator-id ties. A proposition keeps its chosen operator, including
+//     an axiom; its achiever set is the union of the preconditions' sets, plus (operator, proposition) for an action.
+//     Axioms add no member. The goal union counts one member per supported proposition, weighted by its action cost.
+//     reference() implements this rule on the CPU.
+// h² sweeps over two global triangular pair tables. A block evaluates a state and reuses its slice for later rows;
+// the number of resident blocks is reduced to fit max_scratch_bytes (default 512 MiB). More than 8191 propositions,
+// or a single state's scratch larger than the budget, raises std::invalid_argument naming the size and limit.
+// Its resolved variant is Sweep, with a block per state and global scratch for every launch configuration.
+// Two variants of the h_max / h_add / supporter cost computation: synchronous Jacobi sweeps over all operators, or
+// the bucketed frontier (a generalized Dijkstra over precondition counters that evaluates every operator once and stops when the goals
 // are settled). Both compute the least fixpoint, so the values never depend on the variant, the group size, the grid
 // or where the scratch lives.
 // States with an atom outside the grounding (not reachable in the delete relaxation from the initial state) are
-// evaluated by the CPU heuristic (its lifted fallback), as heuristics::make_heuristic does.
+// evaluated by the CPU heuristic (its lifted fallback), as heuristics::make_heuristic does. h² and set-additive
+// have no lifted fallback and throw std::runtime_error for such states, as their CPU counterparts do.
 //
 // Numeric values and constraints are ignored as in the CPU relaxation.
 // Refused with std::invalid_argument ("mymyr: ..."): groundings beyond the budget
-// (heuristics::GroundingBudget, as the CPU's Evaluation::Grounded), kinds other than Max, Add and FF, and real costs
-// the CPU refuses. One DeviceHeuristic serves one stream at a time (its scratch is reused across launches).
+// (heuristics::GroundingBudget, as the CPU's Evaluation::Grounded), kinds other than Max, Add, FF, H2 and SetAdditive,
+// and real costs the CPU refuses. One DeviceHeuristic serves one stream at a time (its scratch is reused across launches).
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -49,7 +58,7 @@ enum class HeuristicVariant : u8
 
 struct DeviceHeuristicOptions
 {
-    heuristics::Kind kind = heuristics::Kind::FF;  // Max, Add or FF
+    heuristics::Kind kind = heuristics::Kind::FF;  // Max, Add, FF, H2 or SetAdditive
     heuristics::Costs costs = heuristics::Costs::Unit;
     heuristics::GroundingBudget budget;
     /// A grounding to use instead of building one (share it with CPU heuristics).
@@ -61,7 +70,8 @@ struct DeviceHeuristicOptions
     u32 max_blocks = 0;       // 0: as many as are resident on the device
     u64 shared_bytes = 0;     // scratch per block kept in shared memory up to this size (0: 48 KB); larger: global
     bool force_global = false;  // scratch in global memory even when it fits shared memory (tests)
-    u64 max_scratch_bytes = u64{512} << 20;  // global scratch at most (fewer blocks beyond)
+    /// Global scratch budget in bytes (fewer resident groups beyond it). h² refuses when even one group exceeds it.
+    u64 max_scratch_bytes = u64{512} << 20;
 };
 
 struct DeviceHeuristicStats
@@ -76,13 +86,16 @@ struct DeviceHeuristicStats
     u32 threads = 0, blocks = 0;
     bool warp_groups = false, shared = false;
     u64 group_bytes = 0;
-    bool supporter_levels = false;  // h_FF runs the levels phase (axioms or different operator costs; otherwise the
-                                    // supporters are the smallest tight achievers: heuristics_kernels.hpp)
+    bool supporter_levels = false;  // h_FF and set-additive run the levels phase (axioms or different operator costs;
+                                    // otherwise the supporters are the smallest tight achievers: heuristics_kernels.hpp)
 };
 
 class DeviceHeuristic
 {
 public:
+    /// The most propositions h² accepts (the same limit as the CPU).
+    static constexpr u32 k_h2_max_props = 8191;
+
     /// Dead end (+inf) among the u32 values.
     static constexpr u32 k_dead_end = 0xFFFFFFFFu;
 
@@ -113,8 +126,8 @@ public:
     /// Sizes the scratch for evaluate_async of up to n rows on `stream` and refreshes the lazy slots' tables.
     void prepare(u64 n, cudaStream_t stream);
 
-    /// The CPU reference of the device's value of s: heuristics::make_heuristic's for h_max and h_add, the device's
-    /// supporter rule for h_FF (see above); +inf for dead ends.
+    /// The CPU reference of the device's value of s: heuristics::make_heuristic's for h_max, h_add and h², the device's
+    /// supporter rule for h_FF and set-additive (see above); +inf for dead ends.
     [[nodiscard]] f64 reference(StateView s);
 
     [[nodiscard]] heuristics::Kind kind() const noexcept;

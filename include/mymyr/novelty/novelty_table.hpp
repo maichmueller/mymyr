@@ -137,6 +137,7 @@ public:
     }
     [[nodiscard]] u64 size() const noexcept { return m_size; }
     [[nodiscard]] u64 bytes() const noexcept { return m_slots.capacity() * sizeof(u64); }
+    void clear();
 
 private:
     void rehash(usize n);
@@ -186,6 +187,11 @@ public:
     // --------------------------------------------------------------------------------------------- states
     /// Marks every tuple of the state (words w, n words; slots < capacity()). Returns whether one was unseen.
     bool mark_state(const u64* w, u32 n);
+    /// Whether a tuple has been marked: `sorted` holds 1..arity() distinct slots in ascending order, each below
+    /// capacity(). Read-only.
+    [[nodiscard]] bool seen(std::span<const u32> sorted) const noexcept;
+    /// Unmarks every tuple; the capacity and the layout of every level (dense or sparse) stay.
+    void clear();
 
     /// Transition novelty. parent: the expanded state (np words); succ: the successor (ns words); add: the atoms of
     /// succ that are not in parent (each once; all slots < capacity()). Returns whether a tuple of succ containing an

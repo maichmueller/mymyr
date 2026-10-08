@@ -1,5 +1,5 @@
-"""State spaces, generalized state spaces, samplers, object graphs and certificates (datasets/*.hpp in the C++ core),
-on the CPU or a CUDA device, for classical and numeric tasks.
+"""State spaces, generalized state spaces, knowledge bases, tuple graphs, samplers, object graphs and certificates
+(datasets/*.hpp in the C++ core), on the CPU or a CUDA device, for classical and numeric tasks.
 
     task = mymyr.Task.from_pddl("domain.pddl", "p01.pddl", atoms="frozen")
     space = mymyr.datasets.state_space(task, threads=8)         # None if the generation failed
@@ -15,6 +15,11 @@ on the CPU or a CUDA device, for classical and numeric tasks.
 
     g = mymyr.datasets.object_graph(space.state(i))              # as in mimir's object graph (not an encoder)
     g.color_refinement_certificate(), g.kfwl_certificate(2)
+
+    tasks = mymyr.rl.TaskTable.from_pddl("domain.pddl", "problems/")   # a task set: one domain, many problems
+    kb = mymyr.datasets.KnowledgeBase(tasks, generalized=True, width=2) # spaces, class graph, tuple graphs
+    kb.state_spaces, kb.generalized_state_space, kb.tuple_graph(0, v)
+    graphs = mymyr.datasets.tuple_graphs(space, width=1)         # the tuple graph of every vertex (CPU)
 
 On the device (CUDA builds; mymyr.cuda): ``device=`` a device ordinal or a mymyr.cuda.Context.
 
@@ -41,15 +46,19 @@ from mymyr._core import Task, TaskHandle
 from mymyr._core._datasets import (
     GeneralizedStateSpace,
     GenerationResult,
+    KnowledgeBase,
     ObjectGraph,
     ObjectGraphBuilder,
     StateSpace,
     StateSpaceSampler,
     Status,
+    TupleGraph,
     generate,
     generate_many,
     object_graph,
     sorted_by_size,
+    tuple_graph,
+    tuple_graphs,
 )
 from mymyr._core._datasets import state_space as _cpu_state_space
 from mymyr._core._rl import TaskSuite, TaskTable
@@ -141,7 +150,7 @@ def state_space(
     Options: max_states (fail when the space has max(max_states, 2) states or more, as in mimir), max_seconds,
     remove_if_unsolvable (no space when the initial state cannot reach a goal), symmetry_pruning (one state per
     certificate class of its object graph; CPU, single-threaded), certificate ('kfwl' or the cheaper but weaker
-    'color_refinement') and k (2 or 3) for symmetry pruning, labels (keep (schema, binding) per transition).
+    'color_refinement') and k (2, 3 or 4) for symmetry pruning, labels (keep (schema, binding) per transition).
     """
     if device is None:
         return _cpu_state_space(
@@ -312,11 +321,13 @@ __all__ = [
     "Certificate",
     "GeneralizedStateSpace",
     "GenerationResult",
+    "KnowledgeBase",
     "ObjectGraph",
     "ObjectGraphBuilder",
     "StateSpace",
     "StateSpaceSampler",
     "Status",
+    "TupleGraph",
     "generalized_state_space",
     "generate",
     "generate_many",
@@ -324,4 +335,6 @@ __all__ = [
     "sorted_by_size",
     "state_space",
     "state_spaces",
+    "tuple_graph",
+    "tuple_graphs",
 ]

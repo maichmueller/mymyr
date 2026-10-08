@@ -1,6 +1,6 @@
 // Batched grounded heuristics on the device (include/mymyr/cuda/heuristics.hpp): the upload of the relaxed grounding,
 // the launch configuration, the CPU fallback for states outside the grounding, and the CPU reference of the device's
-// h_FF tie-breaking.
+// h_FF and set-additive tie-breaking.
 
 #include "mymyr/cuda/heuristics.hpp"
 
@@ -31,6 +31,8 @@ u32 kind_code(heuristics::Kind k)
         case heuristics::Kind::Max: return hk::k_max;
         case heuristics::Kind::Add: return hk::k_add;
         case heuristics::Kind::FF: return hk::k_ff;
+        case heuristics::Kind::SetAdditive: return hk::k_set_additive;
+        case heuristics::Kind::H2: return hk::k_h2;
         default: return ~u32{0};
     }
 }
@@ -81,7 +83,8 @@ const char* to_string(HeuristicVariant v) noexcept
 std::string DeviceHeuristic::unsupported(const Task& task, const DeviceHeuristicOptions& o)
 {
     if (kind_code(o.kind) == ~u32{0})
-        return std::string("the heuristic '") + heuristics::to_string(o.kind) + "' (the device evaluates max, add and ff)";
+        return std::string("the heuristic '") + heuristics::to_string(o.kind) +
+               "' (the device evaluates max, add, ff, h2 and set_additive)";
     if (o.costs == heuristics::Costs::Real)
     {
         const heuristics::ActionCosts costs(task);
@@ -137,7 +140,7 @@ struct DeviceHeuristic::Impl
     void run(const u64* rows, u64 stride, u32 words, u64 n, u32* out, cudaStream_t s);
     /// The device's view of a state (propositions; false if an atom lies outside the grounding).
     bool convert(StateView s, std::vector<u32>& init) const;
-    f64 reference_ff(StateView s);
+    f64 reference_supporters(StateView s);
 };
 
 DeviceHeuristic::DeviceHeuristic(ContextPtr ctx, TaskPtr task, const DeviceHeuristicOptions& options) : m(std::make_unique<Impl>())
@@ -167,6 +170,9 @@ DeviceHeuristic::DeviceHeuristic(ContextPtr ctx, TaskPtr task, const DeviceHeuri
     if (m->o.costs == heuristics::Costs::Real && !m->R->real_costs_available())
         throw std::invalid_argument("mymyr: the CUDA backend cannot evaluate this heuristic: real costs need non-negative "
                                     "integer action costs below 2^31");
+    if (m->o.kind == heuristics::Kind::H2 && m->R->num_props() > k_h2_max_props)
+        throw std::invalid_argument("mymyr: CUDA h2 grounding has " + std::to_string(m->R->num_props()) +
+                                    " propositions; limit is " + std::to_string(k_h2_max_props));
     const cudaStream_t s = m->ctx->stream();
     m->upload(s);
     m->configure();
@@ -269,8 +275,68 @@ void DeviceHeuristic::Impl::upload(cudaStream_t s)
               o_zero = words32.add(zero), o_goal = words32.add(goal), o_ach_begin = words32.add(ach_begin),
               o_ach = words32.add(ach);
     const u64 o_axiom = bytes8.add(axiom), o_negative = bytes8.add(negative), o_is_goal = bytes8.add(is_goal);
+    u64 o_comp = 0, o_excl_begin = 0, o_excl = 0, o_ga_begin = 0, o_ga_ops = 0;
+    if (o.kind == heuristics::Kind::H2)
+    {
+        std::vector<u32> comp(P, k_none), ga_begin(GA + 1, 0), ga_ops;
+        for (u32 p = 0; p < P; ++p)
+            if (X.negative(p))
+            {
+                const u32 pos = X.fluent_props(X.prop_atom(p)).first;
+                comp[p] = pos;
+                if (pos != k_none)
+                    comp[pos] = p;
+            }
+        for (u32 op = 0; op < O; ++op)
+            if (!X.is_axiom(op))
+                ++ga_begin[X.ground_action(op) + 1];
+        for (u32 ga = 0; ga < GA; ++ga)
+            ga_begin[ga + 1] += ga_begin[ga];
+        ga_ops.resize(ga_begin[GA]);
+        std::vector<u32> fill = ga_begin;
+        for (u32 op = 0; op < O; ++op)
+            if (!X.is_axiom(op))
+                ga_ops[fill[X.ground_action(op)]++] = op;
+        std::vector<u32> excl_begin{0}, excl, tmp;
+        auto falsified = [&](u32 op)
+        {
+            tmp.insert(tmp.end(), X.del(op).begin(), X.del(op).end());
+            for (u32 p : X.eff(op))
+                if (comp[p] != k_none)
+                    tmp.push_back(comp[p]);
+        };
+        for (u32 op = 0; op < O; ++op)
+        {
+            tmp.assign(X.eff(op).begin(), X.eff(op).end());
+            falsified(op);
+            if (!X.is_axiom(op))
+            {
+                const u32 ga = X.ground_action(op);
+                for (u32 j = ga_begin[ga]; j < ga_begin[ga + 1]; ++j)
+                    if (ga_ops[j] != op && X.unconditional(ga_ops[j]))
+                        falsified(ga_ops[j]);
+            }
+            std::sort(tmp.begin(), tmp.end());
+            tmp.erase(std::unique(tmp.begin(), tmp.end()), tmp.end());
+            excl.insert(excl.end(), tmp.begin(), tmp.end());
+            excl_begin.push_back(static_cast<u32>(excl.size()));
+        }
+        o_comp = words32.add(comp);
+        o_excl_begin = words32.add(excl_begin);
+        o_excl = words32.add(excl);
+        o_ga_begin = words32.add(ga_begin);
+        o_ga_ops = words32.add(ga_ops);
+    }
     words32.upload(ctx, s);
     bytes8.upload(ctx, s);
+    if (o.kind == heuristics::Kind::H2)
+    {
+        view.complement = words32.at(o_comp);
+        view.excl_begin = words32.at(o_excl_begin);
+        view.excl = words32.at(o_excl);
+        view.ga_ops_begin = words32.at(o_ga_begin);
+        view.ga_ops = words32.at(o_ga_ops);
+    }
     view.P = P;
     view.O = O;
     view.G = static_cast<u32>(goal.size());
@@ -344,17 +410,24 @@ void DeviceHeuristic::Impl::configure()
     HeuristicVariant v = o.variant;
     if (v == HeuristicVariant::Auto)
         v = O >= 2048 || (P >= 128 && O <= 2 * P) ? HeuristicVariant::Frontier : HeuristicVariant::Sweep;
+    const bool h2 = launch.kind == hk::k_h2;
+    if (h2)
+        v = HeuristicVariant::Sweep;
     st.variant = v;
     launch.variant = v == HeuristicVariant::Frontier ? hk::k_frontier : hk::k_sweep;
     launch.group_bytes = hk::scratch_bytes(P, O, view.GA, launch.kind, launch.variant, view.uniform_cost != 0);
-    const bool warp = o.warp_groups >= 0 ? o.warp_groups == 1 : (P <= 56 && O <= 200);
+    const bool warp = !h2 && (o.warp_groups >= 0 ? o.warp_groups == 1 : (P <= 56 && O <= 200));
     launch.warp = warp ? 1 : 0;
     launch.threads = o.threads ? o.threads : (warp ? 128 : (O >= 2048 ? 512 : O >= 1024 ? 256 : 128));
     if (launch.threads % 32 != 0 || launch.threads > 1024)
         throw std::invalid_argument("mymyr: DeviceHeuristic: threads must be a multiple of 32, at most 1024");
     const u64 groups_per_block = warp ? launch.threads / 32 : 1;
     const u64 shared_limit = o.shared_bytes ? o.shared_bytes : u64{48} << 10;
-    launch.shared = !o.force_global && launch.group_bytes * groups_per_block <= shared_limit ? 1 : 0;
+    if (h2 && launch.group_bytes > o.max_scratch_bytes)
+        throw std::invalid_argument("mymyr: CUDA h2 grounding has " + std::to_string(P) + " propositions and needs " +
+                                    std::to_string(launch.group_bytes) + " scratch bytes per state; limit is " +
+                                    std::to_string(o.max_scratch_bytes) + " bytes (max_scratch_bytes)");
+    launch.shared = !h2 && !o.force_global && launch.group_bytes * groups_per_block <= shared_limit ? 1 : 0;
     int sms = 0;
     check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, ctx->device()), "cudaDeviceGetAttribute");
     int per_sm = 0;
@@ -385,7 +458,7 @@ void DeviceHeuristic::Impl::configure()
     st.warp_groups = warp;
     st.shared = launch.shared != 0;
     st.group_bytes = launch.group_bytes;
-    st.supporter_levels = launch.kind == hk::k_ff && !view.uniform_cost;
+    st.supporter_levels = (launch.kind == hk::k_ff || launch.kind == hk::k_set_additive) && !view.uniform_cost;
 }
 
 void DeviceHeuristic::Impl::run(const u64* rows, u64 stride, u32 words, u64 n, u32* out, cudaStream_t s)
@@ -540,12 +613,12 @@ bool DeviceHeuristic::Impl::convert(StateView s, std::vector<u32>& init) const
 
 f64 DeviceHeuristic::reference(StateView s)
 {
-    if (m->o.kind != heuristics::Kind::FF)
+    if (m->o.kind != heuristics::Kind::FF && m->o.kind != heuristics::Kind::SetAdditive)
         return m->cpu_heuristic().evaluate(s);
-    return m->reference_ff(s);
+    return m->reference_supporters(s);
 }
 
-f64 DeviceHeuristic::Impl::reference_ff(StateView s)
+f64 DeviceHeuristic::Impl::reference_supporters(StateView s)
 {
     const heuristics::RelaxedTask& X = *R;
     const u32 P = X.num_props(), O = X.num_ops();
@@ -648,7 +721,7 @@ f64 DeviceHeuristic::Impl::reference_ff(StateView s)
         {
             const u32 op = r_cand[e];
             u32 sup = op;
-            if (X.is_axiom(op))
+            if (o.kind == heuristics::Kind::FF && X.is_axiom(op))
             {
                 u32 best = k_none;
                 for (u32 x : X.pre(op))
@@ -665,7 +738,7 @@ f64 DeviceHeuristic::Impl::reference_ff(StateView s)
         r_avail.swap(r_next);
     }
 
-    // the relaxed plan: the closure of the goal under x -> pre(supp(x)), each ground action once
+    // The goal closure under x -> pre(supp(x)): FF counts ground actions, set-additive supported propositions.
     r_pmark.assign(P, 0);
     r_gmark.assign(X.num_ground_actions(), 0);
     std::vector<u32> stack(X.goal().begin(), X.goal().end());
@@ -681,7 +754,7 @@ f64 DeviceHeuristic::Impl::reference_ff(StateView s)
         if (op == k_none)
             continue;
         const u32 ga = X.ground_action(op);
-        if (!r_gmark[ga])
+        if (!X.is_axiom(op) && (o.kind == heuristics::Kind::SetAdditive || !r_gmark[ga]))
         {
             r_gmark[ga] = 1;
             h += o.costs == heuristics::Costs::Real ? X.real_cost(ga) : 1;

@@ -158,3 +158,17 @@ def test_one_heuristic_per_thread_over_a_shared_task(depot, depot_space):
     for t in threads:
         t.join()
     assert not errors
+
+
+def test_h2_proposition_limit_reports_the_size(tmp_path):
+    n = 8192
+    path = tmp_path / "initial-propositions.txt"
+    path.write_text(
+        f"O {n}\nP 1\nF 1 p\nSI 0\nFI {n}\n"
+        + "".join(f"0 {i}\n" for i in range(n))
+        + "G 0\nA 0\nX 0\n"
+    )
+    task = mymyr.Task.from_text(str(path))
+    with pytest.raises(ValueError) as caught:
+        search.Heuristic(task, "h2")
+    assert "8192" in str(caught.value) and "8191" in str(caught.value)

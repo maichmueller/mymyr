@@ -13,6 +13,13 @@
 //   mymyr_datasets gss DOMAIN PROBLEM... [--symmetry] [--certificate cr|fwl] [--k K] [--threads T]
 //   mymyr_datasets sampler DOMAIN PROBLEM [--seed S] [--samples N]
 //       As fork_datasets gss / sampler.
+//   mymyr_datasets tg DOMAIN PROBLEM [--width W] [--no-pruning] [--tg-threads T] [state space options]
+//       The tuple graphs of every vertex of the state space (datasets/tuple_graph.hpp) on T threads: seconds, peak RSS
+//       before and after, total vertices and edges; as search_fork --algo tuple_graphs --time-width W.
+//   mymyr_datasets kfwl DOMAIN PROBLEM [--k K] [--samples S] [--max-n M] [state space options]
+//       The k-FWL certificates (datasets/certificates.hpp) of the object graphs of every ceil(N / S)-th state of the
+//       space (N states) with at most M vertices: seconds and count per vertex count n, the number of certificate
+//       classes, peak RSS before and after; as search_fork --algo kfwl --time.
 //
 // Fingerprints (FNV-1a 64 over bytes, u64 as 8 little-endian bytes):
 //   atom string  "(pred o1 ... ok)" of every true fluent atom; state hash = fnv(sorted atom strings joined by '\n'),
@@ -20,9 +27,12 @@
 //   fnv(sorted fnv(src hash, fnv("(schema o1 ... ok)"), dst hash)); goal = fnv(sorted goal state hashes);
 //   vstar = fnv(sorted fnv(state hash, unit distance)), with the fork's INT32_MAX for unsolvable states.
 
+#include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
+#include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/datasets/sampler.hpp"
 #include "mymyr/datasets/state_space.hpp"
+#include "mymyr/datasets/tuple_graph.hpp"
 #if defined(MYMYR_HAS_FRONTEND)
 #include "mymyr/frontend/domain.hpp"
 #endif
@@ -75,7 +85,9 @@ double peak_rss_mb()
                  "                          [--certificate cr|fwl] [--k K] [--no-labels]\n"
                  "       mymyr_datasets pool LIST --threads T [--repeat R] [--text] [--atoms ...] [--quiet]\n"
                  "       mymyr_datasets gss DOMAIN PROBLEM... [--symmetry] [--certificate cr|fwl] [--k K] [--threads T]\n"
-                 "       mymyr_datasets sampler DOMAIN PROBLEM [--seed S] [--samples N]\n",
+                 "       mymyr_datasets sampler DOMAIN PROBLEM [--seed S] [--samples N]\n"
+                 "       mymyr_datasets tg DOMAIN PROBLEM [--width W] [--no-pruning] [--tg-threads T]\n"
+                 "       mymyr_datasets kfwl DOMAIN PROBLEM [--k K] [--samples S] [--max-n M]\n",
                  msg.c_str());
     std::exit(2);
 }
@@ -342,6 +354,8 @@ struct Common
     bool fp = true, hash = false, text = false, quiet = false;
     u32 repeat = 1;
     u64 seed = 1, samples = 20000;
+    u32 max_n = std::numeric_limits<u32>::max();
+    TupleGraphOptions tg;
     std::vector<std::string> positional;
 };
 
@@ -399,6 +413,14 @@ Common parse_common(int argc, char** argv)
             c.seed = std::stoull(value());
         else if (a == "--samples")
             c.samples = std::stoull(value());
+        else if (a == "--max-n")
+            c.max_n = static_cast<u32>(std::stoul(value()));
+        else if (a == "--width")
+            c.tg.width = static_cast<u32>(std::stoul(value()));
+        else if (a == "--no-pruning")
+            c.tg.dominance_pruning = false;
+        else if (a == "--tg-threads")
+            c.tg.threads = static_cast<u32>(std::stoul(value()));
         else if (!a.starts_with("--"))
             c.positional.push_back(a);
         else
@@ -658,6 +680,94 @@ int run_sampler(const Common& c)
     usage("sampler needs the PDDL front end");
 #endif
 }
+
+int run_tg(const Common& c)
+{
+#if defined(MYMYR_HAS_FRONTEND)
+    if (c.positional.size() != 2)
+        usage("tg needs DOMAIN PROBLEM");
+    const auto data = frontend::load_task(c.positional[0], c.positional[1]);
+    const auto t0 = Clock::now();
+    const StateSpaceResult r = generate_state_space(Task::create(*data, c.to), c.so);
+    const double space_s = seconds_since(t0);
+    if (!r.space)
+    {
+        std::printf("{\"lib\":\"mymyr\",\"mode\":\"tg\",\"problem\":\"%s\",\"ok\":false}\n", c.positional[1].c_str());
+        return 0;
+    }
+    const double rss_before = peak_rss_mb();
+    const auto t1 = Clock::now();
+    const std::vector<TupleGraph> graphs = tuple_graphs(r.space, c.tg);
+    const double tg_s = seconds_since(t1);
+    u64 vertices = 0, edges = 0, bytes = 0;
+    for (const TupleGraph& g : graphs)
+        vertices += g.num_vertices(), edges += g.num_edges(), bytes += g.bytes();
+    std::printf("{\"lib\":\"mymyr\",\"mode\":\"tg\",\"problem\":\"%s\",\"ok\":true,\"states\":%u,\"width\":%u,\"pruning\":%s,"
+                "\"threads\":%u,\"seconds\":%.6f,\"state_space_seconds\":%.6f,\"tuple_vertices\":%llu,\"tuple_edges\":%llu,"
+                "\"graph_bytes\":%llu,\"peak_rss_mb_before\":%.1f,\"peak_rss_mb_after\":%.1f}\n",
+                c.positional[1].c_str(), r.space->num_states(), c.tg.width, c.tg.dominance_pruning ? "true" : "false", c.tg.threads, tg_s,
+                space_s, static_cast<unsigned long long>(vertices), static_cast<unsigned long long>(edges),
+                static_cast<unsigned long long>(bytes), rss_before, peak_rss_mb());
+    return 0;
+#else
+    (void)c;
+    usage("tg needs the PDDL front end");
+#endif
+}
+int run_kfwl(const Common& c)
+{
+#if defined(MYMYR_HAS_FRONTEND)
+    if (c.positional.size() != 2)
+        usage("kfwl needs DOMAIN PROBLEM");
+    const auto data = frontend::load_task(c.positional[0], c.positional[1]);
+    StateSpaceOptions so = c.so;
+    so.symmetry_pruning = false;
+    const StateSpaceResult r = generate_state_space(Task::create(*data, c.to), so);
+    if (!r.space)
+    {
+        std::printf("{\"lib\":\"mymyr\",\"mode\":\"kfwl\",\"problem\":\"%s\",\"ok\":false}\n", c.positional[1].c_str());
+        return 0;
+    }
+    const StateSpace& S = *r.space;
+    const u64 N = S.num_states();
+    const u64 step = c.samples > 0 && N > c.samples ? (N + c.samples - 1) / c.samples : 1;
+    ObjectGraphBuilder ogb(*S.task());
+    ObjectGraph graph;
+    std::map<u32, std::pair<u64, double>> per_n;  // n -> (certificates, seconds)
+    std::vector<Certificate> certs;
+    const double rss_before = peak_rss_mb();
+    double total = 0;
+    for (u64 v = 0; v < N; v += step)
+    {
+        ogb.build(S.state(static_cast<u32>(v)), graph);
+        if (graph.num_vertices() > c.max_n)
+            continue;
+        const auto t0 = Clock::now();
+        certs.push_back(kfwl_certificate(graph, so.fwl_k, so.fwl_limits));
+        const double secs = seconds_since(t0);
+        total += secs;
+        auto& [count, seconds] = per_n[graph.num_vertices()];
+        ++count;
+        seconds += secs;
+    }
+    const double rss_after = peak_rss_mb();
+    std::sort(certs.begin(), certs.end());
+    const usize classes = static_cast<usize>(std::unique(certs.begin(), certs.end()) - certs.begin());
+    std::string by_n;
+    for (const auto& [n, cs] : per_n)
+        by_n += (by_n.empty() ? "\"" : ",\"") + std::to_string(n) + "\":{\"count\":" + std::to_string(cs.first) +
+                ",\"seconds\":" + std::to_string(cs.second) + "}";
+    std::printf("{\"lib\":\"mymyr\",\"mode\":\"kfwl\",\"problem\":\"%s\",\"ok\":true,\"k\":%u,\"states\":%llu,\"step\":%llu,"
+                "\"certificates\":%zu,\"classes\":%zu,\"seconds\":%.6f,\"by_n\":{%s},\"peak_rss_mb_before\":%.1f,"
+                "\"peak_rss_mb_after\":%.1f}\n",
+                c.positional[1].c_str(), so.fwl_k, static_cast<unsigned long long>(N), static_cast<unsigned long long>(step), certs.size(),
+                classes, total, by_n.c_str(), rss_before, rss_after);
+    return 0;
+#else
+    (void)c;
+    usage("kfwl needs the PDDL front end");
+#endif
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -676,6 +786,10 @@ int main(int argc, char** argv)
             return run_gss(c);
         if (mode == "sampler")
             return run_sampler(c);
+        if (mode == "tg")
+            return run_tg(c);
+        if (mode == "kfwl")
+            return run_kfwl(c);
         usage("unknown mode " + mode);
     }
     catch (const std::exception& e)

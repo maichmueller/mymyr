@@ -60,6 +60,13 @@ void RankSet::rehash(usize n)
             insert(k);
 }
 
+void RankSet::clear()
+{
+    m_slots.assign(64, k_empty);
+    m_mask = 63;
+    m_size = 0;
+}
+
 // ----------------------------------------------------------------------------------------------------- TupleSet
 void TupleSet::rehash(usize n)
 {
@@ -297,6 +304,42 @@ void NoveltyTable::mark_dense2(const u64* succ, u32 ns, std::span<const u32> add
                        for (u32 a : add)
                            row[a >> 6] |= u64{1} << (a & 63);
                    });
+}
+
+bool NoveltyTable::seen(std::span<const u32> sorted) const noexcept
+{
+    const u32 j = static_cast<u32>(sorted.size());
+    if (j == 1)
+        return seen1(sorted[0]);
+    if (j == 2)
+    {
+        const u32 a = sorted[0], b = sorted[1];
+        if (m_dense2)
+            return (m_t2[static_cast<usize>(a) * m_row_words + (b >> 6)] >> (b & 63)) & 1;
+        return m_s2.contains((static_cast<u64>(a) << 32) | b);
+    }
+    const Level& l = m_levels[j];
+    if (l.dense)
+    {
+        const u64 x = rank(sorted.data(), j);
+        return (l.bits[x >> 6] >> (x & 63)) & 1;
+    }
+    if (l.ranked)
+        return l.ranks.contains(rank(sorted.data(), j));
+    return l.packed.contains(pack(sorted.data(), j));
+}
+
+void NoveltyTable::clear()
+{
+    std::fill(m_t1.begin(), m_t1.end(), 0);
+    std::fill(m_t2.begin(), m_t2.end(), 0);
+    m_s2.clear();
+    for (Level& l : m_levels)
+    {
+        std::fill(l.bits.begin(), l.bits.end(), 0);
+        l.ranks.clear();
+        l.packed.clear();
+    }
 }
 
 bool NoveltyTable::mark_state(const u64* w, u32 n)
