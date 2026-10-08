@@ -178,6 +178,52 @@ TEST(AStarGolden, OptimalCostsEqualTheForks)
     std::printf("GOLDEN-ASTAR checked %u tasks, skipped %u (budget or missing PDDL)\n", checked, skipped);
 }
 
+TEST(AStarGolden, SymmetryPruningPlansAreValid)
+{
+    // A* with symmetry pruning (successor/symmetry.hpp) and the golden file's heuristic: every plan found replays to a
+    // goal and costs at least the optimum (pruning may lose the optimal plans, or every plan)
+    const fs::path dir = golden_dir();
+    if (!fs::is_directory(dir))
+        GTEST_SKIP() << "no golden directory " << dir;
+    const char* filter = std::getenv("MYMYR_GOLDEN_FILTER");
+    const u64 limit = std::min<u64>(max_expanded_limit(), 100000);  // each expansion refines the colours of a state
+    std::vector<fs::path> files;
+    for (const auto& e : fs::directory_iterator(dir))
+        if (e.path().extension() == ".json")
+            files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    u32 solved = 0, optimal = 0, checked = 0;
+    for (const fs::path& f : files)
+    {
+        const std::string name = f.stem().string();
+        if (filter && *filter && name.find(filter) == std::string::npos)
+            continue;
+        const test::json::Value doc = test::json::parse_file(f);
+        const test::json::Value& a = doc["astar"];
+        if (a.is_null() || a["optimal_cost"].is_null() || static_cast<u64>(a["expanded"].num) > limit)
+            continue;
+        fs::path dom, prob;
+        if (!pddl_of(doc["source"], dom, prob))
+            continue;
+        SCOPED_TRACE(name);
+        const auto data = frontend::load_task(dom, prob);
+        const auto task = Task::create(*data);
+        BestFirstOptions o = astar_options(a["heuristic"].str == "blind" ? heuristics::Kind::Blind : heuristics::Kind::Max,
+                                           heuristics::Costs::Unit);
+        o.symmetry_pruning = SymmetryPruning::Wl1;
+        const BestFirstResult r = astar_eager(*task, o);
+        ++checked;
+        if (r.status != SearchStatus::Solved)
+            continue;
+        ++solved;
+        EXPECT_EQ(replay_cost(*task, r.plan), r.cost);
+        EXPECT_GE(r.cost, a["optimal_cost"].num);
+        optimal += r.cost == a["optimal_cost"].num;
+    }
+    std::printf("GOLDEN-ASTAR symmetry pruning: %u tasks, %u solved, %u of them at the optimal cost\n", checked, solved,
+                optimal);
+}
+
 TEST(AStarProbe, CostsEqual0_13_60)
 {
     // 0.13.60's plan costs on the same instances

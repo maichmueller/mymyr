@@ -700,6 +700,7 @@ public:
     f64 g0 = 0;
     SearchObserver* obs = nullptr;
     bool witness = false, canonical = true;
+    SymmetryPruning symmetry = SymmetryPruning::Off;
     bool stop_on_states = false;  // max_states is finite: stop generating once it is exceeded
     bool batched = false;         // the heuristic evaluates batches (Heuristic::batched)
     bool goal_view = false;       // a GoalSpec::AnyOf goal reads derived atoms: is_goal prepares the state
@@ -750,9 +751,9 @@ public:
     void generate(Emit&& emit)
     {
         if (stop_on_states)
-            succ.generate<true>(emit, witness, canonical);
+            succ.generate<true>(emit, witness, canonical, symmetry);
         else
-            succ.generate<false>(emit, witness, canonical);
+            succ.generate<false>(emit, witness, canonical, symmetry);
     }
 
 private:

@@ -97,7 +97,7 @@ void record_plan_extraction(detail::Env& env, detail::StateTracker& tr, const St
                 acts.emplace_back(SchemaId{schema}, std::vector<ObjectId>(binding, binding + succ.arity(schema)));
                 return true;
             },
-            env.witness, env.canonical);
+            env.witness, env.canonical, env.symmetry);
         order.clear();
         if (env.successor_order && *env.successor_order)
             (*env.successor_order)(s, acts, order);
@@ -258,6 +258,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         env.coord = nullptr;
         env.witness = o.iw.witness_pruning;
         env.canonical = o.iw.canonical_order;
+        env.symmetry = o.iw.symmetry_pruning;
         env.successor_order = &o.iw.successor_order;
         env.timed = timed;
         env.deadline = deadline;
