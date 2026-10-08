@@ -33,6 +33,29 @@ novelty-tested successor, while `"survivors_only"` commits novelty only for reta
 supported by LIW, and the two modes are equivalent for BrFS. `randomize_ties=True` uses `seed=` for equal scores. A
 layer beam is different from `search.beam`, which is heuristic best-first search with a fixed queue width.
 
+`threads=` runs a layer beam's step (successor generation, scoring and read-only novelty tests) on that many threads
+(`0`: one per hardware thread) for `brfs` and the IW family. With `"all_tested"` and `"survivors_only"` the plan and
+every count equal the single-threaded search's, ties and seeds included; an observer or blocked states keep the
+step on the calling thread. `threads > 1` without a beam is refused, except by the plain `brfs`, which has its own
+parallel layers.
+
+`beam_novelty="relaxed_survivors_only"` (with `layer_order="goal_count"`; not supported by LIW) is mimir's relaxed
+survivors-only beam: a layer's transitions, in generation order, are split into `min(threads, ceil(n / beam_chunk))`
+contiguous parts (`beam_chunk=1024` by default). Each part keeps its best `beam_width` successors by the read-only
+novelty test; the kept ones of all parts enter in rank order, skipping states seen before, until `beam_width` entered;
+then the survivors-only replay commits novelty. Since the parts follow the thread count, so can the result: it is
+deterministic for a given thread count and seed, and does not depend on the thread count when a layer has at most
+`beam_chunk` transitions.
+
+```python
+exact = [search.iw(task, max_arity=2, layer_order="goal_count", beam_width=4, threads=t) for t in (1, 4)]
+print(exact[0].status == exact[1].status, exact[0].passes[-1].expanded == exact[1].passes[-1].expanded)
+
+relaxed = search.brfs(task, stop_at_goal=True, layer_order="goal_count", beam_width=4,
+                      beam_novelty="relaxed_survivors_only", beam_chunk=64, threads=4)
+print(relaxed.status, len(relaxed.plan))
+```
+
 `astar` and `gbfs` accept `lazy=True` for lazy successor scoring, `costs="unit"` or `"real"`, and a heuristic. The
 best-first `beam` also takes a heuristic and `width=`. IW and SIW support numeric tasks; the other best-first
 algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
