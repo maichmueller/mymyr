@@ -1075,7 +1075,8 @@ template<class Search>
 auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::handle costs,
                              nb::handle evaluation, nb::handle store, nb::handle queue, nb::handle start, bool reopen,
                              bool lazy_requeue, bool preferred_operators, u32 preferred_weight, u32 standard_weight,
-                             u32 beam_width, bool witness_pruning, nb::handle max_states, nb::handle max_expanded,
+                             u32 beam_width, bool witness_pruning, nb::handle symmetry_pruning, nb::handle max_states,
+                             nb::handle max_expanded,
                              nb::handle max_depth, nb::handle max_seconds, nb::handle cancel, nb::handle goal,
                              nb::handle blocked_states, nb::handle observer, nb::handle progress_interval)
 {
@@ -1138,6 +1139,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     opts.standard_weight = standard_weight;
     opts.beam_width = beam_width;
     opts.witness_pruning = witness_pruning;
+    opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
     const Task& t = *o.core->task;
     auto r = run_detached(cs, [&] {
         std::unique_lock<std::mutex> lock;
@@ -1159,19 +1161,22 @@ using BfFn = search::BestFirstResult (*)(const Task&, const search::BestFirstOpt
 PyBestFirstResult bf_call(BfFn fn, nb::handle task, nb::handle heuristic, nb::handle costs, nb::handle evaluation,
                           nb::handle store, nb::handle queue, nb::handle start, bool reopen, bool lazy_requeue,
                           bool preferred_operators, u32 preferred_weight, u32 standard_weight, u32 beam_width,
-                          bool witness_pruning, nb::handle max_states, nb::handle max_expanded, nb::handle max_depth,
+                          bool witness_pruning, nb::handle symmetry_pruning,
+                          nb::handle max_states, nb::handle max_expanded, nb::handle max_depth,
                           nb::handle max_seconds, nb::handle cancel, nb::handle goal, nb::handle blocked_states,
                           nb::handle observer, nb::handle progress_interval)
 {
     return best_first(fn, task, heuristic, costs, evaluation, store, queue, start, reopen, lazy_requeue,
-                      preferred_operators, preferred_weight, standard_weight, beam_width, witness_pruning, max_states,
+                      preferred_operators, preferred_weight, standard_weight, beam_width, witness_pruning,
+                      symmetry_pruning, max_states,
                       max_expanded, max_depth, max_seconds, cancel, goal, blocked_states, observer, progress_interval);
 }
 
 // ------------------------------------------------------------------------------------------------ IW / SIW
 
 search::IwOptions iw_options(ControlScope& cs, const Owner& o, u32 max_arity, nb::handle width_zero, bool optimize_iw1,
-                             bool witness_pruning, bool canonical_order, nb::handle start,
+                             bool witness_pruning, bool canonical_order, nb::handle symmetry_pruning,
+                             nb::handle start,
                              nb::handle transition_ordering = nb::none())
 {
     search::IwOptions opts;
@@ -1187,6 +1192,7 @@ search::IwOptions iw_options(ControlScope& cs, const Owner& o, u32 max_arity, nb
     opts.optimize_iw1 = optimize_iw1;
     opts.witness_pruning = witness_pruning;
     opts.canonical_order = canonical_order;
+    opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
     if (!start.is_none())
         opts.start = state_for(o, start, "start");
     if (!transition_ordering.is_none())
@@ -1207,7 +1213,8 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
                                         nb::handle max_dense_bytes, bool preserve_landmark_atoms, nb::handle layer_order,
                                         u64 seed, nb::handle max_next_layer_states, bool prefer_more_satisfied_goals,
                                         nb::handle beam_width, nb::handle beam_novelty, bool randomize_ties,
-                                        bool witness_pruning, bool canonical_order, nb::handle start)
+                                        bool witness_pruning, bool canonical_order, nb::handle symmetry_pruning,
+                                        nb::handle start)
 {
     search::AbstractedIwOptions opts;
     opts.control = cs.control;
@@ -1218,6 +1225,7 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
                                        beam_novelty, randomize_ties);
     opts.witness_pruning = witness_pruning;
     opts.canonical_order = canonical_order;
+    opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
     if (!start.is_none())
         opts.start = state_for(o, start, "start");
     return opts;
@@ -1230,8 +1238,8 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
 
 #define MYMYR_IW_ARGS                                                                                                  \
     "task"_a, nb::kw_only(), "max_arity"_a = 2, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true,          \
-        "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,           \
-        "transition_ordering"_a = nb::none(), MYMYR_LAYER_ARGS
+        "witness_pruning"_a = false, "canonical_order"_a = true, "symmetry_pruning"_a = "off", "start"_a = nb::none(), \
+        MYMYR_CONTROL_ARGS, "transition_ordering"_a = nb::none(), MYMYR_LAYER_ARGS
 
 #define MYMYR_LANDMARK_ARGS                                                                                            \
     "landmarks"_a = nb::none(), "disjunctive"_a = false, "all_private"_a = false, "unshared_atoms"_a = nb::none(),     \
@@ -1242,6 +1250,12 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
         "prefer_more_satisfied_goals"_a = true, "beam_width"_a = nb::none(), "beam_novelty"_a = "all_tested",         \
         "randomize_ties"_a = false
 
+#define MYMYR_SYMMETRY_DOC                                                                                             \
+    "symmetry_pruning ('off' or 'wl1'; successor/symmetry.hpp): 'wl1' expands only the actions whose parameters are "  \
+    "representatives of the objects' colour refinement classes in the state (mimir's WL1 pruning). It gives up "       \
+    "completeness and optimality: the search may miss every plan (report a solvable task unsolvable) and A* may "      \
+    "return a costlier plan; a plan it finds is valid."
+
 const char* k_control_doc =
     "Common keyword arguments (search/control.hpp): max_states, max_expanded, max_depth, max_seconds (budgets; unset = "
     "unlimited), cancel (a CancelToken, requestable from any thread), goal (None: the task's goal; a callable "
@@ -1251,7 +1265,7 @@ const char* k_control_doc =
     "on_expand(id, state), on_generate(parent, action, child, state, is_new), on_prune(parent, action, state), "
     "on_pass(arity, stats), on_solution(plan, cost), on_progress(stats) -> bool, on_end(status, stats)), "
     "progress_interval (expansions between on_progress calls). The search runs with the thread state detached; "
-    "callbacks attach it. An exception in a callback cancels the search and is re-raised.";
+    "callbacks attach it. An exception in a callback cancels the search and is re-raised. " MYMYR_SYMMETRY_DOC;
 
 const char* k_heuristic_doc =
     "A heuristic written in Python is a callable state -> float or an object with evaluate(state) -> float "
@@ -1806,7 +1820,8 @@ void bind_search(nb::module_& parent)
     m.def(
         "iw",
         [](TaskArg task, u32 max_arity, WidthZeroArg width_zero, bool optimize_iw1, bool witness_pruning,
-           bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded,
+           IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
@@ -1816,7 +1831,7 @@ void bind_search(nb::module_& parent)
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::IwOptions opts = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning,
-                                                canonical_order, start, transition_ordering);
+                                                canonical_order, symmetry_pruning, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
@@ -1834,7 +1849,8 @@ void bind_search(nb::module_& parent)
     m.def(
         "iw_pass",
         [](TaskArg task, u32 arity, WidthZeroArg width_zero, bool witness_pruning, bool canonical_order,
-           StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
+           SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
@@ -1844,7 +1860,8 @@ void bind_search(nb::module_& parent)
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::IwOptions opts =
-                iw_options(cs, o, arity, width_zero, false, witness_pruning, canonical_order, start, transition_ordering);
+                iw_options(cs, o, arity, width_zero, false, witness_pruning, canonical_order, symmetry_pruning, start,
+                transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
@@ -1852,13 +1869,15 @@ void bind_search(nb::module_& parent)
             return PyIwResult{std::move(r), o};
         },
         "task"_a, "arity"_a, nb::kw_only(), "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false,
-        "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS, "transition_ordering"_a = nb::none(),
+        "canonical_order"_a = true, "symmetry_pruning"_a = "off", "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "transition_ordering"_a = nb::none(),
         MYMYR_LAYER_ARGS, "One IW(arity) pass alone, without the ladder. See iw() for the keyword arguments.");
 
     m.def(
         "siw",
         [](TaskArg task, u32 max_arity, WidthZeroArg width_zero, bool optimize_iw1, bool witness_pruning,
-           bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded,
+           IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
@@ -1868,7 +1887,7 @@ void bind_search(nb::module_& parent)
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::SiwOptions opts = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning,
-                                                 canonical_order, start, transition_ordering);
+                                                 canonical_order, symmetry_pruning, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties);
             const Task& t = *o.core->task;
@@ -1884,7 +1903,8 @@ void bind_search(nb::module_& parent)
     m.def(
         "brfs",
         [](TaskArg task, u32 threads, StrArg store, bool witness_pruning, bool canonical_order,
-           bool deterministic_ids, IntArg max_states, bool stop_at_goal, bool fingerprint, LayerArg layer_order,
+           SymmetryArg symmetry_pruning, bool deterministic_ids, IntArg max_states, bool stop_at_goal,
+           bool fingerprint, LayerArg layer_order,
            u64 seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, GoalArg goal, FloatArg max_seconds, CancelArg cancel,
            ObserverArg observer, IntArg progress_interval) {
@@ -1915,6 +1935,7 @@ void bind_search(nb::module_& parent)
             opts.witness_pruning = witness_pruning;
             opts.canonical_order = canonical_order;
             opts.deterministic_ids = deterministic_ids;
+            opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
             if (auto v = opt<u64>(max_states))
                 opts.max_states = *v;
             opts.stop_at_goal = stop_at_goal;
@@ -1926,7 +1947,8 @@ void bind_search(nb::module_& parent)
             return PyBrfsResult{std::move(r), o};
         },
         "task"_a, nb::kw_only(), "threads"_a = 1, "store"_a = "auto", "witness_pruning"_a = true,
-        "canonical_order"_a = true, "deterministic_ids"_a = true, "max_states"_a = nb::none(), "stop_at_goal"_a = false,
+        "canonical_order"_a = true, "symmetry_pruning"_a = "off", "deterministic_ids"_a = true,
+        "max_states"_a = nb::none(), "stop_at_goal"_a = false,
         "fingerprint"_a = false, MYMYR_LAYER_ARGS, "goal"_a = nb::none(), "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("Breadth-first search over the reachable states (search/brfs.hpp): single-threaded, or "
@@ -1940,7 +1962,7 @@ void bind_search(nb::module_& parent)
                      "on_solution and on_end. With threads > 1 it follows the make_worker protocol: make_worker(k) "
                      "gives thread k its own observer for on_expand, on_generate (child None: ids are assigned when "
                      "the layer ends) and on_progress, called from that thread; without make_worker (or when it "
-                     "returns None) the search runs on one thread. ") +
+                     "returns None) the search runs on one thread. " MYMYR_SYMMETRY_DOC " ") +
          k_layer_doc)
             .c_str());
 
@@ -1948,17 +1970,19 @@ void bind_search(nb::module_& parent)
         "astar",
         [](TaskArg task, bool lazy, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
            StrArg queue, StateArg start, bool reopen, bool lazy_requeue, bool preferred_operators,
-           u32 preferred_weight, u32 standard_weight, bool witness_pruning, IntArg max_states,
+           u32 preferred_weight, u32 standard_weight, bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states,
            IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel, GoalArg goal,
            StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             return bf_call(lazy ? &search::astar_lazy : &search::astar_eager, task, heuristic, costs, evaluation, store,
                            queue, start, reopen, lazy_requeue, preferred_operators, preferred_weight, standard_weight,
-                           1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                           1000, witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth, max_seconds,
+                           cancel, goal,
                            blocked_states, observer, progress_interval);
         },
         "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "max", "costs"_a = "unit", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "reopen"_a = true, "lazy_requeue"_a = true,
         "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false,
+        "symmetry_pruning"_a = "off",
         "max_states"_a = nb::none(), "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(),
         "max_seconds"_a = nb::none(), "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(),
         "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
@@ -1976,7 +2000,7 @@ void bind_search(nb::module_& parent)
            double weight, bool preserve_goal_atoms, bool preserve_landmark_atoms,
            bool allow_non_novel_root_goal, bool probe_novelty_before_heuristic, StrArg costs,
            StrArg evaluation, StrArg store, StateArg start, bool witness_pruning, bool canonical_order,
-           IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
+           SymmetryArg symmetry_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const Owner owner = owner_of(task);
             search::AStarIwOptions options;
@@ -2004,9 +2028,10 @@ void bind_search(nb::module_& parent)
                 options.store = base.store;
                 options.start = base.start;
                 options.witness_pruning = base.witness_pruning;
+                options.symmetry_pruning = base.symmetry_pruning;
                 return search::astar_iw(t, options);
             }, task, heuristic, costs, evaluation, store, nb::str("heap"), start, true, true, false, 0, 1,
-                1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                1000, witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
                 blocked_states, observer, progress_interval);
         },
         "task"_a, nb::kw_only(), "heuristic"_a = "max", "width"_a = 1, "features"_a = "classical",
@@ -2014,6 +2039,7 @@ void bind_search(nb::module_& parent)
         "preserve_landmark_atoms"_a = true, "allow_non_novel_root_goal"_a = true,
         "probe_novelty_before_heuristic"_a = true, "costs"_a = "unit", "evaluation"_a = "auto",
         "store"_a = "auto", "start"_a = nb::none(), "witness_pruning"_a = false, "canonical_order"_a = true,
+        "symmetry_pruning"_a = "off",
         MYMYR_CONTROL_ARGS,
         (std::string("Weighted A* with minimum-g novelty pruning (search/astar_iw.hpp). Priority is "
                      "(g + weight*h, h, g, state id). Unit-cost actions and no numeric fluents are required. "
@@ -2030,17 +2056,18 @@ void bind_search(nb::module_& parent)
         "gbfs",
         [](TaskArg task, bool lazy, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
            StrArg queue, StateArg start, bool preferred_operators, u32 preferred_weight, u32 standard_weight,
-           bool witness_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             return bf_call(lazy ? &search::gbfs_lazy : &search::gbfs_eager, task, heuristic, costs, evaluation, store,
                            queue, start, true, true, preferred_operators, preferred_weight, standard_weight, 1000,
-                           witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                           witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
                            blocked_states, observer, progress_interval);
         },
         "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "ff", "costs"_a = "unit", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "preferred_operators"_a = true,
-        "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false, "max_states"_a = nb::none(),
+        "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false, "symmetry_pruning"_a = "off",
+        "max_states"_a = nb::none(),
         "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), "observer"_a = nb::none(),
         "progress_interval"_a = nb::none(),
@@ -2052,15 +2079,18 @@ void bind_search(nb::module_& parent)
     m.def(
         "beam",
         [](TaskArg task, u32 width, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
-           StateArg start, bool witness_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           StateArg start, bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states, IntArg max_expanded,
+           IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             return bf_call(&search::beam, task, heuristic, costs, evaluation, store, nb::str("auto"), start, true, true,
-                           true, 0, 1, width, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel,
+                           true, 0, 1, width, witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth,
+                           max_seconds, cancel,
                            goal, blocked_states, observer, progress_interval);
         },
         "task"_a, nb::kw_only(), "width"_a = 1000, "heuristic"_a = "ff", "costs"_a = "unit", "evaluation"_a = "auto",
-        "store"_a = "auto", "start"_a = nb::none(), "witness_pruning"_a = false, "max_states"_a = nb::none(),
+        "store"_a = "auto", "start"_a = nb::none(), "witness_pruning"_a = false, "symmetry_pruning"_a = "off",
+        "max_states"_a = nb::none(),
         "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), "observer"_a = nb::none(),
         "progress_interval"_a = nb::none(),
@@ -2127,7 +2157,8 @@ void bind_search(nb::module_& parent)
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, WidthZeroArg width_zero,
            bool witness_pruning, bool canonical_order,
-           StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds,
+           SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             const Owner o = owner_of(task);
@@ -2136,7 +2167,7 @@ void bind_search(nb::module_& parent)
                          observer, progress_interval);
             search::LiwOptions opts;
             static_cast<search::IwOptions&>(opts) =
-                iw_options(cs, o, max_arity, width_zero, true, witness_pruning, canonical_order, start);
+                iw_options(cs, o, max_arity, width_zero, true, witness_pruning, canonical_order, symmetry_pruning, start);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties);
             opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
@@ -2146,7 +2177,7 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "max_arity"_a = 2, MYMYR_LANDMARK_ARGS, MYMYR_LAYER_ARGS,
         "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false, "canonical_order"_a = true,
-        "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "symmetry_pruning"_a = "off", "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
         (std::string("LIW(k) (search/liw.hpp; mimir's iw with landmark_novelty_graph): the width-0 pass, then "
                      "LIW(1..max_arity) over (landmark coordinate, tuple of size <= k) novelty, each pass from the start "
                      "with a fresh table, until one solves the task (an exhausted ladder is EXHAUSTED, mimir's "
@@ -2161,7 +2192,7 @@ void bind_search(nb::module_& parent)
            IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, u64 seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, bool witness_pruning,
-           bool canonical_order, StateArg start,
+           bool canonical_order, SymmetryArg symmetry_pruning, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
            GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const Owner o = owner_of(task);
@@ -2172,7 +2203,7 @@ void bind_search(nb::module_& parent)
                 aiw_options(cs, o, keep_depth_one_novel, landmarks, disjunctive, all_private, unshared_atoms,
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
                             prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
-                            witness_pruning, canonical_order, start);
+                            witness_pruning, canonical_order, symmetry_pruning, start);
             opts.width = width;
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
@@ -2182,7 +2213,8 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "width"_a = 1, "base_abstracted"_a = false, "preserve_goal_atoms"_a = true,
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS,
-        "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "witness_pruning"_a = false, "canonical_order"_a = true, "symmetry_pruning"_a = "off", "start"_a = nb::none(),
+        MYMYR_CONTROL_ARGS,
         (std::string("Abstracted IW(width) (search/aiw.hpp; mimir's abstracted_iw): one breadth-first pass whose "
                      "novelty features are abstracted atoms, one per object position with the other objects' type "
                      "signature (base_abstracted: BAIW, no signatures); preserve_goal_atoms keeps positive goal atoms "
@@ -2199,7 +2231,7 @@ void bind_search(nb::module_& parent)
            IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, u64 seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
            BeamNoveltyArg beam_novelty, bool randomize_ties, bool witness_pruning,
-           bool canonical_order, StateArg start,
+           bool canonical_order, SymmetryArg symmetry_pruning, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
            GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const Owner o = owner_of(task);
@@ -2211,7 +2243,7 @@ void bind_search(nb::module_& parent)
                 aiw_options(cs, o, keep_depth_one_novel, landmarks, disjunctive, all_private, unshared_atoms,
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
                             prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
-                            witness_pruning, canonical_order, start);
+                            witness_pruning, canonical_order, symmetry_pruning, start);
             opts.typed_projection = typed_projection;
             opts.keep_goal_nonunary_atoms = keep_goal_nonunary_atoms;
             const Task& t = *o.core->task;
@@ -2220,7 +2252,8 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "typed_projection"_a = false, "keep_goal_nonunary_atoms"_a = false,
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS,
-        "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "witness_pruning"_a = false, "canonical_order"_a = true, "symmetry_pruning"_a = "off", "start"_a = nb::none(),
+        MYMYR_CONTROL_ARGS,
         (std::string("Mimir's projective_iw alias: abstracted IW(1) with base_abstracted = not typed_projection "
                      "and preserve_goal_atoms = keep_goal_nonunary_atoms. See abstracted_iw.") +
          k_landmark_doc + k_layer_doc + " " + k_control_doc + k_iw_family_doc)
@@ -2229,7 +2262,8 @@ void bind_search(nb::module_& parent)
     m.def(
         "rollout_iw",
         [](TaskArg task, OrderingArg ordering, u64 seed, IntArg max_rollouts, IntArg incumbent_bound,
-           bool canonical_order, StateArg start, IntArg max_states, IntArg max_depth, FloatArg max_seconds,
+           bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_depth,
+           FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             const Owner o = owner_of(task);
@@ -2245,6 +2279,7 @@ void bind_search(nb::module_& parent)
             if (auto v = opt<u32>(incumbent_bound))
                 opts.incumbent_bound = *v;
             opts.canonical_order = canonical_order;
+            opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
             if (!start.is_none())
                 opts.start = state_for(o, start, "start");
             const Task& t = *o.core->task;
@@ -2253,7 +2288,8 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "ordering"_a = search::ActionOrdering::InOrder, "seed"_a = 0,
         "max_rollouts"_a = nb::none(), "incumbent_bound"_a = nb::none(), "canonical_order"_a = true,
-        "start"_a = nb::none(), "max_states"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),
+        "symmetry_pruning"_a = "off", "start"_a = nb::none(), "max_states"_a = nb::none(), "max_depth"_a = nb::none(),
+        "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), "observer"_a = nb::none(),
         "progress_interval"_a = nb::none(),
         (std::string("Rollout IW(1) (search/rollout_iw.hpp; Bandres et al. 2018, mimir's find_solution_rollout_iw): "
@@ -2272,7 +2308,8 @@ void bind_search(nb::module_& parent)
         "find_rollouts_parallel",
         [](TaskArg task, std::vector<u64> seeds, u32 max_arity, u32 num_threads, IntArg max_next_layer_states,
            bool report_landing_states, bool report_co_occurrence, WidthZeroArg width_zero, bool optimize_iw1,
-           bool witness_pruning, bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded,
+           bool witness_pruning, bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states,
+           IntArg max_expanded,
            IntArg max_depth, FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states,
            ObserverArg observer, IntArg progress_interval) {
             const Owner o = owner_of(task);
@@ -2280,7 +2317,8 @@ void bind_search(nb::module_& parent)
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::ParallelRolloutOptions opts;
-            opts.iw = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning, canonical_order, start);
+            opts.iw = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning, canonical_order,
+            symmetry_pruning, start);
             opts.seeds = seeds;
             opts.num_threads = num_threads;
             if (auto v = opt<u32>(max_next_layer_states))
@@ -2295,7 +2333,7 @@ void bind_search(nb::module_& parent)
         "task"_a, "seeds"_a, nb::kw_only(), "max_arity"_a = 2, "num_threads"_a = 0,
         "max_next_layer_states"_a = nb::none(), "report_landing_states"_a = false, "report_co_occurrence"_a = false,
         "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,
-        "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "canonical_order"_a = true, "symmetry_pruning"_a = "off", "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
         (std::string("Parallel IW rollouts (search/parallel_rollouts.hpp; mimir's find_rollouts_iw_parallel / "
                      "iw_parallel): one IW(max_arity) ladder per seed with a randomized layer order seeded by it, on "
                      "num_threads threads (0: all cores, capped at len(seeds)) over the one task. For a seed a "
@@ -2347,7 +2385,8 @@ void bind_search(nb::module_& parent)
     m.def(
         "atomic_goal_portfolio",
         [](TaskArg task, u32 num_rollout_workers, u32 num_threads, u64 base_seed, OrderingsArg rollout_orderings,
-           bool canonical_order, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
+           bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded,
+           IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             const Owner o = owner_of(task);
@@ -2361,6 +2400,7 @@ void bind_search(nb::module_& parent)
             opts.base_seed = base_seed;
             opts.rollout_orderings = parse_orderings(rollout_orderings);
             opts.canonical_order = canonical_order;
+            opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
             if (!start.is_none())
                 opts.start = state_for(o, start, "start");
             const Task& t = *o.core->task;
@@ -2368,7 +2408,8 @@ void bind_search(nb::module_& parent)
             return PyPortfolioResult{std::move(r), o};
         },
         "task"_a, nb::kw_only(), "num_rollout_workers"_a = 4, "num_threads"_a = 0, "base_seed"_a = 0,
-        "rollout_orderings"_a = nb::none(), "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
+        "rollout_orderings"_a = nb::none(), "canonical_order"_a = true, "symmetry_pruning"_a = "off",
+        "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
         (std::string("The atomic-goal portfolio (search/portfolio.hpp; mimir's "
                      "find_solution_atomic_goal_iw_portfolio): one IW(1) certifier (worker 0) and num_rollout_workers "
                      "goal-guided Rollout IW workers (1..K) under one coordination: the best plan's length prunes the "

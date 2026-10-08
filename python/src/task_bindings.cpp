@@ -916,7 +916,9 @@ std::vector<f64> numeric_values_arg(PyTaskCore& core, nb::handle values)
 /// An exported array bundle (export_bundle): scalars and arrays by name.
 using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
 
-ActionList applicable_actions(const Owner& o, StateView s)
+/// The applicable actions of s in canonical order (of the schemas [first_schema, end_schema) only).
+ActionList applicable_actions(const Owner& o, StateView s, SymmetryPruning symmetry = SymmetryPruning::Off,
+                              u32 first_schema = 0, u32 end_schema = ~u32{0})
 {
     Successors& succ = o.core->task->workspace().successors();
     std::vector<u32> schemas;
@@ -929,7 +931,7 @@ ActionList applicable_actions(const Owner& o, StateView s)
             bindings.insert(bindings.end(), b, b + succ.arity(schema));
             return true;
         },
-        false, true);
+        false, true, symmetry, first_schema, end_schema);
     nb::list out;
     usize at = 0;
     for (u32 schema : schemas)
@@ -949,6 +951,7 @@ struct PyApplicableIter
     State s;
     Owner o;
     u32 next_schema = 0;
+    SymmetryPruning symmetry = SymmetryPruning::Off;
     std::vector<u32> schemas;  // the buffered actions of the current schema
     std::vector<ObjectId> bindings;
     usize pos = 0, at = 0;
@@ -977,7 +980,7 @@ Arg<PyAction> applicable_next(PyApplicableIter& it)
                         it.bindings.insert(it.bindings.end(), b, b + succ.arity(schema));
                         return true;
                     },
-                    false, true, k, k + 1);
+                    false, true, it.symmetry, k, k + 1);
             }
         }
         if (it.schemas.empty())
@@ -990,11 +993,12 @@ Arg<PyAction> applicable_next(PyApplicableIter& it)
     return a;
 }
 
-Arg<PyApplicableIter> iter_applicable(const Owner& o, StateView s)
+Arg<PyApplicableIter> iter_applicable(const Owner& o, StateView s, SymmetryPruning symmetry)
 {
     auto it = std::make_unique<PyApplicableIter>();
     it->s = State(s);
     it->o = o;
+    it->symmetry = symmetry;
     return nb::cast(it.release(), nb::rv_policy::take_ownership);
 }
 
@@ -1025,7 +1029,7 @@ AtomList derived_atoms(const Owner& o, StateView s)
 }
 
 /// Successor states in canonical order; with labels, (Action, State) pairs.
-nb::list successors(const Owner& o, StateView s, bool labels)
+nb::list successors(const Owner& o, StateView s, bool labels, SymmetryPruning symmetry = SymmetryPruning::Off)
 {
     Successors& succ = o.core->task->workspace().successors();
     std::vector<State> states;
@@ -1045,7 +1049,7 @@ nb::list successors(const Owner& o, StateView s, bool labels)
             }
             return true;
         },
-        false, true);
+        false, true, symmetry);
     PyObject* list = PyList_New(static_cast<Py_ssize_t>(states.size()));
     if (!list)
         throw nb::python_error();
@@ -1453,21 +1457,30 @@ void bind_task_api(nb::class_<C>& cls)
            "The initial state.")
         .def(
             "applicable_actions",
-            [owner](Self self, StateLike state, SchemaArg schema, PartialArg partial) {
+            [owner](Self self, StateLike state, SchemaArg schema, PartialArg partial, SymmetryArg symmetry_pruning) {
                 StateArg s = state_arg(*self.p->core, state);
+                const SymmetryPruning sym = parse_symmetry_pruning(symmetry_pruning);
                 if (schema.is_none())
                 {
                     if (!partial.is_none())
                         throw nb::value_error("mymyr: partial= needs schema=");
-                    return applicable_actions(owner(self), s.view);
+                    return applicable_actions(owner(self), s.view, sym);
                 }
                 const Target t = target_arg(*self.p->core, schema);
+                if (sym != SymmetryPruning::Off)
+                {
+                    if (!partial.is_none())
+                        throw nb::value_error("mymyr: partial= does not combine with symmetry_pruning");
+                    return applicable_actions(owner(self), s.view, sym, t.schema, t.schema + 1);
+                }
                 return schema_actions(owner(self), s.view, t.schema, partial_arg(*self.p->core, t, partial));
             },
-            "state"_a, nb::kw_only(), "schema"_a = nb::none(), "partial"_a = nb::none(),
+            "state"_a, nb::kw_only(), "schema"_a = nb::none(), "partial"_a = nb::none(), "symmetry_pruning"_a = "off",
             "The applicable ground actions of a state in canonical order (schema, then binding), witness pruning off. "
             "With schema= (a name or index), the actions of that schema only; partial= then fixes some of its "
-            "parameters, as in bindings().")
+            "parameters, as in bindings(). symmetry_pruning='wl1' keeps only the actions whose parameters are "
+            "representatives of the objects' colour classes in the state (as the searches' symmetry_pruning; not "
+            "with partial=).")
         .def(
             "bindings",
             [owner](Self self, TargetArg target, StateLike state, PartialArg partial, LimitArg limit) {
@@ -1517,14 +1530,14 @@ void bind_task_api(nb::class_<C>& cls)
             "The goal as a GroundCondition (each literal once, then the numeric constraints).")
         .def(
             "iter_applicable_actions",
-            [owner](Self self, StateLike state) {
+            [owner](Self self, StateLike state, SymmetryArg symmetry_pruning) {
                 StateArg s = state_arg(*self.p->core, state);
-                return iter_applicable(owner(self), s.view);
+                return iter_applicable(owner(self), s.view, parse_symmetry_pruning(symmetry_pruning));
             },
-            "state"_a,
+            "state"_a, nb::kw_only(), "symmetry_pruning"_a = "off",
             "The applicable actions of a state as a lazy iterator (ApplicableActions): the actions of a schema are "
             "enumerated only when the iterator reaches it, so stopping early saves the remaining schemas. Same actions "
-            "and order as applicable_actions.")
+            "and order as applicable_actions (with the same symmetry_pruning).")
         .def(
             "any_applicable",
             [](Self self, StateLike state) {
@@ -1550,18 +1563,21 @@ void bind_task_api(nb::class_<C>& cls)
             "that normalization introduced). Empty for a task without axioms.")
         .def(
             "successors",
-            [owner](Self self, StateLike state) {
+            [owner](Self self, StateLike state, SymmetryArg symmetry_pruning) {
                 StateArg s = state_arg(*self.p->core, state);
-                return SuccessorList(successors(owner(self), s.view, true));
+                return SuccessorList(successors(owner(self), s.view, true, parse_symmetry_pruning(symmetry_pruning)));
             },
-            "state"_a, "(Action, State) pairs in canonical order.")
+            "state"_a, nb::kw_only(), "symmetry_pruning"_a = "off",
+            "(Action, State) pairs in canonical order (symmetry_pruning as for applicable_actions).")
         .def(
             "successor_states",
-            [owner](Self self, StateLike state) {
+            [owner](Self self, StateLike state, SymmetryArg symmetry_pruning) {
                 StateArg s = state_arg(*self.p->core, state);
-                return StateList(successors(owner(self), s.view, false));
+                return StateList(successors(owner(self), s.view, false, parse_symmetry_pruning(symmetry_pruning)));
             },
-            "state"_a, "Successor states in canonical order (the labels are those of applicable_actions).")
+            "state"_a, nb::kw_only(), "symmetry_pruning"_a = "off",
+            "Successor states in canonical order (the labels are those of applicable_actions with the same "
+            "symmetry_pruning).")
         .def(
             "apply",
             [owner](Self self, StateLike state, ActionLike action) {
@@ -2179,9 +2195,16 @@ void bind_task(nb::module_& m)
              "'(not (on a b))', or a GroundCondition: fluent atoms from the state, static ones from the task, derived "
              "ones by evaluating the axioms, numeric constraints by the state's values.")
         .def("is_goal", [](const PyState& s) { return s.core->task->is_goal(s.s.view()); })
-        .def("applicable_actions", [](const PyState& s) { return applicable_actions(Owner{s.core, s.owner}, s.s.view()); })
+        .def("applicable_actions",
+             [](const PyState& s, SymmetryArg symmetry_pruning) {
+                 return applicable_actions(Owner{s.core, s.owner}, s.s.view(), parse_symmetry_pruning(symmetry_pruning));
+             },
+             nb::kw_only(), "symmetry_pruning"_a = "off", "The applicable actions (Task.applicable_actions).")
         .def("iter_applicable_actions",
-             [](const PyState& s) { return iter_applicable(Owner{s.core, s.owner}, s.s.view()); },
+             [](const PyState& s, SymmetryArg symmetry_pruning) {
+                 return iter_applicable(Owner{s.core, s.owner}, s.s.view(), parse_symmetry_pruning(symmetry_pruning));
+             },
+             nb::kw_only(), "symmetry_pruning"_a = "off",
              "The applicable actions as a lazy iterator (Task.iter_applicable_actions).")
         .def("any_applicable",
              [](const PyState& s) { return s.core->task->workspace().successors().any_applicable(s.s.view()); },
@@ -2192,9 +2215,17 @@ void bind_task(nb::module_& m)
         .def("derived_atoms", [](const PyState& s) { return derived_atoms(Owner{s.core, s.owner}, s.s.view()); },
              "The derived atoms: the fluent atoms closed under the axioms (Task.derived_atoms).")
         .def("successors",
-             [](const PyState& s) { return SuccessorList(successors(Owner{s.core, s.owner}, s.s.view(), true)); })
+             [](const PyState& s, SymmetryArg symmetry_pruning) {
+                 return SuccessorList(successors(Owner{s.core, s.owner}, s.s.view(), true,
+                 parse_symmetry_pruning(symmetry_pruning)));
+             },
+             nb::kw_only(), "symmetry_pruning"_a = "off", "(Action, State) pairs (Task.successors).")
         .def("successor_states",
-             [](const PyState& s) { return StateList(successors(Owner{s.core, s.owner}, s.s.view(), false)); })
+             [](const PyState& s, SymmetryArg symmetry_pruning) {
+                 return StateList(successors(Owner{s.core, s.owner}, s.s.view(), false,
+                 parse_symmetry_pruning(symmetry_pruning)));
+             },
+             nb::kw_only(), "symmetry_pruning"_a = "off", "Successor states (Task.successor_states).")
         .def("apply",
              [](const PyState& s, ActionLike action) { return apply(Owner{s.core, s.owner}, s.s.view(), action); },
              "action"_a)
