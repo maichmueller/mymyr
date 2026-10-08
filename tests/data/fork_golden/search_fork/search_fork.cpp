@@ -1,7 +1,8 @@
 // search_fork: one search of the mimir fork (0.16.x) on a PDDL task, for the expectations of mymyr's parity tests:
 // the numeric best-first test (tests/data/numeric_tasks/fork_best_first.json, made by run_numeric.py), the layer
 // ordering test (tests/data/layer_orders/fork_layer_orders.json, made by run_layer_orders.py), the beam test
-// (tests/data/beam/fork_beam.json, made by run_beam.py) and the heuristics test
+// (tests/data/beam/fork_beam.json and fork_beam_relaxed.json, made by run_beam.py and run_beam_relaxed.py) and the
+// heuristics test
 // (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py), the binding generator test
 // (tests/data/bindings/fork_bindings.json, made by run_bindings.py) and the tuple graph tests
 // (tests/data/tuple_graphs/fork_tuple_graphs.json, made by run_tuple_graphs.py) and the k-FWL certificate tests
@@ -10,7 +11,8 @@
 //   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
 //               --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo iw|brfs --order in_order|reverse|goal_count|goal_count_fewer [--k K] [--limit L]
-//               [--beam W [--beam-mode all_tested|survivors_only]] --domain D --problem P [--max-ms T] [--max-states N]
+//               [--beam W [--beam-mode all_tested|survivors_only|relaxed]] [--tie-seed S] [--threads N] [--chunk C]
+//               [--iw1-knobs precheck|atom_first|incremental] --domain D --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo astar_iw --h blind|hmax --width K --features classical|abstracted|base_abstracted
 //               --domain D --problem P [--max-ms T] [--max-states N]
 //   search_fork --algo walk_h --h setadd|h2|perfect --domain D --problem P [--walks W] [--steps S] [--seed B]
@@ -26,8 +28,11 @@
 // over a LiftedGrounder (unit action costs), blind is its BlindHeuristic, perfect its PerfectHeuristic over the
 // search context's state space (built first with --max-states as its limit: a larger space is an ERROR); the searches
 // use the fork's default event handlers and strategies. iw is iw::find_solution with max_arity K and the layer
-// ordering strategy (max_next_layer_states L, or beam_width W with beam_novelty_mode); brfs is brfs::find_solution
-// with stop_if_goal and the same ordering.
+// ordering strategy (max_next_layer_states L, or beam_width W with beam_novelty_mode; relaxed is SURVIVORS_ONLY with
+// relaxed_survivors_only_beam; --tie-seed S randomizes equal-score ties with seed S; --threads and --chunk are
+// parallel_beam_num_threads and parallel_beam_chunk_size); brfs is brfs::find_solution with stop_if_goal and the same
+// ordering. --iw1-knobs adds IW(1)'s iw1_precheck_add_effect_novelty, then iw1_atom_first_mode, then
+// iw1_incremental_first_applicability (each implies the ones before).
 // walk_h evaluates the heuristic on the states of the seeded random walks of tests/data/fork_golden/README.md (walk w
 // uses seed B + w, the next action is sorted_applicable[splitmix64() % count]; W = 3, S = 25, B = 1 as in the
 // golden files) and prints per walk and step the fluent atom count, the set hash of their strings and h.
@@ -78,6 +83,27 @@ namespace
 {
 /// The symmetry pruning of every search context (--symmetry off|wl1).
 SearchContextImpl::SymmetryPruning g_symmetry = SearchContextImpl::SymmetryPruning::OFF;
+struct BeamKnobs
+{
+    long tie_seed = -1;  // -1: ties in generation order
+    uint32_t threads = 1;
+    uint32_t chunk = 1024;
+    int iw1 = 0;  // 1 precheck, 2 + atom first, 3 + incremental first applicability
+};
+BeamKnobs g_beam;
+
+template<class Options>
+void set_beam_knobs(Options& opts, const std::string& mode)
+{
+    opts.relaxed_survivors_only_beam = mode == "relaxed";
+    opts.randomize_equal_score_ties = g_beam.tie_seed >= 0;
+    opts.equal_score_tie_seed = g_beam.tie_seed >= 0 ? static_cast<uint64_t>(g_beam.tie_seed) : 0;
+    opts.parallel_beam_num_threads = g_beam.threads;
+    opts.parallel_beam_chunk_size = g_beam.chunk;
+    opts.iw1_precheck_add_effect_novelty = g_beam.iw1 >= 1;
+    opts.iw1_atom_first_mode = g_beam.iw1 >= 2;
+    opts.iw1_incremental_first_applicability = g_beam.iw1 >= 3;
+}
 
 const char* status_name(SearchStatus s)
 {
@@ -560,7 +586,7 @@ BeamNoveltyMode beam_mode(const std::string& m)
 {
     if (m == "all_tested")
         return BeamNoveltyMode::ALL_TESTED;
-    if (m == "survivors_only")
+    if (m == "survivors_only" || m == "relaxed")
         return BeamNoveltyMode::SURVIVORS_ONLY;
     throw std::invalid_argument("unknown beam mode " + m);
 }
@@ -586,6 +612,7 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
         opts.max_next_layer_states = limit;
         opts.beam_width = beam;
         opts.beam_novelty_mode = beam_mode(mode);
+        set_beam_knobs(opts, mode);
         opts.max_time_in_ms = max_ms;
         opts.max_num_states = max_states;
         auto result = iw::find_solution(context, opts);
@@ -613,6 +640,7 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
         opts.max_next_layer_states = limit;
         opts.beam_width = beam;
         opts.beam_novelty_mode = beam_mode(mode);
+        set_beam_knobs(opts, mode);
         opts.max_time_in_ms = max_ms;
         opts.max_num_states = max_states;
         auto result = brfs::find_solution(context, opts);
@@ -1147,6 +1175,26 @@ int main(int argc, char** argv)
             beam = static_cast<uint32_t>(std::stoul(v));
         else if (a == "--beam-mode")
             mode = v;
+        else if (a == "--tie-seed")
+            g_beam.tie_seed = std::stol(v);
+        else if (a == "--threads")
+            g_beam.threads = static_cast<uint32_t>(std::stoul(v));
+        else if (a == "--chunk")
+            g_beam.chunk = static_cast<uint32_t>(std::stoul(v));
+        else if (a == "--iw1-knobs")
+        {
+            if (v == "precheck")
+                g_beam.iw1 = 1;
+            else if (v == "atom_first")
+                g_beam.iw1 = 2;
+            else if (v == "incremental")
+                g_beam.iw1 = 3;
+            else
+            {
+                std::cerr << "unknown IW(1) knobs " << v << "\n";
+                return 2;
+            }
+        }
         else if (a == "--walks")
             walks = std::stoul(v);
         else if (a == "--steps")

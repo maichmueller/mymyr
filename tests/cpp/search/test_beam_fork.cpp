@@ -3,7 +3,7 @@
 // (more and fewer satisfied goal literals first), beam widths 1, 4 and 32 and both beam novelty modes. Expectations:
 // the status, the plan (action for action) and the counts of every IW pass (expanded, generated, generated_in_tree)
 // and of BrFS (expanded, generated) equal the fork's, on one thread and with the layer step on four (two when
-// sanitized).
+// sanitized). The relaxed SurvivorsOnly beam against the fork: RelaxedBeamEqualsTheForksPerLayerSelection below.
 //
 // A beam keeps the best entries of a layer with ties in generation order, so it depends on the order in which a
 // state's actions are enumerated. On depot, driverlog, gripper, logistics00 and zenotravel
@@ -151,4 +151,61 @@ TEST(BeamFork, IwAndBrfsEqualTheForks)
         }
     }
     EXPECT_GE(compared, sanitized() ? 564u : 576u);
+}
+
+// The relaxed SurvivorsOnly beam against the fork's per-layer relaxed selection (tests/data/beam/fork_beam_relaxed.json,
+// written by tests/data/fork_golden/search_fork/run_beam_relaxed.py): the fork selects per layer only in the IW(1)
+// pass with its atom-first and add-effect precheck knobs (by default it selects per expanded state, and a layer can
+// then exceed beam_width). Where these knobs leave the fork's exact SurvivorsOnly IW(1) pass unchanged and mymyr's
+// equals it, the arity-1 pass of IW(2) with the relaxed beam on 2, 4 and 8 threads (expanded, generated_in_tree)
+// equals the fork's on as many threads.
+TEST(BeamFork, RelaxedBeamEqualsTheForksPerLayerSelection)
+{
+    const test::json::Value doc = test::json::parse_file(std::string(MYMYR_TEST_DATA_DIR) + "/beam/fork_beam_relaxed.json");
+    std::map<std::string, std::shared_ptr<const Task>> tasks;
+    auto pass1 = [](const test::json::Value& r) -> std::pair<u64, u64>
+    {
+        const auto& p = r["passes"].arr.at(1).arr;
+        return {static_cast<u64>(p.at(0).num), static_cast<u64>(p.at(1).num)};
+    };
+    u32 compared = 0;
+    for (const test::json::Value& r : doc["runs"].arr)
+    {
+        const std::string& name = r["task"].str;
+        if (action_order_differs(name) || r["survivors_only"].is_null() || r["survivors_only_atom_first"].is_null())
+            continue;
+        if (r["survivors_only"]["passes"].arr.size() < 2 || r["survivors_only_atom_first"]["passes"].arr.size() < 2 ||
+            pass1(r["survivors_only"]) != pass1(r["survivors_only_atom_first"]))
+            continue;  // the knobs change the fork's search
+        if (!tasks.contains(name))
+            tasks[name] = Task::from_text_file(test::task_path(name));
+        const Task& task = *tasks[name];
+        IwOptions o;
+        o.max_arity = 2;
+        o.layers.kind = LayerOrdering::Kind::GoalCount;
+        o.layers.prefer_more_satisfied_goals = r["order"].str == "goal_count";
+        o.layers.beam_width = static_cast<u32>(r["beam"].num);
+        o.layers.beam_novelty = LayerOrdering::BeamNovelty::SurvivorsOnly;
+        const std::string what = name + " " + r["order"].str + " beam " + std::to_string(static_cast<u32>(r["beam"].num));
+        const IwResult so = iw(task, o);
+        if (so.passes.size() < 2 || std::pair{so.passes[1].expanded, so.passes[1].generated_in_tree} != pass1(r["survivors_only"]))
+        {
+            ADD_FAILURE() << what << ": the exact SurvivorsOnly pass differs from the fork's";
+            continue;
+        }
+        o.layers.beam_novelty = LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly;
+        for (u32 threads : {2u, 4u, 8u})
+        {
+            const test::json::Value& f = r["relaxed"][std::to_string(threads)];
+            if (f.is_null() || f["passes"].arr.size() < 2)
+                continue;
+            o.threads = threads;
+            const IwResult m = iw(task, o);
+            ASSERT_GE(m.passes.size(), 2u) << what;
+            EXPECT_EQ(m.passes[1].expanded, pass1(f).first) << what << " threads " << threads;
+            EXPECT_EQ(m.passes[1].generated_in_tree, pass1(f).second) << what << " threads " << threads;
+            ++compared;
+        }
+    }
+    EXPECT_GE(compared, 141u);
 }

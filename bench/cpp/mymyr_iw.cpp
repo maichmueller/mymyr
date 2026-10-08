@@ -12,6 +12,8 @@
 //          transition, S <expanded>/<generated>/<in_tree> per pass); runs the observed (slow) path
 //          --order-from FILE: test each expanded state's transitions in the order a fork_iw_trace file lists them
 //          (IwOptions::successor_order; states missing from the file keep the generation order: order_misses)
+//          --order goal_count|goal_count_fewer  --beam W  --beam-mode all_tested|survivors_only|relaxed  --tie-seed S
+//          --chunk C  --threads T: the layer ordering and beam (search/layer_ordering.hpp) and IwOptions::threads
 // SIW: the totals (expanded, generated, generated_in_tree, passes, num_subproblems) cover the solved subproblems only,
 // as the fork's SIW statistics do; all_* fields include a last, failed subproblem.
 
@@ -59,7 +61,8 @@ double peak_rss_mb()
                  "error: %s\nusage: mymyr_iw (task.txt | --domain D --problem P) --algo iw|siw|iwpass [--k K]\n"
                  "       [--atoms auto|lazy|frozen] [--match auto|fixed|fc] [--width-zero fork|root] [--no-opt-iw1]\n"
                  "       [--witness] [--no-canonical] [--max-states N] [--max-expanded N] [--max-depth D]\n"
-                 "       [--timeout-ms T] [--dense-mb M] [--plan]\n",
+                 "       [--timeout-ms T] [--dense-mb M] [--plan] [--order goal_count|goal_count_fewer] [--beam W]\n"
+                 "       [--beam-mode all_tested|survivors_only|relaxed] [--tie-seed S] [--chunk C] [--threads T]\n",
                  msg.c_str());
     std::exit(2);
 }
@@ -270,6 +273,30 @@ int main(int argc, char** argv)
             trace_file = value();
         else if (a == "--order-from")
             order_file = value();
+        else if (a == "--order")
+        {
+            const std::string v = value();
+            io.layers.kind = LayerOrdering::Kind::GoalCount;
+            io.layers.prefer_more_satisfied_goals = v != "goal_count_fewer";
+        }
+        else if (a == "--beam")
+            io.layers.beam_width = static_cast<u32>(std::stoul(value()));
+        else if (a == "--beam-mode")
+        {
+            const std::string v = value();
+            io.layers.beam_novelty = v == "survivors_only" ? LayerOrdering::BeamNovelty::SurvivorsOnly
+                                : v == "relaxed"      ? LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly
+                                                      : LayerOrdering::BeamNovelty::AllTested;
+        }
+        else if (a == "--tie-seed")
+        {
+            io.layers.randomize_ties = true;
+            io.layers.seed = std::stoull(value());
+        }
+        else if (a == "--chunk")
+            io.layers.beam_chunk = static_cast<u32>(std::stoul(value()));
+        else if (a == "--threads")
+            io.threads = static_cast<u32>(std::stoul(value()));
         else if (!a.empty() && a[0] != '-' && task_file.empty())
             task_file = a;
         else
