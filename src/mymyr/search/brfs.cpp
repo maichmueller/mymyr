@@ -534,6 +534,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
     std::vector<u32> order, keys;
     std::vector<Expansion> exps;
     std::vector<std::vector<u64>> mcur(members), mnum(members), mnext(members);
+    std::vector<std::vector<u32>> mids(members);  // chunked: find_successor's scratch
     struct Ref
     {
         u32 member, cand, parent;
@@ -563,11 +564,24 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
         }
         x.expanded = 1;
         std::vector<u64>& nx = mnext[t];
+        if constexpr (!flat)
+            mids[t].resize(store.chunks_per_state());
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
                 const u32 seq = x.transitions++;
                 const u32 nn = apply_delta(cv.w, cv.nw, d, nx);
+                if (!relaxed)
+                {
+                    // stored before the batch (the store is only read meanwhile): its insert would find it
+                    if constexpr (flat)
+                    {
+                        if (store.find(StateView{nx.data(), nn, d.num, NN}).valid())
+                            return true;
+                    }
+                    else if (store.find_successor(StateId{id}, cv.w, nx.data(), nn, d, mids[t].data()).valid())
+                        return true;
+                }
                 cs.push(seq, s, b, sc.arity(s), {}, flat ? nullptr : &d, nx.data(), nn, d.num, NN);
                 return true;
             },

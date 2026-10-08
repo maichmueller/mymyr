@@ -8,7 +8,7 @@
 //   - numeric tasks: the numeric words are cut into chunks of their own (never mixed with bit words), which
 //     follow the bit chunks in a state's id vector. A transition changes 1 to 3 slots, so a successor re-interns only
 //     the numeric chunks whose content changed.
-// Single-threaded.
+// Single-threaded, but for the read-only find_successor.
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/hash.hpp"
@@ -181,6 +181,67 @@ public:
         return insert_ids(m_scratch_ids.data());
     }
 
+    /// The id of `next` (its first n words; the rest are zero), the successor of stored state `parent` whose decoded
+    /// words are `cur` (words() words), under delta d, or an invalid id if it is not stored. Read-only: calls from
+    /// several threads are safe while nothing is inserted. `x` is scratch of chunks_per_state() ids.
+    [[nodiscard]] StateId find_successor(StateId parent, const u64* cur, const u64* next, u32 n, const Delta& d, u32* x) const
+    {
+        if (bits::trimmed_size(next, n) > words())
+            return StateId{};
+        const u32 nc = m_nc + m_nnc;
+        std::memcpy(x, ids(parent), nc * sizeof(u32));
+        u64 buf[k_chunk_words];
+        auto touch = [&](u32 slot)
+        {
+            const u32 ci = slot / (64 * k_chunk_words);
+            if (ci >= m_nc || x[ci] == k_none)
+                return;
+            const u32 lo = ci * k_chunk_words;
+            std::memset(buf, 0, sizeof(buf));
+            if (lo < n)
+                std::memcpy(buf, next + lo, std::min(k_chunk_words, n - lo) * sizeof(u64));
+            if (std::memcmp(cur + lo, buf, sizeof(buf)) != 0)
+                x[ci] = k_none;  // looked up below
+        };
+        for (SlotId s : d.del)
+            touch(s.v);
+        for (SlotId s : d.add)
+            touch(s.v);
+        for (u32 ci = 0; ci < m_nc; ++ci)
+            if (x[ci] == k_none)
+            {
+                const u32 lo = ci * k_chunk_words;
+                std::memset(buf, 0, sizeof(buf));
+                if (lo < n)
+                    std::memcpy(buf, next + lo, std::min(k_chunk_words, n - lo) * sizeof(u64));
+                x[ci] = find_chunk(buf);
+                if (x[ci] == k_none)
+                    return StateId{};  // a new chunk: a new state
+            }
+        if (m_nnc && d.num)
+            for (u32 c = 0; c < m_nnc; ++c)
+            {
+                const u32 lo = c * k_chunk_words, len = std::min(k_chunk_words, m_nn - lo);
+                if (std::memcmp(chunk(x[m_nc + c]), d.num + lo, len * sizeof(u64)) == 0)
+                    continue;
+                std::memset(buf, 0, sizeof(buf));
+                std::memcpy(buf, d.num + lo, len * sizeof(u64));
+                x[m_nc + c] = find_chunk(buf);
+                if (x[m_nc + c] == k_none)
+                    return StateId{};
+            }
+        const u64 h = hash_ids(x, nc);
+        const u32 tag = static_cast<u32>(h >> 32);
+        for (u64 j = h & m_smask;; j = (j + 1) & m_smask)
+        {
+            const u32 v = m_sslot[j];
+            if (!v)
+                return StateId{};
+            if (m_stag[j] == tag && std::memcmp(ids(StateId{v - 1}), x, nc * sizeof(u32)) == 0)
+                return StateId{v - 1};
+        }
+    }
+
     /// Writes the words() words of a state and, numeric tasks, its numeric_words() numeric words into `num`.
     void decode(StateId id, u64* out, u64* num = nullptr) const
     {
@@ -223,6 +284,17 @@ public:
     }
 
 private:
+    [[nodiscard]] u32 find_chunk(const u64* w) const noexcept
+    {
+        for (u64 j = hash::words(w, k_chunk_words) & m_cmask;; j = (j + 1) & m_cmask)
+        {
+            const u32 v = m_cslot[j];
+            if (!v)
+                return k_none;
+            if (std::memcmp(chunk(v - 1), w, k_chunk_words * sizeof(u64)) == 0)
+                return v - 1;
+        }
+    }
     static u64 hash_ids(const u32* x, u32 n)
     {
         u64 h = 0x9E3779B97F4A7C15ULL ^ n;
