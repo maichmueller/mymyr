@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Check the output of a ctest run: no failures, at least ctest_min_total tests, at most ctest_max_skipped
-skipped (ci/expected_counts.json).
+"""Check a ctest log against the expected counts for its build configuration.
 
-usage: check_ctest_log.py LOG
+usage: check_ctest_log.py [--sanitized] LOG
 
 Tests that need the benchmark data skip when it is missing, so a run with a misconfigured data
-directory exits 0 with most of the suite skipped. This check turns that into a failure. The counts
-are also written to the GitHub step summary when available.
+directory exits 0 with most of the suite skipped. This check turns that into a failure. Sanitized
+builds use their own minimum total and maximum skipped counts because they register a different set
+of tests. The counts are also written to the GitHub step summary when available.
 """
 
+import argparse
 import json
 import os
 import re
@@ -17,12 +18,18 @@ from pathlib import Path
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(__doc__, file=sys.stderr)
-        return 2
-    text = open(argv[1], errors="replace").read()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sanitized", action="store_true",
+                        help="use the expected counts for sanitizer builds")
+    parser.add_argument("log", type=Path)
+    args = parser.parse_args(argv[1:])
+    text = args.log.read_text(errors="replace")
     expected = json.loads(Path(__file__).with_name("expected_counts.json").read_text())
-    min_total, max_skipped = expected["ctest_min_total"], expected["ctest_max_skipped"]
+    if args.sanitized:
+        min_total = expected["ctest_sanitized_min_total"]
+        max_skipped = expected["ctest_sanitized_max_skipped"]
+    else:
+        min_total, max_skipped = expected["ctest_min_total"], expected["ctest_max_skipped"]
     # CMake 4 leaves out ", 0 tests failed" when none failed: "100% tests passed out of 1205"
     m = re.search(r"(\d+)% tests passed(?:, (\d+) tests failed)? out of (\d+)", text)
     if m is None:
