@@ -162,14 +162,14 @@ public:
     }
     /// generate() with symmetry pruning (successor/symmetry.hpp): with SymmetryPruning::Wl1 only the actions whose
     /// parameters are all bound to representatives of their colour classes in the prepared state are emitted. The
-    /// classes are computed once per call; with Off this is the plain generate().
+    /// classes are computed once per call; with Off, or when every object is alone in its class, this is the plain
+    /// generate().
     template<bool Stop, class Emit>
     bool generate(Emit&& emit, bool witness_pruning, bool canonical_order, SymmetryPruning symmetry, u32 first_schema = 0,
                   u32 end_schema = ~u32{0})
     {
-        if (symmetry == SymmetryPruning::Off)
+        if (symmetry == SymmetryPruning::Off || !symmetry_pruner().compute(m_e))
             return generate_impl<Stop, false>(emit, witness_pruning, canonical_order, first_schema, end_schema);
-        symmetry_pruner().compute(m_e);
         return generate_impl<Stop, true>(emit, witness_pruning, canonical_order, first_schema, end_schema);
     }
 

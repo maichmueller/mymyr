@@ -235,7 +235,7 @@ TEST(SymmetryFork, ActionsAndSearchesMatchTheFork)
 
             // classes: the reference colour refinement, and the fork's refined by having a neighbour
             succ.prepare(s);
-            pruner.compute(succ.engine());
+            (void) pruner.compute(succ.engine());
             const auto cls = pruner.object_classes();
             const std::vector<u32> mine(cls.begin(), cls.end());
             const datasets::ObjectGraph g = graphs.build(s.view());
