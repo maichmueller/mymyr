@@ -208,7 +208,9 @@ __global__ void k_evaluate_h2(Relaxed r, Rows rows, u64 group_bytes, void* scrat
                 cost[i] = next[i];
             }
             __syncthreads();
-            if (!changed)
+            const bool done = changed == 0;
+            __syncthreads();  // Every warp reads the flag before thread 0 clears it for another sweep.
+            if (done)
                 break;
         }
         if (tid == 0)
@@ -233,7 +235,8 @@ cudaError_t launch_h2(const Relaxed& r, Rows rows, Launch l, Out out, cudaStream
 {
     if (rows.n == 0)
         return cudaSuccess;
-    if (!l.scratch || !out.h || !out.counters || !l.blocks || l.warp || l.shared)
+    if (!l.scratch || !out.h || !out.counters || !l.blocks || l.warp || l.shared || l.threads == 0 ||
+        l.threads % 32 != 0 || l.threads > 1024)
         return cudaErrorInvalidValue;
     k_evaluate_h2<<<l.blocks, l.threads, 0, s>>>(r, rows, l.group_bytes, l.scratch, out);
     return cudaGetLastError();
