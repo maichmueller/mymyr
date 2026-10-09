@@ -19,8 +19,8 @@ for kind in ("max", "add", "ff", "h2", "set_additive"):
     print(kind, heuristic(state))
 
 space = datasets.state_space(task, remove_if_unsolvable=False)
-perfect = search.Heuristic.perfect(space, costs="real")
-result = search.astar(task, heuristic=perfect, costs="real")
+perfect = search.Heuristic.perfect(space)
+result = search.astar(task, heuristic=perfect)
 print(perfect(state), result.cost)
 ```
 
