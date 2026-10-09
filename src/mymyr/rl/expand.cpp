@@ -81,21 +81,26 @@ void check_out(const TaskSuite& table, const Expansion& out)
         check_numeric(table, out.numeric_words, "the successor rows");
 }
 
-/// The calling thread's successor generators of a suite's instances, looked up once per instance and call.
+/// Successor generators of a suite's instances for one thread, leased on first use per instance and returned with the
+/// object.
 class Generators
 {
 public:
-    explicit Generators(const TaskSuite& table) : m_table(table), m_succ(table.size(), nullptr) {}
+    explicit Generators(const TaskSuite& table) : m_table(table), m_ws(table.size()), m_succ(table.size(), nullptr) {}
     [[nodiscard]] Successors& of(u32 instance)
     {
         Successors*& s = m_succ[instance];
         if (!s)
-            s = &m_table.task(instance)->workspace().successors();
+        {
+            m_ws[instance] = m_table.task(instance)->workspace();
+            s = &m_ws[instance]->successors();
+        }
         return *s;
     }
 
 private:
     const TaskSuite& m_table;
+    std::vector<WorkspaceLease> m_ws;
     std::vector<Successors*> m_succ;
 };
 
@@ -575,7 +580,8 @@ void goal_count(StateBatchView in, StateBatchView gpos, StateBatchView gneg, i32
 WalkStats random_walks(const Task& task, u64 steps, u64 episode, u64 seed, const ExpandOptions& opt)
 {
     WalkStats st;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease ws = task.workspace();
+    Successors& succ = ws->successors();
     const State init = task.initial_state();
     State cur = init;
     LineVector<State> kids;  // per-thread hot scratch (see LineAllocator)

@@ -75,7 +75,8 @@ u64 max_expanded_limit()
 /// Replays the plan: every action applicable, the goal reached; returns the cost under ActionCosts (-1 if invalid).
 double replay_cost(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const heuristics::ActionCosts costs(task);
     State s = task.initial_state();
     double g = costs.initial();

@@ -11,7 +11,7 @@
 namespace mymyr::search::bf
 {
 Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& res, const char* algorithm)
-    : task(t), o(opt), r(res), succ(t.workspace().successors()), nn(t.numeric_words()), m_blocked(1, 16, t.numeric_words())
+    : task(t), o(opt), r(res), lease(t.workspace()), succ(lease->successors()), nn(t.numeric_words()), m_blocked(1, 16, t.numeric_words())
 {
     m_t0 = Clock::now();
     m_search_t0 = m_t0;

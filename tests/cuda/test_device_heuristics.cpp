@@ -482,7 +482,8 @@ TEST(CudaHeuristic, IgnoresNumericValuesAndRefusesOtherKindsAndLargeGroundings)
 /// (g0 plus the action costs), or -1 when the plan is not valid.
 f64 replay(const Task& task, const State& start, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const heuristics::ActionCosts costs(task);
     f64 g = costs.initial();
     State s = start;

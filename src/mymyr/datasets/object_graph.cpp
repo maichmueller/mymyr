@@ -117,7 +117,8 @@ struct ObjectGraphBuilder::Impl
     void build(StateView s, ObjectGraph& g)
     {
         const AtomIndex& atoms = task.atoms();
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         const bool derived = task.has_axioms();
         if (derived)
             succ.prepare(s);

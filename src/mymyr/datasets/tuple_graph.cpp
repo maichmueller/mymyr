@@ -1,6 +1,7 @@
 #include "mymyr/datasets/tuple_graph.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/object_graph.hpp"
@@ -322,7 +323,8 @@ private:
     /// The successor states of s (symmetry reduction).
     void successors_of(const State& s, std::vector<State>& out)
     {
-        Successors& succ = m_task.workspace().successors();
+        const WorkspaceLease lease = m_task.workspace();
+        Successors& succ = lease->successors();
         const StateView sv = s.view();
         succ.prepare(sv);
         const u32 NN = m_task.numeric_words();
@@ -679,7 +681,7 @@ std::vector<TupleGraph> tuple_graphs(const StateSpacePtr& space, const TupleGrap
 {
     check(space, options);
     const u32 N = space->num_states();
-    const u32 threads = options.threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : options.threads;
+    const u32 threads = resolve_threads(options.threads);
     Shared sh{space, options, {}};
     classes(sh, threads);
     std::vector<TupleGraph> out(N);

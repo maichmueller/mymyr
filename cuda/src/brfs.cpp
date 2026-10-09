@@ -3,6 +3,7 @@
 #include "mymyr/cuda/brfs.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
 #include "mymyr/cuda/state_set.hpp"
@@ -836,9 +837,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         const u32 T = std::clamp<u32>(std::thread::hardware_concurrency() / 4, 1, 8);
         std::vector<u64> part(T, 0);
         std::vector<std::thread> threads;
-        for (u32 t = 0; t < T; ++t)
-            threads.emplace_back(
-                [&, t]
+        auto hash_part = [&](u32 t)
                 {
                     u64 x = 0;
                     for (u64 id = t; id < count; id += T)
@@ -853,7 +852,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                             x ^= brfs_fingerprint_term(id, task->canonical_hash(StateView{row, bits::trimmed_size(row, W), nullptr, 0}));
                     }
                     part[t] = x;
-                });
+                };
+        start_threads(threads, T, hash_part, [] {});
         for (auto& th : threads)
             th.join();
         for (u64 x : part)
@@ -886,7 +886,8 @@ std::vector<Action> DeviceBrfs::Impl::plan_to(u64 id)
     }
     std::reverse(chain.begin(), chain.end());
     std::vector<Action> plan;
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::vector<u64> prow(W), crow(W), tmp;
     u64 p = 0;
     for (const auto& [v, k] : chain)

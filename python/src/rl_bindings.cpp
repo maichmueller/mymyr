@@ -827,8 +827,7 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
         nb::gil_scoped_release release;
         std::vector<std::exception_ptr> errors(n);
         std::atomic<usize> next{0};
-        const u32 hw = std::max(1u, std::thread::hardware_concurrency());
-        ThreadPool pool(static_cast<u32>(std::min<usize>(threads == 0 ? hw : threads, n)));
+        ThreadPool pool(static_cast<u32>(std::min<usize>(resolve_threads(threads), n)));
         pool.run([&](u32) {
             for (usize i; (i = next.fetch_add(1, std::memory_order_relaxed)) < n;)
             {

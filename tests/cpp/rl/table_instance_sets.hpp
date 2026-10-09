@@ -81,7 +81,8 @@ inline void table_rows(const rl::TaskTable& table, u32 per, std::vector<u64>& ro
     for (u32 i = 0; i < I; ++i)
     {
         const Task& task = *table.task(i);
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         std::vector<u64> cur = table.instance(i).init;
         std::vector<u64> tmp;
         for (u32 k = 0; k < per; ++k)

@@ -143,14 +143,83 @@ void Task::build_initial_state()
     m_initial = State(w.data(), static_cast<u32>(w.size()), num.data(), N.words);
 }
 
-Workspace& Task::workspace() const
+WorkspaceLease Task::workspace() const
 {
-    return m_workspaces.local([this] { return std::make_unique<Workspace>(*this); });
+    detail::WorkspacePool& pool = m_workspaces.local([] { return std::make_unique<detail::WorkspacePool>(); });
+    std::unique_ptr<Workspace> ws;
+    if (!pool.idle.empty())
+    {
+        ws = std::move(pool.idle.back());
+        pool.idle.pop_back();
+    }
+    else if (m_spare_count.load(std::memory_order_relaxed) != 0)
+    {
+        std::lock_guard lock(m_spare_mutex);
+        if (!m_spare.empty())
+        {
+            ws = std::move(m_spare.back());
+            m_spare.pop_back();
+            m_spare_count.store(m_spare.size(), std::memory_order_relaxed);
+        }
+    }
+    if (!ws)
+    {
+        ws = std::make_unique<Workspace>(*this);
+        m_workspaces_made.fetch_add(1, std::memory_order_relaxed);
+    }
+    Successors& succ = ws->successors();
+    succ.set_witness_pruning(true);
+    succ.set_canonical_order(true);
+    succ.set_schema_filter(nullptr);
+    return WorkspaceLease(*this, &pool, std::move(ws));
 }
 
-Workspace& Task::evaluation_workspace() const
+void Task::give_back(detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) const noexcept
 {
-    return m_eval_workspaces.local([this] { return std::make_unique<Workspace>(*this); });
+    try
+    {
+        if (m_workspaces.find() == home)  // the pool of the thread that took it, or of a thread that inherited it
+            home->idle.push_back(std::move(ws));
+        else
+        {
+            std::lock_guard lock(m_spare_mutex);
+            m_spare.push_back(std::move(ws));
+            m_spare_count.store(m_spare.size(), std::memory_order_relaxed);
+        }
+    }
+    catch (...)  // out of memory for one pointer: free the workspace instead of keeping it
+    {
+    }
+}
+
+WorkspaceLease::WorkspaceLease(const Task& task, detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) noexcept
+    : m_task(&task), m_home(home), m_ws(std::move(ws))
+{
+}
+
+WorkspaceLease::WorkspaceLease(WorkspaceLease&& other) noexcept
+    : m_task(other.m_task), m_home(other.m_home), m_ws(std::move(other.m_ws))
+{
+}
+
+WorkspaceLease& WorkspaceLease::operator=(WorkspaceLease&& other) noexcept
+{
+    if (this != &other)
+    {
+        release();
+        m_task = other.m_task;
+        m_home = other.m_home;
+        m_ws = std::move(other.m_ws);
+    }
+    return *this;
+}
+
+WorkspaceLease::~WorkspaceLease() { release(); }
+
+void WorkspaceLease::release() noexcept
+{
+    if (m_ws)
+        m_task->give_back(m_home, std::move(m_ws));
 }
 
 State Task::make_state(std::span<const AtomArgs> atoms, std::span<const f64> values) const
@@ -209,9 +278,10 @@ bool Task::is_goal(StateView s) const
     if (g.unsatisfiable)
         return false;
     if (g.uses_derived || !m_compiled.num.goal.empty())
-        // A separate per-thread workspace, so a goal test inside a successor callback does not clobber the
-        // enumeration running in workspace().
-        return evaluation_workspace().successors().is_goal(s);
+    {
+        const WorkspaceLease ws = workspace();
+        return ws->successors().is_goal(s);
+    }
     for (const plan::Check& c : g.lits)
     {
         const u32 slot = m_atoms.find(c.pat.base);  // ground pattern: the key is the base

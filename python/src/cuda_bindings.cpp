@@ -1203,7 +1203,8 @@ void bind_cuda(nb::module_& parent)
                 auto block = std::make_shared<std::vector<u64>>(b.view.rows * DW, 0);
                 {
                     nb::gil_scoped_release release;
-                    Successors& succ = t.task->workspace().successors();
+                    const WorkspaceLease lease = t.task->workspace();
+                    Successors& succ = lease->successors();
                     for (u64 i = 0; i < b.view.rows && t.task->has_axioms(); ++i)
                     {
                         succ.prepare(StateView{b.view.row(i), b.view.words, b.view.numeric_words ? b.view.row(i) + b.view.words : nullptr, b.view.numeric_words});

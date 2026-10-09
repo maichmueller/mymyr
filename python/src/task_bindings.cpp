@@ -916,7 +916,8 @@ using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
 ActionList applicable_actions(const Owner& o, StateView s, SymmetryPruning symmetry = SymmetryPruning::Off,
                               u32 first_schema = 0, u32 end_schema = ~u32{0})
 {
-    Successors& succ = o.core->task->workspace().successors();
+    const WorkspaceLease lease = o.core->task->workspace();
+    Successors& succ = lease->successors();
     std::vector<u32> schemas;
     std::vector<ObjectId> bindings;
     succ.prepare(s);
@@ -957,7 +958,8 @@ struct PyApplicableIter
 Arg<PyAction> applicable_next(PyApplicableIter& it)
 {
     nb::ft_lock_guard lock(it.m);
-    Successors& succ = it.o.core->task->workspace().successors();
+    const WorkspaceLease lease = it.o.core->task->workspace();
+    Successors& succ = lease->successors();
     if (it.pos == it.schemas.size())
     {
         it.schemas.clear();
@@ -1007,7 +1009,8 @@ AtomList derived_atoms(const Owner& o, StateView s)
         return out;
     std::vector<u32> slots;
     {
-        Successors& succ = t.workspace().successors();
+        const WorkspaceLease lease = t.workspace();
+        Successors& succ = lease->successors();
         succ.prepare(s);
         const detail::Engine& e = succ.engine();
         bits::for_each(e.derived(), e.derived_words(), [&](u64 b) { slots.push_back(static_cast<u32>(b)); });
@@ -1027,7 +1030,8 @@ AtomList derived_atoms(const Owner& o, StateView s)
 /// Successor states in canonical order; with labels, (Action, State) pairs.
 nb::list successors(const Owner& o, StateView s, bool labels, SymmetryPruning symmetry = SymmetryPruning::Off)
 {
-    Successors& succ = o.core->task->workspace().successors();
+    const WorkspaceLease lease = o.core->task->workspace();
+    Successors& succ = lease->successors();
     std::vector<State> states;
     std::vector<u32> schemas;
     std::vector<ObjectId> bindings;
@@ -1067,13 +1071,33 @@ nb::list successors(const Owner& o, StateView s, bool labels, SymmetryPruning sy
     return out;
 }
 
+// Single-state queries. Each takes a workspace of its own, so they may be called from inside a search's callbacks.
+bool any_applicable(const Task& t, StateView s)
+{
+    const WorkspaceLease ws = t.workspace();
+    return ws->successors().any_applicable(s);
+}
+
+bool is_applicable(const Task& t, StateView s, const ActionLabel& a)
+{
+    const WorkspaceLease ws = t.workspace();
+    return ws->successors().is_applicable(s, a);
+}
+
+/// The successor of s under a; std::invalid_argument (ValueError) if a is not applicable in s.
+State apply_action(const Task& t, StateView s, const ActionLabel& a)
+{
+    const WorkspaceLease ws = t.workspace();
+    StateBuilder b;
+    ws->successors().apply(s, a, b);
+    return b.build();
+}
+
 Arg<PyState> apply(const Owner& o, StateView s, nb::handle action)
 {
     const auto [schema, binding] = action_label(*o.core, action, nb::none());
     const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding.data()), binding.size()}};
-    StateBuilder b;
-    o.core->task->workspace().successors().apply(s, label, b);  // std::invalid_argument -> ValueError
-    return make_state(o, b.build());
+    return make_state(o, apply_action(*o.core->task, s, label));
 }
 
 // ------------------------------------------------------------------------------------------------ binding generators
@@ -1297,7 +1321,8 @@ void refill(PyBindingsIter& it)
         opt.limit = want;
         opt.resume_after = it.last;
         const PartialBinding partial(it.partial);
-        Workspace& ws = task.workspace();
+        const WorkspaceLease lease = task.workspace();
+        Workspace& ws = *lease;
         if (it.ground)
         {
             auto keep = [&](const GroundConjunction& g)
@@ -1399,7 +1424,11 @@ nb::object make_bindings_iter(const Owner& o, StateView s, nb::handle target, nb
 ActionList schema_actions(const Owner& o, StateView s, u32 schema, const std::vector<std::optional<ObjectId>>& partial)
 {
     const Task& task = *o.core->task;
-    std::vector<std::vector<ObjectId>> found = mymyr::bindings(task, task.workspace(), SchemaId{schema}, s, partial);
+    std::vector<std::vector<ObjectId>> found;
+    {
+        const WorkspaceLease ws = task.workspace();
+        found = mymyr::bindings(task, *ws, SchemaId{schema}, s, partial);
+    }
     std::ranges::sort(found, [](const std::vector<ObjectId>& a, const std::vector<ObjectId>& b)
                       { return std::ranges::lexicographical_compare(a, b, {}, &ObjectId::v, &ObjectId::v); });
     ActionList out{nb::list()};
@@ -1538,14 +1567,14 @@ void bind_task_api(nb::class_<C>& cls)
             "any_applicable",
             [](Self self, StateLike state) {
                 StateArg s = state_arg(*self.p->core, state);
-                return self.p->core->task->workspace().successors().any_applicable(s.view);
+                return any_applicable(*self.p->core->task, s.view);
             },
             "state"_a, "Whether some action is applicable in the state (stops at the first one).")
         .def(
             "is_dead_end",
             [](Self self, StateLike state) {
                 StateArg s = state_arg(*self.p->core, state);
-                return !self.p->core->task->workspace().successors().any_applicable(s.view);
+                return !any_applicable(*self.p->core->task, s.view);
             },
             "state"_a, "Whether no action is applicable in the state (not any_applicable).")
         .def(
@@ -1596,7 +1625,7 @@ void bind_task_api(nb::class_<C>& cls)
                 StateArg s = state_arg(*self.p->core, state);
                 const auto [schema, binding] = action_label(*self.p->core, action, nb::none());
                 const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding.data()), binding.size()}};
-                return self.p->core->task->workspace().successors().is_applicable(s.view, label);
+                return is_applicable(*self.p->core->task, s.view, label);
             },
             "state"_a, "action"_a)
         .def(
@@ -2203,10 +2232,10 @@ void bind_task(nb::module_& m)
              nb::kw_only(), "symmetry_pruning"_a = "off",
              "The applicable actions as a lazy iterator (Task.iter_applicable_actions).")
         .def("any_applicable",
-             [](const PyState& s) { return s.core->task->workspace().successors().any_applicable(s.s.view()); },
+             [](const PyState& s) { return any_applicable(*s.core->task, s.s.view()); },
              "Whether some action is applicable (stops at the first one).")
         .def("is_dead_end",
-             [](const PyState& s) { return !s.core->task->workspace().successors().any_applicable(s.s.view()); },
+             [](const PyState& s) { return !any_applicable(*s.core->task, s.s.view()); },
              "Whether no action is applicable (not any_applicable).")
         .def("derived_atoms", [](const PyState& s) { return derived_atoms(Owner{s.core, s.owner}, s.s.view()); },
              "The derived atoms: the fluent atoms closed under the axioms (Task.derived_atoms).")
@@ -2261,15 +2290,13 @@ void bind_task(nb::module_& m)
              [](const PyAction& a, StateLike state) {
                  const Owner o{a.core, a.owner};
                  StateArg s = state_arg(*a.core, state);
-                 StateBuilder b;
-                 a.core->task->workspace().successors().apply(s.view, a.label(), b);
-                 return make_state(o, b.build());
+                 return make_state(o, apply_action(*a.core->task, s.view, a.label()));
              },
              "state"_a)
         .def("is_applicable",
              [](const PyAction& a, StateLike state) {
                  StateArg s = state_arg(*a.core, state);
-                 return a.core->task->workspace().successors().is_applicable(s.view, a.label());
+                 return is_applicable(*a.core->task, s.view, a.label());
              },
              "state"_a)
         .def("__eq__",

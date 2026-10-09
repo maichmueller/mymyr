@@ -195,7 +195,8 @@ TEST(Numeric, StatesThatDifferOnlyInTheirValuesAreDistinct)
 {
     const auto task = Task::from_text_file(numeric_task("cs-counters"));
     ASSERT_GT(task->numeric_slots(), 0u);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     std::vector<State> next;
     for (const Action& a : succ.applicable_actions(s0.view()))  // not from inside a callback: not reentrant
@@ -403,7 +404,8 @@ TEST(ActionCosts, NumericPlansEqualTheFork)
             continue;
         EXPECT_EQ(plan.size(), c.plan_len) << c.name;
         EXPECT_EQ(cost, c.cost) << c.name;
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         State s = task->initial_state();
         const heuristics::ActionCosts costs(*task);
         f64 g = costs.initial(s.view());
@@ -432,7 +434,8 @@ TEST(NumericRl, ExpandRowsCarryTheNumericWords)
     {
         const auto task = Task::from_text_file(numeric_task(name));
         const u32 NN = task->numeric_words(), W = std::max<u32>(1, task->words()), RW = W + NN;
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         // a batch: the initial state and its successors, twice
         const State s0 = task->initial_state();
         std::vector<State> batch{s0};

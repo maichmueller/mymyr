@@ -149,7 +149,8 @@ TEST(Brfs, StopAtGoalReturnsAValidPlan)
             bo.stop_at_goal = true;
             const BrfsResult r = brfs(*task, bo);
             ASSERT_TRUE(r.solved) << name;
-            Successors& succ = task->workspace().successors();
+            const WorkspaceLease lease = task->workspace();
+            Successors& succ = lease->successors();
             State s = task->initial_state();
             for (const Action& a : r.plan)
             {
@@ -187,7 +188,8 @@ TEST(Brfs, SingleThreadedStoresRejectThreads)
 
 bool replays(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = task.initial_state();
     for (const Action& a : plan)
     {

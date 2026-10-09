@@ -135,7 +135,8 @@ void reference_shuffle(SplitMix64& rng, std::span<u32> a)
 /// `atom`: an atomic goal (the portfolio's use case) instead of the task's goal.
 ORollout oracle_rollout(const Task& task, ActionOrdering ord, u64 seed, u64 max_states, std::optional<CanonicalAtom> atom = {})
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const bool w0 = succ.witness_pruning(), c0 = succ.canonical_order();
     succ.set_witness_pruning(false);
     succ.set_canonical_order(true);
@@ -322,7 +323,8 @@ ORollout oracle_rollout(const Task& task, ActionOrdering ord, u64 seed, u64 max_
 
 bool reaches_goal(const Task& task, std::span<const Action> plan, const std::function<bool(StateView)>& goal = {})
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = task.initial_state();
     for (const Action& a : plan)
     {

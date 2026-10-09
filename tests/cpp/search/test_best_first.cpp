@@ -44,7 +44,8 @@ size_t optimal_length(const Task& task)
 /// The plan is applicable from `start` and ends in a state satisfying `goal` (default: the task's goal).
 bool valid_plan(const Task& task, const std::vector<Action>& plan, const State& start, State* end = nullptr)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = start;
     for (const Action& a : plan)
     {
@@ -99,7 +100,7 @@ TEST(BestFirst, AStarIsOptimalOnEveryStoreAndQueue)
                     EXPECT_EQ(r.cost, static_cast<double>(L));
                     EXPECT_TRUE(valid_plan(*task, r.plan, task->initial_state()));
                     ASSERT_TRUE(r.goal_state.has_value());
-                    EXPECT_TRUE(task->workspace().successors().is_goal(*r.goal_state));
+                    EXPECT_TRUE(task->is_goal(*r.goal_state));
                     EXPECT_GT(r.stats.expanded, 0u);
                     EXPECT_GE(r.stats.states, r.stats.expanded);
                     if (first == 0)
@@ -296,7 +297,8 @@ TEST(BestFirst, BlockedStatesAreNeverEntered)
     ASSERT_EQ(base.status, SearchStatus::Solved);
     ASSERT_GE(base.plan.size(), 2u);
     // block the state after the first action of the optimal plan (and the start state, which stays exempt)
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s1 = succ.apply(task->initial_state(), base.plan[0].label());
     for (const Algo& a : k_all)
     {
@@ -328,7 +330,8 @@ TEST(BestFirst, GoalSpecs)
     const auto task = load("depot__p02");
     const BestFirstResult base = astar_eager(*task, with_h(heuristics::Kind::Blind));
     ASSERT_EQ(base.status, SearchStatus::Solved);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     // AnyOf: reach the fluent atoms of the state two steps into the optimal plan, or an unreachable combination
     State s2 = task->initial_state();
     for (size_t i = 0; i < 2; ++i)
@@ -373,7 +376,8 @@ TEST(BestFirst, StartStateOption)
     const auto task = load("depot__p02");
     const BestFirstResult base = astar_eager(*task, with_h(heuristics::Kind::Max));
     ASSERT_EQ(base.status, SearchStatus::Solved);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s1 = succ.apply(task->initial_state(), base.plan[0].label());
     BestFirstOptions o = with_h(heuristics::Kind::Max);
     o.start = s1;
@@ -475,7 +479,8 @@ TEST(Heuristics, BasicPropertiesAlongAnOptimalPlan)
             o.evaluation = heuristics::Evaluation::Lifted;
             lifted[k] = heuristics::make_heuristic(*task, o);
         }
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         State s = task->initial_state();
         const size_t L = base.plan.size();
         for (size_t i = 0; i <= L; ++i)
@@ -546,7 +551,8 @@ TEST(Heuristics, AnyOfGoalsTakeTheCheapest)
     }
     // the grounded-only kinds: a negative literal over an atom of s0 that depot never uses negatively has no
     // proposition in the grounding (refused); positive atoms of a later state do
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const BestFirstResult plan = astar_eager(*task, with_h(heuristics::Kind::Max));
     ASSERT_GE(plan.plan.size(), 3u);
     State s3 = s0;

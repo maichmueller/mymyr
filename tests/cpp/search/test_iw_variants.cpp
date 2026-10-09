@@ -50,7 +50,8 @@ struct EngineRun
 
 IwResult run_classic(const Task& task, u32 k, EngineRun how, u32* num_states = nullptr, const SearchControl& control = {})
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const sd::GoalTest goal = sd::GoalTest::from_spec(task, control.goal);
     const sd::BlockedSet blocked(control.blocked_states);
     sd::Env env(task, succ, goal, blocked, control);
@@ -210,7 +211,8 @@ struct OPass
 
 OPass oracle_pass(const Task& task, const State& root, OracleNovelty* nov, ORoot rule, bool keep_depth_one)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const bool w0 = succ.witness_pruning(), c0 = succ.canonical_order();
     succ.set_witness_pruning(false);
     succ.set_canonical_order(true);
@@ -902,7 +904,8 @@ TEST(StateTracker, SuccessorRecordingEqualsFullRecording)
     for (const SuiteTask& t : suite())
     {
         const auto task = Task::from_text_file(task_path(t.name));
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         sd::StateTracker full(*task, true, true), incremental(*task, true, true);
         const State root = task->initial_state();
         full.record(root.data(), root.size_words());
