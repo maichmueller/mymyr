@@ -296,13 +296,17 @@ StateArg state_arg(PyTaskCore& core, nb::handle h)
     return a;
 }
 
-/// Parses "(name a b)" into tokens.
+/// Parses "(name a b)" into tokens; ValueError for unbalanced parentheses.
 std::vector<std::string> tokens(std::string_view s)
 {
     std::vector<std::string> out;
     std::string cur;
+    int depth = 0;
     for (char c : s)
     {
+        depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+        if (depth < 0)
+            break;
         if (c == '(' || c == ')' || c == ' ' || c == '\t' || c == '\n' || c == ',')
         {
             if (!cur.empty())
@@ -312,6 +316,8 @@ std::vector<std::string> tokens(std::string_view s)
         else
             cur.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
+    if (depth != 0)
+        throw nb::value_error(("mymyr: unbalanced parentheses in '" + std::string(s) + "'").c_str());
     if (!cur.empty())
         out.push_back(std::move(cur));
     return out;
@@ -1948,14 +1954,20 @@ void bind_task(nb::module_& m)
     task.def(
             "__init__",
             [](PyTask* self, const FormalismTask& normalized, std::string_view atoms, std::string_view matching,
-               u32 fc_free_params, u32 frozen_max_words, u32 pilot_expansions) {
+               IntArg fc_free_params_in, IntArg frozen_max_words_in, IntArg pilot_expansions_in) {
+                const u32 fc_free_params = int_arg<u32>(fc_free_params_in, "fc_free_params");
+                const u32 frozen_max_words = int_arg<u32>(frozen_max_words_in, "frozen_max_words");
+                const u32 pilot_expansions = int_arg<u32>(pilot_expansions_in, "pilot_expansions");
                 const TaskOptions o = make_options(atoms, matching, fc_free_params, frozen_max_words, pilot_expansions);
                 new (self) PyTask{build_core(normalized.t, normalized.source, o)};
             },
             "normalized"_a, MYMYR_TASK_OPTION_ARGS, k_options_doc)
         .def_static(
             "from_text",
-            [](const std::filesystem::path& path, std::string_view atoms, std::string_view matching, u32 fc, u32 fmw, u32 pilot) {
+            [](const std::filesystem::path& path, std::string_view atoms, std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in) {
+                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
+                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
+                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
                 const TaskOptions o = make_options(atoms, matching, fc, fmw, pilot);
                 std::shared_ptr<const formalism::TaskData> data;
                 {
@@ -1970,7 +1982,10 @@ void bind_task(nb::module_& m)
         .def_static(
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain, const std::filesystem::path& problem,
-               std::string_view atoms, std::string_view matching, u32 fc, u32 fmw, u32 pilot) {
+               std::string_view atoms, std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in) {
+                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
+                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
+                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
                 const TaskOptions o = make_options(atoms, matching, fc, fmw, pilot);
                 PyDomain dom;
                 if (nb::isinstance<PyDomain>(domain))
@@ -1979,8 +1994,7 @@ void bind_task(nb::module_& m)
                 {
                     const std::filesystem::path path = nb::cast<std::filesystem::path>(domain);
                     nb::gil_scoped_release release;
-                    dom = PyDomain{frontend::Domain::from_file(path), std::make_shared<const std::string>(read_file(path.string())),
-                                   path.string()};
+                    dom = load_domain(path);
                 }
                 std::shared_ptr<const formalism::TaskData> data;
                 auto source = std::make_shared<TaskSource>();
@@ -1989,7 +2003,7 @@ void bind_task(nb::module_& m)
                     source->kind = TaskSource::Kind::Pddl;
                     source->domain = dom.text ? *dom.text : std::string();
                     source->domain_path = dom.path;
-                    source->problem = read_file(problem.string());
+                    source->problem = read_problem(problem);
                     source->problem_path = problem.string();
                     data = dom.d->instantiate_file(problem);
                 }
@@ -2090,7 +2104,8 @@ void bind_task(nb::module_& m)
             "covers the slots assigned so far.")
         .def(
             "device_arrays",
-            [](const PyTask& t, u32 version, FrameworkArg framework) {
+            [](const PyTask& t, IntArg version_in, FrameworkArg framework) {
+                const u32 version = int_arg<u32>(version_in, "version");
                 const Framework fw = parse_framework(framework, nb::none());
                 std::shared_ptr<const rl::ArrayBundle> b;
                 {

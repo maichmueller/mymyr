@@ -987,7 +987,10 @@ void bind_cuda(nb::module_& parent)
                              "compute stream and a copy stream. Owned by the user; device tasks and arrays keep it alive.")
         .def(
             "__init__",
-            [](PyContextObj* self, int device, u64 max_bytes, std::optional<u64> release_threshold) {
+            [](PyContextObj* self, IntArg device_in, IntArg max_bytes_in, IntArg release_threshold_in) {
+                const int device = int_arg<int>(device_in, "device", 0);
+                const u64 max_bytes = int_arg<u64>(max_bytes_in, "max_bytes");
+                const std::optional<u64> release_threshold = opt_int_arg<u64>(release_threshold_in, "release_threshold");
                 cuda::ContextOptions o;
                 o.max_bytes = max_bytes;
                 if (release_threshold)
@@ -1014,7 +1017,7 @@ void bind_cuda(nb::module_& parent)
             c.p->ctx->synchronize();
             c.p->drain(true);
         })
-        .def("trim", [](const PyContextObj& c, u64 keep) { c.p->ctx->trim(keep); }, "keep"_a = 0)
+        .def("trim", [](const PyContextObj& c, IntArg keep_in) { const u64 keep = int_arg<u64>(keep_in, "keep"); c.p->ctx->trim(keep); }, "keep"_a = 0)
         .def_prop_ro("pending_imports", [](const PyContextObj& c) {
             c.p->drain();
             return c.p->pending();
@@ -1132,7 +1135,8 @@ void bind_cuda(nb::module_& parent)
         .def(
             "apply",
             [](PyDeviceTask& t, ArrayArg states, ArrayArg state_index, ArrayArg schema, ArrayArg binding,
-               ArrayArg derived, u32 words, StreamArg stream, FrameworkArg framework) {
+               ArrayArg derived, IntArg words_in, StreamArg stream, FrameworkArg framework) {
+                const u32 words = int_arg<u32>(words_in, "words");
                 SmokeInputs in = smoke_inputs(t, states, derived, stream);
                 const k::DeviceLabels l = labels_of(t, in, state_index, schema, binding);
                 const rl::dev::TaskView& v = t.dt->acquire(in.os.s);
@@ -1223,9 +1227,9 @@ void bind_cuda(nb::module_& parent)
                         "tail copies. One writer; not thread-safe.")
         .def(
             "__init__",
-            [](PyArena* self, ContextArg ctx, u32 words, u64 capacity) {
-                if (words == 0)
-                    throw nb::value_error("mymyr: StateArena needs words >= 1");
+            [](PyArena* self, ContextArg ctx, IntArg words_in, IntArg capacity_in) {
+                const u32 words = int_arg<u32>(words_in, "words", 1);
+                const u64 capacity = int_arg<u64>(capacity_in, "capacity");
                 PyContextPtr c = context_of(ctx);
                 auto a = std::make_unique<cuda::DeviceArena>(c->ctx, words * 8, capacity);
                 new (self) PyArena{std::move(c), std::move(a), words};
@@ -1264,8 +1268,9 @@ void bind_cuda(nb::module_& parent)
         .def("wait", [](PyArena& a) { a.arena->wait(); })
         .def(
             "device_view",
-            [](const PyArena& a, u64 lo, SizeArg hi_obj, FrameworkArg framework) -> ArrayOut {
-                const u64 hi = hi_obj.is_none() ? a.arena->device_size() : nb::cast<u64>(hi_obj);
+            [](const PyArena& a, IntArg lo_in, SizeArg hi_obj, FrameworkArg framework) -> ArrayOut {
+                const u64 lo = int_arg<u64>(lo_in, "lo");
+                const u64 hi = hi_obj.is_none() ? a.arena->device_size() : int_arg<u64>(hi_obj, "hi");
                 if (lo > hi || hi > a.arena->device_size())
                     throw nb::index_error("mymyr: StateArena.device_view: range outside [0, device_size]");
                 const Framework fw = framework.is_none() ? Framework::DLPack : parse_framework(framework, nb::none());
@@ -1473,12 +1478,14 @@ void bind_cuda(nb::module_& parent)
             return nb::cast(*e.padded);
         }, "The padded view, if expand() was called with K")
         .def("pad",
-             [](const PyDeviceExpansion& e, u32 K) {
+             [](const PyDeviceExpansion& e, IntArg K_in) {
+                 const u32 K = int_arg<u32>(K_in, "K");
                  return make_device_padded(e.ref, e.ctx, e.flat, K == 0 ? device_auto_K(e.flat) : K, e.fw, e.enc);
              },
              "K"_a = 0, "The padded [N, K] view on the device (K = 0: the next power of two at or above the largest count).")
         .def("action",
-             [](const PyDeviceExpansion& e, u64 j) {
+             [](const PyDeviceExpansion& e, IntArg j_in) {
+                 const u64 j = int_arg<u64>(j_in, "row");
                  if (j >= e.flat.valid())
                      throw nb::index_error("mymyr: successor row out of range");
                  std::vector<i32> b(e.flat.label_width + 1);
@@ -1508,7 +1515,8 @@ void bind_cuda(nb::module_& parent)
              },
              "row"_a, "The Action (label) of flat row j (copies it to the host).")
         .def("actions",
-             [](nb::pointer_and_handle<PyDeviceExpansion> self, u64 i) {
+             [](nb::pointer_and_handle<PyDeviceExpansion> self, IntArg i_in) {
+                 const u64 i = int_arg<u64>(i_in, "state");
                  const PyDeviceExpansion& e = *self.p;
                  if (i >= e.flat.rows)
                      throw nb::index_error("mymyr: state index out of range");
@@ -1608,7 +1616,8 @@ void bind_cuda(nb::module_& parent)
              "The node records [states, 2] int32: parent id (-1 for the root) and the index among the parent's "
              "successors in canonical order (zero-copy, read-only, on the device)")
         .def("plan_to",
-             [](const PyDeviceBrfs& x, u64 id) {
+             [](const PyDeviceBrfs& x, IntArg id_in) {
+                 const u64 id = int_arg<u64>(id_in, "id");
                  std::vector<Action> plan;
                  {
                      nb::gil_scoped_release release;

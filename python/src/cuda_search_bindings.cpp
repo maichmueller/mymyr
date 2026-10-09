@@ -62,8 +62,6 @@ ContextLookup g_lookup = nullptr;
 // ------------------------------------------------------------------------------------------------ argument types
 using TaskArg = Arg<std::variant<PyTask, PyHandle>>;
 using ContextArg = Arg<ann::CudaContext>;
-using IntArg = Arg<u64>;
-using FloatArg = Arg<double>;
 using StrArg = Arg<std::string>;
 using StateArg = Arg<PyState>;
 using Slots = nb::typed<nb::sequence, int>;
@@ -123,11 +121,11 @@ cuda::MultiIwOptions options_of(u32 max_arity, nb::handle width_zero, bool optim
     o.canonical_order = canonical_order;
     o.exact = exact;
     if (!max_states.is_none())
-        o.budget.max_states = nb::cast<u64>(max_states);
+        o.budget.max_states = int_arg<u64>(max_states, "max_states");
     if (!max_expanded.is_none())
-        o.budget.max_expanded = nb::cast<u64>(max_expanded);
+        o.budget.max_expanded = int_arg<u64>(max_expanded, "max_expanded");
     if (!max_depth.is_none())
-        o.budget.max_depth = nb::cast<u32>(max_depth);
+        o.budget.max_depth = int_arg<u32>(max_depth, "max_depth");
     if (!max_seconds.is_none())
     {
         const double s = nb::cast<double>(max_seconds);
@@ -136,10 +134,10 @@ cuda::MultiIwOptions options_of(u32 max_arity, nb::handle width_zero, bool optim
         o.budget.max_seconds = s;
     }
     if (!max_searches.is_none())
-        o.max_searches = nb::cast<u32>(max_searches);
+        o.max_searches = int_arg<u32>(max_searches, "max_searches");
     if (!chunk_states.is_none())
     {
-        o.chunk_states = nb::cast<u32>(chunk_states);
+        o.chunk_states = int_arg<u32>(chunk_states, "chunk_states");
         if (o.chunk_states == 0)
             throw nb::value_error("mymyr: chunk_states must be positive");
     }
@@ -175,7 +173,7 @@ search::GoalSpec::AtomGoal goal_of(nb::handle g, const Task& task)
     {
         for (nb::handle v : seq)
         {
-            const i64 s = nb::cast<i64>(v);
+            const i64 s = int_arg<i64>(v, "a goal slot");
             if (s < 0 || static_cast<u64>(s) >= slots)
                 throw nb::value_error(("mymyr: goal slot " + std::to_string(s) + " is not a fluent slot of the task (0.." +
                                        std::to_string(slots) + ")")
@@ -489,10 +487,11 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
 
     m.def(
         "multi_iw",
-        [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, u32 max_arity, StrArg width_zero,
+        [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_arity_in, StrArg width_zero,
            bool optimize_iw1, bool witness_pruning, bool canonical_order, bool exact, IntArg max_states,
            IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
            TaskIdsArg task_ids) {
+            const u32 max_arity = int_arg<u32>(max_arity_in, "max_arity");
             const cuda::MultiIwOptions opts = options_of(max_arity, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                          exact, max_states, max_expanded, max_depth, max_seconds,
                                                          max_searches, chunk_states);
@@ -545,9 +544,10 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
     m.def(
         "rollouts",
         [](TaskArg task, SeedsArg seeds, ContextArg ctx, StateArg start, Arg<GoalArg> goal,
-           IntArg max_next_layer_states, u32 max_arity, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
+           IntArg max_next_layer_states, IntArg max_arity_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, IntArg max_searches, IntArg chunk_states) {
+            const u32 max_arity = int_arg<u32>(max_arity_in, "max_arity");
             const Owner o = owner_of(task);
             const TaskPtr& t = o.core->task;
             const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
@@ -556,13 +556,13 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                                                    chunk_states);
             if (!max_next_layer_states.is_none())
             {
-                opts.max_next_layer_states = nb::cast<u32>(max_next_layer_states);
+                opts.max_next_layer_states = int_arg<u32>(max_next_layer_states, "max_next_layer_states");
                 if (opts.max_next_layer_states == 0)
                     throw nb::value_error("mymyr: max_next_layer_states must be positive");
             }
             std::vector<u64> s;
             for (nb::handle v : seeds)
-                s.push_back(nb::cast<u64>(v));
+                s.push_back(int_arg<u64>(v, "seeds"));
             PyIwBatch x;
             x.owners.push_back(o);
             x.rollouts = true;

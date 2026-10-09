@@ -73,8 +73,6 @@ using datasets::StateSpaceStatus;
 using TaskArg = Arg<std::variant<PyTask, PyHandle>>;
 using ContextArg = Arg<ann::CudaContext>;
 using OutputArg = Arg<ann::SpaceOutput>;
-using IntArg = Arg<u64>;
-using FloatArg = Arg<double>;
 using DeviceArg = Arg<int>;
 using ArrayDict = nb::typed<nb::dict, std::string, ann::Any>;
 using StatsDict = nb::typed<nb::dict, std::string, std::variant<double, u64>>;
@@ -245,7 +243,7 @@ cuda::DeviceStateSpaceOptions options_of(const Common& a)
     cuda::DeviceStateSpaceOptions o;
     o.space.threads = a.threads;
     if (!a.max_states.is_none())
-        o.space.max_states = nb::cast<u64>(a.max_states);
+        o.space.max_states = int_arg<u64>(a.max_states, "max_states");
     if (!a.max_seconds.is_none())
     {
         const double s = nb::cast<double>(a.max_seconds);
@@ -257,21 +255,21 @@ cuda::DeviceStateSpaceOptions options_of(const Common& a)
     o.space.labels = a.labels;
     if (!a.chunk_states.is_none())
     {
-        o.chunk_states = nb::cast<u32>(a.chunk_states);
+        o.chunk_states = int_arg<u32>(a.chunk_states, "chunk_states");
         if (o.chunk_states == 0)
             throw nb::value_error("mymyr: chunk_states must be positive");
     }
     if (!a.view_bytes.is_none())
-        o.view_bytes = nb::cast<u64>(a.view_bytes);
+        o.view_bytes = int_arg<u64>(a.view_bytes, "view_bytes");
     if (!a.expected_states.is_none())
-        o.expected_states = nb::cast<u64>(a.expected_states);
+        o.expected_states = int_arg<u64>(a.expected_states, "expected_states");
     o.stream = stream_value(a.stream);
     return o;
 }
 
 cuda::ContextPtr context_for(nb::handle table, const Common& a)
 {
-    const int device = a.device.is_none() ? 0 : nb::cast<int>(a.device);
+    const int device = a.device.is_none() ? 0 : int_arg<int>(a.device, "device", 0);
     cuda::ContextPtr c = table_device_context(table, a.ctx, device);
     if (!a.device.is_none() && c->device() != device)
         throw nb::value_error(("mymyr: device " + std::to_string(device) + " differs from the context's (cuda:" +
@@ -338,12 +336,12 @@ std::vector<PyDeviceGeneration> generate_many(nb::handle table, const Common& a,
     opts.output = output;
     if (!wave_states.is_none())
     {
-        opts.wave_states = nb::cast<u64>(wave_states);
+        opts.wave_states = int_arg<u64>(wave_states, "wave_states");
         if (opts.wave_states == 0)
             throw nb::value_error("mymyr: wave_states must be positive");
     }
     if (!wave_instances.is_none())
-        opts.wave_instances = nb::cast<u32>(wave_instances);
+        opts.wave_instances = int_arg<u32>(wave_instances, "wave_instances");
     cuda::DeviceStateSpaces rs;
     {
         nb::gil_scoped_release release;
@@ -470,9 +468,10 @@ void bind_cuda_datasets(nb::module_& parent)
 
     m.def(
         "generate_state_space",
-        [](TaskArg task, ContextArg ctx, DeviceArg device, StreamArg stream, u32 threads, IntArg max_states,
+        [](TaskArg task, ContextArg ctx, DeviceArg device, StreamArg stream, IntArg threads_in, IntArg max_states,
            FloatArg max_seconds, bool remove_if_unsolvable, bool labels, IntArg chunk_states, IntArg view_bytes,
            IntArg expected_states, OutputArg output) {
+            const u32 threads = threads_arg(threads_in);
             const Common a{ctx, device, stream, threads, max_states, max_seconds, remove_if_unsolvable, labels,
                            chunk_states, view_bytes, expected_states};
             return generate_one(task, a, parse_output(output));
@@ -485,9 +484,10 @@ void bind_cuda_datasets(nb::module_& parent)
 
     m.def(
         "state_space",
-        [](TaskArg task, ContextArg ctx, DeviceArg device, StreamArg stream, u32 threads, IntArg max_states,
+        [](TaskArg task, ContextArg ctx, DeviceArg device, StreamArg stream, IntArg threads_in, IntArg max_states,
            FloatArg max_seconds, bool remove_if_unsolvable, bool labels, IntArg chunk_states, IntArg view_bytes,
            IntArg expected_states) {
+            const u32 threads = threads_arg(threads_in);
             const Common a{ctx, device, stream, threads, max_states, max_seconds, remove_if_unsolvable, labels,
                            chunk_states, view_bytes, expected_states};
             return generate_one(task, a, cuda::StateSpaceOutput::Device).space;
@@ -500,9 +500,10 @@ void bind_cuda_datasets(nb::module_& parent)
 
     m.def(
         "generate_state_spaces",
-        [](TableArg table, ContextArg ctx, DeviceArg device, StreamArg stream, u32 threads, IntArg max_states,
+        [](TableArg table, ContextArg ctx, DeviceArg device, StreamArg stream, IntArg threads_in, IntArg max_states,
            FloatArg max_seconds, bool remove_if_unsolvable, bool labels, IntArg chunk_states, IntArg view_bytes,
            IntArg expected_states, OutputArg output, IntArg wave_states, IntArg wave_instances) {
+            const u32 threads = threads_arg(threads_in);
             const Common a{ctx, device, stream, threads, max_states, max_seconds, remove_if_unsolvable, labels,
                            chunk_states, view_bytes, expected_states};
             return generate_many(table, a, parse_output(output), wave_states, wave_instances);
@@ -519,9 +520,10 @@ void bind_cuda_datasets(nb::module_& parent)
 
     m.def(
         "state_spaces",
-        [](TableArg table, ContextArg ctx, DeviceArg device, StreamArg stream, u32 threads, IntArg max_states,
+        [](TableArg table, ContextArg ctx, DeviceArg device, StreamArg stream, IntArg threads_in, IntArg max_states,
            FloatArg max_seconds, bool remove_if_unsolvable, bool labels, IntArg chunk_states, IntArg view_bytes,
            IntArg expected_states, IntArg wave_states, IntArg wave_instances) {
+            const u32 threads = threads_arg(threads_in);
             const Common a{ctx, device, stream, threads, max_states, max_seconds, remove_if_unsolvable, labels,
                            chunk_states, view_bytes, expected_states};
             std::vector<std::optional<PyDeviceStateSpace>> out;
