@@ -186,7 +186,7 @@ def test_knowledge_base_as_the_fork():
     g = kb.generalized_state_space
     assert (g.num_vertices, g.num_edges) == (36, 128)
     assert len(g.goal_vertices()) == 4 and len(g.unsolvable_vertices()) == 0
-    assert g.spaces == kb.state_spaces
+    assert [s.num_states for s in g.spaces] == [s.num_states for s in kb.state_spaces] == [8, 28]
     assert not kb.has_tuple_graphs and kb.width is None
     with pytest.raises(ValueError, match="no tuple graphs"):
         kb.tuple_graphs(0)
