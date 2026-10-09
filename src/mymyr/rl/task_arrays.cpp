@@ -771,7 +771,14 @@ GoalMasks goal_masks(const Task& task)
     std::vector<std::pair<u32, bool>> fluent;
     for (const plan::Check& c : goal.lits)
     {
-        // ground patterns: the key is the base (a canonical id)
+        // ground patterns: the key is the base (a canonical id). An atom outside the layout is in no state (no effect
+        // or axiom produces it and the initial state lacks it): as a positive goal it is unreachable, as a negative
+        // one it always holds.
+        if (c.pat.base >= A.layout().total)
+        {
+            g.unsatisfiable |= c.pos;
+            continue;
+        }
         const u32 s = A.intern(c.pat.base);
         if (c.pat.kind == plan::LitKind::Derived)
             (c.pos ? g.derived_pos : g.derived_neg).push_back(s);

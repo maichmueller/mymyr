@@ -1009,3 +1009,35 @@ TEST(DeviceNumericRules, OnlyEffectsThatFireConflictAndAssignDefines)
         EXPECT_EQ(r.goal_states, 2u);
     }
 }
+
+/// A goal literal over an atom no state holds (no effect adds it, the initial state lacks it): negative, it always
+/// holds; positive, no state is a goal. Device breadth-first search, A* and state space agree with the CPU.
+TEST(DeviceGoals, AtomsNoStateHolds)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    const auto domain = frontend::Domain::from_string(R"((define (domain d) (:requirements :strips :negative-preconditions)
+ (:predicates (f ?x) (g ?x))
+ (:action set :parameters (?x) :precondition (g ?x) :effect (f ?x))))",
+                                                      "d.pddl");
+    for (const auto& [goal, goals] : {std::pair{"(and (f a) (not (f b)))", 1u}, std::pair{"(and (f a) (f b))", 0u}})
+    {
+        SCOPED_TRACE(goal);
+        const TaskPtr task = Task::create(*domain->instantiate_string(
+            std::string("(define (problem p) (:domain d) (:objects a b) (:init (g a)) (:goal ") + goal + "))", "p.pddl"));
+        const BrfsResult r = cuda::brfs(ctx, task, {}).result;
+        EXPECT_TRUE(r.exhausted);
+        EXPECT_EQ(r.states, 2u);
+        EXPECT_EQ(r.goal_states, goals);
+        const search::BestFirstResult cpu = search::astar_eager(*task);
+        const cuda::DeviceBestFirstResult a = cuda::astar(ctx, task, {});
+        EXPECT_EQ(a.result.status, cpu.status);
+        EXPECT_EQ(a.result.status, goals ? search::SearchStatus::Solved : search::SearchStatus::Exhausted);
+        cuda::DeviceStateSpaceOptions o; o.space.remove_if_unsolvable = false; o.output = cuda::StateSpaceOutput::Host;
+        const cuda::DeviceStateSpaceResult s = cuda::state_space(ctx, task, o);
+        ASSERT_EQ(s.status, datasets::StateSpaceStatus::Ok);
+        ASSERT_TRUE(s.host);
+        EXPECT_EQ(s.host->num_states(), 2u);
+        EXPECT_EQ(s.host->num_goal_states(), goals);
+    }
+}

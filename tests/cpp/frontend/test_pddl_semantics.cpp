@@ -4,6 +4,7 @@
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
+#include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/search/best_first.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -360,4 +361,29 @@ TEST(PddlSemantics, RelaxedCostsStayLowerBounds)
     ASSERT_EQ(r.status, search::SearchStatus::Solved) << r.message;
     EXPECT_DOUBLE_EQ(r.cost, 0.6234567);
     EXPECT_LE(h, r.cost);
+}
+
+/// A goal literal over an atom no state holds (no effect adds it, the initial state lacks it): negative, it always
+/// holds; positive, the goal is unreachable. The goal masks of the RL and device paths say the same.
+TEST(PddlSemantics, GoalAtomsNoStateHolds)
+{
+    const std::string domain = R"((define (domain d) (:requirements :strips :negative-preconditions)
+ (:predicates (f ?x) (g ?x))
+ (:action set :parameters (?x) :precondition (g ?x) :effect (f ?x))))";
+    auto problem = [](const std::string& goal)
+    { return "(define (problem p) (:domain d) (:objects a b) (:init (g a)) (:goal " + goal + "))"; };
+    const auto holds = make(domain, problem("(and (f a) (not (f b)))"));
+    BrfsResult r = brfs(*holds);
+    EXPECT_TRUE(r.exhausted);
+    EXPECT_EQ(r.states, 2u);
+    EXPECT_EQ(r.goal_states, 1u);
+    rl::GoalMasks g = rl::goal_masks(*holds);
+    EXPECT_FALSE(g.unsatisfiable);
+    EXPECT_TRUE(std::ranges::all_of(g.neg, [](u64 w) { return w == 0; }));
+    const auto never = make(domain, problem("(and (f a) (f b))"));
+    r = brfs(*never);
+    EXPECT_TRUE(r.exhausted);
+    EXPECT_EQ(r.goal_states, 0u);
+    g = rl::goal_masks(*never);
+    EXPECT_TRUE(g.unsatisfiable);
 }
