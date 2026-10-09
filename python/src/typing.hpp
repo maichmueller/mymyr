@@ -80,6 +80,8 @@ std::string range_text(T lo, T hi)
     // only the 64-bit limits go unnamed: a narrower type's limit is part of the range a caller has to know
     const bool lo_open = std::is_signed_v<T> && sizeof(T) == 8 && lo == std::numeric_limits<T>::lowest();
     const bool hi_open = sizeof(T) == 8 && hi == std::numeric_limits<T>::max();
+    if (lo_open && hi_open)
+        return "in the 64-bit range";
     if (hi_open)
         return ">= " + std::to_string(lo);
     if (lo_open)

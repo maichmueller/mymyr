@@ -60,10 +60,13 @@ struct ExpandOptions
     bool validate = true;
 };
 
+/// States of one batch, and successor rows (capacity, total) of one expansion, at most: parents and offsets are i32.
+inline constexpr u64 k_max_rows = (u64{1} << 31) - 1;
+
 /// Destination buffers and results of a flat expansion. A null array is not written.
 struct Expansion
 {
-    u64 capacity = 0;        // rows of succ / parent / schema / binding / goal
+    u64 capacity = 0;        // rows of succ / parent / schema / binding / goal (at most k_max_rows)
     u32 words = 0;           // atom words per successor row
     u32 label_width = 0;     // columns of `binding` (at least the table's label_width() when binding is set)
     u64* succ = nullptr;     // [capacity, words + numeric_words]

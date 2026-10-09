@@ -363,7 +363,7 @@ u32 object_index(PyTaskCore& core, nb::handle h)
 {
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "an object index");
         if (v < 0 || v >= static_cast<i64>(core.data->objects.size()))
             throw nb::index_error("mymyr: object index out of range");
         return static_cast<u32>(v);
@@ -474,7 +474,7 @@ u32 predicate_index(PyTaskCore& core, nb::handle h)
     }
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "a predicate index");
         if (v < 0 || v >= static_cast<i64>(core.data->predicates.size()))
             throw nb::index_error("mymyr: predicate index out of range");
         return static_cast<u32>(v);
@@ -608,7 +608,7 @@ LiteralSpec literal_spec(PyTaskCore& core, nb::handle x)
     }
     if (nb::isinstance<nb::int_>(x))
     {
-        const i64 s = nb::cast<i64>(x);
+        const i64 s = int_arg<i64>(x, "an atom slot");
         if (s < 0 || s >= core.task->atoms().fluent_slots())
             throw nb::index_error("mymyr: atom slot out of range");
         const auto args = core.task->atoms().arguments(SlotId{static_cast<u32>(s)});
@@ -728,7 +728,7 @@ TypeId type_index(PyTaskCore& core, nb::handle h)
     }
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "a type index");
         if (v < 0 || v >= static_cast<i64>(D.types.size()))
             throw nb::index_error("mymyr: type index out of range");
         return TypeId{static_cast<u32>(v)};
@@ -1163,7 +1163,7 @@ u32 schema_index(PyTaskCore& core, nb::handle h)
 {
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "a schema index");
         if (v < 0 || v >= static_cast<i64>(core.data->schemas.size()))
             throw nb::index_error("mymyr: schema index out of range");
         return static_cast<u32>(v);
@@ -1241,7 +1241,7 @@ std::vector<std::optional<ObjectId>> partial_arg(PyTaskCore& core, const Target&
             u32 var = 0;
             if (nb::isinstance<nb::int_>(k))
             {
-                const i64 i = nb::cast<i64>(k);
+                const i64 i = int_arg<i64>(k, "a variable index");
                 if (i < 0 || i >= static_cast<i64>(t.arity))
                     throw nb::index_error(("mymyr: partial: variable index " + std::to_string(i) + " out of range (arity " +
                                            std::to_string(t.arity) + ")")
@@ -1292,10 +1292,7 @@ u64 limit_arg(nb::handle h)
 {
     if (h.is_none())
         return ~u64{0};
-    const i64 v = nb::cast<i64>(h);
-    if (v < 0)
-        throw nb::value_error("mymyr: limit must be >= 0");
-    return static_cast<u64>(v);
+    return int_arg<u64>(h, "limit");
 }
 
 ObjectTuple object_tuple(PyTaskCore& core, const ObjectId* b, u32 n)

@@ -26,6 +26,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace mymyr::cuda
 {
@@ -267,6 +268,8 @@ struct Driver
     void ensure_room(u64 more)
     {
         const u64 count = hc->count;
+        if (count + more > state_set::k_max_states)
+            throw std::length_error("mymyr: device best-first search: more than 2^31 - 2 states (with a step's candidates)");
         if (count + more > state_limit())
         {
             ensure_table(count, std::max(more, count));
@@ -1136,6 +1139,9 @@ DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestF
         throw std::invalid_argument("mymyr: device best-first search: null context or task");
     if (const std::string why = best_first_unsupported(*task, options); !why.empty())
         throw std::invalid_argument("mymyr: the CUDA backend cannot run this search: " + why);
+    if (options.expected_states > state_set::k_max_states)
+        throw std::invalid_argument("mymyr: device best-first search: expected_states above the state id limit (" +
+                                    std::to_string(state_set::k_max_states) + ")");
     if (task->numeric_slots())
         return numeric_best_first(std::move(ctx), std::move(task), options, greedy);
     Driver d(std::move(ctx), std::move(task), options, greedy);

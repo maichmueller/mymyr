@@ -147,7 +147,7 @@ const i32* import_task_ids(nb::handle obj, u64 rows, u32 instances, std::vector<
                                       .c_str());
         copy.resize(rows);
         for (u64 r = 0; r < rows; ++r)
-            copy[r] = checked(nb::cast<i64>(seq[r]), r);
+            copy[r] = checked(int_arg<i64>(seq[r], name), r);
         return copy.data();
     }
     if (!dl::host_accessible(dev.device_type))
@@ -250,12 +250,12 @@ FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal)
     r.numeric_words = NN;
     r.label_width = L;
     r.has_goal = goal;
-    r.off_succ = lay.add(cap * (W + NN) * sizeof(u64));
-    r.off_parent = lay.add(cap * sizeof(i32));
-    r.off_schema = lay.add(cap * sizeof(i32));
-    r.off_binding = lay.add(cap * L * sizeof(i32));
-    r.off_goal = lay.add(goal ? cap : 0);
-    r.off_offsets = lay.add((rows + 1) * sizeof(i32));
+    r.off_succ = lay.add(cap, (u64{W} + NN) * sizeof(u64));
+    r.off_parent = lay.add(cap, sizeof(i32));
+    r.off_schema = lay.add(cap, sizeof(i32));
+    r.off_binding = lay.add(cap, u64{L} * sizeof(i32));
+    r.off_goal = lay.add(goal ? cap : 0, 1);
+    r.off_offsets = lay.add(checked_add(rows, 1, "the offsets"), sizeof(i32));
     r.block = Block::make(lay.bytes);
     return r;
 }
@@ -283,14 +283,14 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     p.has_goal = f.has_goal;
     p.fw = fw;
     p.enc = enc;
-    const u64 NK = f.rows * K;
-    p.off_index = lay.add(NK * sizeof(i32));
-    p.off_mask = lay.add(NK);
-    p.off_count = lay.add(f.rows * sizeof(i32));
-    p.off_succ = lay.add(NK * (f.words + f.numeric_words) * sizeof(u64));
-    p.off_schema = lay.add(NK * sizeof(i32));
-    p.off_binding = lay.add(NK * f.label_width * sizeof(i32));
-    p.off_goal = lay.add(f.has_goal ? NK : 0);
+    const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
+    p.off_index = lay.add(NK, sizeof(i32));
+    p.off_mask = lay.add(NK, 1);
+    p.off_count = lay.add(f.rows, sizeof(i32));
+    p.off_succ = lay.add(NK, (u64{f.words} + f.numeric_words) * sizeof(u64));
+    p.off_schema = lay.add(NK, sizeof(i32));
+    p.off_binding = lay.add(NK, u64{f.label_width} * sizeof(i32));
+    p.off_goal = lay.add(f.has_goal ? NK : 0, 1);
     p.block = Block::make(lay.bytes);
     std::byte* b = p.block->data();
     rl::PaddedExpansion out;
@@ -481,11 +481,12 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     const u64 N = in.view.rows;
     const TaskIds ids(task_ids, in, tt);
     const u32 L = tt.label_width();
-    const bool fixed_cap = !capacity.is_none();
-    const bool fixed_words = !words.is_none();
+    const std::optional<u64> fixed_cap = opt_int_arg<u64>(capacity, "capacity", 0, rl::k_max_rows);
+    const std::optional<u32> fixed_words = opt_int_arg<u32>(words, "words");
+    const std::optional<u32> fixed_K = opt_int_arg<u32>(K, "K");
     std::atomic<u32>& branching = ref.branching();
-    u64 cap = fixed_cap ? int_arg<u64>(capacity, "capacity") : N * branching.load(std::memory_order_relaxed) + 16;
-    u32 W = fixed_words ? int_arg<u32>(words, "words") : std::max(in.view.words, current_words(tt));
+    u64 cap = fixed_cap ? *fixed_cap : std::min(N * branching.load(std::memory_order_relaxed) + 16, rl::k_max_rows);
+    u32 W = fixed_words ? *fixed_words : std::max(in.view.words, current_words(tt));
     if (W == 0)
         W = 1;
     FlatResult f;
@@ -500,7 +501,7 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
         const bool narrow = x.words_needed > W && !fixed_words;
         if ((!short_rows && !narrow) || attempt >= 3)
             break;
-        cap = std::max(cap, x.total);
+        cap = std::max(cap, std::min(x.total, rl::k_max_rows));
         W = std::max(W, x.words_needed);
     }
     if (N > 0 && !fixed_cap)
@@ -522,11 +523,8 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     if (ids.ptr && tt.size() > 1)
         e.task_ids.assign(ids.ptr, ids.ptr + N);
     e.single = in.single;
-    if (!K.is_none())
-    {
-        const u32 k = int_arg<u32>(K, "K");
-        e.padded = make_padded(e.flat, k == 0 ? auto_K(e.flat) : k, fw, enc);
-    }
+    if (fixed_K)
+        e.padded = make_padded(e.flat, *fixed_K == 0 ? auto_K(e.flat) : *fixed_K, fw, enc);
     return nb::cast(std::move(e), nb::rv_policy::move);
 }
 
@@ -991,7 +989,7 @@ HostInts host_ints(nb::handle obj, const char* name)
         const nb::sequence seq = nb::borrow<nb::sequence>(obj);
         auto v = std::make_shared<std::vector<i64>>(nb::len(seq));
         for (usize i = 0; i < v->size(); ++i)
-            (*v)[i] = nb::cast<i64>(seq[i]);
+            (*v)[i] = int_arg<i64>(seq[i], name);
         h.data = v->data();
         h.n = v->size();
         h.keep = std::move(v);

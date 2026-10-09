@@ -697,6 +697,9 @@ public:
                                         "(datasets::generate_state_space)");
         if (m_o.chunk_states == 0)
             throw std::invalid_argument("mymyr: device state space: chunk_states must be at least 1");
+        if (m_o.expected_states > state_set::k_max_states)
+            throw std::invalid_argument("mymyr: device state space: expected_states above the state id limit (" +
+                                        std::to_string(state_set::k_max_states) + ")");
         m_s = m_o.stream ? m_o.stream : m_ctx->stream();
         m_threads = resolve_threads(m_o.space.threads);
         for (u32 i = 0; i < m_tasks.size(); ++i)

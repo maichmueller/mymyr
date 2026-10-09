@@ -326,13 +326,8 @@ PyDeviceSearchResult run_search(bool greedy, TaskArg task, nb::handle heuristic,
         so.control.budget.max_expanded = int_arg<u64>(max_expanded, "max_expanded");
     if (!max_depth.is_none())
         so.control.budget.max_depth = int_arg<u32>(max_depth, "max_depth");
-    if (!max_seconds.is_none())
-    {
-        const double s = nb::cast<double>(max_seconds);
-        if (!(s >= 0) || std::isnan(s))
-            throw nb::value_error("mymyr: max_seconds must be non-negative");
-        so.control.budget.max_seconds = s;
-    }
+    if (const auto s = opt_float_arg(max_seconds, "max_seconds", 0))
+        so.control.budget.max_seconds = *s;
     if (batch == 0)
         throw nb::value_error("mymyr: batch must be positive");
     opts.batch = batch;

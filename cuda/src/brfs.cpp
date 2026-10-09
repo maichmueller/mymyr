@@ -17,6 +17,7 @@
 #include <cmath>
 #include <deque>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace mymyr::cuda
@@ -181,6 +182,9 @@ DeviceBrfs::DeviceBrfs(ContextPtr ctx, TaskPtr task, const DeviceBrfsOptions& op
     m->s = m->ctx->stream();  // the arenas' writer stream
     if (m->o.chunk_states == 0)
         throw std::invalid_argument("mymyr: DeviceBrfs: chunk_states must be at least 1");
+    if (m->o.expected_states > state_set::k_max_states)
+        throw std::invalid_argument("mymyr: DeviceBrfs: expected_states above the state id limit (" +
+                                    std::to_string(state_set::k_max_states) + ")");
 }
 
 DeviceBrfs::~DeviceBrfs()
