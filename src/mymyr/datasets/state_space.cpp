@@ -678,7 +678,7 @@ private:
                         w.targs.push_back(i < arity ? b[i].v : ~u32{0});
                 }
                 if (!m_unit)
-                    w.tcost.push_back(m_costs.next(g, d) - g);
+                    w.tcost.push_back(m_costs.transition(g, d));
                 return true;
             },
             false, true);
@@ -986,7 +986,7 @@ public:
                             bindings.push_back(i < arity ? b[i].v : ~u32{0});
                     }
                     if (!unit)
-                        costs.push_back(m_costs.next(g, d) - g);
+                        costs.push_back(m_costs.transition(g, d));
                     return true;
                 },
                 false, true);
@@ -1142,7 +1142,7 @@ public:
                     for (u32 i = 0; i < K; ++i)
                         succ_binding.push_back(i < arity ? b[i].v : ~u32{0});
                     if (!unit)
-                        succ_cost.push_back(m_costs.next(g, d) - g);
+                        succ_cost.push_back(m_costs.transition(g, d));
                     return true;
                 },
                 false, true);

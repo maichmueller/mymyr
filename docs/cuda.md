@@ -15,9 +15,10 @@ numeric rows hold one canonical double per fluent slot. TaskTable/TaskSuite nume
 with the shared atom/numeric row boundary. Classical tasks retain their atom-only layout and device kernels.
 
 The device heuristic kinds are `"max"`, `"add"`, `"ff"`, `"h2"` and `"set_additive"`; `"blind"` is also accepted by device A* and GBFS.
-Relaxation ignores numeric values and constraints as on the CPU. Real heuristic costs must be state-independent,
-non-negative integers below 2^31. For tasks with numeric fluent slots, unit relaxation supports fractional/fluent
-actual search costs. Cost-only classical searches require integral, state-independent costs. Numeric A*/GBFS use
+Relaxation ignores numeric values and constraints as on the CPU, and the heuristic costs are the CPU heuristics'
+(`costs="auto"` by default: the task's objective); real costs must stay below 2^31 units of their cost scale. Numeric
+searches support fractional and state-dependent action costs. Cost-only classical searches require integral,
+state-independent costs. Numeric A*/GBFS use
 a host double-priority heap for CPU eager ordering, with device successor, cost and heuristic evaluation.
 
 Multi-IW, batched IW(1) and rollouts accept `(positive_slots, negative_slots)` tuples or `GroundCondition` goals with
