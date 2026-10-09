@@ -31,6 +31,9 @@ The bindings reject goals simplified as impossible because of static literals or
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
 than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks. Backend
 limits remain 64 internal state words and 512 objects; unsupported schema/axiom plans use the documented CPU fallback.
+The device evaluates numeric conditions and effects only in tasks with numeric state values: a task whose numeric
+conditions or effects read only static functions and functions that never get a value (no initial value, no `assign`
+effect) is refused with `ValueError`; run it on the CPU.
 
 This BrFS example runs the repository's classical blocks fixture on device 0:
 
