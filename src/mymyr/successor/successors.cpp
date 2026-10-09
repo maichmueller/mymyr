@@ -48,9 +48,9 @@ detail::SymmetryPruner& Successors::symmetry_pruner()
     return *m_sym;
 }
 
-// Mimir's applicability rules for the numeric and total-cost effects of one (conditional) effect, checked in mimir's
-// order (ActionSatisficingBindingGenerator::is_valid_binding): fluent effects, then the total-cost effect; each records
-// its family on its target before its value is checked. The effects are appended to `writes` / `auxes`.
+// The applicability rules for the numeric and total-cost effects of one (conditional) effect that fires, checked in
+// mimir's order (ActionSatisficingBindingGenerator::is_valid_binding): fluent effects, then the total-cost effect; each
+// records its family on its target before its value is checked. The effects are appended to `writes` / `auxes`.
 bool Successors::numeric_effects(const std::vector<plan::NumEffect>& es, bool has_aux, const plan::AuxEffect& aux,
                                  std::vector<NumericWrite>& writes, std::vector<AuxWrite>& auxes)
 {
@@ -77,7 +77,7 @@ bool Successors::numeric_effects(const std::vector<plan::NumEffect>& es, bool ha
             m_fam_touched.push_back(slot);
         m_fam[slot] = f;
         const f64 v = m_e.eval(e.expr);
-        if (std::isnan(v))
+        if (!plan::defined_effect(e.op, v))
             return false;
         writes.push_back({slot, e.op, v});
     }
@@ -88,7 +88,7 @@ bool Successors::numeric_effects(const std::vector<plan::NumEffect>& es, bool ha
             return false;
         m_aux_fam = f;
         const f64 v = m_e.eval(aux.expr);
-        if (std::isnan(v))
+        if (!plan::defined_effect(aux.op, v))
             return false;
         auxes.push_back({aux.op, v});
     }
@@ -133,8 +133,8 @@ bool Successors::collect_numeric(SchemaExec& se)
         detail::ExecMatcher& xm = se.ces[r.index];
         if (!ce.extras)
         {
-            // as in mimir: the effects are checked (and their families recorded) first; a failure matters if it fires
-            const bool valid = numeric_effects(ce.neffs, ce.has_aux, ce.aux, m_tw, m_ta);
+            // only an effect that fires executes: an effect that does not fire records no family, so it cannot
+            // conflict with one that does
             bool fires = false;
             auto f = [&]() -> bool
             {
@@ -144,7 +144,7 @@ bool Successors::collect_numeric(SchemaExec& se)
             m_e.run<false>(xm, f);
             if (!fires)
                 continue;
-            if (!valid)
+            if (!numeric_effects(ce.neffs, ce.has_aux, ce.aux, m_tw, m_ta))
             {
                 ok = false;
                 break;
