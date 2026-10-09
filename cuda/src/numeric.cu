@@ -53,6 +53,8 @@ struct ActionWriter
             const f64 value = numeric_eval(n, e[6], e[7], row + p.words, bind, t.num_objects);
             if (std::isnan(value) || (e[0] == 4 && value == 0))  // undefined, or a scale-down by zero
                 return false;
+            if (e[0] != 0 && std::isnan(numeric_value(values, slot)))
+                return false;  // only assign gives an undefined function a value
             touched[slot] = 1;
             values[slot] = numeric_bits(numeric_assign(e[0], numeric_value(values, slot), value));
         }

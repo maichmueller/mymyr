@@ -1,35 +1,40 @@
 #pragma once
 // Numeric fluents.
 //
-// Slots. Every ground fluent function with a value in the initial state gets a numeric slot, in (function, arguments)
-// order. A state carries one value per slot, in its *numeric words* after its atom bits: the logical row of a state
-// is [bits | slots]. The storage type is fixed per task:
-//   - I32 when the task is statically integral (integral initial values, integral constants and static values in
-//     fluent effects, no division and no scale-down in fluent effects) and no quantization is set: two slots per word,
-//     slot 2k in the low half of word k (little endian, as the state bits);
+// Slots. Every ground fluent function with a value in the initial state gets a numeric slot, and so does every ground
+// fluent function without one that an `assign` effect can target (under a binding that satisfies the static literals
+// of the action's precondition and of the effect's condition): its value is undefined (NaN) until an assign gives it
+// one. Slots are in (function, arguments) order. A state carries one value per slot, in its *numeric words* after its
+// atom bits: the logical row of a state is [bits | slots]. The storage type is fixed per task:
+//   - I32 when the task is statically integral (integral initial values and no undefined ones, integral constants and
+//     static values in fluent effects, no division and no scale-down in fluent effects) and no quantization is set:
+//     two slots per word, slot 2k in the low half of word k (little endian, as the state bits);
 //   - F64 otherwise: one IEEE-754 double per word (its bit pattern).
 //   Values are evaluated in double precision in either case (mimir's semantics); an I32 task whose value leaves the
 //   int32 range or stops being integral throws std::overflow_error (choose TaskOptions::numeric_storage = F64).
 // Canonical bit patterns (dedup compares and hashes words): -0 becomes +0 and every NaN one quiet NaN (mimir compares
-// raw bit patterns, so it keeps -0 and +0 apart; no numeric task of the parity set produces -0). A slot value is never
-// NaN in practice: an effect that would produce NaN makes its action inapplicable.
+// raw bit patterns, so it keeps -0 and +0 apart; no numeric task of the parity set produces -0). A slot value is NaN
+// only while it is undefined: an effect that would produce NaN makes its action inapplicable.
 //
 // Expressions compile to postfix bytecode with constant folding: numbers, static functions of constants and operators
 // over constants become constants, fluent functions of constants become direct slot loads, the rest look up a
 // per-function table (typed-dense over the objects that occur at each argument position; hashed above 2^24 keys).
 // Semantics (mimir's):
 //   - an undefined function value is NaN, so is a division by zero; a comparison with a NaN side is false;
+//   - an expression that reads an undefined value is undefined, so a precondition, goal, axiom body or effect
+//     condition that compares one is false;
 //   - a binding is inapplicable when a numeric effect of a conditional effect that fires (or of the unconditional
-//     effect) targets a function without a value, evaluates to NaN, scales down by zero, or conflicts with an earlier
-//     effect of the same action on the same target (assign with anything, additive with multiplicative); the effects
-//     that fire record their families in mimir's order: every conditional effect in turn, fluent effects then the
-//     total-cost effect. total-cost effects obey the same rules (NaN, families);
+//     effect) evaluates to NaN, scales down by zero, increases, decreases or scales a function without a value (only
+//     `assign` gives one a value), or conflicts with an earlier effect of the same action on the same target (assign
+//     with anything, additive with multiplicative); the effects that fire record their families in mimir's order:
+//     every conditional effect in turn, fluent effects then the total-cost effect. total-cost effects obey the same
+//     rules (NaN, families);
 //   - effect values are evaluated on the parent state and applied in order to a copy.
 // Deviation: mimir records the families of a conditional effect whether or not it fires, so an effect that does not
 // fire can make its action inapplicable; here only the effects that fire take part in a conflict.
-// Deviation: mimir also lets `assign` give a value to a function that has none (its states grow a numeric variable);
-// here such an action is inapplicable, because the slots are fixed per task (the ground functions with an initial
-// value), so that every state row of a task has the same width. No task of the parity set does this.
+// An assign that gives a function a value is mimir's semantics too (there, states grow a numeric variable); here the
+// slot exists from the start, so every state row of a task has the same width. A task whose assign effects can target
+// more than 2^16 ground functions without an initial value is refused (std::invalid_argument).
 // Options (TaskOptions): `numeric_quantum` q > 0 snaps every stored value to the grid q * round(v / q) (it changes the
 // state space: never silent); `numeric_tolerant` gives the numeric semantics of Mimir-C#: values below 1e6 in
 // magnitude snap to a 1e-9 grid, non-finite results are undefined, comparisons use a 1e-9 tolerance.

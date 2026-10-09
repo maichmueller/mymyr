@@ -9,8 +9,11 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <deque>
+#include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -303,19 +306,25 @@ private:
             k += F.rs[static_cast<usize>(i) * n + objs[i].v];
         return k;
     }
-    u32 new_slot(u32 f, const GroundFunctionValue* v)
+    /// A ground function's arguments and value (NaN: undefined).
+    struct KeyValue
+    {
+        std::span<const ObjectId> args;
+        f64 value = 0;
+    };
+
+    u32 new_slot(u32 f, std::span<const ObjectId> args)
     {
         const u32 s = N.slots++;
         N.initial.push_back(0);
         N.slot_function.push_back(f);
-        const auto objs = TaskData::slice(T.object_ids, v->objects);
-        N.slot_args.insert(N.slot_args.end(), objs.begin(), objs.end());
+        N.slot_args.insert(N.slot_args.end(), args.begin(), args.end());
         N.slot_args_begin.push_back(static_cast<u32>(N.slot_args.size()));
         return s;
     }
 
-    /// The argument table of function f from its defined values (fluent: new slots in the order of `vals`).
-    void build_function_table(u32 f, const std::vector<const GroundFunctionValue*>& vals)
+    /// The argument table of function f from its values (fluent: new slots in the order of `vals`).
+    void build_function_table(u32 f, const std::vector<KeyValue>& vals)
     {
         plan::FunctionTable& F = N.tables[f];
         const u32 ar = T.functions[f].arity;
@@ -323,12 +332,9 @@ private:
         F.fluent = T.functions[f].kind == FuncKind::Fluent;
         std::vector<std::vector<u32>> rank(ar, std::vector<u32>(n, ~0u));
         std::vector<u32> dsize(ar, 0);
-        for (const GroundFunctionValue* v : vals)
-        {
-            const auto objs = TaskData::slice(T.object_ids, v->objects);
+        for (const KeyValue& v : vals)
             for (u32 i = 0; i < ar; ++i)
-                rank[i][objs[i].v] = 0;
-        }
+                rank[i][v.args[i].v] = 0;
         for (u32 i = 0; i < ar; ++i)
             for (u32 o = 0; o < n; ++o)
                 if (rank[i][o] == 0)
@@ -365,19 +371,19 @@ private:
             F.slot.assign(size, plan::FunctionTable::k_none);
         else
             F.value.assign(size, std::numeric_limits<f64>::quiet_NaN());
-        for (const GroundFunctionValue* v : vals)
+        for (const KeyValue& v : vals)
         {
-            const u64 k = function_key(F, TaskData::slice(T.object_ids, v->objects));
+            const u64 k = function_key(F, v.args);
             if (dense)
             {
                 if (F.fluent)
                 {
                     if (F.slot[k] == plan::FunctionTable::k_none)
-                        F.slot[k] = new_slot(f, v);
-                    N.initial[F.slot[k]] = v->value;  // a repeated value overrides
+                        F.slot[k] = new_slot(f, v.args);
+                    N.initial[F.slot[k]] = v.value;  // a repeated value overrides
                 }
                 else
-                    F.value[k] = v->value;
+                    F.value[k] = v.value;
                 continue;
             }
             u64 j = plan::FunctionTable::hash_key(k) & F.hmask;
@@ -387,12 +393,12 @@ private:
             {
                 F.hkeys[j] = k + 1;
                 if (F.fluent)
-                    F.hslot[j] = new_slot(f, v);
+                    F.hslot[j] = new_slot(f, v.args);
             }
             if (F.fluent)
-                N.initial[F.hslot[j]] = v->value;
+                N.initial[F.hslot[j]] = v.value;
             else
-                F.hvalue[j] = v->value;
+                F.hvalue[j] = v.value;
         }
     }
 
@@ -405,23 +411,22 @@ private:
         const u32 m = static_cast<u32>(T.functions.size());
         N.tables.assign(m, {});
         static_integral.assign(m, 1);
-        std::vector<std::vector<const GroundFunctionValue*>> svals(m), fvals(m);
+        std::vector<std::vector<KeyValue>> svals(m), fvals(m);
         for (const auto& v : T.static_values)
         {
-            svals[v.func.v].push_back(&v);
+            svals[v.func.v].push_back({TaskData::slice(T.object_ids, v.objects), v.value});
             if (!(std::isfinite(v.value) && v.value == std::nearbyint(v.value)))
                 static_integral[v.func.v] = 0;
         }
         for (const auto& v : T.fluent_values)
-            fvals[v.func.v].push_back(&v);
+            fvals[v.func.v].push_back({TaskData::slice(T.object_ids, v.objects), v.value});
+        // the ground fluents an assign effect can give a value to also get a slot, undefined until assigned
+        assignable_keys(fvals);
+        for (const auto& [f, args] : undefined_keys)
+            fvals[f].push_back({args, std::numeric_limits<f64>::quiet_NaN()});
         for (u32 f = 0; f < m; ++f)  // slots in (function, arguments) order
-            std::stable_sort(fvals[f].begin(), fvals[f].end(),
-                             [&](const GroundFunctionValue* a, const GroundFunctionValue* b)
-                             {
-                                 const auto x = TaskData::slice(T.object_ids, a->objects);
-                                 const auto y = TaskData::slice(T.object_ids, b->objects);
-                                 return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
-                             });
+            std::stable_sort(fvals[f].begin(), fvals[f].end(), [](const KeyValue& a, const KeyValue& b)
+                             { return std::ranges::lexicographical_compare(a.args, b.args); });
         for (u32 f = 0; f < m; ++f)
             switch (T.functions[f].kind)
             {
@@ -444,9 +449,127 @@ private:
         }
         N.words = plan::Numeric::words_for(N.slots, N.storage);
         if (N.storage == NumericStorage::I32)
-            for (f64 v : N.initial)
+            for (u32 s = 0; s < N.slots; ++s)
+            {
+                const f64 v = N.initial[s];
+                if (std::isnan(v))
+                    throw std::invalid_argument("mymyr: numeric_storage I32 cannot hold undefined values, and function '" +
+                                                std::string(T.str(T.functions[N.slot_function[s]].name)) +
+                                                "' has one an assign effect can define (use numeric_storage F64 or Auto)");
                 if (!(v >= -2147483648.0 && v <= 2147483647.0) || v != std::nearbyint(v))
                     throw std::invalid_argument("mymyr: numeric_storage I32, but an initial value is not an int32");
+            }
+    }
+
+    /// The ground fluents without an initial value that an `assign` effect can target, into undefined_keys: the
+    /// effect's target under every binding of its variables that satisfies the static literals of the precondition
+    /// and of the effect's condition over these variables (a superset of the targets of applicable actions).
+    void assignable_keys(const std::vector<std::vector<KeyValue>>& fvals)
+    {
+        constexpr u64 k_max_undefined = u64{1} << 16;  // slots for undefined values
+        constexpr u64 k_max_visits = u64{1} << 26;     // bindings visited by the enumeration
+        const u32 m = static_cast<u32>(T.functions.size());
+        std::vector<std::set<std::vector<u32>>> seen(m);  // per function: the keys with a slot
+        std::vector<u8> seeded(m, 0);
+        std::vector<u32> key;
+        u64 visits = 0;
+        for (const Schema& sc : T.schemas)
+            for (const ConditionalEffect& ce : T.effects_of(sc))
+                for (const NumericEffect& e : TaskData::slice(T.numeric_effects, ce.numeric_effects))
+                {
+                    if (e.op != AssignOp::Assign || T.functions[e.func.v].kind != FuncKind::Fluent)
+                        continue;
+                    const u32 f = e.func.v;
+                    if (!seeded[f])
+                    {
+                        seeded[f] = 1;
+                        for (const KeyValue& v : fvals[f])
+                        {
+                            key.clear();
+                            for (ObjectId o : v.args)
+                                key.push_back(o.v);
+                            seen[f].insert(key);
+                        }
+                    }
+                    const auto targs = TaskData::slice(T.terms, e.terms);
+                    std::vector<u32> vars;  // the target's distinct parameters
+                    for (Term t : targs)
+                        if (!is_object(t) && std::ranges::find(vars, term_parameter(t)) == vars.end())
+                            vars.push_back(term_parameter(t));
+                    auto var_of = [&](Term t) { return static_cast<u32>(std::ranges::find(vars, term_parameter(t)) - vars.begin()); };
+                    // the static literals over these variables and constants, each checked at its last variable
+                    std::vector<std::vector<const Literal*>> at(vars.size() + 1);
+                    auto take = [&](std::span<const Literal> ls)
+                    {
+                        for (const Literal& l : ls)
+                        {
+                            if (T.predicates[l.pred.v].kind != PredKind::Static)
+                                continue;
+                            u32 last = 0;
+                            bool inside = true;
+                            for (Term t : T.terms_of(l))
+                                if (!is_object(t))
+                                {
+                                    const u32 i = var_of(t);
+                                    inside = inside && i < vars.size();
+                                    last = std::max(last, i + 1);
+                                }
+                            if (inside)
+                                at[last].push_back(&l);
+                        }
+                    };
+                    take(T.literals_of(sc.precondition));
+                    take(T.literals_of(ce.condition));
+                    std::vector<u32> val(vars.size(), 0);
+                    auto holds = [&](const Literal* lp)
+                    {
+                        const Literal& l = *lp;
+                        const plan::StaticRelation& R = C.statics[l.pred.v];
+                        const auto ts = T.terms_of(l);
+                        u64 k = 0;
+                        for (u32 i = 0; i < R.arity; ++i)
+                            k += R.rs[static_cast<usize>(i) * n + (is_object(ts[i]) ? term_object(ts[i]).v : val[var_of(ts[i])])];
+                        return R.contains(k) == l.positive;
+                    };
+                    auto fail = [&](const char* what)
+                    {
+                        throw std::invalid_argument(std::string("mymyr: an assign effect of action '") + std::string(T.str(sc.name)) +
+                                                    "' can target " + what + " of function '" +
+                                                    std::string(T.str(T.functions[f].name)) +
+                                                    "' that have no initial value (each needs a numeric slot); give them "
+                                                    "initial values or constrain the action's parameters with static predicates");
+                    };
+                    if (!std::ranges::all_of(at[0], holds))
+                        continue;
+                    std::function<void(u32)> bind = [&](u32 d)
+                    {
+                        if (d == vars.size())
+                        {
+                            key.clear();
+                            for (Term t : targs)
+                                key.push_back(is_object(t) ? term_object(t).v : val[var_of(t)]);
+                            if (seen[f].insert(key).second)
+                            {
+                                if (undefined_keys.size() >= k_max_undefined)
+                                    fail("more than 65536 values");
+                                std::vector<ObjectId> args;
+                                for (u32 o : key)
+                                    args.push_back(ObjectId{o});
+                                undefined_keys.emplace_back(f, std::move(args));
+                            }
+                            return;
+                        }
+                        for (u32 o = 0; o < n; ++o)
+                        {
+                            if (++visits > k_max_visits)
+                                fail("too many values to enumerate");
+                            val[d] = o;
+                            if (std::ranges::all_of(at[d + 1], holds))
+                                bind(d + 1);
+                        }
+                    };
+                    bind(0);
+                }
     }
 
     void emit_const(f64 v)
@@ -1356,6 +1479,7 @@ private:
     u32 n = 0, OW = 1;
     std::vector<std::vector<u64>> s_unary;
     std::vector<std::vector<const GroundAtom*>> static_atoms;
+    std::deque<std::pair<u32, std::vector<ObjectId>>> undefined_keys;  // (function, arguments) without an initial value
     std::map<std::tuple<u32, u32, u32>, u64> row_tables;
     plan::Numeric& N = C.num;
     std::unordered_map<std::string, plan::NumProg> m_programs;  // compile_expr: code key -> program
