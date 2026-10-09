@@ -1675,10 +1675,11 @@ void bind_cuda(nb::module_& parent)
             return x;
         },
         "task"_a, nb::kw_only(), "ctx"_a = nb::none(), "witness_pruning"_a = true, "canonical_order"_a = true,
-        "max_states"_a = nb::none(), "stop_at_goal"_a = false, "fingerprint"_a = false, "chunk_states"_a = nb::none(),
+        "max_states"_a = nb::none(), "stop_at_goal"_a = true, "fingerprint"_a = false, "chunk_states"_a = nb::none(),
         "expected_states"_a = nb::none(), "max_depth"_a = nb::none(), "timings"_a = false,
         "The device layer BrFS: the ids equal the CPU BrFS's deterministic ids (mymyr.search.brfs with any thread "
-        "count), whatever the chunk size; stop_at_goal returns the CPU's plan. The state space stays on the device "
+        "count), whatever the chunk size; a search that expands a goal state is SOLVED with the CPU's plan to the first one, "
+        "and stop_at_goal (the default) stops there. The state space stays on the device "
         "(state_words(), nodes()). Small layers run in device loops (one host read per loop); timings=True records "
         "the per-phase device times instead (stats; every chunk then runs from the host).");
     bind_cuda_search(m, [](PyTaskCore& core, nb::handle ctx, int device) { return task_context(core, ctx, device)->ctx; });

@@ -147,9 +147,9 @@ TEST_P(DeviceNumeric, BrfsEqualsCpu)
     {
         TaskOptions to; to.numeric_storage = storage;
         const auto task = task_of(GetParam(), to);
-        BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true;
+        BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true; cpu.stop_at_goal = false;
         const auto expected = brfs(*task, cpu);
-        cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.chunk_states = 17;
+        cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.stop_at_goal = false; options.chunk_states = 17;
         const auto actual = cuda::brfs(ctx, task, options).result;
         EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
         EXPECT_EQ(actual.expanded, expected.expanded); EXPECT_EQ(actual.goal_states, expected.goal_states);
@@ -503,9 +503,10 @@ TEST(DeviceNumericRules, ExhaustiveCountsOnFiniteTasks)
                              "m-tpp-numeric", "m-woodworking", "m-barman", "m-transport"})
     {
         const auto task = task_of(name);
-        BrfsOptions cpu; cpu.fingerprint = true;
+        BrfsOptions cpu; cpu.fingerprint = true; cpu.stop_at_goal = false;
         const auto expected = brfs(*task, cpu);
         cuda::DeviceBrfsOptions options; options.fingerprint = true; options.chunk_states = 257;
+        options.stop_at_goal = false;
         const auto actual = cuda::brfs(ctx, task, options).result;
         EXPECT_TRUE(actual.exhausted) << name;
         EXPECT_EQ(actual.states, expected.states) << name;
@@ -570,9 +571,9 @@ TEST_P(DeviceNumericPddl, ExpandBrfsAndIwEqualCpu)
     compare_cost_programs(ctx, task);
     compare_best_first(ctx, task, true);
     compare_expand(ctx, task, states, true, 3);
-    BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true;
+    BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true; cpu.stop_at_goal = false;
     const auto expected = brfs(*task, cpu);
-    cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true;
+    cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.stop_at_goal = false;
     const auto actual = cuda::brfs(ctx, task, options).result;
     EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
     EXPECT_EQ(actual.goal_states, expected.goal_states); EXPECT_EQ(actual.fingerprint, expected.fingerprint);

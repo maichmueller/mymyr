@@ -19,10 +19,10 @@
 // needs the parents), the node records (parent id, index among the parent's successors) in a second one: a plan is
 // the chain of node records, replayed on the CPU (the index names the action in canonical order).
 //
-// Semantics follow the CPU BrFS: every expanded state is goal-tested (goal_states); stop_at_goal expands the parents
-// before the first goal state of its layer (in id order) and stops, with the plan. The max_states budget is checked
-// before each chunk (like the multi-threaded CPU BrFS checks per layer), so the store may exceed it by one chunk's new
-// states.
+// Semantics follow the CPU BrFS: every expanded state is goal-tested (goal_states), and a search that expanded a goal
+// state is solved with the plan to the first one (in id order); stop_at_goal (the default) expands the parents before
+// that state and stops. The max_states budget is checked before each chunk, so the store may exceed it by one chunk's
+// new states (the CPU searches stop at the state that fills it).
 
 #include "mymyr/cuda/arena.hpp"
 #include "mymyr/cuda/runtime.hpp"
@@ -39,7 +39,7 @@ struct DeviceBrfsOptions
     bool canonical_order = true;  // without it a (state, schema) keeps the matcher's order (still deterministic)
     u64 max_states = ~u64{0};
     u32 max_depth = ~u32{0};  // layers to expand, as in BrfsOptions::max_depth
-    bool stop_at_goal = false;
+    bool stop_at_goal = true;          // false: the whole space (BrfsOptions::stop_at_goal)
     bool fingerprint = false;          // BrfsResult::fingerprint (downloads the states once at the end)
     u32 chunk_states = u32{1} << 20;   // parents per chunk at most (tests use tiny chunks: the ids must not change)
     u64 view_bytes = 0;                // per-chunk view budget (lowers the chunk size); 0: half the device's L2 cache

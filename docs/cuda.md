@@ -41,7 +41,7 @@ from mymyr import cuda
 
 data = Path("tests/data/pddl/blocks")
 task = mymyr.Task.from_pddl(data / "domain.pddl", data / "probBLOCKS-8-0.pddl")
-result = cuda.brfs(task, stop_at_goal=True)
+result = cuda.brfs(task)
 print(result.status, result.solved, len(result.plan), result.stats)
 ```
 

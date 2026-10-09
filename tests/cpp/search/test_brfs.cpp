@@ -74,6 +74,7 @@ TEST_P(SuiteCounts, MatchTheProbe)
     to.atoms = p.config.atoms;
     const auto task = Task::from_text_file(task_path(p.task.name), to);
     BrfsOptions bo;
+    bo.stop_at_goal = false;
     bo.store = p.config.store;
     bo.threads = p.config.threads;
     bo.witness_pruning = p.config.witness;
@@ -121,6 +122,7 @@ TEST(Brfs, DeterministicIdsIndependentOfThreadCount)
             to.atoms = atoms;
             const auto task = Task::from_text_file(task_path(t.name), to);
             BrfsOptions bo;
+            bo.stop_at_goal = false;
             bo.fingerprint = true;
             bo.store = BrfsOptions::Store::Flat;
             const u64 ref = brfs(*task, bo).fingerprint;
@@ -167,6 +169,7 @@ TEST(Brfs, MaxStatesStopsEarly)
     for (auto store : {BrfsOptions::Store::Flat, BrfsOptions::Store::Chunked, BrfsOptions::Store::Concurrent})
     {
         BrfsOptions bo;
+        bo.stop_at_goal = false;
         bo.store = store;
         bo.max_states = 1000;
         bo.threads = store == BrfsOptions::Store::Concurrent ? 2 : 1;
@@ -181,6 +184,7 @@ TEST(Brfs, SingleThreadedStoresRejectThreads)
 {
     const auto task = Task::from_text_file(task_path("gripper__prob05"));
     BrfsOptions bo;
+    bo.stop_at_goal = false;
     bo.store = BrfsOptions::Store::Flat;
     bo.threads = 2;
     EXPECT_THROW((void) brfs(*task, bo), std::invalid_argument);
@@ -211,6 +215,7 @@ TEST(Brfs, LayerOrderings)
             q.store = store;
             q.witness_pruning = false;
             q.fingerprint = true;
+            q.stop_at_goal = false;
             const BrfsResult all = brfs(*task, q);
             q.stop_at_goal = true;
             q.fingerprint = false;
@@ -401,17 +406,14 @@ TEST(Brfs, ObserverEventsEqualTheStatistics)
             EXPECT_EQ(o.passes, r.layers) << where;
             EXPECT_EQ(o.pass_expanded, r.expanded) << where;
             EXPECT_EQ(o.pass_generated, r.generated) << where;
-            if (stop)
+            // a goal state is expanded either way: solved, with the plan to the first one
+            EXPECT_EQ(r.status, search::SearchStatus::Solved) << where;
+            ASSERT_EQ(o.solutions, 1u) << where;
+            EXPECT_EQ(o.plan.size(), r.plan.size()) << where;
+            EXPECT_TRUE(replays(*task, o.plan)) << where;
+            EXPECT_EQ(r.exhausted, !stop) << where;
+            if (!stop)
             {
-                EXPECT_EQ(r.status, search::SearchStatus::Solved) << where;
-                ASSERT_EQ(o.solutions, 1u) << where;
-                EXPECT_EQ(o.plan.size(), r.plan.size()) << where;
-                EXPECT_TRUE(replays(*task, o.plan)) << where;
-            }
-            else
-            {
-                EXPECT_EQ(r.status, search::SearchStatus::Exhausted) << where;
-                EXPECT_EQ(o.solutions, 0u) << where;
                 EXPECT_EQ(fresh, r.states - 1) << where;
                 EXPECT_EQ(o.pass_states, r.states - 1) << where;
             }
@@ -428,6 +430,7 @@ TEST(Brfs, BudgetsCancelAndProgressSetTheStatus)
     {
         const std::string where = "store " + std::to_string(static_cast<int>(store));
         BrfsOptions bo;
+        bo.stop_at_goal = false;
         bo.store = store;
         bo.threads = threads;
         bo.max_seconds = 0;
@@ -457,7 +460,9 @@ TEST(Brfs, BudgetsCancelAndProgressSetTheStatus)
         EXPECT_EQ(r.status, SearchStatus::Cancelled) << where;
         EXPECT_LT(r.expanded, (500u + 100u + 64u) * threads) << where;  // on_progress sees each worker's counts
         bo.observer = nullptr;
-        EXPECT_EQ(brfs(*task, bo).status, SearchStatus::Exhausted) << where;
+        r = brfs(*task, bo);
+        EXPECT_EQ(r.status, SearchStatus::Solved) << where;  // the whole space, goals included
+        EXPECT_TRUE(r.exhausted) << where;
     }
 }
 
@@ -467,6 +472,7 @@ TEST(Brfs, CancelFromAnotherThread)
     for (u32 T : {1u, 4u})
     {
         BrfsOptions bo;
+        bo.stop_at_goal = false;
         bo.store = BrfsOptions::Store::Concurrent;
         bo.threads = T;
         std::atomic<bool> started{false};
@@ -485,9 +491,9 @@ TEST(Brfs, CancelFromAnotherThread)
         const BrfsResult r = brfs(*task, bo);
         canceller.join();
         // the search may finish before the request lands; when it does not, it stops as cancelled
-        EXPECT_TRUE(r.status == search::SearchStatus::Cancelled || r.status == search::SearchStatus::Exhausted)
+        EXPECT_TRUE(r.status == search::SearchStatus::Cancelled || r.status == search::SearchStatus::Solved)
             << search::to_string(r.status);
-        EXPECT_EQ(r.exhausted, r.status == search::SearchStatus::Exhausted);
+        EXPECT_EQ(r.exhausted, r.status == search::SearchStatus::Solved);
     }
 }
 }  // namespace

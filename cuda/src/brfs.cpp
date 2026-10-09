@@ -275,6 +275,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     u64 count = 1, lb = 0, le = 1;
     bool stop = false, budget_hit = false;
     u64 goal_id = 0;
+    u64 first_goal = ~u64{0};  // the first goal state expanded (stop_at_goal stops before it instead)
     u64 b = 0;             // the layer [lb, le)'s next parent
     bool started = false;  // the layer [lb, le) was counted
     bool exhausted = false;
@@ -501,6 +502,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         r.expanded += hl->expanded;
         r.generated += hl->generated;
         r.goal_states += hl->goal_states;
+        first_goal = std::min<u64>(first_goal, hl->first_goal);
         if (hl->chunks)
             ratios[ratio_at++ % k_window] = static_cast<double>(hl->max_ratio) / 256;
         states->commit(hl->chunk.count - count);
@@ -779,6 +781,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                     r.expanded += ck.ns;
                     r.generated += x.candidates;
                     r.goal_states += x.goals;
+                    if (x.goals)
+                        first_goal = std::min<u64>(first_goal, ck.b + x.first);
                     count += x.fresh;
                     ++st.chunks;
                     if (ck.ns)
@@ -825,6 +829,11 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     st.axiom_reruns = gs.axiom_reruns;
     st.table_slots = slots;
     st.device_bytes = ctx->usage().used_high;
+    if (!r.solved && first_goal != ~u64{0})
+    {
+        r.solved = true;  // a goal state was expanded: its plan, as the CPU BrFS without stop_at_goal
+        goal_id = first_goal;
+    }
     if (r.solved)
         r.plan = plan_to(goal_id);
     if (o.fingerprint)

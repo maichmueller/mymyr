@@ -284,6 +284,7 @@ TEST(SymmetryPruning, ThreadedBrfsIsDeterministic)
             continue;
         const auto task = Task::from_text_file(task_path(t.name));
         BrfsOptions bo;
+        bo.stop_at_goal = false;
         bo.symmetry_pruning = SymmetryPruning::Wl1;
         bo.fingerprint = true;
         bo.store = BrfsOptions::Store::Flat;

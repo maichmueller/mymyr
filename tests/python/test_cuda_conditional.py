@@ -41,8 +41,8 @@ def ctx():
 @pytest.mark.parametrize("atoms", ["frozen", "lazy"])
 def test_device_brfs_runs_conditional_effects_and_axioms(ctx, name, ce, axioms, atoms):
     task = text_task(name, atoms=atoms)
-    r = mc.brfs(task, ctx=ctx, fingerprint=True)
-    c = mymyr.search.brfs(task, threads=2, fingerprint=True)
+    r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
+    c = mymyr.search.brfs(task, threads=2, fingerprint=True, stop_at_goal=False)
     assert (r.states, r.generated, r.goal_states, r.fingerprint) == (c.states, c.generated, c.goal_states, c.fingerprint)
     s = r.stats
     assert s["host_schemas"] == 0 and s["host_ce_schemas"] == 0
@@ -55,8 +55,8 @@ def test_device_brfs_runs_conditional_effects_and_axioms(ctx, name, ce, axioms, 
 
 def test_stop_at_goal_over_derived_goals(ctx):
     task = text_task("philosophers__p03-phil4")
-    g = mc.brfs(task, ctx=ctx, stop_at_goal=True)
-    c = mymyr.search.brfs(task, stop_at_goal=True)
+    g = mc.brfs(task, ctx=ctx)
+    c = mymyr.search.brfs(task)
     assert g.solved and c.solved
     assert [a.label for a in g.plan] == [a.label for a in c.plan]
     assert g.states == c.states

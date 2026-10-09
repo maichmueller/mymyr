@@ -191,7 +191,7 @@ TEST(BestFirst, Budgets)
             o.control.budget.max_states = 50;
             const BestFirstResult r = a.run(*task, o);
             EXPECT_EQ(r.status, SearchStatus::OutOfStates);
-            EXPECT_EQ(r.stats.states, 51u);  // the state that exceeded the budget is stored
+            EXPECT_EQ(r.stats.states, 50u);  // the search stops at the state that fills the store
         }
         {
             BestFirstOptions o = with_h(heuristics::Kind::Blind);

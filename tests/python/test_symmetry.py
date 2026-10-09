@@ -104,8 +104,8 @@ def test_matches_the_fork(rec):
                 queue.append(t)
     assert states == rec["num_states"]
 
-    ex = search.brfs(task, witness_pruning=False, symmetry_pruning="wl1")
-    br = search.brfs(task, witness_pruning=False, symmetry_pruning="wl1", stop_at_goal=True)
+    ex = search.brfs(task, witness_pruning=False, symmetry_pruning="wl1", stop_at_goal=False)
+    br = search.brfs(task, witness_pruning=False, symmetry_pruning="wl1")
     ar = search.astar(task, heuristic="blind", symmetry_pruning="wl1")
     if br.solved:
         assert reaches_goal(task, br.plan)
@@ -131,7 +131,7 @@ def blocks_task():
 @pytest.mark.parametrize(
     "run",
     [
-        lambda t, **kw: search.brfs(t, stop_at_goal=True, **kw),
+        lambda t, **kw: search.brfs(t, **kw),
         lambda t, **kw: search.astar(t, heuristic="blind", **kw),
         lambda t, **kw: search.astar(t, heuristic="ff", **kw),
         lambda t, **kw: search.gbfs(t, heuristic="ff", **kw),
@@ -159,8 +159,8 @@ def test_pruning_shrinks_a_symmetric_space():
     if not (gripper / "test_problem4.pddl").exists():
         pytest.skip("set MYMYR_FORK_DATA")
     task = mymyr.Task.from_pddl(gripper / "domain.pddl", gripper / "test_problem4.pddl")
-    off = search.brfs(task, witness_pruning=False)
-    on = search.brfs(task, witness_pruning=False, symmetry_pruning="wl1")
+    off = search.brfs(task, witness_pruning=False, stop_at_goal=False)
+    on = search.brfs(task, witness_pruning=False, symmetry_pruning="wl1", stop_at_goal=False)
     assert on.states < off.states
     s = task.initial_state
     assert len(task.applicable_actions(s, symmetry_pruning="wl1")) < len(task.applicable_actions(s))

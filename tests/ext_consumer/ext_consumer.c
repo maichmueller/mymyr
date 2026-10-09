@@ -881,8 +881,8 @@ typedef struct
     mymyr_store* store;
     bfs_nodes* nodes;
     int64_t parent;
-    uint64_t generated;
-    int failed;
+    uint64_t generated, max_states;
+    int failed, full;
 } bfs_ctx;
 
 static int bfs_emit(void* p, uint32_t schema, const uint32_t* binding, uint32_t arity, const mymyr_state_view* succ,
@@ -895,6 +895,11 @@ static int bfs_emit(void* p, uint32_t schema, const uint32_t* binding, uint32_t 
     if (id < 0 || (inserted && bfs_push(c->nodes, c->parent, schema, binding, arity, metric) != 0))
     {
         c->failed = 1;
+        return 1;
+    }
+    if (inserted && g_api->store_size(c->store) >= c->max_states)
+    {
+        c->full = 1; /* max_states: the search stops at the state that fills the store */
         return 1;
     }
     return 0;
@@ -924,7 +929,7 @@ static void run_bfs(const mymyr_task* task, const mymyr_state_view* init, double
             g_api->store_free(store);
         return;
     }
-    bfs_ctx ctx = {store, nodes, 0, 0, 0};
+    bfs_ctx ctx = {store, nodes, 0, 0, max_states, 0, 0};
     uint64_t pos = 0, layer_end = 0;
     for (; pos < g_api->store_size(store) && g_api->store_size(store) < max_states; ++pos)
     {
@@ -972,11 +977,12 @@ static void run_bfs(const mymyr_task* task, const mymyr_state_view* init, double
             break;
         }
         r->goal_states += (uint64_t)goal;
-        if (goal && stop_at_goal)
+        if (goal && r->goal < 0)
         {
             r->solved = 1;
             r->goal = (int64_t)pos;
-            break;
+            if (stop_at_goal)
+                break;
         }
         ++r->expanded;
         ctx.parent = (int64_t)pos;
@@ -985,10 +991,12 @@ static void run_bfs(const mymyr_task* task, const mymyr_state_view* init, double
             r->failed = 1;
             break;
         }
+        if (ctx.full)
+            break;
     }
     r->generated = ctx.generated;
     r->states = g_api->store_size(store);
-    r->exhausted = !r->solved && !r->failed && pos == r->states;
+    r->exhausted = !r->failed && pos == r->states;
     free(words);
     free(numeric);
     g_api->store_free(store);
@@ -996,7 +1004,7 @@ static void run_bfs(const mymyr_task* task, const mymyr_state_view* init, double
 
 /* brfs(task, state, g, max_states, stop_at_goal) -> (states, expanded, generated, goal_states, layers, exhausted,
  * solved, plan, cost): the whole search runs through the C API with the thread detached. plan is the list of
- * (schema, binding) to the first goal state found (stop_at_goal), cost its metric value. */
+ * (schema, binding) to the first goal state expanded, cost its metric value. */
 static PyObject* brfs(PyObject* self, PyObject* args)
 {
     (void)self;

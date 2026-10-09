@@ -294,11 +294,11 @@ TEST(CudaDeep, OrganicSynthesisBrfsEqualsTheCpu)
 {
     SKIP_WITHOUT_GPU();
     const auto task = load(k_organic, true);
-    const BrfsResult c = brfs(*task, {.threads = 2, .fingerprint = true});
+    const BrfsResult c = brfs(*task, {.threads = 2, .stop_at_goal = false, .fingerprint = true});
     for (const u64 candidate_bytes : {u64{32} << 20, u64{1}})
     {
         SCOPED_TRACE("candidate bytes " + std::to_string(candidate_bytes));
-        const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.fingerprint = true, .candidate_bytes = candidate_bytes});
+        const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = false, .fingerprint = true, .candidate_bytes = candidate_bytes});
         EXPECT_EQ(d.result.states, c.states);
         EXPECT_EQ(d.result.expanded, c.expanded);
         EXPECT_EQ(d.result.generated, c.generated);

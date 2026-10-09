@@ -134,15 +134,25 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
             ++r.stats.pruned;
             continue;
         }
+        if (store.size() >= c.max_states)  // the start state alone fills the store
+        {
+            r.status = SearchStatus::OutOfStates;
+            break;
+        }
         ++r.stats.expanded;
         if (c.obs)
             c.obs->on_expand(e.id, cur.view());
         // Heuristic evaluation may reuse the successor engine, so buffer each transition before evaluating any.
         tr.clear();
         c.succ.prepare(cur.view());
-        bool full = false;
+        bool full = false, interrupted = false;
         c.generate([&](u32 schema, const ObjectId* binding, const Delta& delta) -> bool
         {
+            if (!c.keep_generating())  // the time or the cancellation (r.status set)
+            {
+                interrupted = true;
+                return false;
+            }
             const f64 g = c.g_next(e.g, delta);
             if (g - e.g != 1)
                 throw NonUnitCost();
@@ -174,6 +184,8 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
             }
             return true;
         });
+        if (interrupted)
+            break;
         for (const Transitions::T& t : tr.t)
         {
             const StateView child = tr.view(t);

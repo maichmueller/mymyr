@@ -304,6 +304,7 @@ TEST(SymmetryFork, ActionsAndSearchesMatchTheFork)
         BrfsOptions bo;
         bo.witness_pruning = false;
         bo.symmetry_pruning = SymmetryPruning::Wl1;
+        bo.stop_at_goal = false;
         const BrfsResult ex = brfs(*task, bo);
         bo.stop_at_goal = true;
         const BrfsResult br = brfs(*task, bo);

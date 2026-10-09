@@ -118,6 +118,7 @@ struct Expansion
     u32 transitions = 0;  // all transitions generated (recorded or not)
     u8 goal = 0;          // the goal test, when the engine runs it in parallel
     u8 expanded = 0;      // 1: the successors were generated
+    u8 interrupted = 0;   // 1: the deadline or the token stopped the generation (the transitions are incomplete)
 };
 
 /// The members of a parallel layer step: a Team and each member's successor generator (its own workspace; member 0

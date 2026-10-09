@@ -93,6 +93,9 @@ struct LayerLog
     }
 };
 
+/// No goal state expanded yet.
+constexpr u32 k_no_goal = ~u32{0};
+
 /// The stop conditions of BrfsOptions (max_seconds, cancel, on_progress) and the lifecycle events of the observer,
 /// for a single-threaded search and the calling thread of the multi-threaded one.
 class Control
@@ -136,6 +139,17 @@ public:
         }
         return true;
     }
+
+    /// Inside an expansion, before a transition: check() every search::k_check_transitions transitions, so that a
+    /// state with many successors cannot run past the deadline or a cancellation.
+    bool keep_generating()
+    {
+        if (--m_transitions != 0) [[likely]]
+            return true;
+        m_transitions = search::k_check_transitions;
+        return check();
+    }
+    [[nodiscard]] bool stopped() const { return m_stopped.has_value(); }
 
     /// The time and the token: false (and the reason recorded) once one of them stops the search.
     bool check()
@@ -182,6 +196,7 @@ private:
     u64 m_next_progress;
     static constexpr u32 k_check_every = 8;  // expansions between checks of the time, the token and on_progress
     u32 m_countdown = 1;
+    u32 m_transitions = search::k_check_transitions;
     std::optional<search::SearchStatus> m_stopped;
 };
 
@@ -248,6 +263,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
     const auto t0 = Clock::now();
     u32 layer_end = 0;
     u32 pos = 0;
+    u32 first_goal = k_no_goal;  // the first goal state expanded (a shortest plan reaches it)
     LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, obs};
     // Ordered layers (BrfsOptions::layers): the layer [layer_begin, layer_end) of ids is expanded in the order `order`
     // (with a beam, only its first beam_width ids; the others stay stored and are never expanded)
@@ -291,18 +307,19 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
         succ.prepare(sv);
         const bool goal = is_goal(o.goal, succ, sv);
         r.goal_states += goal;
+        if (goal && first_goal == k_no_goal)
+            first_goal = id;
         if (goal && o.stop_at_goal)
-        {
-            r.solved = true;
-            r.plan = nodes.plan(id, succ);
             break;
-        }
         ++r.expanded;
         if constexpr (Observed)
             obs->on_expand(id, sv);
-        succ.generate<Ordered>(
+        bool full = false;
+        succ.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d)
             {
+                if (!ctl.keep_generating())
+                    return false;
                 ++r.generated;
                 const u32 nn = apply_delta(cur.data(), n, d, next);
                 const auto [child, fresh] = store.insert(next.data(), nn, d.num);
@@ -311,6 +328,11 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
                 if (fresh)
                 {
                     nodes.push(id, s, b, succ.arity(s));
+                    if (store.size() >= o.max_states)
+                    {
+                        full = true;
+                        return false;
+                    }
                     if constexpr (Ordered)
                         if (lo.limited() && store.size() - layer_end >= lo.limit())
                         {
@@ -321,19 +343,26 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
                 return true;
             },
             witness, canonical, o.symmetry_pruning);
+        if (full || ctl.stopped())
+            break;  // max_states, the time or the token, inside the expansion
         if constexpr (Ordered)
             if (truncated || pos + 1 - layer_begin == order.size())
                 pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);
-    r.exhausted = !r.solved && pos == store.size();
+    r.exhausted = pos == store.size();  // every stored state expanded (stop_at_goal stops before)
     r.states = store.size();
     r.words = store.stride();
     r.store_bytes = store.bytes() + nodes.bytes();
     if (o.fingerprint)
         for (u32 i = 0; i < store.size(); ++i)
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash(store[StateId{i}]));
+    if (first_goal != k_no_goal)
+    {
+        r.solved = true;
+        r.plan = nodes.plan(first_goal, succ);
+    }
     ctl.finish(r);
     return r;
 }
@@ -357,6 +386,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
     const auto t0 = Clock::now();
     u32 layer_end = 0;
     u32 pos = 0;
+    u32 first_goal = k_no_goal;  // the first goal state expanded (a shortest plan reaches it)
     LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, obs};
     // Ordered layers (BrfsOptions::layers): the layer [layer_begin, layer_end) of ids is expanded in the order `order`
     // (with a beam, only its first beam_width ids; the others stay stored and are never expanded)
@@ -402,18 +432,19 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
         succ.prepare(sv);
         const bool goal = is_goal(o.goal, succ, sv);
         r.goal_states += goal;
+        if (goal && first_goal == k_no_goal)
+            first_goal = id;
         if (goal && o.stop_at_goal)
-        {
-            r.solved = true;
-            r.plan = nodes.plan(id, succ);
             break;
-        }
         ++r.expanded;
         if constexpr (Observed)
             obs->on_expand(id, sv);
-        succ.generate<Ordered>(
+        bool full = false;
+        succ.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d)
             {
+                if (!ctl.keep_generating())
+                    return false;
                 ++r.generated;
                 u32 need = 0;
                 MYMYR_NOVECTOR
@@ -441,6 +472,11 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
                 if (fresh)
                 {
                     nodes.push(id, s, b, succ.arity(s));
+                    if (store.size() >= o.max_states)
+                    {
+                        full = true;
+                        return false;
+                    }
                     if constexpr (Ordered)
                         if (lo.limited() && store.size() - layer_end >= lo.limit())
                         {
@@ -451,13 +487,15 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
                 return true;
             },
             witness, canonical, o.symmetry_pruning);
+        if (full || ctl.stopped())
+            break;  // max_states, the time or the token, inside the expansion
         if constexpr (Ordered)
             if (truncated || pos + 1 - layer_begin == order.size())
                 pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);
-    r.exhausted = !r.solved && pos == store.size();
+    r.exhausted = pos == store.size();  // every stored state expanded (stop_at_goal stops before)
     r.states = store.size();
     r.words = store.words();
     r.store_bytes = store.bytes() + nodes.bytes();
@@ -469,6 +507,11 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
             store.decode(StateId{i}, w.data(), curnum.data());
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash({w.data(), store.words(), NN ? curnum.data() : nullptr, NN}));
         }
+    }
+    if (first_goal != k_no_goal)
+    {
+        r.solved = true;
+        r.plan = nodes.plan(first_goal, succ);
     }
     ctl.finish(r);
     return r;
@@ -569,6 +612,12 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
+                if ((x.transitions + 1) % search::k_check_transitions == 0 &&
+                    ((ctl.timed() && Clock::now() >= ctl.deadline()) || o.cancel.requested()))
+                {
+                    x.interrupted = 1;
+                    return false;
+                }
                 const u32 seq = x.transitions++;
                 const u32 nn = apply_delta(cv.w, cv.nw, d, nx);
                 if (!relaxed)
@@ -592,6 +641,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                 cs.set_value(j, lo.key(sc, StateView{cs.words(j), cs.nwords(j), cs.num(j, NN), NN}));
     };
     // phase 2, on this thread: the pop of order[i] (as the serial loop); false stops the search
+    u32 first_goal = k_no_goal;  // the first goal state popped
     auto pop_one = [&](usize i) -> bool
     {
         const Expansion& x = exps[i];
@@ -606,26 +656,36 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
             goal = is_goal(o.goal, succ, cv);
         }
         r.goal_states += goal;
+        if (goal && first_goal == k_no_goal)
+            first_goal = id;
         if (goal && o.stop_at_goal)
-        {
-            r.solved = true;
-            r.plan = nodes.plan(id, succ);
             return false;
-        }
         ++r.expanded;
         return true;
     };
-    // exact: the transitions of order[i] stored in their order
-    auto merge_exact = [&](usize i)
+    // exact: the transitions of order[i] stored in their order; false when a new state fills the store (max_states),
+    // where the serial search stops too (its generated count then ends at that transition)
+    auto merge_exact = [&](usize i) -> bool
     {
         const Expansion& x = exps[i];
         const u32 id = order[i];
         const Candidates& cs = team.candidates(x.member);
+        auto full = [&](u32 j)
+        {
+            if (store.size() < o.max_states)
+                return false;
+            r.generated += cs.seq(j) + 1;
+            return true;
+        };
         if constexpr (flat)
         {
             for (u32 j = x.first; j < x.first + x.count; ++j)
                 if (store.insert(cs.words(j), cs.nwords(j), cs.num(j, NN)).second)
+                {
                     nodes.push(id, cs.schema(j), cs.binding(j), succ.arity(cs.schema(j)));
+                    if (full(j))
+                        return false;
+                }
         }
         else
         {
@@ -655,10 +715,15 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                 for (SlotId s : d.add)
                     bits::set(next.data(), s.v);
                 if (store.insert_successor(StateId{id}, cur.data(), next.data(), d).second)
+                {
                     nodes.push(id, cs.schema(j), cs.binding(j), succ.arity(cs.schema(j)));
+                    if (full(j))
+                        return false;
+                }
             }
         }
         r.generated += x.transitions;
+        return true;
     };
     // relaxed: the transitions of order[i] join the layer's ranking
     auto collect_relaxed = [&](usize i)
@@ -673,8 +738,9 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
         layer_transitions += x.transitions;
         r.generated += x.transitions;
     };
-    // relaxed: the parts' best transitions in rank order, stored until beam_width new states are
-    auto select_relaxed = [&]()
+    // relaxed: the parts' best transitions in rank order, stored until beam_width new states are; false when a new
+    // state fills the store (max_states)
+    auto select_relaxed = [&]() -> bool
     {
         const SplitMix64 ties = lo.draw_ties(layer_transitions);
         if (lo.random_ties())
@@ -692,11 +758,14 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
             {
                 nodes.push(f.parent, cs.schema(f.cand), cs.binding(f.cand), succ.arity(cs.schema(f.cand)));
                 ++kept;
+                if (store.size() >= o.max_states)
+                    return false;
             }
         }
         ranked.clear();
         refs.clear();
         layer_transitions = 0;
+        return true;
     };
 
     u32 layer_begin = 0, layer_end = 0;
@@ -748,6 +817,12 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                     stop = true;
                     break;
                 }
+                if (exps[i].interrupted)
+                {
+                    ctl.check();  // records OutOfTime or Cancelled
+                    stop = true;
+                    break;
+                }
                 if (!pop_one(i))
                 {
                     stop = true;
@@ -755,18 +830,21 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                 }
                 if (relaxed)
                     collect_relaxed(i);
-                else
-                    merge_exact(i);
+                else if (!merge_exact(i))
+                {
+                    stop = true;
+                    break;
+                }
             }
         }
         if (stop)
             break;
-        if (relaxed)
-            select_relaxed();
+        if (relaxed && !select_relaxed())
+            break;
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);
-    r.exhausted = !r.solved && exhausted;
+    r.exhausted = exhausted;
     r.states = store.size();
     if constexpr (flat)
         r.words = store.stride();
@@ -781,6 +859,11 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
             const StateView v = decode(i, w, num);
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash({w.data(), static_cast<u32>(w.size()), v.num, NN}));
         }
+    }
+    if (first_goal != k_no_goal)
+    {
+        r.solved = true;
+        r.plan = nodes.plan(first_goal, succ);
     }
     ctl.finish(r);
     return r;
@@ -832,6 +915,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
     closed.insert(key_of(f0, s0.numeric().data()));
     nodes.root();
     u32 layer_first = 0;
+    u32 first_goal = k_no_goal;  // the first goal state expanded
     search::SearchObserver* const obs = Observed ? ctl.observer() : nullptr;
     ctl.start(s0.view());
     const auto t0 = Clock::now();
@@ -861,19 +945,22 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
             succ.prepare(sv);
             const bool goal = is_goal(o.goal, succ, sv);
             r.goal_states += goal;
+            if (goal && first_goal == k_no_goal)
+                first_goal = pid;
             if (goal && o.stop_at_goal)
             {
-                r.solved = true;
-                r.plan = nodes.plan(pid, succ);
                 stopped = true;
                 break;
             }
             ++r.expanded;
             if constexpr (Observed)
                 obs->on_expand(pid, sv);
-            succ.generate<false>(
+            bool full = false;
+            succ.generate<true>(
                 [&](u32 s, const ObjectId* b, const Delta& d)
                 {
+                    if (!ctl.keep_generating())
+                        return false;
                     ++r.generated;
                     u32 need = 0;
                     MYMYR_NOVECTOR
@@ -925,7 +1012,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                         toggle(x.v);
                     for (u32 slot : changed)
                         bits::reset(tog.data(), slot);
-                    const bool fresh = closed.size() < o.max_states && closed.insert(key_of(f, d.num));
+                    const bool fresh = closed.insert(key_of(f, d.num));
                     if constexpr (Observed)  // a duplicate's id is not kept (closed states are fingerprints)
                         obs->on_generate(pid, action_of(succ, s, b), fresh ? closed.size() - 1 : ~u64{0},
                                          {next.data(), bits::trimmed_size(next.data(), W), d.num, NN}, fresh);
@@ -936,9 +1023,19 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                         next_layer_num.insert(next_layer_num.end(), d.num, d.num + NN);
                     next_f.push_back(f);
                     nodes.push(pid, s, b, succ.arity(s));
+                    if (closed.size() >= o.max_states)
+                    {
+                        full = true;
+                        return false;
+                    }
                     return true;
                 },
                 witness, canonical, o.symmetry_pruning);
+            if (full || ctl.stopped())
+            {
+                stopped = true;  // max_states, the time or the token, inside the expansion
+                break;
+            }
         }
         log.close(r.expanded, r.generated, closed.size());
         layer_first += static_cast<u32>(layer_f.size());
@@ -954,6 +1051,11 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                     (layer.capacity() + next_layer.capacity() + layer_num.capacity() + next_layer_num.capacity()) * sizeof(u64);
     if (o.fingerprint)
         r.fingerprint = 0;  // closed states are not kept: no per-id fingerprint
+    if (first_goal != k_no_goal)
+    {
+        r.solved = true;
+        r.plan = nodes.plan(first_goal, succ);
+    }
     ctl.finish(r);
     return r;
 }
@@ -968,6 +1070,7 @@ struct alignas(64) ThreadState
     u64 generated = 0, goals = 0, expanded = 0;
     u64 next_progress = 0;
     u32 tick = 0;
+    u32 transitions = 0;  // since the last check of the time and the token inside an expansion
 };
 
 class ParallelBrfs
@@ -1003,6 +1106,7 @@ public:
         const auto t0 = Clock::now();
         const State& s0 = m_task.initial_state();
         m_loc.push_back(m_store.insert(0, s0.data(), s0.size_words(), ~u64{0}, s0.numeric().data()).first);
+        m_stored.store(1, std::memory_order_relaxed);
         m_ctl.start(s0.view());
         m_store.begin_layer();
         m_layer_lo = 0;
@@ -1060,11 +1164,13 @@ public:
         if (const u8 why = m_halt.load(std::memory_order_relaxed); why != 0)
             m_ctl.stop(static_cast<search::SearchStatus>(why - 1));
         r.search_s = seconds_since(t0);
-        r.solved = m_stop.load(std::memory_order_relaxed);
+        r.solved = m_goal.load(std::memory_order_relaxed) != ~u64{0};
         if (r.solved)
             r.plan = plan_to(m_goal.load(std::memory_order_relaxed));
-        r.exhausted = !r.solved && m_layer_lo == m_layer_hi;
-        r.states = m_layer_hi;
+        r.exhausted = !m_stop.load(std::memory_order_relaxed) && m_layer_lo == m_layer_hi;
+        r.states = m_layer_hi;  // with ids; a layer the search stopped inside also stored states
+        for (u32 t = 0; t < m_T; ++t)
+            r.states += m_store.local_size(t) - m_store.layer_start(t);
         for (const ThreadState& w : m_ws)
         {
             r.generated += w.generated;
@@ -1191,29 +1297,56 @@ private:
         succ.prepare(rec);
         const bool goal = is_goal(m_o.goal, succ, rec);
         w.goals += goal;
-        if (goal && m_o.stop_at_goal)
+        if (goal)
         {
             u64 g = m_goal.load(std::memory_order_relaxed);
             while (id < g && !m_goal.compare_exchange_weak(g, id, std::memory_order_relaxed))
             {
             }
-            m_stop.store(true, std::memory_order_relaxed);
-            return;
+            if (m_o.stop_at_goal)
+            {
+                m_stop.store(true, std::memory_order_relaxed);
+                return;
+            }
         }
         ++w.expanded;
         if (w.obs)
             w.obs->on_expand(id, rec);
         u32 k = 0;
-        succ.generate<false>(
+        const bool bounded = m_o.max_states != ~u64{0};
+        succ.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d)
             {
+                if (m_halt.load(std::memory_order_relaxed))
+                    return false;
+                if (++w.transitions == search::k_check_transitions)
+                {
+                    w.transitions = 0;
+                    if (m_ctl.timed() && Clock::now() >= m_ctl.deadline())
+                        return halt(search::SearchStatus::OutOfTime);
+                    if (m_o.cancel.requested())
+                        return halt(search::SearchStatus::Cancelled);
+                }
                 const u32 kk = k++;
-                ++w.generated;
                 const u32 nn = apply_delta(rec.w, rec.nw, d, w.next);
-                const bool fresh = m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num).second;
+                bool fresh;
+                if (bounded)
+                {
+                    // at most max_states states: the one that fills the store stops the search
+                    const auto ins = m_store.insert_bounded(t, w.next.data(), nn, (id << 24) | kk, d.num, m_stored,
+                                                            m_o.max_states);
+                    if (!ins)
+                        return halt(search::SearchStatus::OutOfStates);
+                    fresh = ins->second;
+                }
+                else
+                    fresh = m_store.insert(t, w.next.data(), nn, (id << 24) | kk, d.num).second;
+                ++w.generated;
                 if (w.obs)  // ids are assigned when the layer ends
                     w.obs->on_generate(id, action_of(succ, s, b), ~u64{0},
                                        {w.next.data(), nn, d.num, m_task.numeric_words()}, fresh);
+                if (fresh && bounded && m_stored.load(std::memory_order_relaxed) >= m_o.max_states)
+                    return halt(search::SearchStatus::OutOfStates);
                 return true;
             },
             m_o.witness_pruning, m_o.canonical_order, m_o.symmetry_pruning);
@@ -1353,8 +1486,9 @@ private:
     u64 m_chunk = 1;
     std::atomic<bool> m_resize{false};
     std::atomic<bool> m_stop{false};
-    std::atomic<u64> m_goal{~u64{0}};  // stop_at_goal: the smallest id of a goal state expanded
-    std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress)
+    std::atomic<u64> m_goal{~u64{0}};  // the smallest id of a goal state expanded
+    std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress, states)
+    std::atomic<u64> m_stored{0};  // states stored, when max_states is finite (ConcurrentStateStore::insert_bounded)
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;
     u64 m_cursor_cap = 0;

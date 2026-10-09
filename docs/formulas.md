@@ -63,7 +63,7 @@ assert not numeric_goal.holds(numeric_task.initial_state)
 # CPU search accepts one GroundCondition or an any-of sequence of goals.
 goal = task.ground_condition([task.atom("holding", "d")])
 other_goal = task.ground_condition([task.atom("holding", "a")])
-result = search.brfs(task, stop_at_goal=True, goal=[goal, other_goal])
+result = search.brfs(task, goal=[goal, other_goal])
 end_state = state
 for action in result.plan:
     end_state = task.apply(end_state, action)

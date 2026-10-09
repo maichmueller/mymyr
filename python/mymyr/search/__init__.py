@@ -7,7 +7,7 @@ reachability/*.hpp in the C++ core).
     r = mymyr.search.astar(task, heuristic="max")       # A* (eager; lazy=True for lazy)
     r = mymyr.search.gbfs(task, heuristic="ff", lazy=True)
     r = mymyr.search.beam(task, width=100)
-    r = mymyr.search.brfs(task, threads=8)              # exhaustive breadth-first search, deterministic ids
+    r = mymyr.search.brfs(task, threads=8)              # breadth-first search to a shortest plan, deterministic ids
     r.status, r.plan, r.cost, r.goal_state              # Status.SOLVED, [Action], float, State
     text = mymyr.search.format_plan(task, r.plan)       # IPC plan text; parse_plan(task, text) reads it back
 
@@ -35,7 +35,7 @@ strategies): ``layer_order`` is ``"queue"`` (plain breadth-first, the default), 
 ``prefer_more_satisfied_goals=False``: fewest first), and ``max_next_layer_states`` stops expanding a layer once the
 next one holds that many states:
 
-    r = mymyr.search.brfs(task, stop_at_goal=True, layer_order="goal_count", max_next_layer_states=100)
+    r = mymyr.search.brfs(task, layer_order="goal_count", max_next_layer_states=100)
 
 With ``beam_width`` an ordered search keeps only the best ``beam_width`` states of every next layer (equal scores in
 generation order, or randomly by ``seed`` with ``randomize_ties=True``); ``beam_novelty`` decides whether the
@@ -50,7 +50,7 @@ transitions into ``min(threads, ceil(n / beam_chunk))`` parts and keeps the best
 merging, so its result depends on the thread count (deterministic for a thread count and seed):
 
     r = mymyr.search.iw(task, max_arity=2, layer_order="goal_count", beam_width=32, threads=8)
-    r = mymyr.search.brfs(task, stop_at_goal=True, layer_order="goal_count", beam_width=32,
+    r = mymyr.search.brfs(task, layer_order="goal_count", beam_width=32,
                           beam_novelty="relaxed_survivors_only", threads=8)
 
 The IW family variants:
@@ -82,7 +82,9 @@ Every search runs with the thread state detached: other Python threads keep runn
 run at once on one task (free-threaded CPython). Common keyword arguments:
 
 - budgets ``max_states``, ``max_expanded``, ``max_depth``, ``max_seconds`` (unset: unlimited; brfs takes
-  ``max_states`` and ``max_seconds``);
+  ``max_states`` and ``max_seconds``). ``max_states`` counts the states a search stores, the start state included
+  (IW: the nodes of a pass); the search stops with OUT_OF_STATES at the new state that fills them, inside its
+  parent's expansion, so it never stores more. The deadline and the cancellation are checked inside expansions too;
 - ``cancel``: a :class:`CancelToken`; ``token.request()`` from any thread stops the search (status CANCELLED);
 - ``goal``: ``None`` (the task's goal), a callable ``state -> bool``, a :class:`mymyr.GroundCondition`, or a sequence
   of goals, each a GroundCondition or a sequence of ground literals and atoms (anything ``task.ground_condition``

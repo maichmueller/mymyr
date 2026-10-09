@@ -146,7 +146,7 @@ def _search(task: mymyr.Task, a: argparse.Namespace, cancel: search.CancelToken)
     if a.search == "gbfs":
         return search.gbfs(task, heuristic=h, costs="real", **budget)
     if a.search == "brfs":
-        return search.brfs(task, stop_at_goal=True, threads=a.threads, **budget)
+        return search.brfs(task, threads=a.threads, **budget)
     width = {} if a.width is None else ({"width": a.width} if a.search == "astar_iw" else {"max_arity": a.width})
     if a.search == "iw":
         return search.iw(task, **width, **budget)

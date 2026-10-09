@@ -112,7 +112,7 @@ def test_golden_iw_per_pass(name):
                                   and load_golden(n)["brfs"]["states"] <= 400_000])
 def test_golden_brfs_counts(name):
     g = load_golden(name)["brfs"]
-    r = search.brfs(golden_task(name), witness_pruning=False)
+    r = search.brfs(golden_task(name), witness_pruning=False, stop_at_goal=False)
     assert r.exhausted and r.states == g["states"] and r.generated == g["generated"]
 
 
@@ -153,7 +153,7 @@ def test_invariants_across_algorithms(name):
     blind = search.astar(task, heuristic="blind")
     hmax = search.astar(task, heuristic="max")
     lazy = search.astar(task, heuristic="max", lazy=True)
-    bfs = search.brfs(task, stop_at_goal=True)
+    bfs = search.brfs(task)
     assert blind.status == hmax.status == lazy.status == Status.SOLVED and bfs.solved
     # unit costs: optimal cost = the shortest plan = BrFS's plan
     assert blind.cost == hmax.cost == lazy.cost == len(bfs.plan) == len(blind.plan)
@@ -164,6 +164,43 @@ def test_invariants_across_algorithms(name):
     # the admissible heuristics bound the optimal cost from below
     for kind in ("blind", "max"):
         assert search.Heuristic(task, kind)(task.initial_state) <= blind.cost
+
+
+BRFS_STORES = {
+    "flat": dict(store="flat"),
+    "chunked": dict(store="chunked"),
+    "compact": dict(store="compact"),
+    "concurrent": dict(store="concurrent"),
+    "concurrent_4": dict(store="concurrent", threads=4),
+    "in_order": dict(store="flat", layer_order="in_order"),
+    "beam": dict(store="flat", layer_order="in_order", beam_width=1 << 20),
+}
+
+
+@pytest.mark.parametrize("store", sorted(BRFS_STORES))
+def test_brfs_stops_at_the_first_goal_by_default(store):
+    task = text_task("depot__p02")
+    shortest = search.astar(task, heuristic="blind", costs="unit")
+    r = search.brfs(task, **BRFS_STORES[store])
+    assert r.status == Status.SOLVED and r.solved and not r.exhausted
+    assert len(r.plan) == shortest.cost and task.is_goal(replay(task, r.plan))
+    assert r.states < search.brfs(task, stop_at_goal=False, **BRFS_STORES[store]).states
+
+
+@pytest.mark.parametrize("store", sorted(BRFS_STORES))
+def test_a_whole_space_brfs_that_reached_a_goal_is_solved(store):
+    task = text_task("depot__p02")
+    first = search.brfs(task, **BRFS_STORES[store])
+    r = search.brfs(task, stop_at_goal=False, **BRFS_STORES[store])
+    assert r.status == Status.SOLVED and r.solved and r.exhausted and r.goal_states > 0
+    # the plan to the first goal state expanded: the shortest one
+    assert len(r.plan) == len(first.plan) and task.is_goal(replay(task, r.plan))
+
+
+def test_a_whole_space_brfs_without_a_goal_is_exhausted_with_an_empty_plan():
+    task = text_task("depot__p02")
+    r = search.brfs(task, stop_at_goal=False, goal=lambda s: False)
+    assert r.status == Status.EXHAUSTED and r.exhausted and not r.solved and r.plan == [] and r.goal_states == 0
 
 
 # ------------------------------------------------------------------------------------------------ control surface

@@ -1275,7 +1275,8 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
 
 const char* k_control_doc =
     "Common keyword arguments (search/control.hpp): max_states, max_expanded, max_depth, max_seconds (budgets; unset = "
-    "unlimited), cancel (a CancelToken, requestable from any thread), goal (None: the task's goal; a callable "
+    "unlimited; max_states counts the stored states, the start state included, and the search stops with "
+    "OUT_OF_STATES at the new state that fills them, inside its parent's expansion), cancel (a CancelToken, requestable from any thread), goal (None: the task's goal; a callable "
     "state -> bool; a GroundCondition; or a sequence of goals, each a GroundCondition or a sequence of ground literals "
     "and atoms as Task.ground_condition takes them, any of which counts: static, fluent and derived literals of either "
     "polarity and numeric constraints), blocked_states (States never entered), observer (an object with any of on_start(state), "
@@ -1979,12 +1980,14 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "threads"_a = 1, "store"_a = "auto", "witness_pruning"_a = true,
         "canonical_order"_a = true, "symmetry_pruning"_a = "off", "deterministic_ids"_a = true,
-        "max_states"_a = nb::none(), "stop_at_goal"_a = false,
+        "max_states"_a = nb::none(), "stop_at_goal"_a = true,
         "fingerprint"_a = false, MYMYR_LAYER_ARGS, "goal"_a = nb::none(), "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("Breadth-first search over the reachable states (search/brfs.hpp): single-threaded, or "
-                     "layer-synchronous on `threads` threads with ids independent of the thread count. stop_at_goal "
-                     "returns the first goal state's plan, a shortest one. goal: the goal states, as the common "
+                     "layer-synchronous on `threads` threads with ids independent of the thread count. A search that "
+                     "expands a goal state is SOLVED, with the plan to the first one (a shortest plan); stop_at_goal "
+                     "(the default) stops there, stop_at_goal=False goes on through the whole reachable space "
+                     "(`exhausted` tells whether it got through, `goal_states` counts the goal states). goal: the goal states, as the common "
                      "keyword argument of the other searches (a callable needs threads=1). fingerprint: the result's fingerprint "
                      "hashes (id, canonical state) over the whole store (determinism checks; 0 when off). An ordered "
                      "layer_order needs the 'flat' or 'chunked' store ('auto' picks one of them) and, without a beam, "

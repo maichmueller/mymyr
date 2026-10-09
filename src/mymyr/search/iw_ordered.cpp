@@ -197,9 +197,20 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             }
             if (!prepared)
                 succ.prepare(cv);
-            succ.generate<false>(
+            u32 since_check = 0;
+            succ.generate<true>(
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
+                    if (++since_check == k_check_transitions)  // the time and the token inside the expansion
+                    {
+                        since_check = 0;
+                        if (c.out_of_time() || cancel.requested())
+                        {
+                            finish(c.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
+                            stop = true;
+                            return false;
+                        }
+                    }
                     ++st.generated;
                     const u32 nn = apply_delta(cur.data(), n, d, next);
                     Candidate x{id, s, binding.size(), words.size(), nn, adds_buf.size(), 0};
@@ -214,6 +225,8 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                     return true;
                 },
                 o.witness_pruning, o.canonical_order, o.symmetry_pruning);
+            if (stop)
+                break;
         }
         if (stop)
             break;
@@ -298,6 +311,12 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             {
                 reject();
                 continue;
+            }
+            if (nodes.size() >= budget.max_states)  // the root alone fills the tree
+            {
+                finish(SearchStatus::OutOfStates);
+                stop = true;
+                break;
             }
             if (obs)
                 obs->on_generate(x.parent, Action(SchemaId{x.schema}, std::vector<ObjectId>(b.begin(), b.end())), nodes.size(), child, true);

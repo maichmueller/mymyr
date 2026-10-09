@@ -692,6 +692,7 @@ TEST(BeamParallel, Refusals)
     EXPECT_EQ(r.status, SearchStatus::Failed);
     EXPECT_NE(r.message.find("RelaxedSurvivorsOnly requires Kind::GoalCount"), std::string::npos) << r.message;
     BrfsOptions b;
+    b.stop_at_goal = false;
     b.layers = lo;
     EXPECT_THROW((void)brfs(*task, b), std::invalid_argument);
     o.layers = beam(4, Novelty::RelaxedSurvivorsOnly);
