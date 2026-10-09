@@ -417,6 +417,25 @@ struct TaskIds
     {
         ptr = import_task_ids(obj, rows, t.size(), copy, keep, "task_ids", t.noun());
     }
+    /// The ids of `batch` (read in place or converted), checked against the suite, and its States against the
+    /// instance of their row: ValueError for a State of another task.
+    TaskIds(nb::handle obj, const StateBatch& batch, const rl::TaskSuite& t) : TaskIds(obj, batch.view.rows, t)
+    {
+        if (batch.owners.empty() || (!ptr && t.size() > 1))
+            return;  // arrays: the caller's encoding; no ids for a suite of several: the expansion reports it
+        t.check_task_ids(ptr, batch.view.rows);
+        for (u64 i = 0; i < batch.owners.size(); ++i)
+        {
+            const u32 g = ptr ? static_cast<u32>(ptr[i]) : 0;
+            if (batch.owners[i] == t.task(g)->uid())
+                continue;
+            const std::string which = batch.single ? std::string("the state") : "state " + std::to_string(i);
+            throw nb::value_error((t.size() == 1 ? "mymyr: " + which + " belongs to another task"
+                                                 : "mymyr: " + which + " is not a state of instance " + std::to_string(g) +
+                                                       " of the " + t.noun() + " (its task id)")
+                                      .c_str());
+        }
+    }
     TaskIds(const TaskIds&) = delete;
     TaskIds& operator=(const TaskIds&) = delete;
 };
@@ -460,7 +479,7 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     PyPool* p = pool_arg(pool);
     const rl::ExpandOptions opt = expand_options(canonical, witness, validate);
     const u64 N = in.view.rows;
-    const TaskIds ids(task_ids, N, tt);
+    const TaskIds ids(task_ids, in, tt);
     const u32 L = tt.label_width();
     const bool fixed_cap = !capacity.is_none();
     const bool fixed_words = !words.is_none();
@@ -541,7 +560,7 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
     StateBatch in = import_table_states(states, tt);
-    const TaskIds ids(task_ids, in.view.rows, tt);
+    const TaskIds ids(task_ids, in, tt);
     const u32 NN = tt.numeric_words();
     rl::Expansion x;
     x.numeric_words = NN;
@@ -1661,7 +1680,7 @@ void bind_rl(nb::module_& parent)
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {
             const SuiteRef ref = suite_of(table);
             StateBatch in = import_table_states(states, *ref.suite);
-            const TaskIds ids(task_ids, in.view.rows, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
             const auto [fw, enc] = output_kind(in, framework, !in.packed);
             auto block = Block::make(std::max<u64>(in.view.rows, 1));
             {

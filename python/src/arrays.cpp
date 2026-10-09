@@ -663,6 +663,7 @@ StateBatch import_states(nb::handle obj, u32 task_words)
         b.view = {b.packed->data(), 1, static_cast<u32>(b.packed->size()), 0};
         b.single = true;
         b.enc = {64, false};
+        b.owners = {state_of(obj).core->task->uid()};
         return b;
     }
     if (nb::isinstance<nb::list>(obj) || nb::isinstance<nb::tuple>(obj))
@@ -677,6 +678,7 @@ StateBatch import_states(nb::handle obj, u32 task_words)
             if (!is_state(item))
                 throw nb::type_error("mymyr: expected an array of state words, a State, or a sequence of States");
             states[i] = &state_of(item).s;
+            b.owners.push_back(state_of(item).core->task->uid());
             W = std::max(W, states[i]->size_words());
         }
         b.packed = std::make_shared<std::vector<u64>>(n * W, 0);

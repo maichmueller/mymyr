@@ -155,7 +155,45 @@ const PyState& state_of(nb::handle h) { return *nb::inst_ptr<PyState>(h); }
 /// task.numeric_words() columns are the numeric words), States are packed with their values.
 StateBatch import_task_states(nb::handle obj, const Task& task)
 {
-    return import_rows(obj, task.words(), task.numeric_words());
+    StateBatch b = import_rows(obj, task.words(), task.numeric_words());
+    check_task_rows(b, task);
+    return b;
+}
+
+namespace
+{
+std::string row_name(const StateBatch& b, u64 i)
+{
+    return b.single ? std::string("the state") : "state " + std::to_string(i);
+}
+}  // namespace
+
+void check_task_rows(const StateBatch& b, const Task& task)
+{
+    for (u64 i = 0; i < b.owners.size(); ++i)
+        if (b.owners[i] != task.uid())
+            throw nb::value_error(("mymyr: " + row_name(b, i) + " belongs to another task").c_str());
+    if (!b.owners.empty())
+        return;  // States of this task: their rows are its rows
+    const u32 W = b.view.words;
+    if (task.atoms().mode() == AtomMode::Frozen && W < task.words() && b.view.rows)
+        throw nb::value_error(("mymyr: rows of " + std::to_string(W) + " atom words; this task's states have " +
+                               std::to_string(task.words()) + " (frozen atom slots)")
+                                  .c_str());
+    const u32 limit = task.atoms().fluent_slots();
+    if (static_cast<u64>(W) * 64 <= limit)
+        return;
+    for (u64 i = 0; i < b.view.rows; ++i)
+    {
+        const u64* w = b.view.row(i);
+        u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
+        for (u32 k = (limit >> 6) + 1; k < W && !bad; ++k)
+            bad = w[k];
+        if (bad)
+            throw nb::value_error(("mymyr: " + row_name(b, i) +
+                                   " sets atom slots this task has not assigned (a state of another task?)")
+                                      .c_str());
+    }
 }
 
 StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
@@ -179,6 +217,11 @@ StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
         for (const State* s : states)
             W = std::max(W, s->size_words());
         StateBatch b;
+        if (seq)
+            for (nb::handle item : nb::borrow<nb::sequence>(obj))
+                b.owners.push_back(state_of(item).core->task->uid());
+        else
+            b.owners.push_back(state_of(obj).core->task->uid());
         b.packed = std::make_shared<std::vector<u64>>(states.size() * (W + NN), 0);
         for (usize i = 0; i < states.size(); ++i)
         {
@@ -282,16 +325,9 @@ StateArg state_arg(PyTaskCore& core, nb::handle h)
     a.batch = import_task_states(h, *core.task);
     if (a.batch.view.rows != 1)
         throw nb::value_error("mymyr: expected one state");
-    const u32 limit = core.task->atoms().fluent_slots();
     const u64* w = a.batch.view.data;
     const u32 nw = a.batch.view.words;
     const u32 NN = a.batch.view.numeric_words;
-    for (u32 i = limit >> 6; i < nw; ++i)
-    {
-        const u64 bad = i == (limit >> 6) ? w[i] & ~((u64{1} << (limit & 63)) - 1) : w[i];
-        if (bad)
-            throw nb::value_error("mymyr: the state words set atom slots this task has not assigned");
-    }
     a.view = StateView{w, nw, NN ? w + nw : nullptr, NN};
     return a;
 }
@@ -1737,15 +1773,11 @@ void bind_task_api(nb::class_<C>& cls)
             [owner](Self self, WordsArg words) {
                 PyTaskCore& core = *self.p->core;
                 StateBatch b = import_task_states(words, *core.task);
-                const u32 limit = core.task->atoms().fluent_slots();
                 const u32 NN = b.view.numeric_words;
                 StateList out{nb::list()};
                 for (u64 i = 0; i < b.view.rows; ++i)
                 {
                     const u64* w = b.view.row(i);
-                    for (u32 k = limit >> 6; k < b.view.words; ++k)
-                        if (k == (limit >> 6) ? (w[k] & ~((u64{1} << (limit & 63)) - 1)) : w[k])
-                            throw nb::value_error("mymyr: a row sets atom slots this task has not assigned");
                     out.append(make_state(owner(self), State(w, b.view.words, NN ? w + b.view.words : nullptr, NN)));
                 }
                 return out;

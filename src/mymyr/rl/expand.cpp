@@ -22,7 +22,7 @@ namespace
 constexpr u64 k_i32_max = static_cast<u64>(std::numeric_limits<i32>::max());
 
 /// Throws unless row `i` sets only assigned fluent slots (bits at or beyond `limit` would index unassigned records).
-void check_row(const u64* row, u32 nw, u32 limit, u64 i)
+void check_row(const u64* row, u32 nw, u32 limit, u64 i, const char* what)
 {
     const u32 lw = limit >> 6;
     if (nw <= lw)
@@ -31,8 +31,25 @@ void check_row(const u64* row, u32 nw, u32 limit, u64 i)
     for (u32 w = lw + 1; w < nw && !bad; ++w)
         bad = row[w];
     if (bad)
-        throw std::invalid_argument("mymyr: expand: state row " + std::to_string(i) +
+        throw std::invalid_argument(std::string("mymyr: ") + what + ": state row " + std::to_string(i) +
                                     " sets atom slots its instance has not assigned (a state of another task?)");
+}
+
+/// Throws unless every row is a state of its instance: at least the instance's width when its atom slots are frozen
+/// (a narrower row is a truncated state), and, with `content`, no bit at a slot the instance has not assigned.
+void check_rows(const TaskSuite& table, StateBatchView in, const i32* ids, bool content, const char* what)
+{
+    for (u64 i = 0; i < in.rows; ++i)
+    {
+        const Task& t = table.task_of(ids, i);
+        if (in.words < t.words() && t.atoms().mode() == AtomMode::Frozen)
+            throw std::invalid_argument(std::string("mymyr: ") + what + ": state rows of " + std::to_string(in.words) +
+                                        " atom words; the states of instance " + std::to_string(ids ? ids[i] : 0) +
+                                        " have " + std::to_string(t.words()) + " (frozen atom slots)");
+        const u32 limit = t.atoms().fluent_slots();
+        if (content && static_cast<u64>(in.words) * 64 > limit)
+            check_row(in.row(i), in.words, limit, i, what);
+    }
 }
 
 void check_numeric(const TaskSuite& suite, u32 numeric_words, const char* what)
@@ -56,14 +73,7 @@ void check_batch(const TaskSuite& table, StateBatchView in, const i32* ids, cons
         throw std::invalid_argument(std::string("mymyr: expand: a batch over a ") + table.noun() + " of " +
                                     std::to_string(table.size()) + " instances needs task ids");
     table.check_task_ids(ids, in.rows);
-    if (!opt.validate)
-        return;
-    for (u64 i = 0; i < in.rows; ++i)
-    {
-        const u32 limit = table.task_of(ids, i).atoms().fluent_slots();
-        if (static_cast<u64>(in.words) * 64 > limit)
-            check_row(in.row(i), in.words, limit, i);
-    }
+    check_rows(table, in, ids, opt.validate, "expand");
 }
 
 void check_out(const TaskSuite& table, const Expansion& out)
@@ -521,6 +531,7 @@ void is_goal(const TaskSuite& table, StateBatchView in, const i32* ids, u8* out)
         throw std::invalid_argument(std::string("mymyr: is_goal: a batch over a ") + table.noun() + " of " +
                                     std::to_string(table.size()) + " instances needs task ids");
     table.check_task_ids(ids, in.rows);
+    check_rows(table, in, ids, true, "is_goal");
     for (u64 i = 0; i < in.rows; ++i)
         out[i] = goal_of(table.task_of(ids, i), in.row(i), in.words, in.numeric_words);
 }
