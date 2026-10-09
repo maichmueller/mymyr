@@ -77,10 +77,11 @@ f64 value(const Task& t, StateView s, const std::string& name)
 }
 }  // namespace
 
-TEST(NumericPddl, EffectApplicabilityFollowsTheFork)
+TEST(NumericPddl, EffectApplicability)
 {
     const auto task = rules_task();
-    EXPECT_EQ(task->numeric_slots(), 2u);  // x, y; z is static, u has no value, total-cost is auxiliary
+    // x, y and u (undefined until assign-undefined gives it a value); z is static, total-cost is auxiliary
+    EXPECT_EQ(task->numeric_slots(), 3u);
     EXPECT_EQ(task->numeric_storage(), NumericStorage::F64);  // a division
     Successors& succ = task->workspace().successors();
     const State s0 = task->initial_state();
@@ -99,15 +100,24 @@ TEST(NumericPddl, EffectApplicabilityFollowsTheFork)
     std::set<std::string> applicable;
     for (const auto& [name, _] : next)
         applicable.insert(name);
-    const std::set<std::string> want = {"inc",           "make-p",        "two-increases",        "increase-decrease",
-                                        "two-scales",    "ce-not-firing", "ce-families",          "ce-families-conflict",
-                                        "fluent-cost",   "conditional-cost", "numeric-pre",       "negative-zero",
-                                        "zero"};
-    // not applicable: an effect on a function without a value (increase and, unlike the fork, assign), an assignment
-    // with another effect on the same target, additive with multiplicative effects, a NaN value (division by zero),
-    // a total-cost over an undefined value, a constraint over one. Unlike the fork, a conditional effect that does
-    // not fire conflicts with nothing (ce-families-conflict).
+    const std::set<std::string> want = {"inc",          "make-p",           "assign-undefined", "two-increases",
+                                        "increase-decrease", "two-scales",  "ce-not-firing",    "ce-families",
+                                        "ce-families-conflict", "fluent-cost", "conditional-cost", "numeric-pre",
+                                        "negative-zero", "zero"};
+    // not applicable: an increase of a function without a value, an assignment with another effect on the same
+    // target, additive with multiplicative effects, a NaN value (division by zero), a total-cost over an undefined
+    // value, a constraint over one. An assign gives a function without a value one (as in the fork); unlike the fork,
+    // a conditional effect that does not fire conflicts with nothing (ce-families-conflict).
     EXPECT_EQ(applicable, want);
+    EXPECT_TRUE(std::isnan(value(*task, s0.view(), "(u)")));
+    EXPECT_EQ(value(*task, next.at("assign-undefined").view(), "(u)"), 1);
+    // with a value, u can be increased and read
+    std::set<std::string> after;
+    succ.for_each_applicable(next.at("assign-undefined").view(),
+                             [&](const ActionLabel& a, const Delta&) { after.insert(task->schema_name(a.schema)); });
+    EXPECT_TRUE(after.contains("inc-undefined"));
+    EXPECT_TRUE(after.contains("undefined-pre"));
+    EXPECT_TRUE(after.contains("undefined-cost"));
     EXPECT_EQ(value(*task, next.at("inc").view(), "(x)"), 2);
     EXPECT_EQ(value(*task, next.at("two-increases").view(), "(x)"), 4);
     EXPECT_EQ(value(*task, next.at("increase-decrease").view(), "(x)"), -1);

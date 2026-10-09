@@ -69,7 +69,7 @@ bool Successors::numeric_effects(const std::vector<plan::NumEffect>& es, bool ha
             slot = F.slot_of(k);
         }
         if (slot == plan::FunctionTable::k_none)
-            return false;  // the target has no value (mimir allows `assign` to it; see task/numeric.hpp)
+            return false;  // no action can assign the target (task/numeric.hpp): it has no value
         const u8 f = plan::effect_family(e.op);
         if (!plan::compatible_family(m_fam[slot], f))
             return false;
@@ -79,6 +79,8 @@ bool Successors::numeric_effects(const std::vector<plan::NumEffect>& es, bool ha
         const f64 v = m_e.eval(e.expr);
         if (!plan::defined_effect(e.op, v))
             return false;
+        if (e.op != formalism::AssignOp::Assign && std::isnan(plan::load(N, m_e.numeric(), slot)))
+            return false;  // only assign gives an undefined function a value
         writes.push_back({slot, e.op, v});
     }
     if (has_aux)
