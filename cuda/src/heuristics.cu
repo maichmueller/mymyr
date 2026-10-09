@@ -601,7 +601,7 @@ __device__ u32 evaluate_one(const Relaxed& r, const u64* row, u32 words, const A
     if constexpr (KIND == k_max)
         return gs.hmax;
     if constexpr (KIND == k_add)
-        return gs.hsum >= k_inf ? k_inf : static_cast<u32>(gs.hsum);
+        return gs.hsum >= k_inf ? k_inf - 1 : static_cast<u32>(gs.hsum);  // a sum beyond the cost range is large, not a dead end
 
     if constexpr (KIND == k_ff || KIND == k_set_additive)
     {
@@ -670,7 +670,7 @@ __device__ u32 evaluate_one(const Relaxed& r, const u64* row, u32 words, const A
             }
             g.sync();
         }
-        return gs.hsum >= k_inf ? k_inf : static_cast<u32>(gs.hsum);
+        return gs.hsum >= k_inf ? k_inf - 1 : static_cast<u32>(gs.hsum);  // a sum beyond the cost range is large, not a dead end
     }
     return k_inf;
 }
@@ -708,10 +708,10 @@ __global__ void k_evaluate(Relaxed r, Rows rows, u64 group_bytes, void* gscratch
     }
 }
 
-__global__ void k_to_f64(const u32* h, u64 n, f64* out)
+__global__ void k_to_f64(const u32* h, u64 n, f64 scale, f64* out)
 {
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < n; i += u64{gridDim.x} * blockDim.x)
-        out[i] = h[i] == k_inf ? __longlong_as_double(0x7FF0000000000000ll) : static_cast<f64>(h[i]);
+        out[i] = h[i] == k_inf ? __longlong_as_double(0x7FF0000000000000ll) : static_cast<f64>(h[i]) / scale;
 }
 
 using Kernel = void (*)(Relaxed, Rows, u64, void*, Out);
@@ -775,12 +775,12 @@ cudaError_t launch_evaluate(const Relaxed& r, Rows rows, Launch l, Out out, cuda
     return cudaGetLastError();
 }
 
-cudaError_t launch_to_f64(const u32* h, u64 n, f64* out, cudaStream_t s)
+cudaError_t launch_to_f64(const u32* h, u64 n, f64 scale, f64* out, cudaStream_t s)
 {
     if (n == 0)
         return cudaSuccess;
     const u64 g = (n + 255) / 256;
-    k_to_f64<<<static_cast<unsigned>(g < 65535 ? g : 65535), 256, 0, s>>>(h, n, out);
+    k_to_f64<<<static_cast<unsigned>(g < 65535 ? g : 65535), 256, 0, s>>>(h, n, scale, out);
     return cudaGetLastError();
 }
 

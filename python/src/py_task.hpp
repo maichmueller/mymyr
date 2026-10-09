@@ -73,7 +73,8 @@ public:
         return m_suite;
     }
 
-    /// The task's action costs (heuristics::ActionCosts), made on first use.
+    /// The task's action costs (heuristics::ActionCosts), made on first use. Throws std::invalid_argument (on every
+    /// call: a failed initialization runs again) for a metric mymyr refuses.
     [[nodiscard]] const heuristics::ActionCosts& costs()
     {
         m_costs_once.call([this] { m_costs = std::make_unique<heuristics::ActionCosts>(*task); });

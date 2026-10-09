@@ -185,8 +185,8 @@ struct Out
 /// time.
 cudaError_t launch_evaluate(const Relaxed& r, Rows rows, Launch l, Out out, cudaStream_t s);
 
-/// out[i] = h[i] as a double (+inf for k_inf).
-cudaError_t launch_to_f64(const u32* h, u64 n, f64* out, cudaStream_t s);
+/// out[i] = h[i] / scale as a double (+inf for k_inf).
+cudaError_t launch_to_f64(const u32* h, u64 n, f64 scale, f64* out, cudaStream_t s);
 /// Resident blocks per SM of the launch's kernel with its dynamic shared memory (0 when it does not fit).
 cudaError_t occupancy(const Launch& l, int* blocks_per_sm);
 
