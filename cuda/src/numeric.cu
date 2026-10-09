@@ -13,7 +13,8 @@ constexpr u32 block = 128;
 
 unsigned grid(u64 n) { return static_cast<unsigned>((n + block - 1) / block); }
 
-/// Numeric effect families persist even across a non-firing conditional effect, matching CPU applicability.
+/// The applicability rules of the numeric and total-cost effects (task/numeric.hpp), as on the CPU: only the effects
+/// that fire record their families.
 template<u32 OW>
 struct ActionWriter
 {
@@ -50,8 +51,10 @@ struct ActionWriter
                 return false;
             family[slot] = f;
             const f64 value = numeric_eval(n, e[6], e[7], row + p.words, bind, t.num_objects);
-            if (std::isnan(value))
+            if (std::isnan(value) || (e[0] == 4 && value == 0))  // undefined, or a scale-down by zero
                 return false;
+            if (e[0] != 0 && std::isnan(numeric_value(values, slot)))
+                return false;  // only assign gives an undefined function a value
             touched[slot] = 1;
             values[slot] = numeric_bits(numeric_assign(e[0], numeric_value(values, slot), value));
         }
@@ -62,7 +65,7 @@ struct ActionWriter
                 return false;
             aux_family = f;
             const f64 value = numeric_eval(n, g[3], g[4], row + p.words, bind, t.num_objects);
-            if (std::isnan(value))
+            if (std::isnan(value) || (g[2] == 4 && value == 0))
                 return false;
             aux_value = numeric_assign(g[2], aux_value, value);
         }
@@ -105,29 +108,12 @@ struct ActionWriter
         const u64* view = v.data + u64{parent} * v.words;
         if (numeric && !meta[2])
         {
-            u64 saved[k_max_words];
-            u8 saved_touch[k_max_words];
-            for (u32 i = 0; i < t.numeric.slots; ++i)
-            {
-                saved[i] = values[i];
-                saved_touch[i] = touched[i];
-            }
-            const f64 saved_aux = aux_value;
-            const bool ok = group(meta[0], bind);
+            // only an effect that fires executes (and records its families)
             bool fires = false;
             auto emit = [&](const u32* b) { fires = true; ce_literals(id, b); };
             run_fixed<OW, k_ce_depth, false, false, true>(t, mx, state, view, bind, emit);
             if (fires)
-                valid &= ok;
-            else
-            {
-                aux_value = saved_aux;
-                for (u32 i = 0; i < t.numeric.slots; ++i)
-                {
-                    values[i] = saved[i];
-                    touched[i] = saved_touch[i];
-                }
-            }
+                valid &= group(meta[0], bind);
         }
         else
         {

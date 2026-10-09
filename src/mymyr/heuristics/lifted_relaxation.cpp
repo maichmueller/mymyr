@@ -162,7 +162,10 @@ struct LiftedRelaxation::Impl
         total = L.total;
         build();
         if (real)
+        {
             costs = std::make_unique<ActionCosts>(task);
+            scale = costs->relaxed_scale();
+        }
         const u64 words = bits::words_for(std::max<u64>(total, 1));
         old_view.init(C, total);
         new_view.init(C, total);
@@ -260,7 +263,12 @@ struct LiftedRelaxation::Impl
         obj_scratch.resize(op.num_vars);
         for (u32 i = 0; i < op.num_vars; ++i)
             obj_scratch[i] = ObjectId{b[i]};
-        return static_cast<u32>(costs->cost(op.schema, obj_scratch.data()));
+        const u64 c = costs->relaxed_cost(op.schema, obj_scratch.data());
+        if (c == ActionCosts::k_undefined)
+            return k_inf;  // never applicable
+        if (c >= (u64{1} << 31))
+            throw std::domain_error("mymyr: an action cost is 2^31 units of the cost scale or more (heuristics::ActionCosts::relaxed_cost)");
+        return static_cast<u32>(c);
     }
     bool unify(const Op& op, u32 slot, const u32* a)
     {
@@ -304,6 +312,7 @@ struct LiftedRelaxation::Impl
     bool real;
     u64 total = 0;
     std::unique_ptr<ActionCosts> costs;
+    f64 scale = 1;  // real costs: the unit of the integer costs is 1 / scale
     std::vector<Op> ops;
     std::vector<std::vector<Anchor>> anchors, seed_anchors;  // per predicate
     std::vector<u32> seed_ops;                               // operators without relation literals
@@ -679,7 +688,10 @@ void LiftedRelaxation::Impl::fire(u32 oi, const u32* b, u32 acc, u32 last_supp, 
             last_supp = dsupp[x];
         }
     }
-    const u32 val = sat_add(acc, op_cost(oi, b));
+    const u32 oc = op_cost(oi, b);
+    if (oc == k_inf)
+        return;  // an action whose cost is undefined is never applicable
+    const u32 val = sat_add(acc, oc);
     u32 sup = k_none;
     bool have = false;
     auto supporter = [&]()
@@ -956,9 +968,9 @@ Value LiftedRelaxation::Impl::evaluate(StateView s, const std::vector<std::vecto
             }
             h = hc;
         }
-        best = std::min(best, h);
+        best = std::min(best, std::min<u64>(h, k_inf - 1));  // a sum beyond the cost range is large, not a dead end
     }
-    return best >= k_inf ? k_dead_end : static_cast<Value>(best);
+    return best >= k_inf ? k_dead_end : static_cast<Value>(best) / scale;
 }
 
 LiftedRelaxation::LiftedRelaxation(const Task& task, Kind kind, bool real) : m(std::make_unique<Impl>(task, kind, real)) {}

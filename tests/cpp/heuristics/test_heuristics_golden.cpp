@@ -509,6 +509,7 @@ void run_task(const fs::path& file, Tally& total)
             lifted = false;
         heuristics::Options o;
         o.relaxed = relaxed;
+        o.costs = heuristics::Costs::Unit;  // the fork's relaxation heuristics count every action 1
         o.kind = heuristics::Kind::Max;
         hm = heuristics::make_heuristic(*task, o);
         o.kind = heuristics::Kind::Add;
@@ -518,6 +519,7 @@ void run_task(const fs::path& file, Tally& total)
         if (lifted)  // the fallback: the same values without grounding
         {
             heuristics::Options l;
+            l.costs = heuristics::Costs::Unit;
             l.evaluation = heuristics::Evaluation::Lifted;
             l.kind = heuristics::Kind::Max;
             lm = heuristics::make_heuristic(*task, l);
@@ -561,7 +563,7 @@ void run_task(const fs::path& file, Tally& total)
                 {
                     // the fork's perfect heuristic is the cost-goal distance (action costs), as mymyr's with real costs
                     hstar = heuristics::perfect(space.space, heuristics::Costs::Real);
-                    hstar_unit = heuristics::perfect(space.space);  // bounds h² (unit costs)
+                    hstar_unit = heuristics::perfect(space.space, heuristics::Costs::Unit);  // bounds h² (unit costs)
                     if (fh->has("astar_perfect"))
                     {
                         // A* with h*: the fork's optimal cost; with unit costs it expands the states of its plan but

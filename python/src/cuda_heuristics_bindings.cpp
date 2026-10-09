@@ -64,7 +64,7 @@ struct type_caster<mymyr::python::ann::EvalKind>
 template<>
 struct type_caster<mymyr::python::ann::HeuristicCosts>
 {
-    static constexpr auto Name = const_name("typing.Literal['unit', 'real']");
+    static constexpr auto Name = const_name("typing.Literal['auto', 'unit', 'real']");
 };
 template<>
 struct type_caster<mymyr::python::ann::HeuristicVariant>
@@ -123,11 +123,13 @@ heuristics::Kind kind_of(nb::handle v, const char* name)
 heuristics::Costs costs_of(nb::handle v)
 {
     const std::string c = str_of(v, "costs");
+    if (c == "auto")
+        return heuristics::Costs::Auto;
     if (c == "unit")
         return heuristics::Costs::Unit;
     if (c == "real")
         return heuristics::Costs::Real;
-    throw nb::value_error("mymyr: costs must be 'unit' or 'real'");
+    throw nb::value_error("mymyr: costs must be 'auto', 'unit' or 'real'");
 }
 
 cuda::HeuristicVariant variant_of(nb::handle v)
@@ -391,9 +393,9 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                                   "per launch over the relaxed grounding, uploaded once. h_max, h_add and h² equal "
                                   "mymyr.search.Heuristic's; h_FF and set-additive break ties among equally cheap supporters by BFS level "
                                   "and operator id (reference() is the CPU implementation of that rule). Numeric values "
-                                  "and constraints are ignored in relaxation, as on the CPU. Real costs must be "
-                                  "state-independent, non-negative integers below 2^31; unsupported costs and groundings "
-                                  "beyond the budget raise ValueError.")
+                                  "and constraints are ignored in relaxation, as on the CPU. Real costs are those of "
+                                  "mymyr.search.Heuristic (exact up to 6 decimal places); costs below 2^31 units of that "
+                                  "scale only: larger costs and groundings beyond the budget raise ValueError.")
         .def_ro_static("DEAD_END", &cuda::DeviceHeuristic::k_dead_end, "The uint32 value of a dead end on the device.")
         .def(
             "__init__",
@@ -426,10 +428,11 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                 self->o = o;
                 self->h = std::move(h);
             },
-            "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "unit", "ctx"_a = nb::none(), "variant"_a = "auto",
+            "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "auto", "ctx"_a = nb::none(), "variant"_a = "auto",
             "threads"_a = nb::none(), "warp_groups"_a = nb::none(), "max_blocks"_a = nb::none(), "force_global"_a = false,
             "max_operators"_a = nb::none(), "max_scratch_bytes"_a = nb::none(),
-            "kind: 'max', 'add', 'ff', 'h2' or 'set_additive'; costs: 'unit' (every action 1) or 'real' (the task's action costs). The launch "
+            "kind: 'max', 'add', 'ff', 'h2' or 'set_additive'; costs: 'auto' (the default: the task's objective, 'unit' for a "
+            "task without action costs and metric, else 'real'), 'unit' (every action 1) or 'real' (the task's action costs). The launch "
             "configuration (variant, threads, warp_groups, max_blocks, force_global) changes no value. h2 uses global "
             "scratch and sweeps, at most 8191 propositions. max_scratch_bytes limits global scratch (default 512 MiB); "
             "h2 raises ValueError when a single state needs more.")
@@ -494,7 +497,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
         });
 
 #define MYMYR_DEVICE_SEARCH_ARGS                                                                                           \
-    "costs"_a = "unit", "ctx"_a = nb::none(), "start"_a = nb::none(), "batch"_a = 10000, "single_bucket"_a = true,       \
+    "costs"_a = "auto", "ctx"_a = nb::none(), "start"_a = nb::none(), "batch"_a = 10000, "single_bucket"_a = true,       \
         "reopen"_a = true, "witness_pruning"_a = false, "canonical_order"_a = true, "max_states"_a = nb::none(),         \
         "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),                        \
         "chunk_states"_a = nb::none(), "variant"_a = "auto"
@@ -510,7 +513,8 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
         "task"_a, nb::kw_only(), "heuristic"_a = "max", MYMYR_DEVICE_SEARCH_ARGS,
         "A* on the device with batched expansion: every step expands up to `batch` open nodes of the lowest bucket "
         "(f, h; single_bucket=False: the whole lowest f layer), the heuristic of the new states in one batch. With "
-        "an admissible heuristic and non-negative additive costs the plan is optimal; at batch=1 it is mymyr.search.astar "
+        "an admissible heuristic, costs='auto' (the default, the task's objective) and non-negative additive costs the plan "
+        "is optimal; at batch=1 it is mymyr.search.astar "
         "(same statistics and plan). Numeric tasks evaluate fluent costs and state metrics on the device and use a "
         "host double-priority heap, one parent per step, with CPU eager tie ordering; they do not capture graphs.");
 

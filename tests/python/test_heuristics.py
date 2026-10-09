@@ -104,9 +104,10 @@ def test_perfect_with_real_costs(tmp_path):
     task = mymyr.Task.from_pddl(tmp_path / "domain.pddl", tmp_path / "problem.pddl")
     space = datasets.state_space(task, remove_if_unsolvable=False)
     s = task.initial_state
-    assert search.Heuristic.perfect(space)(s) == 1
+    assert search.Heuristic.perfect(space)(s) == 2  # the task's action costs
+    assert search.Heuristic.perfect(space, costs="unit")(s) == 1
     assert search.Heuristic.perfect(space, costs="real")(s) == 2
-    r = search.astar(task, heuristic=search.Heuristic.perfect(space, costs="real"), costs="real")
+    r = search.astar(task, heuristic=search.Heuristic.perfect(space))
     assert r.status == Status.SOLVED and r.cost == 2
     # set-additive with real costs: the summed costs of its supporters
     assert search.Heuristic(task, "set_additive", costs="real")(s) == 2

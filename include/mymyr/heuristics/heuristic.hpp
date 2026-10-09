@@ -39,8 +39,12 @@
 // Numeric tasks. As mimir's delete relaxation (DeleteRelaxTranslator), the relaxation heuristics ignore numeric conditions
 // (of actions, effects and the goal) and numeric effects: they see the task's atoms only. Goal count counts the
 // fluent and derived goal literals; numeric goal constraints are not counted.
-// Costs. Unit: every action costs 1 and every axiom 0 (mimir's heuristics). Real: the task's action costs
-// (heuristics/action_costs.hpp); they must be non-negative integers.
+// Costs. Auto (the default): the task's objective, i.e. Unit for a task without action costs and metric, Real
+// otherwise. Unit: every action costs 1 and every axiom 0 (mimir's heuristics). Real: the task's action costs as the
+// relaxation sees them (ActionCosts::relaxed_cost, heuristics/action_costs.hpp): exact for integral and decimal costs
+// (zero and fractional costs included), rounded down for others, and 0 for an action whose cost depends on the state
+// (and for every action under a state metric), so h_max and h² stay admissible for non-negative costs. A heuristic
+// with unit costs on a task whose actions cost less than 1 overestimates: A* is then not optimal.
 // Evaluation. Grounded (the relaxed task is built on first use, within the budget) or lifted (a cost-bucketed semi-naive
 // fixpoint over lifted matchers; the fallback beyond the budget and for states outside the grounded relaxation). h_max,
 // h_add and h_FF have both; set-additive and h² are grounded only: make_heuristic throws std::invalid_argument for
@@ -93,8 +97,13 @@ enum class Kind : u8
 enum class Costs : u8
 {
     Unit,  // every action 1, axioms 0 (mimir)
-    Real,  // the task's action costs (total-cost)
+    Real,  // the task's action costs (ActionCosts::relaxed_cost)
+    Auto,  // the task's objective: Unit for a task without action costs and metric, else Real
 };
+
+/// Costs::Auto resolved for `task` (Unit or Real); Unit and Real as they are. Throws std::invalid_argument for a
+/// metric mymyr refuses (ActionCosts).
+[[nodiscard]] Costs resolve_costs(const Task& task, Costs costs);
 
 enum class Evaluation : u8
 {
@@ -111,7 +120,7 @@ enum class Evaluation : u8
 struct Options
 {
     Kind kind = Kind::FF;
-    Costs costs = Costs::Unit;
+    Costs costs = Costs::Auto;
     Evaluation evaluation = Evaluation::Auto;
     GroundingBudget budget;
     /// A grounding to use instead of building one (share it between heuristics and threads).
@@ -177,7 +186,7 @@ protected:
     std::function<bool()> m_interrupt;
 };
 
-/// Throws std::invalid_argument for unsupported combinations (real costs on a task whose costs are not integral, h² or
-/// set-additive without a grounding) and for Kind::Custom and Kind::Perfect.
+/// Throws std::invalid_argument for unsupported combinations (real costs of 2^31 units or more, h² or set-additive
+/// without a grounding) and for Kind::Custom and Kind::Perfect.
 [[nodiscard]] std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& options = {});
 }  // namespace mymyr::heuristics

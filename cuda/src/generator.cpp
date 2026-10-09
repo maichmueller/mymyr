@@ -139,11 +139,37 @@ std::vector<u64> axiom_reads(const plan::Compiled& C)
     }
     return out;
 }
+
+/// Whether the task evaluates numeric conditions or numeric effects on its states (total-cost effects aside).
+bool numeric_semantics(const plan::Compiled& C)
+{
+    const auto checks = [](const plan::Matcher& m) { return !m.npre.empty() || !m.nchecks.empty(); };
+    if (!C.num.goal.empty())
+        return true;
+    for (const plan::Schema& s : C.schemas)
+    {
+        if (!s.pre_nums.empty() || checks(s.pre[0]) || checks(s.pre[1]) ||
+            std::ranges::any_of(s.uncond_num, [](const plan::NumGroup& g) { return !g.neffs.empty(); }))
+            return true;
+        for (const plan::CondEffect& ce : s.ces)
+            if (checks(ce.cond) || !ce.neffs.empty())
+                return true;
+    }
+    for (const plan::Stratum& st : C.strata)
+        for (const plan::Axiom& x : st.axioms)
+            if (checks(x.body))
+                return true;
+    return false;
+}
 }  // namespace
 
 std::string ChunkGenerator::unsupported(const Task& task)
 {
     const plan::Compiled& C = task.compiled();
+    // the device kernels evaluate numeric conditions and effects only alongside numeric state values
+    if (!task.numeric_slots() && numeric_semantics(C))
+        return "numeric conditions or effects without numeric state values (no ground fluent function has an initial "
+               "value or an assign effect)";
     if (C.ow > lifted::k_max_ow)
         return "object bitsets of " + std::to_string(C.ow) + " words (the device kernels take at most " +
                std::to_string(lifted::k_max_ow) + ", i.e. " + std::to_string(64 * lifted::k_max_ow) + " objects)";

@@ -15,9 +15,10 @@ numeric rows hold one canonical double per fluent slot. TaskTable/TaskSuite nume
 with the shared atom/numeric row boundary. Classical tasks retain their atom-only layout and device kernels.
 
 The device heuristic kinds are `"max"`, `"add"`, `"ff"`, `"h2"` and `"set_additive"`; `"blind"` is also accepted by device A* and GBFS.
-Relaxation ignores numeric values and constraints as on the CPU. Real heuristic costs must be state-independent,
-non-negative integers below 2^31. For tasks with numeric fluent slots, unit relaxation supports fractional/fluent
-actual search costs. Cost-only classical searches require integral, state-independent costs. Numeric A*/GBFS use
+Relaxation ignores numeric values and constraints as on the CPU, and the heuristic costs are the CPU heuristics'
+(`costs="auto"` by default: the task's objective); real costs must stay below 2^31 units of their cost scale. Numeric
+searches support fractional and state-dependent action costs. Cost-only classical searches require integral,
+state-independent costs. Numeric A*/GBFS use
 a host double-priority heap for CPU eager ordering, with device successor, cost and heuristic evaluation.
 
 Multi-IW, batched IW(1) and rollouts accept `(positive_slots, negative_slots)` tuples or `GroundCondition` goals with
@@ -30,6 +31,9 @@ The bindings reject goals simplified as impossible because of static literals or
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
 than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks. Backend
 limits remain 64 internal state words and 512 objects; unsupported schema/axiom plans use the documented CPU fallback.
+The device evaluates numeric conditions and effects only in tasks with numeric state values: a task whose numeric
+conditions or effects read only static functions and functions that never get a value (no initial value, no `assign`
+effect) is refused with `ValueError`; run it on the CPU.
 
 This BrFS example runs the repository's classical blocks fixture on device 0:
 

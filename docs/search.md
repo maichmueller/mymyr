@@ -56,7 +56,8 @@ relaxed = search.brfs(task, stop_at_goal=True, layer_order="goal_count", beam_wi
 print(relaxed.status, len(relaxed.plan))
 ```
 
-`astar` and `gbfs` accept `lazy=True` for lazy successor scoring, `costs="unit"` or `"real"`, and a heuristic. The
+`astar` and `gbfs` accept `lazy=True` for lazy successor scoring, a heuristic, and its costs: `costs="auto"` (the
+default: the task's objective), `"unit"` or `"real"` (see the heuristics guide). The
 best-first `beam` also takes a heuristic and `width=`. IW and SIW support numeric tasks; the other best-first
 algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
 
