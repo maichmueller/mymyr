@@ -126,13 +126,8 @@ cuda::MultiIwOptions options_of(u32 max_arity, nb::handle width_zero, bool optim
         o.budget.max_expanded = int_arg<u64>(max_expanded, "max_expanded");
     if (!max_depth.is_none())
         o.budget.max_depth = int_arg<u32>(max_depth, "max_depth");
-    if (!max_seconds.is_none())
-    {
-        const double s = nb::cast<double>(max_seconds);
-        if (!(s >= 0) || std::isnan(s))
-            throw nb::value_error("mymyr: max_seconds must be non-negative");
-        o.budget.max_seconds = s;
-    }
+    if (const auto s = opt_float_arg(max_seconds, "max_seconds", 0))
+        o.budget.max_seconds = *s;
     if (!max_searches.is_none())
         o.max_searches = int_arg<u32>(max_searches, "max_searches");
     if (!chunk_states.is_none())

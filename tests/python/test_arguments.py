@@ -114,6 +114,18 @@ def test_beam_width_is_positive(task):
     assert search.beam(task, width=1).status in (search.Status.SOLVED, search.Status.EXHAUSTED)
 
 
+def test_expand_capacity_is_at_most_the_row_limit(task):
+    s = [task.initial_state]
+    with pytest.raises(ValueError, match=r"^mymyr: capacity must be None or an int in \[0, 2147483647\], got 2305843009213693952$"):
+        rl.expand(task, s, capacity=2**61)
+    with pytest.raises(ValueError, match=r"^mymyr: capacity must be None or an int in \[0, 2147483647\], got 2147483648$"):
+        rl.expand(task, s, capacity=2**31)
+    with pytest.raises(ValueError, match=r"^mymyr: K must be None or an int in \[0, 4294967295\], got -1$"):
+        rl.expand(task, s, K=-1)
+    e = rl.expand(task, s, capacity=1, K=0)
+    assert e.capacity == 1 and e.overflow == (len(task.applicable_actions(task.initial_state)) > 1)
+
+
 def test_lists_and_constructors_name_the_argument(task):
     with pytest.raises(ValueError, match=r"^mymyr: seeds must be an int >= 0, got -2$"):
         search.find_rollouts_parallel(task, [1, -2])

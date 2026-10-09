@@ -126,7 +126,7 @@ u32 predicate_arg(const Owner& o, nb::handle h)
     const formalism::TaskData& t = o.core->task->data();
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 p = nb::cast<i64>(h);
+        const i64 p = int_arg<i64>(h, "a predicate index");
         if (p < 0 || p >= static_cast<i64>(t.predicates.size()))
             throw nb::index_error("mymyr: predicate index out of range");
         return static_cast<u32>(p);
@@ -216,7 +216,7 @@ rr::ConjunctiveQuery make_query(const Owner& o, u32 num_variables, nb::handle li
     auto term = [&](nb::handle x) -> rr::QueryTerm {
         if (nb::isinstance<nb::int_>(x))
         {
-            const i64 v = nb::cast<i64>(x);
+            const i64 v = int_arg<i64>(x, "a query variable index");
             if (v < 0 || v >= static_cast<i64>(num_variables))
                 throw nb::value_error("mymyr: a query variable index must be in [0, num_variables)");
             return rr::query_variable(static_cast<u32>(v));

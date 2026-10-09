@@ -23,6 +23,7 @@
 #include "mymyr/cuda/device_task.hpp"
 #include "mymyr/cuda/expand.hpp"
 #include "mymyr/cuda/kernels.hpp"
+#include "mymyr/cuda/lifted.hpp"
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 #include "mymyr/search/control.hpp"
@@ -354,7 +355,7 @@ SmokeInputs smoke_inputs(PyDeviceTask& t, nb::handle states, nb::handle derived,
             throw nb::value_error("mymyr: numeric smoke operations exceed the device row or binding limit; use rl.expand");
         const auto& view = t.dt->acquire(in.os.s);
         in.numeric_rows = device_output(*t.ctx, in.w.rows * rw * sizeof(u64), in.os);
-        in.numeric_views = device_output(*t.ctx, in.w.rows * view.view_rows * view.ow * sizeof(u64), in.os);
+        in.numeric_views = device_output(*t.ctx, checked_mul({in.w.rows, view.view_rows, view.ow, 8}, "the numeric views"), in.os);
         in.numeric_error = device_output(*t.ctx, sizeof(u32), in.os);
         cuda::check(cudaMemsetAsync(in.numeric_error->data(), 0, sizeof(u32), in.os.s), "numeric smoke error");
         cuda::check(cuda::numeric::launch_convert(view, in.w.data, in.w.stride, atoms,
@@ -614,12 +615,12 @@ DeviceFlat allocate_device_flat(const PyContext& c, const OpStream& os, u64 rows
     f.numeric_words = NN;
     f.label_width = L;
     f.has_goal = goal;
-    f.off_succ = lay.add(cap * (W + NN) * sizeof(u64));
-    f.off_parent = lay.add(cap * sizeof(i32));
-    f.off_schema = lay.add(cap * sizeof(i32));
-    f.off_binding = lay.add(cap * L * sizeof(i32));
-    f.off_goal = lay.add(goal ? cap : 0);
-    f.off_offsets = lay.add((rows + 1) * sizeof(i32));
+    f.off_succ = lay.add(cap, (u64{W} + NN) * sizeof(u64));
+    f.off_parent = lay.add(cap, sizeof(i32));
+    f.off_schema = lay.add(cap, sizeof(i32));
+    f.off_binding = lay.add(cap, u64{L} * sizeof(i32));
+    f.off_goal = lay.add(goal ? cap : 0, 1);
+    f.off_offsets = lay.add(checked_add(rows, 1, "the offsets"), sizeof(i32));
     f.buf = device_output(c, lay.bytes, os);
     return f;
 }
@@ -680,14 +681,14 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.has_goal = f.has_goal;
     p.fw = fw;
     p.enc = enc;
-    const u64 NK = f.rows * K;
-    p.off_index = lay.add(NK * sizeof(i32));
-    p.off_mask = lay.add(NK);
-    p.off_count = lay.add(f.rows * sizeof(i32));
-    p.off_succ = lay.add(NK * (f.words + f.numeric_words) * sizeof(u64));
-    p.off_schema = lay.add(NK * sizeof(i32));
-    p.off_binding = lay.add(NK * f.label_width * sizeof(i32));
-    p.off_goal = lay.add(f.has_goal ? NK : 0);
+    const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
+    p.off_index = lay.add(NK, sizeof(i32));
+    p.off_mask = lay.add(NK, 1);
+    p.off_count = lay.add(f.rows, sizeof(i32));
+    p.off_succ = lay.add(NK, (u64{f.words} + f.numeric_words) * sizeof(u64));
+    p.off_schema = lay.add(NK, sizeof(i32));
+    p.off_binding = lay.add(NK, u64{f.label_width} * sizeof(i32));
+    p.off_goal = lay.add(f.has_goal ? NK : 0, 1);
     p.buf = device_output(*c, lay.bytes, f.os);
     auto* b = static_cast<std::byte*>(p.buf->data());
     rl::PaddedExpansion out;
@@ -730,9 +731,9 @@ nb::object device_expand(const ExpandArgs& a)
     const i32* ids = device_task_ids(a.task_ids, *c, os, w.rows, keep);
     const auto [fw, enc] = output_kind(in, w, a.framework);
     const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
-    const std::optional<u64> fixed_cap = a.capacity.is_none() ? std::nullopt : std::optional<u64>(nb::cast<u64>(a.capacity));
-    const std::optional<u32> fixed_words = a.words.is_none() ? std::nullopt : std::optional<u32>(nb::cast<u32>(a.words));
-    const std::optional<u32> K = a.K.is_none() ? std::nullopt : std::optional<u32>(nb::cast<u32>(a.K));
+    const std::optional<u64> fixed_cap = opt_int_arg<u64>(a.capacity, "capacity", 0, rl::k_max_rows);
+    const std::optional<u32> fixed_words = opt_int_arg<u32>(a.words, "words", 0, cuda::lifted::k_max_words);
+    const std::optional<u32> K = opt_int_arg<u32>(a.K, "K");
     const u32 L = tt.label_width();
     DeviceFlat f;
     {
@@ -740,7 +741,7 @@ nb::object device_expand(const ExpandArgs& a)
         nb::gil_scoped_release release;
         ex->set_stream(os.s);
         const u64 total = ex->count({w.data, w.rows, atom_words, w.stride, NN}, ids, opt);
-        const u64 cap = fixed_cap.value_or(total);
+        const u64 cap = fixed_cap.value_or(std::min(total, rl::k_max_rows));  // more: the write raises
         u32 W = fixed_words.value_or(std::max(atom_words, current_words(tt)));
         if (W == 0)
             W = 1;
@@ -1141,7 +1142,7 @@ void bind_cuda(nb::module_& parent)
                 const k::DeviceLabels l = labels_of(t, in, state_index, schema, binding);
                 const rl::dev::TaskView& v = t.dt->acquire(in.os.s);
                 const u32 W = words ? words : std::max(in.w.words, v.state_words) + t.task->numeric_words();
-                auto succ = device_output(*t.ctx, l.count * W * 8, in.os);
+                auto succ = device_output(*t.ctx, checked_mul({l.count, W, 8}, "apply (labels x words)"), in.os);
                 auto status = device_output(*t.ctx, l.count * 4, in.os);
                 if (t.task->numeric_slots())
                 {
@@ -1228,10 +1229,10 @@ void bind_cuda(nb::module_& parent)
         .def(
             "__init__",
             [](PyArena* self, ContextArg ctx, IntArg words_in, IntArg capacity_in) {
-                const u32 words = int_arg<u32>(words_in, "words", 1);
+                const u32 words = int_arg<u32>(words_in, "words", 1, ~u32{0} / 8);  // a record's bytes fit in a u32
                 const u64 capacity = int_arg<u64>(capacity_in, "capacity");
                 PyContextPtr c = context_of(ctx);
-                auto a = std::make_unique<cuda::DeviceArena>(c->ctx, words * 8, capacity);
+                auto a = std::make_unique<cuda::DeviceArena>(c->ctx, words * 8, capacity);  // checks capacity x 8 words
                 new (self) PyArena{std::move(c), std::move(a), words};
             },
             "ctx"_a, "words"_a, "capacity"_a = 1024)
@@ -1276,7 +1277,8 @@ void bind_cuda(nb::module_& parent)
                 const Framework fw = framework.is_none() ? Framework::DLPack : parse_framework(framework, nb::none());
                 const auto& gen = a.arena->generation();
                 ArraySpec s;
-                const std::byte* p = a.arena->device_data() + lo * a.words * 8;  // offset folded into the pointer
+                // offset folded into the pointer (lo <= device_size: within the checked capacity x record bytes)
+                const std::byte* p = a.arena->device_data() + lo * a.arena->record_bytes();
                 s.owner = std::shared_ptr<const void>(gen, p);
                 s.data = p;
                 s.dtype = rl::DType::U64;
@@ -1355,7 +1357,7 @@ void bind_cuda(nb::module_& parent)
         [](u64 n, u64 value, u64 cycles, ContextArg ctx, StreamArg stream, FrameworkArg framework) -> ArrayOut {
             PyContextPtr c = context_of(ctx);
             const OpStream os = c->stream_of(stream);
-            auto buf = device_output(*c, n * 8, os);
+            auto buf = device_output(*c, checked_mul({n, 8}, "_delayed_iota"), os);
             cuda::check(k::launch_delayed_iota(static_cast<u64*>(buf->data()), n, value, cycles, os.s), "delayed_iota");
             const Framework fw = framework.is_none() ? Framework::DLPack : parse_framework(framework, nb::none());
             return export_buffer(buf, os, rl::DType::U64, {static_cast<i64>(n)}, false, fw, default_words(fw));
@@ -1647,15 +1649,15 @@ void bind_cuda(nb::module_& parent)
             opts.witness_pruning = witness_pruning;
             opts.canonical_order = canonical_order;
             if (!max_states.is_none())
-                opts.max_states = nb::cast<u64>(max_states);
+                opts.max_states = int_arg<u64>(max_states, "max_states");
             opts.stop_at_goal = stop_at_goal;
             opts.fingerprint = fingerprint;
             if (!chunk_states.is_none())
-                opts.chunk_states = nb::cast<u32>(chunk_states);
+                opts.chunk_states = int_arg<u32>(chunk_states, "chunk_states", 1);
             if (!expected_states.is_none())
-                opts.expected_states = nb::cast<u64>(expected_states);
+                opts.expected_states = int_arg<u64>(expected_states, "expected_states");
             if (!max_depth.is_none())
-                opts.max_depth = nb::cast<u32>(max_depth);
+                opts.max_depth = int_arg<u32>(max_depth, "max_depth");
             opts.timings = timings;
             PyDeviceBrfs x;
             x.o = o;

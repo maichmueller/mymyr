@@ -244,13 +244,8 @@ cuda::DeviceStateSpaceOptions options_of(const Common& a)
     o.space.threads = a.threads;
     if (!a.max_states.is_none())
         o.space.max_states = int_arg<u64>(a.max_states, "max_states");
-    if (!a.max_seconds.is_none())
-    {
-        const double s = nb::cast<double>(a.max_seconds);
-        if (!(s >= 0) || std::isnan(s))
-            throw nb::value_error("mymyr: max_seconds must be non-negative");
-        o.space.max_seconds = s;
-    }
+    if (const auto s = opt_float_arg(a.max_seconds, "max_seconds", 0))
+        o.space.max_seconds = *s;
     o.space.remove_if_unsolvable = a.remove_if_unsolvable;
     o.space.labels = a.labels;
     if (!a.chunk_states.is_none())

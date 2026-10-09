@@ -23,6 +23,7 @@
 // after the producer's stream handoff (CUDA builds); device memory raises a TypeError, since these operations run on
 // the CPU until the device expand.
 
+#include "mymyr/core/checked.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/task_arrays.hpp"
@@ -79,14 +80,17 @@ private:
     u64 m_size = 0;
 };
 
-/// Byte layout of several arrays in one Block (each 64-byte aligned).
+/// Byte layout of several arrays in one Block (each 64-byte aligned). Sizes are checked: std::length_error when the
+/// block would exceed 2^64 - 1 bytes.
 struct BlockLayout
 {
     u64 bytes = 0;
-    u64 add(u64 n)
+    /// The offset of an array of `count` elements of `elem_bytes` bytes each.
+    u64 add(u64 count, u64 elem_bytes)
     {
+        const u64 n = checked_mul({count, elem_bytes}, "an output array");
         const u64 at = bytes;
-        bytes += (n + 63) & ~u64{63};
+        bytes = checked_add(bytes, checked_add(n, 63, "an output array") & ~u64{63}, "an output block");
         return at;
     }
 };

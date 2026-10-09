@@ -19,8 +19,6 @@ namespace mymyr::rl
 {
 namespace
 {
-constexpr u64 k_i32_max = static_cast<u64>(std::numeric_limits<i32>::max());
-
 /// Throws unless row `i` sets only assigned fluent slots (bits at or beyond `limit` would index unassigned records).
 void check_row(const u64* row, u32 nw, u32 limit, u64 i, const char* what)
 {
@@ -67,7 +65,7 @@ void check_batch(const TaskSuite& table, StateBatchView in, const i32* ids, cons
     if (in.stride && in.stride < static_cast<u64>(in.words) + in.numeric_words)
         throw std::invalid_argument("mymyr: expand: row stride smaller than the row width");
     check_numeric(table, in.numeric_words, "the states");
-    if (in.rows > k_i32_max)
+    if (in.rows > k_max_rows)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
     if (!ids && in.rows && table.size() > 1)
         throw std::invalid_argument(std::string("mymyr: expand: a batch over a ") + table.noun() + " of " +
@@ -81,7 +79,7 @@ void check_out(const TaskSuite& table, const Expansion& out)
     if (out.binding && out.label_width < table.label_width())
         throw std::invalid_argument("mymyr: expand: label width " + std::to_string(out.label_width) +
                                     " is below the largest schema arity " + std::to_string(table.label_width()));
-    if (out.capacity > k_i32_max)
+    if (out.capacity > k_max_rows)
         throw std::invalid_argument("mymyr: expand: capacity above 2^31 - 1 rows");
     if (out.succ && out.words == 0 && out.capacity)
         throw std::invalid_argument("mymyr: expand: successor rows of zero words");
@@ -274,7 +272,7 @@ struct ScratchSink
 
 void write_offsets(i32* offsets, u64 i, u64 value)
 {
-    if (value > k_i32_max)
+    if (value > k_max_rows)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     offsets[i] = static_cast<i32>(value);
 }
