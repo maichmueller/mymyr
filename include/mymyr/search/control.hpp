@@ -51,10 +51,21 @@ enum class SearchStatus : u8
     return "?";
 }
 
-/// Limits. Unset members are unlimited. Searches check them at least once per expansion batch.
+/// Transitions between two checks of the deadline and the cancellation inside one expansion: a state with many
+/// successors does not delay a stop by more than this many transitions.
+inline constexpr u32 k_check_transitions = 1024;
+
+/// Limits. Unset members are unlimited.
+///
+/// max_states bounds the states a search stores, the start state included (IW: the nodes of a pass's tree; rollout
+/// IW: the new nodes its rollouts register, mimir's generated states). The search stops with OutOfStates as soon as
+/// it holds max_states states: the count is checked as each new state is stored, inside the expansion that finds it,
+/// so a search never stores more than max(max_states, 1) states (the GPU searches check between chunks; see
+/// mymyr/cuda). max_expanded is checked before each expansion; max_seconds and the cancellation before each
+/// expansion and every k_check_transitions transitions inside one.
 struct Budget
 {
-    u64 max_states = std::numeric_limits<u64>::max();    // stored or generated states (per pass in IW ladders)
+    u64 max_states = std::numeric_limits<u64>::max();    // stored states (per pass in IW ladders)
     u64 max_expanded = std::numeric_limits<u64>::max();  // expanded states
     u32 max_depth = std::numeric_limits<u32>::max();     // g-depth in actions (BrFS/IW layers)
     double max_seconds = std::numeric_limits<double>::infinity();  // wall time of the whole call

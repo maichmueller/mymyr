@@ -244,6 +244,7 @@ TEST(Numeric, BrfsCountsEqualTheForkOnEveryStore)
                 if (threads > 1 && store != BrfsOptions::Store::Concurrent)
                     continue;
                 BrfsOptions o;
+                o.stop_at_goal = false;
                 o.store = store;
                 o.threads = threads;
                 const BrfsResult r = brfs(*task, o);
@@ -266,6 +267,7 @@ TEST(Numeric, BrfsIsIndependentOfTheSlotType)
         EXPECT_EQ(a->numeric_storage(), NumericStorage::I32) << name;
         EXPECT_EQ(b->numeric_storage(), NumericStorage::F64) << name;
         BrfsOptions o;
+        o.stop_at_goal = false;
         o.fingerprint = true;
         const BrfsResult ra = brfs(*a, o), rb = brfs(*b, o);
         EXPECT_EQ(ra.states, rb.states) << name;
@@ -280,6 +282,7 @@ TEST(Numeric, BrfsIdsAreDeterministicAcrossThreadCounts)
 {
     const auto task = Task::from_text_file(numeric_task("cs-farmland"));
     BrfsOptions o;
+    o.stop_at_goal = false;
     o.fingerprint = true;
     o.store = BrfsOptions::Store::Flat;
     const BrfsResult one = brfs(*task, o);
@@ -316,6 +319,7 @@ TEST(Numeric, DepthCappedLayersEqualTheProbe)
                                          BrfsOptions::Store::Concurrent})
         {
             BrfsOptions o;
+            o.stop_at_goal = false;
             o.store = store;
             o.threads = store == BrfsOptions::Store::Concurrent ? 2 : 1;
             o.max_depth = static_cast<u32>(x.layers.size());

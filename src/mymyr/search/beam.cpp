@@ -111,8 +111,7 @@ struct Beam
                     c.obs->on_expand(id, cur.view());
                 if (!expand(c, store, nodes, id, cur, next, tr, false))
                 {
-                    r.status = SearchStatus::OutOfStates;
-                    stop = true;
+                    stop = true;  // r.status is set
                     break;
                 }
                 for (const Transitions::T& t : tr.t)

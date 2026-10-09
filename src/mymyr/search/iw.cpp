@@ -397,6 +397,12 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     // admit a successor into the tree; false stops the expansion (max_states, or a full next layer)
     auto admit = [&](const u64* w, u32 nn, const u64* num, u32 parent, u32 schema, const ObjectId* b, u32 depth, bool skip) -> bool
     {
+        if (tree.size() >= budget.max_states)  // the root alone fills the tree
+        {
+            finish(SearchStatus::OutOfStates);
+            stop = true;
+            return false;
+        }
         tree.push(w, nn, num, parent, schema, b, succ.arity(schema), depth, skip);
         ++st.generated_in_tree;
         if (tree.size() >= budget.max_states)
@@ -433,8 +439,25 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     std::vector<std::array<u32, 3>> buf_ranges;  // (first slot, adds, dels)
     std::vector<u32> order, perm;
     std::vector<u8> taken;
+    // inside an expansion: the time and the token every k_check_transitions transitions (false stops the pass)
+    u32 since_check = 0;
+    auto keep_generating = [&]() -> bool
+    {
+        if (++since_check != k_check_transitions) [[likely]]
+            return true;
+        since_check = 0;
+        if (c.out_of_time())
+            finish(SearchStatus::OutOfTime);
+        else if (cancel.requested())
+            finish(SearchStatus::Cancelled);
+        else
+            return true;
+        stop = true;
+        return false;
+    };
     auto drive = [&](StateView cv, auto&& process)
     {
+        auto checked = [&](u32 s, const ObjectId* b, const Delta& d) -> bool { return keep_generating() && process(s, b, d); };
         if constexpr (Slow)
         {
             if (o.successor_order)
@@ -443,9 +466,11 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 buf_slots.clear();
                 buf_num.clear();
                 buf_ranges.clear();
-                succ.generate<false>(
+                succ.generate<true>(
                     [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                     {
+                        if (!keep_generating())
+                            return false;
                         buf_actions.emplace_back(SchemaId{s}, std::vector<ObjectId>(b, b + succ.arity(s)));
                         if (NN)
                             buf_num.insert(buf_num.end(), d.num, d.num + NN);
@@ -455,6 +480,8 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         return true;
                     },
                     witness, canonical, o.symmetry_pruning);
+                if (stop)
+                    return;
                 order.clear();
                 o.successor_order(cv, buf_actions, order);
                 // complete to a permutation: invalid and repeated indices are dropped, missing ones appended
@@ -479,13 +506,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                                   NN,
                                   {},
                                   {}};
-                    if (!process(buf_actions[i].schema.v, static_cast<const ObjectId*>(buf_actions[i].binding.data()), d))
+                    if (!checked(buf_actions[i].schema.v, static_cast<const ObjectId*>(buf_actions[i].binding.data()), d))
                         return;
                 }
                 return;
             }
         }
-        succ.generate<true>(process, witness, canonical, o.symmetry_pruning);
+        succ.generate<true>(checked, witness, canonical, o.symmetry_pruning);
     };
 
     // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
@@ -587,6 +614,12 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
+                // the time and the token: the pop of this entry then stops the pass (both stay set once set)
+                if ((x.transitions + 1) % k_check_transitions == 0 && (c.out_of_time() || cancel.requested()))
+                {
+                    x.interrupted = 1;
+                    return false;
+                }
                 const u32 seq = x.transitions++;
                 if (k == 0 && !root_rule)
                     return true;  // width 0 below the root: pruned

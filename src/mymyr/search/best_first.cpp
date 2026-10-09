@@ -25,7 +25,6 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     canonical = o.canonical_order;
     symmetry = o.symmetry_pruning;
     max_states = b.max_states;
-    stop_on_states = max_states != std::numeric_limits<u64>::max();
     start = o.start ? *o.start : task.initial_state();
     if (o.control.goal.kind == GoalSpec::Kind::Custom && !o.control.goal.test)
         throw std::invalid_argument("mymyr best-first search: GoalSpec::Custom without a test");
@@ -161,19 +160,8 @@ bool Context::keep_going()
         r.status = SearchStatus::OutOfStates;
         return false;
     }
-    if ((m_tick++ & 7) == 0)
-    {
-        if (m_timed && Clock::now() >= m_deadline)
-        {
-            r.status = SearchStatus::OutOfTime;
-            return false;
-        }
-        if (o.control.cancel.requested())
-        {
-            r.status = SearchStatus::Cancelled;
-            return false;
-        }
-    }
+    if ((m_tick++ & 7) == 0 && !check_time_and_token())
+        return false;
     if (obs && r.stats.expanded >= m_next_progress)
     {
         m_next_progress = r.stats.expanded + std::max<u64>(1, o.control.progress_interval);
@@ -183,6 +171,21 @@ bool Context::keep_going()
             r.status = SearchStatus::Cancelled;
             return false;
         }
+    }
+    return true;
+}
+
+bool Context::check_time_and_token()
+{
+    if (m_timed && Clock::now() >= m_deadline)
+    {
+        r.status = SearchStatus::OutOfTime;
+        return false;
+    }
+    if (o.control.cancel.requested())
+    {
+        r.status = SearchStatus::Cancelled;
+        return false;
     }
     return true;
 }

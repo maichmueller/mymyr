@@ -169,6 +169,7 @@ TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
     EXPECT_EQ(g.at("dbl"), 9);
     // BrFS: x grows without bound; depth-capped
     BrfsOptions o;
+    o.stop_at_goal = false;
     o.max_depth = 3;
     o.layer_stats = true;
     const BrfsResult r = brfs(*task, o);
@@ -208,7 +209,7 @@ TEST(NumericPddl, TasksWithNumericFunctionsKeepTheirStateSpace)
             GTEST_SKIP() << "no " << dir;
         const auto task = Task::create(*frontend::load_task(dir / "domain.pddl", dir / c.problem));
         EXPECT_EQ(task->numeric_slots(), 0u);
-        const BrfsResult r = brfs(*task);
+        const BrfsResult r = brfs(*task, {.stop_at_goal = false});
         EXPECT_EQ(r.states, c.states) << c.dir;
         EXPECT_EQ(r.generated, c.generated) << c.dir;
         EXPECT_EQ(r.goal_states, c.goals) << c.dir;
