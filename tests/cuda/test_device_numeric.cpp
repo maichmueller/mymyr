@@ -1041,3 +1041,37 @@ TEST(DeviceGoals, AtomsNoStateHolds)
         EXPECT_EQ(s.host->num_goal_states(), goals);
     }
 }
+
+/// Numeric conditions and effects in a task without numeric state values (its fluent function has no value and no
+/// assign effect, the other one is static): the device refuses the task instead of ignoring them. With an assign
+/// effect the function has a slot, and the device runs the task as the CPU does.
+TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    const std::string actions = R"(
+ (:action a :parameters (?x) :precondition (>= (w ?x) 1) :effect (f ?x))
+ (:action b :parameters (?x) :precondition (>= (c) 1) :effect (f ?x))
+ (:action e :parameters (?x) :precondition (f ?x) :effect (and (not (f ?x)) (increase (c) 1))))";
+    auto make = [&](const std::string& extra)
+    {
+        const auto domain = frontend::Domain::from_string(
+            "(define (domain d) (:requirements :strips :numeric-fluents) (:predicates (f ?x)) (:functions (w ?x) (c))" +
+                extra + actions + ")",
+            "d.pddl");
+        return Task::create(*domain->instantiate_string(
+            "(define (problem p) (:domain d) (:objects a b) (:init (= (w a) 1) (= (w b) 0)) (:goal (f b)))", "p.pddl"));
+    };
+    const TaskPtr slotless = make("");
+    ASSERT_EQ(slotless->numeric_slots(), 0u);
+    EXPECT_EQ(brfs(*slotless).states, 2u);
+    EXPECT_NE(cuda::ChunkGenerator::unsupported(*slotless).find("numeric conditions or effects"), std::string::npos);
+    EXPECT_THROW((void) cuda::brfs(ctx, slotless, {}), std::invalid_argument);
+    const TaskPtr assigned = make(" (:action reset :parameters () :precondition (and) :effect (assign (c) 0))");
+    ASSERT_EQ(assigned->numeric_slots(), 1u);
+    const BrfsResult cpu = brfs(*assigned), device = cuda::brfs(ctx, assigned, {}).result;
+    EXPECT_TRUE(device.exhausted);
+    EXPECT_EQ(device.states, cpu.states);
+    EXPECT_EQ(device.generated, cpu.generated);
+    EXPECT_EQ(device.goal_states, cpu.goal_states);
+}
