@@ -24,6 +24,7 @@
 #include "rl_typing.hpp"
 
 #include "mymyr/core/thread_pool.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/pool.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -805,9 +806,14 @@ std::vector<std::filesystem::path> problem_files(const std::variant<std::filesys
     return files;
 }
 
-/// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads.
+/// The loader's default thread count: instantiating and compiling a problem is short, so a few threads saturate it,
+/// while every thread reserves about 72 MB of address space (its stack and its malloc arena).
+constexpr u32 k_loader_threads = 8;
+
+/// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads
+/// (none: min(k_loader_threads, the hardware threads)).
 nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-                           const TaskOptions& options, u32 threads)
+                           const TaskOptions& options, std::optional<u32> threads)
 {
     PyDomain dom;
     if (nb::isinstance<PyDomain>(domain))
@@ -827,7 +833,8 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
         nb::gil_scoped_release release;
         std::vector<std::exception_ptr> errors(n);
         std::atomic<usize> next{0};
-        ThreadPool pool(static_cast<u32>(std::min<usize>(resolve_threads(threads), n)));
+        const u32 T = threads ? resolve_threads(*threads) : std::min(k_loader_threads, hardware_threads());
+        ThreadPool pool(static_cast<u32>(std::min<usize>(T, n)));
         pool.run([&](u32) {
             for (usize i; (i = next.fetch_add(1, std::memory_order_relaxed)) < n;)
             {
@@ -1234,16 +1241,17 @@ void bind_rl(nb::module_& parent)
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain,
                const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems, std::string_view atoms,
-               std::string_view matching, u32 fc, u32 fmw, u32 pilot, u32 threads) {
+               std::string_view matching, u32 fc, u32 fmw, u32 pilot, std::optional<u32> threads) {
                 return nb::typed<nb::object, PyTable>(
                     table_from_pddl(domain, problems, make_options(atoms, matching, fc, fmw, pilot), threads));
             },
-            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 0,
+            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = nb::none(),
             "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "
             "once). problems is a list of problem files (kept in its order), a directory (its *.pddl files sorted by "
             "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; domain files in a "
             "directory or among the matches are skipped. The problems are instantiated and compiled on `threads` "
-            "threads (0: the hardware concurrency); instance i is the same task as Task(domain.instantiate(files[i])) "
+            "threads (default: min(8, the hardware threads), as more threads gain little here while each reserves about 72 "
+            "MB of address space for its stack and malloc arena; 0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i])) "
             "with these options. Raises ValueError when a directory or pattern has no problem files.")
 #endif
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
