@@ -33,16 +33,18 @@ std::shared_ptr<const Task> make(const std::string& domain, const std::string& p
 std::set<std::string> applicable(const Task& t, StateView s)
 {
     std::set<std::string> out;
-    for (const Action& a : t.workspace().successors().applicable_actions(s))
+    const WorkspaceLease ws = t.workspace();
+    for (const Action& a : ws->successors().applicable_actions(s))
         out.insert(t.format(a.label()));
     return out;
 }
 
 State apply(const Task& t, StateView s, const std::string& action)
 {
-    for (const Action& a : t.workspace().successors().applicable_actions(s))
+    const WorkspaceLease ws = t.workspace();
+    for (const Action& a : ws->successors().applicable_actions(s))
         if (t.format(a.label()) == action)
-            return t.workspace().successors().apply(s, a.label());
+            return ws->successors().apply(s, a.label());
     ADD_FAILURE() << action << " is not applicable";
     return State{};
 }
@@ -284,7 +286,8 @@ TEST(PddlSemantics, MetricsAreMinimizedOrRefused)
     const heuristics::ActionCosts costs(*reached);
     const State s0 = reached->initial_state();
     EXPECT_EQ(costs.initial(s0.view()), 0);
-    reached->workspace().successors().for_each_applicable(
+    const WorkspaceLease ws = reached->workspace();
+    ws->successors().for_each_applicable(
         s0.view(),
         [&](const ActionLabel& a, const Delta& d)
         {
