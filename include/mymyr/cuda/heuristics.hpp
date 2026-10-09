@@ -32,7 +32,8 @@
 // Numeric values and constraints are ignored as in the CPU relaxation.
 // Refused with std::invalid_argument ("mymyr: ..."): groundings beyond the budget
 // (heuristics::GroundingBudget, as the CPU's Evaluation::Grounded), kinds other than Max, Add, FF, H2 and SetAdditive,
-// and real costs the CPU refuses. One DeviceHeuristic serves one stream at a time (its scratch is reused across launches).
+// and real costs the CPU refuses. Costs (heuristics::Costs, Auto by default) are those of the CPU heuristics: real costs
+// are integers in units of 1 / cost_scale() (heuristics::ActionCosts::relaxed_cost). One DeviceHeuristic serves one stream at a time (its scratch is reused across launches).
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -59,7 +60,7 @@ enum class HeuristicVariant : u8
 struct DeviceHeuristicOptions
 {
     heuristics::Kind kind = heuristics::Kind::FF;  // Max, Add, FF, H2 or SetAdditive
-    heuristics::Costs costs = heuristics::Costs::Unit;
+    heuristics::Costs costs = heuristics::Costs::Auto;
     heuristics::GroundingBudget budget;
     /// A grounding to use instead of building one (share it with CPU heuristics).
     std::shared_ptr<const heuristics::RelaxedTask> relaxed;
@@ -112,6 +113,7 @@ public:
     /// stream) after the work enqueued on it. Synchronizes the stream once: states outside the grounding are then
     /// evaluated on the CPU and their values written back. Throws std::invalid_argument for a row that sets an atom
     /// slot the task has not assigned.
+    /// The values are integers in units of 1 / cost_scale() (k_inf: a dead end).
     void evaluate(const u64* rows, u64 stride, u32 words, u64 n, u32* out, cudaStream_t stream = nullptr);
     /// The same as doubles: heuristics::Heuristic's values (+inf for dead ends).
     void evaluate(const u64* rows, u64 stride, u32 words, u64 n, f64* out, cudaStream_t stream = nullptr);
@@ -131,6 +133,9 @@ public:
     [[nodiscard]] f64 reference(StateView s);
 
     [[nodiscard]] heuristics::Kind kind() const noexcept;
+    /// The integer values' unit is 1 / cost_scale(): 1 for unit costs, a power of ten for real costs
+    /// (heuristics::ActionCosts::relaxed_scale).
+    [[nodiscard]] f64 cost_scale() const noexcept;
     [[nodiscard]] const heuristics::RelaxedTask& relaxed() const noexcept;
     [[nodiscard]] const std::shared_ptr<const heuristics::RelaxedTask>& grounding() const noexcept;
     [[nodiscard]] const DeviceHeuristicStats& stats() const noexcept;

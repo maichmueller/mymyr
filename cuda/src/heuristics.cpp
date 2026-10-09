@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -85,14 +86,7 @@ std::string DeviceHeuristic::unsupported(const Task& task, const DeviceHeuristic
     if (kind_code(o.kind) == ~u32{0})
         return std::string("the heuristic '") + heuristics::to_string(o.kind) +
                "' (the device evaluates max, add, ff, h2 and set_additive)";
-    if (o.costs == heuristics::Costs::Real)
-    {
-        const heuristics::ActionCosts costs(task);
-        if (!costs.state_independent())
-            return "real costs that depend on the state";
-        if (!costs.integral())
-            return "real costs that are not integral";
-    }
+    (void) task;
     return {};
 }
 
@@ -114,6 +108,7 @@ struct DeviceHeuristic::Impl
     DeviceBuffer out_u32, status, counters, rows_buf;
     u64 out_cap = 0, status_cap = 0, rows_cap = 0;
     PinnedBuffer pinned{64};
+    f64 scale = 1;  // the integer values are in units of 1 / scale
     std::unique_ptr<heuristics::Heuristic> cpu;  // fallback and reference (h_max, h_add)
     // reference scratch
     std::vector<u32> r_cost, r_init, r_cnt, r_acc, r_lvl, r_cand, r_supp, r_touched, r_avail, r_next;
@@ -150,6 +145,7 @@ DeviceHeuristic::DeviceHeuristic(ContextPtr ctx, TaskPtr task, const DeviceHeuri
     m->ctx = std::move(ctx);
     m->task = std::move(task);
     m->o = options;
+    m->o.costs = heuristics::resolve_costs(*m->task, options.costs);
     if (const std::string why = unsupported(*m->task, m->o); !why.empty())
         throw std::invalid_argument("mymyr: the CUDA backend cannot evaluate this heuristic: " + why);
     DeviceGuard guard(m->ctx->device());
@@ -168,8 +164,10 @@ DeviceHeuristic::DeviceHeuristic(ContextPtr ctx, TaskPtr task, const DeviceHeuri
         throw std::invalid_argument("mymyr: DeviceHeuristic: the grounding belongs to another task");
     m->st.grounding_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (m->o.costs == heuristics::Costs::Real && !m->R->real_costs_available())
-        throw std::invalid_argument("mymyr: the CUDA backend cannot evaluate this heuristic: real costs need non-negative "
-                                    "integer action costs below 2^31");
+        throw std::invalid_argument("mymyr: the CUDA backend cannot evaluate this heuristic: real costs need defined, "
+                                    "non-negative action costs below 2^31 units of the cost scale "
+                                    "(heuristics::ActionCosts::relaxed_cost)");
+    m->scale = m->o.costs == heuristics::Costs::Real ? m->R->cost_scale() : 1;
     if (m->o.kind == heuristics::Kind::H2 && m->R->num_props() > k_h2_max_props)
         throw std::invalid_argument("mymyr: CUDA h2 grounding has " + std::to_string(m->R->num_props()) +
                                     " propositions; limit is " + std::to_string(k_h2_max_props));
@@ -195,6 +193,7 @@ DeviceHeuristic::~DeviceHeuristic()
 }
 
 heuristics::Kind DeviceHeuristic::kind() const noexcept { return m->o.kind; }
+f64 DeviceHeuristic::cost_scale() const noexcept { return m->scale; }
 const heuristics::RelaxedTask& DeviceHeuristic::relaxed() const noexcept { return *m->R; }
 const std::shared_ptr<const heuristics::RelaxedTask>& DeviceHeuristic::grounding() const noexcept { return m->R; }
 const DeviceHeuristicStats& DeviceHeuristic::stats() const noexcept { return m->st; }
@@ -500,7 +499,8 @@ void DeviceHeuristic::Impl::run(const u64* rows, u64 stride, u32 words, u64 n, u
         check(cudaMemcpyAsync(row.data(), rows + i * stride, u64{words} * sizeof(u64), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
         const f64 v = cpu_heuristic().evaluate(StateView{row.data(), bits::trimmed_size(row.data(), words), nullptr, 0});
-        const u32 h = v == heuristics::k_dead_end || v >= static_cast<f64>(k_inf) ? k_inf : static_cast<u32>(v);
+        const f64 x = std::nearbyint(v * scale);
+        const u32 h = v == heuristics::k_dead_end ? k_inf : x >= static_cast<f64>(k_inf) ? k_inf - 1 : static_cast<u32>(x);
         check(cudaMemcpyAsync(out + i, &h, sizeof(u32), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync");
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
         ++st.fallbacks;
@@ -551,7 +551,7 @@ void DeviceHeuristic::evaluate(const u64* rows, u64 stride, u32 words, u64 n, f6
         m->out_cap = std::max<u64>(n, 1);
     }
     m->run(rows, stride, words, n, static_cast<u32*>(m->out_u32.data()), s);
-    check(hk::launch_to_f64(static_cast<const u32*>(m->out_u32.data()), n, out, s), "hk::launch_to_f64");
+    check(hk::launch_to_f64(static_cast<const u32*>(m->out_u32.data()), n, m->scale, out, s), "hk::launch_to_f64");
 }
 
 std::vector<f64> DeviceHeuristic::evaluate(std::span<const State> states)
@@ -762,6 +762,6 @@ f64 DeviceHeuristic::Impl::reference_supporters(StateView s)
         for (u32 y : X.pre(op))
             stack.push_back(y);
     }
-    return h >= k_inf ? heuristics::k_dead_end : static_cast<f64>(h);
+    return static_cast<f64>(std::min<u64>(h, k_inf - 1)) / scale;  // a sum beyond the cost range is large, not a dead end
 }
 }  // namespace mymyr::cuda

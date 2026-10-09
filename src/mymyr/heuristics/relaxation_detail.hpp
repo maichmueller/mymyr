@@ -21,7 +21,11 @@ inline constexpr u32 k_none = ~u32{0};
     const u64 s = static_cast<u64>(a) + b;
     return s >= k_inf ? k_inf - 1 : static_cast<u32>(s);
 }
-[[nodiscard]] inline Value to_value(u64 h) noexcept { return h >= k_inf ? k_dead_end : static_cast<Value>(h); }
+/// The heuristic value of an integer cost h (k_inf: a dead end) in units of 1 / scale.
+[[nodiscard]] inline Value to_value(u64 h, f64 scale = 1) noexcept
+{
+    return h >= k_inf ? k_dead_end : scale == 1 ? static_cast<Value>(h) : static_cast<Value>(h) / scale;
+}
 
 /// Monotone priority queue of the relaxed exploration: buckets for small keys, a binary heap beyond.
 class RelaxedQueue
