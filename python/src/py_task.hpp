@@ -172,8 +172,12 @@ struct Owner
 
 struct StateBatch;  // arrays.hpp
 /// A batch of states of `task`: import_states, except that the rows of a numeric task are [W + NN] (the atom
-/// words, then task.numeric_words() numeric words), for arrays and for packed States alike.
+/// words, then task.numeric_words() numeric words), for arrays and for packed States alike. Checked with
+/// check_task_rows.
 [[nodiscard]] StateBatch import_task_states(nb::handle obj, const Task& task);
+/// ValueError unless the batch holds states of `task`: its States belong to the task; array rows set no atom slot the
+/// task has not assigned and, for frozen atom slots, are at least task.words() wide.
+void check_task_rows(const StateBatch& b, const Task& task);
 /// import_task_states for rows of at least `words` atom words (packed States) and NN numeric words (a task table's
 /// rows: words = TaskTable::words(), NN = TaskTable::numeric_words(); a State may carry fewer numeric words).
 [[nodiscard]] StateBatch import_rows(nb::handle obj, u32 words, u32 NN);

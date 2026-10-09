@@ -138,6 +138,9 @@ struct StateBatch
     nb::object keep;      // keeps the source alive (an ndarray handle or a packed copy's owner)
     std::shared_ptr<std::vector<u64>> packed;
     std::shared_ptr<void> keep_native;
+    /// States packed from State objects: the Task::uid() of each row's task (empty for arrays). The importer of a
+    /// batch checks them against the task or instance a row belongs to.
+    std::vector<u64> owners;
 };
 
 /// `task_words` is used to pack State sequences.

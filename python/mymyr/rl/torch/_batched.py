@@ -5,7 +5,7 @@ from typing import Any, Callable, NamedTuple, Optional, Union
 import torch
 from torch import Tensor
 
-from mymyr._core import _rl_torch
+from mymyr._core import _rl, _rl_torch
 
 from . import _ops
 from ._graph import CapturedRollout
@@ -33,6 +33,27 @@ def _device_index(device: torch.device) -> Optional[int]:
     if device.type != "cuda":
         raise ValueError(f"mymyr: environments run on the CPU or a CUDA device, not {device}")
     return device.index if device.index is not None else torch.cuda.current_device()
+
+
+def _task_ids(core: Any, ids: Any, mask: Optional[Tensor], n: int, device: torch.device, name: str) -> Tensor:
+    """``ids`` as [n] int32 on ``device``. Host values (ints, sequences, NumPy arrays, CPU tensors) are checked here:
+    ValueError for an id outside the table's (suite's) instances in a row the call uses (``mask``: the masked rows); the
+    device environment reports device ids outside them at :meth:`BatchedEnv.check_errors`."""
+    instances = core.num_instances
+    t = torch.as_tensor(ids)
+    if t.device.type == "cpu":
+        flat = t.reshape(n).to(torch.int64)
+        bad = (flat < 0) | (flat >= instances)
+        if mask is not None:
+            bad &= mask.reshape(n).to(device="cpu", dtype=torch.bool)
+        if bool(bad.any()):
+            r = int(bad.nonzero()[0])
+            table = core.table
+            noun = "suite" if isinstance(table, _rl.TaskSuite) and table.num_domains > 1 else "table"
+            raise ValueError(
+                f"mymyr: {name}: task id {int(flat[r])} of row {r} is outside the {noun}'s {instances} instances"
+            )
+    return t.reshape(n).to(device=device, dtype=torch.int32).contiguous()
 
 
 def _where(mask: Optional[Tensor], new: Tensor, old: Tensor) -> Tensor:
@@ -106,7 +127,7 @@ class BatchedEnv:
         self.states = torch.zeros((n, self.core.row_words), dtype=torch.int64, device=d)
         self.task_ids = torch.zeros(n, dtype=torch.int32, device=d)
         if task_ids is not None:
-            self.task_ids.copy_(torch.as_tensor(task_ids).reshape(n).to(device=d, dtype=torch.int32))
+            self.task_ids.copy_(_task_ids(self.core, task_ids, None, n, d, "task_ids"))
         self.steps = torch.zeros(n, dtype=torch.int32, device=d)
         self.draws = torch.zeros(n, dtype=torch.int64, device=d)
         self.counts = torch.zeros((n, self.core.cache_schemas), dtype=torch.int32, device=d)
@@ -170,7 +191,7 @@ class BatchedEnv:
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
         if task_ids is not None:
-            new = torch.as_tensor(task_ids).reshape(self.num_envs).to(device=self.device, dtype=torch.int32)
+            new = _task_ids(self.core, task_ids, mask, self.num_envs, self.device, "reset")
             self.task_ids.copy_(_where(mask, new, self.task_ids))
         keep = goal_pos is not None or goal_neg is not None
         if keep:
@@ -214,7 +235,7 @@ class BatchedEnv:
         if action is not None:
             action = action.reshape(self.num_envs).to(device=self.device, dtype=torch.int64).contiguous()
         if next_task_ids is not None:
-            next_task_ids = next_task_ids.reshape(self.num_envs).to(device=self.device, dtype=torch.int32).contiguous()
+            next_task_ids = _task_ids(self.core, next_task_ids, None, self.num_envs, self.device, "next_task_ids")
             if not self.multi:
                 next_task_ids = None  # a table of one: every instance is 0
         return (
@@ -267,7 +288,8 @@ class BatchedEnv:
 
     def check_errors(self) -> None:
         """Waits for the device work and raises if a fast-path step met states written without :meth:`refresh`, or
-        met task ids outside the table."""
+        met task ids outside the table (device ``task_ids`` / ``next_task_ids``; host values are checked when given).
+        A no-op on the CPU."""
         self.core.check_errors()
 
     def close(self) -> None:

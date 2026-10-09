@@ -568,6 +568,8 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
             x.rollouts = true;
             if (!start.is_none() && !is_state(start))
                 throw nb::type_error("mymyr: start must be a State or None");
+            if (!start.is_none() && state_of(start).core->task->uid() != t->uid())
+                throw nb::value_error("mymyr: start belongs to another task");
             x.starts.push_back(start.is_none() ? t->initial_state() : state_of(start).s);
             std::vector<search::GoalSpec::AtomGoal> g;
             if (!goal.is_none())
