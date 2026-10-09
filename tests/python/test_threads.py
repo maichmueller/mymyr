@@ -83,3 +83,32 @@ def test_a_refused_thread_is_a_runtime_error(name):
     lines = p.stdout.splitlines()
     assert lines[0].startswith("RuntimeError mymyr: could not start worker thread"), p.stdout
     assert lines[1] == "after SOLVED 35", p.stdout
+
+
+# A child process with 1.5 GiB of spare address space loads a table of 64 problems with the default thread count. Each
+# worker thread reserves about 72 MiB (its stack and its malloc arena), so one thread per core does not fit on a
+# machine with many cores.
+LOADER = textwrap.dedent(
+    """
+    import resource, sys
+    from mymyr.rl import TaskTable
+    vm = int(next(x.split()[1] for x in open("/proc/self/status") if x.startswith("VmSize:"))) * 1024
+    hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+    resource.setrlimit(resource.RLIMIT_AS, (vm + (3 << 29), hard))
+    table = TaskTable.from_pddl(sys.argv[1], [sys.argv[2]] * 64)
+    print("loaded", len(table))
+    """
+)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS and /proc are Linux")
+def test_the_table_loader_default_fits_a_small_address_space():
+    counters = TASKS.parent / "pddl" / "counters"
+    p = subprocess.run(
+        [sys.executable, "-c", LOADER, str(counters / "domain.pddl"), str(counters / "p01.pddl")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert p.returncode == 0, p.stderr[-2000:]
+    assert p.stdout.splitlines() == ["loaded 64"], p.stdout
