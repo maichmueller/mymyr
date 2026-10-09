@@ -48,7 +48,9 @@ public:
     /// forward_targets()[e].
     [[nodiscard]] std::span<const u64> forward_offsets() const noexcept { return m_foffsets; }
     [[nodiscard]] std::span<const u32> forward_targets() const noexcept { return m_targets; }
-    [[nodiscard]] u32 source(u64 edge) const;  // binary search over forward_offsets
+    /// The vertex an edge leaves (binary search over forward_offsets()). Throws std::out_of_range for an edge outside
+    /// the graph.
+    [[nodiscard]] u32 source(u64 edge) const;
 
     /// Flags per vertex (0 or 1), and the flagged vertices in ascending order.
     [[nodiscard]] std::span<const u8> initial_flags() const noexcept { return m_initial; }
