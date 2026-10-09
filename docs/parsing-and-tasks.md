@@ -32,6 +32,66 @@ next_state = task.apply(state, action)
 print(action, next_state.numeric_values())
 ```
 
+## Semantics
+
+mymyr implements the PDDL semantics of mimir, with the differences listed at the end of this section.
+
+- **Types.** A parameter, a quantified variable or a `forall` effect variable of type `(either a b)` ranges over the
+  objects of `a`, of `b` and of their subtypes. An object or constant declared `(either a b)` belongs to `a`, to `b`
+  and to their supertypes.
+- **Conditional effects.** The effects whose conditions hold in the state an action is applied to fire, and every
+  effect reads the values of that state. A numeric effect that fires conflicts with an earlier one of the same action
+  on the same ground function: an `assign` with any other effect, an additive effect (`increase`, `decrease`) with a
+  multiplicative one (`scale-up`, `scale-down`). A conflict makes the action inapplicable; effects that do not fire
+  take no part in one. `total-cost` effects follow the same rules.
+- **Numeric values.** A ground function without a value in `:init` is undefined, and so is an expression that reads
+  an undefined value or divides by zero. A comparison with an undefined side is false, in preconditions, goals, axiom
+  bodies and effect conditions alike. An action is inapplicable when an effect that fires has an undefined value,
+  scales down by zero, or increases, decreases or scales an undefined value; `assign` gives an undefined function a
+  value. `state.numeric_values()` shows undefined values as NaN. Every ground function an `assign` effect can target
+  has a numeric slot from the start (so every state of a task has the same size); a task whose `assign` effects can
+  target more than 65536 ground functions without an initial value is refused with `ValueError`.
+- **Metrics.** With `(:metric minimize (total-cost))`, or without a metric in a domain that declares `total-cost`,
+  the cost of a plan is the sum of the `total-cost` effects of its actions. With `(:metric minimize <expression>)` over
+  numeric fluents, the cost of a plan is the expression's value in the state it reaches, and `total-cost` effects do
+  not count. Without a metric and `total-cost`, every action costs 1. A `maximize` metric, and a metric that combines
+  `total-cost` with other terms, are refused, naming the metric: best-first searches return `FAILED` with that message,
+  the other searches, state spaces and heuristics with real costs raise `ValueError`. A metric that is undefined in the
+  start state or in a reached state stops the search or state space with an error naming it.
+
+```python
+import mymyr
+from mymyr import search
+
+domain = mymyr.Domain.from_string("""
+(define (domain fuel) (:requirements :strips :numeric-fluents)
+  (:predicates (at-goal))
+  (:functions (fuel) (used))
+  (:action fill :parameters () :precondition (and) :effect (and (assign (fuel) 2)))
+  (:action drive :parameters () :precondition (>= (fuel) 1)
+    :effect (and (at-goal) (decrease (fuel) 1) (increase (used) 1))))""")
+problem = "(define (problem p) (:domain fuel) (:init (= (used) 0)) (:goal (at-goal)) (:metric {} (used)))"
+
+task = mymyr.Task(domain.instantiate_string(problem.format("minimize")))
+assert task.numeric_names == ["(fuel)", "(used)"]  # fuel is undefined until `fill` assigns it
+result = search.astar(task)
+assert [str(a) for a in result.plan] == ["(fill)", "(drive)"] and result.cost == 1
+
+refused = search.astar(mymyr.Task(domain.instantiate_string(problem.format("maximize"))))
+assert refused.status == search.Status.FAILED and "maximize" in refused.message
+```
+
+Differences from mimir:
+
+- a variable of type `(either a b)` ranges over the objects of `a` and of `b` (mimir takes the objects of both);
+- a conditional effect that does not fire records no effect family, so it cannot make its action inapplicable;
+- in a numeric constraint without parameters, a unary minus over an expression with fluents is kept (mimir drops it);
+- a division by zero is undefined also between constants, and a `scale-down` by zero makes its action inapplicable;
+- `maximize` metrics and metrics that combine `total-cost` with other terms are refused rather than minimized, and an
+  undefined metric value is an error;
+- heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), where mimir's count
+  every action 1.
+
 ## Errors
 
 PDDL that mymyr cannot read raises `mymyr.PddlError`, a `ValueError`. Its message is one line that names the file, the

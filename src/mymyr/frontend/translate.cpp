@@ -307,7 +307,8 @@ struct Classifier
                     && !std::holds_alternative<loki::ConditionNumericConstraint>(part->get_condition()))
                     throw std::logic_error("Expected literal in conjunctive condition.");
         }
-        else if (!std::holds_alternative<loki::ConditionLiteral>(c->get_condition()))
+        else if (!std::holds_alternative<loki::ConditionLiteral>(c->get_condition())
+                 && !std::holds_alternative<loki::ConditionNumericConstraint>(c->get_condition()))
             throw std::logic_error("Expected conjunctive condition.");
     }
     void effect(loki::Effect effect)
@@ -321,7 +322,8 @@ struct Classifier
                 const auto& c = (*w)->get_condition()->get_condition();
                 if (const auto* a = std::get_if<loki::ConditionAnd>(&c))
                     for (const auto& part : (*a)->get_conditions())
-                        if (!std::holds_alternative<loki::ConditionLiteral>(part->get_condition()))
+                        if (!std::holds_alternative<loki::ConditionLiteral>(part->get_condition())
+                            && !std::holds_alternative<loki::ConditionNumericConstraint>(part->get_condition()))
                             throw std::logic_error("Expected literal in conjunctive condition.");
                 e = (*w)->get_effect();
             }
@@ -658,6 +660,8 @@ public:
         }
         else if (const auto* l = std::get_if<loki::ConditionLiteral>(&c->get_condition()))
             add_lit((*l)->get_literal());
+        else if (const auto* n = std::get_if<loki::ConditionNumericConstraint>(&c->get_condition()))
+            ncs.push_back(nc(*n));
         else
             throw std::logic_error("Expected conjunctive condition.");
         return Core::cond(ps, lits, std::move(ncs));

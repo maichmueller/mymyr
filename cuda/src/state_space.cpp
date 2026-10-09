@@ -1468,7 +1468,7 @@ private:
                             [&](u32, const ObjectId*, const Delta& d)
                             {
                                 if (e < off[g + 1])
-                                    costs[e] = ac.unit() ? 1.0 : ac.next(gv, d) - gv;
+                                    costs[e] = ac.unit() ? 1.0 : ac.transition(gv, d);
                                 ++e;
                                 return true;
                             },

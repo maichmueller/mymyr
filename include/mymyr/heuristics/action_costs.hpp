@@ -37,6 +37,7 @@
 #include "mymyr/successor/action.hpp"
 #include "mymyr/task/numeric.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -97,6 +98,20 @@ public:
             }
         }
         return g + 1;
+    }
+    /// The cost of the transition under delta d from a state with metric value g: next(g, d) - g. When every
+    /// total-cost effect is an `increase`, it is their sum, added up from 0 (exact whatever g is).
+    [[nodiscard]] f64 transition(f64 g, const Delta& d) const
+    {
+        if (m_kind == Kind::TotalCost &&
+            std::ranges::all_of(d.aux, [](const AuxWrite& a) { return a.op == formalism::AssignOp::Increase; }))
+        {
+            f64 c = 0;
+            for (const AuxWrite& a : d.aux)
+                c += a.value;
+            return c;
+        }
+        return next(g, d) - g;
     }
     /// Whether schema s costs the same under every binding (state-independent schemas only).
     [[nodiscard]] bool constant(u32 schema) const noexcept { return m_schemas[schema].kind == Cost::Const; }
