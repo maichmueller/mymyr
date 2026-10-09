@@ -33,9 +33,10 @@ and fractional costs with up to 6 decimal places (the relaxation counts them in 
 beyond; an action whose cost depends on the state, and every action under a metric over numeric fluents, costs 0 in
 the relaxation, and an action whose cost is undefined is never applicable and left out. So `max` and `h2` never
 overestimate the cost of reaching a goal, and A* with them finds an optimal plan. With `costs="unit"` on a task whose
-actions cost less than 1 they can overestimate, and A* need not find an optimal plan. The h² and set-additive implementations use grounded evaluation; they do not support
-`evaluation="lifted"`.
+actions cost less than 1 they can overestimate, and A* need not find an optimal plan. The h² and set-additive
+implementations use grounded evaluation; they do not support `evaluation="lifted"`.
 
 The perfect heuristic stores goal distances from a complete `mymyr.datasets.StateSpace`. Use
-`search.Heuristic.perfect(space)` (the task's objective; `costs="unit"` or `"real"` to override) to reuse a space, or pass `heuristic="perfect"` to A* or
-GBFS to have search generate it within the supplied state and time budgets. A state outside the space is rejected.
+`search.Heuristic.perfect(space)` (the task's objective; `costs="unit"` or `"real"` to override) to reuse a space, or
+pass `heuristic="perfect"` to A* or GBFS to have search generate it within the supplied state and time budgets. A state
+outside the space is rejected.
