@@ -1032,7 +1032,7 @@ TEST(DeviceGoals, AtomsNoStateHolds)
         const search::BestFirstResult cpu = search::astar_eager(*task);
         const cuda::DeviceBestFirstResult a = cuda::astar(ctx, task, {});
         EXPECT_EQ(a.result.status, cpu.status);
-        EXPECT_EQ(a.result.status, goals ? search::SearchStatus::Solved : search::SearchStatus::Exhausted);
+        EXPECT_EQ(a.result.status, goals ? search::SearchStatus::Solved : search::SearchStatus::Unsolvable);
         cuda::DeviceStateSpaceOptions o; o.space.remove_if_unsolvable = false; o.output = cuda::StateSpaceOutput::Host;
         const cuda::DeviceStateSpaceResult s = cuda::state_space(ctx, task, o);
         ASSERT_EQ(s.status, datasets::StateSpaceStatus::Ok);
