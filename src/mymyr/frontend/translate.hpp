@@ -143,4 +143,15 @@ GroundInit read_loki_init(const DomainState& ds, const loki::Problem& problem, c
 formalism::TaskData translate_problem(const DomainState& ds, const loki::Problem& problem, const GroundInit& init,
                                       const ObjectMap& object_of, const PredicateOrigin& origin);
 
+/// Union types. loki gives a variable of type (either t1 ... tk) (a parameter of an action or axiom, a quantified
+/// variable of a precondition, effect or goal) the conjunction of the type literals of every ti and their supertypes,
+/// i.e. the intersection of the types. This replaces that conjunction by one literal over a static predicate that
+/// holds for the objects of any ti (the union), created once per set of member types and named
+/// `either_<t1>_..._<tk>` (with a suffix if the name is taken). Members that are subtypes of another member are left
+/// out; a union that reduces to one type keeps the type literals of that type. Objects and constants (also those
+/// declared `(either ...)`) keep loki's typing: they belong to each listed type and its supertypes. With `init`, the
+/// union predicates' atoms are added to the static initial atoms. A task without union-typed variables is unchanged
+/// (returns false).
+bool apply_union_types(const DomainState& ds, formalism::TaskData& t, bool init);
+
 }  // namespace mymyr::frontend::detail

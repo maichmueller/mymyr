@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -100,7 +101,7 @@ public:
             case loki::BinaryOperatorEnum::PLUS: return a + b;
             case loki::BinaryOperatorEnum::MINUS: return a - b;
             case loki::BinaryOperatorEnum::MUL: return a * b;
-            case loki::BinaryOperatorEnum::DIV: return a / b;
+            case loki::BinaryOperatorEnum::DIV: return b == 0 ? std::numeric_limits<f64>::quiet_NaN() : a / b;  // undefined
         }
         fail("bad binary operator");
     }
@@ -109,8 +110,8 @@ public:
         return static_cast<loki::MultiOperatorEnum>(op) == loki::MultiOperatorEnum::PLUS ? a + b : a * b;
     }
 
-    /// mimir: Repositories::ground(FunctionExpression, {}) -- used for nullary numeric constraints; folds constants and
-    /// (sic) drops a unary minus over a non-constant operand.
+    /// mimir: Repositories::ground(FunctionExpression, {}) -- used for nullary numeric constraints; folds constants.
+    /// Unlike mimir, a unary minus over a non-constant operand is kept (mimir drops it, which negates the constraint).
     u32 ground(u32 f)
     {
         const Key& key = r.fe[f];
@@ -145,7 +146,7 @@ public:
             case kFeMinus:
             {
                 const u32 g = ground(key_u32(key[1]));
-                return gis_number(g) ? gnum(-gnumber(g)) : g;
+                return gis_number(g) ? gnum(-gnumber(g)) : gminus(g);
             }
             case kFeFunction:
             {
@@ -2230,7 +2231,164 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
     }
     for (u32 x : axioms2)
         t.axioms.push_back(em.axiom(x, true));
+    apply_union_types(ds, t, true);
     validate(t);
     return t;
+}
+
+// ================================================================================================ union types
+
+bool apply_union_types(const DomainState& ds, TaskData& t, bool init)
+{
+    bool any = false;
+    const u32 nt = static_cast<u32>(t.types.size());
+    // anc[a * nt + b]: b is a or a supertype of a
+    std::vector<u8> anc(static_cast<usize>(nt) * nt, 0);
+    for (u32 a = 0; a < nt; ++a)
+    {
+        std::vector<u32> stack{a};
+        while (!stack.empty())
+        {
+            const u32 x = stack.back();
+            stack.pop_back();
+            if (anc[static_cast<usize>(a) * nt + x])
+                continue;
+            anc[static_cast<usize>(a) * nt + x] = 1;
+            for (TypeId b : TaskData::slice(t.type_ids, t.types[x].bases))
+                stack.push_back(b.v);
+        }
+    }
+    auto is_super = [&](u32 a, u32 b) { return a < nt && b < nt && anc[static_cast<usize>(a) * nt + b]; };
+    auto type_of_pred = [&](u32 p) { return p < ds.pred_type.size() ? ds.pred_type[p] : ~0u; };
+
+    struct Union
+    {
+        std::vector<u32> members;  // sorted type ids, none a subtype of another
+        u32 pred = 0;
+    };
+    std::vector<Union> unions;
+    auto union_pred = [&](const std::vector<u32>& members) -> u32
+    {
+        for (const Union& u : unions)
+            if (u.members == members)
+                return u.pred;
+        std::string base = "either";
+        for (u32 m : members)
+            base += "_" + std::string(t.str(t.types[m].name));
+        auto taken = [&](const std::string& name)
+        {
+            for (const Predicate& q : t.predicates)
+                if (t.str(q.name) == name)
+                    return true;
+            return false;
+        };
+        std::string name = base;
+        for (u32 k = 2; taken(name); ++k)
+            name = base + "_" + std::to_string(k);
+        Predicate q;
+        q.name = t.intern_string(name);
+        q.kind = PredKind::Static;
+        q.arity = 1;
+        Parameter par;
+        par.name = t.intern_string("arg");
+        std::vector<TypeId> ids;
+        for (u32 m : members)
+            ids.push_back(TypeId{m});
+        par.types = TaskData::append<TypeId>(t.type_ids, ids);
+        q.params = TaskData::append<Parameter>(t.params, std::span<const Parameter>(&par, 1));
+        unions.push_back(Union{members, static_cast<u32>(t.predicates.size())});
+        t.predicates.push_back(q);
+        return unions.back().pred;
+    };
+
+    // The type literals of variable `var` (declared types `declared`, two or more) in condition c.
+    auto rewrite = [&](Condition& c, u32 var, std::span<const TypeId> declared)
+    {
+        std::vector<u32> members;
+        for (TypeId d : declared)
+        {
+            bool subsumed = false;
+            for (TypeId e : declared)
+                subsumed = subsumed || (e.v != d.v && is_super(d.v, e.v) && !(is_super(e.v, d.v) && e.v > d.v));
+            if (!subsumed && std::find(members.begin(), members.end(), d.v) == members.end())
+                members.push_back(d.v);
+        }
+        std::sort(members.begin(), members.end());
+        const std::vector<Literal> lits(t.literals_of(c).begin(), t.literals_of(c).end());
+        std::vector<Literal> out;
+        bool changed = false, placed = false;
+        for (const Literal& l : lits)
+        {
+            const u32 ty = type_of_pred(l.pred.v);
+            const auto terms = t.terms_of(l);
+            const bool type_lit = l.positive && ty != ~0u && terms.size() == 1 && terms[0] == static_cast<Term>(var) &&
+                                  std::any_of(declared.begin(), declared.end(), [&](TypeId d) { return is_super(d.v, ty); });
+            if (!type_lit)
+            {
+                out.push_back(l);
+                continue;
+            }
+            if (members.size() == 1 && is_super(members[0], ty))
+            {
+                out.push_back(l);  // the type literals of the one remaining type
+                continue;
+            }
+            changed = true;
+            if (members.size() > 1 && !placed)
+            {
+                Literal u = l;  // the same single term
+                u.pred = PredicateId{union_pred(members)};
+                out.push_back(u);
+                placed = true;
+            }
+        }
+        if (changed)
+        {
+            c.literals = TaskData::append<Literal>(t.literals, out);
+            any = true;
+        }
+    };
+    auto rewrite_scope = [&](Condition& c, Range params, u32 first)
+    {
+        const std::vector<Parameter> ps(TaskData::slice(t.params, params).begin(), TaskData::slice(t.params, params).end());
+        for (u32 i = 0; i < ps.size(); ++i)
+            if (ps[i].types.count > 1)
+            {
+                const std::vector<TypeId> declared(TaskData::slice(t.type_ids, ps[i].types).begin(),
+                                                   TaskData::slice(t.type_ids, ps[i].types).end());
+                rewrite(c, first + i, declared);
+            }
+    };
+    for (Schema& s : t.schemas)
+    {
+        rewrite_scope(s.precondition, s.params, 0);
+        for (u32 e = s.effects.begin; e < s.effects.end(); ++e)
+            rewrite_scope(t.conditional_effects[e].condition, t.conditional_effects[e].extra_params, s.arity());
+    }
+    for (Axiom& x : t.axioms)
+        rewrite_scope(x.body, x.params, 0);
+
+    if (!init || unions.empty())
+        return any;
+    // the objects of any member type: loki gives every object the type atoms of its declared types and their supertypes
+    std::vector<u32> type_pred(nt, ~0u);
+    for (u32 p = 0; p < ds.pred_type.size(); ++p)
+        if (ds.pred_type[p] < nt)
+            type_pred[ds.pred_type[p]] = p;
+    for (const Union& u : unions)
+    {
+        std::vector<u8> member(t.objects.size(), 0);
+        for (const GroundAtom& a : t.static_init)
+            for (u32 m : u.members)
+                if (a.pred.v == type_pred[m] && a.objects.count == 1)
+                    member[t.object_ids[a.objects.begin].v] = 1;
+        for (u32 o = 0; o < member.size(); ++o)
+            if (member[o])
+            {
+                const ObjectId id{o};
+                t.static_init.push_back(GroundAtom{PredicateId{u.pred}, TaskData::append<ObjectId>(t.object_ids, std::span<const ObjectId>(&id, 1))});
+            }
+    }
+    return any;
 }
 }  // namespace mymyr::frontend::detail
