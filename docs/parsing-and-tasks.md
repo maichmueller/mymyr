@@ -63,21 +63,21 @@ mymyr implements the PDDL semantics of mimir, with the differences listed at the
 import mymyr
 from mymyr import search
 
-domain = mymyr.Domain.from_string("""
+fuel = mymyr.Domain.from_string("""
 (define (domain fuel) (:requirements :strips :numeric-fluents)
   (:predicates (at-goal))
   (:functions (fuel) (used))
   (:action fill :parameters () :precondition (and) :effect (and (assign (fuel) 2)))
   (:action drive :parameters () :precondition (>= (fuel) 1)
     :effect (and (at-goal) (decrease (fuel) 1) (increase (used) 1))))""")
-problem = "(define (problem p) (:domain fuel) (:init (= (used) 0)) (:goal (at-goal)) (:metric {} (used)))"
+fuel_problem = "(define (problem p) (:domain fuel) (:init (= (used) 0)) (:goal (at-goal)) (:metric {} (used)))"
 
-task = mymyr.Task(domain.instantiate_string(problem.format("minimize")))
-assert task.numeric_names == ["(fuel)", "(used)"]  # fuel is undefined until `fill` assigns it
-result = search.astar(task)
+fuel_task = mymyr.Task(fuel.instantiate_string(fuel_problem.format("minimize")))
+assert fuel_task.numeric_names == ["(fuel)", "(used)"]  # fuel is undefined until `fill` assigns it
+result = search.astar(fuel_task)
 assert [str(a) for a in result.plan] == ["(fill)", "(drive)"] and result.cost == 1
 
-refused = search.astar(mymyr.Task(domain.instantiate_string(problem.format("maximize"))))
+refused = search.astar(mymyr.Task(fuel.instantiate_string(fuel_problem.format("maximize"))))
 assert refused.status == search.Status.FAILED and "maximize" in refused.message
 ```
 

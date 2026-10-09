@@ -41,7 +41,7 @@ def test_stubs_parse_and_are_typed():
         "heuristic: str | Heuristic | Callable[[mymyr._core.State], float] | mymyr._typing.HeuristicObject = 'max'"
         in search
     )
-    assert "def perfect(space: mymyr._core._datasets.StateSpace, *, costs: str = 'unit') -> Heuristic:" in search
+    assert "def perfect(space: mymyr._core._datasets.StateSpace, *, costs: str = 'auto') -> Heuristic:" in search
     assert "def plan(self) -> list[mymyr._core.Action]" in search
     assert "def goal_state(self) -> mymyr._core.State | None" in search
     # the IW family variants, landmarks and relaxed reachability (search_bindings.cpp, landmarks_bindings.cpp)
