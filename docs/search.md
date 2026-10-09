@@ -72,7 +72,8 @@ sequence of ground atoms and literals; any one that holds ends the search. See [
 construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
 literals and numeric constraints; each batched goal selects one conjunction per search. Callable goals and any-of
 alternatives within one device search are not supported; device A*/GBFS use the task goal.
-`search.CancelToken` supports cancellation from another thread.
+`search.CancelToken` supports cancellation from another thread. A search that does not solve the task returns an
+empty `plan`; an unsolved `siw` keeps the subplans of the subproblems it solved in `partial_plan`.
 
 `brfs` takes `max_states=`, `max_seconds=` and `cancel=`, and its result has a `status` like the other searches.
 It stops at the first goal state it expands and returns a shortest plan (`SOLVED`); with `threads > 1` it searches

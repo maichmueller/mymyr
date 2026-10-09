@@ -992,7 +992,15 @@ TEST(Siw, EqualsAReferenceOnTheOracle)
             {
                 EXPECT_EQ(r.subproblems.size(), sub);
                 EXPECT_EQ(r.plan.size(), plan_length);
+                EXPECT_TRUE(r.partial_plan.empty());
                 expect_valid_plan(*task, task->initial_state(), r.plan, task_goal(*task));
+            }
+            else
+            {
+                // no plan; the solved subproblems' subplans lead to the state where the failed one started
+                EXPECT_TRUE(r.plan.empty()) << st.name << " k=" << k;
+                EXPECT_EQ(r.partial_plan.size(), plan_length) << st.name << " k=" << k;
+                expect_valid_plan(*task, task->initial_state(), r.partial_plan, [&](const State& s) { return s == cur; });
             }
         }
     }
