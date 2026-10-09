@@ -1,14 +1,11 @@
 // Datasets: state spaces against the fork's StateSpace on the fork's own test instances (counts, V*, and the
 // content, transition and V* fingerprints of the fork's own state-space tool), ids and arrays independent of
 // the thread count, the array invariants, the options (max_states, remove_if_unsolvable, statically false goals,
-// timeouts), transition costs and numeric tasks, the instance pool, generalized state spaces, samplers, object graphs
-// and certificates.
+// timeouts), transition costs and numeric tasks, the instance pool, generalized state spaces and samplers.
 
 #include "../frontend/golden.hpp"
 #include "../support/suite.hpp"
-#include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
-#include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/datasets/sampler.hpp"
 #include "mymyr/datasets/state_space.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -277,7 +274,7 @@ void check_invariants(const StateSpace& S)
     for (u32 v = 0; v < N; ++v)
         EXPECT_EQ(S.find(S.state(v)), static_cast<i64>(v));
     // each row is the task's canonical successor sequence of its state (labels and targets)
-    if (S.has_labels() && !S.symmetry_reduced())
+    if (S.has_labels())
     {
         const Task& task = *S.task();
         Successors& succ = task.workspace().successors();
@@ -322,7 +319,7 @@ struct ForkCase
 };
 
 // fork_datasets ss lists/fork_data.txt --max-states 200000 (build/parity/fork_data.jsonl; the fork 0.16.3 configured
-// as fork_ss: remove_if_unsolvable = false, no symmetry pruning)
+// as fork_ss: remove_if_unsolvable = false)
 const ForkCase kForkCases[] = {
 #include "fork_cases.inc"
 };
@@ -765,126 +762,8 @@ TEST(Sampler, NoDeadEnds)
     EXPECT_THROW((void)s.sample_dead_end_state(), std::out_of_range);
 }
 
-// ----------------------------------------------------------------------------------------------- object graphs, certificates
-ObjectGraph make_graph(u32 n, const std::vector<std::pair<u32, u32>>& edges, std::vector<u32> colors = {})
-{
-    ObjectGraph g;
-    g.num_objects = n;
-    g.color = colors.empty() ? std::vector<u32>(n, 0) : colors;
-    const u32 k = *std::max_element(g.color.begin(), g.color.end()) + 1;
-    g.palette_offsets.assign(1, 0);
-    for (u32 c = 0; c < k; ++c)
-    {
-        g.palette_values.push_back(c);
-        g.palette_offsets.push_back(c + 1);
-    }
-    std::vector<std::vector<u32>> adj(n);
-    for (auto [a, b] : edges)
-    {
-        adj[a].push_back(b);
-        adj[b].push_back(a);
-    }
-    g.offsets.assign(1, 0);
-    for (auto& a : adj)
-    {
-        std::sort(a.begin(), a.end());
-        g.neighbors.insert(g.neighbors.end(), a.begin(), a.end());
-        g.offsets.push_back(g.neighbors.size());
-    }
-    return g;
-}
-
-TEST(Certificates, WeisfeilerLemanHierarchy)
-{
-    // two triangles and a hexagon: 1-WL cannot tell them apart, 2-FWL can
-    const ObjectGraph triangles = make_graph(6, {{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}});
-    const ObjectGraph hexagon = make_graph(6, {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 0}});
-    EXPECT_EQ(color_refinement_certificate(triangles), color_refinement_certificate(hexagon));
-    EXPECT_NE(kfwl_certificate(triangles, 2), kfwl_certificate(hexagon, 2));
-    EXPECT_NE(kfwl_certificate(triangles, 3), kfwl_certificate(hexagon, 3));
-    // isomorphic relabellings
-    const ObjectGraph hexagon2 = make_graph(6, {{3, 0}, {0, 5}, {5, 1}, {1, 4}, {4, 2}, {2, 3}});
-    EXPECT_EQ(color_refinement_certificate(hexagon), color_refinement_certificate(hexagon2));
-    EXPECT_EQ(kfwl_certificate(hexagon, 2), kfwl_certificate(hexagon2, 2));
-    EXPECT_EQ(kfwl_certificate(hexagon, 3), kfwl_certificate(hexagon2, 3));
-    // colours matter, and isolated vertices of different colours are told apart (the fork's certificate is not)
-    const ObjectGraph path_a = make_graph(3, {{0, 1}, {1, 2}}, {0, 1, 0});
-    const ObjectGraph path_b = make_graph(3, {{0, 1}, {1, 2}}, {1, 0, 0});
-    EXPECT_NE(color_refinement_certificate(path_a), color_refinement_certificate(path_b));
-    EXPECT_NE(kfwl_certificate(path_a, 2), kfwl_certificate(path_b, 2));
-    EXPECT_NE(color_refinement_certificate(make_graph(2, {}, {0, 1})), color_refinement_certificate(make_graph(2, {}, {0, 0})));
-    std::vector<u32> stable;
-    (void)color_refinement_certificate(path_a, &stable);
-    ASSERT_EQ(stable.size(), 3u);
-    EXPECT_EQ(stable[0], stable[2]);
-    EXPECT_NE(stable[0], stable[1]);
-    EXPECT_THROW((void)kfwl_certificate(hexagon, 5), std::invalid_argument);
-    EXPECT_THROW((void)kfwl_certificate(hexagon, 1), std::invalid_argument);
-}
-
-TEST(ObjectGraph, GripperStructureAndClasses)
-{
-    const TaskPtr task = fork_task("gripper", "p-2-0.pddl");
-    if (!task)
-        GTEST_SKIP();
-    const StateSpacePtr S = space_of(task, fork_ss());
-    ASSERT_TRUE(S);
-    ObjectGraphBuilder ogb(*task);
-    // the fork's test (tests/unit/datasets/object_graph.cpp): 12 isomorphism classes among the 28 states
-    std::set<Certificate> cr, fwl;
-    for (u32 v = 0; v < S->num_states(); ++v)
-    {
-        const ObjectGraph g = ogb.build(S->state(v));
-        EXPECT_EQ(g.num_objects, task->num_objects());
-        EXPECT_EQ(g.offsets.size(), g.num_vertices() + 1u);
-        for (u32 x = 0; x < g.num_vertices(); ++x)
-            for (u32 y : g.adjacent(x))
-            {
-                EXPECT_NE(x, y);
-                const auto back = g.adjacent(y);
-                EXPECT_TRUE(std::binary_search(back.begin(), back.end(), x));
-            }
-        for (u32 c = 1; c < g.num_colors(); ++c)
-            EXPECT_TRUE(std::lexicographical_compare(g.palette(c - 1).begin(), g.palette(c - 1).end(), g.palette(c).begin(),
-                                                     g.palette(c).end()));
-        cr.insert(color_refinement_certificate(g));
-        fwl.insert(kfwl_certificate(g, 2));
-    }
-    EXPECT_EQ(cr.size(), 12u);
-    EXPECT_EQ(fwl.size(), 12u);
-}
-
-// ----------------------------------------------------------------------------------------------- symmetry pruning
-TEST(SymmetricStateSpace, OneStatePerClass)
-{
-    const TaskPtr task = fork_task("gripper", "p-2-0.pddl");
-    if (!task)
-        GTEST_SKIP();
-    for (CertificateKind k : {CertificateKind::ColorRefinement, CertificateKind::KFwl})
-    {
-        StateSpaceOptions o = fork_ss();
-        o.symmetry_pruning = true;
-        o.certificate = k;
-        const StateSpacePtr S = space_of(task, o);
-        ASSERT_TRUE(S);
-        EXPECT_TRUE(S->symmetry_reduced());
-        EXPECT_EQ(S->num_states(), 12u);
-        // no parallel edges; every class reached
-        for (u32 v = 0; v < S->num_states(); ++v)
-        {
-            std::set<u32> t(S->forward_targets().begin() + static_cast<i64>(S->forward_offsets()[v]),
-                            S->forward_targets().begin() + static_cast<i64>(S->forward_offsets()[v + 1]));
-            EXPECT_EQ(t.size(), S->forward_offsets()[v + 1] - S->forward_offsets()[v]);
-        }
-        check_invariants(*S);
-        // goal distances are those of the full space's corresponding states
-        const StateSpacePtr F = space_of(task, fork_ss());
-        EXPECT_EQ(S->max_goal_distance(), F->max_goal_distance());
-    }
-}
-
 // ----------------------------------------------------------------------------------------------- generalized
-TEST(GeneralizedStateSpace, ConcatenationAndSymmetryReduction)
+TEST(GeneralizedStateSpace, DisjointUnion)
 {
     std::vector<TaskPtr> tasks;
     for (const char* p : {"test_problem4.pddl", "p-2-0.pddl", "test_problem2.pddl", "p-1-0.pddl"})
@@ -892,7 +771,7 @@ TEST(GeneralizedStateSpace, ConcatenationAndSymmetryReduction)
             tasks.push_back(t);
     if (tasks.size() < 4)
         GTEST_SKIP();
-    // without symmetry reduction: the disjoint union, spaces sorted by size (stable)
+    // the disjoint union, spaces sorted by size (stable)
     const auto results = generate_state_spaces(tasks, fork_ss(), 2);
     const auto spaces = ordered_spaces(results);
     ASSERT_EQ(spaces.size(), 4u);
@@ -901,35 +780,54 @@ TEST(GeneralizedStateSpace, ConcatenationAndSymmetryReduction)
     EXPECT_EQ(spaces[1]->task(), tasks[1]);  // p-2-0 and test_problem2 tie at 28 states: input order
     EXPECT_EQ(spaces[2]->task(), tasks[2]);
     const auto G = GeneralizedStateSpace::create(spaces);
-    EXPECT_FALSE(G->symmetry_reduced());
-    u64 V = 0, E = 0, goals = 0;
+    EXPECT_EQ(G->spaces(), spaces);
+    u64 V = 0, E = 0, goals = 0, unsolvable = 0;
     for (const auto& s : spaces)
-        V += s->num_states(), E += s->num_transitions(), goals += s->num_goal_states();
+        V += s->num_states(), E += s->num_transitions(), goals += s->num_goal_states(), unsolvable += s->num_unsolvable_states();
     EXPECT_EQ(G->num_vertices(), V);
     EXPECT_EQ(G->num_edges(), E);
-    EXPECT_EQ(G->initial_vertices().size(), 4u);
+    ASSERT_EQ(G->vertex_offsets().size(), 5u);
+    ASSERT_EQ(G->edge_offsets().size(), 5u);
+    ASSERT_EQ(G->forward_offsets().size(), V + 1);
+    ASSERT_EQ(G->forward_targets().size(), E);
     EXPECT_EQ(G->goal_vertices().size(), goals);
+    EXPECT_EQ(G->unsolvable_vertices().size(), unsolvable);
+    std::vector<u32> initial;
     for (u32 p = 0; p < 4; ++p)
-        for (u32 v = 0; v < spaces[p]->num_states(); ++v)
+    {
+        const StateSpace& S = *spaces[p];
+        EXPECT_EQ(G->vertex_offsets()[p + 1] - G->vertex_offsets()[p], S.num_states());
+        EXPECT_EQ(G->edge_offsets()[p + 1] - G->edge_offsets()[p], S.num_transitions());
+        initial.push_back(G->vertex(p, S.initial_state()));
+        for (u32 v = 0; v < S.num_states(); ++v)
         {
-            const u32 c = G->vertex_mapping(p)[v];
-            EXPECT_EQ(G->vertex_problems()[c], p);
-            EXPECT_EQ(G->vertex_problem_vertices()[c], v);
+            const u32 g = G->vertex(p, v);
+            EXPECT_EQ(g, G->vertex_offsets()[p] + v);
+            EXPECT_EQ(G->problem_of(g), p);
+            EXPECT_EQ(G->goal_flags()[g], S.goal_flags()[v]);
+            EXPECT_EQ(G->unsolvable_flags()[g], S.unsolvable_flags()[v]);
+            // the edges of vertex g are the transitions of state v, in their order
+            ASSERT_EQ(G->forward_offsets()[g + 1] - G->forward_offsets()[g], S.forward_offsets()[v + 1] - S.forward_offsets()[v]);
+            for (u64 e = S.forward_offsets()[v]; e < S.forward_offsets()[v + 1]; ++e)
+            {
+                const u64 ge = G->edge(p, e);
+                EXPECT_EQ(ge, G->forward_offsets()[g] + (e - S.forward_offsets()[v]));
+                EXPECT_EQ(G->forward_targets()[ge], G->vertex(p, S.forward_targets()[e]));
+                EXPECT_EQ(G->source(ge), g);
+            }
         }
-    EXPECT_EQ(G->forward_offsets().back(), G->num_edges());
-    // with symmetry reduction: p-2-0 and test_problem2 are isomorphic (same initial state class): one is dropped
-    StateSpaceOptions o = fork_ss();
-    o.symmetry_pruning = true;
-    const auto sym = GeneralizedStateSpace::create(ordered_spaces(generate_state_spaces(tasks, o, 2)));
-    EXPECT_TRUE(sym->symmetry_reduced());
-    EXPECT_LT(sym->spaces().size(), 4u);
-    for (u32 p = 0; p < sym->spaces().size(); ++p)
-        for (u32 v = 0; v < sym->spaces()[p]->num_states(); ++v)
-        {
-            const u32 c = sym->vertex_mapping(p)[v];
-            ASSERT_LT(c, sym->num_vertices());
-            EXPECT_EQ(sym->goal_flags()[c], sym->spaces()[p]->goal_flags()[v]);
-        }
+    }
+    EXPECT_EQ(G->initial_vertices(), initial);
+    EXPECT_THROW((void)G->vertex(4, 0), std::out_of_range);
+    EXPECT_THROW((void)G->vertex(0, spaces[0]->num_states()), std::out_of_range);
+    EXPECT_THROW((void)G->edge(0, spaces[0]->num_transitions()), std::out_of_range);
+    EXPECT_THROW((void)G->problem_of(G->num_vertices()), std::out_of_range);
+    EXPECT_THROW((void)G->source(G->num_edges()), std::out_of_range);
+    // no spaces: an empty graph
+    const auto empty = GeneralizedStateSpace::create({});
+    EXPECT_EQ(empty->num_vertices(), 0u);
+    EXPECT_EQ(empty->num_edges(), 0u);
+    EXPECT_EQ(empty->forward_offsets().size(), 1u);
     // one domain only
     const TaskPtr other = fork_task("blocks_3", "test_problem.pddl");
     ASSERT_TRUE(other);

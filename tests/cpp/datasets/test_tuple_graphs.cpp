@@ -1,6 +1,6 @@
 // Tuple graphs: against the fork's TupleGraphImpl on the state-space suite (tests/data/tuple_graphs/
 // fork_tuple_graphs.json, written by tests/data/fork_golden/search_fork/run_tuple_graphs.py), the definition on small
-// tasks, independence of the thread count, and symmetry reduction.
+// tasks and independence of the thread count.
 
 #include "../frontend/golden.hpp"
 #include "../support/json.hpp"
@@ -38,12 +38,10 @@ TaskPtr fork_task(const std::string& dir, const std::string& problem)
     return Task::create(*frontend::load_task(d, p), to);
 }
 
-StateSpacePtr space_of(TaskPtr task, bool symmetry_pruning = false, u32 threads = 1)
+StateSpacePtr space_of(TaskPtr task)
 {
     StateSpaceOptions o;
-    o.threads = threads;
     o.remove_if_unsolvable = false;
-    o.symmetry_pruning = symmetry_pruning;
     StateSpaceResult r = generate_state_space(std::move(task), o);
     EXPECT_EQ(r.status, StateSpaceStatus::Ok);
     return r.space;
@@ -181,7 +179,7 @@ std::vector<i64> bfs(const StateSpace& S, u32 r)
     return dist;
 }
 
-/// The structural invariants of a tuple graph of a space without symmetry reduction.
+/// The structural invariants of a tuple graph.
 void check_invariants(const TupleGraph& g)
 {
     const StateSpace& S = *g.space();
@@ -400,26 +398,24 @@ TEST(TupleGraph, IndependentOfTheThreadCount)
     {
         const char* dir;
         const char* problem;
-        bool symmetric;
     };
 #if defined(MYMYR_SANITIZED)
-    const Case cases[] = {{"gripper", "p-2-0.pddl", false}, {"gripper", "p-2-0.pddl", true}, {"spanner", "p-1-1-3-1.pddl", false}};
+    const Case cases[] = {{"gripper", "p-2-0.pddl"}, {"spanner", "p-1-1-3-1.pddl"}};
 #else
-    const Case cases[] = {{"gripper", "p-2-0.pddl", false},  {"gripper", "test_problem4.pddl", true}, {"blocks_3", "test_problem2.pddl", false},
-                          {"delivery", "test_problem2.pddl", false}, {"miconic-fulladl", "test_problem.pddl", false}};
+    const Case cases[] = {{"gripper", "p-2-0.pddl"}, {"blocks_3", "test_problem2.pddl"}, {"delivery", "test_problem2.pddl"},
+                          {"miconic-fulladl", "test_problem.pddl"}};
 #endif
     for (const Case& c : cases)
     {
         const TaskPtr task = fork_task(c.dir, c.problem);
         if (!task)
             GTEST_SKIP();
-        const StateSpacePtr S = space_of(task, c.symmetric);
+        const StateSpacePtr S = space_of(task);
         ASSERT_TRUE(S);
         for (u32 w : {0u, 1u, 2u})
             for (bool pruning : {true, false})
             {
-                SCOPED_TRACE(std::string(c.dir) + "/" + c.problem + " width " + std::to_string(w) + (pruning ? "" : " no pruning") +
-                             (c.symmetric ? " symmetric" : ""));
+                SCOPED_TRACE(std::string(c.dir) + "/" + c.problem + " width " + std::to_string(w) + (pruning ? "" : " no pruning"));
                 const auto ref = tuple_graphs(S, {.width = w, .dominance_pruning = pruning, .threads = 1});
                 ASSERT_EQ(ref.size(), S->num_states());
                 for (u32 T : {4u, 8u})
@@ -432,36 +428,6 @@ TEST(TupleGraph, IndependentOfTheThreadCount)
                 for (u32 v = 0; v < S->num_states(); v += std::max<u32>(1, S->num_states() / 7))
                     EXPECT_TRUE(tuple_graph(S, v, {.width = w, .dominance_pruning = pruning}) == ref[v]);
             }
-    }
-}
-
-// ----------------------------------------------------------------------------------------------- symmetry
-TEST(TupleGraph, SymmetryReducedSpaces)
-{
-    // the counts of the fork's knowledge base tests (tests/unit/datasets/knowledge_base.cpp), per problem
-    const TaskPtr p1 = fork_task("gripper", "p-1-0.pddl"), p2 = fork_task("gripper", "p-2-0.pddl");
-    if (!p1 || !p2)
-        GTEST_SKIP();
-    auto totals = [](const std::vector<TupleGraph>& gs)
-    {
-        u64 v = 0, e = 0;
-        for (const auto& g : gs)
-            v += g.num_vertices(), e += g.num_edges();
-        return std::pair{v, e};
-    };
-    for (bool symmetric : {false, true})
-    {
-        const StateSpacePtr S1 = space_of(p1, symmetric), S2 = space_of(p2, symmetric);
-        ASSERT_TRUE(S1 && S2);
-        EXPECT_EQ(S1->num_states() + S2->num_states(), symmetric ? 18u : 36u);
-        const auto [v1, e1] = totals(tuple_graphs(S1, {.width = 1}));
-        const auto [v2, e2] = totals(tuple_graphs(S2, {.width = 1}));
-        EXPECT_EQ(v1 + v2, symmetric ? 76u : 220u);
-        EXPECT_EQ(e1 + e2, symmetric ? 70u : 184u);
-        const auto [z1, f1] = totals(tuple_graphs(S1, {.width = 0}));
-        const auto [z2, f2] = totals(tuple_graphs(S2, {.width = 0}));
-        EXPECT_EQ(z1 + z2, symmetric ? 52u : 128u);
-        EXPECT_EQ(f1 + f2, symmetric ? 34u : 92u);
     }
 }
 }  // namespace

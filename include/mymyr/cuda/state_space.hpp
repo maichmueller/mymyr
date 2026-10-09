@@ -13,10 +13,10 @@
 // parallel edges and self-loops kept); the forward CSR with labels (schema, binding padded with ~0u to
 // label_width()) and costs; the reverse CSR (per target, its incoming transitions in ascending forward edge order);
 // goal, unsolvable and alive flags; unit and cost goal distances; the initial state is id 0. The options are the
-// host's (datasets::StateSpaceOptions: max_states, max_seconds, remove_if_unsolvable, labels; symmetry pruning is
-// refused), with the host's statuses per instance. The `states` of an instance that runs out of states is the
-// host's count at the failure (its one-thread generator's, after the parent whose successors reached
-// max(max_states, 2), whatever the chunk); max_seconds is checked between chunks.
+// host's (datasets::StateSpaceOptions: max_states, max_seconds, remove_if_unsolvable, labels), with the host's
+// statuses per instance. The `states` of an instance that runs out of states is the host's count at the failure (its
+// one-thread generator's, after the parent whose successors reached max(max_states, 2), whatever the chunk);
+// max_seconds is checked between chunks.
 //
 // Generation. One pipeline expands the states of every instance of a wave (below) in first-in first-out chunks of
 // stored parents (a chunk may span layers and instances): the successor rows of a chunk come in (parent, canonical
@@ -86,8 +86,7 @@ enum class StateSpaceOutput : u8
 
 struct DeviceStateSpaceOptions
 {
-    /// The host generator's options (threads: host threads for the host-side work, 0: hardware concurrency;
-    /// symmetry_pruning must be off).
+    /// The host generator's options (threads: host threads for the host-side work, 0: hardware concurrency).
     datasets::StateSpaceOptions space{};
     StateSpaceOutput output = StateSpaceOutput::Device;
     u32 chunk_states = u32{1} << 20;  // parents per chunk at most (tests use tiny chunks: the results must not change)
@@ -210,9 +209,8 @@ struct DeviceStateSpaces
 /// Why the device cannot generate the state space of `task` (empty: it can): ChunkGenerator::unsupported.
 [[nodiscard]] std::string state_space_unsupported(const Task& task);
 
-/// The state space of one task. Throws std::invalid_argument for tasks the device cannot run and for symmetry pruning,
-/// std::length_error beyond 2^31 - 2 states or 2^32 - 1 transitions, std::domain_error for negative, NaN or undefined
-/// transition costs.
+/// The state space of one task. Throws std::invalid_argument for tasks the device cannot run, std::length_error beyond
+/// 2^31 - 2 states or 2^32 - 1 transitions, std::domain_error for negative, NaN or undefined transition costs.
 [[nodiscard]] DeviceStateSpaceResult state_space(ContextPtr ctx, TaskPtr task, const DeviceStateSpaceOptions& options = {},
                                                  DeviceStateSpaceStats* stats = nullptr);
 

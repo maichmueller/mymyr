@@ -693,9 +693,6 @@ public:
     {
         if (!m_ctx)
             throw std::invalid_argument("mymyr: device state space: null context");
-        if (m_o.space.symmetry_pruning)
-            throw std::invalid_argument("mymyr: device state space: symmetry pruning runs on the CPU only "
-                                        "(datasets::generate_state_space)");
         if (m_o.chunk_states == 0)
             throw std::invalid_argument("mymyr: device state space: chunk_states must be at least 1");
         m_s = m_o.stream ? m_o.stream : m_ctx->stream();

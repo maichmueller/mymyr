@@ -165,8 +165,6 @@ def test_generation_outputs_and_statuses(ctx):
     small = mc.generate_state_space(task, ctx=ctx, max_states=10)
     assert small.status == datasets.Status.OUT_OF_STATES and not small and small.space is None
     assert datasets.generate(task, max_states=10).status == datasets.Status.OUT_OF_STATES
-    with pytest.raises(ValueError, match="symmetry"):
-        datasets.state_space(task, device=ctx, symmetry_pruning=True)
     with pytest.raises(ValueError, match="output"):
         mc.generate_state_space(task, ctx=ctx, output="disk")
     with pytest.raises(ValueError, match="differs"):
@@ -262,7 +260,7 @@ def test_generalized_state_space_from_device(ctx, sets):
     spaces = [s.to_host() for s in datasets.state_spaces(tasks, device=ctx, remove_if_unsolvable=False, max_states=30000)
               if s is not None]
     by_hand = datasets.GeneralizedStateSpace(datasets.sorted_by_size(spaces))
-    assert np.array_equal(by_hand.arrays()["edge_targets"], cpu.arrays()["edge_targets"])
+    assert np.array_equal(by_hand.arrays()["forward_targets"], cpu.arrays()["forward_targets"])
 
 
 def test_samplers_over_device_spaces(ctx):

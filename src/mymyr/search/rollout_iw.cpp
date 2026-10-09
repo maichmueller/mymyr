@@ -321,7 +321,7 @@ private:
                 }
                 return true;
             },
-            false, m_o.canonical_order, m_o.symmetry_pruning);
+            false, m_o.canonical_order);
         if (interrupted)
             return false;
         const u32 m = static_cast<u32>(m_buf_schema.size());

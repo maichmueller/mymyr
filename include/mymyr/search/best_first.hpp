@@ -57,7 +57,6 @@
 #include "mymyr/search/control.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
-#include "mymyr/successor/symmetry.hpp"
 
 #include <optional>
 #include <string>
@@ -93,9 +92,6 @@ struct BestFirstOptions
     Queue queue = Queue::Auto;
     bool witness_pruning = false;  // off: every applicable action is a transition (mimir's counts)
     bool canonical_order = true;   // successors per state in (schema, binding) order
-    /// Wl1: successors only by actions over representatives of the objects' colour classes (successor/symmetry.hpp);
-    /// the search may then miss every plan, and A* may return a costlier one.
-    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;
     std::optional<State> start;    // default: the task's initial state
 
     // lazy searches

@@ -1,5 +1,5 @@
-"""State spaces, generalized state spaces, knowledge bases, tuple graphs, samplers, object graphs and certificates
-(datasets/*.hpp in the C++ core), on the CPU or a CUDA device, for classical and numeric tasks.
+"""State spaces, generalized state spaces, knowledge bases, tuple graphs and samplers (datasets/*.hpp in the C++
+core), on the CPU or a CUDA device, for classical and numeric tasks.
 
     task = mymyr.Task.from_pddl("domain.pddl", "p01.pddl", atoms="frozen")
     space = mymyr.datasets.state_space(task, threads=8)         # None if the generation failed
@@ -13,11 +13,8 @@
     sampler = mymyr.datasets.StateSpaceSampler(space, seed=0)    # deterministic for a seed on every platform
     ids = sampler.sample_states(1024)
 
-    g = mymyr.datasets.object_graph(space.state(i))              # as in mimir's object graph (not an encoder)
-    g.color_refinement_certificate(), g.kfwl_certificate(2)
-
     tasks = mymyr.rl.TaskTable.from_pddl("domain.pddl", "problems/")   # a task set: one domain, many problems
-    kb = mymyr.datasets.KnowledgeBase(tasks, generalized=True, width=2) # spaces, class graph, tuple graphs
+    kb = mymyr.datasets.KnowledgeBase(tasks, generalized=True, width=2) # spaces, their union, tuple graphs
     kb.state_spaces, kb.generalized_state_space, kb.tuple_graph(0, v)
     graphs = mymyr.datasets.tuple_graphs(space, width=1)         # the tuple graph of every vertex (CPU)
 
@@ -40,22 +37,19 @@ the same ids and arrays. Every generation runs with the thread state detached.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, overload
 
 from mymyr._core import Task, TaskHandle
 from mymyr._core._datasets import (
     GeneralizedStateSpace,
     GenerationResult,
     KnowledgeBase,
-    ObjectGraph,
-    ObjectGraphBuilder,
     StateSpace,
     StateSpaceSampler,
     Status,
     TupleGraph,
     generate,
     generate_many,
-    object_graph,
     sorted_by_size,
     tuple_graph,
     tuple_graphs,
@@ -65,8 +59,6 @@ from mymyr._core._rl import TaskSuite, TaskTable
 
 if TYPE_CHECKING:
     from mymyr.cuda import Context, DeviceStateSpace
-
-Certificate = Literal["kfwl", "color_refinement"]
 
 
 def _device_args(device: int | Context) -> dict[str, Context | int]:
@@ -81,11 +73,6 @@ def _cuda_module():
     except ImportError as e:
         raise ValueError("mymyr: device= needs a CUDA build of mymyr (this one has no mymyr.cuda)") from e
     return cuda
-
-
-def _no_symmetry(symmetry_pruning: bool) -> None:
-    if symmetry_pruning:
-        raise ValueError("mymyr: symmetry pruning runs on the CPU only (device=None)")
 
 
 Tasks = TaskSuite | TaskTable | Sequence[Task | TaskHandle]
@@ -109,9 +96,6 @@ def state_space(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
 ) -> StateSpace | None: ...
 @overload
@@ -123,9 +107,6 @@ def state_space(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
 ) -> DeviceStateSpace | None: ...
 def state_space(
@@ -136,21 +117,17 @@ def state_space(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
 ) -> StateSpace | DeviceStateSpace | None:
     """The state space of a task, or None if the generation failed (as in mimir's StateSpace.create).
 
     device None: on the CPU (a StateSpace; threads: generation threads, default 1). Otherwise a device ordinal or a
     mymyr.cuda.Context: on that device (a mymyr.cuda.DeviceStateSpace with the same ids and arrays, in device memory;
-    threads: host threads for the host-side work, default all cores; no symmetry pruning).
+    threads: host threads for the host-side work, default all cores).
 
     Options: max_states (fail when the space has max(max_states, 2) states or more, as in mimir), max_seconds,
-    remove_if_unsolvable (no space when the initial state cannot reach a goal), symmetry_pruning (one state per
-    certificate class of its object graph; CPU, single-threaded), certificate ('kfwl' or the cheaper but weaker
-    'color_refinement') and k (2, 3 or 4) for symmetry pruning, labels (keep (schema, binding) per transition).
+    remove_if_unsolvable (no space when the initial state cannot reach a goal), labels (keep (schema, binding) per
+    transition).
     """
     if device is None:
         return _cpu_state_space(
@@ -159,12 +136,8 @@ def state_space(
             max_states=max_states,
             max_seconds=max_seconds,
             remove_if_unsolvable=remove_if_unsolvable,
-            symmetry_pruning=symmetry_pruning,
-            certificate=certificate,
-            k=k,
             labels=labels,
         )
-    _no_symmetry(symmetry_pruning)
     return _cuda_module().state_space(
         task,
         **_device_args(device),
@@ -185,9 +158,6 @@ def state_spaces(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
     wave_states: int | None = None,
     wave_instances: int | None = None,
@@ -201,9 +171,6 @@ def state_spaces(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
     wave_states: int | None = None,
     wave_instances: int | None = None,
@@ -216,9 +183,6 @@ def state_spaces(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
     wave_states: int | None = None,
     wave_instances: int | None = None,
@@ -240,13 +204,9 @@ def state_spaces(
             max_states=max_states,
             max_seconds=max_seconds,
             remove_if_unsolvable=remove_if_unsolvable,
-            symmetry_pruning=symmetry_pruning,
-            certificate=certificate,
-            k=k,
             labels=labels,
         )
         return [r.space for r in results]
-    _no_symmetry(symmetry_pruning)
     return _cuda_module().state_spaces(
         _table(tasks),
         **_device_args(device),
@@ -269,16 +229,13 @@ def generalized_state_space(
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
-    symmetry_pruning: bool = False,
-    certificate: Certificate = "kfwl",
-    k: int = 2,
     labels: bool = True,
 ) -> GeneralizedStateSpace:
     """The generalized state space of tasks of one domain, as mimir builds it: each task's state space, failures
-    skipped, sorted ascending by size (stable), then the class graph. device None: the CPU instance pool (threads
-    workers, default all cores); symmetry_pruning=True gives the symmetry-reduced class graph. Otherwise the spaces
-    come from one device pipeline (mymyr.cuda.generate_state_spaces with host output); the class graph is the same.
-    A TaskSuite of several domains raises ValueError (one generalized space per domain: pass suite.tables[d])."""
+    skipped, sorted ascending by size (stable), then their disjoint union. device None: the CPU instance pool (threads
+    workers, default all cores). Otherwise the spaces come from one device pipeline (mymyr.cuda.generate_state_spaces
+    with host output); the graph is the same. A TaskSuite of several domains raises ValueError (one generalized space
+    per domain: pass suite.tables[d])."""
     if isinstance(tasks, TaskSuite) and tasks.num_domains > 1:
         raise ValueError(
             f"mymyr: a generalized state space is of one domain; the suite has {tasks.num_domains} (pass suite.tables[d])"
@@ -292,15 +249,11 @@ def generalized_state_space(
                 max_states=max_states,
                 max_seconds=max_seconds,
                 remove_if_unsolvable=remove_if_unsolvable,
-                symmetry_pruning=symmetry_pruning,
-                certificate=certificate,
-                k=k,
                 labels=labels,
             )
             if s is not None
         ]
     else:
-        _no_symmetry(symmetry_pruning)
         results = _cuda_module().generate_state_spaces(
             _table(tasks),
             **_device_args(device),
@@ -318,12 +271,9 @@ def generalized_state_space(
 
 
 __all__ = [
-    "Certificate",
     "GeneralizedStateSpace",
     "GenerationResult",
     "KnowledgeBase",
-    "ObjectGraph",
-    "ObjectGraphBuilder",
     "StateSpace",
     "StateSpaceSampler",
     "Status",
@@ -331,7 +281,6 @@ __all__ = [
     "generalized_state_space",
     "generate",
     "generate_many",
-    "object_graph",
     "sorted_by_size",
     "state_space",
     "state_spaces",

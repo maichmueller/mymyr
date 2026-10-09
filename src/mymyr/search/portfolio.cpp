@@ -203,7 +203,6 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
         env.root = nullptr;
         env.coord = &coord;
         env.canonical = o.canonical_order;
-        env.symmetry = o.symmetry_pruning;
         env.successor_order = &o.successor_order;
         env.timed = timed;
         env.deadline = deadline;
@@ -237,7 +236,6 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
         ro.ordering = cfg.ordering;
         ro.seed = cfg.seed;
         ro.canonical_order = o.canonical_order;
-        ro.symmetry_pruning = o.symmetry_pruning;
         ro.start = start;
         ro.successor_order = o.successor_order;
         SearchObserver* const hot = hot_of(k);

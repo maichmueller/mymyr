@@ -454,7 +454,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         buf_slots.insert(buf_slots.end(), d.del.begin(), d.del.end());
                         return true;
                     },
-                    witness, canonical, o.symmetry_pruning);
+                    witness, canonical);
                 order.clear();
                 o.successor_order(cv, buf_actions, order);
                 // complete to a permutation: invalid and repeated indices are dropped, missing ones appended
@@ -485,7 +485,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 return;
             }
         }
-        succ.generate<true>(process, witness, canonical, o.symmetry_pruning);
+        succ.generate<true>(process, witness, canonical);
     };
 
     // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
@@ -623,7 +623,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 cs.push(seq, s, b, sc.arity(s), ad, nullptr, nx.data(), nn, d.num, NN);
                 return true;
             },
-            witness, canonical, o.symmetry_pruning);
+            witness, canonical);
         x.count = cs.size() - x.first;
         if (relaxed)
             for (u32 j = x.first; j < cs.size(); ++j)

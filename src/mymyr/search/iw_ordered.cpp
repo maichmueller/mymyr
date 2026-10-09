@@ -213,7 +213,7 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                     cands.push_back(x);
                     return true;
                 },
-                o.witness_pruning, o.canonical_order, o.symmetry_pruning);
+                o.witness_pruning, o.canonical_order);
         }
         if (stop)
             break;

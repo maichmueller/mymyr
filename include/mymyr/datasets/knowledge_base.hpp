@@ -10,9 +10,7 @@
 // Construction (mimir's KnowledgeBaseImpl::create): the state spaces of the tasks (the instance pool, one task per
 // thread), the failed generations skipped; sorted ascending by size if sort_by_size (stable: ties keep the task order;
 // mimir's sort_ascending_by_num_states, default on as in mimir); with `generalized`, the generalized state space over
-// them, whose kept spaces (with symmetry reduction, problems isomorphic to an earlier one are dropped) become the
-// knowledge base's spaces; with `tuple_graphs`, the tuple graphs of every vertex of every kept space (tuple graphs over
-// symmetry-reduced spaces use symmetry reduction, as in mimir).
+// them (problem p = state space p); with `tuple_graphs`, the tuple graphs of every vertex of every space.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
