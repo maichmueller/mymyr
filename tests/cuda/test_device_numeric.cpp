@@ -60,7 +60,8 @@ TaskPtr task_of(const std::string& name, const TaskOptions& options = {})
 
 std::vector<State> walks(const Task& task, u32 n = 8)
 {
-    auto& successors = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& successors = lease->successors();
     std::vector<State> states{task.initial_state()};
     for (u32 i = 1; i < n; ++i)
     {
@@ -319,7 +320,9 @@ void compare_cost_programs(const cuda::ContextPtr& ctx, TaskPtr task)
                 static_cast<const f64*>(pg.data()), count, static_cast<f64*>(cg.data()), static_cast<u32*>(control.data()), stream),
                 "cost programs");
             std::vector<f64> actual(count), expected;
-            auto& succ = task->workspace().successors(); succ.prepare(state.view());
+            const WorkspaceLease lease = task->workspace();
+            auto& succ = lease->successors();
+            succ.prepare(state.view());
             succ.generate<false>([&](u32, const ObjectId*, const Delta& delta) { expected.push_back(costs.next(g, delta)); return true; }, false, true);
             cuda::check(cudaMemcpyAsync(actual.data(), cg.data(), u64{count} * 8, cudaMemcpyDeviceToHost, stream), "cost values");
             u32 error = 0;
@@ -608,7 +611,8 @@ TEST(DeviceNumericRules, Int32OverflowIsReportedBeforeWriting)
 )", "overflow1.pddl");
     const auto task = Task::create(*data);
     ASSERT_EQ(task->numeric_storage(), NumericStorage::I32);
-    EXPECT_THROW((void)task->workspace().successors().applicable_actions(task->initial_state().view()), std::overflow_error);
+    const WorkspaceLease lease = task->workspace();
+    EXPECT_THROW((void)lease->successors().applicable_actions(task->initial_state().view()), std::overflow_error);
     cuda::DeviceBrfsOptions options; options.max_depth = 1;
     EXPECT_THROW((void)cuda::brfs(context(), task, options), std::overflow_error);
     TaskOptions f64; f64.numeric_storage = TaskOptions::NumericStorageMode::F64;

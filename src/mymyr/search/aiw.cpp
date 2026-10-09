@@ -599,7 +599,8 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
         throw std::invalid_argument("mymyr: abstracted IW does not support tasks with numeric fluents (IW and SIW do)");
     if (o.width < 1 || o.width > 3)
         return detail::failed("abstracted IW width must be 1, 2 or 3 (got " + std::to_string(o.width) + ")");
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const detail::GoalTest goal = detail::GoalTest::from_spec(task, o.control.goal);
     const detail::BlockedSet blocked(o.control.blocked_states);
     detail::Env env(task, succ, goal, blocked, o.control);

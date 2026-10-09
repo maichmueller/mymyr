@@ -818,14 +818,25 @@ std::vector<search::RolloutResult> collect_rollouts(nb::handle results, Owner& o
 
 // ------------------------------------------------------------------------------------------------ heuristic objects
 
-/// A heuristic usable from Python. Evaluations are serialized by a mutex (a Heuristic holds scratch); for parallel
-/// evaluation give each thread its own object (they can share the grounding: Heuristic(task, share=other)).
+/// A heuristic usable from Python. Calls on the object are serialized by a mutex (a Heuristic holds scratch); for
+/// parallel evaluation give each thread its own object (they can share the grounding: Heuristic(task, share=other)).
+/// A search given the object evaluates with an evaluator of its own (make_evaluator), so it never holds the mutex: the
+/// object stays callable while the search runs, from the search's callbacks and from other threads.
 struct PyHeuristic
 {
-    std::unique_ptr<heuristics::Heuristic> h;
+    std::unique_ptr<heuristics::Heuristic> h;  // evaluates the calls on the object
     Owner o;
-    heuristics::Options options;
+    heuristics::Options options;  // h's options, with h's grounding (options.relaxed)
     std::mutex m;
+    datasets::StateSpacePtr space{};  // Heuristic.perfect: the state space
+
+    /// A new evaluator of h's values with scratch of its own, sharing h's grounding or state space.
+    [[nodiscard]] std::unique_ptr<heuristics::Heuristic> make_evaluator() const
+    {
+        if (space)
+            return heuristics::perfect(space, options.costs);
+        return heuristics::make_heuristic(*o.core->task, options);
+    }
 };
 
 /// A heuristic written in Python (heuristics::Kind::Custom): a callable h(state) -> float, or an object with
@@ -1089,7 +1100,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
                  progress_interval);
     search::BestFirstOptions opts;
     opts.control = cs.control;
-    PyHeuristic* shared = nullptr;
+    std::unique_ptr<heuristics::Heuristic> own;  // the search's evaluator of a Heuristic object
     std::unique_ptr<PyCallbackHeuristic> callback;
     std::unique_ptr<heuristics::Heuristic> perfect;
     if (nb::isinstance<nb::str>(heuristic) && nb::cast<std::string>(heuristic) == "perfect")
@@ -1099,10 +1110,14 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     }
     else if (nb::isinstance<PyHeuristic>(heuristic))
     {
-        shared = nb::inst_ptr<PyHeuristic>(heuristic);
-        if (shared->o.core->task->uid() != o.core->task->uid())
+        const PyHeuristic& shared = *nb::inst_ptr<PyHeuristic>(heuristic);
+        if (shared.o.core->task->uid() != o.core->task->uid())
             throw nb::value_error("mymyr: the heuristic belongs to another task");
-        opts.evaluator = shared->h.get();
+        {
+            nb::gil_scoped_release release;
+            own = shared.make_evaluator();
+        }
+        opts.evaluator = own.get();
     }
     else if (nb::isinstance<nb::str>(heuristic))
         opts.heuristic.kind = parse_kind(heuristic);
@@ -1144,12 +1159,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     opts.witness_pruning = witness_pruning;
     opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
     const Task& t = *o.core->task;
-    auto r = run_detached(cs, [&] {
-        std::unique_lock<std::mutex> lock;
-        if (shared)
-            lock = std::unique_lock(shared->m);
-        return search_fn(t, opts);
-    });
+    auto r = run_detached(cs, [&] { return search_fn(t, opts); });
     if constexpr (std::is_same_v<decltype(r), search::AStarIwResult>)
     {
         const auto novelty = r.novelty;
@@ -1713,7 +1723,10 @@ void bind_search(nb::module_& parent)
                             "set-additive then sums the costs of its achiever set, one per supported proposition); "
                             "evaluation: 'auto', 'grounded', 'lifted' (set_additive and h2 are grounded only). "
                             "share=another Heuristic of the task reuses its grounding. Calls on one object are "
-                            "serialized; use one object per thread for parallel evaluation.")
+                            "serialized; use one object per thread for parallel evaluation. A search given the object "
+                            "evaluates with an evaluator of its own that shares the grounding, so the object stays "
+                            "callable while the search runs (from its observer, from other threads); stats counts the "
+                            "calls on the object, the search's evaluations are in its result.")
         .def(
             "__init__",
             [](PyHeuristic* self, TaskArg task, StrArg kind, StrArg costs, StrArg evaluation,
@@ -1725,18 +1738,19 @@ void bind_search(nb::module_& parent)
                 opts.evaluation = parse_evaluation(evaluation);
                 if (!share.is_none())
                 {
-                    PyHeuristic& other = nb::cast<PyHeuristic&>(share);
+                    const PyHeuristic& other = nb::cast<const PyHeuristic&>(share);
                     if (other.o.core->task->uid() != o.core->task->uid())
                         throw nb::value_error("mymyr: share= must be a heuristic of the same task");
-                    nb::gil_scoped_release release;  // never block on a heuristic's mutex while attached
-                    std::lock_guard lock(other.m);
-                    opts.relaxed = other.h->relaxed();
+                    opts.relaxed = other.options.relaxed;
                 }
                 std::unique_ptr<heuristics::Heuristic> h;
                 {
                     nb::gil_scoped_release release;  // grounding can take a while
                     h = heuristics::make_heuristic(*o.core->task, opts);
                 }
+                opts.relaxed = h->relaxed();
+                if (!opts.relaxed && opts.evaluation == heuristics::Evaluation::Auto)
+                    opts.evaluation = heuristics::Evaluation::Lifted;  // the grounding exceeded the budget: never retry it
                 new (self) PyHeuristic{std::move(h), std::move(o), opts, {}};
             },
             "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "unit", "evaluation"_a = "auto",
@@ -1756,7 +1770,7 @@ void bind_search(nb::module_& parent)
                 {
                     throw nb::value_error(e.what());
                 }
-                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}});
+                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}, space.space});
             },
             "space"_a, nb::kw_only(), "costs"_a = "unit",
             "The perfect heuristic h* of the task of a state space (mymyr.datasets.state_space(task, "

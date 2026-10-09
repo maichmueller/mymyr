@@ -409,7 +409,7 @@ void ChunkGenerator::host_work(const ChunkInput& in, bool witness, bool canonica
     const bool axioms = m_task->has_axioms();
     const bool host_derived = axioms && !m_device_axioms;
     const SchemaPlacement& pl = placement(witness);
-    const u32 DW = std::max<u32>(1, m_task->workspace().successors().engine().derived_words());
+    const u32 DW = std::max<u32>(1, bits::words_for(m_task->atoms().max_derived_slots()));
     if (host_derived)
         m_host_derived.assign(static_cast<usize>(in.rows) * DW, 0);
     struct Row
@@ -436,7 +436,8 @@ void ChunkGenerator::host_work(const ChunkInput& in, bool witness, bool canonica
     {
         const auto [lo, hi] = ThreadPool::slice(in.rows, t, n);
         Part& part = parts[t];
-        Successors& succ = m_task->workspace().successors();  // this thread's
+        const WorkspaceLease lease = m_task->workspace();
+        Successors& succ = lease->successors();
         detail::Engine& e = succ.engine();
         std::vector<u64> tmp;
         for (u64 i = lo; i < hi; ++i)
@@ -601,7 +602,7 @@ void ChunkGenerator::begin(const ChunkInput& in, bool witness, bool canonical)
     m_parents.rows_dev = in.rows_dev;
     if (m_task->has_axioms() && !m_device_axioms)
     {
-        const u32 DW = std::max<u32>(1, m_task->workspace().successors().engine().derived_words());
+        const u32 DW = std::max<u32>(1, bits::words_for(m_task->atoms().max_derived_slots()));
         upload_vec(m_ctx, m_derived, m_host_derived, m_s);
         m_parents.derived = static_cast<const u64*>(m_derived.data());
         m_parents.derived_words = DW;

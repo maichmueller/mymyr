@@ -113,7 +113,8 @@ std::vector<Label> collect(Successors& succ, bool canonical_order, SymmetryPruni
 /// IPC text (format_plan, parse_plan).
 bool valid_plan(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     auto replay = [&](const std::vector<Action>& p)
     {
         State s = task.initial_state();
@@ -147,7 +148,8 @@ TEST(SymmetryPruning, KeptActionsFollowTheRuleAlongWalks)
     for (const SuiteTask& t : suite())
     {
         const auto task = Task::from_text_file(task_path(t.name));
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         detail::SymmetryPruner& pruner = succ.symmetry_pruner();
         datasets::ObjectGraphBuilder graphs(*task);
         const u32 n = task->data().num_objects();

@@ -72,7 +72,8 @@ TEST(NumericDeviceArrays, ProgramsMatchCpuOnWalkStates)
             std::vector<u64> values(n.slots);
             for (u32 i = 0; i < n.slots; ++i)
                 values[i] = std::bit_cast<u64>(plan::load(n, state.numeric().data(), i));
-            const auto actions = task->workspace().successors().applicable_actions(state.view());
+            const WorkspaceLease lease = task->workspace();
+            const auto actions = lease->successors().applicable_actions(state.view());
             for (const auto& action : actions)
             {
                 const auto label = action.label();
@@ -95,7 +96,7 @@ TEST(NumericDeviceArrays, ProgramsMatchCpuOnWalkStates)
                 }
             }
             if (actions.empty()) break;
-            state = task->workspace().successors().apply(state.view(), actions[step % actions.size()].label());
+            state = lease->successors().apply(state.view(), actions[step % actions.size()].label());
         }
     }
 }

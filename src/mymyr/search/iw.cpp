@@ -1207,7 +1207,8 @@ namespace
 {
 IwResult run_iw(const Task& task, const IwOptions& options, int only_arity)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     detail::Context c(task, options, succ);
     const State root = options.start ? *options.start : task.initial_state();
     if (c.observer)

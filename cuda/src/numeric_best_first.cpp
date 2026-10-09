@@ -181,7 +181,10 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
             r.plan.push_back(nodes[n].action);
         std::reverse(r.plan.begin(), r.plan.end());
         if (greedy && !costs.unit())
-            r.cost = heuristics::plan_metric(task->workspace().successors(), costs, start, g0, r.plan);
+        {
+            const WorkspaceLease lease = task->workspace();
+            r.cost = heuristics::plan_metric(lease->successors(), costs, start, g0, r.plan);
+        }
     };
     auto evaluate = [&](const u64* rows, u64 count, std::vector<f64>& h)
     {
@@ -220,7 +223,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
         r.status = search::SearchStatus::Unsolvable;
         return finish();
     }
-    if (task->workspace().successors().is_goal(start.view()))
+    if (task->is_goal(start.view()))
     {
         solved(0);
         return finish();
@@ -340,7 +343,8 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
         else
         {
             const State state = load(parent);
-            auto& succ = task->workspace().successors();
+            const WorkspaceLease lease = task->workspace();
+            Successors& succ = lease->successors();
             succ.prepare(state.view());
             u32 at = 0;
             succ.generate<false>([&](u32, const ObjectId*, const Delta& delta) { gs[at++] = costs.next(gp, delta); return true; },
@@ -354,7 +358,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
             std::vector<u64> rows(u64{T} * W);
             download(rows.data(), cand, rows.size(), s); sync();
             for (u32 i = 0; i < T; ++i)
-                goal[i] = task->workspace().successors().is_goal(numeric::decode(*task, rows.data() + u64{i} * W, W).view());
+                goal[i] = task->is_goal(numeric::decode(*task, rows.data() + u64{i} * W, W).view());
         }
         else
         {
@@ -403,7 +407,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
             n.g = gs[i]; n.parent = parent; n.depth = nodes[parent].depth + 1;
             n.action.schema = SchemaId{schemas[i]};
             n.action.binding.clear();
-            for (u32 j = 0; j < task->workspace().successors().arity(schemas[i]); ++j)
+            for (u32 j = 0; j < task->compiled().schemas[schemas[i]].arity; ++j)
                 n.action.binding.push_back(ObjectId{bindings[u64{i} * L + j]});
             if (fresh)
             {

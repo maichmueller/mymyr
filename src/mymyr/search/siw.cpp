@@ -15,7 +15,8 @@ namespace mymyr::search
 SiwResult siw(const Task& task, const SiwOptions& options)
 {
     SiwResult r;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     detail::Context c(task, options, succ);
     State cur = options.start ? *options.start : task.initial_state();
     if (c.observer)

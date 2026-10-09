@@ -82,7 +82,8 @@ TEST(NumericPddl, EffectApplicabilityFollowsTheFork)
     const auto task = rules_task();
     EXPECT_EQ(task->numeric_slots(), 2u);  // x, y; z is static, u has no value, total-cost is auxiliary
     EXPECT_EQ(task->numeric_storage(), NumericStorage::F64);  // a division
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     std::map<std::string, State> next;
     const heuristics::ActionCosts costs(*task);
@@ -133,7 +134,8 @@ TEST(NumericPddl, ConditionalEffectFamiliesAreRecordedWhetherOrNotTheyFire)
     // (the firing increase first, the failing assign does not fire): applicable. Both match the fork (each variant
     // run alone, against mymyr_brfs).
     const auto task = rules_task();
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::set<std::string> seen;
     succ.for_each_applicable(task->initial_state().view(),
                              [&](const ActionLabel& a, const Delta&) { seen.insert(task->schema_name(a.schema)); });
@@ -158,7 +160,8 @@ TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
     EXPECT_EQ(costs.kind(), heuristics::ActionCosts::Kind::StateMetric);
     const State s0 = task->initial_state();
     EXPECT_EQ(costs.initial(s0.view()), 5);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::map<std::string, f64> g;
     succ.for_each_applicable(s0.view(), [&](const ActionLabel& a, const Delta& delta)
                              { g[task->schema_name(a.schema)] = costs.next(5, delta); });

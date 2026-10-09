@@ -56,6 +56,12 @@ target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURC
 include(GoogleTest)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 
+# Thread counts and thread creation; interposes pthread_create to simulate refused threads, so in an executable of
+# its own.
+add_executable(mymyr_thread_tests core/test_threads.cpp)
+target_link_libraries(mymyr_thread_tests PRIVATE mymyr::core mymyr_warnings GTest::gtest_main ${CMAKE_DL_LIBS})
+gtest_discover_tests(mymyr_thread_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+
 # ------------------------------------------------------------------------------------------------ PDDL front end
 if(TARGET mymyr_frontend)
     # Where the golden tests find their PDDL: MYMYR_WORK_DIR holds mimir-cs/ and mimir/, MYMYR_FORK_DATA_DIR the

@@ -961,6 +961,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
 // ------------------------------------------------------------------------------------------------- parallel
 struct alignas(64) ThreadState
 {
+    WorkspaceLease lease;
     Successors* succ = nullptr;
     search::SearchObserver* obs = nullptr;  // the thread's observer (BrfsOptions::observer, make_worker)
     std::vector<u64> next;
@@ -978,7 +979,12 @@ public:
         : m_task(task), m_o(o), m_ctl(ctl), m_T(threads), m_team(threads), m_store(threads, task.numeric_words()),
           m_ws(threads)
     {
-        m_team.run([&](u32 t) { m_ws[t].succ = &task.workspace().successors(); });
+        m_team.run(
+            [&](u32 t)
+            {
+                m_ws[t].lease = task.workspace();
+                m_ws[t].succ = &m_ws[t].lease->successors();
+            });
         for (u32 t = 0; t < m_T && !workers.empty(); ++t)
         {
             m_ws[t].obs = workers[t];
@@ -1359,7 +1365,7 @@ private:
 
 BrfsResult brfs(const Task& task, const BrfsOptions& options)
 {
-    u32 T = search::detail::resolve_threads(options.threads);
+    u32 T = resolve_threads(options.threads);
     // a beam runs on the flat or chunked store, with the layer step for threads > 1 or a relaxed selection
     const bool ordered = options.layers.kind != search::LayerOrdering::Kind::Queue;
     const bool beam = ordered && options.layers.beam();
@@ -1423,7 +1429,8 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
     }
     else
     {
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         switch (store)
         {
             case BrfsOptions::Store::Flat:

@@ -693,6 +693,7 @@ public:
     const Task& task;
     const BestFirstOptions& o;
     BestFirstResult& r;
+    WorkspaceLease lease;
     Successors& succ;
     heuristics::Heuristic* h = nullptr;
     const heuristics::ActionCosts* costs = nullptr;
