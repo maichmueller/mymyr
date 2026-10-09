@@ -20,11 +20,13 @@
 // Semantics (mimir's):
 //   - an undefined function value is NaN, so is a division by zero; a comparison with a NaN side is false;
 //   - a binding is inapplicable when a numeric effect of a conditional effect that fires (or of the unconditional
-//     effect) targets a function without a value, evaluates to NaN, or conflicts with an earlier effect of the same
-//     action on the same target (assign with anything, additive with multiplicative); the effect families are recorded
-//     in mimir's order: every conditional effect in turn, fluent effects then the total-cost effect, whether or not
-//     it fires (a failure only matters if it fires). total-cost effects obey the same rules (NaN, families);
+//     effect) targets a function without a value, evaluates to NaN, scales down by zero, or conflicts with an earlier
+//     effect of the same action on the same target (assign with anything, additive with multiplicative); the effects
+//     that fire record their families in mimir's order: every conditional effect in turn, fluent effects then the
+//     total-cost effect. total-cost effects obey the same rules (NaN, families);
 //   - effect values are evaluated on the parent state and applied in order to a copy.
+// Deviation: mimir records the families of a conditional effect whether or not it fires, so an effect that does not
+// fire can make its action inapplicable; here only the effects that fire take part in a conflict.
 // Deviation: mimir also lets `assign` give a value to a function that has none (its states grow a numeric variable);
 // here such an action is inapplicable, because the slots are fixed per task (the ground functions with an initial
 // value), so that every state row of a task has the same width. No task of the parity set does this.
@@ -366,6 +368,12 @@ inline void store(const Numeric& N, u64* num, u32 slot, f64 v)
 [[nodiscard]] inline bool holds(const Numeric& N, const NumCheck& c, const u64* num, const ObjectId* bind) noexcept
 {
     return compare(N, c.cmp, eval(N, c.lhs, num, bind), eval(N, c.rhs, num, bind));
+}
+
+/// Whether an effect of operator `op` with value v is defined: v is not NaN, and a scale-down is not by zero.
+[[nodiscard]] inline bool defined_effect(formalism::AssignOp op, f64 v) noexcept
+{
+    return !std::isnan(v) && !(op == formalism::AssignOp::ScaleDown && v == 0);
 }
 
 /// The effect family of an assign operator (mimir's EffectFamily): 1 assign, 2 additive, 3 multiplicative.

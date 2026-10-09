@@ -99,12 +99,14 @@ TEST(NumericPddl, EffectApplicabilityFollowsTheFork)
     std::set<std::string> applicable;
     for (const auto& [name, _] : next)
         applicable.insert(name);
-    const std::set<std::string> want = {"inc",         "make-p",        "two-increases", "increase-decrease",
-                                        "two-scales",  "ce-not-firing", "ce-families",   "fluent-cost",
-                                        "conditional-cost", "numeric-pre", "negative-zero", "zero"};
+    const std::set<std::string> want = {"inc",           "make-p",        "two-increases",        "increase-decrease",
+                                        "two-scales",    "ce-not-firing", "ce-families",          "ce-families-conflict",
+                                        "fluent-cost",   "conditional-cost", "numeric-pre",       "negative-zero",
+                                        "zero"};
     // not applicable: an effect on a function without a value (increase and, unlike the fork, assign), an assignment
     // with another effect on the same target, additive with multiplicative effects, a NaN value (division by zero),
-    // a firing conditional effect in conflict, a total-cost over an undefined value, a constraint over one
+    // a total-cost over an undefined value, a constraint over one. Unlike the fork, a conditional effect that does
+    // not fire conflicts with nothing (ce-families-conflict).
     EXPECT_EQ(applicable, want);
     EXPECT_EQ(value(*task, next.at("inc").view(), "(x)"), 2);
     EXPECT_EQ(value(*task, next.at("two-increases").view(), "(x)"), 4);
@@ -124,21 +126,44 @@ TEST(NumericPddl, EffectApplicabilityFollowsTheFork)
     EXPECT_EQ(cost.at("inc"), 0);                // no total-cost effect
 }
 
-TEST(NumericPddl, ConditionalEffectFamiliesAreRecordedWhetherOrNotTheyFire)
+TEST(NumericPddl, OnlyConditionalEffectsThatFireRecordTheirFamilies)
 {
-    // The fork checks the numeric effects of every conditional effect in turn and records their families even when
-    // the condition is false; a failure only matters if the effect fires. loki orders the conditional effects of
-    // ce-families-conflict as (when (p) (increase (y) 1)) (p false: recorded, not applied), then
-    // (when (q) (assign (y) 5)), which fires and conflicts: not applicable. ce-families comes out in the other order
-    // (the firing increase first, the failing assign does not fire): applicable. Both match the fork (each variant
-    // run alone, against mymyr_brfs).
+    // The fork records the effect families of every conditional effect in turn, also when its condition is false, so
+    // that the order loki gives the conditional effects decides applicability: (when (p) (increase (y) 1)) with p
+    // false, then (when (q) (assign (y) 5)), which fires, made ce-families-conflict inapplicable there. An effect
+    // that does not fire does not execute: both actions are applicable, and an assignment and an increase of one
+    // target that both fire are not (in either order).
     const auto task = rules_task();
     Successors& succ = task->workspace().successors();
     std::set<std::string> seen;
     succ.for_each_applicable(task->initial_state().view(),
                              [&](const ActionLabel& a, const Delta&) { seen.insert(task->schema_name(a.schema)); });
     EXPECT_TRUE(seen.contains("ce-families"));
-    EXPECT_FALSE(seen.contains("ce-families-conflict"));
+    EXPECT_TRUE(seen.contains("ce-families-conflict"));
+
+    const char* domain = R"((define (domain ce) (:requirements :strips :numeric-fluents :conditional-effects)
+ (:predicates (a) (z) (done)) (:functions (x))
+ (:action finish :parameters () :precondition (and)
+  :effect (and (when (a) (assign (x) 7)) (when (z) (increase (x) 1)) (done)))
+ (:action finish2 :parameters () :precondition (and)
+  :effect (and (when (z) (increase (x) 1)) (when (a) (assign (x) 7)) (done)))))";
+    const auto d = frontend::Domain::from_string(domain, "ce.pddl");
+    for (const char* init : {"", "(a)", "(z)", "(a) (z)"})
+    {
+        const std::string problem = std::string("(define (problem p) (:domain ce) (:init ") + init + " (= (x) 2)) (:goal (done)))";
+        const auto t = Task::create(*d->instantiate_string(problem, "p.pddl"));
+        const bool a = std::string(init).find("(a)") != std::string::npos, z = std::string(init).find("(z)") != std::string::npos;
+        std::map<std::string, State> next;
+        std::vector<Action> actions;
+        Successors& s = t->workspace().successors();
+        s.for_each_applicable(t->initial_state().view(), [&](const ActionLabel& l, const Delta&) { actions.emplace_back(l); });
+        for (const Action& x : actions)
+            next.emplace(t->schema_name(x.schema), s.apply(t->initial_state().view(), x.label()));
+        SCOPED_TRACE(init);
+        EXPECT_EQ(next.size(), a && z ? 0u : 2u);
+        for (const auto& [name, state] : next)
+            EXPECT_EQ(value(*t, state.view(), "(x)"), a ? 7 : z ? 3 : 2) << name;
+    }
 }
 
 TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
