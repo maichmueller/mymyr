@@ -1230,3 +1230,72 @@ TEST(CudaHeuristic, SetAdditiveMatchesCpuWithoutSupporterTies)
         }
 }
 #endif
+
+#if defined(MYMYR_DEVICE_HEURISTICS_FRONTEND)
+/// Zero and fractional action costs: the device heuristics follow the task's objective by default (h_max and h² are
+/// 0.75 where the cheapest plan costs 0.75 and the shortest one 1), and device A* on the numeric variant is optimal.
+TEST(DeviceHeuristicsPddl, ZeroAndFractionalCostsByDefault)
+{
+    SKIP_WITHOUT_GPU();
+    auto make = [](const char* fluent)
+    {
+        const std::string domain = std::string(R"((define (domain d) (:requirements :strips :action-costs :numeric-fluents)
+ (:predicates (a) (b) (goal)) (:functions (total-cost) (price) (n))
+ (:action direct :parameters () :precondition (and) :effect (and (goal) (increase (total-cost) 1)))
+ (:action s1 :parameters () :precondition (and) :effect (and (a) (increase (total-cost) 0)))
+ (:action s2 :parameters () :precondition (a) :effect (and (b) (increase (total-cost) 0.25)))
+ (:action s3 :parameters () :precondition (b) :effect (and (goal) (increase (total-cost) (price)) )") +
+                                   fluent + ")))";
+        const auto d = frontend::Domain::from_string(domain, "d.pddl");
+        return Task::create(*d->instantiate_string("(define (problem p) (:domain d) (:init (= (total-cost) 0) (= (price) 0.5) "
+                                                   "(= (n) 0)) (:goal (goal)) (:metric minimize (total-cost)))",
+                                                   "p.pddl"));
+    };
+    const cuda::ContextPtr ctx = context();
+    const TaskPtr classical = make("");
+    for (heuristics::Kind k : {heuristics::Kind::Max, heuristics::Kind::H2})
+    {
+        cuda::DeviceHeuristicOptions o;
+        o.kind = k;
+        cuda::DeviceHeuristic h(ctx, classical, o);
+        EXPECT_EQ(h.cost_scale(), 100);
+        const std::vector<State> states{classical->initial_state()};
+        EXPECT_EQ(h.evaluate(states).at(0), 0.75) << kind_name(k);
+        EXPECT_EQ(h.reference(states[0].view()), 0.75) << kind_name(k);
+        o.costs = heuristics::Costs::Unit;
+        cuda::DeviceHeuristic unit(ctx, classical, o);
+        EXPECT_EQ(unit.evaluate(states).at(0), 1) << kind_name(k);
+    }
+    const TaskPtr numeric = make("(increase (n) 1)");
+    ASSERT_GT(numeric->numeric_slots(), 0u);
+    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::Max, heuristics::Kind::H2})
+    {
+        const cuda::DeviceBestFirstResult r = cuda::astar(ctx, numeric, device_search(k, 16));
+        ASSERT_EQ(r.result.status, search::SearchStatus::Solved) << r.result.message;
+        EXPECT_EQ(r.result.cost, 0.75) << kind_name(k);
+        EXPECT_EQ(r.result.plan.size(), 3u) << kind_name(k);
+    }
+}
+
+/// A metric that is undefined in a reached state stops device A* with the error that names it.
+TEST(DeviceHeuristicsPddl, UndefinedMetricIsAnError)
+{
+    SKIP_WITHOUT_GPU();
+    const auto d = frontend::Domain::from_string(R"((define (domain d) (:requirements :strips :numeric-fluents)
+ (:predicates (done)) (:functions (x) (y))
+ (:action zero :parameters () :precondition (and) :effect (assign (y) 0))
+ (:action finish :parameters () :precondition (and) :effect (and (done) (increase (x) 1)))))",
+                                                 "d.pddl");
+    const TaskPtr task = Task::create(*d->instantiate_string(
+        "(define (problem p) (:domain d) (:init (= (x) 1) (= (y) 1)) (:goal (done)) (:metric minimize (/ (x) (y))))", "p.pddl"));
+    try
+    {
+        (void) cuda::astar(context(), task, device_search(heuristics::Kind::Blind, 4));
+        ADD_FAILURE() << "an undefined metric value";
+    }
+    catch (const std::domain_error& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("is undefined in a reached state"), std::string::npos) << e.what();
+    }
+}
+#endif
