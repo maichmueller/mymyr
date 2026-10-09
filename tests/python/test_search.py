@@ -197,6 +197,24 @@ def test_a_whole_space_brfs_that_reached_a_goal_is_solved(store):
     assert len(r.plan) == len(first.plan) and task.is_goal(replay(task, r.plan))
 
 
+@pytest.mark.parametrize("name,kw", [("blocks__probBLOCKS-8-0", {}), ("blocks__probBLOCKS-8-0", dict(max_states=40)),
+                                     ("openstacks-opt08-adl__p03", dict(max_arity=1))])
+def test_an_unsolved_siw_has_an_empty_plan_and_a_partial_plan(name, kw):
+    task = text_task(name)
+    r = search.siw(task, **kw)
+    assert r.status != Status.SOLVED and not r.solved
+    assert r.plan == [] and r.cost == 0
+    solved = [sp for sp in r.subproblems if sp.status == Status.SOLVED]
+    assert len(solved) == len(r.subproblems) - 1 and solved
+    assert len(r.partial_plan) == sum(sp.plan_length for sp in solved) > 0
+    # the partial plan reaches a state with as many unsatisfied goal literals as the failed subproblem started with
+    s, goal = replay(task, r.partial_plan), task.goal_condition
+    unsatisfied = sum(not s.holds(g) for g in [*goal.fluent_literals, *goal.derived_literals])
+    assert unsatisfied == r.subproblems[-1].unsatisfied_at_start
+    assert "partial_plan_length=" in repr(r)
+    assert search.siw(task, max_arity=2, goal=lambda s: True).partial_plan == []
+
+
 def test_a_whole_space_brfs_without_a_goal_is_exhausted_with_an_empty_plan():
     task = text_task("depot__p02")
     r = search.brfs(task, stop_at_goal=False, goal=lambda s: False)

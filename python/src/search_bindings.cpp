@@ -1438,7 +1438,11 @@ void bind_search(nb::module_& parent)
     nb::class_<PySiwResult>(m, "SiwResult")
         .def_prop_ro("status", [](const PySiwResult& x) { return x.r.status; })
         .def_prop_ro("solved", [](const PySiwResult& x) { return x.r.status == SearchStatus::Solved; })
-        .def_prop_ro("plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.plan); })
+        .def_prop_ro("plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.plan); },
+                     "The whole plan when solved, else empty.")
+        .def_prop_ro("partial_plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.partial_plan); },
+                     "Unless solved: the subplans of the subproblems solved before the one that failed, from the "
+                     "start state to where that one started (empty when solved).")
         .def_prop_ro("cost", [](const PySiwResult& x) { return x.r.cost; })
         .def_prop_ro("cost_exact", [](const PySiwResult& x) { return x.r.cost_exact; })
         .def_prop_ro("goal_state", [](const PySiwResult& x) { return state_or_none(x.o, x.r.goal_state); })
@@ -1448,8 +1452,11 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("message", [](const PySiwResult& x) { return x.r.message; })
         .def("__repr__", [](const PySiwResult& x) {
             return std::string("SiwResult(status=") + search::to_string(x.r.status) +
-                   ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
-                   ", subproblems=" + std::to_string(x.r.subproblems.size()) + ", " + stats_repr(x.r.total) + ")";
+                   ", plan_length=" + std::to_string(x.r.plan.size()) +
+                   (x.r.partial_plan.empty() ? std::string{}
+                                             : ", partial_plan_length=" + std::to_string(x.r.partial_plan.size())) +
+                   ", cost=" + cost_repr(x.r.cost) + ", subproblems=" + std::to_string(x.r.subproblems.size()) + ", " +
+                   stats_repr(x.r.total) + ")";
         });
 
     nb::class_<search::AStarIwNoveltyStatistics>(m, "AStarIwNoveltyStatistics")
@@ -1928,7 +1935,8 @@ void bind_search(nb::module_& parent)
         },
         MYMYR_IW_ARGS,
         (std::string("Serialized IW (search/siw.hpp): IW ladders from subgoal to subgoal, each subproblem ending where "
-                     "fewer goal literals are unsatisfied. ") +
+                     "fewer goal literals are unsatisfied. Unsolved, the plan is empty and partial_plan holds the "
+                     "subplans of the subproblems solved before the one that failed. ") +
          k_layer_doc + " " + k_control_doc)
             .c_str());
 

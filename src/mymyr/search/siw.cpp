@@ -9,6 +9,7 @@
 #include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace mymyr::search
 {
@@ -29,7 +30,10 @@ SiwResult siw(const Task& task, const SiwOptions& options)
     {
         r.status = s;
         if (s != SearchStatus::Solved)
+        {
             r.cost = 0;
+            r.partial_plan = std::exchange(r.plan, {});
+        }
         r.cost_exact = plan_cost.exact();
         r.fluent_slots = task.atoms().fluent_slots();
         if (c.observer)
