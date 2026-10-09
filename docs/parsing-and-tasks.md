@@ -89,6 +89,8 @@ Differences from mimir:
 - a division by zero is undefined also between constants, and a `scale-down` by zero makes its action inapplicable;
 - `maximize` metrics and metrics that combine `total-cost` with other terms are refused rather than minimized, and an
   undefined metric value is an error;
+- the transition costs of a state space are the exact sums of the actions' `total-cost` increases (mimir computes
+  `(d + c) - d` for the search depth `d`, which rounds fractional costs), so its goal distances equal plan costs;
 - heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), where mimir's count
   every action 1.
 
