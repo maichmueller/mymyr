@@ -8,7 +8,7 @@
 //
 // Semantics: ActionCosts::evaluate's, operation by operation in IEEE double precision (round to nearest, no
 // contraction): a static function value that is undefined (missing, an argument beyond the objects, more than 64
-// arguments) is NaN and NaN propagates. evaluate() returns the value as is; the callers decide about NaN and negative
+// arguments) is NaN, so is a division by zero, and NaN propagates. evaluate() returns the value as is; the callers decide about NaN and negative
 // costs (ActionCosts::cost throws std::domain_error for both). Unit instances cost 1.
 //
 // Device-code subset: included by .cu files compiled by nvcc as C++20, and by the host builder.
@@ -75,13 +75,13 @@ MYMYR_HD f64 nan_value() { return __longlong_as_double(0x7FF8000000000000ll); }
 MYMYR_HD f64 add(f64 a, f64 b) { return __dadd_rn(a, b); }
 MYMYR_HD f64 sub(f64 a, f64 b) { return __dsub_rn(a, b); }
 MYMYR_HD f64 mul(f64 a, f64 b) { return __dmul_rn(a, b); }
-MYMYR_HD f64 div(f64 a, f64 b) { return __ddiv_rn(a, b); }
+MYMYR_HD f64 div(f64 a, f64 b) { return b == 0 ? nan_value() : __ddiv_rn(a, b); }
 #else
 MYMYR_HD f64 nan_value() { return std::numeric_limits<f64>::quiet_NaN(); }
 MYMYR_HD f64 add(f64 a, f64 b) { return a + b; }
 MYMYR_HD f64 sub(f64 a, f64 b) { return a - b; }
 MYMYR_HD f64 mul(f64 a, f64 b) { return a * b; }
-MYMYR_HD f64 div(f64 a, f64 b) { return a / b; }
+MYMYR_HD f64 div(f64 a, f64 b) { return b == 0 ? nan_value() : a / b; }
 #endif
 
 /// The value of static function f of instance i at `args` (ActionCosts::function_key and its map; NaN: undefined).

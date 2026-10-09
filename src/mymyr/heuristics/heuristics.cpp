@@ -157,19 +157,13 @@ class RelaxationHeuristic final : public Heuristic
 {
 public:
     RelaxationHeuristic(const Task& task, const Options& o)
-        : m_task(task), m_kind(o.kind), m_real(o.costs == Costs::Real),
+        : m_task(task), m_kind(o.kind), m_real(resolve_costs(task, o.costs) == Costs::Real),
           m_grounded_only(o.evaluation == Evaluation::Grounded || o.kind == Kind::SetAdditive)
     {
         if (m_kind == Kind::SetAdditive && o.evaluation == Evaluation::Lifted)
             throw std::invalid_argument("mymyr: the set-additive heuristic has no lifted evaluation (use Evaluation::Auto or Grounded)");
         if (m_real)
-        {
-            const ActionCosts costs(task);
-            if (!costs.state_independent())
-                throw std::invalid_argument("mymyr: real-cost heuristics need action costs that do not depend on the state");
-            if (!costs.integral())
-                throw std::invalid_argument("mymyr: real-cost heuristics need integral action costs");
-        }
+            m_scale = ActionCosts(task).relaxed_scale();
         if (o.evaluation != Evaluation::Lifted)
         {
             const auto t0 = std::chrono::steady_clock::now();
@@ -184,7 +178,8 @@ public:
             m_stats.grounding_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         }
         if (m_R && m_real && !m_R->real_costs_available())
-            throw std::invalid_argument("mymyr: real-cost heuristics need non-negative integer action costs below 2^31");
+            throw std::invalid_argument("mymyr: real-cost heuristics need defined, non-negative action costs below 2^31 units of "
+                                        "the cost scale (heuristics::ActionCosts::relaxed_cost)");
         if (m_R)
             init_grounded();
     }
@@ -386,7 +381,7 @@ private:
             h = m_kind == Kind::Add ? h + c : std::max<u64>(h, c);
         }
         if (m_kind != Kind::FF && m_kind != Kind::SetAdditive)
-            return h;
+            return std::min<u64>(h, k_inf - 1);  // a sum beyond the cost range is large, not a dead end
         const RelaxedTask& R = *m_R;
         const bool sa = m_kind == Kind::SetAdditive;
         ++m_pstamp;
@@ -421,7 +416,7 @@ private:
                 hc += cost;  // the member (o, x) of the union: one per supported proposition
         }
         m_plan_valid = true;
-        return hc;
+        return std::min<u64>(hc, k_inf - 1);
     }
 
     Value single(std::span<const u32> goal)
@@ -430,7 +425,7 @@ private:
         const u64 h = fold(goal);
         if (h >= k_inf)
             m_plan_valid = false;
-        return to_value(h);
+        return to_value(h, m_scale);
     }
 
     /// The propositions of each atom goal; false if the grounding lacks a "false" proposition that one needs.
@@ -490,7 +485,7 @@ private:
         m_plan_valid = false;
         if ((m_kind == Kind::FF || m_kind == Kind::SetAdditive) && best_g != k_none && best < k_inf)
             (void) fold(goal(best_g));  // leave the best goal's relaxed plan marked
-        return to_value(best);
+        return to_value(best, m_scale);
     }
 
     // ------------------------------------------------------------------------------------ lifted fallback
@@ -530,6 +525,7 @@ private:
     Kind m_kind;
     bool m_real;
     bool m_grounded_only;
+    f64 m_scale = 1;  // real costs: the unit of the integer costs is 1 / m_scale
     std::shared_ptr<const RelaxedTask> m_R;
     // grounded scratch
     std::vector<u32> m_cost_init, m_cost, m_supp, m_gmark, m_pmark, m_cnt, m_acc, m_last, m_npos, m_opcost;
@@ -546,6 +542,13 @@ private:
     std::vector<std::vector<GoalLit>> m_task_goal;
 };
 }  // namespace
+
+Costs resolve_costs(const Task& task, Costs costs)
+{
+    if (costs != Costs::Auto)
+        return costs;
+    return ActionCosts(task).unit() ? Costs::Unit : Costs::Real;
+}
 
 std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& options)
 {
