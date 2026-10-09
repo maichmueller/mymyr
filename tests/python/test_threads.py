@@ -38,7 +38,7 @@ CALLS = {
 
 @pytest.mark.parametrize("name", sorted(CALLS))
 def test_too_many_threads_raise_value_error(gripper, name):
-    with pytest.raises(ValueError, match="threads=1000000 exceeds the limit of"):
+    with pytest.raises(ValueError, match=r"threads must be an int in \[0, \d+\], got 1000000"):
         CALLS[name](gripper)
 
 

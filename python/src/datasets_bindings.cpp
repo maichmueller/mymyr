@@ -76,8 +76,6 @@ using namespace mymyr::datasets;
 using TaskArg = Arg<std::variant<PyTask, PyHandle>>;
 using TasksArg = Arg<nb::typed<nb::sequence, std::variant<PyTask, PyHandle>>>;
 using StateArg = Arg<PyState>;
-using IntArg = Arg<u64>;
-using FloatArg = Arg<double>;
 using StrArg = Arg<std::string>;
 using AnyArray = Arg<ann::Any>;
 using ArrayDict = nb::typed<nb::dict, std::string, ann::Any>;
@@ -165,14 +163,6 @@ std::string str_arg(nb::handle h, const char* what)
     return lower(nb::cast<std::string>(h));
 }
 
-template<class T>
-std::optional<T> opt(nb::handle h)
-{
-    if (h.is_none())
-        return std::nullopt;
-    return nb::cast<T>(h);
-}
-
 CertificateKind parse_certificate(nb::handle h)
 {
     const std::string s = str_arg(h, "certificate");
@@ -188,14 +178,10 @@ StateSpaceOptions make_options(u32 threads, nb::handle max_states, nb::handle ma
 {
     StateSpaceOptions o;
     o.threads = threads;
-    if (auto v = opt<u64>(max_states))
+    if (auto v = opt_int_arg<u64>(max_states, "max_states", 0))
         o.max_states = *v;
-    if (auto v = opt<double>(max_seconds))
-    {
-        if (!(*v >= 0))
-            throw nb::value_error("mymyr: max_seconds must be non-negative");
+    if (auto v = opt_float_arg(max_seconds, "max_seconds", 0))
         o.max_seconds = *v;
-    }
     o.remove_if_unsolvable = remove_if_unsolvable;
     o.symmetry_pruning = symmetry_pruning;
     o.certificate = parse_certificate(certificate);
@@ -562,8 +548,10 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "generate",
-        [](TaskArg task, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-           bool symmetry_pruning, StrArg certificate, u32 k, bool labels) {
+        [](TaskArg task, IntArg threads_in, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
+           bool symmetry_pruning, StrArg certificate, IntArg k_in, bool labels) {
+            const u32 threads = threads_arg(threads_in);
+            const u32 k = int_arg<u32>(k_in, "k");
             const Owner o = task_owner(task);
             const StateSpaceOptions opts =
                 make_options(threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
@@ -573,8 +561,10 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "state_space",
-        [](TaskArg task, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-           bool symmetry_pruning, StrArg certificate, u32 k, bool labels) -> std::optional<PyStateSpace> {
+        [](TaskArg task, IntArg threads_in, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
+           bool symmetry_pruning, StrArg certificate, IntArg k_in, bool labels) -> std::optional<PyStateSpace> {
+            const u32 threads = threads_arg(threads_in);
+            const u32 k = int_arg<u32>(k_in, "k");
             const Owner o = task_owner(task);
             const StateSpaceOptions opts =
                 make_options(threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
@@ -587,8 +577,10 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "generate_many",
-        [](TasksArg tasks, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-           bool symmetry_pruning, StrArg certificate, u32 k, bool labels) {
+        [](TasksArg tasks, IntArg threads_in, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
+           bool symmetry_pruning, StrArg certificate, IntArg k_in, bool labels) {
+            const u32 threads = threads_arg(threads_in);
+            const u32 k = int_arg<u32>(k_in, "k");
             const std::vector<Owner> owners = owners_of(tasks);
             StateSpaceOptions opts =
                 make_options(1, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
@@ -678,7 +670,8 @@ void bind_datasets(nb::module_& parent)
             "forward_edges).")
         .def(
             "vertex_mapping",
-            [](const PyGeneralizedStateSpace& g, u32 problem, FrameworkArg framework) {
+            [](const PyGeneralizedStateSpace& g, IntArg problem_in, FrameworkArg framework) {
+                const u32 problem = int_arg<u32>(problem_in, "problem");
                 if (problem >= g.spaces.size())
                     throw nb::index_error("mymyr: problem index out of range");
                 return AnyArray(view<u32>(g.gss, g.gss->vertex_mapping(problem), parse_framework(framework)));
@@ -686,7 +679,8 @@ void bind_datasets(nb::module_& parent)
             "problem"_a, "framework"_a = nb::none(), "The class vertex of every vertex of a problem's state space.")
         .def(
             "edge_mapping",
-            [](const PyGeneralizedStateSpace& g, u32 problem, FrameworkArg framework) {
+            [](const PyGeneralizedStateSpace& g, IntArg problem_in, FrameworkArg framework) {
+                const u32 problem = int_arg<u32>(problem_in, "problem");
                 if (problem >= g.spaces.size())
                     throw nb::index_error("mymyr: problem index out of range");
                 return AnyArray(view<u32>(g.gss, g.gss->edge_mapping(problem), parse_framework(framework)));
@@ -726,7 +720,8 @@ void bind_datasets(nb::module_& parent)
                           "on the host (downloaded once) and gives the samples of its host copy.")
         .def(
             "__init__",
-            [](PySampler* self, SamplerSpace space, u64 seed) {
+            [](PySampler* self, SamplerSpace space, IntArg seed_in) {
+                const u64 seed = int_arg<u64>(seed_in, "seed");
                 if (nb::isinstance<PyStateSpace>(space))
                 {
                     new (self) PySampler{space, std::make_shared<SamplerCore>(nb::cast<const PyStateSpace&>(space).space, seed)};
@@ -739,7 +734,8 @@ void bind_datasets(nb::module_& parent)
             },
             "space"_a, "seed"_a = 0)
         .def_prop_ro("space", [](const PySampler& s) { return SamplerSpace(s.space); })
-        .def("set_seed", [](PySampler& s, u64 seed) {
+        .def("set_seed", [](PySampler& s, IntArg seed_in) {
+            const u64 seed = int_arg<u64>(seed_in, "seed");
             std::lock_guard lock(s.core->mutex);
             s.core->sampler.set_seed(seed);
         }, "seed"_a)
@@ -747,7 +743,8 @@ void bind_datasets(nb::module_& parent)
             std::lock_guard lock(s.core->mutex);
             return s.core->sampler.sample_state();
         })
-        .def("sample_state_n_steps_from_goal", [](PySampler& s, i32 n) {
+        .def("sample_state_n_steps_from_goal", [](PySampler& s, IntArg n_in) {
+            const i32 n = int_arg<i32>(n_in, "n", 0);
             std::lock_guard lock(s.core->mutex);
             try
             {
@@ -771,7 +768,8 @@ void bind_datasets(nb::module_& parent)
         })
         .def(
             "sample_states",
-            [](PySampler& s, u64 count, FrameworkArg framework) {
+            [](PySampler& s, IntArg count_in, FrameworkArg framework) {
+                const u64 count = int_arg<u64>(count_in, "count");
                 const Framework fw = parse_framework(framework);
                 std::vector<u32> v(count);
                 {
@@ -783,7 +781,9 @@ void bind_datasets(nb::module_& parent)
             "count"_a, "framework"_a = nb::none(), "count uniform state ids (uint32).")
         .def(
             "sample_states_n_steps_from_goal",
-            [](PySampler& s, i32 n, u64 count, FrameworkArg framework) {
+            [](PySampler& s, IntArg n_in, IntArg count_in, FrameworkArg framework) {
+                const i32 n = int_arg<i32>(n_in, "n", 0);
+                const u64 count = int_arg<u64>(count_in, "count");
                 const Framework fw = parse_framework(framework);
                 std::vector<u32> v(count);
                 {
@@ -802,7 +802,8 @@ void bind_datasets(nb::module_& parent)
             "n"_a, "count"_a, "framework"_a = nb::none())
         .def(
             "sample_dead_end_states",
-            [](PySampler& s, u64 count, FrameworkArg framework) {
+            [](PySampler& s, IntArg count_in, FrameworkArg framework) {
+                const u64 count = int_arg<u64>(count_in, "count");
                 const Framework fw = parse_framework(framework);
                 std::vector<u32> v(count);
                 {
@@ -826,7 +827,8 @@ void bind_datasets(nb::module_& parent)
         .def_prop_ro("max_steps_to_goal", [](const PySampler& s) { return s.core->sampler.max_steps_to_goal(); })
         .def(
             "states_n_steps_from_goal",
-            [](const PySampler& s, i32 n, FrameworkArg framework) {
+            [](const PySampler& s, IntArg n_in, FrameworkArg framework) {
+                const i32 n = int_arg<i32>(n_in, "n", 0);
                 // the id lists are the sampler's (fixed at construction): the view keeps the sampler alive
                 const auto v = s.core->sampler.states_n_steps_from_goal(n);
                 return AnyArray(view<u32>(s.core, v, parse_framework(framework)));
@@ -849,7 +851,8 @@ void bind_datasets(nb::module_& parent)
         .def_prop_ro("num_edges", [](const PyObjectGraph& g) { return g.graph->num_edges(); }, "Undirected edges.")
         .def_prop_ro("num_colors", [](const PyObjectGraph& g) { return g.graph->num_colors(); })
         .def(
-            "palette", [](const PyObjectGraph& g, u32 c) {
+            "palette", [](const PyObjectGraph& g, IntArg c_in) {
+                const u32 c = int_arg<u32>(c_in, "color");
                 if (c >= g.graph->num_colors())
                     throw nb::index_error("mymyr: colour out of range");
                 const auto p = g.graph->palette(c);
@@ -888,9 +891,10 @@ void bind_datasets(nb::module_& parent)
             "A 128-bit certificate by colour refinement (1-WL): equal for isomorphic graphs.")
         .def(
             "kfwl_certificate",
-            [](const PyObjectGraph& g, u32 k, std::optional<u64> max_tuples, std::optional<u64> max_round_work) {
-                if (k < 2 || k > 4)
-                    throw nb::value_error("mymyr: k-FWL certificates support k = 2, 3 and 4");
+            [](const PyObjectGraph& g, IntArg k_in, IntArg max_tuples_in, IntArg max_round_work_in) {
+                const u32 k = int_arg<u32>(k_in, "k", 2, 4);
+                const std::optional<u64> max_tuples = opt_int_arg<u64>(max_tuples_in, "max_tuples");
+                const std::optional<u64> max_round_work = opt_int_arg<u64>(max_round_work_in, "max_round_work");
                 KfwlLimits limits;
                 if (max_tuples)
                     limits.max_tuples = *max_tuples;
@@ -1054,7 +1058,9 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "tuple_graphs",
-        [](const PyStateSpace& space, u32 width, bool dominance_pruning, u32 threads) {
+        [](const PyStateSpace& space, IntArg width_in, bool dominance_pruning, IntArg threads_in) {
+            const u32 width = int_arg<u32>(width_in, "width");
+            const u32 threads = threads_arg(threads_in);
             const TupleGraphOptions o{.width = width, .dominance_pruning = dominance_pruning, .threads = threads};
             std::vector<TupleGraph> graphs;
             {
@@ -1074,7 +1080,8 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "tuple_graph",
-        [](const PyStateSpace& space, i64 vertex, u32 width, bool dominance_pruning) {
+        [](const PyStateSpace& space, i64 vertex, IntArg width_in, bool dominance_pruning) {
+            const u32 width = int_arg<u32>(width_in, "width");
             if (vertex < 0 || vertex >= static_cast<i64>(space.space->num_states()))
                 throw nb::index_error("mymyr: state id out of range");
             const TupleGraphOptions o{.width = width, .dominance_pruning = dominance_pruning, .threads = 1};
@@ -1101,9 +1108,12 @@ void bind_datasets(nb::module_& parent)
         "every count. Pickling stores the tasks and the arguments, and unpickling builds the knowledge base again.")
         .def(
             "__init__",
-            [](PyKnowledgeBase* self, KbTasksArg tasks, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-               bool symmetry_pruning, StrArg certificate, u32 k, bool labels, bool sort_by_size, bool generalized,
-               std::optional<u32> width, bool dominance_pruning) {
+            [](PyKnowledgeBase* self, KbTasksArg tasks, IntArg threads_in, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
+               bool symmetry_pruning, StrArg certificate, IntArg k_in, bool labels, bool sort_by_size, bool generalized,
+               IntArg width_in, bool dominance_pruning) {
+                const u32 threads = threads_arg(threads_in);
+                const u32 k = int_arg<u32>(k_in, "k");
+                const std::optional<u32> width = opt_int_arg<u32>(width_in, "width");
                 init_knowledge_base(self, tasks, threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate,
                                     k, labels, sort_by_size, generalized, width, dominance_pruning);
             },

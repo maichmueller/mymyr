@@ -512,8 +512,12 @@ void bind_landmarks(nb::module_& m)
     m.def(
         "approximate_fact_landmarks",
         [](TaskArg task, bool include_positive_goal_facts, bool compute_greedy_necessary_orderings,
-           usize max_disjunctive_landmark_size, usize max_disjunctive_landmark_depth, u64 max_operators, u64 max_bindings,
+           IntArg max_disjunctive_landmark_size_in, IntArg max_disjunctive_landmark_depth_in, IntArg max_operators_in, IntArg max_bindings_in,
            double max_seconds) {
+            const u64 max_disjunctive_landmark_size = int_arg<u64>(max_disjunctive_landmark_size_in, "max_disjunctive_landmark_size");
+            const u64 max_disjunctive_landmark_depth = int_arg<u64>(max_disjunctive_landmark_depth_in, "max_disjunctive_landmark_depth");
+            const u64 max_operators = int_arg<u64>(max_operators_in, "max_operators");
+            const u64 max_bindings = int_arg<u64>(max_bindings_in, "max_bindings");
             const Owner o = owner_of(task);
             lm::ApproximateFactLandmarkOptions opts;
             opts.include_positive_goal_facts = include_positive_goal_facts;
@@ -542,11 +546,13 @@ void bind_landmarks(nb::module_& m)
     m.def(
         "lifted_fact_landmarks",
         [](TaskArg task, ReachabilityArg reachability, bool include_positive_goal_facts,
-           bool compute_greedy_necessary_orderings, bool use_static_filter, usize max_occurrence_combinations,
-           usize max_disjunctive_members, bool reachability_filter_members,
+           bool compute_greedy_necessary_orderings, bool use_static_filter, IntArg max_occurrence_combinations_in,
+           IntArg max_disjunctive_members_in, bool reachability_filter_members,
            Arg<std::variant<lm::ReachabilityDisambiguation, std::string>> reachability_disambiguation,
            bool first_achievers_restricted, bool verify_pi_plus,
            Arg<std::variant<lm::CompleteFactLandmarks, std::string>> complete_fact_landmarks) {
+            const u64 max_occurrence_combinations = int_arg<u64>(max_occurrence_combinations_in, "max_occurrence_combinations");
+            const u64 max_disjunctive_members = int_arg<u64>(max_disjunctive_members_in, "max_disjunctive_members");
             const Owner o = owner_of(task);
             const PyRelaxedReachability* engine = engine_arg(o, reachability);
             lm::LiftedFactLandmarkOptions opts;
@@ -682,8 +688,9 @@ void bind_landmarks(nb::module_& m)
             "forbidden"_a)
         .def(
             "project",
-            [](const PyReachabilityTable& t, u32 num_variables, nb::typed<nb::iterable, QueryLiteralArg> literals,
+            [](const PyReachabilityTable& t, IntArg num_variables_in, nb::typed<nb::iterable, QueryLiteralArg> literals,
                TermPairsArg equalities, TermPairsArg disequalities) {
+                const u32 num_variables = int_arg<u32>(num_variables_in, "num_variables");
                 const rr::ConjunctiveQuery q = make_query(t.o, num_variables, literals, equalities, disequalities);
                 std::vector<std::vector<ObjectId>> r;
                 {

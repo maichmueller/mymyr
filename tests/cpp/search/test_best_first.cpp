@@ -17,6 +17,7 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -170,6 +171,16 @@ TEST(BestFirst, GreedyAndBeamReturnValidPlans)
                 EXPECT_EQ(r2.stats.generated, r.stats.generated);
             }
     }
+}
+
+TEST(BestFirst, BeamRefusesAZeroWidth)
+{
+    const auto task = load("depot__p02");
+    BestFirstOptions o = with_h(heuristics::Kind::FF);
+    o.beam_width = 0;
+    EXPECT_THROW((void)beam(*task, o), std::invalid_argument);
+    o.beam_width = 1;
+    EXPECT_NO_THROW((void)beam(*task, o));
 }
 
 TEST(BestFirst, Budgets)

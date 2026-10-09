@@ -647,8 +647,8 @@ dl::Imported import_host_accessible(nb::handle obj)
     return im;
 #else
     (void)obj;
-    throw nb::type_error("mymyr: pinned-host and managed CUDA arrays need a CUDA build of mymyr (-DMYMYR_CUDA=ON) "
-                         "to synchronize with their producer; pass CPU arrays");
+    throw nb::type_error("mymyr: pinned-host and managed CUDA arrays need a CUDA build of mymyr "
+                         "(CMAKE_ARGS=\"-DMYMYR_CUDA=ON\") to synchronize with their producer; pass CPU arrays");
 #endif
 }
 }  // namespace

@@ -203,7 +203,7 @@ public:
             m_init_count.push_back(e->host->initial_count(i));
         if (!device.is_none())
         {
-            m_device = nb::cast<int>(device);
+            m_device = int_arg<int>(device, "device", 0);
             if (m_device < 0)
                 throw nb::value_error("mymyr: device must be a CUDA device index (>= 0) or None (the CPU)");
 #if defined(MYMYR_HAS_CUDA)
@@ -1340,9 +1340,10 @@ void bind_rl_jax(nb::module_& parent)
                          "the same results bit for bit.")
         .def(
             "__init__",
-            [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, u32 max_steps, f32 step_reward,
+            [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
                bool canonical, bool witness, Arg<ann::EnvPath> path) {
+                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
                 rl::EnvConfig c;
                 c.max_steps = max_steps;
                 c.step_reward = step_reward;

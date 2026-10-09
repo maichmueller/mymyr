@@ -334,9 +334,12 @@ def _info(a: argparse.Namespace) -> int:
 
 
 def _one_line(e: BaseException) -> str:
+    """The message of `e` on one line, without the library's own "mymyr: " prefix (the CLI prints its own)."""
     if isinstance(e, OSError) and e.strerror:
         return f"{e.strerror}: {e.filename}" if e.filename else e.strerror
     text = " ".join(str(e).split())
+    for prefix in ("mymyr: ", "mymyr "):  # "mymyr: ..." and "mymyr brfs: ..."
+        text = text.removeprefix(prefix)
     return text or type(e).__name__
 
 
