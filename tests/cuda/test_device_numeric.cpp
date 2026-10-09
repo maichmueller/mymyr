@@ -986,3 +986,26 @@ TEST(DeviceNumericRules, StaticFunctionGoalsWithoutFluents)
         EXPECT_EQ(results[i].status, search::iw(*task, cpu).status);
     }
 }
+
+/// Conditional numeric effects that do not fire conflict with nothing, and an assign gives an undefined value a value:
+/// the reachable states of a task where both matter (counted by hand), on the device as on the CPU.
+TEST(DeviceNumericRules, OnlyEffectsThatFireConflictAndAssignDefines)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto domain = frontend::Domain::from_string(R"((define (domain d) (:requirements :strips :negative-preconditions
+                                                            :conditional-effects :numeric-fluents)
+ (:predicates (p) (q) (done)) (:functions (y) (u))
+ (:action set-p :parameters () :precondition (not (p)) :effect (p))
+ (:action ce :parameters () :precondition (not (done)) :effect (and (done) (when (q) (assign (y) 5)) (when (p) (increase (y) 1))))
+ (:action def-u :parameters () :precondition (and) :effect (assign (u) 1))))",
+                                                      "d.pddl");
+    const TaskPtr task = Task::create(*domain->instantiate_string(
+        "(define (problem p) (:domain d) (:init (q) (= (y) 2)) (:goal (and (done) (>= (u) 0))))", "p.pddl"));
+    for (const BrfsResult& r : {brfs(*task), cuda::brfs(context(), task, {}).result})
+    {
+        EXPECT_TRUE(r.exhausted);
+        EXPECT_EQ(r.states, 8u);
+        EXPECT_EQ(r.generated, 14u);
+        EXPECT_EQ(r.goal_states, 2u);
+    }
+}
