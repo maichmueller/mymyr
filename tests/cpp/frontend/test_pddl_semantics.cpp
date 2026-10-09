@@ -77,7 +77,7 @@ TEST(PddlSemantics, UnionTypesRangeOverEveryListedType)
     const std::set<std::string> want = {"(pick a)",       "(pick b)",       "(pick e)",       "(pick k)",
                                         "(pick s)",       "(pick-other e)", "(pick-other k)", "(pick-other o)",
                                         "(pick-other s)", "(only-good a)",  "(only-good e)",  "(only-good s)",
-                                        "(only-other e)", "(only-other k)", "(only-other o)", "(some)",
+                                        "(only-other e)", "(only-other k)", "(only-other o)", "(some o)",
                                         "(mark)"};
     EXPECT_EQ(applicable(*t, s0.view()), want);
     // the forall effect marks b, k and s; then every good or bad object is marked once a and e are
