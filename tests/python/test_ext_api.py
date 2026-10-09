@@ -1,6 +1,7 @@
 """The versioned C API (mymyr/ext.h) seen from a pure-C downstream module that links nothing of mymyr."""
 
 import re
+import subprocess
 import sys
 import threading
 
@@ -178,6 +179,28 @@ def test_numeric_slot_names_are_truncated_like_snprintf():
     assert consumer.numeric_name_truncated(task, 0, 4) == (full[:3], len(full))
     assert consumer.numeric_name_truncated(task, 0, 0)[1] == len(full)
     assert consumer.numeric_name_truncated(task, task.numeric_slots, 512) is None
+
+
+REFUSED_METRIC = """
+import mymyr
+from mymyr._testing import _ext_consumer as consumer
+d = mymyr.Domain.from_string('''(define (domain d) (:requirements :strips :numeric-fluents) (:predicates (p))
+  (:functions (x)) (:action a :parameters () :precondition (and) :effect (and (p) (increase (x) 1))))''')
+task = mymyr.Task(d.instantiate_string("(define (problem q) (:domain d) (:init (= (x) 0)) (:goal (p)) (:metric maximize (x)))"))
+for _ in range(2):
+    try:
+        consumer.numeric_info(task)
+    except RuntimeError as e:
+        print(e)
+"""
+
+
+@pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+def test_a_refused_metric_is_an_error_of_the_c_api():
+    # a fresh interpreter: the error must reach the caller on every call, also without pytest's fault handler
+    r = subprocess.run([sys.executable, "-c", REFUSED_METRIC], capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["task_numeric() failed"] * 2
 
 
 @pytest.mark.parametrize("name", ["cs-counters", "cs-hydropower", "cs-tpp", "cs-drone"])
