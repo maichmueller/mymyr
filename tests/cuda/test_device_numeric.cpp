@@ -1052,7 +1052,7 @@ TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
     const std::string actions = R"(
  (:action a :parameters (?x) :precondition (>= (w ?x) 1) :effect (f ?x))
  (:action b :parameters (?x) :precondition (>= (c) 1) :effect (f ?x))
- (:action e :parameters (?x) :precondition (f ?x) :effect (and (not (f ?x)) (increase (c) 1))))";
+ (:action e :parameters (?x) :precondition (and (f ?x) (< (c) 2)) :effect (and (not (f ?x)) (increase (c) 1))))";
     auto make = [&](const std::string& extra)
     {
         const auto domain = frontend::Domain::from_string(
@@ -1067,9 +1067,14 @@ TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
     EXPECT_EQ(brfs(*slotless).states, 2u);
     EXPECT_NE(cuda::ChunkGenerator::unsupported(*slotless).find("numeric conditions or effects"), std::string::npos);
     EXPECT_THROW((void) cuda::brfs(ctx, slotless, {}), std::invalid_argument);
+    // c only grows from the value reset gives it, up to 2: a finite state space
     const TaskPtr assigned = make(" (:action reset :parameters () :precondition (and) :effect (assign (c) 0))");
     ASSERT_EQ(assigned->numeric_slots(), 1u);
-    const BrfsResult cpu = brfs(*assigned), device = cuda::brfs(ctx, assigned, {}).result;
+    BrfsOptions bounded; bounded.max_states = 1000;
+    const BrfsResult cpu = brfs(*assigned, bounded);
+    ASSERT_TRUE(cpu.exhausted);
+    cuda::DeviceBrfsOptions device_bounded; device_bounded.max_states = 1000;
+    const BrfsResult device = cuda::brfs(ctx, assigned, device_bounded).result;
     EXPECT_TRUE(device.exhausted);
     EXPECT_EQ(device.states, cpu.states);
     EXPECT_EQ(device.generated, cpu.generated);
