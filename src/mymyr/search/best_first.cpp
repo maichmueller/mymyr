@@ -23,7 +23,6 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     obs = o.control.observer;
     witness = o.witness_pruning;
     canonical = o.canonical_order;
-    symmetry = o.symmetry_pruning;
     max_states = b.max_states;
     stop_on_states = max_states != std::numeric_limits<u64>::max();
     start = o.start ? *o.start : task.initial_state();

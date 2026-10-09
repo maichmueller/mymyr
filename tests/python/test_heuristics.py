@@ -72,10 +72,6 @@ def test_perfect_is_the_goal_distance(depot, depot_space):
     other = text_task("gripper__prob05")
     with pytest.raises(ValueError):
         hp(other.initial_state)
-    sym = datasets.state_space(depot, remove_if_unsolvable=False, symmetry_pruning=True,
-                               certificate="color_refinement")
-    with pytest.raises(ValueError):
-        search.Heuristic.perfect(sym)
 
 
 COST_DOMAIN = """(define (domain route)

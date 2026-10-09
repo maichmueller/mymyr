@@ -164,8 +164,8 @@ def test_width_zero_and_pruning(gripper):
 
 
 def test_independent_of_the_thread_count():
-    for d, p, sym in (("gripper", "p-2-0.pddl", False), ("gripper", "p-2-0.pddl", True), ("blocks_3", "test_problem.pddl", False)):
-        s = datasets.state_space(fork_task(d, p), threads=1, symmetry_pruning=sym)
+    for d, p in (("gripper", "p-2-0.pddl"), ("blocks_3", "test_problem.pddl")):
+        s = datasets.state_space(fork_task(d, p), threads=1)
         for width in (0, 1, 2):
             one = datasets.tuple_graphs(s, width=width, threads=1)
             for threads in (4, 8):
@@ -179,28 +179,24 @@ def gripper_table():
                                [FORK_DATA / "gripper" / p for p in ("p-1-0.pddl", "p-2-0.pddl")], atoms="frozen")
 
 
-@pytest.mark.parametrize("symmetry_pruning,vertices,edges", [(False, 36, 128), (True, 18, 52)])
-def test_knowledge_base_as_the_fork(symmetry_pruning, vertices, edges):
-    """The fork's test_knowledge_base_{without,with}_symmetry_reduction (gripper p-1-0 and p-2-0)."""
+def test_knowledge_base_as_the_fork():
+    """The fork's Python knowledge base test (gripper p-1-0 and p-2-0)."""
     fork_task("gripper", "p-2-0.pddl")
-    kb = datasets.KnowledgeBase(gripper_table(), generalized=True, symmetry_pruning=symmetry_pruning)
+    kb = datasets.KnowledgeBase(gripper_table(), generalized=True)
     g = kb.generalized_state_space
-    assert (g.num_vertices, g.num_edges) == (vertices, edges)
+    assert (g.num_vertices, g.num_edges) == (36, 128)
     assert len(g.goal_vertices()) == 4 and len(g.unsolvable_vertices()) == 0
-    assert g.symmetry_reduced == symmetry_pruning
+    assert g.spaces == kb.state_spaces
     assert not kb.has_tuple_graphs and kb.width is None
     with pytest.raises(ValueError, match="no tuple graphs"):
         kb.tuple_graphs(0)
 
 
-@pytest.mark.parametrize(
-    "symmetry_pruning,width,tg_vertices,tg_edges",
-    [(False, 1, 220, 184), (True, 1, 76, 70), (False, 0, 128, 92), (True, 0, 52, 34)],
-)
-def test_knowledge_base_tuple_graphs(symmetry_pruning, width, tg_vertices, tg_edges):
+@pytest.mark.parametrize("width,tg_vertices,tg_edges", [(1, 220, 184), (0, 128, 92)])
+def test_knowledge_base_tuple_graphs(width, tg_vertices, tg_edges):
     """The fork's knowledge base counts (its C++ knowledge base test, gripper)."""
     fork_task("gripper", "p-2-0.pddl")
-    kb = datasets.KnowledgeBase(gripper_table(), generalized=True, symmetry_pruning=symmetry_pruning, width=width)
+    kb = datasets.KnowledgeBase(gripper_table(), generalized=True, width=width)
     assert kb.width == width and len(kb) == 2
     graphs = [kb.tuple_graphs(i) for i in range(len(kb))]
     assert [len(x) for x in graphs] == [s.num_states for s in kb.state_spaces]

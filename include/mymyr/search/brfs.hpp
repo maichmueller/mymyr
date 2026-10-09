@@ -34,7 +34,6 @@
 #include "mymyr/search/control.hpp"
 #include "mymyr/search/layer_ordering.hpp"
 #include "mymyr/successor/action.hpp"
-#include "mymyr/successor/symmetry.hpp"
 
 #include <array>
 #include <limits>
@@ -61,9 +60,6 @@ struct BrfsOptions
     Store store = Store::Auto;
     bool witness_pruning = true;
     bool canonical_order = true;     // per state, successors in (schema, binding) order
-    /// Wl1: successors only by actions over representatives of the objects' colour classes (successor/symmetry.hpp);
-    /// fewer states, but a solvable task may become unsolvable and the shortest plan longer.
-    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;
     bool deterministic_ids = true;   // multi-threaded: ids independent of the thread count
     u64 max_states = ~u64{0};        // stop expanding once this many states are stored
     u32 max_depth = ~u32{0};         // expand only states of depth < max_depth (depth-max_depth states are stored)

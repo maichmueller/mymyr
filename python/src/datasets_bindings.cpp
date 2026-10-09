@@ -1,5 +1,5 @@
-// mymyr._core._datasets: state spaces, generalized state spaces, knowledge bases, tuple graphs, samplers, object graphs
-// and certificates (mymyr.datasets; datasets/*.hpp in the C++ core).
+// mymyr._core._datasets: state spaces, generalized state spaces, knowledge bases, tuple graphs and samplers
+// (mymyr.datasets; datasets/*.hpp in the C++ core).
 //
 // Every generation releases the thread state while it runs. The results are immutable C++ objects shared by the
 // Python wrappers; their arrays are exported zero-copy (read-only views that keep the result alive) to NumPy, torch or
@@ -14,10 +14,8 @@
 #include "py_table.hpp"
 #include "py_task.hpp"
 
-#include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
 #include "mymyr/datasets/knowledge_base.hpp"
-#include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/datasets/sampler.hpp"
 #include "mymyr/datasets/state_space.hpp"
 #include "mymyr/datasets/tuple_graph.hpp"
@@ -25,6 +23,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
@@ -37,6 +36,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -78,7 +78,6 @@ using TasksArg = Arg<nb::typed<nb::sequence, std::variant<PyTask, PyHandle>>>;
 using StateArg = Arg<PyState>;
 using IntArg = Arg<u64>;
 using FloatArg = Arg<double>;
-using StrArg = Arg<std::string>;
 using AnyArray = Arg<ann::Any>;
 using ArrayDict = nb::typed<nb::dict, std::string, ann::Any>;
 /// The space of a sampler: a StateSpace, or (CUDA builds) a mymyr.cuda.DeviceStateSpace.
@@ -118,19 +117,6 @@ struct PySampler
     std::shared_ptr<SamplerCore> core;
 };
 
-struct PyObjectGraph
-{
-    std::shared_ptr<const ObjectGraph> graph;
-};
-
-struct PyObjectGraphBuilder
-{
-    explicit PyObjectGraphBuilder(const Owner& o) : owner(o), builder(*o.core->task) {}
-    Owner owner;
-    std::mutex mutex;  // the builder holds scratch
-    ObjectGraphBuilder builder;
-};
-
 /// A tuple graph and the state space it is of (shared: a graph of a knowledge base aliases the knowledge base).
 struct PyTupleGraph
 {
@@ -150,21 +136,6 @@ struct PyKnowledgeBase
 };
 
 // ------------------------------------------------------------------------------------------------ helpers
-std::string lower(std::string s)
-{
-    for (char& c : s)
-        if (c >= 'A' && c <= 'Z')
-            c = static_cast<char>(c - 'A' + 'a');
-    return s;
-}
-
-std::string str_arg(nb::handle h, const char* what)
-{
-    if (!nb::isinstance<nb::str>(h))
-        throw nb::type_error((std::string("mymyr: ") + what + " must be a string").c_str());
-    return lower(nb::cast<std::string>(h));
-}
-
 template<class T>
 std::optional<T> opt(nb::handle h)
 {
@@ -173,18 +144,8 @@ std::optional<T> opt(nb::handle h)
     return nb::cast<T>(h);
 }
 
-CertificateKind parse_certificate(nb::handle h)
-{
-    const std::string s = str_arg(h, "certificate");
-    if (s == "color_refinement" || s == "colour_refinement" || s == "1-wl" || s == "wl")
-        return CertificateKind::ColorRefinement;
-    if (s == "kfwl" || s == "k-fwl" || s == "fwl")
-        return CertificateKind::KFwl;
-    throw nb::value_error("mymyr: certificate must be 'color_refinement' or 'kfwl'");
-}
-
 StateSpaceOptions make_options(u32 threads, nb::handle max_states, nb::handle max_seconds, bool remove_if_unsolvable,
-                               bool symmetry_pruning, nb::handle certificate, u32 k, bool labels)
+                               bool labels)
 {
     StateSpaceOptions o;
     o.threads = threads;
@@ -197,11 +158,6 @@ StateSpaceOptions make_options(u32 threads, nb::handle max_states, nb::handle ma
         o.max_seconds = *v;
     }
     o.remove_if_unsolvable = remove_if_unsolvable;
-    o.symmetry_pruning = symmetry_pruning;
-    o.certificate = parse_certificate(certificate);
-    o.fwl_k = k;
-    if (o.symmetry_pruning && o.certificate == CertificateKind::KFwl && (k < 2 || k > 4))
-        throw nb::value_error("mymyr: k-FWL certificates support k = 2, 3 and 4");
     o.labels = labels;
     return o;
 }
@@ -245,20 +201,6 @@ nb::object fresh_u32(const std::vector<u32>& v, Framework fw)
         std::memcpy(block->data(), v.data(), v.size() * sizeof(u32));
     ArraySpec spec{block, block->data(), rl::DType::U32, {static_cast<i64>(v.size())}, {}, false, false};
     return export_array(std::move(spec), fw, default_words(fw));
-}
-
-nb::int_ certificate_int(const Certificate& c)
-{
-    unsigned char b[16];
-    for (int i = 0; i < 8; ++i)
-    {
-        b[i] = static_cast<unsigned char>(c.lo >> (8 * i));
-        b[8 + i] = static_cast<unsigned char>(c.hi >> (8 * i));
-    }
-    PyObject* r = PyLong_FromUnsignedNativeBytes(b, 16, Py_ASNATIVEBYTES_LITTLE_ENDIAN | Py_ASNATIVEBYTES_UNSIGNED_BUFFER);
-    if (!r)
-        throw nb::python_error();
-    return nb::steal<nb::int_>(r);
 }
 
 StateSpaceResult run_generation(const TaskPtr& task, const StateSpaceOptions& o)
@@ -367,24 +309,31 @@ u32 tuple_distance(const TupleGraph& g, i64 d)
 
 std::vector<u32> to_vector(std::span<const u32> s) { return {s.begin(), s.end()}; }
 
+/// A generalized state space index (problem, state, transition, vertex or edge) below n, or IndexError.
+u64 gss_index(i64 i, u64 n, const char* what)
+{
+    if (i < 0 || static_cast<u64>(i) >= n)
+        throw nb::index_error((std::string("mymyr: ") + what + " out of range").c_str());
+    return static_cast<u64>(i);
+}
+
 /// The keyword arguments of KnowledgeBase(), in order (its pickled state is the table, then these).
 #define MYMYR_KB_ARGS                                                                                                      \
     nb::kw_only(), "threads"_a = 0, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \
-        "remove_if_unsolvable"_a = true, "symmetry_pruning"_a = false, "certificate"_a = "kfwl", "k"_a = 2,             \
-        "labels"_a = true, "sort_by_size"_a = true, "generalized"_a = false, "width"_a = nb::none(),                    \
-        "dominance_pruning"_a = true
+        "remove_if_unsolvable"_a = true, "labels"_a = true, "sort_by_size"_a = true, "generalized"_a = false,           \
+        "width"_a = nb::none(), "dominance_pruning"_a = true
 
 using KbTasksArg = Arg<std::variant<PyTable, nb::typed<nb::sequence, std::variant<PyTask, PyHandle>>>>;
-using KbState = nb::typed<nb::tuple, PyTable, u32, std::optional<u64>, std::optional<double>, bool, bool, std::string, u32,
-                          bool, bool, bool, std::optional<u32>, bool>;
+using KbState = nb::typed<nb::tuple, PyTable, u32, std::optional<u64>, std::optional<double>, bool, bool, bool, bool,
+                          std::optional<u32>, bool>;
 
 void init_knowledge_base(PyKnowledgeBase* self, nb::handle tasks, u32 threads, nb::handle max_states, nb::handle max_seconds,
-                         bool remove_if_unsolvable, bool symmetry_pruning, nb::handle certificate, u32 k, bool labels,
-                         bool sort_by_size, bool generalized, std::optional<u32> width, bool dominance_pruning)
+                         bool remove_if_unsolvable, bool labels, bool sort_by_size, bool generalized, std::optional<u32> width,
+                         bool dominance_pruning)
 {
     nb::object table = nb::isinstance<PyTable>(tasks) ? nb::borrow(tasks) : nb::type<PyTable>()(tasks);
     KnowledgeBaseOptions o;
-    o.state_space = make_options(1, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
+    o.state_space = make_options(1, max_states, max_seconds, remove_if_unsolvable, labels);
     o.sort_by_size = sort_by_size;
     o.generalized = generalized;
     if (width)
@@ -403,8 +352,8 @@ void init_knowledge_base(PyKnowledgeBase* self, nb::handle tasks, u32 threads, n
         p->spaces.push_back(PyStateSpace{kb->state_spaces()[i], owner_of(t.tasks[kb->task_indices()[i]])});
     if (kb->generalized_state_space())
         p->gss = PyGeneralizedStateSpace{kb->generalized_state_space(), p->spaces};
-    p->args = nb::make_tuple(table, threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k,
-                             labels, sort_by_size, generalized, width, dominance_pruning);
+    p->args = nb::make_tuple(table, threads, max_states, max_seconds, remove_if_unsolvable, labels, sort_by_size, generalized,
+                             width, dominance_pruning);
 }
 
 usize kb_space(const PyKnowledgeBase& kb, i64 i)
@@ -435,20 +384,17 @@ const char* k_space_doc =
 const char* k_options_doc =
     "Options: threads (0: all cores; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
     "or more, as in mimir), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
-    "symmetry_pruning (one state per certificate class of its object graph; single-threaded), certificate "
-    "('kfwl', the default, or the cheaper but weaker 'color_refinement') and k (2, 3 or 4) for symmetry pruning, labels (keep (schema, binding) per "
-    "transition). State words are independent of the thread count when the task has frozen atoms (atoms='frozen').";
+    "labels (keep (schema, binding) per transition). State words are independent of the thread count when the task has frozen atoms (atoms='frozen').";
 
 #define MYMYR_SS_ARGS                                                                                                      \
     nb::kw_only(), "threads"_a = 1, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \
-        "remove_if_unsolvable"_a = true, "symmetry_pruning"_a = false, "certificate"_a = "kfwl", "k"_a = 2, \
-        "labels"_a = true
+        "remove_if_unsolvable"_a = true, "labels"_a = true
 }  // namespace
 
 void bind_datasets(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule(
-        "_datasets", "State spaces, knowledge bases, tuple graphs, samplers, object graphs and certificates (mymyr.datasets)");
+        "_datasets", "State spaces, generalized state spaces, knowledge bases, tuple graphs and samplers (mymyr.datasets)");
 
     nb::enum_<StateSpaceStatus>(m, "Status", "Outcome of a state space generation.")
         .value("OK", StateSpaceStatus::Ok)
@@ -463,7 +409,6 @@ void bind_datasets(nb::module_& parent)
         .def_prop_ro("num_states", [](const PyStateSpace& s) { return s.space->num_states(); })
         .def_prop_ro("num_transitions", [](const PyStateSpace& s) { return s.space->num_transitions(); })
         .def_prop_ro("initial_state_id", [](const PyStateSpace& s) { return s.space->initial_state(); })
-        .def_prop_ro("symmetry_reduced", [](const PyStateSpace& s) { return s.space->symmetry_reduced(); })
         .def_prop_ro("words", [](const PyStateSpace& s) { return s.space->words(); }, "Fluent words per state row.")
         .def_prop_ro("numeric_words", [](const PyStateSpace& s) { return s.space->numeric_words(); })
         .def_prop_ro("row_words", [](const PyStateSpace& s) { return s.space->row_words(); })
@@ -545,8 +490,7 @@ void bind_datasets(nb::module_& parent)
         .def("__repr__", [](const PyStateSpace& s) {
             return "StateSpace(states=" + std::to_string(s.space->num_states()) + ", transitions=" +
                    std::to_string(s.space->num_transitions()) + ", goal=" + std::to_string(s.space->num_goal_states()) +
-                   ", unsolvable=" + std::to_string(s.space->num_unsolvable_states()) +
-                   (s.space->symmetry_reduced() ? ", symmetry_reduced=True)" : ")");
+                   ", unsolvable=" + std::to_string(s.space->num_unsolvable_states()) + ")";
         });
 
     nb::class_<PyGenerationResult>(m, "GenerationResult")
@@ -562,11 +506,9 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "generate",
-        [](TaskArg task, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-           bool symmetry_pruning, StrArg certificate, u32 k, bool labels) {
+        [](TaskArg task, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable, bool labels) {
             const Owner o = task_owner(task);
-            const StateSpaceOptions opts =
-                make_options(threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
+            const StateSpaceOptions opts = make_options(threads, max_states, max_seconds, remove_if_unsolvable, labels);
             return wrap(o, run_generation(o.core->task, opts));
         },
         "task"_a, MYMYR_SS_ARGS, (std::string("Generates the state space of a task: a GenerationResult. ") + k_options_doc).c_str());
@@ -574,10 +516,9 @@ void bind_datasets(nb::module_& parent)
     m.def(
         "state_space",
         [](TaskArg task, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-           bool symmetry_pruning, StrArg certificate, u32 k, bool labels) -> std::optional<PyStateSpace> {
+           bool labels) -> std::optional<PyStateSpace> {
             const Owner o = task_owner(task);
-            const StateSpaceOptions opts =
-                make_options(threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
+            const StateSpaceOptions opts = make_options(threads, max_states, max_seconds, remove_if_unsolvable, labels);
             return wrap(o, run_generation(o.core->task, opts)).space;
         },
         "task"_a, MYMYR_SS_ARGS,
@@ -587,11 +528,9 @@ void bind_datasets(nb::module_& parent)
 
     m.def(
         "generate_many",
-        [](TasksArg tasks, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-           bool symmetry_pruning, StrArg certificate, u32 k, bool labels) {
+        [](TasksArg tasks, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable, bool labels) {
             const std::vector<Owner> owners = owners_of(tasks);
-            StateSpaceOptions opts =
-                make_options(1, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate, k, labels);
+            const StateSpaceOptions opts = make_options(1, max_states, max_seconds, remove_if_unsolvable, labels);
             std::vector<TaskPtr> ts;
             for (const Owner& o : owners)
                 ts.push_back(o.core->task);
@@ -606,18 +545,17 @@ void bind_datasets(nb::module_& parent)
             return out;
         },
         "tasks"_a, nb::kw_only(), "threads"_a = 0, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),
-        "remove_if_unsolvable"_a = true, "symmetry_pruning"_a = false, "certificate"_a = "kfwl", "k"_a = 2,
-        "labels"_a = true,
+        "remove_if_unsolvable"_a = true, "labels"_a = true,
         "The instance pool: the state spaces of many tasks, one task per worker thread (threads workers; 0: all "
         "cores), each generated single-threaded. Results in input order. Options as generate().");
 
     // ---------------------------------------------------------------------------------------------- generalized
-    nb::class_<PyGeneralizedStateSpace>(m, "GeneralizedStateSpace",
-                                        "A class graph over the state spaces of several problems of one domain (as in "
-                                        "mimir's GeneralizedStateSpace; datasets/generalized_state_space.hpp). Without "
-                                        "symmetry reduction the disjoint union of the problem graphs; with it (every "
-                                        "space symmetry reduced) one class vertex per certificate class, problems "
-                                        "isomorphic to earlier ones dropped.")
+    nb::class_<PyGeneralizedStateSpace>(
+        m, "GeneralizedStateSpace",
+        "One graph over the state spaces of several problems of one domain, as mimir's GeneralizedStateSpace "
+        "(datasets/generalized_state_space.hpp): their disjoint union in input order. State s of problem p is vertex "
+        "vertex_offsets[p] + s and transition e of problem p is edge edge_offsets[p] + e, so the edges out of a vertex "
+        "are its state's transitions in their order. The initial, goal and unsolvable vertices are the problems' ones.")
         .def(
             "__init__",
             [](PyGeneralizedStateSpace* self, nb::typed<nb::sequence, PyStateSpace> spaces) {
@@ -636,19 +574,11 @@ void bind_datasets(nb::module_& parent)
                     nb::gil_scoped_release release;  // std::invalid_argument (other domains) becomes a ValueError
                     g = GeneralizedStateSpace::create(std::move(sp));
                 }
-                auto* p = new (self) PyGeneralizedStateSpace{g, {}};
-                for (const StateSpacePtr& s : g->spaces())
-                    for (const PyStateSpace& x : in)
-                        if (x.space == s)
-                        {
-                            p->spaces.push_back(x);
-                            break;
-                        }
+                new (self) PyGeneralizedStateSpace{g, std::move(in)};
             },
             "spaces"_a, "From state spaces in their order (see sorted_by_size / generalized_state_space for mimir's order).")
         .def_prop_ro("spaces", [](const PyGeneralizedStateSpace& g) { return g.spaces; },
-                     "The problems' state spaces kept, in class-graph problem order.")
-        .def_prop_ro("symmetry_reduced", [](const PyGeneralizedStateSpace& g) { return g.gss->symmetry_reduced(); })
+                     "The problems' state spaces (problem p = spaces[p]).")
         .def_prop_ro("num_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->num_vertices(); })
         .def_prop_ro("num_edges", [](const PyGeneralizedStateSpace& g) { return g.gss->num_edges(); })
         .def(
@@ -658,47 +588,54 @@ void bind_datasets(nb::module_& parent)
                 const std::shared_ptr<const void> own = g.gss;
                 const GeneralizedStateSpace& G = *g.gss;
                 ArrayDict d{nb::dict()};
-                d["vertex_problems"] = view<u32>(own, G.vertex_problems(), fw);
-                d["vertex_problem_vertices"] = view<u32>(own, G.vertex_problem_vertices(), fw);
-                d["edge_sources"] = view<u32>(own, G.edge_sources(), fw);
-                d["edge_targets"] = view<u32>(own, G.edge_targets(), fw);
-                d["edge_problems"] = view<u32>(own, G.edge_problems(), fw);
-                d["edge_problem_edges"] = view<u32>(own, G.edge_problem_edges(), fw);
+                d["vertex_offsets"] = view<u32>(own, G.vertex_offsets(), fw);
+                d["edge_offsets"] = view<u64>(own, G.edge_offsets(), fw);
                 d["forward_offsets"] = view<u64>(own, G.forward_offsets(), fw);
-                d["forward_edges"] = view<u32>(own, G.forward_edges(), fw);
+                d["forward_targets"] = view<u32>(own, G.forward_targets(), fw);
                 d["initial"] = view<u8>(own, G.initial_flags(), fw);
                 d["goal"] = view<u8>(own, G.goal_flags(), fw);
                 d["unsolvable"] = view<u8>(own, G.unsolvable_flags(), fw);
                 return d;
             },
             "framework"_a = nb::none(),
-            "Zero-copy views of the class graph: per class vertex its representative (vertex_problems, "
-            "vertex_problem_vertices) and flags (initial, goal, unsolvable); per class edge its ends (edge_sources, "
-            "edge_targets) and representative (edge_problems, edge_problem_edges); the forward CSR (forward_offsets, "
-            "forward_edges).")
+            "Zero-copy views of the graph: per problem the first vertex and edge (vertex_offsets, edge_offsets, each "
+            "with a final entry: the total), the forward CSR (forward_offsets, forward_targets) and per vertex the "
+            "flags (initial, goal, unsolvable).")
         .def(
-            "vertex_mapping",
-            [](const PyGeneralizedStateSpace& g, u32 problem, FrameworkArg framework) {
-                if (problem >= g.spaces.size())
-                    throw nb::index_error("mymyr: problem index out of range");
-                return AnyArray(view<u32>(g.gss, g.gss->vertex_mapping(problem), parse_framework(framework)));
+            "vertex",
+            [](const PyGeneralizedStateSpace& g, i64 problem, i64 state) {
+                const u32 p = static_cast<u32>(gss_index(problem, g.spaces.size(), "problem index"));
+                return g.gss->vertex(p, static_cast<u32>(gss_index(state, g.gss->spaces()[p]->num_states(), "state id")));
             },
-            "problem"_a, "framework"_a = nb::none(), "The class vertex of every vertex of a problem's state space.")
+            "problem"_a, "state"_a, "The vertex of a state of a problem.")
         .def(
-            "edge_mapping",
-            [](const PyGeneralizedStateSpace& g, u32 problem, FrameworkArg framework) {
-                if (problem >= g.spaces.size())
-                    throw nb::index_error("mymyr: problem index out of range");
-                return AnyArray(view<u32>(g.gss, g.gss->edge_mapping(problem), parse_framework(framework)));
+            "edge",
+            [](const PyGeneralizedStateSpace& g, i64 problem, i64 edge) {
+                const u32 p = static_cast<u32>(gss_index(problem, g.spaces.size(), "problem index"));
+                return g.gss->edge(p, gss_index(edge, g.gss->spaces()[p]->num_transitions(), "transition index"));
             },
-            "problem"_a, "framework"_a = nb::none(), "The class edge of every transition of a problem's state space.")
+            "problem"_a, "edge"_a, "The edge of a transition of a problem.")
+        .def(
+            "problem_of",
+            [](const PyGeneralizedStateSpace& g, i64 vertex) {
+                const u32 v = static_cast<u32>(gss_index(vertex, g.gss->num_vertices(), "vertex"));
+                const u32 p = g.gss->problem_of(v);
+                return std::pair<u32, u32>{p, v - g.gss->vertex_offsets()[p]};
+            },
+            "vertex"_a, "The (problem, state id) of a vertex.")
+        .def(
+            "source", [](const PyGeneralizedStateSpace& g, i64 e) { return g.gss->source(gss_index(e, g.gss->num_edges(), "edge")); },
+            "edge"_a)
+        .def(
+            "target",
+            [](const PyGeneralizedStateSpace& g, i64 e) { return g.gss->forward_targets()[gss_index(e, g.gss->num_edges(), "edge")]; },
+            "edge"_a)
         .def("initial_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->initial_vertices(); })
         .def("goal_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->goal_vertices(); })
         .def("unsolvable_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->unsolvable_vertices(); })
         .def("__repr__", [](const PyGeneralizedStateSpace& g) {
             return "GeneralizedStateSpace(problems=" + std::to_string(g.spaces.size()) + ", vertices=" +
-                   std::to_string(g.gss->num_vertices()) + ", edges=" + std::to_string(g.gss->num_edges()) +
-                   (g.gss->symmetry_reduced() ? ", symmetry_reduced=True)" : ")");
+                   std::to_string(g.gss->num_vertices()) + ", edges=" + std::to_string(g.gss->num_edges()) + ")";
         });
 
     m.def(
@@ -839,126 +776,6 @@ void bind_datasets(nb::module_& parent)
             },
             "framework"_a = nb::none());
 
-    // ---------------------------------------------------------------------------------------------- object graphs
-    nb::class_<PyObjectGraph>(m, "ObjectGraph",
-                              "The vertex-coloured object graph of a state (as in mimir's create_object_graph; "
-                              "datasets/object_graph.hpp): vertex i < num_objects is object i. A structure for "
-                              "isomorphism tests, not an observation encoder.")
-        .def_prop_ro("num_objects", [](const PyObjectGraph& g) { return g.graph->num_objects; })
-        .def_prop_ro("num_vertices", [](const PyObjectGraph& g) { return g.graph->num_vertices(); })
-        .def_prop_ro("num_edges", [](const PyObjectGraph& g) { return g.graph->num_edges(); }, "Undirected edges.")
-        .def_prop_ro("num_colors", [](const PyObjectGraph& g) { return g.graph->num_colors(); })
-        .def(
-            "palette", [](const PyObjectGraph& g, u32 c) {
-                if (c >= g.graph->num_colors())
-                    throw nb::index_error("mymyr: colour out of range");
-                const auto p = g.graph->palette(c);
-                return std::vector<u32>(p.begin(), p.end());
-            },
-            "color"_a,
-            "A colour as its integer sequence: object vertex [0, n, preds.., m, (pred, polarity)..], atom [1, pred], atom "
-            "position [2, pred, pos], literal [3, pred, polarity], literal position [4, pred, pos, polarity].")
-        .def(
-            "arrays",
-            [](const PyObjectGraph& g, FrameworkArg framework) {
-                const Framework fw = parse_framework(framework);
-                const std::shared_ptr<const void> own = g.graph;
-                const ObjectGraph& G = *g.graph;
-                ArrayDict d{nb::dict()};
-                d["color"] = view<u32>(own, std::span<const u32>(G.color), fw);
-                d["palette_offsets"] = view<u32>(own, std::span<const u32>(G.palette_offsets), fw);
-                d["palette_values"] = view<u32>(own, std::span<const u32>(G.palette_values), fw);
-                d["offsets"] = view<u64>(own, std::span<const u64>(G.offsets), fw);
-                d["neighbors"] = view<u32>(own, std::span<const u32>(G.neighbors), fw);
-                return d;
-            },
-            "framework"_a = nb::none(),
-            "Zero-copy views: color [V] (palette index), palette_offsets / palette_values (the colours' integer "
-            "sequences, sorted), offsets [V + 1] and neighbors (undirected adjacency as CSR, both directions).")
-        .def(
-            "color_refinement_certificate",
-            [](const PyObjectGraph& g) {
-                Certificate c;
-                {
-                    nb::gil_scoped_release release;
-                    c = color_refinement_certificate(*g.graph);
-                }
-                return certificate_int(c);
-            },
-            "A 128-bit certificate by colour refinement (1-WL): equal for isomorphic graphs.")
-        .def(
-            "kfwl_certificate",
-            [](const PyObjectGraph& g, u32 k, std::optional<u64> max_tuples, std::optional<u64> max_round_work) {
-                if (k < 2 || k > 4)
-                    throw nb::value_error("mymyr: k-FWL certificates support k = 2, 3 and 4");
-                KfwlLimits limits;
-                if (max_tuples)
-                    limits.max_tuples = *max_tuples;
-                if (max_round_work)
-                    limits.max_round_work = *max_round_work;
-                Certificate c;
-                {
-                    nb::gil_scoped_release release;
-                    c = kfwl_certificate(*g.graph, k, limits);
-                }
-                return certificate_int(c);
-            },
-            "k"_a = 2, "max_tuples"_a = nb::none(), "max_round_work"_a = nb::none(),
-            "A 128-bit certificate by k-dimensional folklore Weisfeiler-Leman (k = 2, 3 or 4): equal for isomorphic "
-            "graphs. With n vertices it holds n^k tuples of 28 bytes and hashes n^(k+1) colour k-tuples per round; "
-            "max_tuples (default 2^26) and max_round_work (default 2^30) bound them, and a larger graph raises "
-            "ValueError.")
-        .def(
-            "stable_colors",
-            [](const PyObjectGraph& g) {
-                std::vector<u32> colors;
-                (void)color_refinement_certificate(*g.graph, &colors);
-                return colors;
-            },
-            "The stable colour refinement colour of every vertex (canonical across isomorphic graphs).")
-        .def("__repr__", [](const PyObjectGraph& g) {
-            return "ObjectGraph(vertices=" + std::to_string(g.graph->num_vertices()) + ", edges=" +
-                   std::to_string(g.graph->num_edges()) + ", colors=" + std::to_string(g.graph->num_colors()) + ")";
-        });
-
-    nb::class_<PyObjectGraphBuilder>(m, "ObjectGraphBuilder",
-                                     "Builds object graphs of one task's states (per-task tables built once).")
-        .def(
-            "__init__", [](PyObjectGraphBuilder* self, TaskArg task) { new (self) PyObjectGraphBuilder(task_owner(task)); },
-            "task"_a)
-        .def(
-            "build",
-            [](PyObjectGraphBuilder& b, StateArg state) {
-                if (!is_state(state))
-                    throw nb::type_error("mymyr: state must be a mymyr.State");
-                const PyState& p = state_of(state);
-                if (p.core->task->uid() != b.owner.core->task->uid())
-                    throw nb::value_error("mymyr: the state belongs to another task");
-                auto g = std::make_shared<ObjectGraph>();
-                {
-                    nb::gil_scoped_release release;
-                    std::lock_guard lock(b.mutex);
-                    b.builder.build(p.s.view(), *g);
-                }
-                return PyObjectGraph{std::move(g)};
-            },
-            "state"_a);
-
-    m.def(
-        "object_graph",
-        [](StateArg state) {
-            if (!is_state(state))
-                throw nb::type_error("mymyr: state must be a mymyr.State");
-            const PyState& p = state_of(state);
-            auto g = std::make_shared<ObjectGraph>();
-            {
-                nb::gil_scoped_release release;
-                *g = datasets::object_graph(*p.core->task, p.s.view());
-            }
-            return PyObjectGraph{std::move(g)};
-        },
-        "state"_a, "The object graph of a state (ObjectGraphBuilder for many states of one task).");
-
     // ---------------------------------------------------------------------------------------------- tuple graphs
     nb::class_<PyTupleGraph>(
         m, "TupleGraph",
@@ -967,8 +784,8 @@ void bind_datasets(nb::module_& parent)
         "breadth-first distance from the root, the problem vertices (states) at that distance in which each is novel, "
         "and the edges u -> t between consecutive distances where every problem vertex of u has a successor among "
         "those of t. Width 0: the root and one vertex per successor state. Vertices are ordered by distance; "
-        "dominance pruning (default) keeps the vertices with minimal problem-vertex sets. Over a symmetry-reduced space "
-        "the problem vertices are class vertices. The result does not depend on the thread count.")
+        "dominance pruning (default) keeps the vertices with minimal problem-vertex sets. The result does not depend "
+        "on the thread count.")
         .def_prop_ro("space", [](const PyTupleGraph& g) { return g.space; }, "The state space the root belongs to.")
         .def_prop_ro("root", [](const PyTupleGraph& g) { return g.graph->root(); }, "The root's state id.")
         .def_prop_ro("width", [](const PyTupleGraph& g) { return g.graph->width(); })
@@ -1094,18 +911,16 @@ void bind_datasets(nb::module_& parent)
         "What is known about a set of tasks of one domain, as mimir's KnowledgeBase (datasets/knowledge_base.hpp): the "
         "tasks (a mymyr.rl.TaskTable), the state space of every task whose generation succeeded (failures skipped; "
         "max_states and max_seconds bound each one), sorted ascending by size unless sort_by_size=False (ties in task "
-        "order), optionally the generalized state space over them (generalized=True; with symmetry_pruning, problems "
-        "isomorphic to an earlier one are dropped from the knowledge base), and optionally the tuple graphs of every "
-        "vertex of every space (width=0..5; tuple graphs of large spaces are better built per vertex with "
+        "order), optionally the generalized state space over them (generalized=True), and optionally the tuple graphs "
+        "of every vertex of every space (width=0..5; tuple graphs of large spaces are better built per vertex with "
         "tuple_graph(space, vertex)). Every step runs on `threads` threads (0: all cores) with the same result at "
         "every count. Pickling stores the tasks and the arguments, and unpickling builds the knowledge base again.")
         .def(
             "__init__",
             [](PyKnowledgeBase* self, KbTasksArg tasks, u32 threads, IntArg max_states, FloatArg max_seconds, bool remove_if_unsolvable,
-               bool symmetry_pruning, StrArg certificate, u32 k, bool labels, bool sort_by_size, bool generalized,
-               std::optional<u32> width, bool dominance_pruning) {
-                init_knowledge_base(self, tasks, threads, max_states, max_seconds, remove_if_unsolvable, symmetry_pruning, certificate,
-                                    k, labels, sort_by_size, generalized, width, dominance_pruning);
+               bool labels, bool sort_by_size, bool generalized, std::optional<u32> width, bool dominance_pruning) {
+                init_knowledge_base(self, tasks, threads, max_states, max_seconds, remove_if_unsolvable, labels, sort_by_size,
+                                    generalized, width, dominance_pruning);
             },
             "tasks"_a, MYMYR_KB_ARGS,
             "The knowledge base of tasks of one domain: a TaskTable or a sequence of Tasks (made into a TaskTable). The "
@@ -1153,9 +968,9 @@ void bind_datasets(nb::module_& parent)
         .def("__getstate__", [](const PyKnowledgeBase& kb) { return KbState(kb.args); })
         .def("__setstate__",
              [](PyKnowledgeBase* self, KbState s) {
-                 init_knowledge_base(self, s[0], nb::cast<u32>(s[1]), s[2], s[3], nb::cast<bool>(s[4]), nb::cast<bool>(s[5]), s[6],
-                                     nb::cast<u32>(s[7]), nb::cast<bool>(s[8]), nb::cast<bool>(s[9]), nb::cast<bool>(s[10]),
-                                     nb::cast<std::optional<u32>>(s[11]), nb::cast<bool>(s[12]));
+                 init_knowledge_base(self, s[0], nb::cast<u32>(s[1]), s[2], s[3], nb::cast<bool>(s[4]), nb::cast<bool>(s[5]),
+                                     nb::cast<bool>(s[6]), nb::cast<bool>(s[7]), nb::cast<std::optional<u32>>(s[8]),
+                                     nb::cast<bool>(s[9]));
              })
         .def("__repr__", [](const PyKnowledgeBase& kb) {
             std::string r = "KnowledgeBase(spaces=" + std::to_string(kb.spaces.size()) + " of " +

@@ -739,12 +739,7 @@ TEST(CudaBestFirst, BudgetsStartsAndRefusals)
         EXPECT_EQ(z.result.status, search::SearchStatus::Solved);
         EXPECT_TRUE(z.result.plan.empty());
     }
-    // refusals
-    cuda::DeviceBestFirstOptions symmetric;
-    symmetric.search.symmetry_pruning = SymmetryPruning::Wl1;
-    EXPECT_NE(cuda::best_first_unsupported(*task, symmetric).find("symmetry pruning"), std::string::npos);
-    EXPECT_THROW((void)cuda::astar(ctx, task, symmetric), std::invalid_argument);
-    EXPECT_THROW((void)cuda::gbfs(ctx, task, symmetric), std::invalid_argument);
+    // numeric tasks run; refusals
     const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
     EXPECT_TRUE(cuda::best_first_unsupported(*numeric, {}).empty());
     cuda::DeviceBestFirstOptions numeric_options;

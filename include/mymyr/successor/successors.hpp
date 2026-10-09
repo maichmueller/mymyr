@@ -8,8 +8,6 @@
 //   - canonical order (on by default): per state, actions come ordered by schema, then lexicographically by
 //     binding (the schema's parameter order). Schemas whose matcher already binds its parameters in index order with
 //     the fixed-order search emit in that order for free; the others are buffered per schema and sorted.
-//   - symmetry pruning (off by default; successor/symmetry.hpp): generate(..., SymmetryPruning::Wl1) emits only
-//     the actions whose parameters are bound to representatives of the objects' colour classes in the state.
 // Numeric tasks (task/numeric.hpp): numeric preconditions are checked inside the matchers; a binding whose numeric
 // or total-cost effects break mimir's applicability rules is not applicable (never emitted); the Delta carries the
 // successor's numeric words and the total-cost effects of the action (the shared cost evaluation: every search takes
@@ -21,13 +19,10 @@
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
 #include "mymyr/successor/detail/engine.hpp"
-#include "mymyr/successor/detail/symmetry.hpp"
-#include "mymyr/successor/symmetry.hpp"
 #include "mymyr/task/plan.hpp"
 
 #include <algorithm>
 #include <bit>
-#include <memory>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -158,28 +153,6 @@ public:
     bool generate(Emit&& emit, bool witness_pruning, bool canonical_order, u32 first_schema = 0,
                   u32 end_schema = ~u32{0})
     {
-        return generate_impl<Stop, false>(emit, witness_pruning, canonical_order, first_schema, end_schema);
-    }
-    /// generate() with symmetry pruning (successor/symmetry.hpp): with SymmetryPruning::Wl1 only the actions whose
-    /// parameters are all bound to representatives of their colour classes in the prepared state are emitted. The
-    /// classes are computed once per call; with Off, or when every object is alone in its class, this is the plain
-    /// generate().
-    template<bool Stop, class Emit>
-    bool generate(Emit&& emit, bool witness_pruning, bool canonical_order, SymmetryPruning symmetry, u32 first_schema = 0,
-                  u32 end_schema = ~u32{0})
-    {
-        if (symmetry == SymmetryPruning::Off || !symmetry_pruner().compute(m_e))
-            return generate_impl<Stop, false>(emit, witness_pruning, canonical_order, first_schema, end_schema);
-        return generate_impl<Stop, true>(emit, witness_pruning, canonical_order, first_schema, end_schema);
-    }
-
-    /// This thread's symmetry pruning state (created on first use).
-    [[nodiscard]] detail::SymmetryPruner& symmetry_pruner();
-
-private:
-    template<bool Stop, bool Masked, class Emit>
-    bool generate_impl(Emit& emit, bool witness_pruning, bool canonical_order, u32 first_schema, u32 end_schema)
-    {
         m_e.clear_stop();
         m_cd.num = m_e.numeric();
         const u32 wi = witness_pruning ? 0 : 1;
@@ -189,12 +162,6 @@ private:
             if (m_only && !m_only[s])
                 continue;
             SchemaExec& se = m_schemas[s];
-            [[maybe_unused]] const u64* mask = nullptr;
-            if constexpr (Masked)
-            {
-                if (se.plan->arity > 0 && !se.pre[wi].plan->never)
-                    mask = m_sym->masks(s);
-            }
             if (!canonical_order || se.ordered[wi])
             {
                 auto f = [&]() -> bool
@@ -203,10 +170,7 @@ private:
                         return true;  // numeric effects break the applicability rules
                     return emit(s, m_e.bind(), delta(se));
                 };
-                if constexpr (Masked)
-                    m_e.run_masked<Stop>(se.pre[wi], f, mask);
-                else
-                    m_e.run<Stop>(se.pre[wi], f);
+                m_e.run<Stop>(se.pre[wi], f);
                 if constexpr (Stop)
                     if (m_e.stopped())
                         return false;
@@ -222,10 +186,7 @@ private:
                     m_rows.push_back(b[i].v);
                 return true;
             };
-            if constexpr (Masked)
-                m_e.run_masked<false>(se.pre[wi], buffer, mask);
-            else
-                m_e.run<false>(se.pre[wi], buffer);
+            m_e.run<false>(se.pre[wi], buffer);
             const usize n = m_rows.size() / arity;
             if (n == 0)
                 continue;
@@ -285,9 +246,7 @@ private:
         return true;
     }
 
-public:
-    /// Whether the prepared state has an applicable action (witness pruning is used regardless of the setting; symmetry
-    /// pruning is not applied).
+    /// Whether the prepared state has an applicable action (witness pruning is used regardless of the setting).
     [[nodiscard]] bool any();
 
     /// Effects of the binding currently in engine().bind() for `schema` (preconditions are not checked). Numeric tasks:
@@ -436,7 +395,6 @@ private:
     LineVector<u8> m_val_mark;
     u32 m_pack_bits = 1;
     const u8* m_only = nullptr;  // set_schema_filter
-    std::unique_ptr<detail::SymmetryPruner> m_sym;  // symmetry_pruner()
     bool m_witness = true;
     bool m_canonical = true;
 };

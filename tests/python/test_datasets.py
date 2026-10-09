@@ -1,5 +1,4 @@
-"""mymyr.datasets: state spaces, the instance pool, generalized state spaces, samplers,
-object graphs and certificates.
+"""mymyr.datasets: state spaces, the instance pool, generalized state spaces and samplers.
 
 Counts against the fork use the fork's own test instances (its data/ directory: env MYMYR_FORK_DATA; skipped when
 missing) with the fork's own state-space numbers. The torch and JAX tests skip
@@ -76,7 +75,7 @@ def test_arrays_are_consistent(depot, depot_space):
     s = depot_space
     a = s.arrays()
     n, e = s.num_states, s.num_transitions
-    assert len(s) == n == 40320 and s.initial_state_id == 0 and not s.symmetry_reduced
+    assert len(s) == n == 40320 and s.initial_state_id == 0
     assert a["state_words"].shape == (n, s.row_words) and a["state_words"].dtype == np.uint64
     off, tgt = a["forward_offsets"], a["forward_targets"]
     assert off.shape == (n + 1,) and off[-1] == e and tgt.shape == (e,) and tgt.max() < n
@@ -179,10 +178,6 @@ def test_options(tmp_path, depot):
     assert not s.has_labels and "label_schemas" not in s.arrays()
     with pytest.raises(ValueError):
         s.label(0)
-    with pytest.raises(ValueError):
-        datasets.generate(depot, symmetry_pruning=True, certificate="kfwl", k=5)
-    with pytest.raises(ValueError):
-        datasets.generate(depot, certificate="nauty")
     with pytest.raises(TypeError):
         datasets.generate("depot")
     assert str(datasets.Status.OUT_OF_STATES) == "out_of_states"
@@ -223,19 +218,28 @@ def test_generalized_state_space():
     sizes = [s.num_states for s in g.spaces]
     assert sizes == sorted(sizes) == [8, 28, 28, 256]
     assert g.spaces[1].task is tasks[1] and g.spaces[2].task is tasks[2]  # ties keep the input order
-    assert not g.symmetry_reduced and g.num_vertices == sum(sizes)
+    assert g.num_vertices == sum(sizes) and len(g.spaces) == 4
     assert g.num_edges == sum(s.num_transitions for s in g.spaces)
     a = g.arrays()
+    assert np.array_equal(a["vertex_offsets"], np.cumsum([0] + sizes))
+    assert np.array_equal(a["edge_offsets"], np.cumsum([0] + [s.num_transitions for s in g.spaces]))
+    assert a["forward_offsets"].shape == (g.num_vertices + 1,) and a["forward_targets"].shape == (g.num_edges,)
     assert len(g.initial_vertices()) == 4 and a["initial"].sum() == 4
     for p, s in enumerate(g.spaces):
-        vm = g.vertex_mapping(p)
-        assert np.array_equal(a["vertex_problems"][vm], np.full(s.num_states, p))
-        assert np.array_equal(a["vertex_problem_vertices"][vm], np.arange(s.num_states))
-        assert np.array_equal(a["goal"][vm], s.arrays()["goal"])
-    sym = datasets.generalized_state_space(tasks, remove_if_unsolvable=False, symmetry_pruning=True)
-    assert sym.symmetry_reduced and len(sym.spaces) < 4 and sym.num_vertices < g.num_vertices
-    with pytest.raises(IndexError):
-        g.vertex_mapping(4)
+        b = s.arrays()
+        v0, e0 = int(a["vertex_offsets"][p]), int(a["edge_offsets"][p])
+        assert g.vertex(p, 0) == v0 and g.edge(p, 0) == e0
+        assert g.problem_of(v0 + s.num_states - 1) == (p, s.num_states - 1)
+        assert np.array_equal(a["goal"][v0 : v0 + s.num_states], b["goal"])
+        assert np.array_equal(a["unsolvable"][v0 : v0 + s.num_states], b["unsolvable"])
+        assert np.array_equal(a["forward_offsets"][v0 : v0 + s.num_states + 1], b["forward_offsets"] + e0)
+        assert np.array_equal(a["forward_targets"][e0 : e0 + s.num_transitions], b["forward_targets"] + v0)
+        e = s.num_transitions - 1
+        assert g.source(g.edge(p, e)) == g.vertex(p, s.source(e)) and g.target(g.edge(p, e)) == g.vertex(p, s.target(e))
+    for bad in (lambda: g.vertex(4, 0), lambda: g.vertex(0, -1), lambda: g.edge(0, g.spaces[0].num_transitions),
+                lambda: g.problem_of(g.num_vertices), lambda: g.source(-1), lambda: g.target(g.num_edges)):
+        with pytest.raises(IndexError):
+            bad()
     with pytest.raises(ValueError):
         datasets.GeneralizedStateSpace([g.spaces[0], datasets.state_space(fork_task("blocks_3", "test_problem.pddl"), remove_if_unsolvable=False)])
 
@@ -267,32 +271,6 @@ def test_sampler():
     no_dead = datasets.StateSpaceSampler(datasets.state_space(fork_task("gripper", "p-2-0.pddl")))
     with pytest.raises(ValueError):
         no_dead.sample_dead_end_state()
-
-
-# ------------------------------------------------------------------------------------------------ object graphs
-def test_object_graphs_and_certificates():
-    task = fork_task("gripper", "p-2-0.pddl")
-    s = datasets.state_space(task)
-    builder = datasets.ObjectGraphBuilder(task)
-    cr, fwl = set(), set()
-    for i in range(s.num_states):
-        g = builder.build(s.state(i))
-        a = g.arrays()
-        assert g.num_objects == task.num_objects
-        assert a["color"].shape == (g.num_vertices,) and a["offsets"][-1] == 2 * g.num_edges
-        assert a["color"].max() < g.num_colors and g.palette(int(a["color"][0]))[0] == 0  # object colours first
-        cr.add(g.color_refinement_certificate())
-        fwl.add(g.kfwl_certificate(2))
-        assert g.color_refinement_certificate() == datasets.object_graph(s.state(i)).color_refinement_certificate()
-    assert len(cr) == len(fwl) == 12  # the fork's test: 12 isomorphism classes among the 28 states
-    assert all(0 <= c < 2**128 for c in cr)
-    assert len(builder.build(s.state(0)).stable_colors()) == builder.build(s.state(0)).num_vertices
-    with pytest.raises(ValueError):
-        builder.build(text_task("depot__p02").initial_state)
-    with pytest.raises(ValueError):
-        builder.build(s.state(0)).kfwl_certificate(5)
-    sym = datasets.state_space(task, symmetry_pruning=True)
-    assert sym.symmetry_reduced and sym.num_states == 12
 
 
 # ------------------------------------------------------------------------------------------------ frameworks

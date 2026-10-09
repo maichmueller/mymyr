@@ -359,9 +359,8 @@ std::vector<PyDeviceGeneration> generate_many(nb::handle table, const Common& a,
 const char* k_options_doc =
     " Options: as in the CPU generator's (mymyr.datasets.state_space): max_states (fail at max(max_states, 2) states "
     "or more), max_seconds, remove_if_unsolvable, labels; threads are host threads for the host-side work "
-    "(state-dependent costs, host output; 0: all cores); symmetry pruning is not offered (the CPU generator only). "
-    "chunk_states caps the parents per "
-    "chunk, view_bytes the per-chunk view memory, expected_states pre-sizes the arrays; none changes the result. "
+    "(state-dependent costs, host output; 0: all cores). chunk_states caps the parents per chunk, view_bytes the "
+    "per-chunk view memory, expected_states pre-sizes the arrays; none changes the result. "
     "ctx: a mymyr.cuda.Context, or None: the task's (table's) default context on `device` (default 0). stream: the "
     "stream of the work and of the result's arrays (None: the context's). Tasks beyond the device's limits "
     "raise ValueError; negative, NaN or undefined transition costs ValueError.";

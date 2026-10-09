@@ -1,17 +1,8 @@
 #pragma once
-// Generalized state spaces, matching mimir's `GeneralizedStateSpaceImpl`: a class graph over the state spaces of
-// several problems of one domain.
-//   - Without symmetry reduction (the input spaces were generated without symmetry pruning): the class graph is the
-//     disjoint union of the problem graphs, in input order: class vertex (problem p, vertex v) = offset[p] + v, and
-//     class edge (p, e) = edge offset[p] + e. Initial, goal and unsolvable class vertices are the problems' ones.
-//   - With symmetry reduction (every input space was generated with symmetry pruning): the certificate of each
-//     problem vertex's state (the object graph certificate its space was pruned with) names its class. A problem whose
-//     initial state's class exists already is dropped (isomorphic to an earlier one); otherwise each of its vertices
-//     maps to its certificate's class (a new class vertex with this problem vertex as representative, flagged
-//     initial / goal / unsolvable from it, if the certificate is new), and each edge to the class edge between the
-//     classes of its ends (no parallel class edges). mimir stores the problem vertex index instead of the class
-//     vertex index for new certificates (a bug that maps later problems' vertices to wrong classes); mymyr stores the
-//     class vertex.
+// Generalized state spaces, as mimir's `GeneralizedStateSpaceImpl`: one graph over the state spaces of several problems
+// of one domain, their disjoint union in input order. Vertex v of problem p is vertex vertex_offsets()[p] + v, and edge
+// e of problem p is edge edge_offsets()[p] + e, so the edges out of a vertex are its state's transitions in their
+// forward order. The initial, goal and unsolvable vertices are the problems' ones.
 // mimir's StateSpaceImpl::create(GeneralizedSearchContext, options) sorts the spaces by their number of states
 // (its option sort_ascending_by_num_states) with std::sort, whose order of ties is unspecified; ordered_spaces() sorts
 // stably (ties keep the input order), which is what mimir's libstdc++ std::sort does for up to 16 spaces.
@@ -32,30 +23,34 @@ namespace mymyr::datasets
 class GeneralizedStateSpace
 {
 public:
-    /// Symmetry reduction is applied iff every space is symmetry reduced (as in mimir). The spaces must belong to
-    /// one domain (equal domain names).
+    /// The disjoint union of `spaces`, in their order. Throws std::invalid_argument for a null space or spaces of
+    /// different domains (by domain name), std::length_error for 2^32 vertices or more.
     [[nodiscard]] static std::shared_ptr<const GeneralizedStateSpace> create(std::vector<StateSpacePtr> spaces);
 
-    /// The problems' spaces kept (with symmetry reduction, problems isomorphic to earlier ones are dropped).
+    /// The problems' state spaces (problem p = spaces()[p]).
     [[nodiscard]] const std::vector<StateSpacePtr>& spaces() const noexcept { return m_spaces; }
-    [[nodiscard]] bool symmetry_reduced() const noexcept { return m_symmetric; }
+    [[nodiscard]] u32 num_vertices() const noexcept { return m_voffsets.back(); }
+    [[nodiscard]] u64 num_edges() const noexcept { return m_eoffsets.back(); }
 
-    // class graph
-    [[nodiscard]] u32 num_vertices() const noexcept { return static_cast<u32>(m_vproblem.size()); }
-    [[nodiscard]] u64 num_edges() const noexcept { return m_esource.size(); }
-    /// Per class vertex: the problem (index into spaces()) and the problem vertex of its representative.
-    [[nodiscard]] std::span<const u32> vertex_problems() const noexcept { return m_vproblem; }
-    [[nodiscard]] std::span<const u32> vertex_problem_vertices() const noexcept { return m_vvertex; }
-    /// Per class edge, in insertion order: its ends, and the problem and problem edge of its representative.
-    [[nodiscard]] std::span<const u32> edge_sources() const noexcept { return m_esource; }
-    [[nodiscard]] std::span<const u32> edge_targets() const noexcept { return m_etarget; }
-    [[nodiscard]] std::span<const u32> edge_problems() const noexcept { return m_eproblem; }
-    [[nodiscard]] std::span<const u32> edge_problem_edges() const noexcept { return m_eedge; }
-    /// Forward CSR over class vertices: the class edges out of v are forward_edges()[offsets[v] .. offsets[v + 1])
-    /// (ascending edge indices).
+    /// [spaces().size() + 1]: the vertices of problem p are vertex_offsets()[p] .. vertex_offsets()[p + 1] - 1, its
+    /// edges edge_offsets()[p] .. edge_offsets()[p + 1] - 1.
+    [[nodiscard]] std::span<const u32> vertex_offsets() const noexcept { return m_voffsets; }
+    [[nodiscard]] std::span<const u64> edge_offsets() const noexcept { return m_eoffsets; }
+    /// The vertex of state `state` of problem `problem`, and the edge of its transition `edge`. Throw std::out_of_range
+    /// for an index outside its problem or space.
+    [[nodiscard]] u32 vertex(u32 problem, u32 state) const;
+    [[nodiscard]] u64 edge(u32 problem, u64 edge) const;
+    /// The problem of a vertex (binary search over vertex_offsets()); its state is vertex - vertex_offsets()[problem].
+    /// Throws std::out_of_range for a vertex outside the graph.
+    [[nodiscard]] u32 problem_of(u32 vertex) const;
+
+    /// Forward CSR: the edges out of vertex v are forward_offsets()[v] .. forward_offsets()[v + 1] - 1, edge e goes to
+    /// forward_targets()[e].
     [[nodiscard]] std::span<const u64> forward_offsets() const noexcept { return m_foffsets; }
-    [[nodiscard]] std::span<const u32> forward_edges() const noexcept { return m_fedges; }
-    /// Flags per class vertex (0 or 1), and the flagged vertices in ascending order.
+    [[nodiscard]] std::span<const u32> forward_targets() const noexcept { return m_targets; }
+    [[nodiscard]] u32 source(u64 edge) const;  // binary search over forward_offsets
+
+    /// Flags per vertex (0 or 1), and the flagged vertices in ascending order.
     [[nodiscard]] std::span<const u8> initial_flags() const noexcept { return m_initial; }
     [[nodiscard]] std::span<const u8> goal_flags() const noexcept { return m_goal; }
     [[nodiscard]] std::span<const u8> unsolvable_flags() const noexcept { return m_unsolvable; }
@@ -63,21 +58,15 @@ public:
     [[nodiscard]] std::vector<u32> goal_vertices() const;
     [[nodiscard]] std::vector<u32> unsolvable_vertices() const;
 
-    /// Per problem p (index into spaces()): the class vertex of each problem vertex and the class edge of each edge.
-    [[nodiscard]] std::span<const u32> vertex_mapping(u32 p) const { return m_vmap.at(p); }
-    [[nodiscard]] std::span<const u32> edge_mapping(u32 p) const { return m_emap.at(p); }
-
     GeneralizedStateSpace() = default;
 
 private:
     std::vector<StateSpacePtr> m_spaces;
-    bool m_symmetric = false;
-    std::vector<u32> m_vproblem, m_vvertex;
-    std::vector<u32> m_esource, m_etarget, m_eproblem, m_eedge;
-    std::vector<u64> m_foffsets;
-    std::vector<u32> m_fedges;
+    std::vector<u32> m_voffsets{0};
+    std::vector<u64> m_eoffsets{0};
+    std::vector<u64> m_foffsets{0};
+    std::vector<u32> m_targets;
     std::vector<u8> m_initial, m_goal, m_unsolvable;
-    std::vector<std::vector<u32>> m_vmap, m_emap;
 };
 using GeneralizedStateSpacePtr = std::shared_ptr<const GeneralizedStateSpace>;
 }  // namespace mymyr::datasets

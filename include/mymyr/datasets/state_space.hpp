@@ -30,8 +30,6 @@
 //   - threads > 1: the same generator on a Team, over the concurrent store, with ids deterministic regardless of
 //     thread count;
 //   - generate_state_spaces: an instance pool, one task per worker thread (many small instances).
-// Symmetry pruning (options.symmetry_pruning) keeps one state per certificate class of its object graph
-// (datasets/certificates.hpp) and runs single-threaded, as in mimir's state space with symmetry pruning.
 //
 // State words: row i of state_words() holds state i in the task's slot layout (the fluent/derived words, then
 // numeric_words() words for numeric tasks), zero-padded to row_words(). With frozen atoms
@@ -41,12 +39,11 @@
 //
 // Options that mirror mimir's `StateSpaceOptions`: max_states (mimir's max_num_states: the generation fails when
 // the space has max_states states or more), remove_if_unsolvable (no state space when the initial state cannot
-// reach a goal: the name notwithstanding, mimir removes the whole space, never single states), symmetry_pruning,
-// and max_seconds (mimir declares timeout_ms but does not use it). As in mimir, a task whose goal is statically
-// false has no state space (its BrFS ends as unsolvable before expanding anything), whatever remove_if_unsolvable.
+// reach a goal: the name notwithstanding, mimir removes the whole space, never single states) and max_seconds (mimir
+// declares timeout_ms but does not use it). As in mimir, a task whose goal is statically false has no state space (its
+// BrFS ends as unsolvable before expanding anything), whatever remove_if_unsolvable.
 
 #include "mymyr/core/types.hpp"
-#include "mymyr/datasets/certificates.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
 #include "mymyr/task/task.hpp"
@@ -61,26 +58,12 @@
 
 namespace mymyr::datasets
 {
-/// Certificates of object graphs used by symmetry pruning (datasets/certificates.hpp).
-enum class CertificateKind : u8
-{
-    ColorRefinement,  // 1-WL
-    KFwl,             // k-dimensional folklore Weisfeiler-Leman (StateSpaceOptions::fwl_k)
-};
-
 struct StateSpaceOptions
 {
     u32 threads = 1;                                          // 0: std::thread::hardware_concurrency()
     u64 max_states = std::numeric_limits<u64>::max();         // fail (OutOfStates) when the space reaches this size
     f64 max_seconds = std::numeric_limits<f64>::infinity();   // fail (Timeout) after this wall-clock time
     bool remove_if_unsolvable = true;                         // fail (Unsolvable) if the initial state is unsolvable
-    bool symmetry_pruning = false;                            // one state per certificate class (single-threaded)
-    // 2-FWL by default: it matches mimir's nauty canonical classes, where colour refinement can merge
-    // non-isomorphic states (a goal state with non-goal states in one block); colour refinement is much cheaper
-    // (O((V + E) log V) against O(V^3) per round)
-    CertificateKind certificate = CertificateKind::KFwl;
-    u32 fwl_k = 2;                                            // k of CertificateKind::KFwl (2, 3 or 4)
-    KfwlLimits fwl_limits;                                    // n and work bounds of a k-FWL certificate
     bool labels = true;                                       // keep (schema, binding) per transition
 };
 
@@ -130,12 +113,6 @@ public:
     [[nodiscard]] u32 num_states() const noexcept { return m_n; }
     [[nodiscard]] u64 num_transitions() const noexcept { return m_targets.size(); }
     [[nodiscard]] u32 initial_state() const noexcept { return 0; }
-    [[nodiscard]] bool symmetry_reduced() const noexcept { return m_symmetry_reduced; }
-    /// The certificate kind (and k, and the k-FWL limits) of the symmetry reduction; meaningful iff
-    /// symmetry_reduced().
-    [[nodiscard]] CertificateKind certificate() const noexcept { return m_certificate; }
-    [[nodiscard]] u32 fwl_k() const noexcept { return m_fwl_k; }
-    [[nodiscard]] const KfwlLimits& fwl_limits() const noexcept { return m_fwl_limits; }
 
     // ------------------------------------------------------------------------------------------ states
     /// Fluent words per state, numeric words per state, and the row width (their sum).
@@ -214,10 +191,6 @@ private:
     TaskPtr m_task;
     u32 m_n = 0;
     u32 m_words = 0, m_numeric_words = 0;
-    bool m_symmetry_reduced = false;
-    CertificateKind m_certificate = CertificateKind::ColorRefinement;
-    u32 m_fwl_k = 2;
-    KfwlLimits m_fwl_limits;
     bool m_has_labels = false;
     u32 m_label_width = 0;
     std::vector<u64> m_states;

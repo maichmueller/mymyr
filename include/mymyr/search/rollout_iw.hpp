@@ -50,7 +50,6 @@
 #include "mymyr/search/control.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
-#include "mymyr/successor/symmetry.hpp"
 
 #include <functional>
 #include <optional>
@@ -86,7 +85,6 @@ struct RolloutIwOptions
     u64 max_rollouts = ~u64{0};
     u32 incumbent_bound = ~u32{0};  // a plan of this length is known elsewhere
     bool canonical_order = true;
-    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;  // as IwOptions::symmetry_pruning
     std::optional<State> start;
     /// As IwOptions::successor_order, applied when a node's actions are materialized: its result is the node's
     /// generation order (the parity gate replays mimir's generator order with it).

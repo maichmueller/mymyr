@@ -93,7 +93,6 @@ add_library(mymyr_core STATIC
     src/mymyr/successor/successors.cpp
     src/mymyr/successor/bindings.cpp
     src/mymyr/successor/conditions.cpp
-    src/mymyr/successor/symmetry.cpp
     src/mymyr/axioms/evaluator.cpp
     src/mymyr/search/brfs.cpp
     src/mymyr/search/goal.cpp
@@ -158,14 +157,12 @@ target_link_libraries(mymyr_core PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
 find_package(Threads REQUIRED)
 target_link_libraries(mymyr_core PUBLIC Threads::Threads)
 
-# datasets: state spaces, generalized state spaces, samplers, object graphs, certificates, tuple graphs
+# datasets: state spaces, generalized state spaces, samplers, tuple graphs, knowledge bases
 target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/state_space.cpp
     src/mymyr/heuristics/perfect.cpp
     src/mymyr/datasets/generalized_state_space.cpp
     src/mymyr/datasets/sampler.cpp
-    src/mymyr/datasets/object_graph.cpp
-    src/mymyr/datasets/certificates.cpp
     src/mymyr/datasets/tuple_graph.cpp
     src/mymyr/datasets/knowledge_base.cpp
 )

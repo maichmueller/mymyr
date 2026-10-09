@@ -2,24 +2,20 @@
 // per measurement, for parity, speed and determinism checks against the fork.
 //
 //   mymyr_datasets ss LIST [--threads T] [--no-fp] [--hash] [--max-states N] [--atoms auto|lazy|frozen] [--text]
-//                          [--remove-if-unsolvable] [--symmetry] [--certificate cr|fwl] [--k K] [--no-labels]
+//                          [--remove-if-unsolvable] [--no-labels]
 //       One JSON line per line "domain.pddl problem.pddl [task.txt]" of LIST (--text: read the exported task.txt of
-//       the third column instead of the PDDL). Defaults as the fork_ss configuration: remove_if_unsolvable = false, no
-//       symmetry pruning, frozen atoms. --hash adds "arrays_hash": FNV-1a over the bytes of every array of the space
+//       the third column instead of the PDDL). Defaults as the fork_ss configuration: remove_if_unsolvable = false,
+//       frozen atoms. --hash adds "arrays_hash": FNV-1a over the bytes of every array of the space
 //       (state words, forward CSR, labels, costs, reverse CSR, distances, flags), for the determinism gate.
 //   mymyr_datasets pool LIST --threads T [--repeat R] [--text] [--atoms ...] [--quiet]
 //       The instance pool (datasets::for_each_state_space) over LIST repeated R times: one JSON line per task unless
 //       --quiet, then the probe's summary line (bench "pool": wall_s, states_per_s, ...).
-//   mymyr_datasets gss DOMAIN PROBLEM... [--symmetry] [--certificate cr|fwl] [--k K] [--threads T]
+//   mymyr_datasets gss DOMAIN PROBLEM... [--threads T]
 //   mymyr_datasets sampler DOMAIN PROBLEM [--seed S] [--samples N]
 //       As fork_datasets gss / sampler.
 //   mymyr_datasets tg DOMAIN PROBLEM [--width W] [--no-pruning] [--tg-threads T] [state space options]
 //       The tuple graphs of every vertex of the state space (datasets/tuple_graph.hpp) on T threads: seconds, peak RSS
 //       before and after, total vertices and edges; as search_fork --algo tuple_graphs --time-width W.
-//   mymyr_datasets kfwl DOMAIN PROBLEM [--k K] [--samples S] [--max-n M] [state space options]
-//       The k-FWL certificates (datasets/certificates.hpp) of the object graphs of every ceil(N / S)-th state of the
-//       space (N states) with at most M vertices: seconds and count per vertex count n, the number of certificate
-//       classes, peak RSS before and after; as search_fork --algo kfwl --time.
 //
 // Fingerprints (FNV-1a 64 over bytes, u64 as 8 little-endian bytes):
 //   atom string  "(pred o1 ... ok)" of every true fluent atom; state hash = fnv(sorted atom strings joined by '\n'),
@@ -27,9 +23,7 @@
 //   fnv(sorted fnv(src hash, fnv("(schema o1 ... ok)"), dst hash)); goal = fnv(sorted goal state hashes);
 //   vstar = fnv(sorted fnv(state hash, unit distance)), with the fork's INT32_MAX for unsolvable states.
 
-#include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
-#include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/datasets/sampler.hpp"
 #include "mymyr/datasets/state_space.hpp"
 #include "mymyr/datasets/tuple_graph.hpp"
@@ -81,13 +75,11 @@ double peak_rss_mb()
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_datasets ss LIST [--threads T] [--no-fp] [--hash] [--max-states N]\n"
-                 "                          [--atoms auto|lazy|frozen] [--text] [--remove-if-unsolvable] [--symmetry]\n"
-                 "                          [--certificate cr|fwl] [--k K] [--no-labels]\n"
+                 "                          [--atoms auto|lazy|frozen] [--text] [--remove-if-unsolvable] [--no-labels]\n"
                  "       mymyr_datasets pool LIST --threads T [--repeat R] [--text] [--atoms ...] [--quiet]\n"
-                 "       mymyr_datasets gss DOMAIN PROBLEM... [--symmetry] [--certificate cr|fwl] [--k K] [--threads T]\n"
+                 "       mymyr_datasets gss DOMAIN PROBLEM... [--threads T]\n"
                  "       mymyr_datasets sampler DOMAIN PROBLEM [--seed S] [--samples N]\n"
-                 "       mymyr_datasets tg DOMAIN PROBLEM [--width W] [--no-pruning] [--tg-threads T]\n"
-                 "       mymyr_datasets kfwl DOMAIN PROBLEM [--k K] [--samples S] [--max-n M]\n",
+                 "       mymyr_datasets tg DOMAIN PROBLEM [--width W] [--no-pruning] [--tg-threads T]\n",
                  msg.c_str());
     std::exit(2);
 }
@@ -354,7 +346,6 @@ struct Common
     bool fp = true, hash = false, text = false, quiet = false;
     u32 repeat = 1;
     u64 seed = 1, samples = 20000;
-    u32 max_n = std::numeric_limits<u32>::max();
     TupleGraphOptions tg;
     std::vector<std::string> positional;
 };
@@ -389,20 +380,6 @@ Common parse_common(int argc, char** argv)
             c.text = true;
         else if (a == "--remove-if-unsolvable")
             c.so.remove_if_unsolvable = true;
-        else if (a == "--symmetry")
-            c.so.symmetry_pruning = true;
-        else if (a == "--certificate")
-        {
-            const std::string v = value();
-            if (v == "cr")
-                c.so.certificate = CertificateKind::ColorRefinement;
-            else if (v == "fwl")
-                c.so.certificate = CertificateKind::KFwl;
-            else
-                usage("unknown --certificate " + v);
-        }
-        else if (a == "--k")
-            c.so.fwl_k = static_cast<u32>(std::stoul(value()));
         else if (a == "--no-labels")
             c.so.labels = false;
         else if (a == "--repeat")
@@ -413,8 +390,6 @@ Common parse_common(int argc, char** argv)
             c.seed = std::stoull(value());
         else if (a == "--samples")
             c.samples = std::stoull(value());
-        else if (a == "--max-n")
-            c.max_n = static_cast<u32>(std::stoul(value()));
         else if (a == "--width")
             c.tg.width = static_cast<u32>(std::stoul(value()));
         else if (a == "--no-pruning")
@@ -547,10 +522,10 @@ int run_gss(const Common& c)
         order += (i ? ",\"" : "\"") + path_of.at(gss->spaces()[i]->task().get()) + "\"";
     }
     order += "]";
-    auto rep = [&](u32 cv) -> std::pair<u64, u64>
+    auto rep = [&](u32 v) -> std::pair<u64, u64>
     {
-        const u32 p = gss->vertex_problems()[cv];
-        return {p, hashes.at(p).at(gss->vertex_problem_vertices()[cv])};
+        const u32 p = gss->problem_of(v);
+        return {p, hashes.at(p).at(v - gss->vertex_offsets()[p])};
     };
     std::vector<u64> vfp, efp, mfp, ifp, gfp, ufp;
     for (u32 v = 0; v < gss->num_vertices(); ++v)
@@ -567,23 +542,22 @@ int run_gss(const Common& c)
         if (gss->unsolvable_flags()[v])
             ufp.push_back(f.h);
     }
-    for (u64 e = 0; e < gss->num_edges(); ++e)
-    {
-        auto [ps, hs] = rep(gss->edge_sources()[e]);
-        auto [pt, ht] = rep(gss->edge_targets()[e]);
-        Fnv f;
-        f.u64le(ps);
-        f.u64le(hs);
-        f.u64le(pt);
-        f.u64le(ht);
-        efp.push_back(f.h);
-    }
-    for (u32 p = 0; p < gss->spaces().size(); ++p)
-    {
-        const auto vmap = gss->vertex_mapping(p);
-        for (u32 v = 0; v < vmap.size(); ++v)
+    for (u32 v = 0; v < gss->num_vertices(); ++v)
+        for (u64 e = gss->forward_offsets()[v]; e < gss->forward_offsets()[v + 1]; ++e)
         {
-            auto [cp, ch] = rep(vmap[v]);
+            auto [ps, hs] = rep(v);
+            auto [pt, ht] = rep(gss->forward_targets()[e]);
+            Fnv f;
+            f.u64le(ps);
+            f.u64le(hs);
+            f.u64le(pt);
+            f.u64le(ht);
+            efp.push_back(f.h);
+        }
+    for (u32 p = 0; p < gss->spaces().size(); ++p)
+        for (u32 v = 0; v < gss->spaces()[p]->num_states(); ++v)
+        {
+            auto [cp, ch] = rep(gss->vertex(p, v));
             Fnv f;
             f.u64le(p);
             f.u64le(hashes[p][v]);
@@ -591,12 +565,11 @@ int run_gss(const Common& c)
             f.u64le(ch);
             mfp.push_back(f.h);
         }
-    }
-    std::printf("{\"lib\":\"mymyr\",\"mode\":\"gss\",\"symmetry\":%s,\"domain\":\"%s\",\"problems\":%zu,\"state_spaces\":%zu,\"order\":%s,"
+    std::printf("{\"lib\":\"mymyr\",\"mode\":\"gss\",\"domain\":\"%s\",\"problems\":%zu,\"state_spaces\":%zu,\"order\":%s,"
                 "\"class_vertices\":%u,\"class_edges\":%llu,\"initial\":%zu,\"goal\":%zu,\"unsolvable\":%zu,"
                 "\"fp_vertices\":\"%s\",\"fp_edges\":\"%s\",\"fp_mapping\":\"%s\",\"fp_initial\":\"%s\",\"fp_goal\":\"%s\",\"fp_unsolvable\":\"%s\","
                 "\"total_s\":%.4f,\"peak_rss_mb\":%.1f}\n",
-                so.symmetry_pruning ? "true" : "false", c.positional[0].c_str(), c.positional.size() - 1, gss->spaces().size(), order.c_str(),
+                c.positional[0].c_str(), c.positional.size() - 1, gss->spaces().size(), order.c_str(),
                 gss->num_vertices(), static_cast<unsigned long long>(gss->num_edges()), ifp.size(), gfp.size(), ufp.size(),
                 hex(fnv_list(vfp)).c_str(), hex(fnv_list(efp)).c_str(), hex(fnv_list(mfp)).c_str(), hex(fnv_list(ifp)).c_str(),
                 hex(fnv_list(gfp)).c_str(), hex(fnv_list(ufp)).c_str(), total_s, peak_rss_mb());
@@ -714,60 +687,6 @@ int run_tg(const Common& c)
     usage("tg needs the PDDL front end");
 #endif
 }
-int run_kfwl(const Common& c)
-{
-#if defined(MYMYR_HAS_FRONTEND)
-    if (c.positional.size() != 2)
-        usage("kfwl needs DOMAIN PROBLEM");
-    const auto data = frontend::load_task(c.positional[0], c.positional[1]);
-    StateSpaceOptions so = c.so;
-    so.symmetry_pruning = false;
-    const StateSpaceResult r = generate_state_space(Task::create(*data, c.to), so);
-    if (!r.space)
-    {
-        std::printf("{\"lib\":\"mymyr\",\"mode\":\"kfwl\",\"problem\":\"%s\",\"ok\":false}\n", c.positional[1].c_str());
-        return 0;
-    }
-    const StateSpace& S = *r.space;
-    const u64 N = S.num_states();
-    const u64 step = c.samples > 0 && N > c.samples ? (N + c.samples - 1) / c.samples : 1;
-    ObjectGraphBuilder ogb(*S.task());
-    ObjectGraph graph;
-    std::map<u32, std::pair<u64, double>> per_n;  // n -> (certificates, seconds)
-    std::vector<Certificate> certs;
-    const double rss_before = peak_rss_mb();
-    double total = 0;
-    for (u64 v = 0; v < N; v += step)
-    {
-        ogb.build(S.state(static_cast<u32>(v)), graph);
-        if (graph.num_vertices() > c.max_n)
-            continue;
-        const auto t0 = Clock::now();
-        certs.push_back(kfwl_certificate(graph, so.fwl_k, so.fwl_limits));
-        const double secs = seconds_since(t0);
-        total += secs;
-        auto& [count, seconds] = per_n[graph.num_vertices()];
-        ++count;
-        seconds += secs;
-    }
-    const double rss_after = peak_rss_mb();
-    std::sort(certs.begin(), certs.end());
-    const usize classes = static_cast<usize>(std::unique(certs.begin(), certs.end()) - certs.begin());
-    std::string by_n;
-    for (const auto& [n, cs] : per_n)
-        by_n += (by_n.empty() ? "\"" : ",\"") + std::to_string(n) + "\":{\"count\":" + std::to_string(cs.first) +
-                ",\"seconds\":" + std::to_string(cs.second) + "}";
-    std::printf("{\"lib\":\"mymyr\",\"mode\":\"kfwl\",\"problem\":\"%s\",\"ok\":true,\"k\":%u,\"states\":%llu,\"step\":%llu,"
-                "\"certificates\":%zu,\"classes\":%zu,\"seconds\":%.6f,\"by_n\":{%s},\"peak_rss_mb_before\":%.1f,"
-                "\"peak_rss_mb_after\":%.1f}\n",
-                c.positional[1].c_str(), so.fwl_k, static_cast<unsigned long long>(N), static_cast<unsigned long long>(step), certs.size(),
-                classes, total, by_n.c_str(), rss_before, rss_after);
-    return 0;
-#else
-    (void)c;
-    usage("kfwl needs the PDDL front end");
-#endif
-}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -788,8 +707,6 @@ int main(int argc, char** argv)
             return run_sampler(c);
         if (mode == "tg")
             return run_tg(c);
-        if (mode == "kfwl")
-            return run_kfwl(c);
         usage("unknown mode " + mode);
     }
     catch (const std::exception& e)
