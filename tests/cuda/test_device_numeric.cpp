@@ -986,3 +986,97 @@ TEST(DeviceNumericRules, StaticFunctionGoalsWithoutFluents)
         EXPECT_EQ(results[i].status, search::iw(*task, cpu).status);
     }
 }
+
+/// Conditional numeric effects that do not fire conflict with nothing, and an assign gives an undefined value a value:
+/// the reachable states of a task where both matter (counted by hand), on the device as on the CPU.
+TEST(DeviceNumericRules, OnlyEffectsThatFireConflictAndAssignDefines)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto domain = frontend::Domain::from_string(R"((define (domain d) (:requirements :strips :negative-preconditions
+                                                            :conditional-effects :numeric-fluents)
+ (:predicates (p) (q) (done)) (:functions (y) (u))
+ (:action set-p :parameters () :precondition (not (p)) :effect (p))
+ (:action ce :parameters () :precondition (not (done)) :effect (and (done) (when (q) (assign (y) 5)) (when (p) (increase (y) 1))))
+ (:action def-u :parameters () :precondition (and) :effect (assign (u) 1))))",
+                                                      "d.pddl");
+    const TaskPtr task = Task::create(*domain->instantiate_string(
+        "(define (problem p) (:domain d) (:init (q) (= (y) 2)) (:goal (and (done) (>= (u) 0))))", "p.pddl"));
+    for (const BrfsResult& r : {brfs(*task), cuda::brfs(context(), task, {}).result})
+    {
+        EXPECT_TRUE(r.exhausted);
+        EXPECT_EQ(r.states, 8u);
+        EXPECT_EQ(r.generated, 14u);
+        EXPECT_EQ(r.goal_states, 2u);
+    }
+}
+
+/// A goal literal over an atom no state holds (no effect adds it, the initial state lacks it): negative, it always
+/// holds; positive, no state is a goal. Device breadth-first search, A* and state space agree with the CPU.
+TEST(DeviceGoals, AtomsNoStateHolds)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    const auto domain = frontend::Domain::from_string(R"((define (domain d) (:requirements :strips :negative-preconditions)
+ (:predicates (f ?x) (g ?x))
+ (:action set :parameters (?x) :precondition (g ?x) :effect (f ?x))))",
+                                                      "d.pddl");
+    for (const auto& [goal, goals] : {std::pair{"(and (f a) (not (f b)))", 1u}, std::pair{"(and (f a) (f b))", 0u}})
+    {
+        SCOPED_TRACE(goal);
+        const TaskPtr task = Task::create(*domain->instantiate_string(
+            std::string("(define (problem p) (:domain d) (:objects a b) (:init (g a)) (:goal ") + goal + "))", "p.pddl"));
+        const BrfsResult r = cuda::brfs(ctx, task, {}).result;
+        EXPECT_TRUE(r.exhausted);
+        EXPECT_EQ(r.states, 2u);
+        EXPECT_EQ(r.goal_states, goals);
+        const search::BestFirstResult cpu = search::astar_eager(*task);
+        const cuda::DeviceBestFirstResult a = cuda::astar(ctx, task, {});
+        EXPECT_EQ(a.result.status, cpu.status);
+        EXPECT_EQ(a.result.status, goals ? search::SearchStatus::Solved : search::SearchStatus::Unsolvable);
+        cuda::DeviceStateSpaceOptions o; o.space.remove_if_unsolvable = false; o.output = cuda::StateSpaceOutput::Host;
+        const cuda::DeviceStateSpaceResult s = cuda::state_space(ctx, task, o);
+        ASSERT_EQ(s.status, datasets::StateSpaceStatus::Ok);
+        ASSERT_TRUE(s.host);
+        EXPECT_EQ(s.host->num_states(), 2u);
+        EXPECT_EQ(s.host->num_goal_states(), goals);
+    }
+}
+
+/// Numeric conditions and effects in a task without numeric state values (its fluent function has no value and no
+/// assign effect, the other one is static): the device refuses the task instead of ignoring them. With an assign
+/// effect the function has a slot, and the device runs the task as the CPU does.
+TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    const std::string actions = R"(
+ (:action a :parameters (?x) :precondition (>= (w ?x) 1) :effect (f ?x))
+ (:action b :parameters (?x) :precondition (>= (c) 1) :effect (f ?x))
+ (:action e :parameters (?x) :precondition (and (f ?x) (< (c) 2)) :effect (and (not (f ?x)) (increase (c) 1))))";
+    auto make = [&](const std::string& extra)
+    {
+        const auto domain = frontend::Domain::from_string(
+            "(define (domain d) (:requirements :strips :numeric-fluents) (:predicates (f ?x)) (:functions (w ?x) (c))" +
+                extra + actions + ")",
+            "d.pddl");
+        return Task::create(*domain->instantiate_string(
+            "(define (problem p) (:domain d) (:objects a b) (:init (= (w a) 1) (= (w b) 0)) (:goal (f b)))", "p.pddl"));
+    };
+    const TaskPtr slotless = make("");
+    ASSERT_EQ(slotless->numeric_slots(), 0u);
+    EXPECT_EQ(brfs(*slotless).states, 2u);
+    EXPECT_NE(cuda::ChunkGenerator::unsupported(*slotless).find("numeric conditions or effects"), std::string::npos);
+    EXPECT_THROW((void) cuda::brfs(ctx, slotless, {}), std::invalid_argument);
+    // c only grows from the value reset gives it, up to 2: a finite state space
+    const TaskPtr assigned = make(" (:action reset :parameters () :precondition (and) :effect (assign (c) 0))");
+    ASSERT_EQ(assigned->numeric_slots(), 1u);
+    BrfsOptions bounded; bounded.max_states = 1000;
+    const BrfsResult cpu = brfs(*assigned, bounded);
+    ASSERT_TRUE(cpu.exhausted);
+    cuda::DeviceBrfsOptions device_bounded; device_bounded.max_states = 1000;
+    const BrfsResult device = cuda::brfs(ctx, assigned, device_bounded).result;
+    EXPECT_TRUE(device.exhausted);
+    EXPECT_EQ(device.states, cpu.states);
+    EXPECT_EQ(device.generated, cpu.generated);
+    EXPECT_EQ(device.goal_states, cpu.goal_states);
+}

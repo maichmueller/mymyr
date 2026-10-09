@@ -25,6 +25,7 @@
 #include <nanobind/stl/variant.h>
 
 #include <atomic>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -72,10 +73,25 @@ public:
         return m_suite;
     }
 
-    /// The task's action costs (heuristics::ActionCosts), made on first use.
+    /// The task's action costs (heuristics::ActionCosts), made on first use. Throws std::invalid_argument (on every
+    /// call) for a metric mymyr refuses. The error is captured inside call_once and rethrown outside it, so that no
+    /// exception unwinds through the C frames of pthread_once.
     [[nodiscard]] const heuristics::ActionCosts& costs()
     {
-        std::call_once(m_costs_once, [this] { m_costs = std::make_unique<heuristics::ActionCosts>(*task); });
+        std::call_once(m_costs_once,
+                       [this]
+                       {
+                           try
+                           {
+                               m_costs = std::make_unique<heuristics::ActionCosts>(*task);
+                           }
+                           catch (...)
+                           {
+                               m_costs_error = std::current_exception();
+                           }
+                       });
+        if (m_costs_error)
+            std::rethrow_exception(m_costs_error);
         return *m_costs;
     }
     /// Numeric slot of a name "(function o1 ... ok)" (Task::numeric_name), or ~0 if no slot has it.
@@ -99,6 +115,7 @@ public:
 private:
     std::once_flag m_names_once, m_table_once, m_suite_once, m_costs_once, m_slots_once;
     std::unique_ptr<heuristics::ActionCosts> m_costs;
+    std::exception_ptr m_costs_error;
     std::unordered_map<std::string, u32> m_slots;
     NameIndex m_names;
     rl::TaskTablePtr m_table;

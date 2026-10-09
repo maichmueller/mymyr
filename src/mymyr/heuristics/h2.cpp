@@ -63,18 +63,12 @@ struct Lists
 class H2Heuristic final : public Heuristic
 {
 public:
-    H2Heuristic(const Task& task, const Options& o) : m_task(task), m_real(o.costs == Costs::Real)
+    H2Heuristic(const Task& task, const Options& o) : m_task(task), m_real(resolve_costs(task, o.costs) == Costs::Real)
     {
         if (o.evaluation == Evaluation::Lifted)
             throw std::invalid_argument("mymyr: h2 has no lifted evaluation (use Evaluation::Auto or Grounded)");
         if (m_real)
-        {
-            const ActionCosts costs(task);
-            if (!costs.state_independent())
-                throw std::invalid_argument("mymyr: real-cost heuristics need action costs that do not depend on the state");
-            if (!costs.integral())
-                throw std::invalid_argument("mymyr: real-cost heuristics need integral action costs");
-        }
+            m_scale = ActionCosts(task).relaxed_scale();
         const auto t0 = std::chrono::steady_clock::now();
         m_R = o.relaxed;
         if (!m_R)
@@ -87,7 +81,8 @@ public:
         }
         m_stats.grounding_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (m_real && !m_R->real_costs_available())
-            throw std::invalid_argument("mymyr: real-cost heuristics need non-negative integer action costs below 2^31");
+            throw std::invalid_argument("mymyr: real-cost heuristics need defined, non-negative action costs below 2^31 units of "
+                                        "the cost scale (heuristics::ActionCosts::relaxed_cost)");
         if (m_R->num_props() > k_h2_max_props)
             throw std::invalid_argument("mymyr: h2 supports at most " + std::to_string(k_h2_max_props) +
                                         " propositions (its table holds every pair); the grounding has " +
@@ -419,7 +414,7 @@ private:
                     h = std::max<u64>(h, m_cost[pair_of(m_goal_props[a], m_goal_props[b])]);
             best = std::min(best, h);
         }
-        return to_value(best);
+        return to_value(best, m_scale);
     }
 
     void clear_targets()
@@ -430,6 +425,7 @@ private:
 
     const Task& m_task;
     bool m_real;
+    f64 m_scale = 1;  // real costs: the unit of the integer costs is 1 / m_scale
     std::shared_ptr<const RelaxedTask> m_R;
     u32 m_P = 0;
     // the operators

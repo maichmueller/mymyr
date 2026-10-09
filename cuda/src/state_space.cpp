@@ -1365,7 +1365,7 @@ private:
             check(ssk::launch_resolve(w.tab(), result, M, m_s), "launch_resolve");
             if (m_cost_mode == CostMode::Device)
             {
-                check(ssk::launch_costs(m_programs.view, w.first, sch, bnd, m_L, parent, w.inst.data(), w.depth.data(), M,
+                check(ssk::launch_costs(m_programs.view, w.first, sch, bnd, m_L, parent, w.inst.data(), M,
                                         w.costs.data() + w.edges, dctl + k_ctl_cost, m_s),
                       "launch_costs");
             }
@@ -1468,7 +1468,7 @@ private:
                             [&](u32, const ObjectId*, const Delta& d)
                             {
                                 if (e < off[g + 1])
-                                    costs[e] = ac.unit() ? 1.0 : ac.next(gv, d) - gv;
+                                    costs[e] = ac.unit() ? 1.0 : ac.transition(gv, d);
                                 ++e;
                                 return true;
                             },

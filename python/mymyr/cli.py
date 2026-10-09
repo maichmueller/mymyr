@@ -142,9 +142,9 @@ def _search(task: mymyr.Task, a: argparse.Namespace, cancel: search.CancelToken)
     budget = {"max_states": a.max_states, "max_seconds": a.max_seconds, "cancel": cancel}
     h = a.heuristic or DEFAULT_HEURISTIC.get(a.search)
     if a.search == "astar":
-        return search.astar(task, heuristic=h, costs="real", **budget)
+        return search.astar(task, heuristic=h, **budget)
     if a.search == "gbfs":
-        return search.gbfs(task, heuristic=h, costs="real", **budget)
+        return search.gbfs(task, heuristic=h, **budget)
     if a.search == "brfs":
         return search.brfs(task, stop_at_goal=True, threads=a.threads, **budget)
     width = {} if a.width is None else ({"width": a.width} if a.search == "astar_iw" else {"max_arity": a.width})

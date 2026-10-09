@@ -214,18 +214,14 @@ __global__ void k_chunk_ids(const u32* inst, const u32* live, u64 n, u32* ids)
 }
 
 __global__ void k_costs(costs::Program pr, u32 inst_base, const u32* schema, const u32* binding, u32 L, const u32* parent,
-                        const u32* inst, const u32* depth, u64 n, f64* out, u32* error)
+                        const u32* inst, u64 n, f64* out, u32* error)
 {
     MYMYR_GRID_LOOP(c, n)
     {
-        const u32 p = parent[c];
-        const f64 v = costs::evaluate(pr, inst_base + inst[p], schema[c], binding + c * L);
+        const f64 v = costs::evaluate(pr, inst_base + inst[parent[c]], schema[c], binding + c * L);
         if (isnan(v))
             atomicOr(error, 1u);
-        // the CPU generator's formula next(g, d) - g with g the parent's depth: (g + c) - g, rounded as the CPU
-        // rounds it
-        const f64 g = static_cast<f64>(depth[p]);
-        out[c] = __dsub_rn(__dadd_rn(g, v), g);
+        out[c] = v;
     }
 }
 
@@ -592,11 +588,10 @@ cudaError_t launch_chunk_ids(const u32* inst, const u32* live, u64 n, u32* ids, 
 }
 
 cudaError_t launch_costs(const costs::Program& programs, u32 inst_base, const u32* schema, const u32* binding, u32 label_width,
-                         const u32* parent, const u32* inst, const u32* depth, u64 n, f64* out, u32* error, cudaStream_t s)
+                         const u32* parent, const u32* inst, u64 n, f64* out, u32* error, cudaStream_t s)
 {
     if (n)
-        k_costs<<<grid_for(n), k_block, 0, s>>>(programs, inst_base, schema, binding, label_width, parent, inst, depth, n, out,
-                                                error);
+        k_costs<<<grid_for(n), k_block, 0, s>>>(programs, inst_base, schema, binding, label_width, parent, inst, n, out, error);
     return cudaGetLastError();
 }
 

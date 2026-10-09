@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stdexcept>
 
 namespace mymyr::frontend
@@ -50,6 +51,7 @@ struct Domain::Impl
     std::unique_ptr<loki::Parser> parser;  // parse_problem mutates it: guarded by parse_mutex
     std::unique_ptr<loki::DomainTranslationResult> translation;
     std::unique_ptr<detail::DomainState> state;
+    std::optional<formalism::TaskData> view;  // the domain with union types applied, if it has union-typed variables
     detail::InitOrderTables init_tables;
     DomainOptions options;
     detail::PredicateOrigin origin;  // declared: the predicates of the parsed domain (the others are loki's)
@@ -65,6 +67,9 @@ struct Domain::Impl
                 origin.declared.insert(pred->get_name());
             origin.argument_order = &options.generated_argument_order;
             state = detail::translate_domain(translation->get_translated_domain(), origin);
+            formalism::TaskData v = state->data;
+            if (detail::apply_union_types(*state, v, false))
+                view = std::move(v);
             init_tables = detail::make_init_order_tables(*state, parser->get_domain(), translation->get_translated_domain());
         });
     }
@@ -141,7 +146,7 @@ TaskPtr Domain::instantiate_string(std::string_view text, const std::filesystem:
     return m_impl->instantiate(detail::preprocess_pddl(text), path, options);
 }
 
-const formalism::TaskData& Domain::domain_data() const { return m_impl->state->data; }
+const formalism::TaskData& Domain::domain_data() const { return m_impl->view ? *m_impl->view : m_impl->state->data; }
 const std::string& Domain::name() const { return m_impl->state->data.domain_name; }
 const std::filesystem::path& Domain::path() const { return m_impl->path; }
 

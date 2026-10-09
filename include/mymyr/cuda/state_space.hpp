@@ -48,11 +48,11 @@
 //     value it stores is the value of a path summed from the goal backward, as Dijkstra sums them, and with c >= 0 the
 //     rounded sum fl(d + c) is monotone in d and at least d, so both compute the minimum over paths of those sums;
 //     the order of relaxations does not matter. Negative or NaN costs throw std::domain_error (as the host's Dijkstra);
-//   - transition costs: Unit tasks have none; state-independent total-cost tasks get the host's cost (g + c) - g (g the
-//     parent's depth, c the action's cost from its instance's cost program, any number of cost parameters and any
-//     static function key space: mymyr/cuda/cost_program.hpp) on the device, at
-//     every transition of the chunk; other costs (conditional or several total-cost effects, metrics) regenerate the
-//     transitions of each state on the CPU (space.threads threads) with the host's formula. A transition whose cost is
+//   - transition costs: Unit tasks have none; state-independent total-cost tasks get the host's cost (the action's
+//     cost from its instance's cost program, any number of cost parameters and any static function key space:
+//     mymyr/cuda/cost_program.hpp) on the device, at every transition of the chunk; other costs (conditional or
+//     several total-cost effects, metrics) regenerate the transitions of each state on the CPU (space.threads threads)
+//     with the host's formula (heuristics::ActionCosts::transition). A transition whose cost is
 //     undefined (the CPU drops such actions; the device kernels do not) throws std::domain_error.
 //
 // Device arrays live in buffers shared by the instances of a wave (DeviceStateSpace::storage() keeps them alive) and
