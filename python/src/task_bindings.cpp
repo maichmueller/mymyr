@@ -52,17 +52,15 @@ PyTaskCore::PyTaskCore(TaskPtr t, std::shared_ptr<const formalism::TaskData> d, 
 
 const NameIndex& PyTaskCore::names()
 {
-    std::call_once(m_names_once,
-                   [this]
-                   {
-                       const formalism::TaskData& D = *data;
-                       for (u32 i = 0; i < D.objects.size(); ++i)
-                           m_names.objects.emplace(std::string(D.str(D.objects[i].name)), i);
-                       for (u32 i = 0; i < D.predicates.size(); ++i)
-                           m_names.predicates.emplace(std::string(D.str(D.predicates[i].name)), i);
-                       for (u32 i = 0; i < D.schemas.size(); ++i)
-                           m_names.schemas.emplace(std::string(D.str(D.schemas[i].name)), i);
-                   });
+    m_names_once.call([this] {
+        const formalism::TaskData& D = *data;
+        for (u32 i = 0; i < D.objects.size(); ++i)
+            m_names.objects.emplace(std::string(D.str(D.objects[i].name)), i);
+        for (u32 i = 0; i < D.predicates.size(); ++i)
+            m_names.predicates.emplace(std::string(D.str(D.predicates[i].name)), i);
+        for (u32 i = 0; i < D.schemas.size(); ++i)
+            m_names.schemas.emplace(std::string(D.str(D.schemas[i].name)), i);
+    });
     return m_names;
 }
 

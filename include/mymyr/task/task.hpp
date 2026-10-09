@@ -22,6 +22,7 @@
 // mimir's metric values by heuristics::ActionCosts.
 
 #include "mymyr/core/ids.hpp"
+#include "mymyr/core/once.hpp"
 #include "mymyr/core/per_thread.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/formalism/task_data.hpp"
@@ -230,7 +231,7 @@ private:
     mutable std::vector<std::unique_ptr<Workspace>> m_spare;
     mutable std::atomic<usize> m_spare_count{0};
     mutable std::atomic<usize> m_workspaces_made{0};
-    mutable std::once_flag m_fingerprint_once;
+    mutable Once m_fingerprint_once;
     mutable u64 m_fingerprint = 0;
 };
 
