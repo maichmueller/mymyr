@@ -167,7 +167,8 @@ TEST(NumericPddl, OnlyConditionalEffectsThatFireRecordTheirFamilies)
         const bool a = std::string(init).find("(a)") != std::string::npos, z = std::string(init).find("(z)") != std::string::npos;
         std::map<std::string, State> next;
         std::vector<Action> actions;
-        Successors& s = t->workspace().successors();
+        const WorkspaceLease lease = t->workspace();
+        Successors& s = lease->successors();
         s.for_each_applicable(t->initial_state().view(), [&](const ActionLabel& l, const Delta&) { actions.emplace_back(l); });
         for (const Action& x : actions)
             next.emplace(t->schema_name(x.schema), s.apply(t->initial_state().view(), x.label()));
