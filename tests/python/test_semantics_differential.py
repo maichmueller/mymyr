@@ -271,7 +271,25 @@ class Task:
                 p = rng.choice(["f", "g"])
                 args = (rng.choice(objs),) if p == "f" else (rng.choice(objs), rng.choice(objs))
                 items.append(("lit", rng.random() < 0.8, p, args))
-        return items
+        if rng.random() < 0.25:
+            return items
+        # most goals hold in a state a short random walk reaches: those tasks are solvable
+        state = as_state(self, self.initial())
+        for _ in range(rng.randint(1, 6)):
+            succ = self.successors(state)
+            if not succ:
+                break
+            state = as_state(self, succ[rng.choice(sorted(succ))][0])
+        reachable = []
+        for it in items:
+            if it[0] == "cmp":
+                flipped = ("cmp", {">=": "<", "<=": ">"}[it[1]], it[2], it[3])
+                it = it if self.conj([it], state, {}) else flipped if self.conj([flipped], state, {}) else None
+            elif not self.conj([it], state, {}):
+                it = ("lit", not it[1], it[2], it[3])
+            if it is not None:
+                reachable.append(it)
+        return reachable
 
     # ---------------------------------------------------------------------------------------------- PDDL
 
