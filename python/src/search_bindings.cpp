@@ -123,11 +123,13 @@ heuristics::Kind parse_kind(nb::handle h)
 heuristics::Costs parse_costs(nb::handle h)
 {
     const std::string s = str_arg(h, "costs");
+    if (s == "auto")
+        return heuristics::Costs::Auto;
     if (s == "unit")
         return heuristics::Costs::Unit;
     if (s == "real")
         return heuristics::Costs::Real;
-    throw nb::value_error("mymyr: costs must be 'unit' or 'real'");
+    throw nb::value_error("mymyr: costs must be 'auto', 'unit' or 'real'");
 }
 
 heuristics::Evaluation parse_evaluation(nb::handle h)
@@ -1730,8 +1732,12 @@ void bind_search(nb::module_& parent)
                             "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count' "
                             "('gc'), 'max' ('hmax'), 'add' ('hadd'), 'ff' ('hff'), 'set_additive' ('hsa', 'setadd'), "
                             "'h2' (heuristics/heuristic.hpp has their definitions); the perfect heuristic h* comes from "
-                            "a state space: Heuristic.perfect(space). costs: 'unit' or 'real' (the task's action costs; "
-                            "set-additive then sums the costs of its achiever set, one per supported proposition); "
+                            "a state space: Heuristic.perfect(space). costs: 'auto' (the default: the task's objective, i.e. 'unit' "
+                            "for a task without action costs and metric, else 'real'), 'unit' (every action 1) or "
+                            "'real' (the task's action costs: zero and fractional costs exact up to 6 decimal places, "
+                            "rounded down beyond, 0 for a cost that depends on the state; set-additive then sums the "
+                            "costs of its achiever set, one per supported proposition). Unit costs on a task whose "
+                            "actions cost less than 1 overestimate; "
                             "evaluation: 'auto', 'grounded', 'lifted' (set_additive and h2 are grounded only). "
                             "share=another Heuristic of the task reuses its grounding. Calls on one object are "
                             "serialized; use one object per thread for parallel evaluation. A search given the object "
@@ -1764,7 +1770,7 @@ void bind_search(nb::module_& parent)
                     opts.evaluation = heuristics::Evaluation::Lifted;  // the grounding exceeded the budget: never retry it
                 new (self) PyHeuristic{std::move(h), std::move(o), opts, {}};
             },
-            "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "unit", "evaluation"_a = "auto",
+            "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "auto", "evaluation"_a = "auto",
             "share"_a = nb::none())
         .def_static(
             "perfect",
@@ -1783,10 +1789,11 @@ void bind_search(nb::module_& parent)
                 }
                 return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}, space.space});
             },
-            "space"_a, nb::kw_only(), "costs"_a = "unit",
+            "space"_a, nb::kw_only(), "costs"_a = "auto",
             "The perfect heuristic h* of the task of a state space (mymyr.datasets.state_space(task, "
             "remove_if_unsolvable=False), without symmetry pruning): the goal distance of a state, +inf where no goal "
-            "is reachable. costs: 'unit' (the number of actions) or 'real' (the transition costs). A state outside "
+            "is reachable. costs: 'auto' (the default: 'real' for a task with action costs or a metric, else 'unit'), "
+            "'unit' (the number of actions) or 'real' (the transition costs). A state outside "
             "the space raises ValueError, as does a search goal other than the task's.")
         .def("__call__", &py_evaluate, "state"_a, "h(state): the heuristic value (+inf for a dead end).")
         .def("evaluate", &py_evaluate, "state"_a)
@@ -2030,7 +2037,7 @@ void bind_search(nb::module_& parent)
                            cancel, goal,
                            blocked_states, observer, progress_interval);
         },
-        "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "max", "costs"_a = "unit", "evaluation"_a = "auto",
+        "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "max", "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "reopen"_a = true, "lazy_requeue"_a = true,
         "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false,
         "symmetry_pruning"_a = "off",
@@ -2040,8 +2047,9 @@ void bind_search(nb::module_& parent)
         (std::string("A* (search/best_first.hpp), eager or lazy. heuristic: a kind ('blind', 'goal_count', 'max', "
                      "'add', 'ff', 'set_additive', 'h2', as for Heuristic), 'perfect' (h* from the task's state space, "
                      "generated first within max_states and max_seconds; ValueError when they stop it), a Heuristic "
-                     "of the task, or a heuristic written in Python; costs: 'unit' or 'real' (the task's action "
-                     "costs). ") +
+                     "of the task, or a heuristic written in Python; costs: 'auto' (the default), 'unit' or 'real', as for "
+                     "Heuristic. With costs='auto' and an admissible heuristic ('blind', 'max', 'h2', 'perfect'), "
+                     "the plan is optimal for the task's objective (its total-cost or metric). ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
 
@@ -2088,7 +2096,7 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "heuristic"_a = "max", "width"_a = 1, "features"_a = "classical",
         "landmarks"_a = nb::none(), "weight"_a = 1.0, "preserve_goal_atoms"_a = true,
         "preserve_landmark_atoms"_a = true, "allow_non_novel_root_goal"_a = true,
-        "probe_novelty_before_heuristic"_a = true, "costs"_a = "unit", "evaluation"_a = "auto",
+        "probe_novelty_before_heuristic"_a = true, "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "start"_a = nb::none(), "witness_pruning"_a = false, "canonical_order"_a = true,
         "symmetry_pruning"_a = "off",
         MYMYR_CONTROL_ARGS,
@@ -2117,7 +2125,7 @@ void bind_search(nb::module_& parent)
                            witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
                            blocked_states, observer, progress_interval);
         },
-        "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "ff", "costs"_a = "unit", "evaluation"_a = "auto",
+        "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "ff", "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "preferred_operators"_a = true,
         "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false, "symmetry_pruning"_a = "off",
         "max_states"_a = nb::none(),
@@ -2142,7 +2150,7 @@ void bind_search(nb::module_& parent)
                            max_seconds, cancel,
                            goal, blocked_states, observer, progress_interval);
         },
-        "task"_a, nb::kw_only(), "width"_a = 1000, "heuristic"_a = "ff", "costs"_a = "unit", "evaluation"_a = "auto",
+        "task"_a, nb::kw_only(), "width"_a = 1000, "heuristic"_a = "ff", "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "start"_a = nb::none(), "witness_pruning"_a = false, "symmetry_pruning"_a = "off",
         "max_states"_a = nb::none(),
         "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(),

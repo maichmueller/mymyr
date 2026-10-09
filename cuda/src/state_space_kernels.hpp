@@ -69,13 +69,12 @@ cudaError_t launch_forward_offsets(const u32* seg, u32 num_schemas, u64 rows, u6
 /// ids[j] = live[inst[j]] for j < n (live: k_no_instance for instances no longer expanded).
 cudaError_t launch_chunk_ids(const u32* inst, const u32* live, u64 n, u32* ids, cudaStream_t s);
 
-/// State-independent action costs (heuristics::ActionCosts::cost) of the transitions of a chunk, with the CPU
-/// generator's formula: cost = (g + c) - g for the parent's depth g (as in mimir's BrFS, which passes the search
-/// depth as the metric value), c the program of (instance inst_base + inst[parent], schema) at the transition's
-/// binding (mymyr/cuda/cost_program.hpp).
+/// State-independent action costs (heuristics::ActionCosts::cost) of the transitions of a chunk: the program of
+/// (instance inst_base + inst[parent], schema) at the transition's binding (mymyr/cuda/cost_program.hpp), the exact
+/// transition cost the CPU generator records (heuristics::ActionCosts::transition).
 /// An undefined (NaN) cost sets *error.
 cudaError_t launch_costs(const costs::Program& programs, u32 inst_base, const u32* schema, const u32* binding, u32 label_width,
-                         const u32* parent, const u32* inst, const u32* depth, u64 n, f64* out, u32* error, cudaStream_t s);
+                         const u32* parent, const u32* inst, u64 n, f64* out, u32* error, cudaStream_t s);
 
 // ------------------------------------------------------------------------------------------------ post-processing
 

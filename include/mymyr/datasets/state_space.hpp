@@ -16,12 +16,14 @@
 //     the transition costs for the cost distance (for unit-cost tasks the two are equal);
 //   - flags: goal, unsolvable (no path to a goal) and alive (neither), as in mimir. The initial state is id 0.
 //
-// Transition costs follow mimir (StateRepositoryImpl::get_or_create_successor_state, called by its BrFS with the
-// search depth as the state's metric value): with total-cost, the total-cost effects applied to the parent's depth,
-// minus that depth (the sum of the increases for the usual `increase` effects); without total-cost and a metric, 1.
-// With a metric but no total-cost, mimir subtracts the parent's depth from the successor's metric value, which
-// makes the costs depend on the search order (and negative, which its Dijkstra rejects); mymyr takes the metric
-// difference between successor and parent instead, a deliberate deviation from mimir.
+// Transition costs (heuristics::ActionCosts::transition): with total-cost, the sum of the action's total-cost
+// increases, added up from 0 (other total-cost effects: applied to the parent's depth, minus that depth, as in mimir's
+// StateRepositoryImpl::get_or_create_successor_state called by its BrFS with the search depth as the metric value);
+// with a metric over the fluents, the metric difference between successor and parent; otherwise 1. Two deliberate
+// deviations from mimir: mimir computes (depth + c) - depth also for increases, which rounds fractional costs (so
+// that goal distances would not equal plan costs), and with a metric it subtracts the parent's depth from the
+// successor's metric value, which makes the costs depend on the search order (and negative, which its Dijkstra
+// rejects).
 //
 // Generators:
 //   - threads == 1: a layer-synchronous breadth-first generator run on one thread;

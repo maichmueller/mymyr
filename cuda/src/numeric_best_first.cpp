@@ -339,6 +339,8 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
             download(&error, ctl + 2, 1, s);
             sync();
             if (error) throw std::domain_error("mymyr: numeric search cost program rejected a labelled successor");
+            if (costs.kind() == heuristics::ActionCosts::Kind::StateMetric && std::ranges::any_of(gs, [](f64 g) { return std::isnan(g); }))
+                costs.undefined_metric("a reached state");
         }
         else
         {

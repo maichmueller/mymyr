@@ -126,10 +126,11 @@ public:
     [[nodiscard]] ActionLabel ground_action_label(u32 ga) const noexcept;
     /// Id of ground action (schema, binding) or k_none.
     [[nodiscard]] u32 find_ground_action(const ActionLabel& a) const noexcept;
-    /// Action cost (the task's total-cost semantics); real costs are available when every one is a non-negative
-    /// integer below 2^31.
+    /// Action cost in units of 1 / cost_scale() (ActionCosts::relaxed_cost); real costs are available when the
+    /// task's metric is supported and every cost is defined and below 2^31 units.
     [[nodiscard]] bool real_costs_available() const noexcept { return m_real_ok; }
     [[nodiscard]] u32 real_cost(u32 ga) const noexcept { return m_ga_cost[ga]; }
+    [[nodiscard]] f64 cost_scale() const noexcept { return m_cost_scale; }
 
     // ------------------------------------------------------------------------------------ goal
     /// The task goal's propositions (distinct; static goal literals, negated derived atoms and negated atoms outside R
@@ -163,6 +164,7 @@ private:
     std::vector<ObjectId> m_ga_bind;
     std::vector<u32> m_ga_cost;
     bool m_real_ok = false;
+    f64 m_cost_scale = 1;
     std::vector<u64> m_ga_keys;  // hash of (schema, binding) -> ga + 1 (open addressing)
     std::vector<u32> m_ga_slots;
     u64 m_ga_mask = 0;

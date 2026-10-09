@@ -12,7 +12,10 @@ namespace
 class PerfectHeuristic final : public Heuristic
 {
 public:
-    PerfectHeuristic(datasets::StateSpacePtr space, Costs costs) : m_space(std::move(space)), m_real(costs == Costs::Real) {}
+    PerfectHeuristic(datasets::StateSpacePtr space, Costs costs)
+        : m_space(std::move(space)), m_real(costs == Costs::Real || (costs == Costs::Auto && !m_space->unit_costs()))
+    {
+    }
 
     [[nodiscard]] Kind kind() const noexcept override { return Kind::Perfect; }
 

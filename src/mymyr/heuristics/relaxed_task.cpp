@@ -271,7 +271,7 @@ public:
         try
         {
             m_costs = std::make_unique<ActionCosts>(m_task);
-            m_costs_ok = m_costs->state_independent();
+            m_out.m_cost_scale = m_costs->relaxed_scale();
         }
         catch (const std::invalid_argument&)
         {
@@ -492,17 +492,15 @@ private:
         m_apre.clear();
         if (!condition_entries(T.literals_of(sc.precondition), b, m_apre, true))
             return;
-        const u32 ga = static_cast<u32>(m_out.m_ga_schema.size());
-        m_out.m_ga_schema.push_back(s);
-        m_out.m_ga_bind.insert(m_out.m_ga_bind.end(), b, b + sc.arity());
-        m_out.m_ga_bind_begin.push_back(static_cast<u32>(m_out.m_ga_bind.size()));
         u32 cost = 1;
         if (m_costs_ok && !m_costs->unit())
         {
             try
             {
-                const f64 c = m_costs->cost(s, b);
-                if (c == std::floor(c) && c < 2147483648.0)
+                const u64 c = m_costs->relaxed_cost(s, b);
+                if (c == ActionCosts::k_undefined)
+                    return;  // its total-cost effect is undefined: never applicable
+                if (c < (u64{1} << 31))
                     cost = static_cast<u32>(c);
                 else
                     m_costs_ok = false;
@@ -512,6 +510,10 @@ private:
                 m_costs_ok = false;
             }
         }
+        const u32 ga = static_cast<u32>(m_out.m_ga_schema.size());
+        m_out.m_ga_schema.push_back(s);
+        m_out.m_ga_bind.insert(m_out.m_ga_bind.end(), b, b + sc.arity());
+        m_out.m_ga_bind_begin.push_back(static_cast<u32>(m_out.m_ga_bind.size()));
         m_out.m_ga_cost.push_back(cost);
         ++m_out.m_stats.ground_actions;
 

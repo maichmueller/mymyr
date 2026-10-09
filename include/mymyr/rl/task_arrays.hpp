@@ -132,7 +132,7 @@ struct GoalMasks
 {
     std::vector<u64> pos, neg;              // fluent goal literals as state words (trimmed to the assigned width)
     std::vector<u32> derived_pos, derived_neg;  // derived goal literals, as derived slots
-    bool unsatisfiable = false;             // the goal contains a statically false literal
+    bool unsatisfiable = false;             // a goal literal is statically false, or asks for an atom no state holds
     [[nodiscard]] bool uses_derived() const noexcept { return !derived_pos.empty() || !derived_neg.empty(); }
 };
 
