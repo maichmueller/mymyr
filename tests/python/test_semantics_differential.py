@@ -636,4 +636,5 @@ def test_device_against_the_reference(tasks):
         for i, v in enumerate(h.evaluate(states)):
             assert v <= ref.hstar[i] + 1e-9, (seed, i, v, ref.hstar[i])
     ctx.synchronize()
+    print(f"device differential: {len(tasks)} tasks, {searched} device searches, {spaces} device state spaces")
     assert searched >= len(tasks) // 2 and spaces >= len(tasks) // 2
