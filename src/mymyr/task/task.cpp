@@ -41,7 +41,7 @@ Task::~Task() = default;
 
 u64 Task::fingerprint() const
 {
-    std::call_once(m_fingerprint_once, [this] { m_fingerprint = formalism::fingerprint(m_data); });
+    m_fingerprint_once.call([this] { m_fingerprint = formalism::fingerprint(m_data); });
     return m_fingerprint;
 }
 

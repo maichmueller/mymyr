@@ -66,24 +66,22 @@ bool rows_equal(StateView a, StateView b)
 
 i64 StateSpace::find(StateView s) const
 {
-    std::call_once(m_index_once,
-                   [&]
-                   {
-                       auto idx = std::make_shared<Index>();
-                       u64 cap = 16;
-                       while (cap < static_cast<u64>(m_n) * 2)
-                           cap *= 2;
-                       idx->slots.assign(cap, 0);
-                       idx->mask = cap - 1;
-                       for (u32 id = 0; id < m_n; ++id)
-                       {
-                           u64 j = row_hash(state(id)) & idx->mask;
-                           while (idx->slots[j])
-                               j = (j + 1) & idx->mask;
-                           idx->slots[j] = id + 1;
-                       }
-                       m_index = std::move(idx);
-                   });
+    m_index_once.call([&] {
+        auto idx = std::make_shared<Index>();
+        u64 cap = 16;
+        while (cap < static_cast<u64>(m_n) * 2)
+            cap *= 2;
+        idx->slots.assign(cap, 0);
+        idx->mask = cap - 1;
+        for (u32 id = 0; id < m_n; ++id)
+        {
+            u64 j = row_hash(state(id)) & idx->mask;
+            while (idx->slots[j])
+                j = (j + 1) & idx->mask;
+            idx->slots[j] = id + 1;
+        }
+        m_index = std::move(idx);
+    });
     if (s.nnum != m_numeric_words)
         return -1;
     for (u64 j = row_hash(s) & m_index->mask;; j = (j + 1) & m_index->mask)

@@ -12,6 +12,7 @@
 #include "formalism_task.hpp"
 #include "typing.hpp"
 
+#include "mymyr/core/once.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/rl/task_suite.hpp"
@@ -62,31 +63,29 @@ public:
     /// The task's table of one (rl::TaskTable::single; the RL entry points take tables), made on first use.
     [[nodiscard]] const rl::TaskTablePtr& table()
     {
-        std::call_once(m_table_once, [this] { m_table = rl::TaskTable::single(task); });
+        m_table_once.call([this] { m_table = rl::TaskTable::single(task); });
         return m_table;
     }
     /// The suite of that table (the RL entry points run suites; rl::TaskSuite::of), made on first use.
     [[nodiscard]] const rl::TaskSuitePtr& suite()
     {
-        std::call_once(m_suite_once, [this] { m_suite = rl::TaskSuite::of(table()); });
+        m_suite_once.call([this] { m_suite = rl::TaskSuite::of(table()); });
         return m_suite;
     }
 
     /// The task's action costs (heuristics::ActionCosts), made on first use.
     [[nodiscard]] const heuristics::ActionCosts& costs()
     {
-        std::call_once(m_costs_once, [this] { m_costs = std::make_unique<heuristics::ActionCosts>(*task); });
+        m_costs_once.call([this] { m_costs = std::make_unique<heuristics::ActionCosts>(*task); });
         return *m_costs;
     }
     /// Numeric slot of a name "(function o1 ... ok)" (Task::numeric_name), or ~0 if no slot has it.
     [[nodiscard]] u32 numeric_slot(const std::string& name)
     {
-        std::call_once(m_slots_once,
-                       [this]
-                       {
-                           for (u32 i = 0; i < task->numeric_slots(); ++i)
-                               m_slots.emplace(task->numeric_name(i), i);
-                       });
+        m_slots_once.call([this] {
+            for (u32 i = 0; i < task->numeric_slots(); ++i)
+                m_slots.emplace(task->numeric_name(i), i);
+        });
         const auto it = m_slots.find(name);
         return it == m_slots.end() ? ~u32{0} : it->second;
     }
@@ -97,7 +96,8 @@ public:
     std::shared_ptr<void> cuda;
 
 private:
-    std::once_flag m_names_once, m_table_once, m_suite_once, m_costs_once, m_slots_once;
+    // lazy initializations that may throw (Once: not std::call_once, see mymyr/core/once.hpp)
+    Once m_names_once, m_table_once, m_suite_once, m_costs_once, m_slots_once;
     std::unique_ptr<heuristics::ActionCosts> m_costs;
     std::unordered_map<std::string, u32> m_slots;
     NameIndex m_names;
