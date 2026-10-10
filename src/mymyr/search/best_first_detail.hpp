@@ -701,7 +701,6 @@ public:
     f64 g0 = 0;
     SearchObserver* obs = nullptr;
     bool witness = false, canonical = true;
-    SymmetryPruning symmetry = SymmetryPruning::Off;
     bool batched = false;         // the heuristic evaluates batches (Heuristic::batched)
     bool goal_view = false;       // a GoalSpec::AnyOf goal reads derived atoms: is_goal prepares the state
     u32 nn = 0;                   // numeric words per state
@@ -758,7 +757,7 @@ public:
     template<class Emit>
     void generate(Emit&& emit)
     {
-        succ.generate<true>(emit, witness, canonical, symmetry);
+        succ.generate<true>(emit, witness, canonical);
     }
 
 private:

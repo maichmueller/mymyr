@@ -29,12 +29,6 @@
 // Deviations from mimir, which are bugs there: mimir adds one distance-1 vertex per transition (parallel transitions
 // to one state give equal vertices) and leaves r out of the problem vertices at distance 0.
 //
-// Symmetry reduction: over a symmetry-reduced state space (StateSpaceOptions::symmetry_pruning), as mimir does over
-// its symmetry-reduced spaces, the breadth-first search runs over the task's states (the successors of each
-// state are generated, symmetric ones included), novelty is tested on those states, and every state stands for the
-// space vertex of its certificate class (the certificate kind the space was pruned with: Weisfeiler-Leman, where
-// mimir uses nauty's canonical forms). The problem vertices at distance d are the classes at quotient distance d.
-//
 // Vertex order: by distance, and within a distance by the canonical order of their tuples. Tuples are fluent atom
 // slots in ascending slot order; problem vertices and edges are ascending. The result is a function of the state
 // space (and, for the tuple kept by dominance pruning, of the atom names): it does not depend on the thread count.
@@ -79,7 +73,7 @@ public:
     /// The tuple of vertex v: fluent atom slots of the space's task, ascending (empty for the empty tuple).
     [[nodiscard]] std::span<const u32> tuple(u32 v) const;
     /// The problem vertices of vertex v: the state-space vertices at its distance in which its tuple is novel,
-    /// ascending (over a symmetry-reduced space: the class vertices of those states).
+    /// ascending.
     [[nodiscard]] std::span<const u32> problem_vertices(u32 v) const;
     /// The edges out of / into vertex v (to distance(v) + 1 / from distance(v) - 1), ascending.
     [[nodiscard]] std::span<const u32> successors(u32 v) const;

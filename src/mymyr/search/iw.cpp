@@ -478,7 +478,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                         buf_slots.insert(buf_slots.end(), d.del.begin(), d.del.end());
                         return true;
                     },
-                    witness, canonical, o.symmetry_pruning);
+                    witness, canonical);
                 if (stop)
                     return;
                 order.clear();
@@ -511,7 +511,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 return;
             }
         }
-        succ.generate<true>(checked, witness, canonical, o.symmetry_pruning);
+        succ.generate<true>(checked, witness, canonical);
     };
 
     // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
@@ -655,7 +655,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 cs.push(seq, s, b, sc.arity(s), ad, nullptr, nx.data(), nn, d.num, NN);
                 return true;
             },
-            witness, canonical, o.symmetry_pruning);
+            witness, canonical);
         x.count = cs.size() - x.first;
         if (relaxed)
             for (u32 j = x.first; j < cs.size(); ++j)

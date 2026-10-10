@@ -234,20 +234,6 @@ public:
     template<bool Stop, class Emit>
     void run(ExecMatcher& x, Emit& emit)
     {
-        run_impl<Stop, false>(x, emit, nullptr);
-    }
-    /// run() with every free parameter v restricted to the objects of mask[v * ow() .. (v + 1) * ow()) (symmetry
-    /// pruning: successor/symmetry.hpp).
-    template<bool Stop, class Emit>
-    void run_masked(ExecMatcher& x, Emit& emit, const u64* mask)
-    {
-        run_impl<Stop, true>(x, emit, mask);
-    }
-
-private:
-    template<bool Stop, bool Masked, class Emit>
-    void run_impl(ExecMatcher& x, Emit& emit, [[maybe_unused]] const u64* mask)
-    {
         const plan::Matcher& m = *x.plan;
         if (m.never)
             return;
@@ -271,15 +257,10 @@ private:
             const ExecUnary* ub = st->ub;
             const ExecUnary* ue = st->ue;
             u64 any = 0;
-            [[maybe_unused]] const u64* mk = nullptr;
-            if constexpr (Masked)
-                mk = mask + static_cast<usize>(st->param) * OW;
             MYMYR_NOVECTOR
             for (u32 w = 0; w < OW; ++w)
             {
                 u64 a = d0[w];
-                if constexpr (Masked)
-                    a &= mk[w];
                 for (const ExecUnary* u = ub; u != ue; ++u)
                     a &= u->ptr[w] ^ u->flip;
                 d[w] = a;
@@ -318,6 +299,7 @@ private:
             search<Stop, true>(x, 0, false, emit);
     }
 
+private:
     void apply_op(const ViewOp& op) noexcept
     {
         if (op.row1 != ViewOp::k_none)

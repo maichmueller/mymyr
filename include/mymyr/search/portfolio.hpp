@@ -68,7 +68,6 @@ struct PortfolioOptions
     u64 base_seed = 0;
     std::vector<RolloutOrdering> rollout_orderings;  // cycled; empty: the built-in mix
     bool canonical_order = true;
-    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;  // every worker's (as IwOptions::symmetry_pruning)
     novelty::TableOptions tables;  // the certifier's novelty table
     std::function<void(StateView state, std::span<const Action> actions, std::vector<u32>& order)> successor_order;
 };

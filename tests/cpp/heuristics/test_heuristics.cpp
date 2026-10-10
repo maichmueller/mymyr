@@ -271,13 +271,6 @@ TEST(Heuristics, PerfectIsTheGoalDistance)
     const auto other = load("pegsol-08-strips__p22");
     EXPECT_THROW((void)h->evaluate(other->initial_state().view()), std::invalid_argument);
     EXPECT_THROW((void)H::perfect(nullptr), std::invalid_argument);
-    datasets::StateSpaceOptions so;
-    so.symmetry_pruning = true;
-    so.certificate = datasets::CertificateKind::ColorRefinement;  // the cheap one
-    so.labels = false;
-    const auto reduced = datasets::generate_state_space(task, so);
-    ASSERT_TRUE(reduced.space);
-    EXPECT_THROW((void)H::perfect(reduced.space), std::invalid_argument);
 }
 
 TEST(Heuristics, AStarWithThePerfectHeuristicExpandsOnePlan)

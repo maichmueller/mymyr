@@ -222,7 +222,6 @@ struct Env
     const SearchControl& control;
     bool witness = false;
     bool canonical = true;
-    SymmetryPruning symmetry = SymmetryPruning::Off;
     const SuccessorOrder* successor_order = nullptr;  // null or empty: generation order
     Clock::time_point deadline{};
     bool timed = false;
@@ -404,7 +403,7 @@ public:
                     m_slots.insert(m_slots.end(), d.del.begin(), d.del.end());
                     return true;
                 },
-                env.witness, env.canonical, env.symmetry);
+                env.witness, env.canonical);
             m_order.clear();
             (*env.successor_order)(cv, m_actions, m_order);
             const u32 m = static_cast<u32>(m_actions.size());
@@ -428,7 +427,7 @@ public:
             }
             return;
         }
-        succ.generate<true>(process, env.witness, env.canonical, env.symmetry);
+        succ.generate<true>(process, env.witness, env.canonical);
     }
 
 private:
@@ -620,7 +619,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
                 cs.push(seq, s, b, sc.arity(s), ad, &d, nx.data(), nn, nullptr, 0);
                 return true;
             },
-            env.witness, env.canonical, env.symmetry);
+            env.witness, env.canonical);
         x.count = cs.size() - x.first;
         if (relaxed)
             for (u32 j = x.first; j < cs.size(); ++j)

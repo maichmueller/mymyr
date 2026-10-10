@@ -8,7 +8,8 @@
 //   - _rl_jax: the XLA FFI targets of the planning environments (rl_jax_bindings.cpp; mymyr.rl.jax);
 //   - _rl_ops: novelty rewards, prefix masks and hindsight relabels (rl_ops_bindings.cpp; mymyr.rl);
 //   - _search: the search family and heuristics (search_bindings.cpp);
-//   - _datasets: state spaces, samplers, object graphs, certificates (datasets_bindings.cpp);
+//   - _datasets: state spaces, generalized state spaces, samplers, tuple graphs, knowledge bases
+//     (datasets_bindings.cpp);
 //   - _C_API: the capsule for downstream native modules (ext_api.cpp);
 //   - _cuda: the CUDA backend (cuda_bindings.cpp, CUDA builds only; mymyr.cuda), with the device state spaces
 //     (cuda_datasets_bindings.cpp).

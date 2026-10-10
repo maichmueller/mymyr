@@ -727,36 +727,6 @@ TEST(ParallelRollouts, SameResultAtEveryThreadCount)
     EXPECT_GE(solved, 24u);
 }
 
-TEST(ParallelRollouts, SymmetryPruningGivesTheSameResultAtEveryThreadCount)
-{
-    // also the TSan case of symmetry pruning in the rollout workers: each thread prunes in its own workspace
-    for (const char* name : {"gripper__prob05", "logistics00__probLOGISTICS-6-1", "miconic__s7-4"})
-    {
-        const auto t1 = Task::from_text_file(task_path(name));
-        ParallelRolloutOptions o = rollout_batch(8, 1);
-        o.max_next_layer_states = 64;
-        o.iw.symmetry_pruning = SymmetryPruning::Wl1;
-        const ParallelRolloutsResult ref = find_rollouts_parallel(*t1, o);
-        for (u32 threads : {4u, 8u})
-        {
-            const auto tn = Task::from_text_file(task_path(name));
-            o.num_threads = threads;
-            const ParallelRolloutsResult r = find_rollouts_parallel(*tn, o);
-            EXPECT_EQ(r.threads_used, threads);
-            ASSERT_EQ(r.rollouts.size(), ref.rollouts.size());
-            for (usize k = 0; k < r.rollouts.size(); ++k)
-            {
-                expect_same_rollout(r.rollouts[k], ref.rollouts[k],
-                                    std::string(name) + " rollout " + std::to_string(k) + " threads " + std::to_string(threads));
-                if (r.rollouts[k].search.status == SearchStatus::Solved)
-                {
-                    EXPECT_TRUE(reaches_goal(*tn, r.rollouts[k].search.plan)) << name;
-                }
-            }
-        }
-    }
-}
-
 TEST(ParallelRollouts, SixtyFourThreads)
 {
     // the TSan target: 64 rollouts on 64 threads over one task, with per-worker observers
@@ -1027,36 +997,6 @@ TEST(Portfolio, RolloutWorkersAndCertification)
             }
             else
                 EXPECT_EQ(r.status, SearchStatus::Exhausted);
-        }
-    }
-}
-
-TEST(Portfolio, SymmetryPruning)
-{
-    // serial: reproducible; in parallel (and under TSan): every worker prunes in its own workspace, plans are valid
-    for (const char* name : {"gripper__prob05", "miconic__s7-4"})
-    {
-        const auto task = Task::from_text_file(task_path(name));
-        PortfolioOptions o = portfolio(4, 1);
-        o.symmetry_pruning = SymmetryPruning::Wl1;
-        const PortfolioResult a = atomic_goal_portfolio(*task, o);
-        const PortfolioResult b = atomic_goal_portfolio(*task, o);
-        EXPECT_EQ(a.status, b.status) << name;
-        EXPECT_EQ(a.plan, b.plan) << name;
-        EXPECT_EQ(a.total_expansions, b.total_expansions) << name;
-        if (a.status == SearchStatus::Solved)
-        {
-            EXPECT_TRUE(reaches_goal(*task, a.plan)) << name;
-        }
-        for (u32 threads : {4u, 8u})
-        {
-            o.num_threads = threads;
-            const PortfolioResult r = atomic_goal_portfolio(*task, o);
-            EXPECT_EQ(r.threads_used, std::min(threads, 5u)) << name;
-            if (r.status == SearchStatus::Solved)
-            {
-                EXPECT_TRUE(reaches_goal(*task, r.plan)) << name << " threads " << threads;
-            }
         }
     }
 }

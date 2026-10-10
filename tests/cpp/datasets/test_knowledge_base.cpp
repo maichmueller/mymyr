@@ -1,6 +1,5 @@
-// Knowledge bases: the fork's knowledge base tests (tests/unit/datasets/knowledge_base.cpp: spanner and gripper,
-// with and without symmetry reduction, tuple graphs of width 0, 1 and 2), the order of the state spaces and the
-// options.
+// Knowledge bases: the fork's knowledge base tests (tests/unit/datasets/knowledge_base.cpp: spanner and gripper, tuple
+// graphs of width 0, 1 and 2), the order of the state spaces and the options.
 
 #include "../frontend/golden.hpp"
 #include "mymyr/datasets/knowledge_base.hpp"
@@ -48,58 +47,40 @@ Totals totals(const KnowledgeBase& kb)
     return t;
 }
 
-KnowledgeBaseOptions options(bool symmetry, u32 width)
+KnowledgeBaseOptions options(u32 width)
 {
     KnowledgeBaseOptions o;
-    o.state_space.symmetry_pruning = symmetry;
     o.generalized = true;
     o.tuple_graphs = TupleGraphOptions{.width = width};
     return o;
 }
 
-// The spanner is at location 1 in one problem and at location 2 in the other: no symmetry within a problem, but
-// between the two.
-TEST(KnowledgeBase, SpannerSymmetryBetweenProblems)
+// The spanner at location 1 in one problem and at location 2 in the other.
+TEST(KnowledgeBase, Spanner)
 {
     if (!std::filesystem::exists(test::fork_data_dir() / "spanner/domain.pddl"))
         GTEST_SKIP();
     const auto table = fork_table("spanner", {"p-1-1-2-1.pddl", "p-1-1-2-1(2).pddl"});
     ASSERT_TRUE(table);
-    {
-        const auto kb = KnowledgeBase::create(table, options(false, 2));
-        const auto& G = *kb->generalized_state_space();
-        EXPECT_EQ(G.num_vertices(), 15u);
-        EXPECT_EQ(G.num_edges(), 13u);
-        EXPECT_EQ(G.initial_vertices().size(), 2u);
-        EXPECT_EQ(G.goal_vertices().size(), 2u);
-        EXPECT_EQ(G.unsolvable_vertices().size(), 3u);
-        ASSERT_EQ(kb->tuple_graphs().size(), 2u);
-        EXPECT_EQ(kb->tuple_graphs()[0].size(), 7u);
-        EXPECT_EQ(kb->tuple_graphs()[1].size(), 8u);
-        EXPECT_EQ(totals(*kb).vertices, 53u);
-        EXPECT_EQ(totals(*kb).edges, 38u);
-        // ascending by size: the second problem (7 states) first
-        EXPECT_EQ(std::vector<u32>(kb->task_indices().begin(), kb->task_indices().end()), (std::vector<u32>{1, 0}));
-    }
-    {
-        const auto kb = KnowledgeBase::create(table, options(true, 2));
-        const auto& G = *kb->generalized_state_space();
-        EXPECT_TRUE(G.symmetry_reduced());
-        EXPECT_EQ(G.num_vertices(), 12u);
-        EXPECT_EQ(G.num_edges(), 11u);
-        EXPECT_EQ(G.initial_vertices().size(), 2u);
-        EXPECT_EQ(G.goal_vertices().size(), 1u);
-        EXPECT_EQ(G.unsolvable_vertices().size(), 3u);
-        ASSERT_EQ(kb->tuple_graphs().size(), 2u);
-        EXPECT_EQ(kb->tuple_graphs()[0].size(), 7u);
-        EXPECT_EQ(kb->tuple_graphs()[1].size(), 8u);
-        EXPECT_EQ(totals(*kb).vertices, 53u);
-        EXPECT_EQ(totals(*kb).edges, 38u);
-    }
+    const auto kb = KnowledgeBase::create(table, options(2));
+    const auto& G = *kb->generalized_state_space();
+    EXPECT_EQ(G.num_vertices(), 15u);
+    EXPECT_EQ(G.num_edges(), 13u);
+    EXPECT_EQ(G.initial_vertices().size(), 2u);
+    EXPECT_EQ(G.goal_vertices().size(), 2u);
+    EXPECT_EQ(G.unsolvable_vertices().size(), 3u);
+    ASSERT_EQ(kb->tuple_graphs().size(), 2u);
+    EXPECT_EQ(kb->tuple_graphs()[0].size(), 7u);
+    EXPECT_EQ(kb->tuple_graphs()[1].size(), 8u);
+    EXPECT_EQ(totals(*kb).vertices, 53u);
+    EXPECT_EQ(totals(*kb).edges, 38u);
+    // ascending by size: the second problem (7 states) first; the generalized state space's problems are the spaces
+    EXPECT_EQ(std::vector<u32>(kb->task_indices().begin(), kb->task_indices().end()), (std::vector<u32>{1, 0}));
+    EXPECT_EQ(G.spaces(), kb->state_spaces());
 }
 
-// One and two balls: symmetry within a problem, none between the two.
-TEST(KnowledgeBase, GripperSymmetryWithinProblems)
+// One and two balls.
+TEST(KnowledgeBase, Gripper)
 {
     if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
         GTEST_SKIP();
@@ -107,17 +88,15 @@ TEST(KnowledgeBase, GripperSymmetryWithinProblems)
     ASSERT_TRUE(table);
     struct Expect
     {
-        bool symmetry;
         u32 width;
         u32 vertices, edges, goals;
         usize graphs0, graphs1;
         u64 tg_vertices, tg_edges;
     };
-    for (const Expect& e : {Expect{false, 1, 36, 128, 4, 8, 28, 220, 184}, Expect{true, 1, 18, 52, 4, 6, 12, 76, 70},
-                            Expect{false, 0, 36, 128, 4, 8, 28, 128, 92}, Expect{true, 0, 18, 52, 4, 6, 12, 52, 34}})
+    for (const Expect& e : {Expect{1, 36, 128, 4, 8, 28, 220, 184}, Expect{0, 36, 128, 4, 8, 28, 128, 92}})
     {
-        SCOPED_TRACE(std::string(e.symmetry ? "symmetry" : "no symmetry") + " width " + std::to_string(e.width));
-        const auto kb = KnowledgeBase::create(table, options(e.symmetry, e.width));
+        SCOPED_TRACE("width " + std::to_string(e.width));
+        const auto kb = KnowledgeBase::create(table, options(e.width));
         const auto& G = *kb->generalized_state_space();
         EXPECT_EQ(G.num_vertices(), e.vertices);
         EXPECT_EQ(G.num_edges(), e.edges);

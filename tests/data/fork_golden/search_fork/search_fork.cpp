@@ -5,8 +5,7 @@
 // heuristics test
 // (tests/data/heuristics/fork_heuristics.json, made by run_heuristics.py), the binding generator test
 // (tests/data/bindings/fork_bindings.json, made by run_bindings.py) and the tuple graph tests
-// (tests/data/tuple_graphs/fork_tuple_graphs.json, made by run_tuple_graphs.py) and the k-FWL certificate tests
-// (tests/data/kfwl/fork_kfwl.json, made by run_kfwl.py).
+// (tests/data/tuple_graphs/fork_tuple_graphs.json, made by run_tuple_graphs.py).
 //
 //   search_fork --algo astar_eager|astar_lazy|gbfs_eager|gbfs_lazy --h blind|max|add|ff|setadd|perfect --domain D
 //               --problem P [--max-ms T] [--max-states N]
@@ -20,7 +19,6 @@
 //   search_fork --algo walk_ground --domain D --problem P [--walks W] [--steps S] [--seed B]
 //   search_fork --algo tuple_graphs --domain D --problem P [--max-states N] [--sample S] [--max-width W]
 //               [--time-width W [--time-pruning 0|1]]
-//   search_fork --algo kfwl --domain D --problem P [--max-states N] [--sample S] [--max-n2 M] [--max-n3 M] [--max-n4 M]
 //
 // Prints one line "RESULT {...}" with status, plan_cost, plan_length, plan (ground action strings), expanded and
 // generated (best-first: also deadends; iw: also per-pass statistics), or "ERROR <message>". Successor generation is
@@ -44,33 +42,22 @@
 // width 0, and of widths 1 and 2 (up to --max-width) with and without dominance pruning, of every
 // ceil(N / S)-th vertex (tests/data/fork_golden/README.md, "Tuple graphs"); with --time-width only that width and
 // pruning, timed over every vertex, with the peak RSS before and after.
-// kfwl prints, for every ceil(N / S)-th vertex of the state space, the state key, the number of vertices of its object
-// graph (datasets::create_object_graph), its class among these states by nauty canonical form and by the fork's
-// k-FWL certificate for k = 2, 3, 4 (only on graphs of at most M vertices; M = 0 skips k), the seconds and peak RSS of
-// the certificates, and the size of the fork's symmetry-reduced state space (nauty).
 
 #include <mimir/mimir.hpp>
 #include <mimir/search/algorithms/astar_iw.hpp>
 #include <mimir/search/algorithms/astar_iw/event_handlers/default.hpp>
-#include <mimir/graphs/algorithms/folklore_weisfeiler_leman.hpp>
-#include <mimir/graphs/algorithms/nauty.hpp>
 #include <mimir/search/heuristics/h2.hpp>  // not in mimir.hpp
 
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <iostream>
 #include <map>
 #include <set>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <sys/resource.h>
@@ -81,8 +68,6 @@ using namespace mimir::formalism;
 
 namespace
 {
-/// The symmetry pruning of every search context (--symmetry off|wl1).
-SearchContextImpl::SymmetryPruning g_symmetry = SearchContextImpl::SymmetryPruning::OFF;
 struct BeamKnobs
 {
     long tie_seed = -1;  // -1: ties in generation order
@@ -222,7 +207,7 @@ int run_walk_h(const std::string& domain, const std::string& problem_file, const
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
     std::unique_ptr<LiftedGrounder> grounder;
     Heuristic h;
     if (hname == "perfect")
@@ -333,7 +318,7 @@ int run_walk_ground(const std::string& domain, const std::string& problem_file, 
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
     const ActionList& actions = problem->get_domain()->get_actions();
     std::vector<ConjunctiveConditionSatisficingBindingGenerator> pre;
     std::vector<ActionSatisficingBindingGenerator> act;
@@ -445,143 +430,6 @@ std::string plan_json(const SearchResult& result)
     return o + "]";
 }
 
-/// symmetry_states: every state reachable without pruning (breadth-first, at most max_states), each with its fluent
-/// atoms (and fluent function values), its applicable actions under the WL1 symmetry pruning of the KPKC generator, and the WL1 colour class of
-/// every object (the colour refinement of the state's object graph, classes numbered by first occurrence in object
-/// order); then, with WL1 pruning, brfs exhaustively and stopping at a goal, and astar_eager with the blind
-/// heuristic.
-int run_symmetry_states(const std::string& domain, const std::string& problem_file, uint32_t max_ms, uint32_t max_states)
-{
-    const auto t0 = std::chrono::steady_clock::now();
-    Problem problem = ProblemImpl::create(domain, problem_file);
-    using Kpkc = SearchContextImpl::LiftedOptions::KPKCOptions;
-    SearchContext context = SearchContextImpl::create(
-        problem, SearchContextImpl::Options(SearchContextImpl::LiftedOptions(Kpkc(SearchContextImpl::SymmetryPruning::OFF))));
-    auto pruned = KPKCLiftedApplicableActionGeneratorImpl::create(problem, Kpkc(SearchContextImpl::SymmetryPruning::WL1));
-    auto& aag = *context->get_applicable_action_generator();
-    auto& repo = *context->get_state_repository();
-    const auto& objects = problem->get_problem_and_domain_objects();
-
-    std::vector<std::string> atom_names, action_names;
-    std::unordered_map<std::string, size_t> atom_ids, action_ids;
-    auto intern = [](std::vector<std::string>& names, std::unordered_map<std::string, size_t>& ids, const std::string& s)
-    {
-        const auto [it, fresh] = ids.emplace(s, names.size());
-        if (fresh)
-            names.push_back(s);
-        return it->second;
-    };
-    std::string states = "[";
-    std::unordered_set<Index> seen;
-    std::deque<std::pair<State, ContinuousCost>> queue;
-    queue.push_back(repo.get_or_create_initial_state());
-    seen.insert(queue.front().first.get_index());
-    size_t num_states = 0, sum_all = 0, sum_pruned = 0;
-    bool complete = true;
-    while (!queue.empty())
-    {
-        const auto [state, metric] = queue.front();
-        queue.pop_front();
-        std::vector<size_t> atoms, acts;
-        for (auto a : repo.get_problem()->get_repositories().get_ground_atoms_from_indices<FluentTag>(state.get_atoms<FluentTag>()))
-        {
-            std::string s = "(" + a->get_predicate()->get_name();
-            for (auto o : a->get_objects())
-                s += " " + o->get_name();
-            atoms.push_back(intern(atom_names, atom_ids, s + ")"));
-        }
-        // numeric tasks: the fluent function values, as "(f o1 ... ok)=v" (%.17g; undefined values are left out)
-        for (const auto& [f, v] : repo.get_problem()->get_repositories().get_ground_function_values<FluentTag>(state.get_numeric_variables()))
-        {
-            if (std::isnan(v))
-                continue;
-            std::string s = "(" + f->get_function_skeleton()->get_name();
-            for (auto o : f->get_objects())
-                s += " " + o->get_name();
-            char buf[40];
-            std::snprintf(buf, sizeof buf, "%.17g", v);
-            atoms.push_back(intern(atom_names, atom_ids, s + ")=" + buf));
-        }
-        for (auto a : pruned->create_applicable_action_generator(state))
-            acts.push_back(intern(action_names, action_ids, action_str(a)));
-        std::sort(atoms.begin(), atoms.end());
-        std::sort(acts.begin(), acts.end());
-        const auto graph = datasets::create_object_graph(state, *problem);
-        const auto certificate = graphs::color_refinement::compute_certificate(graph);
-        std::unordered_map<Index, size_t> class_of_color;
-        std::string classes = "[";
-        for (size_t o = 0; o < objects.size(); ++o)
-        {
-            const auto [it, fresh] = class_of_color.emplace(certificate->get_hash_to_color()[o], class_of_color.size());
-            classes += std::string(o ? "," : "") + std::to_string(it->second);
-        }
-        states += std::string(num_states ? "," : "") + "{\"atoms\":[";
-        for (size_t i = 0; i < atoms.size(); ++i)
-            states += std::string(i ? "," : "") + std::to_string(atoms[i]);
-        states += "],\"actions\":[";
-        for (size_t i = 0; i < acts.size(); ++i)
-            states += std::string(i ? "," : "") + std::to_string(acts[i]);
-        states += "],\"classes\":" + classes + "]}";
-        ++num_states;
-        sum_pruned += acts.size();
-        for (auto a : aag.create_applicable_action_generator(state))
-        {
-            ++sum_all;
-            auto next = repo.get_or_create_successor_state(state, a, metric);
-            if (seen.size() >= max_states && !seen.contains(next.first.get_index()))
-            {
-                complete = false;
-                continue;
-            }
-            if (seen.insert(next.first.get_index()).second)
-                queue.push_back(next);
-        }
-    }
-    states += "]";
-
-    // the searches with WL1 pruning, each on its own context
-    auto wl1_context = [&]
-    { return SearchContextImpl::create(problem, SearchContextImpl::Options(SearchContextImpl::LiftedOptions(Kpkc(SearchContextImpl::SymmetryPruning::WL1)))); };
-    std::string searches = "{";
-    for (const bool stop : { false, true })
-    {
-        auto eh = brfs::DefaultEventHandlerImpl::create(problem, true);
-        auto opts = brfs::Options();
-        opts.event_handler = eh;
-        opts.stop_if_goal = stop;
-        opts.max_time_in_ms = max_ms;
-        auto result = brfs::find_solution(wl1_context(), opts);
-        const auto& st = eh->get_statistics();
-        searches += std::string(stop ? ",\"brfs\":{" : "\"brfs_exhaustive\":{") + "\"status\":" + jstr(status_name(result.status)) +
-                    plan_json(result) + ",\"expanded\":" + std::to_string(st.get_num_expanded()) +
-                    ",\"generated\":" + std::to_string(st.get_num_generated()) + "}";
-    }
-    {
-        const auto ctx = wl1_context();
-        searches += ",\"astar_blind\":{" +
-                    run<astar_eager::Options>(ctx, BlindHeuristicImpl::create(problem), astar_eager::DefaultEventHandlerImpl::create(problem, true),
-                                              max_ms, UINT32_MAX,
-                                              [](auto&& c, auto&& hh, auto&& o) { return astar_eager::find_solution(c, hh, o); }) +
-                    "}";
-    }
-    searches += "}";
-
-    std::string names = "[";
-    for (size_t o = 0; o < objects.size(); ++o)
-        names += std::string(o ? "," : "") + jstr(objects[o]->get_name());
-    std::string atoms_json = "[", actions_json = "[";
-    for (size_t i = 0; i < atom_names.size(); ++i)
-        atoms_json += std::string(i ? "," : "") + jstr(atom_names[i]);
-    for (size_t i = 0; i < action_names.size(); ++i)
-        actions_json += std::string(i ? "," : "") + jstr(action_names[i]);
-    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::cout << "RESULT {\"algo\":\"symmetry_states\",\"complete\":" << (complete ? "true" : "false") << ",\"num_states\":" << num_states
-              << ",\"num_actions\":" << sum_all << ",\"num_pruned_actions\":" << sum_pruned << ",\"objects\":" << names
-              << "],\"atom_names\":" << atoms_json << "],\"action_names\":" << actions_json << "],\"states\":" << states
-              << ",\"searches\":" << searches << ",\"seconds\":" << jnum(secs) << "}" << std::endl;
-    return 0;
-}
-
 BeamNoveltyMode beam_mode(const std::string& m)
 {
     if (m == "all_tested")
@@ -598,7 +446,7 @@ int run_layered(const std::string& domain, const std::string& problem_file, cons
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
     std::string body;
     if (algo == "iw")
     {
@@ -669,7 +517,7 @@ int run_search(const std::string& domain, const std::string& problem_file, const
     Problem problem = ProblemImpl::create(domain, problem_file);
     SearchContext context = SearchContextImpl::create(
         problem,
-        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(g_symmetry))));
+        SearchContextImpl::Options(SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF))));
     std::unique_ptr<LiftedGrounder> grounder;
     Heuristic h;
     if (hname == "blind")
@@ -815,10 +663,10 @@ std::map<std::pair<size_t, IndexList>, std::vector<iw::AtomIndexList>> tuple_cla
     return classes;
 }
 
-/// The fork's tuple graphs (TupleGraphImpl::create) of the state space (remove_if_unsolvable = false, no symmetry
-/// pruning) for width 0, and widths 1 and 2 with and without dominance pruning, of every state-space vertex (every
-/// ceil(N / sample)-th when the space has more than `sample` vertices). With time_width >= 0: only that width and
-/// pruning, timed, without the graphs.
+/// The fork's tuple graphs (TupleGraphImpl::create) of the state space (remove_if_unsolvable = false) for width 0,
+/// and widths 1 and 2 with and without dominance pruning, of every state-space vertex (every ceil(N / sample)-th when
+/// the space has more than `sample` vertices). With time_width >= 0: only that width and pruning, timed, without the
+/// graphs.
 int run_tuple_graphs(const std::string& domain, const std::string& problem_file, uint32_t max_states, size_t sample, size_t max_width,
                      long time_width, bool time_pruning)
 {
@@ -1023,113 +871,6 @@ int run_tuple_graphs(const std::string& domain, const std::string& problem_file,
     return 0;
 }
 
-/// Class ids by first occurrence of each value.
-template<class T>
-std::vector<long> first_occurrence_classes(const std::vector<std::optional<T>>& values)
-{
-    std::map<T, long> ids;
-    std::vector<long> out;
-    for (const auto& v : values)
-        out.push_back(v ? ids.emplace(*v, static_cast<long>(ids.size())).first->second : -1);
-    return out;
-}
-
-std::string json_list(const std::vector<long>& v)
-{
-    std::string s = "[";
-    for (size_t i = 0; i < v.size(); ++i)
-        s += (i ? "," : "") + std::to_string(v[i]);
-    return s + "]";
-}
-
-/// The fork's k-FWL certificates (kfwl::compute_certificate<K>, one IsomorphismTypeCompressionFunction per K) of the
-/// object graphs of the sampled states with at most max_n vertices; a state is identified with the 64-bit loki hash of
-/// its certificate (the hash of its identifying members). Adds "k<K>" (class ids, -1 above max_n), "k<K>_max_n",
-/// "k<K>_seconds", "k<K>_state_seconds" (per state, null above max_n) and "k<K>_peak_rss_kb" to `body`.
-template<size_t K>
-void kfwl_classes(const std::vector<graphs::StaticGraph<graphs::Vertex<graphs::PropertyValue>, graphs::Edge<>>>& graphs, size_t max_n,
-                  std::string& body)
-{
-    auto iso = graphs::kfwl::IsomorphismTypeCompressionFunction();
-    std::vector<std::optional<size_t>> hashes;
-    std::string state_seconds = "[";
-    double secs = 0;
-    for (const auto& g : graphs)
-    {
-        if (g.get_num_vertices() > max_n)
-        {
-            hashes.emplace_back();
-            state_seconds += std::string(hashes.size() > 1 ? "," : "") + "null";
-            continue;
-        }
-        const auto t0 = std::chrono::steady_clock::now();
-        const auto certificate = graphs::kfwl::compute_certificate<K>(g, iso);
-        hashes.emplace_back(loki::Hash<graphs::kfwl::CertificateImpl<K>>()(*certificate));
-        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        secs += s;
-        state_seconds += std::string(hashes.size() > 1 ? "," : "") + jnum(s);
-    }
-    state_seconds += "]";
-    const std::string k = std::to_string(K);
-    body += ",\"k" + k + "\":" + json_list(first_occurrence_classes(hashes)) + ",\"k" + k + "_max_n\":" + std::to_string(max_n) + ",\"k" + k +
-            "_seconds\":" + jnum(secs) + ",\"k" + k + "_state_seconds\":" + state_seconds + ",\"k" + k + "_peak_rss_kb\":" + std::to_string(peak_rss_kb());
-}
-
-/// The fork's k-FWL (k = 2, 3, 4) and nauty classes of the object graphs (datasets::create_object_graph) of every
-/// ceil(N / sample)-th state of the state space (remove_if_unsolvable = false, no symmetry pruning), and the size of
-/// the fork's symmetry-reduced state space (nauty canonical forms).
-int run_kfwl(const std::string& domain, const std::string& problem_file, uint32_t max_states, size_t sample, const std::array<size_t, 5>& max_n)
-{
-    Problem problem = ProblemImpl::create(domain, problem_file);
-    auto options = SearchContextImpl::Options(
-        SearchContextImpl::LiftedOptions(SearchContextImpl::LiftedOptions::KPKCOptions(SearchContextImpl::SymmetryPruning::OFF)));
-    auto ss_options = datasets::StateSpaceImpl::Options();
-    ss_options.remove_if_unsolvable = false;
-    ss_options.max_num_states = max_states;
-    auto result = datasets::StateSpaceImpl::create(SearchContextImpl::create(problem, options), ss_options);
-    if (!result)
-        throw std::runtime_error("no state space (max_states reached or a statically false goal)");
-    const auto space = result->first;
-    const auto& graph = space->get_graph();
-    const size_t N = graph.get_num_vertices();
-    const size_t step = (sample > 0 && N > sample) ? (N + sample - 1) / sample : 1;
-
-    std::vector<std::string> keys;
-    std::vector<long> sizes;
-    std::vector<graphs::StaticGraph<graphs::Vertex<graphs::PropertyValue>, graphs::Edge<>>> object_graphs;
-    std::vector<std::optional<graphs::nauty::SparseGraph>> canonical;  // optional: SparseGraph is not copy-assignable
-    const auto t0 = std::chrono::steady_clock::now();
-    for (Index v = 0; v < N; v += step)
-    {
-        const auto& state = graphs::get_state(graph.get_vertex(v));
-        keys.push_back(state_key(problem, state));
-        object_graphs.push_back(datasets::create_object_graph(state, *problem));
-        sizes.push_back(static_cast<long>(object_graphs.back().get_num_vertices()));
-        canonical.emplace_back(graphs::nauty::SparseGraph(object_graphs.back()).canonize());
-    }
-    const double nauty_secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::string body = "\"states\":" + std::to_string(N) + ",\"sample_step\":" + std::to_string(step) + ",\"keys\":[";
-    for (size_t i = 0; i < keys.size(); ++i)
-        body += std::string(i ? "," : "") + jstr(keys[i]);
-    body += "],\"n\":" + json_list(sizes);
-    UnorderedMap<graphs::nauty::SparseGraph, long> nauty_ids;  // loki::Hash / loki::EqualTo of the canonical forms
-    std::vector<long> nauty_classes;
-    for (const auto& c : canonical)
-        nauty_classes.push_back(nauty_ids.emplace(*c, static_cast<long>(nauty_ids.size())).first->second);
-    body += ",\"nauty\":" + json_list(nauty_classes) + ",\"nauty_seconds\":" + jnum(nauty_secs);
-    if (max_n[2])
-        kfwl_classes<2>(object_graphs, max_n[2], body);
-    if (max_n[3])
-        kfwl_classes<3>(object_graphs, max_n[3], body);
-    if (max_n[4])
-        kfwl_classes<4>(object_graphs, max_n[4], body);
-    // the fork's symmetry-reduced state space (nauty)
-    ss_options.symmetry_pruning = true;
-    auto symmetric = datasets::StateSpaceImpl::create(SearchContextImpl::create(ProblemImpl::create(domain, problem_file), options), ss_options);
-    body += ",\"symmetric_states\":" + (symmetric ? std::to_string(symmetric->first->get_graph().get_num_vertices()) : std::string("null"));
-    std::cout << "RESULT {\"algo\":\"kfwl\"," << body << "}" << std::endl;
-    return 0;
-}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -1141,7 +882,6 @@ int main(int argc, char** argv)
     size_t sample = 0, max_width = 2;
     long time_width = -1;
     bool time_pruning = true;
-    std::array<size_t, 5> max_n { 0, 0, 1000, 64, 24 };  // per k: object graphs above are not certified
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -1201,18 +941,6 @@ int main(int argc, char** argv)
             steps = std::stoul(v);
         else if (a == "--seed")
             seed = std::stoull(v);
-        else if (a == "--symmetry")
-        {
-            if (v == "off")
-                g_symmetry = SearchContextImpl::SymmetryPruning::OFF;
-            else if (v == "wl1")
-                g_symmetry = SearchContextImpl::SymmetryPruning::WL1;
-            else
-            {
-                std::cerr << "unknown symmetry pruning " << v << "\n";
-                return 2;
-            }
-        }
         else if (a == "--sample")
             sample = std::stoul(v);
         else if (a == "--max-width")
@@ -1221,8 +949,6 @@ int main(int argc, char** argv)
             time_width = std::stol(v);
         else if (a == "--time-pruning")
             time_pruning = v != "0";
-        else if (a == "--max-n2" || a == "--max-n3" || a == "--max-n4")
-            max_n[a.back() - '0'] = std::stoul(v);
         else
         {
             std::cerr << "unknown argument " << a << "\n";
@@ -1230,7 +956,7 @@ int main(int argc, char** argv)
         }
     }
     const bool layered = algo == "iw" || algo == "brfs";
-    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && algo != "symmetry_states" && algo != "tuple_graphs" && algo != "kfwl" && hname.empty()))
+    if (algo.empty() || domain.empty() || problem.empty() || (layered ? order.empty() : algo != "walk_ground" && algo != "tuple_graphs" && hname.empty()))
     {
         std::cerr << "usage: search_fork --algo A (--h H | --order O [--k K] [--limit L] [--beam W] [--beam-mode M]) --domain D --problem P [--max-ms T] "
                      "[--max-states N] [--walks W] [--steps S] [--seed B]\n";
@@ -1239,14 +965,10 @@ int main(int argc, char** argv)
     int rc = 2;
     try
     {
-        if (algo == "kfwl")
-            rc = run_kfwl(domain, problem, max_states, sample, max_n);
-        else if (algo == "tuple_graphs")
+        if (algo == "tuple_graphs")
             rc = run_tuple_graphs(domain, problem, max_states, sample, max_width, time_width, time_pruning);
         else if (algo == "walk_ground")
             rc = run_walk_ground(domain, problem, walks, steps, seed);
-        else if (algo == "symmetry_states")
-            rc = run_symmetry_states(domain, problem, max_ms, max_states);
         else if (algo == "walk_h")
             rc = run_walk_h(domain, problem, hname, walks, steps, seed, max_states);
         else

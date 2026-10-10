@@ -48,8 +48,6 @@ add_executable(mymyr_tests
     # IW family variants
     search/test_iw_variants.cpp
     search/test_rollouts.cpp
-    # symmetry pruning
-    search/test_symmetry.cpp
 )
 target_link_libraries(mymyr_tests PRIVATE mymyr::core mymyr_warnings GTest::gtest_main)
 target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
@@ -121,16 +119,6 @@ if(TARGET mymyr_frontend)
         MYMYR_WORK_DIR="${MYMYR_WORK_DIR}"
         MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
     gtest_discover_tests(mymyr_bindings_golden_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
-
-    # Symmetry pruning against the fork's WL1 mode on every state of the state-space suite
-    # (tests/data/symmetry/fork_symmetry.json).
-    add_executable(mymyr_symmetry_golden_tests successor/test_symmetry_fork.cpp frontend/golden.cpp)
-    target_link_libraries(mymyr_symmetry_golden_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
-    target_compile_definitions(mymyr_symmetry_golden_tests PRIVATE
-        MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-        MYMYR_WORK_DIR="${MYMYR_WORK_DIR}"
-        MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
-    gtest_discover_tests(mymyr_symmetry_golden_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 endif()
 
 # ------------------------------------------------------------------------------------------------ best-first search
@@ -284,9 +272,9 @@ endif()
 # ------------------------------------------------------------------------------------------------ datasets
 if(TARGET mymyr_frontend)
     # state spaces against the fork on its own test instances (fork_cases.inc), determinism across thread counts,
-    # options, costs, numeric tasks, the pool, generalized state spaces, samplers, object graphs and certificates;
-    # k-FWL certificates and tuple graphs against the fork, knowledge bases
-    add_executable(mymyr_datasets_tests datasets/test_datasets.cpp datasets/test_kfwl.cpp datasets/test_tuple_graphs.cpp
+    # options, costs, numeric tasks, the pool, generalized state spaces, samplers; tuple graphs against the fork,
+    # knowledge bases
+    add_executable(mymyr_datasets_tests datasets/test_datasets.cpp datasets/test_tuple_graphs.cpp
         datasets/test_knowledge_base.cpp frontend/golden.cpp)
     target_link_libraries(mymyr_datasets_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_datasets_tests PRIVATE

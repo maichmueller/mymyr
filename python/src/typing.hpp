@@ -5,7 +5,6 @@
 // names exist (they are never converted).
 
 #include "mymyr/core/threads.hpp"
-#include "mymyr/successor/symmetry.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -50,17 +49,11 @@ struct Framework
 struct CudaStream
 {
 };
-/// A symmetry pruning mode: 'off' or 'wl1' (successor/symmetry.hpp).
-struct SymmetryPruning
-{
-};
 }  // namespace ann
 
 /// A CUDA stream: an int cudaStream_t (1 / 2: the legacy / per-thread default stream) or a stream object. With a None
 /// default, None is the stream of the operation's context.
 using StreamArg = Arg<std::variant<std::intptr_t, ann::CudaStream>>;
-
-using SymmetryArg = Arg<ann::SymmetryPruning>;
 
 // ------------------------------------------------------------------------------------------------ numeric arguments
 // Integer and float parameters are declared as Arg<T> (any object, rendered as int / float) and read with int_arg /
@@ -222,15 +215,6 @@ inline std::optional<double> opt_float_arg(nb::handle h, const char* name,
         return std::nullopt;
     return float_arg(h, name, lo, hi, true);
 }
-
-/// The mode of a symmetry_pruning= argument; ValueError unless it is 'off' or 'wl1'.
-inline mymyr::SymmetryPruning parse_symmetry_pruning(nb::handle h)
-{
-    if (nb::isinstance<nb::str>(h))
-        if (const auto p = mymyr::parse_symmetry_pruning(nb::cast<std::string>(h)))
-            return *p;
-    throw nb::value_error("mymyr: symmetry_pruning must be 'off' or 'wl1'");
-}
 }  // namespace mymyr::python
 
 namespace nanobind::detail
@@ -254,10 +238,5 @@ template<>
 struct type_caster<mymyr::python::ann::CudaStream>
 {
     static constexpr auto Name = const_name("mymyr._typing.SupportsCudaStream");
-};
-template<>
-struct type_caster<mymyr::python::ann::SymmetryPruning>
-{
-    static constexpr auto Name = const_name("typing.Literal['off', 'wl1']");
 };
 }  // namespace nanobind::detail

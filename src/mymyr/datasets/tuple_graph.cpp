@@ -3,21 +3,15 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/threads.hpp"
 #include "mymyr/core/thread_pool.hpp"
-#include "mymyr/datasets/certificates.hpp"
-#include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/novelty/novelty_table.hpp"
-#include "mymyr/successor/successors.hpp"
-#include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <compare>
+#include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace mymyr::datasets
 {
@@ -160,15 +154,7 @@ struct Shared
 {
     StateSpacePtr space;
     TupleGraphOptions options;
-    // symmetry reduction: the space vertex of each certificate
-    std::unordered_map<Certificate, u32, CertificateHash> class_of;
 };
-
-Certificate certificate_of(const StateSpace& S, ObjectGraphBuilder& builder, ObjectGraph& graph, StateView s)
-{
-    builder.build(s, graph);
-    return S.certificate() == CertificateKind::KFwl ? kfwl_certificate(graph, S.fwl_k(), S.fwl_limits()) : color_refinement_certificate(graph);
-}
 }  // namespace
 
 /// Builds the tuple graphs of one space on one thread (scratch reused across roots).
@@ -189,8 +175,6 @@ public:
         m_cpos.assign(m_N, 0);
         m_lstamp.assign(m_N, 0);
         m_lpos.assign(m_N, 0);
-        if (m_S.symmetry_reduced())
-            m_builder.emplace(m_task);
     }
 
     TupleGraph build(u32 root)
@@ -305,39 +289,6 @@ private:
     }
 
     // ------------------------------------------------------------------------------------------- width >= 1
-    StateView space_state(u32 v) const { return m_S.state(v); }
-
-    /// The space vertex of a state of the task (symmetry reduction), by its certificate class; cached per thread.
-    u32 class_of(const State& s)
-    {
-        if (auto it = m_cert_cache.find(s); it != m_cert_cache.end())
-            return it->second;
-        const Certificate c = certificate_of(m_S, *m_builder, m_graph, s.view());
-        const auto jt = m_sh.class_of.find(c);
-        if (jt == m_sh.class_of.end())
-            throw std::logic_error("mymyr: tuple graph: a reachable state has no certificate class in the symmetry-reduced space");
-        m_cert_cache.emplace(s, jt->second);
-        return jt->second;
-    }
-
-    /// The successor states of s (symmetry reduction).
-    void successors_of(const State& s, std::vector<State>& out)
-    {
-        const WorkspaceLease lease = m_task.workspace();
-        Successors& succ = lease->successors();
-        const StateView sv = s.view();
-        succ.prepare(sv);
-        const u32 NN = m_task.numeric_words();
-        succ.generate<false>(
-            [&](u32, const ObjectId*, const Delta& d)
-            {
-                const u32 nn = apply_delta(sv.w, sv.nw, d, m_next);
-                out.emplace_back(m_next.data(), nn, d.num, NN);
-                return true;
-            },
-            false, true);
-    }
-
     void reserve_table(const std::vector<u32>& atoms)
     {
         if (!atoms.empty())
@@ -348,12 +299,11 @@ private:
     {
         novelty::NoveltyTable& table = *m_table;
         table.clear();
-        const bool symmetric = m_S.symmetry_reduced();
         ++m_epoch;
         const u32 epoch_visit = m_epoch;
 
         // distance 0
-        const StateView root_state = space_state(r);
+        const StateView root_state = m_S.state(r);
         atoms_of(root_state.w, root_state.nw, m_atoms);
         reserve_table(m_atoms);
         const u32 root_layer[1] = {r};
@@ -370,13 +320,6 @@ private:
         table.mark_state(root_state.w, root_state.nw);
         m_layer.assign(1, r);
         m_visit[r] = epoch_visit;
-        std::unordered_set<State> visited_states;
-        std::vector<State> prev_states, curr_states, succ_states;
-        if (symmetric)
-        {
-            prev_states.emplace_back(root_state);
-            visited_states.insert(prev_states.back());
-        }
 
         const auto off = m_S.forward_offsets();
         const auto tgt = m_S.forward_targets();
@@ -391,49 +334,22 @@ private:
                         m_visit[c] = epoch_visit;
                         m_next_layer.push_back(c);
                     }
-            if (symmetric)
-            {
-                curr_states.clear();
-                for (const State& s : prev_states)
-                {
-                    succ_states.clear();
-                    successors_of(s, succ_states);
-                    for (State& t : succ_states)
-                        if (visited_states.insert(t).second)
-                            curr_states.push_back(std::move(t));
-                }
-                std::swap(prev_states, curr_states);  // prev_states: this layer's states
-            }
             if (m_next_layer.empty())
                 return;
 
             // the novel tuples of this layer's states: (tuple, problem vertex) pairs
             m_pairs.clear();
-            auto collect = [&](const u64* w, u32 nw, u32 c)
+            for (u32 c : m_next_layer)
             {
-                atoms_of(w, nw, m_atoms);
+                const StateView s = m_S.state(c);
+                atoms_of(s.w, s.nw, m_atoms);
                 reserve_table(m_atoms);
                 for_each_novel(table, m_atoms, m_width, [&](const Tuple& t) { m_pairs.emplace_back(t, c); });
-            };
-            if (symmetric)
-            {
-                for (const State& s : prev_states)
-                    collect(s.data(), s.size_words(), class_of(s));
-                for (const State& s : prev_states)
-                    table.mark_state(s.data(), s.size_words());
             }
-            else
+            for (u32 c : m_next_layer)
             {
-                for (u32 c : m_next_layer)
-                {
-                    const StateView s = space_state(c);
-                    collect(s.w, s.nw, c);
-                }
-                for (u32 c : m_next_layer)
-                {
-                    const StateView s = space_state(c);
-                    table.mark_state(s.w, s.nw);
-                }
+                const StateView s = m_S.state(c);
+                table.mark_state(s.w, s.nw);
             }
             std::swap(m_layer, m_next_layer);
             std::sort(m_layer.begin(), m_layer.end());
@@ -635,12 +551,6 @@ private:
     std::vector<u32> m_poff, m_pv, m_coff, m_ioff, m_cnt, m_mark, m_touched, m_kept, m_reps;
     std::vector<std::pair<u32, u32>> m_ct, m_inv;
     std::vector<std::vector<u32>> m_ext_preds;
-
-    // symmetry reduction
-    std::optional<ObjectGraphBuilder> m_builder;
-    ObjectGraph m_graph;
-    std::unordered_map<State, u32> m_cert_cache;
-    std::vector<u64> m_next;
 };
 
 namespace
@@ -653,28 +563,6 @@ void check(const StateSpacePtr& space, const TupleGraphOptions& options)
         throw std::invalid_argument("mymyr: tuple graph width must be in 0.." + std::to_string(novelty::k_max_arity) + ", got " +
                                     std::to_string(options.width));
 }
-
-/// The space vertex of every certificate class (symmetry-reduced spaces), on `threads` threads.
-void classes(Shared& sh, u32 threads)
-{
-    const StateSpace& S = *sh.space;
-    if (!S.symmetry_reduced() || sh.options.width == 0)
-        return;
-    const u32 N = S.num_states();
-    std::vector<Certificate> certs(N);
-    std::atomic<u32> next{0};
-    ThreadPool pool(std::min<u32>(threads, std::max<u32>(N, 1)));
-    pool.run(
-        [&](u32)
-        {
-            ObjectGraphBuilder builder(*S.task());
-            ObjectGraph graph;
-            for (u32 v; (v = next.fetch_add(1, std::memory_order_relaxed)) < N;)
-                certs[v] = certificate_of(S, builder, graph, S.state(v));
-        });
-    for (u32 v = 0; v < N; ++v)
-        sh.class_of.emplace(certs[v], v);  // the space keeps one state per class: certificates are distinct
-}
 }  // namespace
 
 std::vector<TupleGraph> tuple_graphs(const StateSpacePtr& space, const TupleGraphOptions& options)
@@ -682,8 +570,7 @@ std::vector<TupleGraph> tuple_graphs(const StateSpacePtr& space, const TupleGrap
     check(space, options);
     const u32 N = space->num_states();
     const u32 threads = resolve_threads(options.threads);
-    Shared sh{space, options, {}};
-    classes(sh, threads);
+    const Shared sh{space, options};
     std::vector<TupleGraph> out(N);
     std::atomic<u32> next{0};
     ThreadPool pool(std::min<u32>(threads, std::max<u32>(N, 1)));
@@ -703,8 +590,7 @@ TupleGraph tuple_graph(const StateSpacePtr& space, u32 vertex, const TupleGraphO
     if (vertex >= space->num_states())
         throw std::invalid_argument("mymyr: tuple graph: vertex " + std::to_string(vertex) + " is not in the state space (" +
                                     std::to_string(space->num_states()) + " states)");
-    Shared sh{space, options, {}};
-    classes(sh, 1);
+    const Shared sh{space, options};
     TupleGraphBuilder builder(sh);
     return builder.build(vertex);
 }

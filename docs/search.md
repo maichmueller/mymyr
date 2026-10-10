@@ -82,51 +82,6 @@ layer-synchronously and still returns a shortest plan. `stop_at_goal=False` goes
 (for counts such as `goal_states`); a goal state reached on the way still makes it `SOLVED` with that plan, and
 `exhausted` tells whether every state was expanded.
 
-## Symmetry pruning
-
-`symmetry_pruning="wl1"` restricts the actions a search expands to representatives of symmetric objects, as mimir's
-WL1 mode of its lifted successor generator. In every expanded state the objects are partitioned into the colour
-classes of colour refinement (1-WL) on the state's object graph: the state's atoms, the static atoms and the goal.
-For an action schema, let n(C) be the number of its parameters whose static domain meets class C; each parameter then
-keeps only the n(C) first objects of each class C in its domain, and an action is expanded only if all its parameters
-are bound to kept objects. Objects that are alone in their class are never pruned.
-
-The option is accepted by `brfs`, `astar`, `gbfs`, `beam`, `astar_iw`, the IW family (`iw`, `iw_pass`, `siw`, `liw`,
-`abstracted_iw`, `projective_iw`, `rollout_iw`), `find_rollouts_parallel` and `atomic_goal_portfolio`, and by
-`Task.applicable_actions`, `iter_applicable_actions`, `successors` and `successor_states` (and the same `State`
-methods), which return the actions a search with pruning would expand. The default is `"off"`. The device searches in
-`mymyr.cuda` do not prune.
-
-Pruning gives up completeness and optimality. Colour classes are coarser than the true symmetries, and even objects
-that are truly interchangeable are pruned per parameter, so the pruned actions need not have a symmetric counterpart
-among the kept ones: a search may report a solvable task as unsolvable, and `astar` may return a costlier plan than the
-optimum. A plan found with pruning on is still valid. Pruning pays off on tasks with many interchangeable objects
-(balls in gripper, packages in logistics, passengers in miconic); each expansion then costs one colour refinement of
-the state's object graph.
-
-```python
-from pathlib import Path
-
-import mymyr
-from mymyr import search
-
-data = Path("tests/data/pddl/logistics00")
-task = mymyr.Task.from_pddl(data / "domain.pddl", data / "probLOGISTICS-6-1.pddl")
-
-state = task.initial_state
-print(len(task.applicable_actions(state)), len(task.applicable_actions(state, symmetry_pruning="wl1")))
-
-full = search.brfs(task)
-pruned = search.brfs(task, symmetry_pruning="wl1")
-print(full.states, pruned.states, pruned.solved)
-
-state = task.initial_state
-for action in pruned.plan:
-    assert task.is_applicable(state, action)
-    state = state.apply(action)
-assert task.is_goal(state)
-```
-
 ## Observers
 
 `search.Observer` is the base class of search observers: subclass it, override the events you need and pass an instance

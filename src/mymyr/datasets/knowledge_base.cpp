@@ -43,19 +43,8 @@ std::shared_ptr<const KnowledgeBase> KnowledgeBase::create(rl::TaskTablePtr task
         kb->m_task_indices.push_back(index);
     }
 
-    // the generalized state space: its kept spaces become the knowledge base's
     if (options.generalized)
-    {
         kb->m_gss = GeneralizedStateSpace::create(kb->m_spaces);
-        std::vector<u32> indices;
-        for (const StateSpacePtr& s : kb->m_gss->spaces())
-        {
-            const auto it = std::find_if(spaces.begin(), spaces.end(), [&](const auto& p) { return p.first == s; });
-            indices.push_back(it->second);
-        }
-        kb->m_spaces = kb->m_gss->spaces();
-        kb->m_task_indices = std::move(indices);
-    }
 
     if (options.tuple_graphs)
     {

@@ -9,7 +9,7 @@ These pages describe the Python package, optional CUDA backend, plain-C API and 
 - [Formula values](formulas.md): atoms, literals, conditions, state checks, pickling and search goals.
 - [Search](search.md): breadth-first search, the IW family, best-first search, heuristics, goals, budgets and observers.
 - [Heuristics](heuristics.md): relaxation heuristics, h², set-additive and perfect heuristics.
-- [Datasets](datasets.md): state spaces, generalized state spaces, samplers and certificates.
+- [Datasets](datasets.md): state spaces, generalized state spaces, samplers, knowledge bases and tuple graphs.
 - [Reinforcement learning](rl.md): batched expansion, CPU environments and JAX/PyTorch interop.
 - [CUDA](cuda.md): device requirements, supported operations and current task limits.
 - [C API](c-api.md): the versioned `mymyr/ext.h` function table and a C consumer.

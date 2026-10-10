@@ -139,15 +139,13 @@ def test_lists_and_constructors_name_the_argument(task):
         rl.CpuEnvPool(task, 2, max_steps=-1)
     with pytest.raises(ValueError, match=r"^mymyr: steps must be an int >= 0, got -1$"):
         rl.random_walks(task, -1)
-    with pytest.raises(ValueError, match=r"^mymyr: k must be an int in \[2, 4\], got 5$"):
-        datasets.object_graph(task.initial_state).kfwl_certificate(5)
     space = datasets.state_space(text_task("gripper__prob05"))
     with pytest.raises(ValueError, match=r"^mymyr: seed must be an int >= 0, got -1$"):
         datasets.StateSpaceSampler(space, seed=-1)
     with pytest.raises(ValueError, match=r"^mymyr: n must be an int in \[0, 2147483647\], got -1$"):
         datasets.StateSpaceSampler(space).states_n_steps_from_goal(-1)
-    with pytest.raises(ValueError, match=r"^mymyr: k must be an int in \[0, 4294967295\], got -1$"):
-        datasets.KnowledgeBase([task], k=-1)
+    with pytest.raises(ValueError, match=r"^mymyr: width must be None or an int in \[0, 4294967295\], got -1$"):
+        datasets.KnowledgeBase([task], width=-1)
     with pytest.raises(ValueError, match=r"^mymyr: fc_free_params must be an int in \[0, 4294967295\], got -1$"):
         mymyr.Task.from_text(str(TASKS / "blocks__probBLOCKS-8-0.txt"), fc_free_params=-1)
 

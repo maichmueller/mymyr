@@ -455,10 +455,6 @@ TEST(DeviceStateSpace, OptionsMatchHost)
     o = cpu_options();
     o.max_seconds = 0;
     EXPECT_EQ(cuda::state_space(ctx, depot, dev_options(o)).status, StateSpaceStatus::Timeout);
-    // symmetry pruning requires the CPU generator
-    o = cpu_options();
-    o.symmetry_pruning = true;
-    EXPECT_THROW((void)cuda::state_space(ctx, spanner, dev_options(o)), std::invalid_argument);
     const TaskPtr numeric = pddl_task(R"(
 (define (domain counter)
  (:requirements :strips :numeric-fluents)
@@ -612,10 +608,10 @@ TEST(DeviceStateSpaces, GeneralizedStateSpaceEqualsHost)
     }
     EXPECT_EQ(g->num_vertices(), ref->num_vertices());
     EXPECT_EQ(g->num_edges(), ref->num_edges());
-    EXPECT_TRUE(same(g->edge_sources(), ref->edge_sources()));
-    EXPECT_TRUE(same(g->edge_targets(), ref->edge_targets()));
+    EXPECT_TRUE(same(g->vertex_offsets(), ref->vertex_offsets()));
+    EXPECT_TRUE(same(g->edge_offsets(), ref->edge_offsets()));
     EXPECT_TRUE(same(g->forward_offsets(), ref->forward_offsets()));
-    EXPECT_TRUE(same(g->forward_edges(), ref->forward_edges()));
+    EXPECT_TRUE(same(g->forward_targets(), ref->forward_targets()));
     EXPECT_TRUE(same(g->goal_flags(), ref->goal_flags()));
     EXPECT_TRUE(same(g->unsolvable_flags(), ref->unsolvable_flags()));
     EXPECT_TRUE(same(g->initial_flags(), ref->initial_flags()));
