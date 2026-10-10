@@ -57,7 +57,7 @@ inline std::vector<Set> sets(TaskOptions::Atoms atoms)
     return out;
 }
 
-inline const char* atoms_name(TaskOptions::Atoms a) { return a == TaskOptions::Atoms::Frozen ? " frozen" : " lazy"; }
+inline const char* atoms_name(TaskOptions::Atoms a) { return a == TaskOptions::Atoms::Dense ? " frozen" : " lazy"; }
 
 template<class T>
 std::vector<T> to_host(const void* d, u64 n, cudaStream_t s)

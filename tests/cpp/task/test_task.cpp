@@ -18,7 +18,8 @@ namespace
 TEST(Task, InitialStateHoldsExactlyTheInitialAtoms)
 {
     for (const auto& t : suite())
-        for (auto mode : {TaskOptions::Atoms::Lazy, TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Auto})
+        for (auto mode : {TaskOptions::Atoms::Lazy, TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable,
+                          TaskOptions::Atoms::Auto})
         {
             TaskOptions opt;
             opt.atoms = mode;
@@ -31,10 +32,16 @@ TEST(Task, InitialStateHoldsExactlyTheInitialAtoms)
                 EXPECT_EQ(task->atoms().mode(), AtomMode::Lazy);
                 EXPECT_EQ(task->atoms().fluent_slots(), oracle.initial().size()) << t.name;  // first touch only
             }
-            if (mode == TaskOptions::Atoms::Frozen)
+            if (mode == TaskOptions::Atoms::Dense)
             {
-                EXPECT_EQ(task->atoms().mode(), AtomMode::Frozen);
+                EXPECT_EQ(task->atoms().mode(), AtomMode::Dense);
                 EXPECT_EQ(task->atoms().fluent_slots(), task->info().dense_fluent);
+            }
+            if (mode == TaskOptions::Atoms::Reachable)
+            {
+                EXPECT_EQ(task->atoms().mode(), AtomMode::Reachable);
+                EXPECT_EQ(task->atoms().fluent_slots(), task->info().reachable_fluent);
+                EXPECT_EQ(task->atoms().derived_slots(), task->info().reachable_derived);
             }
         }
 }
@@ -44,7 +51,7 @@ TEST(Task, CanonicalLayoutRoundTrips)
     for (const auto& t : suite())
     {
         TaskOptions opt;
-        opt.atoms = TaskOptions::Atoms::Frozen;
+        opt.atoms = TaskOptions::Atoms::Dense;
         const auto task = Task::from_text_file(task_path(t.name), opt);
         const CanonicalLayout& L = task->compiled().layout;
         std::vector<u32> args(std::max<u32>(1, L.max_arity));
@@ -54,7 +61,7 @@ TEST(Task, CanonicalLayoutRoundTrips)
             const u32 p = L.decode(c, args.data());
             ASSERT_EQ(L.encode(p, args.data()), c) << t.name;
             ASSERT_EQ(L.kind_of(c) == AtomKind::Fluent, task->compiled().kinds[p] == formalism::PredKind::Fluent) << t.name;
-            // frozen: slot = cid (minus F_fluent for derived atoms), and the record decodes to the same atom
+            // dense: slot = cid (minus F_fluent for derived atoms), and the record decodes to the same atom
             const AtomKind k = L.kind_of(c);
             const u32 slot = static_cast<u32>(k == AtomKind::Fluent ? c : c - L.fluent_count);
             ASSERT_EQ(task->atoms().find(c), slot);
@@ -86,7 +93,7 @@ TEST(Task, FindAtomAndFormat)
 TEST(Task, MakeStateFromAtomsAndValues)
 {
     for (const char* path : {"tasks/gripper__prob05.txt", "numeric_tasks/cs-counters.txt"})
-        for (auto mode : {TaskOptions::Atoms::Lazy, TaskOptions::Atoms::Frozen})
+        for (auto mode : {TaskOptions::Atoms::Lazy, TaskOptions::Atoms::Dense})
         {
             TaskOptions opt;
             opt.atoms = mode;
@@ -131,20 +138,19 @@ TEST(Task, MakeStateFromAtomsAndValues)
         }
 }
 
-TEST(Task, AutoModeFollowsTheDenseWidthRule)
+TEST(Task, AutoModeIsDenseExactlyWhereItIsNoWider)
 {
     for (const auto& t : suite())
     {
         const auto task = Task::from_text_file(task_path(t.name));
-        const u32 wd = bits::words_for(task->info().dense_fluent);
-        if (wd <= 8)
-        {
-            EXPECT_EQ(task->atoms().mode(), AtomMode::Frozen) << t.name;
-        }
-        else if (task->info().pilot_words)
-        {
-            EXPECT_EQ(task->atoms().mode() == AtomMode::Frozen, wd <= 2 * task->info().pilot_words) << t.name;
-        }
+        const TaskInfo& i = task->info();
+        ASSERT_TRUE(i.reachability_complete) << t.name;
+        const bool no_wider = bits::words_for(i.dense_fluent) <= bits::words_for(i.reachable_fluent) &&
+                              bits::words_for(i.dense_derived) <= bits::words_for(i.reachable_derived);
+        EXPECT_EQ(task->atoms().mode(), no_wider ? AtomMode::Dense : AtomMode::Reachable) << t.name;
+        EXPECT_LE(i.reachable_fluent, i.dense_fluent) << t.name;
+        EXPECT_EQ(task->words(), bits::words_for(no_wider ? i.dense_fluent : i.reachable_fluent)) << t.name;
+        EXPECT_EQ(task->words(), task->max_words()) << t.name;
     }
 }
 

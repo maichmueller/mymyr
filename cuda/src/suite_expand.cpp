@@ -255,7 +255,7 @@ SuiteExpander::SuiteExpander(ContextPtr ctx, rl::TaskSuitePtr suite, cudaStream_
     {
         dom[g] = I.suite->domain_of(g);
         loc[g] = I.suite->local_id(g);
-        I.lazy = I.lazy || I.suite->task(g)->atoms().mode() != AtomMode::Frozen;
+        I.lazy = I.lazy || !I.suite->task(g)->atoms().frozen();
     }
     I.dom_of = DeviceBuffer(I.ctx, dom.size() * sizeof(u32), I.s);
     I.loc_of = DeviceBuffer(I.ctx, loc.size() * sizeof(u32), I.s);

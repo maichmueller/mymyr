@@ -204,7 +204,7 @@ std::vector<Loaded> load(const std::vector<std::string>& names)
     {
         if (!names.empty() && std::find(names.begin(), names.end(), s.name) == names.end())
             continue;
-        std::vector<TaskPtr> tasks = load_set(s, TaskOptions::Atoms::Frozen);
+        std::vector<TaskPtr> tasks = load_set(s, TaskOptions::Atoms::Dense);
         if (tasks.empty())
             throw std::runtime_error("missing PDDL of set " + s.name);
         auto table = rl::TaskTable::create(tasks);
@@ -489,7 +489,7 @@ TaskPtr sokoban(const std::string& split, const std::string& problem)
     const fs::path d = sokoban_dir();
     const auto dom = frontend::Domain::from_file(d / split / "domain.pddl");
     TaskOptions o;
-    o.atoms = TaskOptions::Atoms::Frozen;
+    o.atoms = TaskOptions::Atoms::Dense;
     return Task::create(*dom->instantiate_file(d / split / problem), o);
 }
 
@@ -572,7 +572,7 @@ void run_table(const std::vector<u64>& sizes, int reps)
         for (int r = 0; r < reps; ++r)
         {
             TaskOptions o;
-            o.atoms = TaskOptions::Atoms::Frozen;
+            o.atoms = TaskOptions::Atoms::Dense;
             double t0 = now_s();
             std::vector<TaskPtr> tasks;
             for (u64 i = 0; i < n; ++i)

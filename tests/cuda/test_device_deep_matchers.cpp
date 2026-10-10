@@ -49,7 +49,7 @@ cuda::ContextPtr context()
 TaskPtr load(const std::string& name, bool frozen)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+    o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
     return Task::from_text_file(task_path(name), o);
 }
 
@@ -249,7 +249,7 @@ TEST(CudaDeep, SecondPassEqualsTheFirst)
     {
         const bool fixed = matching == TaskOptions::Matching::FixedOrder;
         TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
         to.matching = matching;
         const auto task = Task::from_text_file(task_path(k_organic), to);
         // the deep matchers keep the matching's kind

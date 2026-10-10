@@ -174,7 +174,7 @@ std::string ChunkGenerator::unsupported(const Task& task)
         return "object bitsets of " + std::to_string(C.ow) + " words (the device kernels take at most " +
                std::to_string(lifted::k_max_ow) + ", i.e. " + std::to_string(64 * lifted::k_max_ow) + " objects)";
     if (task.numeric_slots() > lifted::k_max_words ||
-        (task.atoms().mode() == AtomMode::Frozen && task.words() + task.numeric_slots() > lifted::k_max_words))
+        (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words))
         return "states of " + std::to_string(task.words() + task.numeric_slots()) + " words (the device kernels take at most " +
                std::to_string(lifted::k_max_words) + ")";
     return {};

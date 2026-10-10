@@ -231,7 +231,7 @@ std::shared_ptr<Program> build_program(const Task& task, const Options& o, Stati
     p->options = o;
     p->st = std::make_unique<reach::StaticTables>(task);
     const TaskData& T = task.data();
-    const CanonicalLayout& L = task.atoms().layout();
+    const CanonicalLayout& L = task.compiled().layout;
     p->total = L.total;
     p->fluent_count = L.fluent_count;
     p->anchors.resize(T.predicates.size());
@@ -357,7 +357,7 @@ class Fixpoint
 public:
     /// Scratch for fixpoints of one program; reset() prepares a run (sparse clears: restricted fixpoints and goal
     /// queries reuse it, see cached()).
-    explicit Fixpoint(const Program& p) : P(p), C(p.task->compiled()), L(p.task->atoms().layout())
+    explicit Fixpoint(const Program& p) : P(p), C(p.task->compiled()), L(p.task->compiled().layout)
     {
         m_known.init(C, p.total);
         m_old.init(C, p.total);
@@ -428,6 +428,14 @@ public:
 
     /// The table of the last run (the scratch allocates a new one for the next).
     std::unique_ptr<TableData> take() { return std::move(m_out); }
+    /// Bounds the next runs' work (reach::Executor::set_step_limit); a run past it stops and exhausted() is set.
+    void set_step_limit(u64 limit) noexcept { m_exec.set_step_limit(limit); }
+    /// Whether runs collect the reached atoms and tuples per predicate (reset() turns it on unless it stops at the goal).
+    void set_collect(bool collect) noexcept { m_collect = collect; }
+    [[nodiscard]] u64 steps() const noexcept { return m_exec.steps(); }
+    [[nodiscard]] bool exhausted() const noexcept { return m_exec.exhausted(); }
+    /// Every atom reached by the last run.
+    [[nodiscard]] const reach::View& reached() const noexcept { return m_known; }
     [[nodiscard]] bool goal() const { return m_out->goal; }
 
     void run(u64* bindings)
@@ -469,6 +477,7 @@ public:
                     const u32* args = m_delta_args.data() + a.args;
                     for (const detail::Anchor& an : P.seed_anchors[a.pred])
                     {
+                        m_exec.charge(1);
                         const Rule& r = P.rules[an.rule];
                         if (!unify(r.body[an.lit], args))
                             continue;
@@ -485,6 +494,7 @@ public:
                     const u32* args = m_delta_args.data() + a.args;
                     for (const detail::Anchor& an : P.anchors[a.pred])
                     {
+                        m_exec.charge(1);
                         if (!unify(P.rules[an.rule].body[an.lit], args))
                             continue;
                         if (an.dedup && !first_run(an))
@@ -652,6 +662,8 @@ private:
         m_rule_index = ri;
         Ctx ctx{*this, P.rules[ri]};
         m_exec.run(P.rules[ri].plans[plan], ctx);
+        if (m_exec.exhausted())
+            m_halt = true;
         return !m_halt;
     }
 
@@ -722,6 +734,35 @@ struct WitnessMemo
 };
 }  // namespace detail
 
+ReachableAtoms reachable_atoms(const Task& task, u64 max_steps)
+{
+    Statistics stats;
+    Options o;
+    o.record_witnesses = false;
+    const std::shared_ptr<const Program> program = build_program(task, o, stats);
+    Fixpoint f(*program);  // a scratch of its own, not the per-thread cache: it is freed on return
+    f.reset({}, false, false);
+    f.set_collect(false);
+    f.set_step_limit(max_steps);
+    f.run(nullptr);
+    ReachableAtoms out;
+    out.steps = f.steps();
+    out.complete = !f.exhausted();
+    if (!out.complete)
+        return out;
+    const std::vector<u64>& reached = f.reached().bits;
+    for (u64 w = 0; w < reached.size(); ++w)
+        for (u64 x = reached[w]; x; x &= x - 1)
+        {
+            const u64 c = w * 64 + static_cast<u64>(std::countr_zero(x));
+            if (c >= program->total)
+                break;
+            out.atoms.push_back(c);
+            out.fluent += c < program->fluent_count ? 1 : 0;
+        }
+    return out;
+}
+
 // ================================================================================================ Table
 Table::Table(std::shared_ptr<const detail::Program> program, std::unique_ptr<detail::TableData> data)
     : m_program(std::move(program)), m_data(std::move(data))
@@ -735,7 +776,7 @@ bool Table::is_reachable(CanonicalAtom atom) const { return atom < m_program->to
 
 bool Table::is_reachable(PredicateId predicate, std::span<const ObjectId> objects) const
 {
-    const CanonicalLayout& L = m_program->task->atoms().layout();
+    const CanonicalLayout& L = m_program->task->compiled().layout;
     if (predicate.v >= L.offset.size() || L.offset[predicate.v] == CanonicalLayout::k_none || objects.size() != L.arity[predicate.v])
         return false;
     u64 c = L.offset[predicate.v];

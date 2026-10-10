@@ -40,7 +40,7 @@ void check_rows(const TaskSuite& table, StateBatchView in, const i32* ids, bool 
     for (u64 i = 0; i < in.rows; ++i)
     {
         const Task& t = table.task_of(ids, i);
-        if (in.words < t.words() && t.atoms().mode() == AtomMode::Frozen)
+        if (in.words < t.words() && t.atoms().frozen())
             throw std::invalid_argument(std::string("mymyr: ") + what + ": state rows of " + std::to_string(in.words) +
                                         " atom words; the states of instance " + std::to_string(ids ? ids[i] : 0) +
                                         " have " + std::to_string(t.words()) + " (frozen atom slots)");

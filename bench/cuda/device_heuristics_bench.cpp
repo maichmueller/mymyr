@@ -3,7 +3,7 @@
 //
 //   mymyr_device_heuristics_bench task.txt [--mode heur|astar|gbfs] [--h max|add|ff|h2|set_additive|blind] [--b 1000,10000,100000]
 //                  [--variant auto|sweep|frontier] [--warp -1|0|1] [--threads T] [--global] [--reps R] [--sample S]
-//                  [--cpu-threads T] [--walk-steps S] [--atoms auto|lazy|frozen] [--distinct N]
+//                  [--cpu-threads T] [--walk-steps S] [--atoms auto|reachable|dense|lazy] [--distinct N]
 //                  [--budget N] [--seconds S] [--single-bucket] [--hcosts unit|real]
 //   mymyr_device_heuristics_bench domain.pddl --problem problem.pddl [...]   (PDDL: needs the front end)
 //
@@ -60,7 +60,7 @@ double since(Clock::time_point t0) { return std::chrono::duration<double>(Clock:
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_heuristics_bench task.txt [--h max|add|ff|h2|set_additive] [--b 1000,10000,100000] [--variant auto|sweep|frontier]\n"
                  "       [--warp -1|0|1] [--threads T] [--global] [--reps R] [--sample S] [--cpu-threads T] [--walk-steps S]\n"
-                 "       [--atoms auto|lazy|frozen] [--distinct N]\n",
+                 "       [--atoms auto|reachable|dense|lazy] [--distinct N]\n",
                  msg);
     std::exit(2);
 }
@@ -288,7 +288,7 @@ int main(int argc, char** argv)
         else if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else
             usage(("unknown option " + a).c_str());

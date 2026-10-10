@@ -55,7 +55,7 @@ std::vector<NamedSuite> suites(TaskOptions::Atoms atoms)
     {
         std::vector<rl::TaskTablePtr> tables;
         std::string name;
-        bool fast = atoms == TaskOptions::Atoms::Frozen;
+        bool fast = atoms == TaskOptions::Atoms::Dense;
         for (const auto& n : names)
         {
             if (!by.count(n))
@@ -505,7 +505,7 @@ TEST(DeviceTaskSuiteExpand, SuiteEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
     {
         const auto all = suites(atoms);
         ASSERT_EQ(all.size(), 3u);
@@ -618,7 +618,7 @@ TEST(DeviceTaskSuiteExpand, MappedWritesOfEveryModeEqualHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
     {
         std::map<std::string, Set> by;
         for (Set& s : sets(atoms))
@@ -630,7 +630,7 @@ TEST(DeviceTaskSuiteExpand, MappedWritesOfEveryModeEqualHost)
         const rl::TaskSuite& S = *suite;
         cuda::SuiteExpander ex(ctx, suite);
         ASSERT_EQ(ex.domain(0).mode(), cuda::DeviceExpander::Mode::Single);
-        ASSERT_EQ(ex.domain(1).mode(), atoms == TaskOptions::Atoms::Frozen ? cuda::DeviceExpander::Mode::Multi
+        ASSERT_EQ(ex.domain(1).mode(), atoms == TaskOptions::Atoms::Dense ? cuda::DeviceExpander::Mode::Multi
                                                                              : cuda::DeviceExpander::Mode::PerInstance);
         for (const Order o : {Order::Interleaved, Order::Reversed})
         {
@@ -665,7 +665,7 @@ TEST(DeviceTaskSuiteExpand, TaskIdsAndRowsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = suites(TaskOptions::Atoms::Frozen);
+    const auto all = suites(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const rl::TaskSuite& S = *all[0].suite;
     std::vector<u64> rows;
@@ -710,7 +710,7 @@ TEST(DeviceTaskSuiteEnv, FastPathPerDomain)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const NamedSuite& ns : suites(atoms))
         {
             SCOPED_TRACE(ns.name);
@@ -736,7 +736,7 @@ TEST(DeviceTaskSuiteEnv, SuiteEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const NamedSuite& ns : suites(atoms))
             for (const auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
                 for (const bool grouped : {false, true})
@@ -756,7 +756,7 @@ TEST(DeviceTaskSuiteEnv, GoalsDeadEndsChunksAndStreams)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Frozen))
+    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Dense))
     {
         if (!ns.fast)
             continue;  // goal axioms: per-env goal masks cannot express them
@@ -910,7 +910,7 @@ TEST(DeviceTaskSuiteEnv, LaunchOrderGroupsTheRowsByDomain)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Frozen))
+    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Dense))
     {
         if (!ns.fast)
             continue;
@@ -957,7 +957,7 @@ TEST(DeviceTaskSuiteEnv, TaskIdsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = suites(TaskOptions::Atoms::Frozen);
+    const auto all = suites(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const rl::TaskSuitePtr& suite = all[0].suite;
     const u32 I = suite->size();
@@ -995,7 +995,7 @@ TEST(DeviceTaskSuiteEnv, CapturedStepsEqualEagerAndHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Frozen))
+    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Dense))
     {
         if (!ns.fast)
             continue;

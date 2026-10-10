@@ -1,7 +1,7 @@
 // mymyr_datasets: state spaces, generalized state spaces and samplers on PDDL instances, printing one JSON line
 // per measurement, for parity, speed and determinism checks against the fork.
 //
-//   mymyr_datasets ss LIST [--threads T] [--no-fp] [--hash] [--max-states N] [--atoms auto|lazy|frozen] [--text]
+//   mymyr_datasets ss LIST [--threads T] [--no-fp] [--hash] [--max-states N] [--atoms auto|reachable|dense|lazy] [--text]
 //                          [--remove-if-unsolvable] [--no-labels]
 //       One JSON line per line "domain.pddl problem.pddl [task.txt]" of LIST (--text: read the exported task.txt of
 //       the third column instead of the PDDL). Defaults as the fork_ss configuration: remove_if_unsolvable = false,
@@ -75,7 +75,7 @@ double peak_rss_mb()
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_datasets ss LIST [--threads T] [--no-fp] [--hash] [--max-states N]\n"
-                 "                          [--atoms auto|lazy|frozen] [--text] [--remove-if-unsolvable] [--no-labels]\n"
+                 "                          [--atoms auto|reachable|dense|lazy] [--text] [--remove-if-unsolvable] [--no-labels]\n"
                  "       mymyr_datasets pool LIST --threads T [--repeat R] [--text] [--atoms ...] [--quiet]\n"
                  "       mymyr_datasets gss DOMAIN PROBLEM... [--threads T]\n"
                  "       mymyr_datasets sampler DOMAIN PROBLEM [--seed S] [--samples N]\n"
@@ -304,8 +304,10 @@ TaskOptions::Atoms parse_atoms(const std::string& v)
 {
     if (v == "lazy")
         return TaskOptions::Atoms::Lazy;
-    if (v == "frozen")
-        return TaskOptions::Atoms::Frozen;
+    if (v == "dense")
+        return TaskOptions::Atoms::Dense;
+    if (v == "reachable")
+        return TaskOptions::Atoms::Reachable;
     if (v == "auto")
         return TaskOptions::Atoms::Auto;
     usage("unknown --atoms " + v);
@@ -354,7 +356,7 @@ Common parse_common(int argc, char** argv)
 {
     Common c;
     c.so.remove_if_unsolvable = false;
-    c.to.atoms = TaskOptions::Atoms::Frozen;
+    c.to.atoms = TaskOptions::Atoms::Dense;
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];

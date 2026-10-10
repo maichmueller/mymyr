@@ -31,9 +31,9 @@ struct Mode
 };
 const Mode k_modes[] = {
     {TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Lazy, "fixed_lazy"},
-    {TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Frozen, "fixed_frozen"},
+    {TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Dense, "fixed_frozen"},
     {TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Lazy, "fc_lazy"},
-    {TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Frozen, "fc_frozen"},
+    {TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Dense, "fc_frozen"},
 };
 
 struct Param

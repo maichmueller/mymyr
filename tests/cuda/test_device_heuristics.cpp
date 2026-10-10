@@ -65,7 +65,7 @@ cuda::ContextPtr context()
 TaskPtr load(const std::string& name, bool frozen)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+    o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
     return Task::from_text_file(task_path(name), o);
 }
 

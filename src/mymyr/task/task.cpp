@@ -4,14 +4,13 @@
 #include "mymyr/core/hash.hpp"
 #include "mymyr/formalism/fingerprint.hpp"
 #include "mymyr/formalism/text_format.hpp"
+#include "mymyr/reachability/relaxed_reachability.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <bit>
 #include <chrono>
 #include <cmath>
-#include <deque>
 #include <stdexcept>
-#include <unordered_set>
 
 namespace mymyr
 {
@@ -47,82 +46,89 @@ u64 Task::fingerprint() const
 
 namespace
 {
-/// Bytes of the per-atom records a frozen index allocates up front.
-u64 frozen_bytes(const CanonicalLayout& L)
+/// Bytes of the per-atom records a frozen index allocates for `atoms` atoms.
+u64 frozen_bytes(const CanonicalLayout& L, u64 atoms)
 {
     const u64 per = (1 + std::max<u64>(1, L.max_arity)) * sizeof(u32) + sizeof(ViewOp) + sizeof(CanonicalAtom);
-    return L.total * per + (L.total + 1) * sizeof(u32);
+    return atoms * per + (L.total + 1) * sizeof(u32);
 }
 constexpr u64 k_frozen_max_bytes = u64{4} << 30;
+
+void check_frozen_bytes(const CanonicalLayout& L, u64 atoms, const char* what)
+{
+    if (frozen_bytes(L, atoms) > k_frozen_max_bytes)
+        throw std::length_error(std::string("mymyr: ") + what + " atom slots need " +
+                                std::to_string(frozen_bytes(L, atoms) >> 20) + " MiB of records (" + std::to_string(atoms) +
+                                " atoms of a typed-dense space of " + std::to_string(L.total) + ")");
+}
 }  // namespace
 
 void Task::choose_atom_mode()
 {
     const CanonicalLayout& L = m_compiled.layout;
-    AtomMode mode = AtomMode::Lazy;
-    switch (m_options.atoms)
+    const TaskOptions::Atoms want = m_options.atoms;
+    reachability::ReachableAtoms reachable;
+    AtomMode mode = AtomMode::Dense;
+    if (want == TaskOptions::Atoms::Lazy)
+        mode = AtomMode::Lazy;
+    else if (want == TaskOptions::Atoms::Auto || want == TaskOptions::Atoms::Reachable)
     {
-        case TaskOptions::Atoms::Lazy: mode = AtomMode::Lazy; break;
-        case TaskOptions::Atoms::Frozen:
-            if (frozen_bytes(L) > k_frozen_max_bytes)
-                throw std::length_error("mymyr: frozen atom slots need " + std::to_string(frozen_bytes(L) >> 20) +
-                                        " MiB of records (typed-dense space of " + std::to_string(L.total) + " atoms)");
-            mode = AtomMode::Frozen;
-            break;
-        case TaskOptions::Atoms::Auto:
+        if (L.total > CanonicalLayout::k_max_total)
+            throw std::length_error("mymyr: the typed-dense canonical space of " + std::to_string(L.total) +
+                                    " atoms exceeds 2^28 (the atom index takes at most 2^28)");
+        const u64 budget = m_options.reachability_budget ? m_options.reachability_budget : ~u64{0};
+        reachable = reachability::reachable_atoms(*this, budget);
+        m_info.reachability_steps = reachable.steps;
+        m_info.reachability_complete = reachable.complete;
+        m_info.reachable_fluent = reachable.fluent;
+        m_info.reachable_derived = reachable.atoms.size() - reachable.fluent;
+        if (!reachable.complete && want == TaskOptions::Atoms::Reachable)
+            throw std::length_error("mymyr: the relaxed-reachability analysis needs more than " + std::to_string(budget) +
+                                    " steps (reachability_budget); raise it, or use dense atom slots");
+        if (reachable.complete)
         {
-            // frozen when W_dense <= frozen_max_words, or W_dense <= 2 * W_lazy (estimated by a bounded pilot).
-            const u32 wd = bits::words_for(L.fluent_count);
-            if (L.total > CanonicalLayout::k_max_total || frozen_bytes(L) > k_frozen_max_bytes)
-                mode = AtomMode::Lazy;
-            else if (wd <= m_options.frozen_max_words)
-                mode = AtomMode::Frozen;
-            else if (m_options.pilot_expansions > 0)
-            {
-                m_atoms.init(&L, &m_compiled.view, AtomMode::Lazy);
-                build_initial_state();
-                const u32 wl = pilot_words();
-                m_info.pilot_words = wl;
-                mode = wd <= 2 * wl ? AtomMode::Frozen : AtomMode::Lazy;
-            }
-            break;
+            // dense where it is not wider: its slots are the canonical ids themselves
+            const bool dense_fits = bits::words_for(L.fluent_count) <= bits::words_for(reachable.fluent) &&
+                                    bits::words_for(L.total - L.fluent_count) <= bits::words_for(m_info.reachable_derived) &&
+                                    frozen_bytes(L, L.total) <= k_frozen_max_bytes;
+            mode = want == TaskOptions::Atoms::Auto && dense_fits ? AtomMode::Dense : AtomMode::Reachable;
         }
     }
-    m_atoms.init(&L, &m_compiled.view, mode);  // also discards the pilot's lazy slots
+    if (mode == AtomMode::Dense)
+        check_frozen_bytes(L, L.total, "dense");
+    else if (mode == AtomMode::Reachable)
+        check_frozen_bytes(L, reachable.atoms.size(), "reachable");
+    m_atoms.init(&L, &m_compiled.view, mode, reachable.atoms);
     m_info.atom_mode = mode;
     build_initial_state();
 }
 
-u32 Task::pilot_words()
+u64 Task::encoding_fingerprint() const
 {
-    // A bounded lazy BrFS with its own (temporary) engine: the index is reset afterwards.
-    detail::Engine engine(*this);
-    AxiomEvaluator axioms(engine);
-    Successors succ(engine, axioms);
-    succ.set_canonical_order(false);
-    std::unordered_set<State> seen;
-    std::deque<State> queue;
-    seen.insert(m_initial);
-    queue.push_back(m_initial);
-    std::vector<u64> next;
-    u32 expansions = 0;
-    while (!queue.empty() && expansions < m_options.pilot_expansions)
+    if (m_atoms.frozen())
     {
-        const State cur = std::move(queue.front());
-        queue.pop_front();
-        ++expansions;
-        succ.prepare(cur);
-        succ.generate<false>(
-            [&](u32, const ObjectId*, const Delta& d)
-            {
-                const u32 n = apply_delta(cur.data(), cur.size_words(), d, next);
-                State s(next.data(), n, d.num, d.nnum);
-                if (seen.insert(s).second)
-                    queue.push_back(std::move(s));
-                return true;
-            });
+        m_encoding_once.call([this] { m_encoding = compute_encoding_fingerprint(); });
+        return m_encoding;
     }
-    return bits::words_for(m_atoms.fluent_slots());
+    return compute_encoding_fingerprint();
+}
+
+u64 Task::compute_encoding_fingerprint() const
+{
+    // the slot -> canonical id maps themselves: reachable and dense slots of a task whose every atom is reachable
+    // encode alike, and hash alike
+    u64 h = hash::mix64(0x656e636f64696e67ULL ^ (m_atoms.frozen() ? 0 : 1));
+    for (u32 k = 0; k < 2; ++k)
+    {
+        const AtomKind kind = k == 0 ? AtomKind::Fluent : AtomKind::Derived;
+        const u32 n = k == 0 ? m_atoms.fluent_slots() : m_atoms.derived_slots();
+        h = hash::mix64(h ^ (u64{n} + k));
+        for (u32 s = 0; s < n; ++s)
+            h = hash::mix64(h ^ m_atoms.canonical(kind, s));
+    }
+    const plan::Numeric& N = m_compiled.num;
+    h = hash::mix64(h ^ (u64{N.slots} << 8) ^ (u64{N.words} << 40) ^ static_cast<u64>(N.storage));
+    return h;
 }
 
 void Task::build_initial_state()
@@ -253,6 +259,11 @@ State Task::make_state(std::span<const AtomArgs> atoms, std::span<const f64> val
         if (c >= L.fluent_count)
             throw std::invalid_argument("mymyr make_state: " + atom_name(a) +
                                         " lies outside the reachable domains of its predicate");
+        if (m_atoms.frozen() && m_atoms.find(c) == AtomIndex::k_empty)
+            throw std::invalid_argument("mymyr make_state: " + atom_name(a) +
+                                        " is not relaxed-reachable from the initial state, so this task has no slot for "
+                                        "it (no state reachable from the initial state holds it; dense atom slots have "
+                                        "one for every atom)");
         const u32 slot = m_atoms.intern(c);
         if (bits::word_of(slot) >= w.size())
             w.resize(bits::word_of(slot) + 1, 0);

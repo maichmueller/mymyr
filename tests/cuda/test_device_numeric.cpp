@@ -127,7 +127,7 @@ TEST_P(DeviceNumeric, ExpandEqualsCpu)
 {
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const auto matching : {TaskOptions::Matching::FixedOrder, TaskOptions::Matching::ForwardChecking})
             for (const auto storage : {TaskOptions::NumericStorageMode::Auto, TaskOptions::NumericStorageMode::F64})
             {
@@ -767,7 +767,7 @@ TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
 {
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
     {
         const auto table = rl::TaskTable::create({instance(2, TaskOptions::NumericStorageMode::I32, atoms),
                                                 instance(4, TaskOptions::NumericStorageMode::F64, atoms),
@@ -912,7 +912,7 @@ TEST(DeviceNumericRules, UserGroundGoalsEqualCpu)
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto ctx = context();
     for (bool numeric_axiom : {false, true})
-        for (auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+        for (auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
             for (auto storage : {TaskOptions::NumericStorageMode::Auto, TaskOptions::NumericStorageMode::F64})
             {
                 TaskOptions options; options.atoms = atoms; options.numeric_storage = storage;

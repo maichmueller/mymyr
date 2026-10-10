@@ -31,7 +31,7 @@ protected:
     TaskPtr load() const
     {
         TaskOptions o;
-        o.atoms = std::get<1>(GetParam()) ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+        o.atoms = std::get<1>(GetParam()) ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
         return Task::from_text_file(task_path(std::get<0>(GetParam())), o);
     }
 };
@@ -196,7 +196,7 @@ TEST_P(TaskArraysV2, DeviceMatcherFlagsFollowTheSearchCosts)
     ASSERT_EQ(costs.schemas.size(), C.schemas.size());
     ASSERT_EQ(again.schemas.size(), C.schemas.size());
     EXPECT_GE(costs.states, 1u);
-    EXPECT_LE(costs.states, task->atoms().mode() == AtomMode::Frozen ? rl::k_probe_states : 1u);
+    EXPECT_LE(costs.states, task->atoms().frozen() ? rl::k_probe_states : 1u);
     const rl::ArrayBundle b = rl::device_arrays(*task, 2);
     const rl::dev::TaskView v = rl::task_view(b);
     auto expect_flags = [&](u32 flags, const plan::Matcher& m, rl::SearchCost c, bool schema, const std::string& what)

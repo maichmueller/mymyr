@@ -461,7 +461,9 @@ private:
         const formalism::TaskData& t = m_task.data();
         for (CanonicalAtom c : m_goal_atoms)
         {
-            const u32 s = m_task.atoms().intern(c);
+            const u32 s = m_task.atoms().slot_if_any(c);
+            if (s == AtomIndex::k_empty)
+                continue;  // no state holds it
             if (s >= m_goal_slot.size())
                 m_goal_slot.resize(s + 1, 0);
             m_goal_slot[s] = 1;

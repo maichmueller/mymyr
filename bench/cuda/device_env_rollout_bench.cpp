@@ -2,7 +2,7 @@
 // batch size:
 //
 //   mymyr_device_env_rollout_bench task.txt [--envs 16384,65536] [--steps 200] [--warmup 10] [--reps 3] [--path auto|fast|general]
-//                     [--atoms auto|lazy|frozen] [--max-steps M] [--no-canonical] [--witness] [--labels] [--final]
+//                     [--atoms auto|reachable|dense|lazy] [--max-steps M] [--no-canonical] [--witness] [--labels] [--final]
 //                     [--chunk R] [--max-bytes B] [--graph K]
 //
 // A step is the full environment step: choose (the counter-based RNG), generate the successor (canonical order by
@@ -50,7 +50,7 @@ u64 fnv(u64 h, const void* d, u64 bytes)
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_env_rollout_bench task.txt [--envs N,N,...] [--steps S] [--warmup W] [--reps R]\n"
-                 "       [--path auto|fast|general] [--atoms auto|lazy|frozen] [--max-steps M] [--no-canonical] [--witness]\n"
+                 "       [--path auto|fast|general] [--atoms auto|reachable|dense|lazy] [--max-steps M] [--no-canonical] [--witness]\n"
                  "       [--labels] [--final] [--chunk R] [--max-bytes B] [--graph K]\n",
                  msg);
     std::exit(2);
@@ -105,7 +105,7 @@ int main(int argc, char** argv)
         else if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else if (a == "--max-steps")
             cfg.max_steps = static_cast<u32>(std::stoul(value()));

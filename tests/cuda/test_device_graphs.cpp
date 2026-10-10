@@ -215,7 +215,7 @@ void run_graph(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const
 std::vector<Set> graph_sets()
 {
     std::vector<Set> out;
-    for (Set& s : sets(TaskOptions::Atoms::Frozen))
+    for (Set& s : sets(TaskOptions::Atoms::Dense))
     {
         if (!cuda::DeviceEnv::fast_unsupported(*s.table, config(0)).empty())
             continue;  // miconic-simpleadl: axioms
@@ -318,7 +318,7 @@ TEST(DeviceGraphEnv, GeneralPathRefusesCapture)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = sets(TaskOptions::Atoms::Frozen);
+    const auto all = sets(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const cuda::Stream cs;
     cuda::DeviceEnv env(ctx, all[0].table, config(5), cuda::DeviceEnv::Path::General);

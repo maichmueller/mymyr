@@ -6,7 +6,7 @@
 //   mymyr_iw task.txt                        --algo iw|siw|iwpass [--k K] [options]
 //   mymyr_iw --domain D.pddl --problem P.pddl --algo ...            (when built with the PDDL front end)
 //
-// options: --atoms auto|lazy|frozen  --match auto|fixed|fc  --width-zero fork|root  --no-opt-iw1  --witness
+// options: --atoms auto|reachable|dense|lazy  --match auto|fixed|fc  --width-zero fork|root  --no-opt-iw1  --witness
 //          --no-canonical  --max-states N  --max-expanded N  --max-depth D  --timeout-ms T  --dense-mb M  --plan
 //          --trace FILE: the event trace of bench/fork_iw_trace (E <sorted atoms> per expansion, G +|- <action> per
 //          transition, S <expanded>/<generated>/<in_tree> per pass); runs the observed (slow) path
@@ -59,7 +59,7 @@ double peak_rss_mb()
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_iw (task.txt | --domain D --problem P) --algo iw|siw|iwpass [--k K]\n"
-                 "       [--atoms auto|lazy|frozen] [--match auto|fixed|fc] [--width-zero fork|root] [--no-opt-iw1]\n"
+                 "       [--atoms auto|reachable|dense|lazy] [--match auto|fixed|fc] [--width-zero fork|root] [--no-opt-iw1]\n"
                  "       [--witness] [--no-canonical] [--max-states N] [--max-expanded N] [--max-depth D]\n"
                  "       [--timeout-ms T] [--dense-mb M] [--plan] [--order goal_count|goal_count_fewer] [--beam W]\n"
                  "       [--beam-mode all_tested|survivors_only|relaxed] [--tie-seed S] [--chunk C] [--threads T]\n",
@@ -240,7 +240,7 @@ int main(int argc, char** argv)
         else if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else if (a == "--match")
         {
@@ -417,7 +417,7 @@ int main(int argc, char** argv)
                         static_cast<unsigned long long>(replay->action_misses));
         std::printf(",\"atoms\":\"%s\",\"F\":%u,\"dense_F\":%llu,\"witness\":%s,\"canonical\":%s,\"table_mb\":%.2f,\"tree_mb\":%.2f,"
                     "\"peak_rss_mb\":%.1f}\n",
-                    task->atoms().mode() == AtomMode::Frozen ? "frozen" : "lazy", fluent_slots,
+                    atom_mode_name(task->atoms().mode()), fluent_slots,
                     static_cast<unsigned long long>(task->info().dense_fluent), io.witness_pruning ? "true" : "false",
                     io.canonical_order ? "true" : "false", static_cast<double>(table_bytes) / 1048576.0,
                     static_cast<double>(node_bytes) / 1048576.0, peak_rss_mb());

@@ -80,7 +80,7 @@ int main(int argc, char** argv)
     {
         const auto dom = frontend::Domain::from_file(files[0]);
         TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
         std::vector<TaskPtr> tasks;
         for (usize k = 1; k < files.size(); ++k)
             tasks.push_back(Task::create(*dom->instantiate_file(files[k]), to));

@@ -105,7 +105,7 @@ u32 bucket(u32 words) { return words <= 2 ? 2 : words <= 4 ? 4 : words <= 16 ? 1
 
 TEST(Table, SetsSpanSizesAndBuckets)
 {
-    for (const Set& s : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& s : sets(TaskOptions::Atoms::Dense))
     {
         SCOPED_TRACE(s.name);
         u32 lo = ~0u, hi = 0;
@@ -129,8 +129,8 @@ TEST(Table, SetsSpanSizesAndBuckets)
 TEST(Table, OneDomainIsChecked)
 {
     const auto all = table_instance_sets();
-    const auto blocks = load_set(all[0], TaskOptions::Atoms::Frozen);
-    const auto gripper = load_set(all[1], TaskOptions::Atoms::Frozen);
+    const auto blocks = load_set(all[0], TaskOptions::Atoms::Dense);
+    const auto gripper = load_set(all[1], TaskOptions::Atoms::Dense);
     ASSERT_FALSE(blocks.empty());
     ASSERT_FALSE(gripper.empty());
     try
@@ -155,7 +155,7 @@ TEST(Table, OneDomainIsChecked)
 
 TEST(Table, PredicatesAndMetadataRoundTrip)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const Set& s : sets(atoms))
         {
             SCOPED_TRACE(s.name);
@@ -258,7 +258,7 @@ TEST(Table, DomainPredicateIdsAreTheDomains)
     for (const InstanceSet& set : table_instance_sets())
     {
         SCOPED_TRACE(set.name);
-        const std::vector<TaskPtr> t = load_set(set, TaskOptions::Atoms::Frozen);
+        const std::vector<TaskPtr> t = load_set(set, TaskOptions::Atoms::Dense);
         ASSERT_GE(t.size(), 4u);
         const u64 n = t.size();
         const auto train = rl::TaskTable::create({t[0], t[1], t[2]});
@@ -300,10 +300,10 @@ TEST(Table, DomainPredicateIdsAreTheDomains)
 
 TEST(TableExpand, MixedBatchEqualsSingleInstanceExpansions)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const Set& s : sets(atoms))
         {
-            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Frozen ? " frozen" : " lazy"));
+            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy"));
             const rl::TaskTable& T = *s.table;
             std::vector<u64> rows;
             std::vector<i32> ids;
@@ -396,7 +396,7 @@ TEST(TableExpand, MixedBatchEqualsSingleInstanceExpansions)
 
 TEST(TableExpand, TaskIdsAreChecked)
 {
-    const auto s = sets(TaskOptions::Atoms::Frozen);
+    const auto s = sets(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(s.empty());
     const rl::TaskTable& T = *s[0].table;
     std::vector<u64> rows;
@@ -500,10 +500,10 @@ std::vector<T> gather(const std::vector<T>& v, const std::vector<u64>& rows, u64
 
 TEST(TableEnv, MixedBatchEqualsSingleInstanceEnvs)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const Set& s : sets(atoms))
         {
-            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Frozen ? " frozen" : " lazy"));
+            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy"));
             const rl::TaskTable& T = *s.table;
             const u32 I = T.size(), per = 5;
             std::vector<i32> ids;
@@ -563,7 +563,7 @@ TEST(TableEnv, MixedBatchEqualsSingleInstanceEnvs)
 
 TEST(TableEnv, NextTaskIdsAndPerEnvGoals)
 {
-    for (const Set& s : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& s : sets(TaskOptions::Atoms::Dense))
     {
         SCOPED_TRACE(s.name);
         const rl::TaskTable& T = *s.table;
@@ -703,7 +703,7 @@ void expect_batch_rows(const rl::PoolBatch& p, u64 pos, const Envs& e, u64 row, 
 
 TEST(TablePool, EqualsTheHostEnvForAnyThreadsSplitsAndOrder)
 {
-    for (const Set& s : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& s : sets(TaskOptions::Atoms::Dense))
     {
         SCOPED_TRACE(s.name);
         const rl::TaskTable& T = *s.table;
@@ -785,7 +785,7 @@ TEST(TablePool, ConcurrentCallersHomeRangesAndRecycledBatches)
 {
     // sends large enough for several home ranges per send (the workers steal pieces of each other's ranges), from
     // several caller threads at once, with next_task_ids and recycled batches: every env equals the HostEnv
-    for (const Set& s : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& s : sets(TaskOptions::Atoms::Dense))
     {
         SCOPED_TRACE(s.name);
         const rl::TaskTable& T = *s.table;

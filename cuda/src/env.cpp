@@ -77,7 +77,7 @@ std::string fast_why(const Task& task, const rl::EnvConfig& config)
         return "numeric applicability and effects require the general expansion path";
     if (task.has_axioms())
         return "axioms (their derived atoms are evaluated on the CPU)";
-    if (task.atoms().mode() != AtomMode::Frozen)
+    if (!task.atoms().frozen())
         return "lazy atom slots (the device may meet atoms without a slot)";
     const plan::Compiled& C = task.compiled();
     const u32 wi = config.witness_pruning ? 0 : 1;

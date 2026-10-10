@@ -162,7 +162,7 @@ class RlExpand : public ::testing::TestWithParam<std::tuple<std::string, bool>>
 TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
     const std::vector<State> states = walk_states(*task, 3, 12, 7);
     const Reference ref = reference(*task, states);  // interns every successor atom (lazy slots) first
     const u32 W = task->words(), L = rl::max_label_width(*task);
@@ -188,7 +188,7 @@ TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
 TEST_P(RlExpand, CapacityOverflowCountsAndClips)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
     const std::vector<State> states = walk_states(*task, 2, 8, 3);
     const Reference ref = reference(*task, states);
     const u32 W = task->words(), L = rl::max_label_width(*task);
@@ -220,7 +220,7 @@ TEST_P(RlExpand, CapacityOverflowCountsAndClips)
 TEST_P(RlExpand, NarrowRowsReportTheWidthNeeded)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
     const std::vector<State> states = walk_states(*task, 2, 8, 5);
     const Reference ref = reference(*task, states);
     u32 need = 0;
@@ -240,7 +240,7 @@ TEST_P(RlExpand, NarrowRowsReportTheWidthNeeded)
 TEST_P(RlExpand, PaddedViewScattersTheFlatRows)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
     const std::vector<State> states = walk_states(*task, 2, 10, 11);
     const Reference ref = reference(*task, states);
     const u32 W = task->words(), L = rl::max_label_width(*task);
@@ -344,7 +344,7 @@ class RlTaskArrays : public ::testing::TestWithParam<std::tuple<std::string, boo
 TEST_P(RlTaskArrays, AtomMetadataMatchesTheIndex)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
     (void)walk_states(*task, 2, 10, 3);  // assign some lazy slots
     const rl::ArrayBundle m = rl::atom_metadata(*task);
     const u32 F = static_cast<u32>(m.scalar("num_atoms"));
@@ -382,7 +382,7 @@ TEST_P(RlTaskArrays, AtomMetadataMatchesTheIndex)
 TEST_P(RlTaskArrays, GoalMasksAgreeWithIsGoalAndLayoutEncodesCids)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
     const std::vector<State> states = walk_states(*task, 3, 15, 9);
     const rl::ArrayBundle d = rl::device_arrays(*task, 1);  // the version-1 layout stays available (version 2 adds to it)
     EXPECT_EQ(d.scalar("version"), 1);

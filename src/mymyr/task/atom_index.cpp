@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <stdexcept>
+#include <string>
 
 namespace mymyr
 {
@@ -42,48 +43,75 @@ ViewOp view_op_of(const ViewLayout& v, u32 pred, u32 arity, const u32* args)
     return op;
 }
 
-void AtomIndex::init(const CanonicalLayout* layout, const ViewLayout* view, AtomMode mode)
+void AtomIndex::init(const CanonicalLayout* layout, const ViewLayout* view, AtomMode mode,
+                     std::span<const CanonicalAtom> reachable)
 {
     m_layout = layout;
     m_view = view;
-    reset(mode);
+    reset(mode, reachable);
 }
 
-void AtomIndex::reset(AtomMode mode)
+void AtomIndex::reset(AtomMode mode, std::span<const CanonicalAtom> reachable)
 {
     const CanonicalLayout& L = *m_layout;
     if (L.total > CanonicalLayout::k_max_total)
-        throw std::length_error("AtomIndex: typed-dense canonical space of " + std::to_string(L.total) +
-                                " atoms exceeds 2^28; hashed interning is not implemented yet");
+        throw std::length_error("mymyr: the typed-dense canonical space of " + std::to_string(L.total) +
+                                " atoms exceeds 2^28 (the atom index takes at most 2^28)");
     m_mode = mode;
     m_slot_of = std::make_unique<std::atomic<u32>[]>(L.total + 1);
-    const u64 counts[2] = {L.fluent_count, L.total - L.fluent_count};
+    u64 counts[2] = {L.fluent_count, L.total - L.fluent_count};
+    if (mode == AtomMode::Reachable)
+    {
+        const auto fluent_end = std::lower_bound(reachable.begin(), reachable.end(), L.fluent_count);
+        counts[0] = static_cast<u64>(fluent_end - reachable.begin());
+        counts[1] = reachable.size() - counts[0];
+    }
     const u32 stride = 1 + std::max<u32>(1, L.max_arity);
     for (usize k = 0; k < 2; ++k)
     {
         m_records[k].reset(std::max<u64>(1, counts[k]), stride);
         m_ops[k].reset(std::max<u64>(1, counts[k]), 1);
         m_cid[k].reset(std::max<u64>(1, counts[k]), 1);
+        m_max[k] = static_cast<u32>(counts[k]);
     }
     m_slot_of[L.total].store(k_empty, std::memory_order_relaxed);
-    if (mode == AtomMode::Lazy)
+    switch (mode)
     {
-        for (u64 c = 0; c < L.total; ++c)
-            m_slot_of[c].store(k_empty, std::memory_order_relaxed);
-        m_next[0].store(0, std::memory_order_relaxed);
-        m_next[1].store(0, std::memory_order_relaxed);
-    }
-    else
-    {
-        for (u64 c = 0; c < L.total; ++c)
+        case AtomMode::Lazy:
+            for (u64 c = 0; c < L.total; ++c)
+                m_slot_of[c].store(k_empty, std::memory_order_relaxed);
+            m_next[0].store(0, std::memory_order_relaxed);
+            m_next[1].store(0, std::memory_order_relaxed);
+            break;
+        case AtomMode::Reachable:
         {
-            const AtomKind k = L.kind_of(c);
-            const u32 s = static_cast<u32>(k == AtomKind::Fluent ? c : c - L.fluent_count);
-            write_slot(k, s, c);
-            m_slot_of[c].store(s, std::memory_order_relaxed);
+            for (u64 c = 0; c < L.total; ++c)
+                m_slot_of[c].store(k_empty, std::memory_order_relaxed);
+            u32 next[2] = {0, 0};
+            for (CanonicalAtom c : reachable)
+            {
+                if (c >= L.total)
+                    throw std::logic_error("AtomIndex: a reachable atom outside the canonical space");
+                const AtomKind k = L.kind_of(c);
+                const u32 s = next[idx(k)]++;
+                write_slot(k, s, c);
+                m_slot_of[c].store(s, std::memory_order_relaxed);
+            }
+            m_next[0].store(next[0], std::memory_order_relaxed);
+            m_next[1].store(next[1], std::memory_order_relaxed);
+            break;
         }
-        m_next[0].store(static_cast<u32>(counts[0]), std::memory_order_relaxed);
-        m_next[1].store(static_cast<u32>(counts[1]), std::memory_order_relaxed);
+        case AtomMode::Dense:
+            for (u64 c = 0; c < L.total; ++c)
+            {
+                const AtomKind k = L.kind_of(c);
+                const u32 s = static_cast<u32>(k == AtomKind::Fluent ? c : c - L.fluent_count);
+                write_slot(k, s, c);
+                m_slot_of[c].store(s, std::memory_order_relaxed);
+            }
+            m_next[0].store(static_cast<u32>(counts[0]), std::memory_order_relaxed);
+            m_next[1].store(static_cast<u32>(counts[1]), std::memory_order_relaxed);
+            break;
     }
     // No fence: reset() runs while the task is built, before it is shared; publishing the task to other threads
     // (thread start, mutex, atomic shared_ptr) orders these stores.
@@ -103,6 +131,9 @@ u32 AtomIndex::intern_slow(CanonicalAtom c) const
 {
     if (c >= m_layout->total)
         throw std::logic_error("AtomIndex::intern: atom outside the typed-dense domains (compiler invariant violated)");
+    if (m_mode != AtomMode::Lazy)
+        throw std::logic_error("mymyr: an atom without a slot: it is not relaxed-reachable from the initial state, so no "
+                               "state of the task holds it");
     std::atomic<u32>& e = m_slot_of[c];
     u32 v = e.load(std::memory_order_acquire);
     for (u32 spins = 0;;)

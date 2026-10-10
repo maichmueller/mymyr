@@ -116,7 +116,7 @@ const ConditionalTask& conditional_task(const std::string& name)
 TaskPtr load(const ConditionalTask& g, bool frozen, TaskOptions::Matching matching = TaskOptions::Matching::Auto)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+    o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
     o.matching = matching;
     if (!g.text.empty())
         return Task::from_text_file(task_path(g.text), o);

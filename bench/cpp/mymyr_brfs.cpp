@@ -2,7 +2,7 @@
 // a domain/problem pair, printing one JSON line (with --layers the per-layer [expanded, generated, new] triples as
 // "layer_counts", matching the fork's own per-layer counts).
 //
-//   mymyr_brfs (task.txt | --domain D.pddl --problem P.pddl) [--atoms auto|lazy|frozen] [--match auto|fixed|fc]
+//   mymyr_brfs (task.txt | --domain D.pddl --problem P.pddl) [--atoms auto|reachable|dense|lazy] [--match auto|fixed|fc]
 //              [--fc-arity K] [--no-witness] [--canonical|--no-canonical]
 //              [--store auto|flat|chunked|compact|concurrent] [--threads T] [--nondet] [--max-states N]
 //              [--depth D] [--layers] [--fp] [--stop-at-goal]
@@ -44,7 +44,7 @@ double peak_rss_mb()
 [[noreturn]] void usage(const char* msg)
 {
     std::fprintf(stderr,
-                 "error: %s\nusage: mymyr_brfs (task.txt | --domain D --problem P) [--atoms auto|lazy|frozen]\n"
+                 "error: %s\nusage: mymyr_brfs (task.txt | --domain D --problem P) [--atoms auto|reachable|dense|lazy]\n"
                  "       [--match auto|fixed|fc] [--fc-arity K] [--no-witness] [--canonical|--no-canonical]\n"
                  "       [--store auto|flat|chunked|compact|concurrent] [--threads T] [--nondet] [--max-states N]\n"
                  "       [--depth D] [--layers] [--fp] [--stop-at-goal] [--numeric-storage auto|f64|i32] [--quantum Q]\n"
@@ -73,7 +73,7 @@ int main(int argc, char** argv)
         if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else if (a == "--match")
         {
@@ -185,7 +185,7 @@ int main(int argc, char** argv)
                     "\"threads\":%u,\"witness\":%s,\"canonical\":%s,\"states\":%llu,\"expanded\":%llu,\"generated\":%llu,"
                     "\"goal_states\":%llu,\"layers\":%u,\"exhausted\":%s,\"solved\":%s,\"plan_len\":%zu,\"prep_s\":%.4f,"
                     "\"search_s\":%.4f,\"states_per_s\":%.0f,\"fp\":\"%016llx\",\"store_mb\":%.1f,\"peak_rss_mb\":%.1f}\n",
-                    task->num_objects(), task->num_schemas(), task->atoms().mode() == AtomMode::Frozen ? "frozen" : "lazy",
+                    task->num_objects(), task->num_schemas(), atom_mode_name(task->atoms().mode()),
                     static_cast<unsigned long long>(task->info().dense_fluent), r.fluent_slots, r.words, r.store.c_str(),
                     r.threads, bo.witness_pruning ? "true" : "false", bo.canonical_order ? "true" : "false",
                     static_cast<unsigned long long>(r.states), static_cast<unsigned long long>(r.expanded),

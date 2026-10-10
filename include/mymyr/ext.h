@@ -65,7 +65,8 @@ typedef struct mymyr_task_view
     uint32_t max_words;   /* largest width any state can have */
     uint32_t label_width; /* largest schema arity */
     uint32_t num_atoms;   /* assigned fluent atom slots */
-    uint32_t atom_mode;   /* 0 lazy slots, 1 frozen (slot = canonical id) */
+    uint32_t atom_mode;   /* 0 lazy slots, 1 dense (slot = canonical id), 2 reachable (the relaxed-reachable atoms in
+                             canonical order) */
 } mymyr_task_view;
 
 /* minor 2 ------------------------------------------------------------------------------------------------------ */

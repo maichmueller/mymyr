@@ -269,7 +269,7 @@ TEST(DeviceTableExpand, MixedBatchEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const Set& set : sets(atoms))
         {
             SCOPED_TRACE(set.name + atoms_name(atoms));
@@ -282,7 +282,7 @@ TEST(DeviceTableExpand, MixedBatchEqualsHost)
             const Flat full = host_expand(T, rows, ids, 1, L);  // counts (and interns first under lazy slots)
             cuda::Stream other;  // (a stream the expander ran on must outlive its scratch)
             cuda::DeviceExpander ex(ctx, set.table);
-            const bool one_pass = atoms == TaskOptions::Atoms::Frozen && set.name != "miconic-simpleadl";
+            const bool one_pass = atoms == TaskOptions::Atoms::Dense && set.name != "miconic-simpleadl";
             EXPECT_EQ(ex.mode(), one_pass ? cuda::DeviceExpander::Mode::Multi : cuda::DeviceExpander::Mode::PerInstance);
             const cudaStream_t s = ex.stream();
             const cuda::DeviceBuffer d_rows = to_device(ctx, rows, s);
@@ -376,7 +376,7 @@ TEST(DeviceTableExpand, TaskIdsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
     {
         const auto all = sets(atoms);
         ASSERT_FALSE(all.empty());
@@ -430,7 +430,7 @@ TEST(DeviceTableEnv, MixedBatchEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const Set& set : sets(atoms))
             for (const auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
             {
@@ -438,7 +438,7 @@ TEST(DeviceTableEnv, MixedBatchEqualsHost)
                 if (path == cuda::DeviceEnv::Path::Auto)
                 {
                     const std::string why = cuda::DeviceEnv::fast_unsupported(*set.table, config(1));
-                    const bool fast = atoms == TaskOptions::Atoms::Frozen && set.name != "miconic-simpleadl";
+                    const bool fast = atoms == TaskOptions::Atoms::Dense && set.name != "miconic-simpleadl";
                     EXPECT_EQ(why.empty(), fast) << why;
                 }
                 RunOptions r;
@@ -455,7 +455,7 @@ TEST(DeviceTableEnv, OrderNotSortedByKeyIsStale)
     // the instances, so the step's select reports it stale and the range launches take every position
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const Set& set : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& set : sets(TaskOptions::Atoms::Dense))
     {
         if (!cuda::DeviceEnv::fast_unsupported(*set.table, config(1)).empty())
             continue;
@@ -474,7 +474,7 @@ TEST(DeviceTableEnv, GoalsDeadEndsChunksAndStreams)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const Set& set : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& set : sets(TaskOptions::Atoms::Dense))
     {
         if (set.name == "miconic-simpleadl")
             continue;  // goal axioms: per-env goal masks cannot express them
@@ -512,7 +512,7 @@ TEST(DeviceTableEnv, RankBitmapsOfLongSegmentsEqualHost)
     // their canonical ranks, so their picks read the cache: alone (gripper-80) and in the mixed table
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const Set& set : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& set : sets(TaskOptions::Atoms::Dense))
     {
         if (set.name != "gripper")
             continue;
@@ -559,7 +559,7 @@ TEST(DeviceTableEnv, TaskIdsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = sets(TaskOptions::Atoms::Frozen);
+    const auto all = sets(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const rl::TaskTablePtr& table = all[0].table;
     const u32 I = table->size();

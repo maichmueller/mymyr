@@ -1260,15 +1260,12 @@ void bind_rl(nb::module_& parent)
         .def_static(
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain,
-               const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems, std::string_view atoms,
-               std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in, IntArg threads_in) {
-                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
-                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
-                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
+               const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
+               MYMYR_TASK_OPTION_PARAMS, IntArg threads_in) {
+                const TaskOptions options = make_options(MYMYR_TASK_OPTION_VALUES);
                 const std::optional<u32> threads =
                     threads_in.is_none() ? std::nullopt : std::optional<u32>(threads_arg(threads_in));
-                return nb::typed<nb::object, PyTable>(
-                    table_from_pddl(domain, problems, make_options(atoms, matching, fc, fmw, pilot), threads));
+                return nb::typed<nb::object, PyTable>(table_from_pddl(domain, problems, options, threads));
             },
             "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = nb::none(),
             "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "

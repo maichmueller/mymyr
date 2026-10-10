@@ -125,6 +125,13 @@ private:
 /// Kind codes of pred_kind.
 inline constexpr i32 k_pred_static = 0, k_pred_fluent = 1, k_pred_derived = 2;
 
+/// Code of an atom mode in exports (the scalar atom_mode, the C API's mymyr_task_view): 0 lazy slots, 1 dense
+/// (slot = canonical id), 2 reachable.
+[[nodiscard]] inline constexpr i32 atom_mode_code(AtomMode m) noexcept
+{
+    return m == AtomMode::Lazy ? 0 : m == AtomMode::Dense ? 1 : 2;
+}
+
 /// Snapshot of the atom metadata (see the file comment).
 [[nodiscard]] ArrayBundle atom_metadata(const Task& task);
 

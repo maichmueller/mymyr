@@ -1519,9 +1519,9 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
             store = BrfsOptions::Store::Concurrent;
         else
         {
-            // Flat for W <= 8 words, Chunked above (the width estimate: frozen W, else the pilot's W_lazy;
+            // Flat for W <= 8 words, Chunked above (the width: frozen W, else the width lazy slots may grow to;
             // numeric tasks count the whole row [bits | slots])
-            const u32 w = task.atoms().mode() == AtomMode::Frozen ? task.words() : std::max(task.words(), task.info().pilot_words);
+            const u32 w = task.atoms().frozen() ? task.words() : task.max_words();
             store = w + task.numeric_words() <= 8 ? BrfsOptions::Store::Flat : BrfsOptions::Store::Chunked;
         }
     }
