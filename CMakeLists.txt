@@ -119,6 +119,8 @@ add_library(mymyr_core STATIC
     src/mymyr/heuristics/relaxed_task.cpp
     src/mymyr/heuristics/heuristics.cpp
     src/mymyr/heuristics/h2.cpp
+    src/mymyr/heuristics/lm_cut.cpp
+    src/mymyr/heuristics/landmark_count.cpp
     src/mymyr/heuristics/lifted_relaxation.cpp
     src/mymyr/search/best_first.cpp
     src/mymyr/search/astar_iw.cpp

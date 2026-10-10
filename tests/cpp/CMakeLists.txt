@@ -32,6 +32,7 @@ add_executable(mymyr_tests
     search/test_astar_iw_fork.cpp
     search/test_best_first.cpp
     heuristics/test_heuristics.cpp
+    heuristics/test_landmark_heuristics.cpp
     search/test_plan_file.cpp
     search/test_layer_orders_fork.cpp
     search/test_beam.cpp
