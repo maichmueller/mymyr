@@ -19,8 +19,9 @@
 // consumer tells the domains apart by the row's task id (domain_of; Python `rl.task_domains(suite, task_ids)`), and
 // may flatten schema ids with schema_offsets() (schema_offset(d) + schema).
 //
-// Rows. A batch over a suite has rows of words() atom words (the widest domain's table width; a narrower instance
-// leaves its extra words zero) followed by numeric_words() numeric words (the most any domain has). The count cache of
+// Rows. A batch over a suite has rows of W atom words followed by numeric_words() numeric words (the most any domain
+// has). W is at least the widest of the batch's instances' words (batch_words; at most words(), the widest domain's
+// table width); a row's words past its own instance's are padding, never read, and written zero. The count cache of
 // the device fast path has S = max_schemas() segments per state (a domain's schemas past its own count are never
 // applicable: count 0).
 //
@@ -99,8 +100,11 @@ public:
         return m_tables[r.domain]->task(r.local);
     }
 
-    /// Atom words of a row: the widest domain's TaskTable::words().
+    /// Atom words of a row that holds any instance: the widest domain's TaskTable::words().
     [[nodiscard]] u32 words() const noexcept { return m_words; }
+    /// Atom words of a batch of rows of instances `task_ids` [n] (null: instance 0): the widest of their instances'
+    /// words (TaskTable::Instance::words, at least 1). Unchecked ids (check_task_ids first).
+    [[nodiscard]] u32 batch_words(const i32* task_ids, u64 n) const noexcept;
     /// Numeric words of a row (the most any domain has).
     [[nodiscard]] u32 numeric_words() const noexcept { return m_numeric_words; }
     [[nodiscard]] u32 row_words() const noexcept { return m_words + m_numeric_words; }
@@ -116,8 +120,8 @@ public:
     [[nodiscard]] u32 schema_offset(u32 domain) const { return m_schema_offsets.at(domain); }
     /// The domain's name (its first instance's domain_name).
     [[nodiscard]] std::string domain_name(u32 domain) const;
-    /// Instance g's initial state as a row of `words` atom words (>= its table's words()), then `numeric_words` numeric
-    /// words (>= its table's numeric_words()): the table row's atom words, zeros, its numeric words, zeros.
+    /// Instance g's initial state as a row of `words` atom words (>= the instance's words), then `numeric_words` numeric
+    /// words (>= its table's numeric_words()): the instance's atom words, zeros, its numeric words, zeros.
     void initial_row(u32 g, u64* row, u32 words, u32 numeric_words) const;
 
     /// The table's fingerprint for one domain, else a hash of the domains' fingerprints and the id mapping.
@@ -138,6 +142,7 @@ private:
     std::vector<Ref> m_refs;                 // [I] (empty: one domain, identity)
     std::vector<std::vector<u32>> m_global;  // [D][I_d] local -> global (empty: identity)
     std::vector<u32> m_schema_offsets;
+    std::vector<u32> m_instance_words;  // [I] each global instance's words
     u32 m_size = 0, m_words = 1, m_numeric_words = 0, m_label_width = 0, m_max_objects = 0, m_max_schemas = 0;
     bool m_numeric = false;
 };
@@ -158,6 +163,5 @@ private:
 ///   schema_offsets [D + 1], schema_arity [S_total]  each domain's schemas (flat id schema_offsets[d] + schema)
 ///   scalars num_instances, num_domains, num_predicates (P), num_domain_predicates (domain 0's), num_schemas (domain
 ///   0's), max_arity, label_width, words
-/// A snapshot: under lazy slots it covers the slots published when it was taken.
 [[nodiscard]] ArrayBundle suite_atom_metadata(const TaskSuite& suite);
 }  // namespace mymyr::rl

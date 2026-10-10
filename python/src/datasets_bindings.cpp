@@ -258,7 +258,8 @@ ArrayDict space_arrays(const PyStateSpace& P, Framework fw)
     const std::shared_ptr<const void> own = P.space;
     ArrayDict d{nb::dict()};
     const i64 N = S.num_states(), E = static_cast<i64>(S.num_transitions());
-    d["state_words"] = view<u64>(own, S.state_words(), fw, {N, static_cast<i64>(S.row_words())}, true);
+    if (S.task()->atoms().frozen())  // lazy slots: the rows' layout is the generation's history
+        d["state_words"] = view<u64>(own, S.state_words(), fw, {N, static_cast<i64>(S.row_words())}, true);
     d["forward_offsets"] = view<u64>(own, S.forward_offsets(), fw);
     d["forward_targets"] = view<u32>(own, S.forward_targets(), fw);
     if (S.has_labels())
@@ -414,7 +415,8 @@ void bind_datasets(nb::module_& parent)
         .def(
             "arrays", [](const PyStateSpace& s, FrameworkArg framework) { return space_arrays(s, parse_framework(framework)); },
             "framework"_a = nb::none(),
-            "Zero-copy read-only views: state_words [N, W + NN] (the task's word encoding), forward_offsets [N + 1], "
+            "Zero-copy read-only views: state_words [N, W + NN] (the task's word encoding; absent for a task with lazy "
+            "atom slots, whose numbering depends on the generation's order), forward_offsets [N + 1], "
             "forward_targets [E], label_schemas [E] and label_bindings [E, label_width] (unused positions 2^32 - 1; "
             "with labels), backward_offsets [N + 1], backward_sources and backward_edges [E] (per target, ascending "
             "forward edge indices), unit_goal_distances [N] (int32, -1: unsolvable), cost_goal_distances [N] (float64, "

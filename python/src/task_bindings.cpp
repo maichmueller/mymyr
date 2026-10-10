@@ -173,20 +173,25 @@ void check_task_rows(const StateBatch& b, const Task& task)
             throw nb::value_error(("mymyr: " + row_name(b, i) + " belongs to another task").c_str());
     if (!b.owners.empty())
         return;  // States of this task: their rows are its rows
+    if (!b.view.rows)
+        return;
+    if (!task.atoms().frozen())
+        throw nb::value_error("mymyr: state rows for a task with lazy atom slots: its slots are numbered in the order "
+                              "searches meet its atoms, so a row cannot be checked against them (pass States, or build "
+                              "the task with atoms 'auto', 'reachable' or 'dense')");
     const u32 W = b.view.words;
-    if (task.atoms().frozen() && W < task.words() && b.view.rows)
+    if (W < task.words())
         throw nb::value_error(("mymyr: rows of " + std::to_string(W) + " atom words; this task's states have " +
-                               std::to_string(task.words()) + " (frozen atom slots)")
+                               std::to_string(task.words()))
                                   .c_str());
+    // words past the task's own are padding (a wider batch's): never read
     const u32 limit = task.atoms().fluent_slots();
-    if (static_cast<u64>(W) * 64 <= limit)
+    if (static_cast<u64>(task.words()) * 64 <= limit)
         return;
     for (u64 i = 0; i < b.view.rows; ++i)
     {
         const u64* w = b.view.row(i);
-        u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
-        for (u32 k = (limit >> 6) + 1; k < W && !bad; ++k)
-            bad = w[k];
+        const u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
         if (bad)
             throw nb::value_error(("mymyr: " + row_name(b, i) +
                                    " sets atom slots this task has not assigned (a state of another task?)")
@@ -369,7 +374,7 @@ StateArg state_arg(PyTaskCore& core, nb::handle h)
     const u64* w = a.batch.view.data;
     const u32 nw = a.batch.view.words;
     const u32 NN = a.batch.view.numeric_words;
-    a.view = StateView{w, nw, NN ? w + nw : nullptr, NN};
+    a.view = StateView{w, std::min(nw, core.task->words()), NN ? w + nw : nullptr, NN};
     return a;
 }
 
@@ -1796,16 +1801,20 @@ void bind_task_api(nb::class_<C>& cls)
             [owner](Self self, WordsArg words) {
                 PyTaskCore& core = *self.p->core;
                 StateBatch b = import_task_states(words, *core.task);
-                const u32 NN = b.view.numeric_words;
+                const u32 NN = b.view.numeric_words, nw = std::min(b.view.words, core.task->words());
                 StateList out{nb::list()};
                 for (u64 i = 0; i < b.view.rows; ++i)
                 {
                     const u64* w = b.view.row(i);
-                    out.append(make_state(owner(self), State(w, b.view.words, NN ? w + b.view.words : nullptr, NN)));
+                    out.append(make_state(owner(self), State(w, nw, NN ? w + b.view.words : nullptr, NN)));
                 }
                 return out;
             },
-            "words"_a, "States from a word array [N, W] (any framework); numeric tasks: [N, W + NN] rows.");
+            "words"_a,
+            "States from a word array [N, W] (any framework, W >= words; the words past the task's own are padding and "
+            "are not read); numeric tasks: [N, W + NN] rows. Raises ValueError for rows narrower than words, rows that "
+            "set atom slots the task does not have, and any rows of a task with lazy atom slots (their numbering is "
+            "the task object's own history: pass States instead).");
 }
 
 nb::object restore_task(std::string_view kind, std::string a, std::string b, std::string apath, std::string bpath,

@@ -110,6 +110,10 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
     for (usize i = 0; i < tasks.size(); ++i)
         if (!tasks[i])
             throw std::invalid_argument("mymyr: TaskTable: instance " + std::to_string(i) + " is null");
+        else if (!tasks[i]->atoms().frozen())
+            throw std::invalid_argument("mymyr: TaskTable: instance " + std::to_string(i) +
+                                        " has lazy atom slots, numbered in the order searches meet its atoms; the rows "
+                                        "of a table need a fixed slot layout (atoms 'auto', 'reachable' or 'dense')");
 
     // schemas: instance 0's, checked against every other instance (count, names, arities, order)
     {
@@ -165,7 +169,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         in.words = std::max<u32>(1, T.max_words());
         in.numeric_words = T.numeric_words();
         in.ow = T.compiled().ow;
-        const GoalMasks g = goal_masks(T);  // assigns the goal atoms' slots under lazy slots (as device_arrays does)
+        const GoalMasks g = goal_masks(T);
         in.goal_pos = g.pos;
         in.goal_neg = g.neg;
         in.goal_derived = g.uses_derived();

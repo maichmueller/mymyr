@@ -114,9 +114,9 @@ struct TaskOptions
         I32,
     };
 
-    /// The default bound of the reachability analysis, in steps (reachability::reachable_atoms): about a second of work
-    /// at most.
-    static constexpr u64 k_reachability_budget = u64{1} << 28;
+    /// The default bound of the reachability analysis, in steps (reachability::reachable_atoms): a few seconds and
+    /// about a gigabyte at most, several times what the largest IPC 2023 learning-track test tasks need.
+    static constexpr u64 k_reachability_budget = u64{1} << 25;
 
     Atoms atoms = Atoms::Auto;
     Matching matching = Matching::Auto;

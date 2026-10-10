@@ -19,34 +19,22 @@ namespace mymyr::rl
 {
 namespace
 {
-/// Throws unless row `i` sets only assigned fluent slots (bits at or beyond `limit` would index unassigned records).
-void check_row(const u64* row, u32 nw, u32 limit, u64 i, const char* what)
-{
-    const u32 lw = limit >> 6;
-    if (nw <= lw)
-        return;
-    u64 bad = row[lw] & ~((u64{1} << (limit & 63)) - 1);
-    for (u32 w = lw + 1; w < nw && !bad; ++w)
-        bad = row[w];
-    if (bad)
-        throw std::invalid_argument(std::string("mymyr: ") + what + ": state row " + std::to_string(i) +
-                                    " sets atom slots its instance has not assigned (a state of another task?)");
-}
-
-/// Throws unless every row is a state of its instance: at least the instance's width when its atom slots are frozen
-/// (a narrower row is a truncated state), and, with `content`, no bit at a slot the instance has not assigned.
+/// Throws unless every row is a state of its instance: at least the instance's width (a narrower row is a truncated
+/// state), and, with `content`, no bit at a slot the instance does not have (they share the last of its words). The
+/// words past the instance's own are padding and are not read, so a row costs its instance's width.
 void check_rows(const TaskSuite& table, StateBatchView in, const i32* ids, bool content, const char* what)
 {
     for (u64 i = 0; i < in.rows; ++i)
     {
         const Task& t = table.task_of(ids, i);
-        if (in.words < t.words() && t.atoms().frozen())
+        if (in.words < t.words())
             throw std::invalid_argument(std::string("mymyr: ") + what + ": state rows of " + std::to_string(in.words) +
                                         " atom words; the states of instance " + std::to_string(ids ? ids[i] : 0) +
-                                        " have " + std::to_string(t.words()) + " (frozen atom slots)");
+                                        " have " + std::to_string(t.words()));
         const u32 limit = t.atoms().fluent_slots();
-        if (content && static_cast<u64>(in.words) * 64 > limit)
-            check_row(in.row(i), in.words, limit, i, what);
+        if (content && (limit & 63) && (in.row(i)[limit >> 6] >> (limit & 63)))
+            throw std::invalid_argument(std::string("mymyr: ") + what + ": state row " + std::to_string(i) +
+                                        " sets atom slots its instance does not have (a state of another task?)");
     }
 }
 
@@ -277,12 +265,12 @@ void write_offsets(i32* offsets, u64 i, u64 value)
     offsets[i] = static_cast<i32>(value);
 }
 
-/// The goal flag of a successor row of instance `task` (the row carries the table's NN numeric words, the task reads
-/// its own).
+/// The goal flag of a row of instance `task` with W atom words (at least the task's) and the table's NN numeric words
+/// (the task reads its own words of each).
 inline u8 goal_of(const Task& task, const u64* s, u32 W, u32 NN)
 {
     const u32 nn = task.numeric_words();
-    return static_cast<u8>(task.is_goal(StateView{s, W, NN ? s + W : nullptr, nn}));
+    return static_cast<u8>(task.is_goal(StateView{s, std::min(W, task.words()), NN ? s + W : nullptr, nn}));
 }
 }  // namespace
 
@@ -337,7 +325,7 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
         const Task& task = *table.task(inst);
         const u32 nn = task.numeric_words();
         const u64* row = in.row(i);
-        const u32 nw = bits::trimmed_size(row, in.words);
+        const u32 nw = bits::trimmed_size(row, std::min(in.words, task.words()));
         DirectSink sink{out, row, nw, static_cast<i32>(i), next, L, tmp};
         expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
         if (out.goal)
@@ -401,7 +389,7 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
                     const Task& task = *table.task(inst);
                     const u32 nn = task.numeric_words();
                     const u64* row = in.row(i);
-                    const u32 nw = bits::trimmed_size(row, in.words);
+                    const u32 nw = bits::trimmed_size(row, std::min(in.words, task.words()));
                     ScratchSink sink{m.succ,       m.parent, m.schema, m.binding, true, true, out.schema != nullptr,
                                      out.binding != nullptr, row, nw, static_cast<i32>(i), W, out.numeric_words, L,
                                      m.words_needed, m.tmp};

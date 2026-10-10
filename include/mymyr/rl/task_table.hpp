@@ -17,7 +17,9 @@
 // instance-local: a label's objects are instance i's; object offsets (the exclusive cumsum of the instances' object
 // counts over a batch) globalize them.
 //
-// Rows. A batch over a table has rows of words() atom words, the widest instance's max_words() (unused words are zero),
+// Rows. A batch over a table has rows of W atom words, at least the widest of the batch's instances' words
+// (TaskSuite::batch_words) and at most words(), the widest instance's: a row's words past its own instance's are
+// padding, never read and written zero, so an operation on a row costs its own instance's width. The atom words are
 // followed by numeric_words() numeric words (the most any instance has; instance i uses the first numeric_words of its
 // own and leaves the rest zero). Every numeric instance stores its values alike (numeric_storage(): one IEEE double
 // per word, or two int32 per word), so a column of the numeric words means the same in every row.
@@ -61,8 +63,9 @@ public:
     };
 
     /// Checks that the tasks are instances of one domain and builds the table. Throws std::invalid_argument (with a
-    /// `mymyr: TaskTable:` message) for an empty list, a null task, instances of different domains, or numeric
-    /// instances that store their values differently (Task::numeric_storage).
+    /// `mymyr: TaskTable:` message) for an empty list, a null task, a task with lazy atom slots (its rows have no fixed
+    /// layout), instances of different domains, or numeric instances that store their values differently
+    /// (Task::numeric_storage).
     static TaskTablePtr create(std::vector<TaskPtr> tasks);
     /// The table of one instance.
     static TaskTablePtr single(TaskPtr task);
@@ -79,7 +82,7 @@ public:
     [[nodiscard]] const TaskPtr& task(u32 i) const { return m_inst.at(i).task; }
     [[nodiscard]] const std::vector<Instance>& instances() const noexcept { return m_inst; }
 
-    /// Atom words of a row: the widest instance's Task::max_words() (at least 1).
+    /// Atom words of a row that holds any instance: the widest instance's Task::words() (at least 1).
     [[nodiscard]] u32 words() const noexcept { return m_words; }
     /// Numeric words of a row (the most any instance has; 0 for classical tables).
     [[nodiscard]] u32 numeric_words() const noexcept { return m_numeric_words; }
@@ -138,7 +141,6 @@ private:
 ///   num_objects [I], object_offsets [I + 1] (their exclusive cumsum), num_atoms [I], domain [I] (all 0)
 ///   pred_arity [P], pred_kind [P], pred_instance [P] (table predicates; -1: a domain predicate, else the instance of
 ///   a problem-local one); scalars num_instances, num_predicates, num_domain_predicates, max_arity, label_width, words
-/// A snapshot: under lazy slots it covers the slots published when it was taken.
 [[nodiscard]] ArrayBundle table_atom_metadata(const TaskTable& table);
 
 }  // namespace mymyr::rl
