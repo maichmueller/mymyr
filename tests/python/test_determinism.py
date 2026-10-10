@@ -65,7 +65,7 @@ def records(task):
     s0 = task.initial_state
     states = walk(task, steps=16, seed=5, walks=4)
     exp = rl.expand(task, states)
-    brfs = search.brfs(task, max_states=BUDGET, fingerprint=True)
+    brfs = search.brfs(task, max_states=BUDGET, fingerprint=True, stop_at_goal=False)
     iw = search.iw(task, max_arity=2, max_expanded=BUDGET)
     siw = search.siw(task, max_arity=2, max_expanded=BUDGET)
     astar = search.astar(task, heuristic="max", max_expanded=BUDGET)

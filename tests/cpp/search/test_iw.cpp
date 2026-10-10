@@ -214,7 +214,8 @@ struct RefSpec
 /// successor materialized, a duplicate check on admitted states, blocked states first, novelty over a set of tuples.
 RefPass ref_pass(const Task& task, const State& root, const RefSpec& sp, const std::function<bool(const State&)>& goal)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const bool w0 = succ.witness_pruning(), c0 = succ.canonical_order();
     succ.set_witness_pruning(sp.witness);
     succ.set_canonical_order(sp.canonical);
@@ -593,7 +594,8 @@ TEST(IwSemantics, InitialGoalAndTooLargeArity)
 
 void expect_valid_plan(const Task& task, const State& start, const std::vector<Action>& plan, const std::function<bool(const State&)>& goal)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = start;
     for (const Action& a : plan)
     {
@@ -860,7 +862,8 @@ TEST(IwControl, GoalSpecs)
 TEST(IwControl, StartStateAndSinglePass)
 {
     const auto task = Task::from_text_file(task_path("gripper__prob05"));
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const std::vector<Action> acts = succ.applicable_actions(task->initial_state());
     ASSERT_FALSE(acts.empty());
     const State start = succ.apply(task->initial_state(), acts.back().label());
@@ -989,7 +992,15 @@ TEST(Siw, EqualsAReferenceOnTheOracle)
             {
                 EXPECT_EQ(r.subproblems.size(), sub);
                 EXPECT_EQ(r.plan.size(), plan_length);
+                EXPECT_TRUE(r.partial_plan.empty());
                 expect_valid_plan(*task, task->initial_state(), r.plan, task_goal(*task));
+            }
+            else
+            {
+                // no plan; the solved subproblems' subplans lead to the state where the failed one started
+                EXPECT_TRUE(r.plan.empty()) << st.name << " k=" << k;
+                EXPECT_EQ(r.partial_plan.size(), plan_length) << st.name << " k=" << k;
+                expect_valid_plan(*task, task->initial_state(), r.partial_plan, [&](const State& s) { return s == cur; });
             }
         }
     }

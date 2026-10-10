@@ -154,10 +154,14 @@ def test_errors_propagate(task):
 
     with pytest.raises(ValueError, match="evaluate_batch returned"):
         search.astar(task, heuristic=Short())
-    with pytest.raises(ValueError, match="NaN"):
+    with pytest.raises(ValueError, match="a Python heuristic returned nan"):
         search.astar(task, heuristic=lambda s: math.nan)
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match=r"a Python heuristic returned -1.0; heuristic values are >= 0"):
+        search.astar(task, heuristic=lambda s: -1.0)
+    with pytest.raises(TypeError, match="a Python heuristic returned a str"):
         search.astar(task, heuristic=lambda s: "far")
+    with pytest.raises(TypeError, match="a Python heuristic returned a NoneType"):
+        search.astar(task, heuristic=lambda s: None)
     with pytest.raises(TypeError):
         search.astar(task, heuristic=object())
 

@@ -407,6 +407,8 @@ __global__ void k_loop_next(LoopCtl* ctl, LoopLimits lim, cudaGraphConditionalHa
             c.expanded += c.ns;
             c.generated += c.rec.candidates;
             c.goal_states += c.rec.goals;
+            if (c.rec.goals && c.first_goal == ~u64{0})
+                c.first_goal = u64{c.b} + c.rec.first;
             ++c.chunks;
             if (c.ns)
             {

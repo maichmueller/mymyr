@@ -203,7 +203,7 @@ public:
             m_init_count.push_back(e->host->initial_count(i));
         if (!device.is_none())
         {
-            m_device = nb::cast<int>(device);
+            m_device = int_arg<int>(device, "device", 0);
             if (m_device < 0)
                 throw nb::value_error("mymyr: device must be a CUDA device index (>= 0) or None (the CPU)");
 #if defined(MYMYR_HAS_CUDA)
@@ -1149,14 +1149,15 @@ rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i3
     const u64 N = st.rows;
     const u64 total = x0.count(rl::StateBatchView{st.as<u64>(), N, e.W, 0, e.NN}, ids, opt);
     rl::Expansion x;
-    x.capacity = total;
+    x.capacity = std::min(total, rl::k_max_rows);  // more successors: the write raises
     x.words = e.W;
     x.numeric_words = e.NN;
     x.label_width = e.L;
-    x.succ = static_cast<u64*>(d.succ.ensure(d.ctx, std::max<u64>(total, 1) * e.row_words() * 8, s));
-    x.schema = static_cast<i32*>(d.schema.ensure(d.ctx, std::max<u64>(total, 1) * 4, s));
-    x.binding = static_cast<i32*>(d.binding.ensure(d.ctx, std::max<u64>(total, 1) * e.L * 4, s));
-    x.goal = static_cast<u8*>(d.goal.ensure(d.ctx, std::max<u64>(total, 1), s));
+    const u64 rows = std::max<u64>(x.capacity, 1);
+    x.succ = static_cast<u64*>(d.succ.ensure(d.ctx, rows * e.row_words() * 8, s));
+    x.schema = static_cast<i32*>(d.schema.ensure(d.ctx, rows * 4, s));
+    x.binding = static_cast<i32*>(d.binding.ensure(d.ctx, rows * e.L * 4, s));
+    x.goal = static_cast<u8*>(d.goal.ensure(d.ctx, rows, s));
     x.offsets = static_cast<i32*>(d.offsets.ensure(d.ctx, (N + 1) * 4, s));
     x0.write(x);
     if (x.words_needed > e.W)
@@ -1340,9 +1341,10 @@ void bind_rl_jax(nb::module_& parent)
                          "the same results bit for bit.")
         .def(
             "__init__",
-            [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, u32 max_steps, f32 step_reward,
+            [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
                bool canonical, bool witness, Arg<ann::EnvPath> path) {
+                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
                 rl::EnvConfig c;
                 c.max_steps = max_steps;
                 c.step_reward = step_reward;

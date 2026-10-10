@@ -83,7 +83,8 @@ TEST(NumericPddl, EffectApplicability)
     // x, y and u (undefined until assign-undefined gives it a value); z is static, total-cost is auxiliary
     EXPECT_EQ(task->numeric_slots(), 3u);
     EXPECT_EQ(task->numeric_storage(), NumericStorage::F64);  // a division
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     std::map<std::string, State> next;
     const heuristics::ActionCosts costs(*task);
@@ -144,7 +145,8 @@ TEST(NumericPddl, OnlyConditionalEffectsThatFireRecordTheirFamilies)
     // that does not fire does not execute: both actions are applicable, and an assignment and an increase of one
     // target that both fire are not (in either order).
     const auto task = rules_task();
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::set<std::string> seen;
     succ.for_each_applicable(task->initial_state().view(),
                              [&](const ActionLabel& a, const Delta&) { seen.insert(task->schema_name(a.schema)); });
@@ -165,7 +167,8 @@ TEST(NumericPddl, OnlyConditionalEffectsThatFireRecordTheirFamilies)
         const bool a = std::string(init).find("(a)") != std::string::npos, z = std::string(init).find("(z)") != std::string::npos;
         std::map<std::string, State> next;
         std::vector<Action> actions;
-        Successors& s = t->workspace().successors();
+        const WorkspaceLease lease = t->workspace();
+        Successors& s = lease->successors();
         s.for_each_applicable(t->initial_state().view(), [&](const ActionLabel& l, const Delta&) { actions.emplace_back(l); });
         for (const Action& x : actions)
             next.emplace(t->schema_name(x.schema), s.apply(t->initial_state().view(), x.label()));
@@ -193,7 +196,8 @@ TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
     EXPECT_EQ(costs.kind(), heuristics::ActionCosts::Kind::StateMetric);
     const State s0 = task->initial_state();
     EXPECT_EQ(costs.initial(s0.view()), 5);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::map<std::string, f64> g;
     succ.for_each_applicable(s0.view(), [&](const ActionLabel& a, const Delta& delta)
                              { g[task->schema_name(a.schema)] = costs.next(5, delta); });
@@ -201,6 +205,7 @@ TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
     EXPECT_EQ(g.at("dbl"), 9);
     // BrFS: x grows without bound; depth-capped
     BrfsOptions o;
+    o.stop_at_goal = false;
     o.max_depth = 3;
     o.layer_stats = true;
     const BrfsResult r = brfs(*task, o);
@@ -240,7 +245,7 @@ TEST(NumericPddl, TasksWithNumericFunctionsKeepTheirStateSpace)
             GTEST_SKIP() << "no " << dir;
         const auto task = Task::create(*frontend::load_task(dir / "domain.pddl", dir / c.problem));
         EXPECT_EQ(task->numeric_slots(), 0u);
-        const BrfsResult r = brfs(*task);
+        const BrfsResult r = brfs(*task, {.stop_at_goal = false});
         EXPECT_EQ(r.states, c.states) << c.dir;
         EXPECT_EQ(r.generated, c.generated) << c.dir;
         EXPECT_EQ(r.goal_states, c.goals) << c.dir;

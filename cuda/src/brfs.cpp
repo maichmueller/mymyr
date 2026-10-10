@@ -3,6 +3,7 @@
 #include "mymyr/cuda/brfs.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
 #include "mymyr/cuda/state_set.hpp"
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <deque>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace mymyr::cuda
@@ -180,6 +182,9 @@ DeviceBrfs::DeviceBrfs(ContextPtr ctx, TaskPtr task, const DeviceBrfsOptions& op
     m->s = m->ctx->stream();  // the arenas' writer stream
     if (m->o.chunk_states == 0)
         throw std::invalid_argument("mymyr: DeviceBrfs: chunk_states must be at least 1");
+    if (m->o.expected_states > state_set::k_max_states)
+        throw std::invalid_argument("mymyr: DeviceBrfs: expected_states above the state id limit (" +
+                                    std::to_string(state_set::k_max_states) + ")");
 }
 
 DeviceBrfs::~DeviceBrfs()
@@ -274,6 +279,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     u64 count = 1, lb = 0, le = 1;
     bool stop = false, budget_hit = false;
     u64 goal_id = 0;
+    u64 first_goal = ~u64{0};  // the first goal state expanded (stop_at_goal stops before it instead)
     u64 b = 0;             // the layer [lb, le)'s next parent
     bool started = false;  // the layer [lb, le) was counted
     bool exhausted = false;
@@ -500,6 +506,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         r.expanded += hl->expanded;
         r.generated += hl->generated;
         r.goal_states += hl->goal_states;
+        first_goal = std::min<u64>(first_goal, hl->first_goal);
         if (hl->chunks)
             ratios[ratio_at++ % k_window] = static_cast<double>(hl->max_ratio) / 256;
         states->commit(hl->chunk.count - count);
@@ -778,6 +785,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                     r.expanded += ck.ns;
                     r.generated += x.candidates;
                     r.goal_states += x.goals;
+                    if (x.goals)
+                        first_goal = std::min<u64>(first_goal, ck.b + x.first);
                     count += x.fresh;
                     ++st.chunks;
                     if (ck.ns)
@@ -824,6 +833,11 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     st.axiom_reruns = gs.axiom_reruns;
     st.table_slots = slots;
     st.device_bytes = ctx->usage().used_high;
+    if (!r.solved && first_goal != ~u64{0})
+    {
+        r.solved = true;  // a goal state was expanded: its plan, as the CPU BrFS without stop_at_goal
+        goal_id = first_goal;
+    }
     if (r.solved)
         r.plan = plan_to(goal_id);
     if (o.fingerprint)
@@ -836,9 +850,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         const u32 T = std::clamp<u32>(std::thread::hardware_concurrency() / 4, 1, 8);
         std::vector<u64> part(T, 0);
         std::vector<std::thread> threads;
-        for (u32 t = 0; t < T; ++t)
-            threads.emplace_back(
-                [&, t]
+        auto hash_part = [&](u32 t)
                 {
                     u64 x = 0;
                     for (u64 id = t; id < count; id += T)
@@ -853,7 +865,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                             x ^= brfs_fingerprint_term(id, task->canonical_hash(StateView{row, bits::trimmed_size(row, W), nullptr, 0}));
                     }
                     part[t] = x;
-                });
+                };
+        start_threads(threads, T, hash_part, [] {});
         for (auto& th : threads)
             th.join();
         for (u64 x : part)
@@ -886,7 +899,8 @@ std::vector<Action> DeviceBrfs::Impl::plan_to(u64 id)
     }
     std::reverse(chain.begin(), chain.end());
     std::vector<Action> plan;
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::vector<u64> prow(W), crow(W), tmp;
     u64 p = 0;
     for (const auto& [v, k] : chain)

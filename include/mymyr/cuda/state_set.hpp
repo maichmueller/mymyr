@@ -148,6 +148,7 @@ struct LoopCtl
     u32 started = 0;     // the layer [lb, le) was counted (the states were below the budget at its start)
     u32 cuts = 0;        // chunks launch_loop_size cut
     u64 expanded = 0, generated = 0, goal_states = 0;
+    u64 first_goal = ~u64{0};  // the id of the first goal state among its committed chunks' parents
 };
 /// The loop's bounds (capture constants): parents per chunk, a chunk's candidates (its scratch), stored states plus a
 /// chunk's candidates the table and the arenas take, the state budget, whether it stops at goals, and the largest

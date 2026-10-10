@@ -16,6 +16,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
 
+#include <cctype>
 #include <cerrno>
 #include <exception>
 #include <filesystem>
@@ -40,6 +41,56 @@ std::string read_file(const std::string& path)
     std::ostringstream s;
     s << in.rdbuf();
     return s.str();
+}
+
+void expect_pddl(std::string_view text, std::string_view kind, const std::string& path)
+{
+    usize i = 0;
+    auto skip = [&] {
+        while (i < text.size())
+            if (std::isspace(static_cast<unsigned char>(text[i])))
+                ++i;
+            else if (text[i] == ';')
+                while (i < text.size() && text[i] != '\n')
+                    ++i;
+            else
+                break;
+    };
+    auto open = [&] {
+        skip();
+        if (i == text.size() || text[i] != '(')
+            return false;
+        ++i;
+        skip();
+        return true;
+    };
+    auto word = [&] {
+        std::string w;
+        while (i < text.size() && (std::isalnum(static_cast<unsigned char>(text[i])) || text[i] == '-' || text[i] == '_'))
+            w += static_cast<char>(std::tolower(static_cast<unsigned char>(text[i++])));
+        return w;
+    };
+    if (!open() || word() != "define" || !open())
+        return;
+    const std::string w = word();
+    if ((w == "domain" || w == "problem") && w != kind)
+        throw frontend::PddlError("this is a PDDL " + w + ", where a " + std::string(kind) +
+                                      " belongs (the domain comes first, then the problem)",
+                                  path);
+}
+
+PyDomain load_domain(const std::filesystem::path& path)
+{
+    auto text = std::make_shared<const std::string>(read_file(path.string()));
+    expect_pddl(*text, "domain", path.string());
+    return PyDomain{frontend::Domain::from_file(path), std::move(text), path.string()};
+}
+
+std::string read_problem(const std::filesystem::path& path)
+{
+    std::string text = read_file(path.string());
+    expect_pddl(text, "problem", path.string());
+    return text;
 }
 
 namespace
@@ -99,8 +150,7 @@ void bind_frontend(nb::module_& m)
             "from_file",
             [](const std::filesystem::path& path) {
                 nb::gil_scoped_release release;
-                auto text = std::make_shared<const std::string>(read_file(path.string()));
-                return PyDomain{frontend::Domain::from_file(path), std::move(text), path.string()};
+                return load_domain(path);
             },
             "path"_a, "Parse and normalize the domain file.")
         .def_static(
@@ -108,6 +158,7 @@ void bind_frontend(nb::module_& m)
             [](std::string_view text) {
                 auto copy = std::make_shared<const std::string>(text);
                 nb::gil_scoped_release release;
+                expect_pddl(*copy, "domain", "");
                 return PyDomain{frontend::Domain::from_string(*copy), copy, ""};
             },
             "text"_a, "Parse and normalize domain PDDL text.")
@@ -115,7 +166,7 @@ void bind_frontend(nb::module_& m)
             "instantiate",
             [](const PyDomain& self, const std::filesystem::path& problem, bool fast_init) {
                 nb::gil_scoped_release release;
-                std::string text = read_file(problem.string());
+                std::string text = read_problem(problem);
                 auto data = self.d->instantiate_file(problem, {.fast_init = fast_init});
                 return FormalismTask{std::move(data), pddl_source(self, std::move(text), problem.string())};
             },
@@ -127,6 +178,7 @@ void bind_frontend(nb::module_& m)
             [](const PyDomain& self, std::string_view text, bool fast_init) {
                 std::string copy(text);
                 nb::gil_scoped_release release;
+                expect_pddl(copy, "problem", "");
                 auto data = self.d->instantiate_string(copy, "", {.fast_init = fast_init});
                 return FormalismTask{std::move(data), pddl_source(self, std::move(copy), "")};
             },

@@ -9,13 +9,15 @@
 #include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace mymyr::search
 {
 SiwResult siw(const Task& task, const SiwOptions& options)
 {
     SiwResult r;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     detail::Context c(task, options, succ);
     State cur = options.start ? *options.start : task.initial_state();
     if (c.observer)
@@ -28,7 +30,10 @@ SiwResult siw(const Task& task, const SiwOptions& options)
     {
         r.status = s;
         if (s != SearchStatus::Solved)
+        {
             r.cost = 0;
+            r.partial_plan = std::exchange(r.plan, {});
+        }
         r.cost_exact = plan_cost.exact();
         r.fluent_slots = task.atoms().fluent_slots();
         if (c.observer)

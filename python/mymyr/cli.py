@@ -146,7 +146,7 @@ def _search(task: mymyr.Task, a: argparse.Namespace, cancel: search.CancelToken)
     if a.search == "gbfs":
         return search.gbfs(task, heuristic=h, **budget)
     if a.search == "brfs":
-        return search.brfs(task, stop_at_goal=True, threads=a.threads, **budget)
+        return search.brfs(task, threads=a.threads, **budget)
     width = {} if a.width is None else ({"width": a.width} if a.search == "astar_iw" else {"max_arity": a.width})
     if a.search == "iw":
         return search.iw(task, **width, **budget)
@@ -334,9 +334,12 @@ def _info(a: argparse.Namespace) -> int:
 
 
 def _one_line(e: BaseException) -> str:
+    """The message of `e` on one line, without the library's own "mymyr: " prefix (the CLI prints its own)."""
     if isinstance(e, OSError) and e.strerror:
         return f"{e.strerror}: {e.filename}" if e.filename else e.strerror
     text = " ".join(str(e).split())
+    for prefix in ("mymyr: ", "mymyr "):  # "mymyr: ..." and "mymyr brfs: ..."
+        text = text.removeprefix(prefix)
     return text or type(e).__name__
 
 

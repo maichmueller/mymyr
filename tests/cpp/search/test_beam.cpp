@@ -142,7 +142,8 @@ struct RefPass
 /// width; SurvivorsOnly replays the kept ones against the table and the layer's delta, then commits the delta.
 RefPass ref_beam(const Task& task, const RefSpec& sp)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const bool w0 = succ.witness_pruning(), c0 = succ.canonical_order();
     succ.set_witness_pruning(false);
     succ.set_canonical_order(true);
@@ -310,7 +311,8 @@ void expect_pass(const IwPassStatistics& p, const RefPass& ref, const std::strin
 /// One pass of the IW family engine with the classic pruner (or the width-0 rule).
 IwResult engine_pass(const Task& task, u32 k, bool continuation, const LayerOrdering& lo, SearchObserver* obs = nullptr)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     SearchControl control;
     control.observer = obs;
     const sd::GoalTest goal = sd::GoalTest::from_spec(task, control.goal);
@@ -816,6 +818,7 @@ TEST(BeamRefusals, InvalidOptionsAreRefused)
         a.layers = lo;
         EXPECT_EQ(abstracted_iw(*task, a).status, SearchStatus::Failed) << msg;
         BrfsOptions b;
+        b.stop_at_goal = false;
         b.layers = lo;
         EXPECT_THROW((void)brfs(*task, b), std::invalid_argument) << msg;
     }
@@ -844,6 +847,7 @@ TEST(BeamRefusals, InvalidOptionsAreRefused)
     EXPECT_EQ(liw(*task, l).status, SearchStatus::Failed);
     // the multi-threaded BrFS orders layers only with a beam; the concurrent and compact stores order none
     BrfsOptions b;
+    b.stop_at_goal = false;
     b.layers = beam(4, Novelty::AllTested);
     b.layers.beam_width = ~u32{0};
     b.threads = 2;

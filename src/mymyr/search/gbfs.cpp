@@ -99,10 +99,7 @@ struct GbfsEager
             if (c.obs)
                 c.obs->on_expand(id, cur.view());
             if (!expand(c, store, nodes, id, cur, next, tr, false))
-            {
-                r.status = SearchStatus::OutOfStates;
-                break;
-            }
+                break;  // r.status is set
             if (c.batched)
                 c.evaluate_fresh(tr, true, false);
             bool done = false;
@@ -216,10 +213,7 @@ struct GbfsLazy
             if (c.obs)
                 c.obs->on_expand(id, sv);
             if (!expand(c, store, nodes, id, cur, next, tr, use_preferred))
-            {
-                r.status = SearchStatus::OutOfStates;
-                break;
-            }
+                break;  // r.status is set
             bool done = false;
             for (const Transitions::T& t : tr.t)
             {

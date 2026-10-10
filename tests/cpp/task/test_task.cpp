@@ -148,27 +148,63 @@ TEST(Task, AutoModeFollowsTheDenseWidthRule)
     }
 }
 
-TEST(Task, WorkspacesArePerThreadAndGoalTestsAreSafeInsideCallbacks)
+TEST(Task, LiveLeasesHaveDistinctWorkspacesAndReleasedOnesAreReused)
+{
+    const auto task = Task::from_text_file(task_path("philosophers__p03-phil4"));
+    WorkspaceLease a = task->workspace();
+    WorkspaceLease b = task->workspace();
+    ASSERT_TRUE(a && b);
+    EXPECT_NE(&*a, &*b);
+    Workspace* const pb = &*b;
+    b.release();
+    EXPECT_FALSE(b);
+    const WorkspaceLease c = task->workspace();
+    EXPECT_EQ(&*c, pb);  // this thread's released workspace
+    Workspace* other = nullptr;
+    std::thread([&] {
+        const WorkspaceLease d = task->workspace();
+        other = &*d;
+    }).join();
+    EXPECT_NE(other, &*a);
+    EXPECT_NE(other, &*c);
+    // leases taken on short-lived threads and released elsewhere are reused, not made anew
+    const usize made = task->workspaces_made();
+    for (u32 i = 0; i < 50; ++i)
+    {
+        WorkspaceLease e;
+        std::thread([&] { e = task->workspace(); }).join();
+        e.release();  // on this thread
+    }
+    EXPECT_LE(task->workspaces_made(), made + 1);
+    // a moved lease keeps its workspace, the source is empty
+    WorkspaceLease moved = std::move(a);
+    EXPECT_FALSE(a);
+    EXPECT_TRUE(moved);
+}
+
+TEST(Task, NestedEnumerationsAndGoalTestsInsideAnEnumerationDoNotDisturbIt)
 {
     const auto task = Task::from_text_file(task_path("philosophers__p03-phil4"));  // derived goal
-    Workspace* main_ws = &task->workspace();
-    Workspace* other = nullptr;
-    std::thread([&] { other = &task->workspace(); }).join();
-    EXPECT_NE(main_ws, other);
-    EXPECT_EQ(main_ws, &task->workspace());
-    // goal tests from inside an enumeration must not disturb it
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     const auto plain = succ.applicable_actions(s0);
-    std::vector<Action> with_goal_tests;
+    ASSERT_FALSE(plain.empty());
+    std::vector<Action> nested;
     succ.for_each_applicable(s0,
                              [&](const ActionLabel& a, const Delta& d)
                              {
                                  StateBuilder b(s0);
                                  b.apply(d.del, d.add);
-                                 (void) task->is_goal(b.view());
-                                 with_goal_tests.emplace_back(a);
+                                 const State child = b.build();
+                                 (void) task->is_goal(child.view());
+                                 // a full enumeration of the child's actions in a workspace of its own
+                                 const WorkspaceLease inner = task->workspace();
+                                 EXPECT_NE(&*inner, &*lease);
+                                 for (const Action& x : inner->successors().applicable_actions(child.view()))
+                                     (void) inner->successors().apply(child.view(), x.label());
+                                 nested.emplace_back(a);
                              });
-    EXPECT_EQ(plain, with_goal_tests);
+    EXPECT_EQ(plain, nested);
 }
 }  // namespace

@@ -82,7 +82,10 @@ TEST(AStarIw, ClassicalSolves)
     EXPECT_GT(r.stats.generated, 0u);
     State s = task->initial_state();
     for (const Action& a : r.plan)
-        s = task->workspace().successors().apply(s, a.label());
+    {
+        const WorkspaceLease lease = task->workspace();
+        s = lease->successors().apply(s, a.label());
+    }
     EXPECT_TRUE(task->is_goal(s));
 }
 

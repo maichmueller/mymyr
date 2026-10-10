@@ -25,7 +25,9 @@ class PlanningEnv(EnvBase):
     (or being stuck in) a dead end. ``terminated`` = goal or dead end (``dead_end_terminal``), ``truncated`` =
     max_steps reached (0: never), ``done`` = either. Finished environments are reset by TorchRL (``_reset`` masks); the
     reset tensordict may carry ``task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
-    ``goal_pos`` / ``goal_neg``. The environments never autoreset themselves.
+    ``goal_pos`` / ``goal_neg``. The environments never autoreset themselves. Every reset waits for the device work
+    and raises the device environment's errors (``BatchedEnv.check_errors``: a ``task_id`` outside the table, states
+    written into ``batched`` without ``refresh``).
 
     ``device="cpu"`` runs the host environments (any table, numeric ones included; ``threads`` splits a batch),
     ``"cuda[:i]"`` the device ones, including numeric tables, with identical trajectories for the same actions. Random actions
@@ -153,6 +155,7 @@ class PlanningEnv(EnvBase):
             if self._env.goals and "goal_pos" in keys and "goal_neg" in keys:
                 goal_pos, goal_neg = tensordict.get("goal_pos"), tensordict.get("goal_neg")
         self._env.reset(mask, task_ids=task_ids, goal_pos=goal_pos, goal_neg=goal_neg)
+        self._env.check_errors()  # device errors (task ids outside the table, ...) surface here
         out = self._observation()
         z = torch.zeros((self._env.num_envs, 1), dtype=torch.bool, device=self._env.device)
         out.update(done=z, terminated=z.clone(), truncated=z.clone())

@@ -63,7 +63,8 @@ State start_state(const Task& task, const std::optional<State>& start)
 std::string format_plan(const Task& task, std::span<const Action> plan, const std::optional<State>& start)
 {
     const formalism::TaskData& D = task.data();
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const heuristics::ActionCosts costs(task);
     State s = start_state(task, start);
     f64 g = costs.initial(s.view());
@@ -96,7 +97,8 @@ std::string format_plan(const Task& task, std::span<const Action> plan, const st
 std::vector<Action> parse_plan(const Task& task, std::string_view text, const std::optional<State>& start)
 {
     const formalism::TaskData& D = task.data();
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = start_state(task, start);
     std::vector<Action> plan;
     usize line_no = 0;

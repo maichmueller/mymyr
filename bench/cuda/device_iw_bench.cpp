@@ -104,7 +104,8 @@ double median(std::vector<double> v)
 /// start k.
 std::vector<State> walk_states(const Task& task, u32 n, u32 steps, u64 seed)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     std::vector<State> out;
     std::vector<u64> tmp;
     for (u32 k = 0; k < n; ++k)

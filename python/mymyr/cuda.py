@@ -2,7 +2,7 @@
 device memory, the device BrFS, the device path of ``rl.expand`` / ``rl.expand_into``, device IW, heuristics and
 searches, and device state spaces.
 
-Only in CUDA builds of mymyr (``-C cmake.define.MYMYR_CUDA=ON``); importing this module otherwise raises ImportError.
+Only in CUDA builds of mymyr (``CMAKE_ARGS="-DMYMYR_CUDA=ON"``); importing this module otherwise raises ImportError.
 
 - :class:`Context`: a user-owned device context (device, its own stream-ordered memory pool capped by ``max_bytes``,
   a compute stream and a copy stream). No global state: device tasks and arrays keep their context alive.
@@ -65,7 +65,8 @@ try:
     from mymyr._core import _cuda as _impl  # type: ignore[attr-defined, unused-ignore]
 except ImportError as e:  # pragma: no cover - depends on the build
     raise ImportError(
-        "mymyr.cuda: this mymyr was built without the CUDA backend (rebuild with -C cmake.define.MYMYR_CUDA=ON)"
+        "mymyr.cuda: this mymyr was built without the CUDA backend (rebuild with CMAKE_ARGS=\"-DMYMYR_CUDA=ON "
+        "-DCMAKE_CUDA_COMPILER=/path/to/nvcc\")"
     ) from e
 
 Context = _impl.Context

@@ -143,7 +143,8 @@ std::string difference(const std::set<std::string>& mine, const std::set<std::st
 /// Replays `plan` from the initial state; whether every action is applicable and the last state is a goal state.
 bool plan_reaches_goal(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = task.initial_state();
     for (const Action& a : plan)
     {
@@ -206,7 +207,8 @@ TEST(SymmetryFork, ActionsAndSearchesMatchTheFork)
             fork_state.emplace(k, i);
         }
 
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         detail::SymmetryPruner& pruner = succ.symmetry_pruner();
         datasets::ObjectGraphBuilder graphs(*task);
         std::set<std::string> seen;
@@ -302,6 +304,7 @@ TEST(SymmetryFork, ActionsAndSearchesMatchTheFork)
         BrfsOptions bo;
         bo.witness_pruning = false;
         bo.symmetry_pruning = SymmetryPruning::Wl1;
+        bo.stop_at_goal = false;
         const BrfsResult ex = brfs(*task, bo);
         bo.stop_at_goal = true;
         const BrfsResult br = brfs(*task, bo);

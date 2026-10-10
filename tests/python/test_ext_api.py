@@ -1,5 +1,6 @@
 """The versioned C API (mymyr/ext.h) seen from a pure-C downstream module that links nothing of mymyr."""
 
+import os
 import re
 import subprocess
 import sys
@@ -203,6 +204,31 @@ def test_a_refused_metric_is_an_error_of_the_c_api():
     assert r.stdout.splitlines() == ["task_numeric() failed"] * 2
 
 
+REFUSED_METRIC_THREADS = REFUSED_METRIC.replace("for _ in range(2):", "def call():") + """
+import faulthandler, threading
+assert not faulthandler.is_enabled()
+threads = [threading.Thread(target=call) for _ in range(8)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+assert consumer.numeric_info(mymyr.Task(d.instantiate_string(
+    "(define (problem q) (:domain d) (:init (= (x) 0)) (:goal (p)))")))[0] == 1
+print("done")
+"""
+
+
+@pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+def test_a_refused_metric_raises_in_every_thread_without_the_fault_handler():
+    # the lazy initialization that raises runs again for every caller, also concurrently, and no exception unwinds
+    # through pthread_once (which aborts without the fault handler)
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONFAULTHANDLER"}
+    r = subprocess.run([sys.executable, "-c", REFUSED_METRIC_THREADS], capture_output=True, text=True, check=False,
+                       env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["task_numeric() failed"] * 8 + ["done"]
+
+
 @pytest.mark.parametrize("name", ["cs-counters", "cs-hydropower", "cs-tpp", "cs-drone"])
 def test_values_read_through_the_c_api_equal_the_state_values(name):
     task = numeric_task(name)
@@ -277,11 +303,11 @@ def test_brfs_through_the_c_api_matches_mymyr_brfs(name):
     task = numeric_task(name)
     s0 = task.initial_state
     g0 = consumer.metric_initial(task, s0)
-    ref = search.brfs(task, witness_pruning=False, max_states=CAP)
+    ref = search.brfs(task, witness_pruning=False, max_states=CAP, stop_at_goal=False)
     states, expanded, generated, goals, layers, exhausted, solved, plan, _ = consumer.brfs(task, s0, g0, CAP, False)
-    assert (states, expanded, generated, goals, layers, exhausted) == (
-        ref.states, ref.expanded, ref.generated, ref.goal_states, ref.layers, ref.exhausted)
-    assert not solved and plan == []
+    assert (states, expanded, generated, goals, layers, exhausted, solved) == (
+        ref.states, ref.expanded, ref.generated, ref.goal_states, ref.layers, ref.exhausted, ref.solved)
+    assert plan == [(a.label[0], tuple(a.label[1])) for a in ref.plan]
 
 
 @pytest.mark.parametrize("name", NUMERIC_IDS)
@@ -289,7 +315,7 @@ def test_brfs_to_a_goal_through_the_c_api_matches_plan_and_cost(name):
     task = numeric_task(name)
     s0 = task.initial_state
     g0 = consumer.metric_initial(task, s0)
-    ref = search.brfs(task, witness_pruning=False, max_states=250_000, stop_at_goal=True)
+    ref = search.brfs(task, witness_pruning=False, max_states=250_000)
     states, expanded, generated, goals, layers, _, solved, plan, cost = consumer.brfs(task, s0, g0, 250_000, True)
     assert (states, expanded, generated, goals, layers, solved) == (
         ref.states, ref.expanded, ref.generated, ref.goal_states, ref.layers, ref.solved)
@@ -305,7 +331,7 @@ def test_brfs_to_a_goal_through_the_c_api_matches_plan_and_cost(name):
 def test_brfs_through_the_c_api_on_a_classical_task():
     task = text_task("gripper__prob05")
     s0 = task.initial_state
-    ref = search.brfs(task, witness_pruning=False, max_states=CAP, stop_at_goal=True)
+    ref = search.brfs(task, witness_pruning=False, max_states=CAP)
     states, expanded, generated, goals, layers, _, solved, plan, cost = consumer.brfs(task, s0, 0.0, CAP, True)
     assert (states, expanded, generated, solved) == (ref.states, ref.expanded, ref.generated, ref.solved)
     assert plan == [(a.label[0], tuple(a.label[1])) for a in ref.plan] and cost == len(plan)

@@ -2,12 +2,19 @@
 // Task: the immutable, shared, compiled planning task.
 //
 //   auto task = mymyr::Task::create(read_task_text_file("p.txt"));   // std::shared_ptr<const Task>
-//   Successors& succ = task->workspace().successors();              // this thread's scratch, owned by the task
+//   WorkspaceLease ws = task->workspace();                           // scratch of its own, while ws lives
+//   Successors& succ = ws->successors();
 //
 // A task holds the normalized TaskData, the static relations (unary bitsets, binary row tables, k-ary sets and
 // projections), the two-level atom index, the compiled schemas, axioms and goal, and the initial state. The only
-// mutation after construction is the CAS-guarded append of lazily assigned slots (atom_index.hpp). Per-thread mutable
-// scratch lives in Workspaces created on first use by each thread and freed with the task (core/per_thread.hpp).
+// mutation after construction is the CAS-guarded append of lazily assigned slots (atom_index.hpp).
+//
+// Mutable scratch (the matching engine, the axiom evaluator, the successor generator) lives in Workspaces, which the
+// task lends out: every search, enumeration or evaluation holds a WorkspaceLease while it runs, and every live lease
+// has a workspace of its own. Code that runs inside an enumeration (an observer, a goal test, a heuristic written in
+// Python) may therefore enumerate actions, test applicability, evaluate axioms or start another search on the same
+// task and thread without disturbing the enumeration around it. Released workspaces are kept per thread for the next
+// lease (core/per_thread.hpp), so a thread uses as many as its deepest nesting, and are freed with the task.
 //
 // Numeric fluents, constraints and effects (task/numeric.hpp): a state carries one value per numeric slot after
 // its atom bits ([bits | slots]); numeric_slots() == 0 for classical tasks, whose states are unchanged. Action
@@ -15,6 +22,7 @@
 // mimir's metric values by heuristics::ActionCosts.
 
 #include "mymyr/core/ids.hpp"
+#include "mymyr/core/once.hpp"
 #include "mymyr/core/per_thread.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/formalism/task_data.hpp"
@@ -23,6 +31,7 @@
 #include "mymyr/task/atom_index.hpp"
 #include "mymyr/task/plan.hpp"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -31,7 +40,43 @@
 
 namespace mymyr
 {
+class Task;
 class Workspace;
+namespace detail
+{
+struct WorkspacePool;
+}
+
+/// A workspace of a task, lent to its holder until the lease is destroyed (Task::workspace()). Move-only. The lease
+/// must not outlive the task. Its accessors exist for named leases only, so a workspace is never used after its
+/// lease ended: `Successors& s = task.workspace()->successors();` does not compile. A lease may be released on
+/// another thread than the one that took it.
+class WorkspaceLease
+{
+public:
+    WorkspaceLease() noexcept = default;  // empty
+    WorkspaceLease(WorkspaceLease&& other) noexcept;
+    WorkspaceLease& operator=(WorkspaceLease&& other) noexcept;
+    WorkspaceLease(const WorkspaceLease&) = delete;
+    WorkspaceLease& operator=(const WorkspaceLease&) = delete;
+    ~WorkspaceLease();
+
+    [[nodiscard]] Workspace& operator*() const& noexcept { return *m_ws; }
+    [[nodiscard]] Workspace* operator->() const& noexcept { return m_ws.get(); }
+    Workspace& operator*() const&& = delete;
+    Workspace* operator->() const&& = delete;
+    [[nodiscard]] explicit operator bool() const noexcept { return m_ws != nullptr; }
+    /// Returns the workspace to the task (no-op for an empty lease).
+    void release() noexcept;
+
+private:
+    friend class Task;
+    WorkspaceLease(const Task& task, detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) noexcept;
+
+    const Task* m_task = nullptr;
+    detail::WorkspacePool* m_home = nullptr;  // the pool of the thread that took it
+    std::unique_ptr<Workspace> m_ws;
+};
 
 struct TaskOptions
 {
@@ -143,19 +188,18 @@ public:
     /// outside the reachable domains of its predicate, or a NaN value; std::overflow_error for a value an I32 slot
     /// cannot hold (TaskOptions::numeric_storage).
     [[nodiscard]] State make_state(std::span<const AtomArgs> atoms, std::span<const f64> values = {}) const;
-    /// Goal test. Evaluates the axioms (in a per-thread workspace of its own) when the goal mentions derived
-    /// predicates, so it may be called from inside a successor callback.
+    /// Goal test. Evaluates the axioms (in a workspace of its own) when the goal mentions derived predicates.
     [[nodiscard]] bool is_goal(StateView s) const;
     /// Order-independent hash of a state over the canonical ids of its atoms: equal for equal states under any slot
     /// numbering (lazy slots depend on the order of first touch), so it identifies states across runs and threads.
     /// Numeric tasks: it also covers the numeric values, as canonical doubles (the same under I32 and F64 slots).
     [[nodiscard]] u64 canonical_hash(StateView s) const;
 
-    /// This thread's workspace (created on first use, owned by the task).
-    [[nodiscard]] Workspace& workspace() const;
-    /// This thread's workspace for evaluating single states (is_goal, holds in successor/conditions.hpp): separate
-    /// from workspace(), so that an evaluation may run inside a successor or binding enumeration there.
-    [[nodiscard]] Workspace& evaluation_workspace() const;
+    /// Lends a workspace that no other live lease holds: one this thread released before, or a new one. Its successor
+    /// generator has the default settings (witness pruning and canonical order on, no schema filter).
+    [[nodiscard]] WorkspaceLease workspace() const;
+    /// Number of workspaces this task has made (diagnostics: a thread makes as many as its deepest nesting of leases).
+    [[nodiscard]] usize workspaces_made() const noexcept { return m_workspaces_made.load(std::memory_order_relaxed); }
 
     // names (API, debugging)
     [[nodiscard]] std::string schema_name(SchemaId s) const;
@@ -178,9 +222,16 @@ private:
     plan::Compiled m_compiled;
     AtomIndex m_atoms;
     State m_initial;
-    mutable PerThread<Workspace> m_workspaces;
-    mutable PerThread<Workspace> m_eval_workspaces;  // evaluation_workspace()
-    mutable std::once_flag m_fingerprint_once;
+    friend class WorkspaceLease;
+    void give_back(detail::WorkspacePool* home, std::unique_ptr<Workspace> ws) const noexcept;
+
+    mutable PerThread<detail::WorkspacePool> m_workspaces;  // each thread's released workspaces
+    /// Workspaces released on another thread than the one that took them, for the next lease of any thread.
+    mutable std::mutex m_spare_mutex;
+    mutable std::vector<std::unique_ptr<Workspace>> m_spare;
+    mutable std::atomic<usize> m_spare_count{0};
+    mutable std::atomic<usize> m_workspaces_made{0};
+    mutable Once m_fingerprint_once;
     mutable u64 m_fingerprint = 0;
 };
 

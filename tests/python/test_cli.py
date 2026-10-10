@@ -2,6 +2,7 @@
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -85,6 +86,7 @@ def test_every_search_on_a_numeric_task(search_name):
     if search_name == "astar_iw":  # refuses numeric tasks: one clear line
         assert r.returncode == 2 and r.stdout == ""
         assert r.stderr.count("\n") == 1 and "numeric" in r.stderr and "Traceback" not in r.stderr
+        assert r.stderr.startswith("mymyr: error: AStarIW does not support")  # one prefix
         return
     if search_name in ("iw", "siw"):  # supported; novelty over the atoms alone does not reach this goal
         assert r.returncode == 1 and "no plan" in r.stderr
@@ -148,11 +150,14 @@ def test_exit_codes(tmp_path):
         (["plan", d, tmp_path / "missing.pddl"], "No such file or directory"),
         (["plan", bad, p], "durative actions are not supported"),
         (["info", bad], "durative actions are not supported"),
+        (["plan", p, d], "this is a PDDL problem, where a domain belongs"),
+        (["plan", d, p, "--search", "brfs", "--threads", "100000"], "threads must be an int in [0, "),
     ]
     for args, words in cases:
         r = run(*args)
         assert r.returncode == 2, (args, r.stderr)
         assert r.stderr.count("\n") == 1 and words in r.stderr and "Traceback" not in r.stderr, (args, r.stderr)
+        assert re.match(r"mymyr( plan| info)?: error: (?!mymyr)", r.stderr), (args, r.stderr)  # one prefix
     r = run("plan", bad, p, "--debug")
     assert r.returncode == 2 and "Traceback" in r.stderr and "PddlError" in r.stderr
     # 0

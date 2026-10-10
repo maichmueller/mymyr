@@ -106,7 +106,7 @@ struct BestFirstOptions
     bool reopen = true;               // reopen states reached with a smaller g (mimir does)
     bool lazy_requeue = true;         // astar_lazy: lower-bound keys and re-queueing (optimal); false: mimir's keys
     // beam
-    u32 beam_width = 1000;
+    u32 beam_width = 1000;  // positive (std::invalid_argument otherwise)
 };
 
 struct BestFirstResult

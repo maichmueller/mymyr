@@ -187,7 +187,8 @@ std::vector<Action> MultiIwBatch::plan(u32 i, const Task& task) const
     if (plan_length.at(i) < 0)
         return out;
     const u32 LW = 1 + label_width;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     for (u64 k = plan_offsets[i]; k < plan_offsets[i + 1]; ++k)
     {
         const u32* l = plan_labels.data() + k * LW;
@@ -226,7 +227,8 @@ search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& star
         if (costs)
         {
             const heuristics::ActionCosts c(task);
-            r.cost = heuristics::plan_metric(task.workspace().successors(), c, start, c.initial(start.view()), r.plan);
+            const WorkspaceLease lease = task.workspace();
+            r.cost = heuristics::plan_metric(lease->successors(), c, start, c.initial(start.view()), r.plan);
         }
     }
     return r;
@@ -1511,7 +1513,8 @@ bool DeviceMultiIw::Impl::enqueue_chunk(Run& r, u32 pb)
     else if (host_goal)
     {
         const auto th = Clock::now();
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         const u32 P = step_host()->rows;
         h_goal.assign(P, 0);
         for (u32 i = 0; i < P; ++i)
@@ -1587,7 +1590,7 @@ bool DeviceMultiIw::Impl::enqueue_body(Run& r, miw::Loop* loop, unsigned long lo
                                              scan_state(miw::k_scan_cut), s),
                   "launch_scan_flag_pair");
             check(miw::launch_cut(g, c, sv, r.lim, r.cut_scan, s), "launch_cut");
-            check(miw::launch_keep(g, c, sv, s), "launch_keep");
+            check(miw::launch_keep(g, c, sv, r.lim, s), "launch_keep");
         }
     }
     if (novel_kept)

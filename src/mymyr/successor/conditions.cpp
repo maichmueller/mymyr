@@ -489,7 +489,8 @@ public:
             return bits::test(m_s.w, m_s.nw, slot);
         if (!m_prepared)
         {
-            m_succ = &m_task.evaluation_workspace().successors();
+            m_lease = m_task.workspace();
+            m_succ = &m_lease->successors();
             m_succ->prepare(m_s);
             m_prepared = true;
         }
@@ -500,6 +501,7 @@ public:
 private:
     const Task& m_task;
     StateView m_s;
+    WorkspaceLease m_lease;  // taken when a derived atom is first asked for
     Successors* m_succ = nullptr;
     bool m_prepared = false;
     std::vector<u32> m_args;

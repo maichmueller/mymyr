@@ -13,7 +13,7 @@ holding_d = task.atom("holding", "d")
 goal = task.ground_condition([holding_d])
 alternative = task.ground_condition([task.literal("holding", "a")])
 
-result = search.brfs(task, stop_at_goal=True, goal=[goal, alternative])
+result = search.brfs(task, goal=[goal, alternative])
 if not result.solved:
     raise RuntimeError(f"search did not reach either goal: {result.status}")
 end_state = task.initial_state

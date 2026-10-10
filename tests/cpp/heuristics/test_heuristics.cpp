@@ -183,7 +183,8 @@ TEST(Heuristics, H2WithConditionalEffectsIsAdmissible)
     so.heuristic.kind = H::Kind::Max;
     const auto r = search::astar_eager(*task, so);
     ASSERT_EQ(r.status, search::SearchStatus::Solved);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     State s = task->initial_state();
     for (usize i = 0; i <= r.plan.size(); ++i)
     {
@@ -209,7 +210,8 @@ TEST(Heuristics, SetAdditiveIsARelaxedPlan)
         auto hmax = make(*task, H::Kind::Max, relaxed);
         auto hff = make(*task, H::Kind::FF, relaxed);
         ASSERT_TRUE(hsa->provides_preferred());
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         const bool ce = task->compiled().has_conditional_effects;
         u32 checked = 0, above_ff = 0, below_ff = 0;
         for (u32 id : sample(*sp, 300))

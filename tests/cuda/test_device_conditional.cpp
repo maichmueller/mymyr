@@ -206,8 +206,8 @@ TEST_P(DeviceConditionalEffectsSuite, BrfsEqualsTheCpu)
     for (bool witness : {true, false})
     {
         SCOPED_TRACE(witness ? "witness pruning" : "no witness pruning");
-        const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.witness_pruning = witness, .fingerprint = true});
-        const BrfsResult c = brfs(*task, {.threads = 2, .witness_pruning = witness, .fingerprint = true});
+        const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.witness_pruning = witness, .stop_at_goal = false, .fingerprint = true});
+        const BrfsResult c = brfs(*task, {.threads = 2, .witness_pruning = witness, .stop_at_goal = false, .fingerprint = true});
         EXPECT_EQ(d.result.states, c.states);
         EXPECT_EQ(d.result.expanded, c.expanded);
         EXPECT_EQ(d.result.generated, c.generated);
@@ -405,7 +405,7 @@ TEST(DeviceConditionalEffects, ChunkSizeDoesNotChangeTheIds)
                     GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
                 if (sanitizer_size() && chunk < 100u)
                     continue;
-                const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.fingerprint = true, .chunk_states = chunk});
+                const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = false, .fingerprint = true, .chunk_states = chunk});
                 if (chunk == u32{1} << 20)
                 {
                     ref_fp = d.result.fingerprint;
@@ -429,10 +429,10 @@ TEST(DeviceConditionalEffects, DerivedAtomsFirstMetOnTheDevice)
         if (!task)
             GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
         const u32 derived0 = task->atoms().derived_slots();
-        const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.fingerprint = true});
+        const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = false, .fingerprint = true});
         EXPECT_GT(task->atoms().derived_slots(), derived0);
         EXPECT_GT(d.stats.axiom_reruns, 0u);
-        const BrfsResult c = brfs(*task, {.threads = 2, .fingerprint = true});
+        const BrfsResult c = brfs(*task, {.threads = 2, .stop_at_goal = false, .fingerprint = true});
         EXPECT_EQ(d.result.states, c.states);
         EXPECT_EQ(d.result.goal_states, c.goal_states);
         EXPECT_EQ(d.result.fingerprint, c.fingerprint);
@@ -544,7 +544,7 @@ TEST(DeviceConditionalEffects, ForcedForwardCheckingEqualsTheCpu)
                     GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
                 const cuda::DeviceBrfsResult d =
                     cuda::brfs(context(), task, {.canonical_order = canonical, .stop_at_goal = false, .fingerprint = true});
-                const BrfsResult c = brfs(*task, {.threads = 2, .canonical_order = canonical, .fingerprint = true});
+                const BrfsResult c = brfs(*task, {.threads = 2, .canonical_order = canonical, .stop_at_goal = false, .fingerprint = true});
                 EXPECT_EQ(d.result.states, c.states);
                 EXPECT_EQ(d.result.generated, c.generated);
                 EXPECT_EQ(d.result.goal_states, c.goal_states);

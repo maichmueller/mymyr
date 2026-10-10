@@ -18,6 +18,7 @@ add_executable(mymyr_tests
     core/test_hash.cpp
     core/test_arena.cpp
     core/test_per_thread.cpp
+    core/test_once.cpp
     core/test_version.cpp
     formalism/test_text_format.cpp
     task/test_task.cpp
@@ -55,6 +56,12 @@ target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURC
     $<$<BOOL:${MYMYR_SANITIZE}>:MYMYR_SANITIZED>)
 include(GoogleTest)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
+
+# Thread counts and thread creation; interposes pthread_create to simulate refused threads, so in an executable of
+# its own.
+add_executable(mymyr_thread_tests core/test_threads.cpp)
+target_link_libraries(mymyr_thread_tests PRIVATE mymyr::core mymyr_warnings GTest::gtest_main ${CMAKE_DL_LIBS})
+gtest_discover_tests(mymyr_thread_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
 
 # ------------------------------------------------------------------------------------------------ PDDL front end
 if(TARGET mymyr_frontend)
