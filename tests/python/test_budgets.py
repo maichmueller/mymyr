@@ -12,6 +12,8 @@ from mymyr import search
 
 from mymyr.search import Status  # noqa: E402
 
+pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+
 FANOUT = 4096  # successors of the initial state
 
 

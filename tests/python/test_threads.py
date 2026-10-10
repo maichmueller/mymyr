@@ -7,6 +7,7 @@ import textwrap
 
 import pytest
 
+import mymyr
 from mymyr import datasets, rl, search
 
 from conftest import TASKS, text_task
@@ -102,6 +103,7 @@ LOADER = textwrap.dedent(
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS and /proc are Linux")
+@pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 def test_the_table_loader_default_fits_a_small_address_space():
     counters = TASKS.parent / "pddl" / "counters"
     p = subprocess.run(
