@@ -2,8 +2,10 @@
 // Team: a fixed group of persistent threads with a spinning fork/join. run(f) calls f(t) on every member t in
 // [0, T), with the caller as member 0, and returns when all are done. Layer-synchronous
 // searches fork/join several times per layer, so waking sleeping threads would dominate; members spin briefly and
-// then yield. Threads exit in the destructor.
+// then yield. Threads exit in the destructor. Construction is exception-safe: if a thread cannot be started, the ones
+// already running are stopped and joined and ThreadStartError is thrown (core/threads.hpp).
 
+#include "mymyr/core/threads.hpp"
 #include "mymyr/core/types.hpp"
 
 #include <atomic>
@@ -32,20 +34,27 @@ inline void cpu_relax() noexcept
 class Team
 {
 public:
-    explicit Team(u32 threads) : m_T(threads == 0 ? 1 : threads)
+    /// threads members (0: 1). Throws std::invalid_argument above max_threads() and ThreadStartError when the system
+    /// refuses a thread.
+    explicit Team(u32 threads) : m_T(threads == 0 ? 1 : resolve_threads(threads))
     {
+        m_threads.reserve(m_T - 1);
         for (u32 i = 1; i < m_T; ++i)
-            m_threads.emplace_back([this, i] { loop(i); });
+        {
+            try
+            {
+                m_threads.emplace_back([this, i] { loop(i); });
+            }
+            catch (const std::exception& e)
+            {
+                stop();
+                throw ThreadStartError(i - 1, m_T - 1, e);
+            }
+        }
     }
     Team(const Team&) = delete;
     Team& operator=(const Team&) = delete;
-    ~Team()
-    {
-        m_quit.store(true, std::memory_order_release);
-        m_gen.fetch_add(1, std::memory_order_release);
-        for (auto& t : m_threads)
-            t.join();
-    }
+    ~Team() { stop(); }
 
     [[nodiscard]] u32 size() const noexcept { return m_T; }
 
@@ -79,6 +88,15 @@ public:
     }
 
 private:
+    /// Ends the members' loops and joins them.
+    void stop() noexcept
+    {
+        m_quit.store(true, std::memory_order_release);
+        m_gen.fetch_add(1, std::memory_order_release);
+        for (auto& t : m_threads)
+            t.join();
+        m_threads.clear();
+    }
     void call(const std::function<void(u32)>& f, u32 t)
     {
         try

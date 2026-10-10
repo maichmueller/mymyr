@@ -45,6 +45,7 @@
 // and max_seconds (mimir declares timeout_ms but does not use it). As in mimir, a task whose goal is statically
 // false has no state space (its BrFS ends as unsolvable before expanding anything), whatever remove_if_unsolvable.
 
+#include "mymyr/core/once.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/datasets/certificates.hpp"
 #include "mymyr/state/state.hpp"
@@ -236,7 +237,7 @@ private:
     f64 m_search_s = 0, m_post_s = 0;
     struct Index;
     mutable std::shared_ptr<Index> m_index;  // find(): built on first use
-    mutable std::once_flag m_index_once;
+    mutable Once m_index_once;
 };
 using StateSpacePtr = std::shared_ptr<const StateSpace>;
 

@@ -14,8 +14,9 @@
 // or total-cost effects break mimir's applicability rules is not applicable (never emitted); the Delta carries the
 // successor's numeric words and the total-cost effects of the action (the shared cost evaluation: every search takes
 // action costs from it through heuristics::ActionCosts).
-// A Successors object lives in a Workspace (per thread, per task): obtain it with task.workspace().successors().
-// Calls on one object are not reentrant: do not call it from inside its own callback.
+// A Successors object lives in a Workspace: lease one with `WorkspaceLease ws = task.workspace();` and use
+// ws->successors() while the lease lives. Calls on one object are not reentrant: code inside its callback that needs a
+// successor generator of the same task leases another workspace (Task::workspace() never hands out a leased one).
 
 #include "mymyr/axioms/evaluator.hpp"
 #include "mymyr/state/state.hpp"

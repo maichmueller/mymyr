@@ -18,9 +18,6 @@ namespace mymyr::cuda
 {
 namespace
 {
-constexpr u64 k_i32_max = static_cast<u64>(std::numeric_limits<i32>::max());
-
-
 template<class T>
 T* scratch_of(Scratch& sc, const ContextPtr& ctx, u64 n, cudaStream_t s)
 {
@@ -322,7 +319,7 @@ u64 SuiteExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::E
         throw std::invalid_argument("mymyr: expand: row stride smaller than the row width");
     if (in.numeric_words != I.suite->numeric_words())
         throw std::invalid_argument("mymyr: device expand: input numeric width differs from the suite");
-    if (in.rows > k_i32_max)
+    if (in.rows > rl::k_max_rows)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
     if (in.words > lifted::k_max_words)
         throw std::invalid_argument("mymyr: device expand: state rows of " + std::to_string(in.words) +
@@ -351,7 +348,7 @@ void SuiteExpander::write(rl::Expansion& out)
     if (out.binding && out.label_width < I.suite->label_width())
         throw std::invalid_argument("mymyr: expand: label width " + std::to_string(out.label_width) +
                                     " is below the largest schema arity " + std::to_string(I.suite->label_width()));
-    if (out.capacity > k_i32_max)
+    if (out.capacity > rl::k_max_rows)
         throw std::invalid_argument("mymyr: expand: capacity above 2^31 - 1 rows");
     if (out.succ && out.words == 0 && out.capacity)
         throw std::invalid_argument("mymyr: expand: successor rows of zero words");
@@ -362,7 +359,7 @@ void SuiteExpander::write(rl::Expansion& out)
                                     " words (the device kernels take at most " + std::to_string(lifted::k_max_words) + ")");
     if (out.numeric_words != I.suite->numeric_words())
         throw std::invalid_argument("mymyr: device expand: output numeric width differs from the suite");
-    if (out.offsets && I.total > k_i32_max)
+    if (out.offsets && I.total > rl::k_max_rows)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     if (I.runs)
         I.write_runs(out);

@@ -214,7 +214,8 @@ public:
         {
             return fail(std::string("delete-free task: ") + e.what());
         }
-        Successors& succ = explore->workspace().successors();
+        const WorkspaceLease lease = explore->workspace();
+        Successors& succ = lease->successors();
         const AtomIndex& xatoms = explore->atoms();
 
         // 1. delete-free fixpoint in naive rounds (witness pruning is exact for the reached atoms)

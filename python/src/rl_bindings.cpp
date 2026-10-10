@@ -24,6 +24,7 @@
 #include "rl_typing.hpp"
 
 #include "mymyr/core/thread_pool.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/pool.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -146,7 +147,7 @@ const i32* import_task_ids(nb::handle obj, u64 rows, u32 instances, std::vector<
                                       .c_str());
         copy.resize(rows);
         for (u64 r = 0; r < rows; ++r)
-            copy[r] = checked(nb::cast<i64>(seq[r]), r);
+            copy[r] = checked(int_arg<i64>(seq[r], name), r);
         return copy.data();
     }
     if (!dl::host_accessible(dev.device_type))
@@ -249,12 +250,12 @@ FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal)
     r.numeric_words = NN;
     r.label_width = L;
     r.has_goal = goal;
-    r.off_succ = lay.add(cap * (W + NN) * sizeof(u64));
-    r.off_parent = lay.add(cap * sizeof(i32));
-    r.off_schema = lay.add(cap * sizeof(i32));
-    r.off_binding = lay.add(cap * L * sizeof(i32));
-    r.off_goal = lay.add(goal ? cap : 0);
-    r.off_offsets = lay.add((rows + 1) * sizeof(i32));
+    r.off_succ = lay.add(cap, (u64{W} + NN) * sizeof(u64));
+    r.off_parent = lay.add(cap, sizeof(i32));
+    r.off_schema = lay.add(cap, sizeof(i32));
+    r.off_binding = lay.add(cap, u64{L} * sizeof(i32));
+    r.off_goal = lay.add(goal ? cap : 0, 1);
+    r.off_offsets = lay.add(checked_add(rows, 1, "the offsets"), sizeof(i32));
     r.block = Block::make(lay.bytes);
     return r;
 }
@@ -282,14 +283,14 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     p.has_goal = f.has_goal;
     p.fw = fw;
     p.enc = enc;
-    const u64 NK = f.rows * K;
-    p.off_index = lay.add(NK * sizeof(i32));
-    p.off_mask = lay.add(NK);
-    p.off_count = lay.add(f.rows * sizeof(i32));
-    p.off_succ = lay.add(NK * (f.words + f.numeric_words) * sizeof(u64));
-    p.off_schema = lay.add(NK * sizeof(i32));
-    p.off_binding = lay.add(NK * f.label_width * sizeof(i32));
-    p.off_goal = lay.add(f.has_goal ? NK : 0);
+    const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
+    p.off_index = lay.add(NK, sizeof(i32));
+    p.off_mask = lay.add(NK, 1);
+    p.off_count = lay.add(f.rows, sizeof(i32));
+    p.off_succ = lay.add(NK, (u64{f.words} + f.numeric_words) * sizeof(u64));
+    p.off_schema = lay.add(NK, sizeof(i32));
+    p.off_binding = lay.add(NK, u64{f.label_width} * sizeof(i32));
+    p.off_goal = lay.add(f.has_goal ? NK : 0, 1);
     p.block = Block::make(lay.bytes);
     std::byte* b = p.block->data();
     rl::PaddedExpansion out;
@@ -416,6 +417,25 @@ struct TaskIds
     {
         ptr = import_task_ids(obj, rows, t.size(), copy, keep, "task_ids", t.noun());
     }
+    /// The ids of `batch` (read in place or converted), checked against the suite, and its States against the
+    /// instance of their row: ValueError for a State of another task.
+    TaskIds(nb::handle obj, const StateBatch& batch, const rl::TaskSuite& t) : TaskIds(obj, batch.view.rows, t)
+    {
+        if (batch.owners.empty() || (!ptr && t.size() > 1))
+            return;  // arrays: the caller's encoding; no ids for a suite of several: the expansion reports it
+        t.check_task_ids(ptr, batch.view.rows);
+        for (u64 i = 0; i < batch.owners.size(); ++i)
+        {
+            const u32 g = ptr ? static_cast<u32>(ptr[i]) : 0;
+            if (batch.owners[i] == t.task(g)->uid())
+                continue;
+            const std::string which = batch.single ? std::string("the state") : "state " + std::to_string(i);
+            throw nb::value_error((t.size() == 1 ? "mymyr: " + which + " belongs to another task"
+                                                 : "mymyr: " + which + " is not a state of instance " + std::to_string(g) +
+                                                       " of the " + t.noun() + " (its task id)")
+                                      .c_str());
+        }
+    }
     TaskIds(const TaskIds&) = delete;
     TaskIds& operator=(const TaskIds&) = delete;
 };
@@ -444,12 +464,13 @@ PyPool* pool_arg(nb::handle pool)
 }
 
 ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, SizeArg capacity, SizeArg words, SizeArg K,
-                    bool goal, bool canonical, bool witness, PoolArg pool, u32 threads, FrameworkArg framework,
+                    bool goal, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
                     bool validate, StreamArg stream, ContextArg ctx)
 {
     if (device_hooks().expand && is_cuda_array(states))
         return device_hooks().expand(
             {table, states, task_ids, capacity, words, K, goal, canonical, witness, framework, validate, stream, ctx});
+    const u32 threads = threads_arg(threads_in);
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
     StateBatch in = import_table_states(states, tt);
@@ -458,13 +479,14 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     PyPool* p = pool_arg(pool);
     const rl::ExpandOptions opt = expand_options(canonical, witness, validate);
     const u64 N = in.view.rows;
-    const TaskIds ids(task_ids, N, tt);
+    const TaskIds ids(task_ids, in, tt);
     const u32 L = tt.label_width();
-    const bool fixed_cap = !capacity.is_none();
-    const bool fixed_words = !words.is_none();
+    const std::optional<u64> fixed_cap = opt_int_arg<u64>(capacity, "capacity", 0, rl::k_max_rows);
+    const std::optional<u32> fixed_words = opt_int_arg<u32>(words, "words");
+    const std::optional<u32> fixed_K = opt_int_arg<u32>(K, "K");
     std::atomic<u32>& branching = ref.branching();
-    u64 cap = fixed_cap ? nb::cast<u64>(capacity) : N * branching.load(std::memory_order_relaxed) + 16;
-    u32 W = fixed_words ? nb::cast<u32>(words) : std::max(in.view.words, current_words(tt));
+    u64 cap = fixed_cap ? *fixed_cap : std::min(N * branching.load(std::memory_order_relaxed) + 16, rl::k_max_rows);
+    u32 W = fixed_words ? *fixed_words : std::max(in.view.words, current_words(tt));
     if (W == 0)
         W = 1;
     FlatResult f;
@@ -479,7 +501,7 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
         const bool narrow = x.words_needed > W && !fixed_words;
         if ((!short_rows && !narrow) || attempt >= 3)
             break;
-        cap = std::max(cap, x.total);
+        cap = std::max(cap, std::min(x.total, rl::k_max_rows));
         W = std::max(W, x.words_needed);
     }
     if (N > 0 && !fixed_cap)
@@ -501,11 +523,8 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     if (ids.ptr && tt.size() > 1)
         e.task_ids.assign(ids.ptr, ids.ptr + N);
     e.single = in.single;
-    if (!K.is_none())
-    {
-        const u32 k = nb::cast<u32>(K);
-        e.padded = make_padded(e.flat, k == 0 ? auto_K(e.flat) : k, fw, enc);
-    }
+    if (fixed_K)
+        e.padded = make_padded(e.flat, *fixed_K == 0 ? auto_K(e.flat) : *fixed_K, fw, enc);
     return nb::cast(std::move(e), nb::rv_policy::move);
 }
 
@@ -539,7 +558,7 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
     StateBatch in = import_table_states(states, tt);
-    const TaskIds ids(task_ids, in.view.rows, tt);
+    const TaskIds ids(task_ids, in, tt);
     const u32 NN = tt.numeric_words();
     rl::Expansion x;
     x.numeric_words = NN;
@@ -805,9 +824,14 @@ std::vector<std::filesystem::path> problem_files(const std::variant<std::filesys
     return files;
 }
 
-/// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads.
+/// The loader's default thread count: instantiating and compiling a problem is short, so a few threads saturate it,
+/// while every thread reserves about 72 MB of address space (its stack and its malloc arena).
+constexpr u32 k_loader_threads = 8;
+
+/// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads
+/// (none: min(k_loader_threads, the hardware threads)).
 nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-                           const TaskOptions& options, u32 threads)
+                           const TaskOptions& options, std::optional<u32> threads)
 {
     PyDomain dom;
     if (nb::isinstance<PyDomain>(domain))
@@ -816,7 +840,7 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
     {
         const auto path = nb::cast<std::filesystem::path>(domain);
         nb::gil_scoped_release release;
-        dom = PyDomain{frontend::Domain::from_file(path), std::make_shared<const std::string>(read_file(path.string())), path.string()};
+        dom = load_domain(path);
     }
     const std::vector<std::filesystem::path> files = problem_files(problems);
     const usize n = files.size();
@@ -827,8 +851,8 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
         nb::gil_scoped_release release;
         std::vector<std::exception_ptr> errors(n);
         std::atomic<usize> next{0};
-        const u32 hw = std::max(1u, std::thread::hardware_concurrency());
-        ThreadPool pool(static_cast<u32>(std::min<usize>(threads == 0 ? hw : threads, n)));
+        const u32 T = threads ? resolve_threads(*threads) : std::min(k_loader_threads, hardware_threads());
+        ThreadPool pool(static_cast<u32>(std::min<usize>(T, n)));
         pool.run([&](u32) {
             for (usize i; (i = next.fetch_add(1, std::memory_order_relaxed)) < n;)
             {
@@ -838,7 +862,7 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
                     source->kind = TaskSource::Kind::Pddl;
                     source->domain = dom.text ? *dom.text : std::string();
                     source->domain_path = dom.path;
-                    source->problem = read_file(files[i].string());
+                    source->problem = read_problem(files[i]);
                     source->problem_path = files[i].string();
                     data[i] = dom.d->instantiate_file(files[i]);
                     tasks[i] = Task::create(formalism::TaskData(*data[i]), options);
@@ -965,7 +989,7 @@ HostInts host_ints(nb::handle obj, const char* name)
         const nb::sequence seq = nb::borrow<nb::sequence>(obj);
         auto v = std::make_shared<std::vector<i64>>(nb::len(seq));
         for (usize i = 0; i < v->size(); ++i)
-            (*v)[i] = nb::cast<i64>(seq[i]);
+            (*v)[i] = int_arg<i64>(seq[i], name);
         h.data = v->data();
         h.n = v->size();
         h.keep = std::move(v);
@@ -1131,8 +1155,9 @@ public:
         return m_pool->send(envs, a.n, act, next);
     }
 
-    PyPoolBatch recv(u64 min_rows)
+    PyPoolBatch recv(IntArg min_rows_in)
     {
+        const u64 min_rows = int_arg<u64>(min_rows_in, "min_rows");
         rl::PoolBatch b;
         {
             nb::gil_scoped_release release;
@@ -1141,8 +1166,9 @@ public:
         return wrap(std::move(b));
     }
 
-    PyPoolBatch recv_ticket(u64 ticket)
+    PyPoolBatch recv_ticket(IntArg ticket_in)
     {
+        const u64 ticket = int_arg<u64>(ticket_in, "ticket");
         rl::PoolBatch b;
         {
             nb::gil_scoped_release release;
@@ -1199,7 +1225,7 @@ void bind_rl(nb::module_& parent)
     nb::class_<PyPool>(m, "ThreadPool",
                        "A pool of worker threads for splitting one batch over threads (rl.expand(..., pool=)). Workers "
                        "sleep between calls; one batch runs at a time. Hold it as long as you expand.")
-        .def(nb::init<u32>(), "threads"_a)
+        .def("__init__", [](PyPool* self, IntArg threads) { new (self) PyPool(threads_arg(threads)); }, "threads"_a)
         .def_prop_ro("threads", [](const PyPool& p) { return p.pool->size(); })
         .def("__repr__", [](const PyPool& p) { return "ThreadPool(" + std::to_string(p.pool->size()) + ")"; });
 
@@ -1235,16 +1261,22 @@ void bind_rl(nb::module_& parent)
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain,
                const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems, std::string_view atoms,
-               std::string_view matching, u32 fc, u32 fmw, u32 pilot, u32 threads) {
+               std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in, IntArg threads_in) {
+                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
+                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
+                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
+                const std::optional<u32> threads =
+                    threads_in.is_none() ? std::nullopt : std::optional<u32>(threads_arg(threads_in));
                 return nb::typed<nb::object, PyTable>(
                     table_from_pddl(domain, problems, make_options(atoms, matching, fc, fmw, pilot), threads));
             },
-            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 0,
+            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = nb::none(),
             "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "
             "once). problems is a list of problem files (kept in its order), a directory (its *.pddl files sorted by "
             "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; domain files in a "
             "directory or among the matches are skipped. The problems are instantiated and compiled on `threads` "
-            "threads (0: the hardware concurrency); instance i is the same task as Task(domain.instantiate(files[i])) "
+            "threads (default: min(8, the hardware threads), as more threads gain little here while each reserves about 72 "
+            "MB of address space for its stack and malloc arena; 0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i])) "
             "with these options. Raises ValueError when a directory or pattern has no problem files.")
 #endif
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
@@ -1439,7 +1471,7 @@ void bind_rl(nb::module_& parent)
             "local_ids", [](const PySuite& t) { return per_instance(*t.suite, [&](u32 g) { return t.suite->local_id(g); }); },
             "Per global instance: its index in its domain's table [I].")
         .def(
-            "global_id", [](const PySuite& t, u32 domain, u32 local) { return t.suite->global_id(domain, local); },
+            "global_id", [](const PySuite& t, IntArg domain_in, IntArg local_in) { const u32 domain = int_arg<u32>(domain_in, "domain"); const u32 local = int_arg<u32>(local_in, "local"); return t.suite->global_id(domain, local); },
             "domain"_a, "local"_a, "The global id of instance `local` of domain `domain`'s table.")
         .def_prop_ro("words", [](const PySuite& t) { return t.suite->words(); },
                      "Atom words of a row: the widest domain's table words.")
@@ -1602,10 +1634,11 @@ void bind_rl(nb::module_& parent)
             return nb::cast(*e.padded);
         }, "The padded view, if expand() was called with K")
         .def("pad",
-             [](const PyExpansion& e, u32 K) { return make_padded(e.flat, K == 0 ? auto_K(e.flat) : K, e.fw, e.enc); },
+             [](const PyExpansion& e, IntArg K_in) { const u32 K = int_arg<u32>(K_in, "K"); return make_padded(e.flat, K == 0 ? auto_K(e.flat) : K, e.fw, e.enc); },
              "K"_a = 0, "The padded [N, K] view (K = 0: the next power of two at or above the largest count).")
         .def("action",
-             [](const PyExpansion& e, u64 j) {
+             [](const PyExpansion& e, IntArg j_in) {
+                 const u64 j = int_arg<u64>(j_in, "row");
                  if (j >= e.flat.valid())
                      throw nb::index_error("mymyr: successor row out of range");
                  const i32* b = e.flat.at<i32>(e.flat.off_binding) + j * e.flat.label_width;
@@ -1616,7 +1649,8 @@ void bind_rl(nb::module_& parent)
              },
              "row"_a, "The Action (label) of flat row j (of its parent's instance).")
         .def("actions",
-             [](nb::pointer_and_handle<PyExpansion> self, u64 i) {
+             [](nb::pointer_and_handle<PyExpansion> self, IntArg i_in) {
+                 const u64 i = int_arg<u64>(i_in, "state");
                  const PyExpansion& e = *self.p;
                  if (i >= e.flat.rows)
                      throw nb::index_error("mymyr: state index out of range");
@@ -1644,7 +1678,7 @@ void bind_rl(nb::module_& parent)
         [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {
             const SuiteRef ref = suite_of(table);
             StateBatch in = import_table_states(states, *ref.suite);
-            const TaskIds ids(task_ids, in.view.rows, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
             const auto [fw, enc] = output_kind(in, framework, !in.packed);
             auto block = Block::make(std::max<u64>(in.view.rows, 1));
             {
@@ -1681,7 +1715,10 @@ void bind_rl(nb::module_& parent)
           "Unsatisfied goal literals per state [N] int32.");
     m.def(
         "random_walks",
-        [](TaskArg task, u64 steps, u64 episode, u64 seed, bool canonical, bool witness) {
+        [](TaskArg task, IntArg steps_in, IntArg episode_in, IntArg seed_in, bool canonical, bool witness) {
+            const u64 steps = int_arg<u64>(steps_in, "steps");
+            const u64 episode = int_arg<u64>(episode_in, "episode");
+            const u64 seed = int_arg<u64>(seed_in, "seed");
             Owner o = owner_of(task);
             rl::WalkStats st;
             {
@@ -1696,8 +1733,8 @@ void bind_rl(nb::module_& parent)
             return d;
         },
         "task"_a, "steps"_a, "episode"_a = 50, "seed"_a = 0, nb::kw_only(), "canonical"_a = true, "witness"_a = false,
-        "Native random walks (one call): expand, move to a uniformly random successor, restart after `episode` steps "
-        "or at a dead end.");
+        "Native random walks (one call): expand, move to a uniformly random successor, restart at a dead end and after "
+        "`episode` steps (0: only at a dead end).");
 
     // --- CpuEnvPool
     using OptArray = Arg<std::optional<ann::Any>>;
@@ -1781,9 +1818,13 @@ void bind_rl(nb::module_& parent)
         "the thread state while they wait).")
         .def(
             "__init__",
-            [](PyCpuPool* self, SuiteArg table, u32 num_envs, u32 threads, bool goals, u64 seed, u32 max_steps,
+            [](PyCpuPool* self, SuiteArg table, IntArg num_envs_in, IntArg threads_in, bool goals, IntArg seed_in, IntArg max_steps_in,
                f32 step_reward, f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal,
                bool autoreset, bool canonical, bool witness, FrameworkArg framework) {
+                const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1);
+                const u32 threads = threads_arg(threads_in);
+                const u64 seed = int_arg<u64>(seed_in, "seed");
+                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
                 rl::EnvConfig c;
                 c.seed = seed;
                 c.max_steps = max_steps;

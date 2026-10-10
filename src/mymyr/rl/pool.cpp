@@ -2,6 +2,8 @@
 
 #include "mymyr/rl/pool.hpp"
 
+#include "mymyr/core/threads.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -112,6 +114,19 @@ struct CpuEnvPool::Impl
     std::vector<PoolBatch> spare;
 
     Impl(TaskSuitePtr suite, const EnvConfig& config) : env(std::move(suite), config) {}
+
+    /// Ends the workers' loops and joins them.
+    void stop_workers() noexcept
+    {
+        {
+            std::lock_guard lock(mu);
+            quit = true;
+        }
+        work_cv.notify_all();
+        for (std::thread& t : workers)
+            t.join();
+        workers.clear();
+    }
 
     /// A recycled batch (arrays with capacity), or an empty one.
     PoolBatch take_spare()
@@ -320,7 +335,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     if (num_envs > static_cast<u32>(std::numeric_limits<i32>::max()))
         throw std::invalid_argument("mymyr: CpuEnvPool: more than 2^31 - 1 envs");
     I.N = num_envs;
-    I.T = options.threads ? options.threads : std::max(1u, std::thread::hardware_concurrency());
+    I.T = resolve_threads(options.threads);
     I.W = tt.words();
     I.NN = tt.numeric_words();
     I.L = std::max<u32>(1, tt.label_width());
@@ -353,19 +368,20 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     I.scratch.resize(I.T);
     I.workers.reserve(I.T);
     for (u32 t = 0; t < I.T; ++t)
-        I.workers.emplace_back([&I, t] { I.worker(t); });
+    {
+        try
+        {
+            I.workers.emplace_back([&I, t] { I.worker(t); });
+        }
+        catch (const std::exception& e)
+        {
+            I.stop_workers();
+            throw ThreadStartError(t, I.T, e);
+        }
+    }
 }
 
-CpuEnvPool::~CpuEnvPool()
-{
-    {
-        std::lock_guard lock(m_impl->mu);
-        m_impl->quit = true;
-    }
-    m_impl->work_cv.notify_all();
-    for (std::thread& t : m_impl->workers)
-        t.join();
-}
+CpuEnvPool::~CpuEnvPool() { m_impl->stop_workers(); }
 
 const TaskSuitePtr& CpuEnvPool::suite() const noexcept { return m_impl->env.suite(); }
 const EnvConfig& CpuEnvPool::config() const noexcept { return m_impl->env.config(); }

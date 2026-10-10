@@ -11,7 +11,6 @@ task = mymyr.Task.from_pddl(DATA / "domain.pddl", DATA / "p01.pddl")
 
 result = search.brfs(
     task,
-    stop_at_goal=True,
     layer_order="goal_count",
     beam_width=8,
     beam_novelty="survivors_only",

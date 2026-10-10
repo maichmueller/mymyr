@@ -9,6 +9,7 @@
 #include "table_launch.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/cuda/device_table.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/state_set.hpp"
@@ -141,7 +142,6 @@ u32 max_arity(const Task& task)
     return k;
 }
 
-u32 resolve_threads(u32 threads) { return threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : threads; }
 
 // ------------------------------------------------------------------------------------------------ host output
 /// One device-to-host copy of a download.
@@ -175,7 +175,7 @@ void parallel(u64 n, u32 threads, const std::function<void(u64)>& job)
     std::atomic<bool> failed{false};
     std::mutex error_mutex;
     std::exception_ptr error;
-    auto worker = [&]
+    auto worker = [&](u32 = 0)
     {
         try
         {
@@ -192,8 +192,7 @@ void parallel(u64 n, u32 threads, const std::function<void(u64)>& job)
     };
     const u32 T = static_cast<u32>(std::min<u64>(std::max<u32>(threads, 1), std::max<u64>(n, 1)));
     std::vector<std::thread> pool;
-    for (u32 t = 1; t < T; ++t)
-        pool.emplace_back(worker);
+    start_threads(pool, T - 1, worker, [&] { failed.store(true, std::memory_order_relaxed); });
     worker();
     for (auto& th : pool)
         th.join();
@@ -507,7 +506,7 @@ public:
     {
         auto done = std::make_shared<Event>();
         done->record(s);
-        m_downloader = std::thread(
+        m_downloader = std::jthread(
             [this, prev = std::move(m_downloader), arrays, storage = std::move(storage), parts = std::move(parts), label_width,
              done]() mutable
             {
@@ -641,7 +640,7 @@ private:
     std::vector<u32> m_phases;                    // presize's phases (Array bits; the last: the others)
     std::vector<std::shared_future<void>> m_sized;  // per phase: sized
     std::thread m_toucher;                        // presize
-    std::thread m_downloader;                     // the last early() (each joins the one before it)
+    std::jthread m_downloader;                    // the last early() (each joins the one before it)
     std::exception_ptr m_error;                   // the downloads' first error
 };
 
@@ -698,6 +697,9 @@ public:
                                         "(datasets::generate_state_space)");
         if (m_o.chunk_states == 0)
             throw std::invalid_argument("mymyr: device state space: chunk_states must be at least 1");
+        if (m_o.expected_states > state_set::k_max_states)
+            throw std::invalid_argument("mymyr: device state space: expected_states above the state id limit (" +
+                                        std::to_string(state_set::k_max_states) + ")");
         m_s = m_o.stream ? m_o.stream : m_ctx->stream();
         m_threads = resolve_threads(m_o.space.threads);
         for (u32 i = 0; i < m_tasks.size(); ++i)
@@ -1439,7 +1441,7 @@ private:
         std::atomic<bool> failed{false};
         std::mutex error_mutex;
         std::exception_ptr error;
-        auto worker = [&]
+        auto worker = [&](u32 = 0)
         {
             try
             {
@@ -1456,7 +1458,8 @@ private:
                             continue;
                         const Task& task = *m_tasks[w.first + m];
                         const heuristics::ActionCosts& ac = m_costs[w.first + m];
-                        Successors& succ = task.workspace().successors();
+                        const WorkspaceLease lease = task.workspace();
+                        Successors& succ = lease->successors();
                         const u64* row = rows.data() + g * W;
                         const State state = numeric::decode(task, row, static_cast<u32>(W));
                         const StateView rec = state.view();
@@ -1490,8 +1493,7 @@ private:
         };
         std::vector<std::thread> pool;
         const u32 T = static_cast<u32>(std::min<u64>(m_threads, std::max<u64>(1, N / 256)));
-        for (u32 t = 1; t < T; ++t)
-            pool.emplace_back(worker);
+        start_threads(pool, T - 1, worker, [&] { failed.store(true, std::memory_order_relaxed); });
         worker();
         for (auto& th : pool)
             th.join();

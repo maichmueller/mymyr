@@ -114,10 +114,7 @@ struct AStarEager
             if (c.obs)
                 c.obs->on_expand(id, cur.view());
             if (!expand(c, store, nodes, id, cur, next, tr, false))
-            {
-                r.status = SearchStatus::OutOfStates;
-                break;
-            }
+                break;  // r.status is set
             if (c.batched)
                 c.evaluate_fresh(tr, false, true);
             for (const Transitions::T& t : tr.t)
@@ -300,10 +297,7 @@ struct AStarLazy
             }
             const bool pref = use_preferred;
             if (!expand(c, store, nodes, id, cur, next, tr, pref))
-            {
-                r.status = SearchStatus::OutOfStates;
-                break;
-            }
+                break;  // r.status is set
             for (const Transitions::T& t : tr.t)
             {
                 const u32 cid = t.child;

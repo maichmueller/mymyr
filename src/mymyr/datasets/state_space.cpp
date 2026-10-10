@@ -9,6 +9,7 @@
 #include "mymyr/datasets/state_space.hpp"
 
 #include "mymyr/core/team.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/datasets/certificates.hpp"
 #include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
@@ -65,24 +66,22 @@ bool rows_equal(StateView a, StateView b)
 
 i64 StateSpace::find(StateView s) const
 {
-    std::call_once(m_index_once,
-                   [&]
-                   {
-                       auto idx = std::make_shared<Index>();
-                       u64 cap = 16;
-                       while (cap < static_cast<u64>(m_n) * 2)
-                           cap *= 2;
-                       idx->slots.assign(cap, 0);
-                       idx->mask = cap - 1;
-                       for (u32 id = 0; id < m_n; ++id)
-                       {
-                           u64 j = row_hash(state(id)) & idx->mask;
-                           while (idx->slots[j])
-                               j = (j + 1) & idx->mask;
-                           idx->slots[j] = id + 1;
-                       }
-                       m_index = std::move(idx);
-                   });
+    m_index_once.call([&] {
+        auto idx = std::make_shared<Index>();
+        u64 cap = 16;
+        while (cap < static_cast<u64>(m_n) * 2)
+            cap *= 2;
+        idx->slots.assign(cap, 0);
+        idx->mask = cap - 1;
+        for (u32 id = 0; id < m_n; ++id)
+        {
+            u64 j = row_hash(state(id)) & idx->mask;
+            while (idx->slots[j])
+                j = (j + 1) & idx->mask;
+            idx->slots[j] = id + 1;
+        }
+        m_index = std::move(idx);
+    });
     if (s.nnum != m_numeric_words)
         return -1;
     for (u64 j = row_hash(s) & m_index->mask;; j = (j + 1) & m_index->mask)
@@ -509,6 +508,7 @@ void drop_unit_costs(std::vector<f64>& costs)
 // ------------------------------------------------------------------------------------------------- layered generator
 struct alignas(64) Worker
 {
+    WorkspaceLease lease;
     Successors* succ = nullptr;
     LineVector<u64> next;
     std::vector<u32> src_id, src_cnt;  // per expanded source: id and number of transitions
@@ -535,7 +535,12 @@ public:
         m_timed = std::isfinite(o.max_seconds);
         m_limit = std::max<u64>(o.max_states, 2);  // mimir: fails iff the space has max(M, 2) states or more
         m_store.emplace(T, m_task.numeric_words());
-        m_team.run([&](u32 t) { m_ws[t].succ = &m_task.workspace().successors(); });
+        m_team.run(
+            [&](u32 t)
+            {
+                m_ws[t].lease = m_task.workspace();
+                m_ws[t].succ = &m_ws[t].lease->successors();
+            });
         m_partial.assign(m_T + 1, 0);
         m_pend_lo.assign(m_T, 0);
         m_pend_hi.assign(m_T, 0);
@@ -939,7 +944,8 @@ public:
         const u32 NN = m_task.numeric_words();
         const u64 limit = std::max<u64>(m_o.max_states, 2);  // mimir: fails iff the space has max(M, 2) states or more
         FlatStateStore store(std::max<u32>(1, m_task.words()), 10, NN);
-        Successors& succ = m_task.workspace().successors();
+        const WorkspaceLease lease = m_task.workspace();
+        Successors& succ = lease->successors();
         const State& s0 = m_task.initial_state();
         store.insert(s0.data(), s0.size_words(), s0.numeric().data());
         std::vector<u32> depth{0};
@@ -1106,7 +1112,8 @@ public:
         reps.push_back(s0);
         depth.push_back(0);
         seen.emplace(s0, 0);
-        Successors& succ = m_task.workspace().successors();
+        const WorkspaceLease lease = m_task.workspace();
+        Successors& succ = lease->successors();
         std::vector<u64> next;
         // the successors of the current representative, collected first: certificates evaluate axioms on this
         // thread's workspace, which must not happen inside the generator's callback
@@ -1243,8 +1250,6 @@ private:
     const StateSpaceOptions& m_o;
     heuristics::ActionCosts m_costs;
 };
-
-u32 resolve_threads(u32 threads) { return threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : threads; }
 }  // namespace
 
 StateSpaceResult generate_state_space(TaskPtr task, const StateSpaceOptions& options)
@@ -1278,7 +1283,7 @@ void for_each_state_space(u64 count, const std::function<TaskPtr(u64)>& make_tas
     std::atomic<bool> failed{false};
     std::mutex error_mutex;
     std::exception_ptr error;
-    auto worker = [&]
+    auto worker = [&](u32 = 0)
     {
         for (;;)
         {
@@ -1300,9 +1305,7 @@ void for_each_state_space(u64 count, const std::function<TaskPtr(u64)>& make_tas
         }
     };
     std::vector<std::thread> pool;
-    pool.reserve(T - 1);
-    for (u64 t = 1; t < T; ++t)
-        pool.emplace_back(worker);
+    start_threads(pool, static_cast<u32>(T - 1), worker, [&] { failed.store(true, std::memory_order_relaxed); });
     worker();
     for (auto& th : pool)
         th.join();

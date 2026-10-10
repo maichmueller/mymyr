@@ -1,5 +1,6 @@
 """mymyr.cuda: device task upload, smoke kernels vs the CPU engine, DLPack for device memory with stream semantics
-(torch CUDA and JAX GPU), and host operations reading pinned / managed CUDA memory in place. See also test_cuda_brfs.py.
+(torch CUDA and JAX GPU), host operations reading pinned / managed CUDA memory in place, and sizes that cannot exist
+raising before any allocation. See also test_cuda_brfs.py.
 
 Runs only when a GPU is made visible explicitly (conftest.py hides GPUs by default), e.g.
 
@@ -355,3 +356,36 @@ def test_jax_pinned_host_arrays_are_read_by_expand(ctx, blocks):
     assert _core._import_info(x)[0] == x.unsafe_buffer_pointer()
     got = rl.expand(blocks, x, framework="numpy")
     assert np.array_equal(got.succ, rl.expand(blocks, r["states"]).succ)
+
+
+# ------------------------------------------------------------------------------------------------ sizes
+# Sizes that cannot exist are refused before anything is allocated (ValueError naming the argument).
+
+STATE_ID_LIMIT = 2**31 - 2
+
+
+def test_state_arena_refuses_capacities_and_widths_beyond_64_bits(ctx):
+    with pytest.raises(ValueError, match=r"^mymyr: DeviceArena \(capacity x record bytes\): the size exceeds 2\^64 - 1 bytes$"):
+        mc.StateArena(ctx, words=1, capacity=2**61)
+    with pytest.raises(ValueError, match=r"^mymyr: words must be an int in \[1, 536870911\], got 536870913$"):
+        mc.StateArena(ctx, words=2**29 + 1)
+    arena = mc.StateArena(ctx, words=4, capacity=4)
+    assert arena.capacity == 4
+
+
+def test_device_expand_refuses_capacities_and_widths_beyond_its_limits(ctx, blocks):
+    rows = mc.to_memory(np.asarray(blocks.encode([blocks.initial_state])), "device", ctx)
+    with pytest.raises(ValueError, match=r"^mymyr: capacity must be None or an int in \[0, 2147483647\], got 4611686018427387904$"):
+        rl.expand(blocks, rows, capacity=2**62)
+    with pytest.raises(ValueError, match=r"^mymyr: words must be None or an int in \[0, 64\], got 65$"):
+        rl.expand(blocks, rows, words=65)
+    e = rl.expand(blocks, rows, capacity=64)
+    assert e.capacity == 64 and not e.overflow
+
+
+def test_presizing_hints_above_the_state_id_limit_raise(ctx, blocks):
+    with pytest.raises(ValueError, match=rf"^mymyr: DeviceBrfs: expected_states above the state id limit \({STATE_ID_LIMIT}\)$"):
+        mc.brfs(blocks, ctx=ctx, expected_states=STATE_ID_LIMIT + 1)
+    with pytest.raises(ValueError, match=rf"^mymyr: device state space: expected_states above the state id limit \({STATE_ID_LIMIT}\)$"):
+        mc.generate_state_space(blocks, ctx=ctx, expected_states=2**63)
+    assert mc.brfs(blocks, ctx=ctx, expected_states=1000).solved

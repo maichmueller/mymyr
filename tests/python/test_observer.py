@@ -60,11 +60,11 @@ def totals(r):
 RUNS = {
     "iw": lambda t, o: search.iw(t, max_arity=2, observer=o),
     "siw": lambda t, o: search.siw(t, max_arity=2, observer=o),
-    "brfs": lambda t, o: search.brfs(t, stop_at_goal=True, observer=o),
-    "brfs_exhaustive": lambda t, o: search.brfs(t, observer=o),
-    "brfs_chunked": lambda t, o: search.brfs(t, store="chunked", stop_at_goal=True, observer=o),
-    "brfs_compact": lambda t, o: search.brfs(t, store="compact", observer=o),
-    "brfs_concurrent": lambda t, o: search.brfs(t, store="concurrent", stop_at_goal=True, observer=o),
+    "brfs": lambda t, o: search.brfs(t, observer=o),
+    "brfs_exhaustive": lambda t, o: search.brfs(t, stop_at_goal=False, observer=o),
+    "brfs_chunked": lambda t, o: search.brfs(t, store="chunked", observer=o),
+    "brfs_compact": lambda t, o: search.brfs(t, store="compact", stop_at_goal=False, observer=o),
+    "brfs_concurrent": lambda t, o: search.brfs(t, store="concurrent", observer=o),
     "astar": lambda t, o: search.astar(t, heuristic="max", observer=o),
     "astar_lazy": lambda t, o: search.astar(t, heuristic="max", lazy=True, observer=o),
     "gbfs": lambda t, o: search.gbfs(t, heuristic="ff", observer=o),
@@ -92,8 +92,8 @@ def test_event_counts_equal_the_statistics(small, name):
 @pytest.mark.parametrize("store", ["flat", "chunked", "compact", "concurrent"])
 def test_brfs_layers_and_new_states(small, store):
     o = Counter()
-    r = search.brfs(small, store=store, observer=o)
-    assert r.status == Status.EXHAUSTED
+    r = search.brfs(small, store=store, stop_at_goal=False, observer=o)
+    assert r.status == Status.SOLVED and r.exhausted
     assert len(o.passes) == r.layers and [p[0] for p in o.passes] == list(range(r.layers))
     assert sum(p[1] for p in o.passes) == r.expanded and sum(p[2] for p in o.passes) == r.generated
     assert sum(p[3] for p in o.passes) == r.states - 1 == o.new
@@ -129,29 +129,29 @@ class Root(Counter):
 @pytest.mark.parametrize("threads", [2, 4])
 def test_brfs_threads_send_hot_events_to_worker_observers(task, threads):
     o = Root()
-    r = search.brfs(task, threads=threads, observer=o)
+    r = search.brfs(task, threads=threads, stop_at_goal=False, observer=o)
     assert r.threads == threads and len(o.workers) == threads
     assert sum(w.expanded for w in o.workers) == r.expanded
     assert sum(w.generated for w in o.workers) == r.generated
     assert sum(w.new for w in o.workers) == r.states - 1
     assert all(w.children == {None} for w in o.workers if w.generated)  # ids are assigned when a layer ends
     assert len(set().union(*(w.threads for w in o.workers))) > 1  # called from the worker threads
-    assert o.expanded == 0 and o.started == 1 and o.ended[0] == Status.EXHAUSTED  # lifecycle on the root
+    assert o.expanded == 0 and o.started == 1 and o.ended[0] == Status.SOLVED  # lifecycle on the root
     assert len(o.passes) == r.layers and sum(p[1] for p in o.passes) == r.expanded
 
 
 def test_brfs_threads_without_make_worker_run_on_one_thread(task):
     o = Counter()
-    r = search.brfs(task, threads=4, stop_at_goal=True, observer=o)
+    r = search.brfs(task, threads=4, observer=o)
     assert r.threads == 1 and o.threads == {threading.get_ident()}
     assert (o.expanded, o.generated) == (r.expanded, r.generated)
     assert r.status == Status.SOLVED and o.solutions[0][0] == r.plan
 
 
 def test_brfs_threads_return_a_shortest_plan(task):
-    one = search.brfs(task, stop_at_goal=True)
+    one = search.brfs(task)
     for threads in (2, 4):
-        r = search.brfs(task, threads=threads, stop_at_goal=True)
+        r = search.brfs(task, threads=threads)
         assert r.status == Status.SOLVED and len(r.plan) == len(one.plan)
         s = task.initial_state
         for a in r.plan:
@@ -244,8 +244,9 @@ def test_brfs_budgets_and_cancel(task):
         r = search.brfs(task, cancel=token, **kw)
         assert r.status == Status.CANCELLED and not r.exhausted
     assert search.brfs(task, max_states=1000).status == Status.OUT_OF_STATES
-    assert search.brfs(task, stop_at_goal=True).status == Status.SOLVED
-    assert search.brfs(text_task("depot__p02")).status == Status.EXHAUSTED
+    assert search.brfs(task).status == Status.SOLVED
+    r = search.brfs(text_task("depot__p02"), stop_at_goal=False)
+    assert r.status == Status.SOLVED and r.exhausted
 
 
 def test_cancel_from_another_thread(task):

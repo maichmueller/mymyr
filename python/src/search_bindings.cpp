@@ -98,14 +98,6 @@ std::string str_arg(nb::handle h, const char* what)
     return lower(nb::cast<std::string>(h));
 }
 
-template<class T>
-std::optional<T> opt(nb::handle h)
-{
-    if (h.is_none())
-        return std::nullopt;
-    return nb::cast<T>(h);
-}
-
 State state_for(const Owner& o, nb::handle h, const char* what)
 {
     if (!is_state(h))
@@ -507,13 +499,13 @@ void fill_control(ControlScope& cs, const Owner& o, nb::handle max_states, nb::h
                   nb::handle observer, nb::handle progress_interval)
 {
     search::SearchControl& c = cs.control;
-    if (auto v = opt<u64>(max_states))
+    if (auto v = opt_int_arg<u64>(max_states, "max_states", 0))
         c.budget.max_states = *v;
-    if (auto v = opt<u64>(max_expanded))
+    if (auto v = opt_int_arg<u64>(max_expanded, "max_expanded", 0))
         c.budget.max_expanded = *v;
-    if (auto v = opt<u32>(max_depth))
+    if (auto v = opt_int_arg<u32>(max_depth, "max_depth", 0))
         c.budget.max_depth = *v;
-    if (auto v = opt<double>(max_seconds))
+    if (auto v = opt_float_arg(max_seconds, "max_seconds", 0))
         c.budget.max_seconds = *v;
     if (!cancel.is_none())
     {
@@ -534,7 +526,7 @@ void fill_control(ControlScope& cs, const Owner& o, nb::handle max_states, nb::h
         else
             cs.observer.reset();  // nothing to call: the search runs as without an observer
     }
-    if (auto v = opt<u64>(progress_interval))
+    if (auto v = opt_int_arg<u64>(progress_interval, "progress_interval", 0))
         c.progress_interval = *v == 0 ? 1 : *v;
 }
 
@@ -698,9 +690,9 @@ search::ActionOrdering parse_ordering(nb::handle h)
                           "'direct_goal_achiever_first', 'goal_regression_relevance', 'mixed_regression_random'");
 }
 
-search::LayerOrdering parse_layers(nb::handle kind, u64 seed, nb::handle max_next_layer_states,
+search::LayerOrdering parse_layers(nb::handle kind, nb::handle seed, nb::handle max_next_layer_states,
                                    bool prefer_more_satisfied_goals, nb::handle beam_width, nb::handle beam_novelty,
-                                   bool randomize_ties, u32 beam_chunk)
+                                   bool randomize_ties, nb::handle beam_chunk)
 {
     search::LayerOrdering l;
     const std::string k = str_arg(kind, "layer_order");
@@ -717,11 +709,11 @@ search::LayerOrdering parse_layers(nb::handle kind, u64 seed, nb::handle max_nex
     else
         throw nb::value_error(
             "mymyr: layer_order must be 'queue', 'in_order', 'reverse', 'randomized' or 'goal_count'");
-    l.seed = seed;
+    l.seed = int_arg<u64>(seed, "seed");
     l.prefer_more_satisfied_goals = prefer_more_satisfied_goals;
-    if (auto v = opt<u32>(max_next_layer_states))
+    if (auto v = opt_int_arg<u32>(max_next_layer_states, "max_next_layer_states", 0))
         l.max_next_layer_states = *v;  // checked by the search (0, or a limit with 'queue', is an error)
-    if (auto v = opt<u32>(beam_width))
+    if (auto v = opt_int_arg<u32>(beam_width, "beam_width", 0))
         l.beam_width = *v;  // checked by the search, as above
     const std::string bn = str_arg(beam_novelty, "beam_novelty");
     if (bn == "all_tested")
@@ -733,7 +725,7 @@ search::LayerOrdering parse_layers(nb::handle kind, u64 seed, nb::handle max_nex
     else
         throw nb::value_error("mymyr: beam_novelty must be 'all_tested', 'survivors_only' or 'relaxed_survivors_only'");
     l.randomize_ties = randomize_ties;
-    l.beam_chunk = beam_chunk;  // checked by the search (0 is an error)
+    l.beam_chunk = int_arg<u32>(beam_chunk, "beam_chunk");  // checked by the search (0 is an error)
     return l;
 }
 
@@ -749,7 +741,7 @@ search::LandmarkNovelty parse_landmarks(const Owner& o, nb::handle graph, bool d
         for (nb::handle a : unshared_atoms)
             if (const auto c = canonical_atom(o, a, false))
                 lm.unshared_atoms.push_back(*c);
-    if (auto v = opt<u64>(max_dense_bytes))
+    if (auto v = opt_int_arg<u64>(max_dense_bytes, "max_dense_bytes", 0))
         lm.tables.max_dense_bytes = *v;
     if (graph.is_none())
         return lm;
@@ -784,7 +776,7 @@ std::vector<search::RolloutOrdering> parse_orderings(nb::handle seq)
             nb::tuple t = nb::borrow<nb::tuple>(x);
             if (nb::len(t) != 2)
                 throw nb::value_error("mymyr: a rollout ordering is an ordering or a pair (ordering, seed)");
-            out.push_back({parse_ordering(t[0]), nb::cast<u64>(t[1])});
+            out.push_back({parse_ordering(t[0]), int_arg<u64>(t[1], "a rollout ordering's seed")});
         }
         else
             out.push_back({parse_ordering(x), 0});
@@ -820,14 +812,25 @@ std::vector<search::RolloutResult> collect_rollouts(nb::handle results, Owner& o
 
 // ------------------------------------------------------------------------------------------------ heuristic objects
 
-/// A heuristic usable from Python. Evaluations are serialized by a mutex (a Heuristic holds scratch); for parallel
-/// evaluation give each thread its own object (they can share the grounding: Heuristic(task, share=other)).
+/// A heuristic usable from Python. Calls on the object are serialized by a mutex (a Heuristic holds scratch); for
+/// parallel evaluation give each thread its own object (they can share the grounding: Heuristic(task, share=other)).
+/// A search given the object evaluates with an evaluator of its own (make_evaluator), so it never holds the mutex: the
+/// object stays callable while the search runs, from the search's callbacks and from other threads.
 struct PyHeuristic
 {
-    std::unique_ptr<heuristics::Heuristic> h;
+    std::unique_ptr<heuristics::Heuristic> h;  // evaluates the calls on the object
     Owner o;
-    heuristics::Options options;
+    heuristics::Options options;  // h's options, with h's grounding (options.relaxed)
     std::mutex m;
+    datasets::StateSpacePtr space{};  // Heuristic.perfect: the state space
+
+    /// A new evaluator of h's values with scratch of its own, sharing h's grounding or state space.
+    [[nodiscard]] std::unique_ptr<heuristics::Heuristic> make_evaluator() const
+    {
+        if (space)
+            return heuristics::perfect(space, options.costs);
+        return heuristics::make_heuristic(*o.core->task, options);
+    }
 };
 
 /// A heuristic written in Python (heuristics::Kind::Custom): a callable h(state) -> float, or an object with
@@ -954,15 +957,27 @@ private:
             ++m_stats.dead_ends;
     }
 
-    /// The float of a Python number (anything with __float__); raises (as a python_error) for NaN and non-numbers.
+    /// The float of a Python number (anything with __float__); raises (as a python_error) for non-numbers and for
+    /// values that are no heuristic values: NaN and negative numbers (inf marks a dead end).
     static heuristics::Value to_value(PyObject* x)
     {
         const double v = PyFloat_AsDouble(x);
         if (v == -1.0 && PyErr_Occurred())
-            throw nb::python_error();
-        if (std::isnan(v))
         {
-            PyErr_SetString(PyExc_ValueError, "mymyr: a Python heuristic returned NaN");
+            if (!PyErr_ExceptionMatches(PyExc_TypeError))
+                throw nb::python_error();
+            PyErr_Clear();
+            const std::string text = "mymyr: a Python heuristic returned a " +
+                                     nb::cast<std::string>(nb::str(nb::handle(x).type().attr("__name__"))) +
+                                     "; heuristic values are numbers >= 0 (inf: a dead end)";
+            PyErr_SetString(PyExc_TypeError, text.c_str());
+            throw nb::python_error();
+        }
+        if (std::isnan(v) || v < 0)
+        {
+            const std::string text = "mymyr: a Python heuristic returned " + nb::cast<std::string>(nb::repr(nb::float_(v))) +
+                                     "; heuristic values are >= 0 (inf: a dead end)";
+            PyErr_SetString(PyExc_ValueError, text.c_str());
             throw nb::python_error();
         }
         return v;
@@ -1021,8 +1036,7 @@ using TaskArg = Arg<std::variant<PyTask, PyHandle>>;
 using StateArg = Arg<PyState>;
 using StrArg = Arg<std::string>;
 using WidthZeroArg = Arg<ann::WidthZero>;
-using IntArg = Arg<u64>;
-using FloatArg = Arg<double>;
+using SeedsArg = Arg<std::vector<u64>>;
 using CancelArg = Arg<PyCancelToken>;
 using AtomsArg = nb::typed<nb::sequence, AtomLike>;
 /// One goal: a GroundCondition, or the ground literals and atoms of one (Task.ground_condition).
@@ -1091,7 +1105,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
                  progress_interval);
     search::BestFirstOptions opts;
     opts.control = cs.control;
-    PyHeuristic* shared = nullptr;
+    std::unique_ptr<heuristics::Heuristic> own;  // the search's evaluator of a Heuristic object
     std::unique_ptr<PyCallbackHeuristic> callback;
     std::unique_ptr<heuristics::Heuristic> perfect;
     if (nb::isinstance<nb::str>(heuristic) && nb::cast<std::string>(heuristic) == "perfect")
@@ -1101,10 +1115,14 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     }
     else if (nb::isinstance<PyHeuristic>(heuristic))
     {
-        shared = nb::inst_ptr<PyHeuristic>(heuristic);
-        if (shared->o.core->task->uid() != o.core->task->uid())
+        const PyHeuristic& shared = *nb::inst_ptr<PyHeuristic>(heuristic);
+        if (shared.o.core->task->uid() != o.core->task->uid())
             throw nb::value_error("mymyr: the heuristic belongs to another task");
-        opts.evaluator = shared->h.get();
+        {
+            nb::gil_scoped_release release;
+            own = shared.make_evaluator();
+        }
+        opts.evaluator = own.get();
     }
     else if (nb::isinstance<nb::str>(heuristic))
         opts.heuristic.kind = parse_kind(heuristic);
@@ -1146,12 +1164,7 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     opts.witness_pruning = witness_pruning;
     opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
     const Task& t = *o.core->task;
-    auto r = run_detached(cs, [&] {
-        std::unique_lock<std::mutex> lock;
-        if (shared)
-            lock = std::unique_lock(shared->m);
-        return search_fn(t, opts);
-    });
+    auto r = run_detached(cs, [&] { return search_fn(t, opts); });
     if constexpr (std::is_same_v<decltype(r), search::AStarIwResult>)
     {
         const auto novelty = r.novelty;
@@ -1216,9 +1229,9 @@ search::IwOptions iw_options(ControlScope& cs, const Owner& o, u32 max_arity, nb
 search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool keep_depth_one_novel, nb::handle landmarks,
                                         bool disjunctive, bool all_private, nb::handle unshared_atoms,
                                         nb::handle max_dense_bytes, bool preserve_landmark_atoms, nb::handle layer_order,
-                                        u64 seed, nb::handle max_next_layer_states, bool prefer_more_satisfied_goals,
+                                        nb::handle seed, nb::handle max_next_layer_states, bool prefer_more_satisfied_goals,
                                         nb::handle beam_width, nb::handle beam_novelty, bool randomize_ties,
-                                        u32 beam_chunk, u32 threads, bool witness_pruning, bool canonical_order, nb::handle symmetry_pruning,
+                                        nb::handle beam_chunk, nb::handle threads, bool witness_pruning, bool canonical_order, nb::handle symmetry_pruning,
                                         nb::handle start)
 {
     search::AbstractedIwOptions opts;
@@ -1228,7 +1241,7 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
     opts.preserve_landmark_atoms = preserve_landmark_atoms;
     opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
-    opts.threads = threads;
+    opts.threads = threads_arg(threads);
     opts.witness_pruning = witness_pruning;
     opts.canonical_order = canonical_order;
     opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
@@ -1267,7 +1280,8 @@ search::AbstractedIwOptions aiw_options(ControlScope& cs, const Owner& o, bool k
 
 const char* k_control_doc =
     "Common keyword arguments (search/control.hpp): max_states, max_expanded, max_depth, max_seconds (budgets; unset = "
-    "unlimited), cancel (a CancelToken, requestable from any thread), goal (None: the task's goal; a callable "
+    "unlimited; max_states counts the stored states, the start state included, and the search stops with "
+    "OUT_OF_STATES at the new state that fills them, inside its parent's expansion), cancel (a CancelToken, requestable from any thread), goal (None: the task's goal; a callable "
     "state -> bool; a GroundCondition; or a sequence of goals, each a GroundCondition or a sequence of ground literals "
     "and atoms as Task.ground_condition takes them, any of which counts: static, fluent and derived literals of either "
     "polarity and numeric constraints), blocked_states (States never entered), observer (an object with any of on_start(state), "
@@ -1429,7 +1443,11 @@ void bind_search(nb::module_& parent)
     nb::class_<PySiwResult>(m, "SiwResult")
         .def_prop_ro("status", [](const PySiwResult& x) { return x.r.status; })
         .def_prop_ro("solved", [](const PySiwResult& x) { return x.r.status == SearchStatus::Solved; })
-        .def_prop_ro("plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.plan); })
+        .def_prop_ro("plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.plan); },
+                     "The whole plan when solved, else empty.")
+        .def_prop_ro("partial_plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.partial_plan); },
+                     "Unless solved: the subplans of the subproblems solved before the one that failed, from the "
+                     "start state to where that one started (empty when solved).")
         .def_prop_ro("cost", [](const PySiwResult& x) { return x.r.cost; })
         .def_prop_ro("cost_exact", [](const PySiwResult& x) { return x.r.cost_exact; })
         .def_prop_ro("goal_state", [](const PySiwResult& x) { return state_or_none(x.o, x.r.goal_state); })
@@ -1439,8 +1457,11 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("message", [](const PySiwResult& x) { return x.r.message; })
         .def("__repr__", [](const PySiwResult& x) {
             return std::string("SiwResult(status=") + search::to_string(x.r.status) +
-                   ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
-                   ", subproblems=" + std::to_string(x.r.subproblems.size()) + ", " + stats_repr(x.r.total) + ")";
+                   ", plan_length=" + std::to_string(x.r.plan.size()) +
+                   (x.r.partial_plan.empty() ? std::string{}
+                                             : ", partial_plan_length=" + std::to_string(x.r.partial_plan.size())) +
+                   ", cost=" + cost_repr(x.r.cost) + ", subproblems=" + std::to_string(x.r.subproblems.size()) + ", " +
+                   stats_repr(x.r.total) + ")";
         });
 
     nb::class_<search::AStarIwNoveltyStatistics>(m, "AStarIwNoveltyStatistics")
@@ -1719,7 +1740,10 @@ void bind_search(nb::module_& parent)
                             "actions cost less than 1 overestimate; "
                             "evaluation: 'auto', 'grounded', 'lifted' (set_additive and h2 are grounded only). "
                             "share=another Heuristic of the task reuses its grounding. Calls on one object are "
-                            "serialized; use one object per thread for parallel evaluation.")
+                            "serialized; use one object per thread for parallel evaluation. A search given the object "
+                            "evaluates with an evaluator of its own that shares the grounding, so the object stays "
+                            "callable while the search runs (from its observer, from other threads); stats counts the "
+                            "calls on the object, the search's evaluations are in its result.")
         .def(
             "__init__",
             [](PyHeuristic* self, TaskArg task, StrArg kind, StrArg costs, StrArg evaluation,
@@ -1731,18 +1755,19 @@ void bind_search(nb::module_& parent)
                 opts.evaluation = parse_evaluation(evaluation);
                 if (!share.is_none())
                 {
-                    PyHeuristic& other = nb::cast<PyHeuristic&>(share);
+                    const PyHeuristic& other = nb::cast<const PyHeuristic&>(share);
                     if (other.o.core->task->uid() != o.core->task->uid())
                         throw nb::value_error("mymyr: share= must be a heuristic of the same task");
-                    nb::gil_scoped_release release;  // never block on a heuristic's mutex while attached
-                    std::lock_guard lock(other.m);
-                    opts.relaxed = other.h->relaxed();
+                    opts.relaxed = other.options.relaxed;
                 }
                 std::unique_ptr<heuristics::Heuristic> h;
                 {
                     nb::gil_scoped_release release;  // grounding can take a while
                     h = heuristics::make_heuristic(*o.core->task, opts);
                 }
+                opts.relaxed = h->relaxed();
+                if (!opts.relaxed && opts.evaluation == heuristics::Evaluation::Auto)
+                    opts.evaluation = heuristics::Evaluation::Lifted;  // the grounding exceeded the budget: never retry it
                 new (self) PyHeuristic{std::move(h), std::move(o), opts, {}};
             },
             "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "auto", "evaluation"_a = "auto",
@@ -1762,7 +1787,7 @@ void bind_search(nb::module_& parent)
                 {
                     throw nb::value_error(e.what());
                 }
-                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}});
+                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}, space.space});
             },
             "space"_a, nb::kw_only(), "costs"_a = "auto",
             "The perfect heuristic h* of the task of a state space (mymyr.datasets.state_space(task, "
@@ -1840,22 +1865,23 @@ void bind_search(nb::module_& parent)
     // searches --------------------------------------------------------------------------------------------------------
     m.def(
         "iw",
-        [](TaskArg task, u32 max_arity, WidthZeroArg width_zero, bool optimize_iw1, bool witness_pruning,
+        [](TaskArg task, IntArg max_arity, WidthZeroArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded,
            IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
+           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, u32 threads) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
-            search::IwOptions opts = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning,
+            search::IwOptions opts = iw_options(cs, o, int_arg<u32>(max_arity, "max_arity"), width_zero, optimize_iw1,
+                                                witness_pruning,
                                                 canonical_order, symmetry_pruning, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
-            opts.threads = threads;
+            opts.threads = threads_arg(threads);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::iw(t, opts); });
             return PyIwResult{std::move(r), o};
@@ -1870,25 +1896,26 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "iw_pass",
-        [](TaskArg task, u32 arity, WidthZeroArg width_zero, bool witness_pruning, bool canonical_order,
+        [](TaskArg task, IntArg arity, WidthZeroArg width_zero, bool witness_pruning, bool canonical_order,
            SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
+           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, u32 threads) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads) {
             const Owner o = owner_of(task);
+            const u32 k = int_arg<u32>(arity, "arity");
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::IwOptions opts =
-                iw_options(cs, o, arity, width_zero, false, witness_pruning, canonical_order, symmetry_pruning, start,
+                iw_options(cs, o, k, width_zero, false, witness_pruning, canonical_order, symmetry_pruning, start,
                 transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
-            opts.threads = threads;
+            opts.threads = threads_arg(threads);
             const Task& t = *o.core->task;
-            search::IwResult r = run_detached(cs, [&] { return search::iw_pass(t, arity, opts); });
+            search::IwResult r = run_detached(cs, [&] { return search::iw_pass(t, k, opts); });
             return PyIwResult{std::move(r), o};
         },
         "task"_a, "arity"_a, nb::kw_only(), "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false,
@@ -1898,39 +1925,41 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "siw",
-        [](TaskArg task, u32 max_arity, WidthZeroArg width_zero, bool optimize_iw1, bool witness_pruning,
+        [](TaskArg task, IntArg max_arity, WidthZeroArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded,
            IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
-           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, u64 seed,
+           IntArg progress_interval, TransitionArg transition_ordering, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, u32 threads) {
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads) {
             const Owner o = owner_of(task);
             ControlScope cs;
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
-            search::SiwOptions opts = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning,
+            search::SiwOptions opts = iw_options(cs, o, int_arg<u32>(max_arity, "max_arity"), width_zero, optimize_iw1,
+                                                 witness_pruning,
                                                  canonical_order, symmetry_pruning, start, transition_ordering);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
-            opts.threads = threads;
+            opts.threads = threads_arg(threads);
             const Task& t = *o.core->task;
             search::SiwResult r = run_detached(cs, [&] { return search::siw(t, opts); });
             return PySiwResult{std::move(r), o};
         },
         MYMYR_IW_ARGS,
         (std::string("Serialized IW (search/siw.hpp): IW ladders from subgoal to subgoal, each subproblem ending where "
-                     "fewer goal literals are unsatisfied. ") +
+                     "fewer goal literals are unsatisfied. Unsolved, the plan is empty and partial_plan holds the "
+                     "subplans of the subproblems solved before the one that failed. ") +
          k_layer_doc + " " + k_control_doc)
             .c_str());
 
     m.def(
         "brfs",
-        [](TaskArg task, u32 threads, StrArg store, bool witness_pruning, bool canonical_order,
+        [](TaskArg task, IntArg threads, StrArg store, bool witness_pruning, bool canonical_order,
            SymmetryArg symmetry_pruning, bool deterministic_ids, IntArg max_states, bool stop_at_goal,
            bool fingerprint, LayerArg layer_order,
-           u64 seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, GoalArg goal, FloatArg max_seconds, CancelArg cancel,
+           IntArg seed, IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, GoalArg goal, FloatArg max_seconds, CancelArg cancel,
            ObserverArg observer, IntArg progress_interval) {
             const Owner o = owner_of(task);
             ControlScope cs;
@@ -1942,7 +1971,7 @@ void bind_search(nb::module_& parent)
             opts.cancel = cs.control.cancel;
             opts.observer = cs.control.observer;
             opts.progress_interval = cs.control.progress_interval;
-            opts.threads = threads;
+            opts.threads = threads_arg(threads);
             const std::string st = str_arg(store, "store");
             if (st == "auto")
                 opts.store = BrfsOptions::Store::Auto;
@@ -1960,7 +1989,7 @@ void bind_search(nb::module_& parent)
             opts.canonical_order = canonical_order;
             opts.deterministic_ids = deterministic_ids;
             opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
-            if (auto v = opt<u64>(max_states))
+            if (auto v = opt_int_arg<u64>(max_states, "max_states", 0))
                 opts.max_states = *v;
             opts.stop_at_goal = stop_at_goal;
             opts.fingerprint = fingerprint;
@@ -1972,12 +2001,14 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "threads"_a = 1, "store"_a = "auto", "witness_pruning"_a = true,
         "canonical_order"_a = true, "symmetry_pruning"_a = "off", "deterministic_ids"_a = true,
-        "max_states"_a = nb::none(), "stop_at_goal"_a = false,
+        "max_states"_a = nb::none(), "stop_at_goal"_a = true,
         "fingerprint"_a = false, MYMYR_LAYER_ARGS, "goal"_a = nb::none(), "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("Breadth-first search over the reachable states (search/brfs.hpp): single-threaded, or "
-                     "layer-synchronous on `threads` threads with ids independent of the thread count. stop_at_goal "
-                     "returns the first goal state's plan, a shortest one. goal: the goal states, as the common "
+                     "layer-synchronous on `threads` threads with ids independent of the thread count. A search that "
+                     "expands a goal state is SOLVED, with the plan to the first one (a shortest plan); stop_at_goal "
+                     "(the default) stops there, stop_at_goal=False goes on through the whole reachable space "
+                     "(`exhausted` tells whether it got through, `goal_states` counts the goal states). goal: the goal states, as the common "
                      "keyword argument of the other searches (a callable needs threads=1). fingerprint: the result's fingerprint "
                      "hashes (id, canonical state) over the whole store (determinism checks; 0 when off). An ordered "
                      "layer_order needs the 'flat' or 'chunked' store ('auto' picks one of them) and, without a beam, "
@@ -1995,11 +2026,13 @@ void bind_search(nb::module_& parent)
         "astar",
         [](TaskArg task, bool lazy, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
            StrArg queue, StateArg start, bool reopen, bool lazy_requeue, bool preferred_operators,
-           u32 preferred_weight, u32 standard_weight, bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states,
+           IntArg preferred_weight, IntArg standard_weight, bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states,
            IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel, GoalArg goal,
            StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             return bf_call(lazy ? &search::astar_lazy : &search::astar_eager, task, heuristic, costs, evaluation, store,
-                           queue, start, reopen, lazy_requeue, preferred_operators, preferred_weight, standard_weight,
+                           queue, start, reopen, lazy_requeue, preferred_operators,
+                           int_arg<u32>(preferred_weight, "preferred_weight"),
+                           int_arg<u32>(standard_weight, "standard_weight", 1),
                            1000, witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth, max_seconds,
                            cancel, goal,
                            blocked_states, observer, progress_interval);
@@ -2022,7 +2055,7 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "astar_iw",
-        [](TaskArg task, HeuristicArg heuristic, u32 width, StrArg features, LandmarksArg landmarks,
+        [](TaskArg task, HeuristicArg heuristic, IntArg width, StrArg features, LandmarksArg landmarks,
            double weight, bool preserve_goal_atoms, bool preserve_landmark_atoms,
            bool allow_non_novel_root_goal, bool probe_novelty_before_heuristic, StrArg costs,
            StrArg evaluation, StrArg store, StateArg start, bool witness_pruning, bool canonical_order,
@@ -2030,7 +2063,7 @@ void bind_search(nb::module_& parent)
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
             const Owner owner = owner_of(task);
             search::AStarIwOptions options;
-            options.width = width;
+            options.width = int_arg<u32>(width, "width");
             const std::string mode = str_arg(features, "features");
             if (mode == "classical")
                 options.features = search::AStarIwFeatures::Classical;
@@ -2081,12 +2114,14 @@ void bind_search(nb::module_& parent)
     m.def(
         "gbfs",
         [](TaskArg task, bool lazy, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
-           StrArg queue, StateArg start, bool preferred_operators, u32 preferred_weight, u32 standard_weight,
+           StrArg queue, StateArg start, bool preferred_operators, IntArg preferred_weight, IntArg standard_weight,
            bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             return bf_call(lazy ? &search::gbfs_lazy : &search::gbfs_eager, task, heuristic, costs, evaluation, store,
-                           queue, start, true, true, preferred_operators, preferred_weight, standard_weight, 1000,
+                           queue, start, true, true, preferred_operators,
+                           int_arg<u32>(preferred_weight, "preferred_weight"),
+                           int_arg<u32>(standard_weight, "standard_weight", 1), 1000,
                            witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
                            blocked_states, observer, progress_interval);
         },
@@ -2104,13 +2139,14 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "beam",
-        [](TaskArg task, u32 width, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
+        [](TaskArg task, IntArg width, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
            StateArg start, bool witness_pruning, SymmetryArg symmetry_pruning, IntArg max_states, IntArg max_expanded,
            IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
            IntArg progress_interval) {
             return bf_call(&search::beam, task, heuristic, costs, evaluation, store, nb::str("auto"), start, true, true,
-                           true, 0, 1, width, witness_pruning, symmetry_pruning, max_states, max_expanded, max_depth,
+                           true, 0, 1, int_arg<u32>(width, "width", 1), witness_pruning, symmetry_pruning, max_states,
+                           max_expanded, max_depth,
                            max_seconds, cancel,
                            goal, blocked_states, observer, progress_interval);
         },
@@ -2178,10 +2214,10 @@ void bind_search(nb::module_& parent)
     // the IW family variants --------------------------------------------------------------------------------------
     m.def(
         "liw",
-        [](TaskArg task, u32 max_arity, LandmarksArg landmarks, bool disjunctive, bool all_private,
-           FluentAtomsArg unshared_atoms, IntArg max_dense_bytes, LayerArg layer_order, u64 seed,
+        [](TaskArg task, IntArg max_arity, LandmarksArg landmarks, bool disjunctive, bool all_private,
+           FluentAtomsArg unshared_atoms, IntArg max_dense_bytes, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, u32 threads, WidthZeroArg width_zero,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, WidthZeroArg width_zero,
            bool witness_pruning, bool canonical_order,
            SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds,
@@ -2193,10 +2229,11 @@ void bind_search(nb::module_& parent)
                          observer, progress_interval);
             search::LiwOptions opts;
             static_cast<search::IwOptions&>(opts) =
-                iw_options(cs, o, max_arity, width_zero, true, witness_pruning, canonical_order, symmetry_pruning, start);
+                iw_options(cs, o, int_arg<u32>(max_arity, "max_arity"), width_zero, true, witness_pruning, canonical_order,
+                           symmetry_pruning, start);
             opts.layers = parse_layers(layer_order, seed, max_next_layer_states, prefer_more_satisfied_goals, beam_width,
                                        beam_novelty, randomize_ties, beam_chunk);
-            opts.threads = threads;
+            opts.threads = threads_arg(threads);
             opts.landmarks = parse_landmarks(o, landmarks, disjunctive, all_private, unshared_atoms, max_dense_bytes);
             const Task& t = *o.core->task;
             search::IwResult r = run_detached(cs, [&] { return search::liw(t, opts); });
@@ -2214,11 +2251,11 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "abstracted_iw",
-        [](TaskArg task, u32 width, bool base_abstracted, bool preserve_goal_atoms, bool keep_depth_one_novel,
+        [](TaskArg task, IntArg width, bool base_abstracted, bool preserve_goal_atoms, bool keep_depth_one_novel,
            LandmarksArg landmarks, bool disjunctive, bool all_private, FluentAtomsArg unshared_atoms,
-           IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, u64 seed,
+           IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, u32 threads, bool witness_pruning,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, bool witness_pruning,
            bool canonical_order, SymmetryArg symmetry_pruning, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
            GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
@@ -2231,7 +2268,7 @@ void bind_search(nb::module_& parent)
                             max_dense_bytes, preserve_landmark_atoms, layer_order, seed, max_next_layer_states,
                             prefer_more_satisfied_goals, beam_width, beam_novelty, randomize_ties,
                             beam_chunk, threads, witness_pruning, canonical_order, symmetry_pruning, start);
-            opts.width = width;
+            opts.width = int_arg<u32>(width, "width");
             opts.base_abstracted = base_abstracted;
             opts.preserve_goal_atoms = preserve_goal_atoms;
             const Task& t = *o.core->task;
@@ -2255,9 +2292,9 @@ void bind_search(nb::module_& parent)
         "projective_iw",
         [](TaskArg task, bool typed_projection, bool keep_goal_nonunary_atoms, bool keep_depth_one_novel,
            LandmarksArg landmarks, bool disjunctive, bool all_private, FluentAtomsArg unshared_atoms,
-           IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, u64 seed,
+           IntArg max_dense_bytes, bool preserve_landmark_atoms, LayerArg layer_order, IntArg seed,
            IntArg max_next_layer_states, bool prefer_more_satisfied_goals, IntArg beam_width,
-           BeamNoveltyArg beam_novelty, bool randomize_ties, u32 beam_chunk, u32 threads, bool witness_pruning,
+           BeamNoveltyArg beam_novelty, bool randomize_ties, IntArg beam_chunk, IntArg threads, bool witness_pruning,
            bool canonical_order, SymmetryArg symmetry_pruning, StateArg start,
            IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
            GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
@@ -2288,7 +2325,7 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "rollout_iw",
-        [](TaskArg task, OrderingArg ordering, u64 seed, IntArg max_rollouts, IntArg incumbent_bound,
+        [](TaskArg task, OrderingArg ordering, IntArg seed, IntArg max_rollouts, IntArg incumbent_bound,
            bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_depth,
            FloatArg max_seconds,
            CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
@@ -2300,10 +2337,10 @@ void bind_search(nb::module_& parent)
             search::RolloutIwOptions opts;
             opts.control = cs.control;
             opts.ordering = parse_ordering(ordering);
-            opts.seed = seed;
-            if (auto v = opt<u64>(max_rollouts))
+            opts.seed = int_arg<u64>(seed, "seed");
+            if (auto v = opt_int_arg<u64>(max_rollouts, "max_rollouts", 0))
                 opts.max_rollouts = *v;
-            if (auto v = opt<u32>(incumbent_bound))
+            if (auto v = opt_int_arg<u32>(incumbent_bound, "incumbent_bound", 0))
                 opts.incumbent_bound = *v;
             opts.canonical_order = canonical_order;
             opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);
@@ -2333,7 +2370,7 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "find_rollouts_parallel",
-        [](TaskArg task, std::vector<u64> seeds, u32 max_arity, u32 num_threads, IntArg max_next_layer_states,
+        [](TaskArg task, SeedsArg seeds, IntArg max_arity, IntArg num_threads, IntArg max_next_layer_states,
            bool report_landing_states, bool report_co_occurrence, WidthZeroArg width_zero, bool optimize_iw1,
            bool witness_pruning, bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states,
            IntArg max_expanded,
@@ -2344,18 +2381,18 @@ void bind_search(nb::module_& parent)
             fill_control(cs, o, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
                          observer, progress_interval);
             search::ParallelRolloutOptions opts;
-            opts.iw = iw_options(cs, o, max_arity, width_zero, optimize_iw1, witness_pruning, canonical_order,
-            symmetry_pruning, start);
-            opts.seeds = seeds;
-            opts.num_threads = num_threads;
-            if (auto v = opt<u32>(max_next_layer_states))
+            opts.iw = iw_options(cs, o, int_arg<u32>(max_arity, "max_arity"), width_zero, optimize_iw1, witness_pruning,
+                                 canonical_order, symmetry_pruning, start);
+            opts.seeds = int_list_arg<u64>(seeds, "seeds");
+            opts.num_threads = threads_arg(num_threads, "num_threads");
+            if (auto v = opt_int_arg<u32>(max_next_layer_states, "max_next_layer_states", 0))
                 opts.max_next_layer_states = *v;
             opts.report_landing_states = report_landing_states;
             opts.report_co_occurrence = report_co_occurrence;
             const Task& t = *o.core->task;
             search::ParallelRolloutsResult r = run_detached(cs, [&] { return search::find_rollouts_parallel(t, opts); });
             return PyParallelRollouts{std::make_shared<const search::ParallelRolloutsResult>(std::move(r)),
-                                      std::move(seeds), o};
+                                      opts.seeds, o};
         },
         "task"_a, "seeds"_a, nb::kw_only(), "max_arity"_a = 2, "num_threads"_a = 0,
         "max_next_layer_states"_a = nb::none(), "report_landing_states"_a = false, "report_co_occurrence"_a = false,
@@ -2411,7 +2448,7 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "atomic_goal_portfolio",
-        [](TaskArg task, u32 num_rollout_workers, u32 num_threads, u64 base_seed, OrderingsArg rollout_orderings,
+        [](TaskArg task, IntArg num_rollout_workers, IntArg num_threads, IntArg base_seed, OrderingsArg rollout_orderings,
            bool canonical_order, SymmetryArg symmetry_pruning, StateArg start, IntArg max_states, IntArg max_expanded,
            IntArg max_depth,
            FloatArg max_seconds, CancelArg cancel, GoalArg goal, StatesArg blocked_states, ObserverArg observer,
@@ -2422,9 +2459,9 @@ void bind_search(nb::module_& parent)
                          observer, progress_interval);
             search::PortfolioOptions opts;
             opts.control = cs.control;
-            opts.num_rollout_workers = num_rollout_workers;
-            opts.num_threads = num_threads;
-            opts.base_seed = base_seed;
+            opts.num_rollout_workers = int_arg<u32>(num_rollout_workers, "num_rollout_workers");
+            opts.num_threads = threads_arg(num_threads, "num_threads");
+            opts.base_seed = int_arg<u64>(base_seed, "base_seed");
             opts.rollout_orderings = parse_orderings(rollout_orderings);
             opts.canonical_order = canonical_order;
             opts.symmetry_pruning = parse_symmetry_pruning(symmetry_pruning);

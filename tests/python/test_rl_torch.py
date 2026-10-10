@@ -500,6 +500,46 @@ def test_device_refusals():
         env.core.step(env.states.cpu())
 
 
+def gripper_table():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    g = ROOT / "tests/data/pddl/gripper"
+    return rl.TaskTable([mymyr.Task.from_pddl(g / "domain.pddl", g / p, atoms="frozen") for p in ("p01.pddl", "p02.pddl")])
+
+
+def test_host_task_ids_outside_the_table_raise_before_they_are_written():
+    env = rt.BatchedEnv(gripper_table(), 4, task_ids=[0, 1, 0, 1])
+    with pytest.raises(ValueError, match=r"^mymyr: reset: task id 99 of row 3 is outside the table's 2 instances$"):
+        env.reset(task_ids=[0, 1, 0, 99])
+    assert env.task_ids.tolist() == [0, 1, 0, 1]
+    env.reset(torch.tensor([True, False, True, False]), task_ids=[1, 99, 1, 99])  # unmasked rows are not read
+    assert env.task_ids.tolist() == [1, 1, 1, 1]
+    with pytest.raises(ValueError, match=r"^mymyr: next_task_ids: task id -1 of row 0 is outside"):
+        env.step(next_task_ids=torch.tensor([-1, 0, 0, 0]))
+    with pytest.raises(ValueError, match=r"^mymyr: task_ids: task id 2 of row 1 is outside"):
+        rt.BatchedEnv(gripper_table(), 2, task_ids=[0, 2])
+
+
+def test_device_task_ids_outside_the_table_raise():
+    dev = gpu()
+    table = gripper_table()
+    env = rt.BatchedEnv(table, 4, device=dev)
+    with pytest.raises(ValueError, match=r"^mymyr: reset: task id 99 of row 3 is outside the table's 2 instances$"):
+        env.reset(task_ids=[0, 1, 0, 99])
+    env.reset(task_ids=torch.tensor([0, 1, 0, 99], dtype=torch.int32, device=dev))  # device ids: check_errors reports
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.check_errors()
+    env.reset(task_ids=torch.tensor([0, 1, 0, 1], dtype=torch.int32, device=dev))
+    env.check_errors()
+    penv = rt.PlanningEnv(table, 4, device=dev)
+    td = penv.reset()
+    td["task_id"] = torch.tensor([0, 1, 0, 99], device=dev)
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        penv.reset(td)  # the reset waits for the device and raises its errors
+    td["task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
+    assert penv.reset(td)["task_id"].tolist() == [1, 1, 0, 0]
+
+
 # ------------------------------------------------------------------------------------------------ rand_action, ParallelEnv, collectors
 
 

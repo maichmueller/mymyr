@@ -52,17 +52,15 @@ PyTaskCore::PyTaskCore(TaskPtr t, std::shared_ptr<const formalism::TaskData> d, 
 
 const NameIndex& PyTaskCore::names()
 {
-    std::call_once(m_names_once,
-                   [this]
-                   {
-                       const formalism::TaskData& D = *data;
-                       for (u32 i = 0; i < D.objects.size(); ++i)
-                           m_names.objects.emplace(std::string(D.str(D.objects[i].name)), i);
-                       for (u32 i = 0; i < D.predicates.size(); ++i)
-                           m_names.predicates.emplace(std::string(D.str(D.predicates[i].name)), i);
-                       for (u32 i = 0; i < D.schemas.size(); ++i)
-                           m_names.schemas.emplace(std::string(D.str(D.schemas[i].name)), i);
-                   });
+    m_names_once.call([this] {
+        const formalism::TaskData& D = *data;
+        for (u32 i = 0; i < D.objects.size(); ++i)
+            m_names.objects.emplace(std::string(D.str(D.objects[i].name)), i);
+        for (u32 i = 0; i < D.predicates.size(); ++i)
+            m_names.predicates.emplace(std::string(D.str(D.predicates[i].name)), i);
+        for (u32 i = 0; i < D.schemas.size(); ++i)
+            m_names.schemas.emplace(std::string(D.str(D.schemas[i].name)), i);
+    });
     return m_names;
 }
 
@@ -155,7 +153,45 @@ const PyState& state_of(nb::handle h) { return *nb::inst_ptr<PyState>(h); }
 /// task.numeric_words() columns are the numeric words), States are packed with their values.
 StateBatch import_task_states(nb::handle obj, const Task& task)
 {
-    return import_rows(obj, task.words(), task.numeric_words());
+    StateBatch b = import_rows(obj, task.words(), task.numeric_words());
+    check_task_rows(b, task);
+    return b;
+}
+
+namespace
+{
+std::string row_name(const StateBatch& b, u64 i)
+{
+    return b.single ? std::string("the state") : "state " + std::to_string(i);
+}
+}  // namespace
+
+void check_task_rows(const StateBatch& b, const Task& task)
+{
+    for (u64 i = 0; i < b.owners.size(); ++i)
+        if (b.owners[i] != task.uid())
+            throw nb::value_error(("mymyr: " + row_name(b, i) + " belongs to another task").c_str());
+    if (!b.owners.empty())
+        return;  // States of this task: their rows are its rows
+    const u32 W = b.view.words;
+    if (task.atoms().mode() == AtomMode::Frozen && W < task.words() && b.view.rows)
+        throw nb::value_error(("mymyr: rows of " + std::to_string(W) + " atom words; this task's states have " +
+                               std::to_string(task.words()) + " (frozen atom slots)")
+                                  .c_str());
+    const u32 limit = task.atoms().fluent_slots();
+    if (static_cast<u64>(W) * 64 <= limit)
+        return;
+    for (u64 i = 0; i < b.view.rows; ++i)
+    {
+        const u64* w = b.view.row(i);
+        u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
+        for (u32 k = (limit >> 6) + 1; k < W && !bad; ++k)
+            bad = w[k];
+        if (bad)
+            throw nb::value_error(("mymyr: " + row_name(b, i) +
+                                   " sets atom slots this task has not assigned (a state of another task?)")
+                                      .c_str());
+    }
 }
 
 StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
@@ -179,6 +215,11 @@ StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
         for (const State* s : states)
             W = std::max(W, s->size_words());
         StateBatch b;
+        if (seq)
+            for (nb::handle item : nb::borrow<nb::sequence>(obj))
+                b.owners.push_back(state_of(item).core->task->uid());
+        else
+            b.owners.push_back(state_of(obj).core->task->uid());
         b.packed = std::make_shared<std::vector<u64>>(states.size() * (W + NN), 0);
         for (usize i = 0; i < states.size(); ++i)
         {
@@ -282,27 +323,24 @@ StateArg state_arg(PyTaskCore& core, nb::handle h)
     a.batch = import_task_states(h, *core.task);
     if (a.batch.view.rows != 1)
         throw nb::value_error("mymyr: expected one state");
-    const u32 limit = core.task->atoms().fluent_slots();
     const u64* w = a.batch.view.data;
     const u32 nw = a.batch.view.words;
     const u32 NN = a.batch.view.numeric_words;
-    for (u32 i = limit >> 6; i < nw; ++i)
-    {
-        const u64 bad = i == (limit >> 6) ? w[i] & ~((u64{1} << (limit & 63)) - 1) : w[i];
-        if (bad)
-            throw nb::value_error("mymyr: the state words set atom slots this task has not assigned");
-    }
     a.view = StateView{w, nw, NN ? w + nw : nullptr, NN};
     return a;
 }
 
-/// Parses "(name a b)" into tokens.
+/// Parses "(name a b)" into tokens; ValueError for unbalanced parentheses.
 std::vector<std::string> tokens(std::string_view s)
 {
     std::vector<std::string> out;
     std::string cur;
+    int depth = 0;
     for (char c : s)
     {
+        depth += c == '(' ? 1 : c == ')' ? -1 : 0;
+        if (depth < 0)
+            break;
         if (c == '(' || c == ')' || c == ' ' || c == '\t' || c == '\n' || c == ',')
         {
             if (!cur.empty())
@@ -312,6 +350,8 @@ std::vector<std::string> tokens(std::string_view s)
         else
             cur.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
+    if (depth != 0)
+        throw nb::value_error(("mymyr: unbalanced parentheses in '" + std::string(s) + "'").c_str());
     if (!cur.empty())
         out.push_back(std::move(cur));
     return out;
@@ -321,7 +361,7 @@ u32 object_index(PyTaskCore& core, nb::handle h)
 {
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "an object index");
         if (v < 0 || v >= static_cast<i64>(core.data->objects.size()))
             throw nb::index_error("mymyr: object index out of range");
         return static_cast<u32>(v);
@@ -432,7 +472,7 @@ u32 predicate_index(PyTaskCore& core, nb::handle h)
     }
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "a predicate index");
         if (v < 0 || v >= static_cast<i64>(core.data->predicates.size()))
             throw nb::index_error("mymyr: predicate index out of range");
         return static_cast<u32>(v);
@@ -566,7 +606,7 @@ LiteralSpec literal_spec(PyTaskCore& core, nb::handle x)
     }
     if (nb::isinstance<nb::int_>(x))
     {
-        const i64 s = nb::cast<i64>(x);
+        const i64 s = int_arg<i64>(x, "an atom slot");
         if (s < 0 || s >= core.task->atoms().fluent_slots())
             throw nb::index_error("mymyr: atom slot out of range");
         const auto args = core.task->atoms().arguments(SlotId{static_cast<u32>(s)});
@@ -686,7 +726,7 @@ TypeId type_index(PyTaskCore& core, nb::handle h)
     }
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "a type index");
         if (v < 0 || v >= static_cast<i64>(D.types.size()))
             throw nb::index_error("mymyr: type index out of range");
         return TypeId{static_cast<u32>(v)};
@@ -916,7 +956,8 @@ using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
 ActionList applicable_actions(const Owner& o, StateView s, SymmetryPruning symmetry = SymmetryPruning::Off,
                               u32 first_schema = 0, u32 end_schema = ~u32{0})
 {
-    Successors& succ = o.core->task->workspace().successors();
+    const WorkspaceLease lease = o.core->task->workspace();
+    Successors& succ = lease->successors();
     std::vector<u32> schemas;
     std::vector<ObjectId> bindings;
     succ.prepare(s);
@@ -957,7 +998,8 @@ struct PyApplicableIter
 Arg<PyAction> applicable_next(PyApplicableIter& it)
 {
     nb::ft_lock_guard lock(it.m);
-    Successors& succ = it.o.core->task->workspace().successors();
+    const WorkspaceLease lease = it.o.core->task->workspace();
+    Successors& succ = lease->successors();
     if (it.pos == it.schemas.size())
     {
         it.schemas.clear();
@@ -1007,7 +1049,8 @@ AtomList derived_atoms(const Owner& o, StateView s)
         return out;
     std::vector<u32> slots;
     {
-        Successors& succ = t.workspace().successors();
+        const WorkspaceLease lease = t.workspace();
+        Successors& succ = lease->successors();
         succ.prepare(s);
         const detail::Engine& e = succ.engine();
         bits::for_each(e.derived(), e.derived_words(), [&](u64 b) { slots.push_back(static_cast<u32>(b)); });
@@ -1027,7 +1070,8 @@ AtomList derived_atoms(const Owner& o, StateView s)
 /// Successor states in canonical order; with labels, (Action, State) pairs.
 nb::list successors(const Owner& o, StateView s, bool labels, SymmetryPruning symmetry = SymmetryPruning::Off)
 {
-    Successors& succ = o.core->task->workspace().successors();
+    const WorkspaceLease lease = o.core->task->workspace();
+    Successors& succ = lease->successors();
     std::vector<State> states;
     std::vector<u32> schemas;
     std::vector<ObjectId> bindings;
@@ -1067,13 +1111,33 @@ nb::list successors(const Owner& o, StateView s, bool labels, SymmetryPruning sy
     return out;
 }
 
+// Single-state queries. Each takes a workspace of its own, so they may be called from inside a search's callbacks.
+bool any_applicable(const Task& t, StateView s)
+{
+    const WorkspaceLease ws = t.workspace();
+    return ws->successors().any_applicable(s);
+}
+
+bool is_applicable(const Task& t, StateView s, const ActionLabel& a)
+{
+    const WorkspaceLease ws = t.workspace();
+    return ws->successors().is_applicable(s, a);
+}
+
+/// The successor of s under a; std::invalid_argument (ValueError) if a is not applicable in s.
+State apply_action(const Task& t, StateView s, const ActionLabel& a)
+{
+    const WorkspaceLease ws = t.workspace();
+    StateBuilder b;
+    ws->successors().apply(s, a, b);
+    return b.build();
+}
+
 Arg<PyState> apply(const Owner& o, StateView s, nb::handle action)
 {
     const auto [schema, binding] = action_label(*o.core, action, nb::none());
     const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding.data()), binding.size()}};
-    StateBuilder b;
-    o.core->task->workspace().successors().apply(s, label, b);  // std::invalid_argument -> ValueError
-    return make_state(o, b.build());
+    return make_state(o, apply_action(*o.core->task, s, label));
 }
 
 // ------------------------------------------------------------------------------------------------ binding generators
@@ -1097,7 +1161,7 @@ u32 schema_index(PyTaskCore& core, nb::handle h)
 {
     if (nb::isinstance<nb::int_>(h))
     {
-        const i64 v = nb::cast<i64>(h);
+        const i64 v = int_arg<i64>(h, "a schema index");
         if (v < 0 || v >= static_cast<i64>(core.data->schemas.size()))
             throw nb::index_error("mymyr: schema index out of range");
         return static_cast<u32>(v);
@@ -1175,7 +1239,7 @@ std::vector<std::optional<ObjectId>> partial_arg(PyTaskCore& core, const Target&
             u32 var = 0;
             if (nb::isinstance<nb::int_>(k))
             {
-                const i64 i = nb::cast<i64>(k);
+                const i64 i = int_arg<i64>(k, "a variable index");
                 if (i < 0 || i >= static_cast<i64>(t.arity))
                     throw nb::index_error(("mymyr: partial: variable index " + std::to_string(i) + " out of range (arity " +
                                            std::to_string(t.arity) + ")")
@@ -1226,10 +1290,7 @@ u64 limit_arg(nb::handle h)
 {
     if (h.is_none())
         return ~u64{0};
-    const i64 v = nb::cast<i64>(h);
-    if (v < 0)
-        throw nb::value_error("mymyr: limit must be >= 0");
-    return static_cast<u64>(v);
+    return int_arg<u64>(h, "limit");
 }
 
 ObjectTuple object_tuple(PyTaskCore& core, const ObjectId* b, u32 n)
@@ -1297,7 +1358,8 @@ void refill(PyBindingsIter& it)
         opt.limit = want;
         opt.resume_after = it.last;
         const PartialBinding partial(it.partial);
-        Workspace& ws = task.workspace();
+        const WorkspaceLease lease = task.workspace();
+        Workspace& ws = *lease;
         if (it.ground)
         {
             auto keep = [&](const GroundConjunction& g)
@@ -1399,7 +1461,11 @@ nb::object make_bindings_iter(const Owner& o, StateView s, nb::handle target, nb
 ActionList schema_actions(const Owner& o, StateView s, u32 schema, const std::vector<std::optional<ObjectId>>& partial)
 {
     const Task& task = *o.core->task;
-    std::vector<std::vector<ObjectId>> found = mymyr::bindings(task, task.workspace(), SchemaId{schema}, s, partial);
+    std::vector<std::vector<ObjectId>> found;
+    {
+        const WorkspaceLease ws = task.workspace();
+        found = mymyr::bindings(task, *ws, SchemaId{schema}, s, partial);
+    }
     std::ranges::sort(found, [](const std::vector<ObjectId>& a, const std::vector<ObjectId>& b)
                       { return std::ranges::lexicographical_compare(a, b, {}, &ObjectId::v, &ObjectId::v); });
     ActionList out{nb::list()};
@@ -1538,14 +1604,14 @@ void bind_task_api(nb::class_<C>& cls)
             "any_applicable",
             [](Self self, StateLike state) {
                 StateArg s = state_arg(*self.p->core, state);
-                return self.p->core->task->workspace().successors().any_applicable(s.view);
+                return any_applicable(*self.p->core->task, s.view);
             },
             "state"_a, "Whether some action is applicable in the state (stops at the first one).")
         .def(
             "is_dead_end",
             [](Self self, StateLike state) {
                 StateArg s = state_arg(*self.p->core, state);
-                return !self.p->core->task->workspace().successors().any_applicable(s.view);
+                return !any_applicable(*self.p->core->task, s.view);
             },
             "state"_a, "Whether no action is applicable in the state (not any_applicable).")
         .def(
@@ -1596,7 +1662,7 @@ void bind_task_api(nb::class_<C>& cls)
                 StateArg s = state_arg(*self.p->core, state);
                 const auto [schema, binding] = action_label(*self.p->core, action, nb::none());
                 const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding.data()), binding.size()}};
-                return self.p->core->task->workspace().successors().is_applicable(s.view, label);
+                return is_applicable(*self.p->core->task, s.view, label);
             },
             "state"_a, "action"_a)
         .def(
@@ -1702,15 +1768,11 @@ void bind_task_api(nb::class_<C>& cls)
             [owner](Self self, WordsArg words) {
                 PyTaskCore& core = *self.p->core;
                 StateBatch b = import_task_states(words, *core.task);
-                const u32 limit = core.task->atoms().fluent_slots();
                 const u32 NN = b.view.numeric_words;
                 StateList out{nb::list()};
                 for (u64 i = 0; i < b.view.rows; ++i)
                 {
                     const u64* w = b.view.row(i);
-                    for (u32 k = limit >> 6; k < b.view.words; ++k)
-                        if (k == (limit >> 6) ? (w[k] & ~((u64{1} << (limit & 63)) - 1)) : w[k])
-                            throw nb::value_error("mymyr: a row sets atom slots this task has not assigned");
                     out.append(make_state(owner(self), State(w, b.view.words, NN ? w + b.view.words : nullptr, NN)));
                 }
                 return out;
@@ -1919,14 +1981,20 @@ void bind_task(nb::module_& m)
     task.def(
             "__init__",
             [](PyTask* self, const FormalismTask& normalized, std::string_view atoms, std::string_view matching,
-               u32 fc_free_params, u32 frozen_max_words, u32 pilot_expansions) {
+               IntArg fc_free_params_in, IntArg frozen_max_words_in, IntArg pilot_expansions_in) {
+                const u32 fc_free_params = int_arg<u32>(fc_free_params_in, "fc_free_params");
+                const u32 frozen_max_words = int_arg<u32>(frozen_max_words_in, "frozen_max_words");
+                const u32 pilot_expansions = int_arg<u32>(pilot_expansions_in, "pilot_expansions");
                 const TaskOptions o = make_options(atoms, matching, fc_free_params, frozen_max_words, pilot_expansions);
                 new (self) PyTask{build_core(normalized.t, normalized.source, o)};
             },
             "normalized"_a, MYMYR_TASK_OPTION_ARGS, k_options_doc)
         .def_static(
             "from_text",
-            [](const std::filesystem::path& path, std::string_view atoms, std::string_view matching, u32 fc, u32 fmw, u32 pilot) {
+            [](const std::filesystem::path& path, std::string_view atoms, std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in) {
+                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
+                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
+                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
                 const TaskOptions o = make_options(atoms, matching, fc, fmw, pilot);
                 std::shared_ptr<const formalism::TaskData> data;
                 {
@@ -1941,7 +2009,10 @@ void bind_task(nb::module_& m)
         .def_static(
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain, const std::filesystem::path& problem,
-               std::string_view atoms, std::string_view matching, u32 fc, u32 fmw, u32 pilot) {
+               std::string_view atoms, std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in) {
+                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
+                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
+                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
                 const TaskOptions o = make_options(atoms, matching, fc, fmw, pilot);
                 PyDomain dom;
                 if (nb::isinstance<PyDomain>(domain))
@@ -1950,8 +2021,7 @@ void bind_task(nb::module_& m)
                 {
                     const std::filesystem::path path = nb::cast<std::filesystem::path>(domain);
                     nb::gil_scoped_release release;
-                    dom = PyDomain{frontend::Domain::from_file(path), std::make_shared<const std::string>(read_file(path.string())),
-                                   path.string()};
+                    dom = load_domain(path);
                 }
                 std::shared_ptr<const formalism::TaskData> data;
                 auto source = std::make_shared<TaskSource>();
@@ -1960,7 +2030,7 @@ void bind_task(nb::module_& m)
                     source->kind = TaskSource::Kind::Pddl;
                     source->domain = dom.text ? *dom.text : std::string();
                     source->domain_path = dom.path;
-                    source->problem = read_file(problem.string());
+                    source->problem = read_problem(problem);
                     source->problem_path = problem.string();
                     data = dom.d->instantiate_file(problem);
                 }
@@ -2061,7 +2131,8 @@ void bind_task(nb::module_& m)
             "covers the slots assigned so far.")
         .def(
             "device_arrays",
-            [](const PyTask& t, u32 version, FrameworkArg framework) {
+            [](const PyTask& t, IntArg version_in, FrameworkArg framework) {
+                const u32 version = int_arg<u32>(version_in, "version");
                 const Framework fw = parse_framework(framework, nb::none());
                 std::shared_ptr<const rl::ArrayBundle> b;
                 {
@@ -2203,10 +2274,10 @@ void bind_task(nb::module_& m)
              nb::kw_only(), "symmetry_pruning"_a = "off",
              "The applicable actions as a lazy iterator (Task.iter_applicable_actions).")
         .def("any_applicable",
-             [](const PyState& s) { return s.core->task->workspace().successors().any_applicable(s.s.view()); },
+             [](const PyState& s) { return any_applicable(*s.core->task, s.s.view()); },
              "Whether some action is applicable (stops at the first one).")
         .def("is_dead_end",
-             [](const PyState& s) { return !s.core->task->workspace().successors().any_applicable(s.s.view()); },
+             [](const PyState& s) { return !any_applicable(*s.core->task, s.s.view()); },
              "Whether no action is applicable (not any_applicable).")
         .def("derived_atoms", [](const PyState& s) { return derived_atoms(Owner{s.core, s.owner}, s.s.view()); },
              "The derived atoms: the fluent atoms closed under the axioms (Task.derived_atoms).")
@@ -2261,15 +2332,13 @@ void bind_task(nb::module_& m)
              [](const PyAction& a, StateLike state) {
                  const Owner o{a.core, a.owner};
                  StateArg s = state_arg(*a.core, state);
-                 StateBuilder b;
-                 a.core->task->workspace().successors().apply(s.view, a.label(), b);
-                 return make_state(o, b.build());
+                 return make_state(o, apply_action(*a.core->task, s.view, a.label()));
              },
              "state"_a)
         .def("is_applicable",
              [](const PyAction& a, StateLike state) {
                  StateArg s = state_arg(*a.core, state);
-                 return a.core->task->workspace().successors().is_applicable(s.view, a.label());
+                 return is_applicable(*a.core->task, s.view, a.label());
              },
              "state"_a)
         .def("__eq__",

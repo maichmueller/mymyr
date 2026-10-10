@@ -12,7 +12,7 @@ from mymyr import search
 data = Path("tests/data/pddl/counters")
 task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01.pddl")
 
-result = search.brfs(task, stop_at_goal=True, layer_order="goal_count", beam_width=8)
+result = search.brfs(task, layer_order="goal_count", beam_width=8)
 print(result.status, result.solved, len(result.plan))
 
 best_first = search.astar(task, heuristic="max")
@@ -51,7 +51,7 @@ deterministic for a given thread count and seed, and does not depend on the thre
 exact = [search.iw(task, max_arity=2, layer_order="goal_count", beam_width=4, threads=t) for t in (1, 4)]
 print(exact[0].status == exact[1].status, exact[0].passes[-1].expanded == exact[1].passes[-1].expanded)
 
-relaxed = search.brfs(task, stop_at_goal=True, layer_order="goal_count", beam_width=4,
+relaxed = search.brfs(task, layer_order="goal_count", beam_width=4,
                       beam_novelty="relaxed_survivors_only", beam_chunk=64, threads=4)
 print(relaxed.status, len(relaxed.plan))
 ```
@@ -64,16 +64,23 @@ algorithms also handle numeric conditions, effects and metric costs. AStarIW doe
 ## Goals, budgets and callbacks
 
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and
-`max_seconds=`. On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
+`max_seconds=`. `max_states=` counts the states a search stores, the start state included (IW: the nodes of a
+pass): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
+never stores more; the deadline and the cancellation are checked inside expansions as well (the GPU searches check
+budgets between chunks). On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
 `mymyr.formalism.GroundCondition`, or a sequence of goals. Each goal in that sequence is a `GroundCondition` or a
 sequence of ground atoms and literals; any one that holds ends the search. See [Formula values](formulas.md) for
 construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
 literals and numeric constraints; each batched goal selects one conjunction per search. Callable goals and any-of
 alternatives within one device search are not supported; device A*/GBFS use the task goal.
-`search.CancelToken` supports cancellation from another thread.
+`search.CancelToken` supports cancellation from another thread. A search that does not solve the task returns an
+empty `plan`; an unsolved `siw` keeps the subplans of the subproblems it solved in `partial_plan`.
 
 `brfs` takes `max_states=`, `max_seconds=` and `cancel=`, and its result has a `status` like the other searches.
-With `threads > 1` it searches layer-synchronously and still returns a shortest plan with `stop_at_goal=True`.
+It stops at the first goal state it expands and returns a shortest plan (`SOLVED`); with `threads > 1` it searches
+layer-synchronously and still returns a shortest plan. `stop_at_goal=False` goes on through the whole reachable space
+(for counts such as `goal_states`); a goal state reached on the way still makes it `SOLVED` with that plan, and
+`exhausted` tells whether every state was expanded.
 
 ## Symmetry pruning
 
@@ -109,8 +116,8 @@ task = mymyr.Task.from_pddl(data / "domain.pddl", data / "probLOGISTICS-6-1.pddl
 state = task.initial_state
 print(len(task.applicable_actions(state)), len(task.applicable_actions(state, symmetry_pruning="wl1")))
 
-full = search.brfs(task, stop_at_goal=True)
-pruned = search.brfs(task, stop_at_goal=True, symmetry_pruning="wl1")
+full = search.brfs(task)
+pruned = search.brfs(task, symmetry_pruning="wl1")
 print(full.states, pruned.states, pruned.solved)
 
 state = task.initial_state
@@ -190,7 +197,7 @@ class PerThread(search.Observer):
 
 
 observer = PerThread()
-result = search.brfs(task, threads=4, stop_at_goal=True, observer=observer)
+result = search.brfs(task, threads=4, observer=observer)
 assert sum(w.expanded for w in observer.workers) == result.expanded
 print(len(result.plan), "steps;", len(set().union(*(w.threads for w in observer.workers))), "threads")
 ```

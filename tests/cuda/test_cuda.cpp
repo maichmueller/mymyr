@@ -1,6 +1,6 @@
 // CUDA backend tests (run on GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device):
 //   - the context, its pool and the stream-ordered buffers (record_stream orders a free after another stream's work);
-//   - device arenas: appends, kernel-written tails, tail syncs to the pinned mirror, growth;
+//   - device arenas: appends, kernel-written tails, tail syncs to the pinned mirror, growth, sizes beyond 64 bits;
 //   - the device task upload of every suite task round-trips byte for byte, validates on the device, and the
 //     smoke kernels (applicability, apply, goal test) agree with the CPU engine along random walks, frozen and lazy.
 
@@ -17,6 +17,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -224,6 +225,28 @@ TEST(CudaArena, AppendsTailsSyncsAndGrows)
     const u64* h = reinterpret_cast<const u64*>(arena.host_data()) + (arena.host_size() - 4) * W;
     for (u64 i = 0; i < 4 * W; ++i)
         ASSERT_EQ(h[i], 77 + i);
+    ctx->synchronize();
+}
+
+TEST(CudaArena, RefusesSizesBeyondSixtyFourBitsAndStaysUnchanged)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    // capacity x record bytes = 2^64: nothing is allocated
+    EXPECT_THROW(cuda::DeviceArena(ctx, 8, u64{1} << 61), std::length_error);
+    EXPECT_THROW(cuda::DeviceArena(ctx, 1u << 20, u64{1} << 44, false), std::length_error);
+    cuda::DeviceArena arena(ctx, 16, 4);
+    const std::vector<u64> rows(2 * 2, 7);
+    arena.append_from_host(rows.data(), 2);
+    const std::shared_ptr<cuda::DeviceBuffer> gen = arena.generation();
+    EXPECT_THROW(arena.reserve(~u64{0} - 1), std::length_error);   // the records exceed 2^64 - 1
+    EXPECT_THROW(arena.reserve(u64{1} << 60), std::length_error);  // their bytes do
+    EXPECT_THROW(arena.commit(~u64{0}), std::out_of_range);
+    EXPECT_EQ(arena.device_size(), 2u);
+    EXPECT_EQ(arena.capacity(), 4u);
+    EXPECT_EQ(arena.generation(), gen);
+    arena.append_from_host(rows.data(), 2);  // still usable
+    EXPECT_EQ(to_host<u64>(arena.device_data(), 8, arena.stream()), std::vector<u64>(8, 7));
     ctx->synchronize();
 }
 

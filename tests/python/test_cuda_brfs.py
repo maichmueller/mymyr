@@ -104,8 +104,8 @@ def assert_same_padded(dev, cpu):
 @pytest.mark.parametrize("atoms", ["frozen", "lazy"])
 def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     task = text_task(name, atoms=atoms)
-    r = mc.brfs(task, ctx=ctx, fingerprint=True)
-    c = mymyr.search.brfs(task, threads=2, fingerprint=True)
+    r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
+    c = mymyr.search.brfs(task, threads=2, fingerprint=True, stop_at_goal=False)
     assert (r.states, r.expanded, r.generated, r.goal_states, r.layers, r.exhausted) == (
         c.states,
         c.expanded,
@@ -116,14 +116,16 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     )
     assert r.fingerprint == c.fingerprint and r.fingerprint != 0
     assert r.status == c.status and r.store == "device"
+    # a whole-space search that expanded a goal state is solved, with the plan to the first one
+    assert r.solved == c.solved and [a.label for a in r.plan] == [a.label for a in c.plan]
     # the chunk size changes nothing
-    small = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, chunk_states=97)
+    small = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, chunk_states=97, stop_at_goal=False)
     assert (small.states, small.fingerprint) == (r.states, r.fingerprint)
     assert small.stats["chunks"] > r.stats["chunks"]
     # small layers run in device loops (frozen slots); timings=True drives every chunk from the host: the same ids
     if atoms == "frozen":
         assert r.stats["loops"] > 0 and r.stats["captures"] > 0
-    timed = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, timings=True)
+    timed = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, timings=True, stop_at_goal=False)
     assert (timed.states, timed.layers, timed.fingerprint) == (r.states, r.layers, r.fingerprint)
     assert timed.stats["loops"] == 0
 
@@ -149,11 +151,11 @@ def test_device_brfs_state_space_and_plans(ctx):
     assert np.array_equal(host(words[i])[: s.num_words], np.asarray(s.words, np.uint64))
     del words, nodes
     torch.cuda.synchronize()
-    # stop_at_goal: the CPU's plan
+    # stopping at the first goal: the CPU's plan
     for name in ("depot__p02", "philosophers__p03-phil4", "miconic-simpleadl__s10-2"):
         task = text_task(name)
-        g = mc.brfs(task, ctx=ctx, stop_at_goal=True)
-        c = mymyr.search.brfs(task, stop_at_goal=True)
+        g = mc.brfs(task, ctx=ctx)
+        c = mymyr.search.brfs(task)
         assert g.solved and c.solved
         assert [a.label for a in g.plan] == [a.label for a in c.plan]
         assert g.states == c.states

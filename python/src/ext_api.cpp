@@ -145,7 +145,8 @@ int64_t api_successors(const mymyr_task* t, const uint64_t* words, uint32_t num_
         const Task& T = *core_of(t)->task;
         if (T.numeric_slots() > 0 || !assigned_only(T, words, num_words))
             return -1;
-        Successors& succ = T.workspace().successors();
+        const WorkspaceLease lease = T.workspace();
+        Successors& succ = lease->successors();
         LineVector<u64> tmp;  // per-thread hot scratch (see LineAllocator)
         int64_t n = 0;
         succ.prepare(StateView{words, num_words, nullptr, 0});
@@ -174,7 +175,8 @@ int64_t api_apply(const mymyr_task* t, const uint64_t* words, uint32_t num_words
         if (T.numeric_slots() > 0 || !assigned_only(T, words, num_words) || schema >= T.num_schemas() ||
             arity != T.data().schemas[schema].arity())
             return -1;
-        Successors& succ = T.workspace().successors();
+        const WorkspaceLease lease = T.workspace();
+        Successors& succ = lease->successors();
         const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding), arity}};
         const StateView s{words, num_words, nullptr, 0};
         if (!succ.is_applicable(s, label))
@@ -395,7 +397,8 @@ int64_t api_successors_state(const mymyr_task* t, const mymyr_state_view* st, do
             return -1;
         const heuristics::ActionCosts& costs = core.costs();
         const StateView s = view_of(*st);
-        Successors& succ = T.workspace().successors();
+        const WorkspaceLease lease = T.workspace();
+        Successors& succ = lease->successors();
         LineVector<u64> tmp;  // per-thread hot scratch (see LineAllocator)
         int64_t n = 0;
         succ.prepare(s);
@@ -426,7 +429,8 @@ int64_t api_apply_state(const mymyr_task* t, const mymyr_state_view* st, double 
         if (!fits(T, st) || schema >= T.num_schemas() || arity != T.data().schemas[schema].arity() ||
             (T.numeric_words() && !out_numeric))
             return -1;
-        Successors& succ = T.workspace().successors();
+        const WorkspaceLease lease = T.workspace();
+        Successors& succ = lease->successors();
         const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding), arity}};
         const StateView s = view_of(*st);
         if (!succ.is_applicable(s, label))

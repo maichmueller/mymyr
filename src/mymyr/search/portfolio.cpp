@@ -6,6 +6,7 @@
 #include "novelty_brfs.hpp"
 #include "rollout_detail.hpp"
 
+#include "mymyr/core/threads.hpp"
 #include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
@@ -189,7 +190,8 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
 
     auto run_certifier = [&]
     {
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         const detail::GoalTest goal = detail::GoalTest::from_spec(task, goal_of(0));
         const detail::BlockedSet blocked(control.blocked_states);
         SearchControl cc;
@@ -273,7 +275,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     };
     auto should_stop = [&] { return coord.is_cancelled() || control.cancel.requested() || out_of_time() || coord.get_total_expansions() >= control.budget.max_expanded; };
 
-    u32 T = o.num_threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : o.num_threads;
+    u32 T = resolve_threads(o.num_threads, "num_threads");
     T = std::min(T, W);
     if (!safe)
         T = 1;
@@ -298,7 +300,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
         std::mutex done_mutex;
         std::condition_variable done_cv;
         u32 running = T;
-        auto thread_main = [&]
+        auto thread_main = [&](u32)
         {
             for (;;)
             {
@@ -320,9 +322,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
             done_cv.notify_all();
         };
         std::vector<std::thread> threads;
-        threads.reserve(T);
-        for (u32 t = 0; t < T; ++t)
-            threads.emplace_back(thread_main);
+        start_threads(threads, T, thread_main, [&] { coord.request_cancel(); });
         {
             // poll for the budgets a worker deep inside one long step cannot see
             std::unique_lock lock(done_mutex);
@@ -391,7 +391,8 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
                              (result.certifier_ran ? to_string(result.certifier_status) : "not started") + ")";
         append_note();
         const detail::PlanCost pc(task);
-        result.cost = pc.apply(task.workspace().successors(), start, result.plan);
+        const WorkspaceLease lease = task.workspace();
+        result.cost = pc.apply(lease->successors(), start, result.plan);
         result.cost_exact = pc.exact();
     }
     if (root)

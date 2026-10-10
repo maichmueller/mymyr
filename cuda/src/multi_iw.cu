@@ -547,6 +547,7 @@ __global__ void k_cut(Gathered g, Candidates c, Searches s, Limits lim, const u6
         const u32 id = g.search[c.parent[i]];
         const u32 fc = first_candidate(c, s, id);
         const u32 tree = s.tree[id], next = s.next[id];
+        // a tree the root alone fills: the first admitted candidate cuts, and k_keep drops it too
         const u32 lim_states = lim.max_states > tree ? lim.max_states - tree : 1;
         const u32 lim_next = lim.max_next > next ? lim.max_next - next : 1;
         if ((f & k_cand_adm) && lim.max_states != k_none && lo32(scan[i + 1]) - lo32(scan[fc]) == lim_states)
@@ -556,13 +557,16 @@ __global__ void k_cut(Gathered g, Candidates c, Searches s, Limits lim, const u6
     }
 }
 
-__global__ void k_keep(Gathered g, Candidates c, Searches s)
+__global__ void k_keep(Gathered g, Candidates c, Searches s, Limits lim)
 {
     const u64 n_live = live(c);
     MIW_FOR(i, n_live)
     {
-        const u32 cut = s.cut[g.search[c.parent[i]]];
-        if (cut == k_none || i <= (cut >> 1))
+        const u32 id = g.search[c.parent[i]];
+        const u32 cut = s.cut[id];
+        // a state cut of a tree the root alone fills keeps candidates before its own: the search stops before storing it
+        const bool full = !(cut & 1) && lim.max_states != k_none && lim.max_states <= s.tree[id];
+        if (cut == k_none || i < (cut >> 1) || (i == (cut >> 1) && !full))
             c.flags[i] |= k_cand_kept;
     }
 }
@@ -1087,10 +1091,10 @@ cudaError_t launch_cut(Gathered g, Candidates c, Searches s, Limits lim, const u
     return cudaGetLastError();
 }
 
-cudaError_t launch_keep(Gathered g, Candidates c, Searches s, cudaStream_t st)
+cudaError_t launch_keep(Gathered g, Candidates c, Searches s, Limits lim, cudaStream_t st)
 {
     if (c.n)
-        k_keep<<<grid_for(c.n), k_block, 0, st>>>(g, c, s);
+        k_keep<<<grid_for(c.n), k_block, 0, st>>>(g, c, s, lim);
     return cudaGetLastError();
 }
 

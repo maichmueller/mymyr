@@ -113,7 +113,8 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
     {
         const Task& task = *m_suite->task(i);
         m_tasks[i] = &task;
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         succ.prepare(view_of(m_suite->instance(i).init.data(), m_suite->table_of(i).words(), task.numeric_words()));
         m_init_count[i] = count_prepared(succ, m_config);
     }
@@ -159,7 +160,8 @@ void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) co
 u32 HostEnv::count_row(const EnvBatch& b, u64 i) const
 {
     const Task& task = *m_tasks[b.instance(i)];
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     succ.prepare(view_of(b.states + i * b.row_words(), b.words, task.numeric_words()));
     return count_prepared(succ, m_config);
 }
@@ -205,7 +207,8 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     const u32 W = b.words, NN = b.numeric_words, RW = W + NN, nn = task.numeric_words();
     const u32 L = m_label_width;
     u64* row = b.states + i * RW;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
 
     // 1. the successors of the current state, in canonical order
     const u32 nw = bits::trimmed_size(row, W);
