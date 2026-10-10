@@ -40,14 +40,17 @@
 //              cost is shared by all of its effects (a cut lowers each of its actions once, however many of their
 //              conditional effects it holds), and axioms are free operators, which no cut contains. With conditional
 //              effects, lowering an action lowers its other effects too and the cuts can sum to less than h_max: h is
-//              then h_max. h_max <= LM-cut <= h*. Ties: an operator's h_max supporter is the first of its most expensive preconditions in the
-//              grounding's order; while the goal zone is marked, a zero-cost achiever's supporter moves to an equally
-//              expensive precondition without zero-cost achievers, else to one already in the goal zone (Fast
-//              Downward's border and goal-zone detection).
+//              then h_max. h_max <= LM-cut <= h*. Ties: an operator's h_max supporter is the first of its most
+//              expensive preconditions in the grounding's order; while the goal zone is marked, a zero-cost
+//              achiever's supporter moves to an equally expensive precondition without zero-cost achievers, else to
+//              one already in the goal zone (Fast Downward's border and goal-zone detection).
 //   LmCount    the landmark count heuristic of LAMA (Richter and Westphal 2010) over approximate fact landmarks
 //              (landmarks/approximate.hpp, possibly-before first achievers): the landmarks the path to a state has not
 //              reached, plus the reached ones that must become true again (false goals, and landmarks greedy-necessarily
 //              ordered before an unreached one). Unit costs count them, real costs sum the cheapest achiever of each.
+//              The landmarks are those of the task's initial state, where paths start; the status of another start
+//              state s holds what every path from the initial state to s reaches as far as s shows it (marked as
+//              inferred: a landmark needed again only for an ordering and without an achiever is then left out).
 //              Path-dependent (below); not admissible. Preferred operators: applicable actions that add a needed one.
 //   Perfect    h* from a state space (heuristics/perfect.hpp: heuristics::perfect); make_heuristic refuses it.
 //   Custom     a Heuristic subclass of the caller (BestFirstOptions::evaluator), e.g. a learned value function.

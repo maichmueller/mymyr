@@ -254,17 +254,17 @@ TEST(LandmarkHeuristicsPddl, LandmarkCountFollowsThePath)
     EXPECT_EQ(value(walk(*t, *hc, {})), 4);  // y, x, g, h
     EXPECT_EQ(value(walk(*t, *hc, {"(get-y)"})), 3);
     EXPECT_EQ(value(walk(*t, *hc, {"(get-y)", "(get-x)"})), 2);
-    // y is lost after x was reached: not needed again; the state alone does not know y was reached
+    // y is lost after x was reached: not needed again; the state alone shows x, so every path to it reached y
     const Path lost_y = walk(*t, *hc, {"(get-y)", "(get-x)", "(lose-y)"});
     EXPECT_EQ(value(lost_y), 2);
-    EXPECT_EQ(state_only(lost_y), 3);
+    EXPECT_EQ(state_only(lost_y), 2);
     // x is lost before g was reached: needed again
     EXPECT_EQ(value(walk(*t, *hc, {"(get-y)", "(get-x)", "(lose-x)"})), 3);
     // a goal atom that was reached and lost is needed again
     EXPECT_EQ(value(walk(*t, *hc, {"(get-y)", "(get-x)", "(make-g)", "(lose-g)"})), 2);
     const Path lost_xg = walk(*t, *hc, {"(get-y)", "(get-x)", "(make-g)", "(lose-x)", "(lose-g)"});
     EXPECT_EQ(value(lost_xg), 2);  // g and h; x is not needed again once g was reached
-    EXPECT_EQ(state_only(lost_xg), 3);
+    EXPECT_EQ(state_only(lost_xg), 3);  // the state alone shows y only
     EXPECT_EQ(value(walk(*t, *hc, {"(get-y)", "(get-x)", "(make-g)", "(get-h)"})), 0);
 
     // the initial state again after reaching y and x: x is needed again (g is not reached), y is not
@@ -287,6 +287,51 @@ TEST(LandmarkHeuristicsPddl, LandmarkCountFollowsThePath)
         ASSERT_EQ(r.status, search::SearchStatus::Solved) << r.message;
         EXPECT_EQ(r.plan.size(), 4u);
         EXPECT_EQ(r.initial_h, 4);
+    }
+}
+
+TEST(LandmarkHeuristicsPddl, LandmarkCountInfersTheStatusOfAnotherStartState)
+{
+    // y holds initially and has no achiever; use-y spends it on x, make-g turns x into the goal g and leaves had-g,
+    // from which restore-g gets g back. Landmarks: y, x, g with y before x before g (greedy-necessary).
+    const auto t = make(R"((define (domain d) (:requirements :strips)
+ (:predicates (y) (x) (g) (had-g))
+ (:action use-y :parameters () :precondition (y) :effect (and (x) (not (y))))
+ (:action make-g :parameters () :precondition (x) :effect (and (g) (had-g)))
+ (:action lose-x :parameters () :precondition (x) :effect (not (x)))
+ (:action lose-g :parameters () :precondition (g) :effect (not (g)))
+ (:action restore-g :parameters () :precondition (had-g) :effect (g))))",
+                        "(define (problem p) (:domain d) (:init (y)) (:goal (g)))");
+    auto hc = heuristic(*t, H::Kind::LmCount);
+    const Path p = walk(*t, *hc, {"(use-y)", "(make-g)", "(lose-x)", "(lose-g)"});
+    const StateView s = p.states.back().view();  // had-g only
+    // on the path, g is needed again (restore-g)
+    EXPECT_EQ(hc->evaluate(s, p.status.back()), 1);
+    // from s alone: every path to s reached y; x and g count as unreached, but y, which has no achiever, is not
+    // needed again, as a path to s may well have reached x
+    EXPECT_EQ(hc->evaluate(s), 2);
+    std::vector<u64> inferred(hc->status_words());
+    hc->initial_status(s, inferred);
+    EXPECT_EQ(hc->evaluate(s, inferred), 2);
+    // without the inference, a path that reached y only makes s a dead end (y is needed again for x)
+    EXPECT_EQ(hc->evaluate(s, p.status[0]), H::k_dead_end);
+    // a status merged with an inferred one is inferred
+    std::vector<u64> merged = p.status.back();
+    EXPECT_TRUE(hc->merge(merged, inferred));
+    EXPECT_EQ(merged, inferred);
+    EXPECT_FALSE(hc->merge(merged, p.status.back()));
+    EXPECT_EQ(hc->evaluate(s, merged), 2);
+
+    // a search started in s finds restore-g
+    for (auto search : {search::gbfs_eager, search::gbfs_lazy, search::astar_eager, search::astar_lazy})
+    {
+        search::BestFirstOptions o;
+        o.heuristic.kind = H::Kind::LmCount;
+        o.start = p.states.back();
+        const auto res = search(*t, o);
+        ASSERT_EQ(res.status, search::SearchStatus::Solved) << res.message;
+        EXPECT_EQ(res.plan.size(), 1u);
+        EXPECT_EQ(res.initial_h, 2);
     }
 }
 

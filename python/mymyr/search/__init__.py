@@ -19,7 +19,8 @@ reachability/*.hpp in the C++ core).
 The landmark count values a state by the path to it: a search keeps a status per node (the landmarks reached on the
 path; a state reached on several paths keeps those all of them reached). ``Heuristic`` gives the same steps for a
 search written in Python: ``status = h.initial_status(start)``, ``h.progress(status, state, action, successor)``,
-``h.merge(status, other)`` and ``h(state, status)``; ``h(state)`` takes the state as the start of the path.
+``h.merge(status, other)`` and ``h(state, status)``; ``h(state)`` takes the state as the start of a path, with the
+status ``h.initial_status(state)`` infers from it (as a search with ``start=`` does).
 
 ``astar_iw`` runs weighted A* with minimum-g novelty pruning. It requires unit-cost actions and no numeric
 fluents. ``features='classical'`` supports widths 1..5; ``'abstracted'`` and ``'base_abstracted'`` support 1..3.
@@ -129,6 +130,7 @@ from mymyr._core._search import (
     CancelToken,
     CompleteFactLandmarks,
     FactLandmarkGraph,
+    FirstAchievers,
     Heuristic,
     HeuristicStatistics,
     IwPass,
@@ -187,6 +189,7 @@ __all__ = [
     "CancelToken",
     "CompleteFactLandmarks",
     "FactLandmarkGraph",
+    "FirstAchievers",
     "Heuristic",
     "HeuristicStatistics",
     "IwPass",

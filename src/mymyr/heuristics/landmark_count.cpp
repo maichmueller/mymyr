@@ -7,18 +7,25 @@
 // discovery order, then the disjunctive ones in the graph's order. A disjunctive landmark holds when one of its atoms
 // holds; a derived atom holds when the state's closure under the axioms has it.
 //
-// Status (one bit per landmark): the landmarks reached on the path, i.e. true in some state of it. The start state
-// reaches those true in it, a transition adds those true in the successor, and a state reached on several paths keeps
-// the landmarks every path reached (the default Heuristic::merge), as Fast Downward intersects its past landmarks.
+// Status (one bit per landmark): the landmarks reached on the path, i.e. true in some state of it. A transition adds
+// those true in the successor, and a state reached on several paths keeps the landmarks every path reached, as Fast
+// Downward intersects its past landmarks. The landmarks are those of the task's initial state, so a path starts there:
+// the status of the initial state is the landmarks true in it. A path may start in another state s as well (a search's
+// start, evaluate(s) without a status): its status is then what every path from the initial state to s reaches, as
+// far as s shows it (the landmarks true in s or in the initial state, and those ordered greedy-necessarily before a
+// landmark true in s but not initially), and a flag bit after the landmarks marks it as inferred.
 // Fast Downward also stores the future landmarks and unites them over the paths; with goal and greedy-necessary
 // orderings only (no reasonable orderings), its future landmarks are those computed here from the reached ones.
 //
 // Value of a state s with reached set R: the needed landmarks are those not in R (they must still be reached) and those
 // in R that are false in s and either a goal atom or ordered greedy-necessarily before a landmark not in R (they must
-// hold again). Unit costs count them; real costs add, per needed landmark, the cheapest cost of its first achievers
+// hold again; for an inferred status, not those that have no achiever and are needed only for an ordering, as the
+// path to s may have reached the later landmark). Unit costs count them; real costs add, per needed landmark, the
+// cheapest cost of its first achievers
 // (not reached yet) or of all its achievers (needed again), as Fast Downward's landmark_sum. A landmark with a derived
 // atom costs the cheapest action (some action must change the state for an axiom to derive it; Fast Downward's). A
-// needed landmark without such an achiever makes s a dead end (+inf): sound for these landmarks and orderings.
+// needed landmark without such an achiever makes s a dead end (+inf): sound for these landmarks and orderings (a
+// landmark without first achievers that is not true initially can never be reached).
 //
 // Preferred operators: an applicable action is preferred if one of its effects that fires in the evaluated state adds
 // an atom of a needed landmark that is false there (Fast Downward's); a condition over a derived atom counts as
@@ -84,6 +91,47 @@ public:
     {
         std::fill(out.begin(), out.end(), u64{0});
         add_true(s, out, m_scan);
+        if (s == m_s0.view())
+            return;
+        // reached on every path from the initial state: the landmarks true there, and transitively those ordered
+        // before a landmark that became true on the way (it was false initially)
+        const u32 n = static_cast<u32>(m_lms.size());
+        m_work.clear();
+        for (u32 i = 0; i < n; ++i)
+            if (bits::test(out.data(), m_words, i) && !bits::test(m_init.data(), m_words, i))
+                m_work.push_back(i);
+        for (usize w = 0; w < m_words; ++w)
+            out[w] |= m_init[w];
+        while (!m_work.empty())
+        {
+            const u32 i = m_work.back();
+            m_work.pop_back();
+            for (u32 k = m_pred_begin[i]; k < m_pred_begin[i + 1]; ++k)
+                if (const u32 p = m_pred[k]; !bits::test(out.data(), m_words, p))
+                {
+                    bits::set(out.data(), p);
+                    if (!bits::test(m_init.data(), m_words, p))
+                        m_work.push_back(p);
+                }
+        }
+        bits::set(out.data(), n);  // inferred
+    }
+
+    /// The landmarks both statuses reached; inferred if either is.
+    bool merge(std::span<u64> into, std::span<const u64> other) const override
+    {
+        const u32 flag = static_cast<u32>(m_lms.size());
+        const bool inferred = bits::test(into.data(), m_words, flag) || bits::test(other.data(), m_words, flag);
+        bool changed = false;
+        for (usize w = 0; w < into.size(); ++w)
+        {
+            u64 x = into[w] & other[w];
+            if (inferred && w == flag / 64)
+                x |= u64{1} << (flag % 64);
+            changed |= x != into[w];
+            into[w] = x;
+        }
+        return changed;
     }
 
     void progress(std::span<const u64> parent_status, StateView /*parent*/, const ActionLabel& /*action*/, StateView child,
@@ -96,7 +144,7 @@ public:
     Value evaluate(StateView s) override
     {
         m_tmp.assign(m_words, 0);
-        add_true(s, m_tmp, m_scan);
+        initial_status(s, m_tmp);
         return evaluate(s, m_tmp);
     }
 
@@ -113,6 +161,7 @@ public:
             h = k_inf;
         const u32 n = static_cast<u32>(m_lms.size());
         m_reached.assign(status.begin(), status.end());
+        const bool inferred = bits::test(status.data(), m_words, n);
         m_true.assign(m_words, 0);
         for (u32 i = 0; i < n && h < k_inf; ++i)
             if (holds(i, m_eval))
@@ -127,7 +176,11 @@ public:
             if (!bits::test(m_reached.data(), m_words, i))
                 c = m_lms[i].first_cost;
             else if (!bits::test(m_true.data(), m_words, i) && needed_again(i))
+            {
                 c = m_lms[i].cost;
+                if (c == k_inf && inferred && !m_lms[i].goal)
+                    continue;  // the path to s may have reached the landmark ordered after it
+            }
             else
                 continue;
             bits::set(m_needed.data(), i);
@@ -213,7 +266,7 @@ private:
                     l.props.push_back(pp);
         }
         const u32 n = static_cast<u32>(m_lms.size());
-        m_words = (n + 63) / 64;
+        m_words = (n + 1 + 63) / 64;  // and the flag of an inferred status
         // greedy-necessary orderings: per landmark the landmarks it must hold right before
         {
             std::vector<std::vector<u32>> succ(n);
@@ -224,11 +277,20 @@ private:
                 if (bi < static_cast<std::ptrdiff_t>(facts.size()) && ai < static_cast<std::ptrdiff_t>(facts.size()))
                     succ[static_cast<usize>(bi)].push_back(static_cast<u32>(ai));
             }
+            std::vector<std::vector<u32>> pred(n);
             m_succ_begin.assign(1, 0);
-            for (const auto& v : succ)
+            for (u32 i = 0; i < n; ++i)
             {
-                m_succ.insert(m_succ.end(), v.begin(), v.end());
+                m_succ.insert(m_succ.end(), succ[i].begin(), succ[i].end());
                 m_succ_begin.push_back(static_cast<u32>(m_succ.size()));
+                for (u32 j : succ[i])
+                    pred[j].push_back(i);
+            }
+            m_pred_begin.assign(1, 0);
+            for (const auto& v : pred)
+            {
+                m_pred.insert(m_pred.end(), v.begin(), v.end());
+                m_pred_begin.push_back(static_cast<u32>(m_pred.size()));
             }
         }
         // proposition -> landmarks holding it
@@ -301,6 +363,9 @@ private:
         }
         m_scan.mark.assign(R.num_props(), 0);
         m_eval.mark.assign(R.num_props(), 0);
+        m_s0 = m_task.initial_state();
+        m_init.assign(m_words, 0);
+        add_true(m_s0.view(), m_init, m_scan);
     }
 
     /// Converts s into `scan` and marks its "true" propositions.
@@ -396,12 +461,15 @@ private:
     std::shared_ptr<const RelaxedTask> m_R;
     std::vector<Landmark> m_lms;
     u32 m_words = 0;
-    std::vector<u32> m_succ_begin, m_succ, m_prop_lms_begin, m_prop_lms, m_ga_adds_begin;
+    std::vector<u32> m_succ_begin, m_succ, m_pred_begin, m_pred, m_prop_lms_begin, m_prop_lms, m_ga_adds_begin;
+    State m_s0;               // the task's initial state
+    std::vector<u64> m_init;  // the landmarks true in it
     std::vector<std::pair<u32, u32>> m_ga_adds;  // per ground action: (operator, landmark) for each landmark atom it adds
     std::vector<std::pair<u32, CanonicalAtom>> m_derived;  // the derived landmark atoms: ("true" proposition, atom)
     // scratch: transitions (m_scan) and the last evaluation (m_eval, the bit sets below)
     Scan m_scan, m_eval;
     std::vector<u64> m_tmp, m_reached, m_true, m_needed;
+    std::vector<u32> m_work;
     bool m_plan_valid = false;
 };
 }  // namespace

@@ -61,6 +61,94 @@ default: the task's objective), `"unit"` or `"real"` (see the heuristics guide).
 best-first `beam` also takes a heuristic and `width=`. IW and SIW support numeric tasks; the other best-first
 algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
 
+## LM-cut and the landmark count
+
+`"lmcut"` (also `"lm_cut"`) and `"lmcount"` (also `"lm_count"`, `"landmark_count"`) are heuristic kinds of
+`search.Heuristic`, of every search's `heuristic=` and of the CLI's `--heuristic`.
+
+```python
+from pathlib import Path
+
+import mymyr
+from mymyr import search
+
+data = Path("tests/data/pddl/gripper")
+task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01.pddl")
+s = task.initial_state
+
+print(search.Heuristic(task, "max")(s), "<=", search.Heuristic(task, "lmcut")(s))
+optimal = search.astar(task, heuristic="lmcut")
+print(optimal.cost, optimal.stats.expanded, optimal.expanded_until_last_jump)
+
+lmcount = search.Heuristic(task, "lmcount")
+status = lmcount.initial_status(s)
+a = task.applicable_actions(s)[0]
+t = task.apply(s, a)
+status = lmcount.progress(status, s, a, t)  # the landmarks reached on the path s, t
+print(lmcount(t, status), lmcount(t))       # along the path, and with t as its start
+print(search.gbfs(task, heuristic="lmcount", lazy=True).status)
+```
+
+Both evaluate the grounded delete relaxation that `max`, `add` and `ff` use (`share=` reuses one grounding). They have
+no lifted evaluation: `evaluation="lifted"` raises `ValueError`, and a state outside the grounding (only a state that
+the initial state cannot reach) raises `RuntimeError`. Like the other relaxation heuristics they ignore numeric
+conditions and effects. Negative preconditions count through a proposition per atom used negatively, true when the
+atom is false. The CUDA heuristics and device searches refuse both kinds.
+
+### LM-cut
+
+LM-cut (Helmert and Domshlak 2009) is admissible, `h_max <= LM-cut <= h*`, so A* with it finds optimal plans. It
+computes h_max with a supporter per operator (a most expensive precondition), marks the goal zone (the propositions
+that reach the goal through zero-cost operators and their supporters), takes the cut (the operators reachable from the
+initial state without entering the goal zone that have an effect in it), adds the cut's cheapest cost to the value and
+subtracts it from the cut's operators, and repeats until the goal costs 0.
+
+- Ties: an operator's supporter is the first of its most expensive preconditions in the grounding's order. While the
+  goal zone is marked, a zero-cost achiever's supporter moves to an equally expensive precondition without zero-cost
+  achievers, else to one in the goal zone (Fast Downward's border and goal-zone detection).
+- Costs: unit costs, or the task's action costs on the relaxation's integer scale (`costs="real"`): zero and
+  fractional costs are exact up to 6 decimal places.
+- Conditional effects: the relaxation has an operator per effect, but an action's cost is charged once. A cut lowers
+  each of its actions once, however many of the action's effects it holds: every plan applies some action of the cut,
+  so the cuts form a cost partitioning over actions. Effects of one action with the same conditions are one operator.
+  Lowering an action lowers its other effects too, so the cuts can sum to less than h_max; the value is then h_max.
+- Derived predicates: the axioms are operators of cost 0, which no cut contains.
+- A search goal of several alternatives (`goal=[...]`): the smallest value over them.
+
+### Landmark count
+
+The landmark count of LAMA (Richter and Westphal 2010), with Fast Downward's landmark progression. The landmarks are
+`approximate_fact_landmarks` with sound first achievers (`first_achievers="possibly_before"`), derived atoms
+(`include_derived_atoms=True`), greedy-necessary orderings and disjunctive landmarks of up to four atoms, one level
+deep. Every plan makes each of them true at some point.
+
+The value of a state depends on the path to it, through the landmarks the path reached (true in one of its states).
+The needed landmarks are those not reached, and the reached ones that are false in the state and either a goal atom
+or ordered greedy-necessarily before a landmark not reached. With unit costs the value is their number. With real
+costs it adds, per needed landmark, the cheapest cost of its first achievers (not reached yet) or of all its achievers
+(needed again); a landmark with a derived atom costs the cheapest action. A needed landmark without such an achiever
+makes the state a dead end. The landmark count is not admissible (one action can achieve several landmarks).
+
+The best-first searches (`astar`, `gbfs`, `beam`, `astar_iw`) keep the reached landmarks per node: a transition adds
+those true in the successor, and a state reached on several paths keeps the landmarks all of them reached. The eager
+searches evaluate a new state after generating every successor of its parent, so its status holds the other paths
+from that parent too; the lazy searches evaluate when they pop it. Eager A* evaluates a state again when a cheaper path
+reaches it. `initial_status`, `progress`, `merge` and `h(state, status)` give the same steps to a search written in
+Python.
+
+The landmarks are those of the task's initial state, where the paths start. A search started in another state
+(`start=`), and a `Heuristic` called on a state alone, infer the start's status from the state: the landmarks true in
+it or in the initial state, and those ordered greedy-necessarily before a landmark true in it but not initially, since
+every path from the initial state reached them. Such a status (and every status merged with it) is marked inferred, and
+a landmark that it needs again only for an ordering and that no action achieves does not make the state a dead end: the
+path to the state may have reached the later landmark.
+
+Preferred operators (the lazy searches' preferred list, `preferred_actions(state, status)`): the applicable actions
+with an effect that fires in the state and adds an atom of a needed landmark that is false there.
+
+A search goal of several alternatives fails (`Status.FAILED`): the landmarks are those of the task's goal. There is no
+admissible variant (cost partitioning over the landmarks).
+
 ## Goals, budgets and callbacks
 
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and

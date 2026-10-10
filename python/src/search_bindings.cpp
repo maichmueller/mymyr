@@ -1476,6 +1476,9 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("evaluations", [](const PyBestFirstResult& x) { return x.r.evaluations; })
         .def_prop_ro("dead_ends", [](const PyBestFirstResult& x) { return x.r.dead_ends; })
         .def_prop_ro("reopened", [](const PyBestFirstResult& x) { return x.r.reopened; })
+        .def_prop_ro("expanded_until_last_jump", [](const PyBestFirstResult& x) { return x.r.expanded_until_last_jump; },
+                     "A*: the expansions before the f-value of the last node popped was first reached (those below "
+                     "the final f-layer; Fast Downward's statistic). 0 for the other searches.")
         .def_prop_ro("layers", [](const PyBestFirstResult& x) { return x.r.layers; })
         .def_prop_ro("initial_h", [](const PyBestFirstResult& x) { return x.r.initial_h; })
         .def_prop_ro("heuristic", [](const PyBestFirstResult& x) { return x.r.heuristic; })
@@ -1810,7 +1813,8 @@ void bind_search(nb::module_& parent)
             },
             "state"_a,
             "The status of a path that starts in `state` (bytes; empty for a heuristic that is not path-dependent). "
-            "lmcount: the landmarks true in it.")
+            "lmcount: the landmarks true in the initial state; for another state, inferred from it (those true in it "
+            "or initially, and those ordered greedy-necessarily before one true in it but not initially).")
         .def(
             "progress",
             [](PyHeuristic& self, nb::bytes status, StateArg state, Arg<PyAction> action, StateArg successor) {
@@ -1843,7 +1847,7 @@ void bind_search(nb::module_& parent)
             },
             "status"_a, "other"_a,
             "The status of a state reached on two paths with statuses `status` and `other`. lmcount: the landmarks "
-            "both reached (Fast Downward's).")
+            "both reached (Fast Downward's), inferred if either status is.")
         .def(
             "relaxed_plan",
             [](PyHeuristic& self, StateArg state) {

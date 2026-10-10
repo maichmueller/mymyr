@@ -22,9 +22,9 @@
 // what the actions have left, so h is a cost partitioning of action landmarks: admissible with conditional effects.
 // Lowering an action lowers all of its operators, also those outside the cut, so with conditional effects the sum of
 // the cuts can fall below h_max; h is the larger of the two (both are admissible). Without conditional effects every
-// action is one operator and h is the sum of the cuts, which is at least h_max. Axioms are zero-cost operators: a zero-cost operator's supporter lies in the goal zone whenever
-// one of its effects does, so no cut holds one, and the derived atoms of a state are reachable in the relaxation from
-// its fluent atoms. "False" propositions (negative preconditions) hold where their atom is false and are otherwise
+// action is one operator and h is the sum of the cuts, which is at least h_max. Axioms are zero-cost operators: a
+// zero-cost operator's supporter lies in the goal zone whenever one of its effects does, so no cut holds one, and the
+// derived atoms of a state are reachable in the relaxation from its fluent atoms. "False" propositions (negative preconditions) hold where their atom is false and are otherwise
 // added by the operators deleting it, which over-approximates every plan as well. Numeric conditions are ignored.
 // Grounded only: a state outside the grounding raises std::runtime_error.
 

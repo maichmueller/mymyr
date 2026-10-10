@@ -81,8 +81,8 @@ def test_landmark_count_follows_the_path(chain):
         t = chain.apply(s, a)
         status = h.progress(status, s, a, t)
         s = t
-    # y was reached and is not needed again; the state alone does not know it
-    assert h(s, status) == 2 and h(s) == 3
+    # y was reached and is not needed again; alone, the state shows x, so every path to it reached y
+    assert h(s, status) == 2 and h(s) == 2
     assert h.evaluate(s, status=status) == 2
     # reached on another path that reached nothing: the landmarks both reached
     assert h.merge(status, start) == start
@@ -92,6 +92,14 @@ def test_landmark_count_follows_the_path(chain):
         h(s, b"\0")
     with pytest.raises(TypeError):
         h(s, "status")
+    # back in the initial state after reaching g: g and h are needed; alone, it starts a path
+    for name in ("(make-g)", "(lose-x)", "(lose-g)"):
+        a = action(chain, s, name)
+        t = chain.apply(s, a)
+        status = h.progress(status, s, a, t)
+        s = t
+    assert s == chain.initial_state
+    assert h(s, status) == 2 and h(s) == 4
 
 
 @pytest.mark.parametrize("kind", ["lmcut", "lmcount"])
@@ -147,3 +155,31 @@ def test_one_heuristic_per_thread_over_a_shared_task(depot):
     for t in threads:
         t.join()
     assert not errors
+
+
+SHORTCUT_DOMAIN = """(define (domain d) (:requirements :strips)
+ (:predicates (x) (y1) (y) (g))
+ (:action get-x :parameters () :precondition (and) :effect (x))
+ (:action get-y1 :parameters () :precondition (and) :effect (y1))
+ (:action get-y :parameters () :precondition (y1) :effect (y))
+ (:action from-x :parameters () :precondition (x) :effect (g))
+ (:action from-y :parameters () :precondition (y) :effect (g)))"""
+
+
+def test_possibly_before_first_achievers_are_sound(tmp_path):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    (tmp_path / "domain.pddl").write_text(SHORTCUT_DOMAIN)
+    (tmp_path / "problem.pddl").write_text("(define (problem p) (:domain d) (:init) (:goal (g)))")
+    task = mymyr.Task.from_pddl(tmp_path / "domain.pddl", tmp_path / "problem.pddl")
+
+    def names(g):
+        return {str(a) for a in g.landmarks}
+
+    # the plan get-y1, get-y, from-y never makes x true: only h_max first achievers make it a landmark
+    assert names(search.approximate_fact_landmarks(task)) == {"(g)", "(x)"}
+    assert names(search.approximate_fact_landmarks(task, first_achievers="possibly_before")) == {"(g)"}
+    pb = search.approximate_fact_landmarks(task, first_achievers=search.FirstAchievers.POSSIBLY_BEFORE)
+    assert names(pb) == {"(g)"}
+    with pytest.raises(ValueError, match="first_achievers"):
+        search.approximate_fact_landmarks(task, first_achievers="cheapest")

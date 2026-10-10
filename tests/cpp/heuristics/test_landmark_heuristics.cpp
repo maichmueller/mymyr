@@ -219,6 +219,9 @@ TEST(LandmarkHeuristics, EveryBestFirstSearchUsesThem)
         blind.heuristic.kind = H::Kind::Blind;
         const auto opt = search::astar_eager(*task, blind);
         ASSERT_EQ(opt.status, search::SearchStatus::Solved);
+        // blind A* expands every state closer than the plan's cost before its final f-layer
+        EXPECT_GT(opt.expanded_until_last_jump, 0u);
+        EXPECT_LE(opt.expanded_until_last_jump, opt.stats.expanded);
         for (const H::Kind k : {H::Kind::LmCount, H::Kind::LmCut})
         {
             search::BestFirstOptions o;
@@ -238,6 +241,7 @@ TEST(LandmarkHeuristics, EveryBestFirstSearchUsesThem)
                 if (k == H::Kind::LmCut && std::string(sname).starts_with("astar"))
                 {
                     EXPECT_EQ(r.cost, opt.cost) << sname;
+                    EXPECT_LE(r.expanded_until_last_jump, r.stats.expanded) << sname;
                 }
                 std::printf("SEARCH %-28s %-8s %-12s cost %g expanded %llu evaluations %llu\n", name, H::to_string(k), sname,
                             r.cost, static_cast<unsigned long long>(r.stats.expanded),

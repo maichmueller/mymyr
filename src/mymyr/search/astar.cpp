@@ -71,6 +71,15 @@ struct AStarEager
             else
                 open.push(f, Q::key(nodes.h[id]), store.make_ref(id, v));
         };
+        f64 last_f = -k_inf;
+        auto layer = [&](u32 id)
+        {
+            if (const f64 f = fval(nodes, id, c.g0); f > last_f)
+            {
+                last_f = f;
+                r.expanded_until_last_jump = r.stats.expanded;
+            }
+        };
         const u32 max_depth = c.o.control.budget.max_depth;
         for (;;)
         {
@@ -86,6 +95,7 @@ struct AStarEager
                 }
                 store.load(ref, cur);
                 store.release(ref);
+                layer(id);
                 c.solved(nodes, id, cur.view(), false);
                 break;
             }
@@ -107,6 +117,7 @@ struct AStarEager
             store.load(ref, cur);
             store.release(ref);
             nodes.set_status(id, Nodes::Closed);
+            layer(id);
             if (nodes.track_depth && nodes.depth[id] >= max_depth)
             {
                 ++r.stats.pruned;
@@ -226,6 +237,15 @@ struct AStarLazy
         const bool use_preferred = c.o.preferred_operators && c.h->provides_preferred();
         const u32 max_depth = c.o.control.budget.max_depth;
         u32 last_evaluated = root;
+        f64 last_f = -k_inf;
+        auto layer = [&](u32 id)
+        {
+            if (const f64 f = fval(nodes, id, c.g0); f > last_f)
+            {
+                last_f = f;
+                r.expanded_until_last_jump = r.stats.expanded;
+            }
+        };
         for (;;)
         {
             if (!goals.empty() && (open.empty() || goals.top_key() <= open.min_key()))
@@ -240,6 +260,7 @@ struct AStarLazy
                 }
                 store.load(ref, cur);
                 store.release(ref);
+                layer(id);
                 c.solved(nodes, id, cur.view(), false);
                 break;
             }
@@ -293,6 +314,7 @@ struct AStarLazy
                 }
             }
             store.release(ref);
+            layer(id);
             if (!requeue && nodes.has(id, Nodes::Goal))
             {
                 c.solved(nodes, id, sv, false);
