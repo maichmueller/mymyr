@@ -241,6 +241,10 @@ if(TARGET mymyr_frontend)
         MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}"
         $<$<BOOL:${MYMYR_SANITIZE}>:MYMYR_SANITIZED>)
     gtest_discover_tests(mymyr_numeric_pddl_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
+    # LM-cut and landmark count on hand-evaluated PDDL tasks
+    add_executable(mymyr_landmark_heuristics_tests heuristics/test_landmark_heuristics_pddl.cpp)
+    target_link_libraries(mymyr_landmark_heuristics_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
+    gtest_discover_tests(mymyr_landmark_heuristics_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 endif()
 
 # ------------------------------------------------------------------------------------------------ relaxed reachability and landmarks

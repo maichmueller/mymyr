@@ -30,6 +30,12 @@
 //      the first achievers' ground actions (PossiblyBefore: for the atoms step 2 and 3 expanded only), and per ground
 //      action the landmarks it achieves, first-achieves and uniquely achieves (as the only achiever at all).
 //
+// Derived atoms (include_derived_atoms): mimir's landmarks are fluent atoms. With the option, positive derived goal
+// atoms and positive derived preconditions are landmarks too, back-chained through the axioms deriving them (their
+// achievers, which the achiever index does not list: it lists ground actions). An atom ordered before a derived atom
+// holds in the state in which the derived atom first does. The graph's state queries (achieved, unachieved, slots) see
+// fluent atoms only.
+//
 // The grounding keeps the operators that can never fire (RelaxedTaskOptions::keep_unreachable_operators): mimir's
 // achiever index counts them. A RelaxedTask built without that option gives the same landmarks and orderings, but its
 // achiever index lacks those actions.
@@ -53,6 +59,7 @@ struct ApproximateFactLandmarkOptions
     usize max_disjunctive_landmark_depth = 0;  // 0: unbounded
     heuristics::GroundingBudget budget = {};   // the Task overload's grounding
     FirstAchievers first_achievers = FirstAchievers::HMax;
+    bool include_derived_atoms = false;  // derived atoms as landmarks too (see above)
 };
 
 /// Grounds `task` (keeping operators that can never fire) and generates. Throws std::runtime_error when the grounding

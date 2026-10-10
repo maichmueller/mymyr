@@ -2,9 +2,10 @@
 // Keller, Eriksson and Helmert 2023).
 //
 // Landmarks: approximate_fact_landmarks over the heuristic's grounding (landmarks/approximate.hpp) with sound first
-// achievers (FirstAchievers::PossiblyBefore), greedy-necessary orderings and disjunctive landmarks of at most
-// k_disjunctive_size atoms drawn from the fact landmarks: the fact landmarks in discovery order, then the disjunctive
-// ones in the graph's order. A disjunctive landmark holds when one of its atoms holds.
+// achievers (FirstAchievers::PossiblyBefore), derived atoms (include_derived_atoms), greedy-necessary orderings and
+// disjunctive landmarks of at most k_disjunctive_size atoms drawn from the fact landmarks: the fact landmarks in
+// discovery order, then the disjunctive ones in the graph's order. A disjunctive landmark holds when one of its atoms
+// holds; a derived atom holds when the state's closure under the axioms has it.
 //
 // Status (one bit per landmark): the landmarks reached on the path, i.e. true in some state of it. The start state
 // reaches those true in it, a transition adds those true in the successor, and a state reached on several paths keeps
@@ -15,8 +16,9 @@
 // Value of a state s with reached set R: the needed landmarks are those not in R (they must still be reached) and those
 // in R that are false in s and either a goal atom or ordered greedy-necessarily before a landmark not in R (they must
 // hold again). Unit costs count them; real costs add, per needed landmark, the cheapest cost of its first achievers
-// (not reached yet) or of all its achievers (needed again), as Fast Downward's landmark_sum. A needed landmark without
-// such an achiever makes s a dead end (+inf): sound for these landmarks and orderings.
+// (not reached yet) or of all its achievers (needed again), as Fast Downward's landmark_sum. A landmark with a derived
+// atom costs the cheapest action (some action must change the state for an axiom to derive it; Fast Downward's). A
+// needed landmark without such an achiever makes s a dead end (+inf): sound for these landmarks and orderings.
 //
 // Preferred operators: an applicable action is preferred if one of its effects that fires in the evaluated state adds
 // an atom of a needed landmark that is false there (Fast Downward's); a condition over a derived atom counts as
@@ -28,7 +30,9 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/landmarks/approximate.hpp"
+#include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
+#include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -171,6 +175,7 @@ private:
     struct Scan
     {
         StateProps props;
+        std::vector<u32> derived;  // the "true" propositions of the derived landmark atoms that hold
         std::vector<u32> mark;
         u32 stamp = 0;
     };
@@ -182,6 +187,7 @@ private:
         lo.first_achievers = landmarks::FirstAchievers::PossiblyBefore;
         lo.max_disjunctive_landmark_size = k_disjunctive_size;
         lo.max_disjunctive_landmark_depth = 1;
+        lo.include_derived_atoms = true;
         const landmarks::FactLandmarkGraph g = landmarks::approximate_fact_landmarks(R, lo);
         const landmarks::AchieverIndex& ix = g.achievers();
         std::vector<u8> goal(R.num_props(), 0);
@@ -238,8 +244,21 @@ private:
                 m_prop_lms_begin.push_back(static_cast<u32>(m_prop_lms.size()));
             }
         }
-        // achievers: every operator adding an atom of the landmark; first achievers from the graph (fact landmarks)
+        // the derived landmark atoms, which the axioms achieve: the cheapest action
+        const u64 fluents = m_task.atoms().layout().fluent_count;
         auto unit_or_real = [&](u32 ga) { return m_real ? R.real_cost(ga) : u32{1}; };
+        u32 cheapest = k_inf;
+        for (u32 ga = 0; ga < R.num_ground_actions(); ++ga)
+            cheapest = std::min(cheapest, unit_or_real(ga));
+        std::vector<u8> derived_prop(R.num_props(), 0);
+        for (u32 i = 0; i < n; ++i)
+            for (u32 p : m_lms[i].props)
+                if (R.prop_atom(p) >= fluents && !derived_prop[p])
+                {
+                    derived_prop[p] = 1;
+                    m_derived.emplace_back(p, R.prop_atom(p));
+                }
+        // achievers: every operator adding an atom of the landmark; first achievers from the graph (fact landmarks)
         std::vector<std::vector<std::pair<u32, u32>>> adds(R.num_ground_actions());
         for (u32 o = 0; o < R.num_ops(); ++o)
         {
@@ -257,9 +276,12 @@ private:
         for (u32 i = 0; i < n; ++i)
         {
             Landmark& l = m_lms[i];
-            if (i >= facts.size())
+            for (u32 p : l.props)
+                if (derived_prop[p])
+                    l.cost = std::min(l.cost, cheapest);
+            if (i >= facts.size() || (!l.props.empty() && derived_prop[l.props[0]]))
             {
-                l.first_cost = l.cost;  // disjunctive: every achiever
+                l.first_cost = l.cost;  // disjunctive or derived: every achiever
                 continue;
             }
             for (u32 a : ix.first_achievers_of(facts[i]))
@@ -294,6 +316,22 @@ private:
         }
         for (u32 p : scan.props.pos)
             scan.mark[p] = scan.stamp;
+        scan.derived.clear();
+        if (!m_derived.empty())
+        {
+            Successors& succ = m_task.evaluation_workspace().successors();
+            succ.prepare(s);
+            const mymyr::detail::Engine& e = succ.engine();
+            for (const auto& [p, c] : m_derived)
+            {
+                const u32 slot = m_task.atoms().find(c);
+                if (slot != AtomIndex::k_empty && bits::test(e.derived(), e.derived_words(), slot))
+                {
+                    scan.mark[p] = scan.stamp;
+                    scan.derived.push_back(p);
+                }
+            }
+        }
     }
 
     [[nodiscard]] bool holds(u32 i, const Scan& scan) const
@@ -308,9 +346,15 @@ private:
     void add_true(StateView s, std::span<u64> out, Scan& scan)
     {
         convert(s, scan);
-        for (u32 p : scan.props.pos)
+        auto set = [&](u32 p)
+        {
             for (u32 k = m_prop_lms_begin[p]; k < m_prop_lms_begin[p + 1]; ++k)
                 out[m_prop_lms[k] >> 6] |= u64{1} << (m_prop_lms[k] & 63);
+        };
+        for (u32 p : scan.props.pos)
+            set(p);
+        for (u32 p : scan.derived)
+            set(p);
     }
 
     /// A reached landmark false in the state: a goal, or ordered greedy-necessarily before an unreached landmark.
@@ -354,6 +398,7 @@ private:
     u32 m_words = 0;
     std::vector<u32> m_succ_begin, m_succ, m_prop_lms_begin, m_prop_lms, m_ga_adds_begin;
     std::vector<std::pair<u32, u32>> m_ga_adds;  // per ground action: (operator, landmark) for each landmark atom it adds
+    std::vector<std::pair<u32, CanonicalAtom>> m_derived;  // the derived landmark atoms: ("true" proposition, atom)
     // scratch: transitions (m_scan) and the last evaluation (m_eval, the bit sets below)
     Scan m_scan, m_eval;
     std::vector<u64> m_tmp, m_reached, m_true, m_needed;

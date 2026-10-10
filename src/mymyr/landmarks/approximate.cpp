@@ -39,9 +39,10 @@ public:
     }
 
 private:
-    [[nodiscard]] bool positive_fluent(u32 prop) const
+    /// A "true" proposition of a fluent atom (or of a derived atom, with include_derived_atoms).
+    [[nodiscard]] bool positive_atom(u32 prop) const
     {
-        return !R.negative(prop) && R.prop_atom(prop) < L.fluent_count;
+        return !R.negative(prop) && (R.prop_atom(prop) < L.fluent_count || (O.include_derived_atoms && R.prop_atom(prop) < L.total));
     }
 
     /// Step 1: h_max-style Dijkstra with unit firing costs, first achievers per proposition.
@@ -193,7 +194,8 @@ private:
         return out;
     }
 
-    /// Positive fluent preconditions of an operator: canonical ids, ascending, distinct.
+    /// Positive fluent (and derived, with include_derived_atoms) preconditions of an operator: canonical ids,
+    /// ascending, distinct.
     const std::vector<CanonicalAtom>& pre_atoms(u32 o)
     {
         if (m_pre_done.empty())
@@ -206,7 +208,7 @@ private:
             return v;
         m_pre_done[o] = 1;
         for (u32 p : R.pre(o))
-            if (positive_fluent(p))
+            if (positive_atom(p))
                 v.push_back(R.prop_atom(p));
         std::sort(v.begin(), v.end());
         v.erase(std::unique(v.begin(), v.end()), v.end());
@@ -241,13 +243,15 @@ private:
             std::vector<u32> args;
             for (const formalism::Literal& l : D.literals_of(D.goal))
             {
-                if (!l.positive || D.predicates[l.pred.v].kind != formalism::PredKind::Fluent || L.offset[l.pred.v] == CanonicalLayout::k_none)
+                const formalism::PredKind kind = D.predicates[l.pred.v].kind;
+                const bool wanted = kind == formalism::PredKind::Fluent || (O.include_derived_atoms && kind == formalism::PredKind::Derived);
+                if (!l.positive || !wanted || L.offset[l.pred.v] == CanonicalLayout::k_none)
                     continue;
                 args.clear();
                 for (formalism::Term t : D.terms_of(l))
                     args.push_back(formalism::term_object(t).v);
                 const CanonicalAtom c = L.encode(l.pred.v, args.data());
-                if (c < L.fluent_count)
+                if (c < (O.include_derived_atoms ? L.total : L.fluent_count))
                     add(c);
             }
         }
@@ -362,14 +366,14 @@ private:
             if (R.is_axiom(o))
                 continue;
             for (u32 q : R.eff(o))
-                if (positive_fluent(q))
+                if (positive_atom(q))
                     ach.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
         }
         std::sort(ach.begin(), ach.end());
         ach.erase(std::unique(ach.begin(), ach.end()), ach.end());
         const bool pb = O.first_achievers == FirstAchievers::PossiblyBefore;
         for (u32 q = 0; q < R.num_props(); ++q)
-            if (positive_fluent(q) && (!pb || (!m_pb_done.empty() && m_pb_done[q])))
+            if (positive_atom(q) && (!pb || (!m_pb_done.empty() && m_pb_done[q])))
                 for (u32 o : pb ? m_pb[q] : m_first[q])
                     if (!R.is_axiom(o))
                         first.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
