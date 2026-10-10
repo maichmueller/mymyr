@@ -277,7 +277,8 @@ void check_invariants(const StateSpace& S)
     if (S.has_labels())
     {
         const Task& task = *S.task();
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         LineVector<u64> next;
         for (u32 v = 0; v < N; v += std::max<u32>(1, N / 200))
         {

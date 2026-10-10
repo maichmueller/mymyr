@@ -26,7 +26,8 @@ class DeviceArena
 {
 public:
     /// `host_mirror` false: no pinned mirror (sync_to_host() throws; growth then copies only on the device, which
-    /// matters for large arenas: pinning memory costs milliseconds per 100 MB).
+    /// matters for large arenas: pinning memory costs milliseconds per 100 MB). Throws std::length_error when
+    /// capacity x record_bytes exceeds 2^64 - 1 (and the context's error when the allocation fails).
     DeviceArena(ContextPtr ctx, u32 record_bytes, u64 capacity = 1024, bool host_mirror = true);
     ~DeviceArena();
     DeviceArena(const DeviceArena&) = delete;
@@ -57,6 +58,7 @@ public:
     [[nodiscard]] const std::shared_ptr<PinnedBuffer>& mirror() const noexcept { return m_mirror; }
 
     /// Makes room for `more` records past device_size() (a new generation when full; capacity at least doubles).
+    /// Throws std::length_error, leaving the arena unchanged, when the records or their bytes exceed 2^64 - 1.
     void reserve(u64 more);
     /// Pointer to records [device_size(), device_size() + n) for a kernel on stream() to fill; then commit(n).
     [[nodiscard]] std::byte* tail(u64 n);

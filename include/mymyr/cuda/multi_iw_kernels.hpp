@@ -26,8 +26,9 @@
 //                           search (the smallest candidate of each content) and self loops;
 //   6. launch_admit / launch_cut / launch_keep: admission flags; per search, the cut where the tree reaches
 //      max_states or the next layer reaches max_next_layer_states (the candidate whose admission reaches the limit,
-//      found from a scan of the admission flags: no atomics decide it); the candidates after a cut are dropped. Without
-//      a root rule the novelty kernels admit, and without a cut every candidate is kept (Admission);
+//      found from a scan of the admission flags: no atomics decide it); the candidates after a cut are dropped, and
+//      the cut's own one too when the root alone fills the tree (max_states <= 1: the search stops before storing it).
+//      Without a root rule the novelty kernels admit, and without a cut every candidate is kept (Admission);
 //   7. launch_compact       the kept admitted candidates become the next layer's nodes, in candidate order (and the
 //                           reached atoms, the novelty commit);
 //   8. launch_search_update per-search counters, statuses and skipped counts, the search's entries of the next layer;
@@ -407,8 +408,9 @@ cudaError_t launch_root_flags(Gathered g, Candidates c, RootSet r, cudaStream_t 
 cudaError_t launch_admit(Candidates c, Admission a, cudaStream_t st);
 /// scan: exclusive scan [n + 1] of the admission (low 32 bits) and entry (high 32 bits) flags (launch_scan_flag_pair).
 cudaError_t launch_cut(Gathered g, Candidates c, Searches s, Limits lim, const u64* scan, cudaStream_t st);
-/// Kept flags (at or before the search's cut) into c.flags.
-cudaError_t launch_keep(Gathered g, Candidates c, Searches s, cudaStream_t st);
+/// Kept flags (at or before the search's cut; before it when the cut is a state cut of a tree the root alone fills,
+/// max_states <= 1) into c.flags.
+cudaError_t launch_keep(Gathered g, Candidates c, Searches s, Limits lim, cudaStream_t st);
 /// reached |= the atoms of every kept candidate (the chunks do it in launch_compact; this is for other candidates).
 cudaError_t launch_reached(Gathered g, Candidates c, Searches s, cudaStream_t st);
 

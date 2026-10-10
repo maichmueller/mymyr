@@ -19,10 +19,8 @@ namespace mymyr::rl
 {
 namespace
 {
-constexpr u64 k_i32_max = static_cast<u64>(std::numeric_limits<i32>::max());
-
 /// Throws unless row `i` sets only assigned fluent slots (bits at or beyond `limit` would index unassigned records).
-void check_row(const u64* row, u32 nw, u32 limit, u64 i)
+void check_row(const u64* row, u32 nw, u32 limit, u64 i, const char* what)
 {
     const u32 lw = limit >> 6;
     if (nw <= lw)
@@ -31,8 +29,25 @@ void check_row(const u64* row, u32 nw, u32 limit, u64 i)
     for (u32 w = lw + 1; w < nw && !bad; ++w)
         bad = row[w];
     if (bad)
-        throw std::invalid_argument("mymyr: expand: state row " + std::to_string(i) +
+        throw std::invalid_argument(std::string("mymyr: ") + what + ": state row " + std::to_string(i) +
                                     " sets atom slots its instance has not assigned (a state of another task?)");
+}
+
+/// Throws unless every row is a state of its instance: at least the instance's width when its atom slots are frozen
+/// (a narrower row is a truncated state), and, with `content`, no bit at a slot the instance has not assigned.
+void check_rows(const TaskSuite& table, StateBatchView in, const i32* ids, bool content, const char* what)
+{
+    for (u64 i = 0; i < in.rows; ++i)
+    {
+        const Task& t = table.task_of(ids, i);
+        if (in.words < t.words() && t.atoms().mode() == AtomMode::Frozen)
+            throw std::invalid_argument(std::string("mymyr: ") + what + ": state rows of " + std::to_string(in.words) +
+                                        " atom words; the states of instance " + std::to_string(ids ? ids[i] : 0) +
+                                        " have " + std::to_string(t.words()) + " (frozen atom slots)");
+        const u32 limit = t.atoms().fluent_slots();
+        if (content && static_cast<u64>(in.words) * 64 > limit)
+            check_row(in.row(i), in.words, limit, i, what);
+    }
 }
 
 void check_numeric(const TaskSuite& suite, u32 numeric_words, const char* what)
@@ -50,20 +65,13 @@ void check_batch(const TaskSuite& table, StateBatchView in, const i32* ids, cons
     if (in.stride && in.stride < static_cast<u64>(in.words) + in.numeric_words)
         throw std::invalid_argument("mymyr: expand: row stride smaller than the row width");
     check_numeric(table, in.numeric_words, "the states");
-    if (in.rows > k_i32_max)
+    if (in.rows > k_max_rows)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
     if (!ids && in.rows && table.size() > 1)
         throw std::invalid_argument(std::string("mymyr: expand: a batch over a ") + table.noun() + " of " +
                                     std::to_string(table.size()) + " instances needs task ids");
     table.check_task_ids(ids, in.rows);
-    if (!opt.validate)
-        return;
-    for (u64 i = 0; i < in.rows; ++i)
-    {
-        const u32 limit = table.task_of(ids, i).atoms().fluent_slots();
-        if (static_cast<u64>(in.words) * 64 > limit)
-            check_row(in.row(i), in.words, limit, i);
-    }
+    check_rows(table, in, ids, opt.validate, "expand");
 }
 
 void check_out(const TaskSuite& table, const Expansion& out)
@@ -71,7 +79,7 @@ void check_out(const TaskSuite& table, const Expansion& out)
     if (out.binding && out.label_width < table.label_width())
         throw std::invalid_argument("mymyr: expand: label width " + std::to_string(out.label_width) +
                                     " is below the largest schema arity " + std::to_string(table.label_width()));
-    if (out.capacity > k_i32_max)
+    if (out.capacity > k_max_rows)
         throw std::invalid_argument("mymyr: expand: capacity above 2^31 - 1 rows");
     if (out.succ && out.words == 0 && out.capacity)
         throw std::invalid_argument("mymyr: expand: successor rows of zero words");
@@ -81,21 +89,26 @@ void check_out(const TaskSuite& table, const Expansion& out)
         check_numeric(table, out.numeric_words, "the successor rows");
 }
 
-/// The calling thread's successor generators of a suite's instances, looked up once per instance and call.
+/// Successor generators of a suite's instances for one thread, leased on first use per instance and returned with the
+/// object.
 class Generators
 {
 public:
-    explicit Generators(const TaskSuite& table) : m_table(table), m_succ(table.size(), nullptr) {}
+    explicit Generators(const TaskSuite& table) : m_table(table), m_ws(table.size()), m_succ(table.size(), nullptr) {}
     [[nodiscard]] Successors& of(u32 instance)
     {
         Successors*& s = m_succ[instance];
         if (!s)
-            s = &m_table.task(instance)->workspace().successors();
+        {
+            m_ws[instance] = m_table.task(instance)->workspace();
+            s = &m_ws[instance]->successors();
+        }
         return *s;
     }
 
 private:
     const TaskSuite& m_table;
+    std::vector<WorkspaceLease> m_ws;
     std::vector<Successors*> m_succ;
 };
 
@@ -259,7 +272,7 @@ struct ScratchSink
 
 void write_offsets(i32* offsets, u64 i, u64 value)
 {
-    if (value > k_i32_max)
+    if (value > k_max_rows)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     offsets[i] = static_cast<i32>(value);
 }
@@ -516,6 +529,7 @@ void is_goal(const TaskSuite& table, StateBatchView in, const i32* ids, u8* out)
         throw std::invalid_argument(std::string("mymyr: is_goal: a batch over a ") + table.noun() + " of " +
                                     std::to_string(table.size()) + " instances needs task ids");
     table.check_task_ids(ids, in.rows);
+    check_rows(table, in, ids, true, "is_goal");
     for (u64 i = 0; i < in.rows; ++i)
         out[i] = goal_of(table.task_of(ids, i), in.row(i), in.words, in.numeric_words);
 }
@@ -575,7 +589,8 @@ void goal_count(StateBatchView in, StateBatchView gpos, StateBatchView gneg, i32
 WalkStats random_walks(const Task& task, u64 steps, u64 episode, u64 seed, const ExpandOptions& opt)
 {
     WalkStats st;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease ws = task.workspace();
+    Successors& succ = ws->successors();
     const State init = task.initial_state();
     State cur = init;
     LineVector<State> kids;  // per-thread hot scratch (see LineAllocator)

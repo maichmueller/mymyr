@@ -763,10 +763,13 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                     const u64 cap = limit_value(limit);
                     std::vector<GroundCondition> found;
                     if (cap > 0)
-                        for_each_binding(task, task.workspace(), *x.c, s.s.view(), fixed, [&](std::span<const ObjectId> b) {
+                    {
+                        const WorkspaceLease ws = task.workspace();
+                        for_each_binding(task, *ws, *x.c, s.s.view(), fixed, [&](std::span<const ObjectId> b) {
                             found.push_back(x.c->ground(b));
                             return found.size() < cap;
                         });
+                    }
                     const FormulaOwner o = x.o.task.is_none() ? task_owner(Owner{s.core, s.owner}) : x.o;
                     nb::typed<nb::list, PyGroundCondition> out{nb::list()};
                     for (GroundCondition& g : found)

@@ -81,7 +81,8 @@ bool has_negative_conditions(const Task& task)
 /// The delete-relaxed fixpoint through the successor generator: S grows by the adds of every action applicable in S.
 std::set<CanonicalAtom> relaxed_by_successors(const Task& task)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const State s0 = task.initial_state();
     std::vector<u64> w(s0.data(), s0.data() + s0.size_words());
     for (bool changed = true; changed;)
@@ -199,7 +200,8 @@ TEST(RelaxedReachability, EveryReachableStateStaysInside)
         SCOPED_TRACE(name);
         const auto task = load(name);
         const auto rr = reachability::RelaxedReachability::create(*task);
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         Lcg rng{7};
         for (int walk = 0; walk < 5; ++walk)
         {
@@ -447,7 +449,8 @@ public:
 
 bool valid_plan(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = task.initial_state();
     for (const Action& a : plan)
     {
@@ -513,7 +516,8 @@ TEST(LiftedHeuristics, EqualTheGroundedEvaluationForAtomGoals)
     {
         SCOPED_TRACE(name);
         const auto task = load(name);
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         for (auto kind : {heuristics::Kind::Max, heuristics::Kind::Add, heuristics::Kind::FF})
         {
             // grounded where the grounding covers the state and the goals (Auto; a negated goal atom without a "false"

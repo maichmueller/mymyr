@@ -1,6 +1,7 @@
 #include "mymyr/datasets/tuple_graph.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/novelty/novelty_table.hpp"
 
@@ -11,7 +12,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
 namespace mymyr::datasets
 {
@@ -569,7 +569,7 @@ std::vector<TupleGraph> tuple_graphs(const StateSpacePtr& space, const TupleGrap
 {
     check(space, options);
     const u32 N = space->num_states();
-    const u32 threads = options.threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : options.threads;
+    const u32 threads = resolve_threads(options.threads);
     const Shared sh{space, options};
     std::vector<TupleGraph> out(N);
     std::atomic<u32> next{0};

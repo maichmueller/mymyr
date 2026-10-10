@@ -26,6 +26,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace mymyr::cuda
 {
@@ -265,6 +266,8 @@ struct Driver
     void ensure_room(u64 more)
     {
         const u64 count = hc->count;
+        if (count + more > state_set::k_max_states)
+            throw std::length_error("mymyr: device best-first search: more than 2^31 - 2 states (with a step's candidates)");
         if (count + more > state_limit())
         {
             ensure_table(count, std::max(more, count));
@@ -528,7 +531,8 @@ struct Driver
             host_rows.resize(fresh * W);
             to_host(host_rows.data(), static_cast<const u64*>(fresh_rows.data()), fresh * W, s);
             sync();
-            Successors& succ = task->workspace().successors();
+            const WorkspaceLease lease = task->workspace();
+            Successors& succ = lease->successors();
             for (u64 i = 0; i < fresh; ++i)
             {
                 const u64* w = host_rows.data() + i * W;
@@ -881,7 +885,8 @@ std::vector<Action> Driver::plan_to(u64 id, const State& s0)
     }
     std::reverse(chain.begin(), chain.end());
     std::vector<Action> plan;
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     std::vector<u64> prow(W, 0), crow(W), tmp;
     std::copy_n(s0.data(), std::min(s0.size_words(), W), prow.begin());
     for (const auto& [v, k] : chain)
@@ -925,7 +930,10 @@ void Driver::solved(u64 id, const State& s0)
     r.cost = g0 + gid;
     r.goal_state = State(row.data(), W);
     if (greedy && !costs->unit())
-        r.cost = heuristics::plan_metric(task->workspace().successors(), *costs, s0, g0, r.plan);
+    {
+        const WorkspaceLease lease = task->workspace();
+        r.cost = heuristics::plan_metric(lease->successors(), *costs, s0, g0, r.plan);
+    }
 }
 
 void Driver::stop_at_goal(const State& s0)
@@ -1057,7 +1065,7 @@ DeviceBestFirstResult Driver::run()
         r.status = search::SearchStatus::Unsolvable;
         return finish();
     }
-    if (task->workspace().successors().is_goal(s0.view()))
+    if (task->is_goal(s0.view()))
     {
         W = bucket(std::max(task->words(), s0.size_words()));
         hc->count = 1;
@@ -1129,6 +1137,9 @@ DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestF
         throw std::invalid_argument("mymyr: device best-first search: null context or task");
     if (const std::string why = best_first_unsupported(*task, options); !why.empty())
         throw std::invalid_argument("mymyr: the CUDA backend cannot run this search: " + why);
+    if (options.expected_states > state_set::k_max_states)
+        throw std::invalid_argument("mymyr: device best-first search: expected_states above the state id limit (" +
+                                    std::to_string(state_set::k_max_states) + ")");
     if (task->numeric_slots())
         return numeric_best_first(std::move(ctx), std::move(task), options, greedy);
     Driver d(std::move(ctx), std::move(task), options, greedy);

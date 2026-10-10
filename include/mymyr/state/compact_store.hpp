@@ -50,6 +50,19 @@ public:
                 return false;
         }
     }
+    /// Whether the fingerprint was inserted.
+    [[nodiscard]] bool contains(Fingerprint128 f) const noexcept
+    {
+        if (f.a == 0 && f.b == 0)
+            f.b = 1;
+        for (u64 j = hash::mix64(f.a) & m_mask;; j = (j + 1) & m_mask)
+        {
+            if (!(m_a[j] | m_b[j]))
+                return false;
+            if (m_a[j] == f.a && m_b[j] == f.b)
+                return true;
+        }
+    }
     [[nodiscard]] u64 size() const noexcept { return m_count; }
     [[nodiscard]] u64 bytes() const noexcept { return m_a.size() * 2 * sizeof(u64); }
 

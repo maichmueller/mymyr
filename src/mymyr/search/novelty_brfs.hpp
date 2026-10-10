@@ -602,6 +602,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         sc.generate<true>(
             [&](u32 s, const ObjectId* b, const Delta& d) -> bool
             {
+                // the time and the token: the pop of this entry then stops the pass (both stay set once set)
+                if ((x.transitions + 1) % k_check_transitions == 0 && (env.out_of_time() || env.cancelled()))
+                {
+                    x.interrupted = 1;
+                    return false;
+                }
                 const u32 seq = x.transitions++;
                 if (width0)
                     return true;  // width 0 below the root: pruned
@@ -683,6 +689,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     };
     auto admit_at = [&](u32 parent, u32 s, const ObjectId* b, const u64* w, u32 nn, bool skip) -> bool
     {
+        if (tree.size() >= budget.max_states)  // the root alone fills the tree
+        {
+            finish(SearchStatus::OutOfStates);
+            stop = true;
+            return false;
+        }
         tree.push(w, nn, parent, s, b, succ.arity(s), tree.depth(parent) + 1, skip);
         ++st.generated_in_tree;
         target->push_back(tree.size() - 1);
@@ -951,6 +963,12 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         // admits a successor (a new node, or a width-0 duplicate entry); false stops the enumeration
         auto admit_node = [&](u32 s, const ObjectId* b, const u64* w, u32 nn, bool skip) -> bool
         {
+            if (tree.size() >= budget.max_states)  // the root alone fills the tree
+            {
+                finish(SearchStatus::OutOfStates);
+                stop = true;
+                return false;
+            }
             const u32 nid = tree.size();
             tree.push(w, nn, id, s, b, succ.arity(s), cdepth, skip);
             ++st.generated_in_tree;
@@ -1058,7 +1076,21 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             report(s, b, w, nn, tree.size(), TransitionOutcome::Opened);
             return admit_node(s, b, w, nn, false);
         };
-        driver.run(env, cv, process);
+        // inside the expansion: the time and the token every k_check_transitions transitions (process counts each in
+        // st.generated)
+        driver.run(env, cv,
+                   [&](u32 s, const ObjectId* b, const Delta& d) -> bool
+                   {
+                       if (!process(s, b, d))
+                           return false;
+                       if (st.generated % k_check_transitions != 0) [[likely]]
+                           return true;
+                       if (!env.out_of_time() && !env.cancelled())
+                           return true;
+                       finish(env.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
+                       stop = true;
+                       return false;
+                   });
         if (env.tracker && env.tracker->pending())
             env.tracker->flush_derived(succ);
         if (truncated)

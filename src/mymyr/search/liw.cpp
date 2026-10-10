@@ -56,7 +56,8 @@ IwResult liw(const Task& task, const LiwOptions& o)
         throw std::invalid_argument("mymyr: LIW does not support tasks with numeric fluents (IW and SIW do)");
     if (o.max_arity > novelty::k_max_arity)
         return detail::failed("LIW arity " + std::to_string(o.max_arity) + " exceeds the maximum " + std::to_string(novelty::k_max_arity));
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const detail::GoalTest goal = detail::GoalTest::from_spec(task, o.control.goal);
     const detail::BlockedSet blocked(o.control.blocked_states);
     detail::Env env(task, succ, goal, blocked, o.control);

@@ -117,7 +117,7 @@ class RolloutSearch
 {
 public:
     RolloutSearch(const Task& task, const RolloutIwOptions& o, SearchObserver* hot)
-        : m_task(task), m_o(o), m_succ(task.workspace().successors()), m_goal(GoalTest::from_spec(task, o.control.goal)),
+        : m_task(task), m_o(o), m_lease(task.workspace()), m_succ(m_lease->successors()), m_goal(GoalTest::from_spec(task, o.control.goal)),
           m_blocked(o.control.blocked_states), m_hot(hot), m_coord(o.control.coordination), m_store(std::max<u32>(task.words(), 1), 10),
           m_rng(o.seed)
     {
@@ -642,6 +642,7 @@ private:
 
     const Task& m_task;
     const RolloutIwOptions& m_o;
+    WorkspaceLease m_lease;
     Successors& m_succ;
     GoalTest m_goal;
     BlockedSet m_blocked;

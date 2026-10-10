@@ -59,6 +59,7 @@ int main(int argc, char** argv)
 {
     TaskOptions to;
     BrfsOptions bo;
+    bo.stop_at_goal = false;  // whole spaces unless --stop-at-goal
     std::string task_file, domain, problem;
     for (int i = 1; i < argc; ++i)
     {

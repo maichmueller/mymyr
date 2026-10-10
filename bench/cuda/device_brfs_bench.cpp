@@ -43,6 +43,7 @@ int main(int argc, char** argv)
         usage("missing task file");
     TaskOptions to;
     cuda::DeviceBrfsOptions o;
+    o.stop_at_goal = false;  // whole spaces unless --stop-at-goal
     u32 cpu_threads = 0;
     int reps = 1;
     u64 max_bytes = u64{12} << 30;

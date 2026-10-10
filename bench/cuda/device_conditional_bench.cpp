@@ -183,6 +183,7 @@ int main(int argc, char** argv)
         usage("give one task.txt or a domain.pddl and a problem.pddl");
     TaskOptions to;
     cuda::DeviceBrfsOptions o;
+    o.stop_at_goal = false;  // whole spaces unless --stop-at-goal
     std::vector<u32> cpu_threads;
     int reps = 1, cpu_reps = 1;
     bool only_info = false;

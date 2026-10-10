@@ -232,7 +232,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         worker_obs.assign(K, nullptr);
         worker_goals.clear();
     }
-    u32 T = o.num_threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : o.num_threads;
+    u32 T = resolve_threads(o.num_threads, "num_threads");
     T = static_cast<u32>(std::min<usize>(T, K));
     if (!safe)
         T = 1;
@@ -248,7 +248,8 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
 
     auto run_one = [&](usize k)
     {
-        Successors& succ = task.workspace().successors();
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
         const GoalSpec& spec = worker_goals.empty() ? control.goal : worker_goals[k];
         const detail::GoalTest goal = detail::GoalTest::from_spec(task, spec);
         const detail::BlockedSet blocked(control.blocked_states);

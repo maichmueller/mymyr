@@ -113,14 +113,14 @@ TEST_P(CudaBrfsSuite, CountsAndIdsEqualTheCpu)
     if (st.states > suite_state_limit())
         GTEST_SKIP() << st.states << " states (MYMYR_TEST_FULL_SUITE=1 runs it)";
     const auto task = load(name, frozen);
-    const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.fingerprint = true});
+    const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = false, .fingerprint = true});
     const BrfsResult& r = d.result;
     EXPECT_EQ(r.states, st.states);
     EXPECT_EQ(r.generated, st.generated);
     EXPECT_EQ(r.goal_states, st.goal_states);
     EXPECT_EQ(r.expanded, st.states);
     EXPECT_TRUE(r.exhausted);
-    const BrfsResult c = brfs(*task, {.threads = 2, .fingerprint = true});
+    const BrfsResult c = brfs(*task, {.threads = 2, .stop_at_goal = false, .fingerprint = true});
     EXPECT_EQ(r.layers, c.layers);
     EXPECT_EQ(r.fingerprint, c.fingerprint) << "device ids differ from the CPU's deterministic ids";
     RecordProperty("host_schemas", static_cast<int>(d.stats.host_schemas));
@@ -146,7 +146,7 @@ TEST(CudaBrfs, ChunkSizeDoesNotChangeTheIds)
                 if (small && chunk == 7 && std::strcmp(name, "organic-synthesis-opt18-strips__p20") == 0)
                     continue;
                 const auto task = load(name, frozen);
-                cuda::DeviceBrfs b(context(), task, {.fingerprint = true, .chunk_states = chunk});
+                cuda::DeviceBrfs b(context(), task, {.stop_at_goal = false, .fingerprint = true, .chunk_states = chunk});
                 const cuda::DeviceBrfsResult d = b.run();
                 std::vector<u64> rows = device_rows(b);
                 // compare canonically: the row width follows the lazy slot numbering of each run
@@ -183,9 +183,9 @@ TEST(CudaBrfs, ChunkGroupsRedoneOnTheDeviceKeepTheIds)
             u64 ref_fp = 0;
             u64 resumed = 0, redone = 0;
             u32 rehashes = 0;
-            for (const cuda::DeviceBrfsOptions& o : {cuda::DeviceBrfsOptions{.fingerprint = true},
-                                                     cuda::DeviceBrfsOptions{.fingerprint = true, .chunk_states = 5000},
-                                                     cuda::DeviceBrfsOptions{.fingerprint = true, .chunk_states = 5000, .expected_states = 1}})
+            for (const cuda::DeviceBrfsOptions& o : {cuda::DeviceBrfsOptions{.stop_at_goal = false, .fingerprint = true},
+                                                     cuda::DeviceBrfsOptions{.stop_at_goal = false, .fingerprint = true, .chunk_states = 5000},
+                                                     cuda::DeviceBrfsOptions{.stop_at_goal = false, .fingerprint = true, .chunk_states = 5000, .expected_states = 1}})
             {
                 const auto task = load(name, frozen);
                 cuda::DeviceBrfs b(context(), task, o);
@@ -238,7 +238,7 @@ TEST(CudaBrfs, CandidateBudgetKeepsTheIds)
             {
                 SCOPED_TRACE("candidate bytes " + std::to_string(bytes));
                 const auto task = load(name, frozen);
-                cuda::DeviceBrfs b(context(), task, {.fingerprint = true, .candidate_bytes = bytes});
+                cuda::DeviceBrfs b(context(), task, {.stop_at_goal = false, .fingerprint = true, .candidate_bytes = bytes});
                 const cuda::DeviceBrfsResult d = b.run();
                 std::vector<u64> rows = device_rows(b);
                 EXPECT_EQ(d.result.states, suite_task(name).states);
@@ -291,11 +291,11 @@ TEST(CudaBrfs, BudgetStopsAtAPrefixOfTheIds)
 {
     SKIP_WITHOUT_GPU();
     const auto full_task = load("depot__p02", true);
-    cuda::DeviceBrfs full(context(), full_task);
+    cuda::DeviceBrfs full(context(), full_task, {.stop_at_goal = false});
     (void)full.run();
     const std::vector<u64> all = device_rows(full);
     const auto task = load("depot__p02", true);
-    cuda::DeviceBrfs b(context(), task, {.max_states = 10000, .chunk_states = 256});
+    cuda::DeviceBrfs b(context(), task, {.max_states = 10000, .stop_at_goal = false, .chunk_states = 256});
     const cuda::DeviceBrfsResult d = b.run();
     EXPECT_GE(d.result.states, 10000u);
     EXPECT_LT(d.result.states, suite_task("depot__p02").states);

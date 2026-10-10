@@ -9,6 +9,7 @@
 // every state's record is the same, so the result does not.
 
 #include "mymyr/core/team.hpp"
+#include "mymyr/core/threads.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/successor/action.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -23,12 +24,6 @@
 
 namespace mymyr::search::detail
 {
-/// threads, with 0 meaning std::thread::hardware_concurrency().
-[[nodiscard]] inline u32 resolve_threads(u32 threads) noexcept
-{
-    return threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : threads;
-}
-
 /// The transitions one member recorded, as structure of arrays: per transition its index among its state's
 /// transitions (seq), schema, binding, added atoms (true in the successor, false in the state; each once), the
 /// delta's add and delete slots when the engine needs them, the successor's words (trimmed) and numeric words, and
@@ -123,6 +118,7 @@ struct Expansion
     u32 transitions = 0;  // all transitions generated (recorded or not)
     u8 goal = 0;          // the goal test, when the engine runs it in parallel
     u8 expanded = 0;      // 1: the successors were generated
+    u8 interrupted = 0;   // 1: the deadline or the token stopped the generation (the transitions are incomplete)
 };
 
 /// The members of a parallel layer step: a Team and each member's successor generator (its own workspace; member 0
@@ -130,9 +126,15 @@ struct Expansion
 class BeamTeam
 {
 public:
-    BeamTeam(const Task& task, u32 threads) : m_team(threads), m_succ(m_team.size()), m_cands(m_team.size())
+    BeamTeam(const Task& task, u32 threads)
+        : m_team(threads), m_leases(m_team.size()), m_succ(m_team.size()), m_cands(m_team.size())
     {
-        m_team.run([&](u32 t) { m_succ[t] = &task.workspace().successors(); });
+        m_team.run(
+            [&](u32 t)
+            {
+                m_leases[t] = task.workspace();
+                m_succ[t] = &m_leases[t]->successors();
+            });
     }
 
     [[nodiscard]] u32 size() const noexcept { return m_team.size(); }
@@ -172,6 +174,7 @@ public:
 
 private:
     Team m_team;
+    std::vector<WorkspaceLease> m_leases;
     std::vector<Successors*> m_succ;
     std::vector<Candidates> m_cands;
 };

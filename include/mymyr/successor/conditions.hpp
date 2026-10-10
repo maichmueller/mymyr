@@ -10,7 +10,8 @@
 //   g.add_constraint(*task, "(>= (fuel a) 1)");
 //   const bool now = holds(*task, state, g);
 //   const ConjunctiveCondition c = g.lift();              // (?x0 ?x1 ?x2) (and (on ?x0 ?x1) (not (clear ?x2)) ...)
-//   for_each_binding(*task, task->workspace(), c, state, {},  // successor/bindings.hpp
+//   const WorkspaceLease ws = task->workspace();
+//   for_each_binding(*task, *ws, c, state, {},  // successor/bindings.hpp
 //                    [&](std::span<const ObjectId> b) { const GroundCondition back = c.ground(b); ... });
 //
 // Truth in a state (holds): a static literal by the task's static facts, a fluent literal by the state's atoms, a
@@ -162,9 +163,9 @@ struct GroundCondition
     friend bool operator==(const GroundCondition& a, const GroundCondition& b);
 };
 
-/// Truth of a ground atom, literal or condition in s (see the top of this file). Derived atoms are evaluated in the
-/// calling thread's evaluation workspace (Task::evaluation_workspace), so these may be called from inside a successor
-/// or binding enumeration. Throws std::invalid_argument for ids out of range or a wrong number of objects.
+/// Truth of a ground atom, literal or condition in s (see the top of this file). Derived atoms are evaluated in a
+/// workspace leased for the call (Task::workspace()), so these may be called from inside a successor or binding
+/// enumeration. Throws std::invalid_argument for ids out of range or a wrong number of objects.
 [[nodiscard]] bool holds(const Task& task, StateView s, const GroundAtom& atom);
 [[nodiscard]] bool holds(const Task& task, StateView s, const GroundLiteral& literal);
 [[nodiscard]] bool holds(const Task& task, StateView s, const GroundCondition& condition);

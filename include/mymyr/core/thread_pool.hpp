@@ -5,8 +5,10 @@
 // pool that user code holds across calls must not burn CPU while idle, so its workers block on a condition variable.
 // run(f) calls f(t) for every member t in [0, size()), the caller being member 0, and returns when all are done.
 // Concurrent run() calls from different threads are serialized (one job at a time); run() is not reentrant.
-// The pool is an object the caller owns; there is no global pool.
+// The pool is an object the caller owns; there is no global pool. Construction is exception-safe: if a thread cannot be
+// started, the ones already running are stopped and joined and ThreadStartError is thrown (core/threads.hpp).
 
+#include "mymyr/core/threads.hpp"
 #include "mymyr/core/types.hpp"
 
 #include <condition_variable>
@@ -22,25 +24,27 @@ namespace mymyr
 class ThreadPool
 {
 public:
-    explicit ThreadPool(u32 threads) : m_T(threads == 0 ? 1 : threads)
+    /// threads members (0: 1). Throws std::invalid_argument above max_threads() and ThreadStartError when the system
+    /// refuses a thread.
+    explicit ThreadPool(u32 threads) : m_T(threads == 0 ? 1 : resolve_threads(threads))
     {
         m_threads.reserve(m_T - 1);
         for (u32 i = 1; i < m_T; ++i)
-            m_threads.emplace_back([this, i] { loop(i); });
+        {
+            try
+            {
+                m_threads.emplace_back([this, i] { loop(i); });
+            }
+            catch (const std::exception& e)
+            {
+                stop();
+                throw ThreadStartError(i - 1, m_T - 1, e);
+            }
+        }
     }
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
-    ~ThreadPool()
-    {
-        {
-            std::lock_guard lock(m_mutex);
-            m_quit = true;
-            ++m_gen;
-        }
-        m_wake.notify_all();
-        for (auto& t : m_threads)
-            t.join();
-    }
+    ~ThreadPool() { stop(); }
 
     [[nodiscard]] u32 size() const noexcept { return m_T; }
 
@@ -73,6 +77,19 @@ public:
     [[nodiscard]] static std::pair<u64, u64> slice(u64 n, u32 t, u32 T) { return {n * t / T, n * (t + 1) / T}; }
 
 private:
+    /// Ends the workers' loops and joins them.
+    void stop() noexcept
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_quit = true;
+            ++m_gen;
+        }
+        m_wake.notify_all();
+        for (auto& t : m_threads)
+            t.join();
+        m_threads.clear();
+    }
     void call(const std::function<void(u32)>& f, u32 t)
     {
         try

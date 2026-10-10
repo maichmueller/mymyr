@@ -88,8 +88,6 @@ ContextLookup g_lookup = nullptr;
 // ------------------------------------------------------------------------------------------------ argument types
 using TaskArg = Arg<std::variant<PyTask, PyHandle>>;
 using ContextArg = Arg<ann::CudaContext>;
-using IntArg = Arg<u64>;
-using FloatArg = Arg<double>;
 using KindArg = Arg<ann::DeviceKind>;
 using EvalKindArg = Arg<ann::EvalKind>;
 using BoolArg = Arg<bool>;
@@ -325,25 +323,20 @@ PyDeviceSearchResult run_search(bool greedy, TaskArg task, nb::handle heuristic,
     so.witness_pruning = witness_pruning;
     so.canonical_order = canonical_order;
     if (!max_states.is_none())
-        so.control.budget.max_states = nb::cast<u64>(max_states);
+        so.control.budget.max_states = int_arg<u64>(max_states, "max_states");
     if (!max_expanded.is_none())
-        so.control.budget.max_expanded = nb::cast<u64>(max_expanded);
+        so.control.budget.max_expanded = int_arg<u64>(max_expanded, "max_expanded");
     if (!max_depth.is_none())
-        so.control.budget.max_depth = nb::cast<u32>(max_depth);
-    if (!max_seconds.is_none())
-    {
-        const double s = nb::cast<double>(max_seconds);
-        if (!(s >= 0) || std::isnan(s))
-            throw nb::value_error("mymyr: max_seconds must be non-negative");
-        so.control.budget.max_seconds = s;
-    }
+        so.control.budget.max_depth = int_arg<u32>(max_depth, "max_depth");
+    if (const auto s = opt_float_arg(max_seconds, "max_seconds", 0))
+        so.control.budget.max_seconds = *s;
     if (batch == 0)
         throw nb::value_error("mymyr: batch must be positive");
     opts.batch = batch;
     opts.single_bucket = single_bucket;
     if (!chunk_states.is_none())
     {
-        opts.chunk_states = nb::cast<u64>(chunk_states);
+        opts.chunk_states = int_arg<u64>(chunk_states, "chunk_states");
         if (opts.chunk_states == 0)
             throw nb::value_error("mymyr: chunk_states must be positive");
     }
@@ -408,16 +401,16 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                 ho.costs = costs_of(costs);
                 ho.variant = variant_of(variant);
                 if (!threads.is_none())
-                    ho.threads = nb::cast<u32>(threads);
+                    ho.threads = int_arg<u32>(threads, "threads");
                 if (!warp_groups.is_none())
                     ho.warp_groups = nb::cast<bool>(warp_groups) ? 1 : 0;
                 if (!max_blocks.is_none())
-                    ho.max_blocks = nb::cast<u32>(max_blocks);
+                    ho.max_blocks = int_arg<u32>(max_blocks, "max_blocks");
                 ho.force_global = force_global;
                 if (!max_scratch_bytes.is_none())
-                    ho.max_scratch_bytes = nb::cast<u64>(max_scratch_bytes);
+                    ho.max_scratch_bytes = int_arg<u64>(max_scratch_bytes, "max_scratch_bytes");
                 if (!max_operators.is_none())
-                    ho.budget.max_operators = nb::cast<u64>(max_operators);
+                    ho.budget.max_operators = int_arg<u64>(max_operators, "max_operators");
                 const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
                 std::unique_ptr<cuda::DeviceHeuristic> h;
                 {
@@ -504,9 +497,10 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
 
     m.def(
         "astar",
-        [](TaskArg task, KindArg heuristic, CostsArg costs, ContextArg ctx, StateArg start, u32 batch, bool single_bucket,
+        [](TaskArg task, KindArg heuristic, CostsArg costs, ContextArg ctx, StateArg start, IntArg batch_in, bool single_bucket,
            bool reopen, bool witness_pruning, bool canonical_order, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, IntArg chunk_states, VariantArg variant) {
+            const u32 batch = int_arg<u32>(batch_in, "batch", 1);
             return run_search(false, task, heuristic, costs, ctx, start, batch, single_bucket, reopen, witness_pruning,
                               canonical_order, max_states, max_expanded, max_depth, max_seconds, chunk_states, variant);
         },
@@ -520,9 +514,10 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
 
     m.def(
         "gbfs",
-        [](TaskArg task, KindArg heuristic, CostsArg costs, ContextArg ctx, StateArg start, u32 batch, bool single_bucket,
+        [](TaskArg task, KindArg heuristic, CostsArg costs, ContextArg ctx, StateArg start, IntArg batch_in, bool single_bucket,
            bool reopen, bool witness_pruning, bool canonical_order, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, IntArg chunk_states, VariantArg variant) {
+            const u32 batch = int_arg<u32>(batch_in, "batch", 1);
             return run_search(true, task, heuristic, costs, ctx, start, batch, single_bucket, reopen, witness_pruning,
                               canonical_order, max_states, max_expanded, max_depth, max_seconds, chunk_states, variant);
         },

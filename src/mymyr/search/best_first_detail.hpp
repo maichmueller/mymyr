@@ -693,6 +693,7 @@ public:
     const Task& task;
     const BestFirstOptions& o;
     BestFirstResult& r;
+    WorkspaceLease lease;
     Successors& succ;
     heuristics::Heuristic* h = nullptr;
     const heuristics::ActionCosts* costs = nullptr;
@@ -700,7 +701,6 @@ public:
     f64 g0 = 0;
     SearchObserver* obs = nullptr;
     bool witness = false, canonical = true;
-    bool stop_on_states = false;  // max_states is finite: stop generating once it is exceeded
     bool batched = false;         // the heuristic evaluates batches (Heuristic::batched)
     bool goal_view = false;       // a GoalSpec::AnyOf goal reads derived atoms: is_goal prepares the state
     u32 nn = 0;                   // numeric words per state
@@ -726,6 +726,15 @@ public:
     }
     /// Budget, time, cancellation and progress, once per expansion. False (and r.status set) to stop.
     bool keep_going();
+    /// Inside an expansion, before a transition: the time and the cancellation every k_check_transitions transitions.
+    /// False (and r.status set) to stop.
+    bool keep_generating()
+    {
+        if (++m_transitions != k_check_transitions) [[likely]]
+            return true;
+        m_transitions = 0;
+        return check_time_and_token();
+    }
     /// The task's goal has a false static literal.
     [[nodiscard]] bool unsolvable() const;
     void begin_search();
@@ -744,18 +753,16 @@ public:
         return Action(SchemaId{schema}, std::vector<ObjectId>(b, b + succ.arity(schema)));
     }
 
-    /// Runs the successor generator on the prepared state; emit returns false to stop (only honoured with a finite
-    /// max_states).
+    /// Runs the successor generator on the prepared state; emit returns false to stop.
     template<class Emit>
     void generate(Emit&& emit)
     {
-        if (stop_on_states)
-            succ.generate<true>(emit, witness, canonical);
-        else
-            succ.generate<false>(emit, witness, canonical);
+        succ.generate<true>(emit, witness, canonical);
     }
 
 private:
+    bool check_time_and_token();
+
     std::unique_ptr<heuristics::Heuristic> m_owned;
     std::unique_ptr<heuristics::ActionCosts> m_costs;
     FlatStateStore m_blocked;
@@ -764,6 +771,7 @@ private:
     Clock::time_point m_t0, m_search_t0, m_deadline;
     bool m_timed = false;
     u64 m_tick = 0;
+    u32 m_transitions = 0;
     u64 m_next_progress = 0;
     std::vector<StateView> m_batch;
     std::vector<u32> m_batch_index;
@@ -773,20 +781,31 @@ private:
 /// Generates the transitions of state `id` (cur) into tr, in generation order: blocked successors are dropped
 /// (pruned, on_prune), the others are inserted into the store; a new state gets its search node (parent id, g through
 /// this transition). Words are kept for new states, and for all when the store needs them (Compact) or an observer is
-/// set. `preferred`: record whether each action is a preferred operator of the last evaluation. False when max_states
-/// was exceeded (the expansion stops there).
+/// set. `preferred`: record whether each action is a preferred operator of the last evaluation. False (and r.status
+/// set) when the search stops inside the expansion: a new state filled the store (max_states: OutOfStates), or the
+/// time or the cancellation.
 template<class S>
 bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u64>& next, Transitions& tr, bool preferred)
 {
     tr.clear();
     tr.nn = c.nn;
+    if (store.size() >= c.max_states)  // the start state alone fills the store
+    {
+        c.r.status = SearchStatus::OutOfStates;
+        return false;
+    }
     c.succ.prepare(cur.view());
     const f64 gp = nodes.g[id];
     const bool keep_all = S::k_needs_words || c.obs != nullptr;
-    bool full = false;
+    bool stop = false;
     c.generate(
         [&](u32 s, const ObjectId* b, const Delta& d) -> bool
         {
+            if (!c.keep_generating())
+            {
+                stop = true;
+                return false;
+            }
             ++c.r.stats.generated;
             const u32 nn = store.successor(cur, d, next, c.succ);
             if (c.blocked(next.data(), nn, d.num))
@@ -813,14 +832,15 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
             if (preferred)
                 t.preferred = c.h->preferred(ActionLabel{SchemaId{s}, std::span<const ObjectId>(b, arity)});
             tr.t.push_back(t);
-            if (fresh && store.size() > c.max_states)
+            if (fresh && store.size() >= c.max_states)
             {
-                full = true;
+                c.r.status = SearchStatus::OutOfStates;
+                stop = true;
                 return false;
             }
             return true;
         });
-    return !full;
+    return !stop;
 }
 
 /// The queue kind for the options (Auto: buckets for small integral costs).

@@ -67,7 +67,8 @@ TEST(PlanFile, GeneralCosts)
 TEST(PlanFile, StartState)
 {
     const auto task = load("gripper__prob05");
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     const std::vector<Action> first = succ.applicable_actions(s0.view());
     ASSERT_FALSE(first.empty());
@@ -85,7 +86,8 @@ TEST(PlanFile, Errors)
 {
     const auto task = load("gripper__prob05");
     const BestFirstResult r = solve(*task);
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     const auto later = std::ranges::find_if(r.plan, [&](const Action& a) { return !succ.is_applicable(s0.view(), a.label()); });
     ASSERT_NE(later, r.plan.end());

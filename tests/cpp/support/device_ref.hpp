@@ -35,7 +35,8 @@ struct DeviceRef
 inline std::vector<State> device_ref_walks(const Task& task, u32 walks, u32 steps, u64 seed)
 {
     std::mt19937_64 rng(seed);
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     std::vector<State> out;
     std::vector<u64> tmp;
     for (u32 w = 0; w < walks; ++w)
@@ -72,7 +73,8 @@ inline DeviceRef device_ref(const Task& task, const std::vector<State>& states, 
 {
     DeviceRef r;
     std::mt19937_64 rng(seed);
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const u32 S = task.num_schemas();
     const u32 n = task.num_objects();
     r.L = 1;

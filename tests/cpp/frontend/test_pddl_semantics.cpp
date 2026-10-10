@@ -33,16 +33,18 @@ std::shared_ptr<const Task> make(const std::string& domain, const std::string& p
 std::set<std::string> applicable(const Task& t, StateView s)
 {
     std::set<std::string> out;
-    for (const Action& a : t.workspace().successors().applicable_actions(s))
+    const WorkspaceLease ws = t.workspace();
+    for (const Action& a : ws->successors().applicable_actions(s))
         out.insert(t.format(a.label()));
     return out;
 }
 
 State apply(const Task& t, StateView s, const std::string& action)
 {
-    for (const Action& a : t.workspace().successors().applicable_actions(s))
+    const WorkspaceLease ws = t.workspace();
+    for (const Action& a : ws->successors().applicable_actions(s))
         if (t.format(a.label()) == action)
-            return t.workspace().successors().apply(s, a.label());
+            return ws->successors().apply(s, a.label());
     ADD_FAILURE() << action << " is not applicable";
     return State{};
 }
@@ -238,7 +240,7 @@ TEST(PddlSemantics, OnlyEffectsThatFireConflict)
  (:action ce :parameters () :precondition (not (done)) :effect (and (done) (when (q) (assign (y) 5)) (when (p) (increase (y) 1))))
  (:action def-u :parameters () :precondition (and) :effect (assign (u) 1))))",
                         "(define (problem p) (:domain d) (:init (q) (= (y) 2)) (:goal (and (done) (>= (u) 0))))");
-    const BrfsResult r = brfs(*t);
+    const BrfsResult r = brfs(*t, {.stop_at_goal = false});
     EXPECT_EQ(r.states, 8u);
     EXPECT_EQ(r.generated, 14u);
     EXPECT_EQ(r.goal_states, 2u);
@@ -284,7 +286,8 @@ TEST(PddlSemantics, MetricsAreMinimizedOrRefused)
     const heuristics::ActionCosts costs(*reached);
     const State s0 = reached->initial_state();
     EXPECT_EQ(costs.initial(s0.view()), 0);
-    reached->workspace().successors().for_each_applicable(
+    const WorkspaceLease ws = reached->workspace();
+    ws->successors().for_each_applicable(
         s0.view(),
         [&](const ActionLabel& a, const Delta& d)
         {
@@ -373,7 +376,7 @@ TEST(PddlSemantics, GoalAtomsNoStateHolds)
     auto problem = [](const std::string& goal)
     { return "(define (problem p) (:domain d) (:objects a b) (:init (g a)) (:goal " + goal + "))"; };
     const auto holds = make(domain, problem("(and (f a) (not (f b)))"));
-    BrfsResult r = brfs(*holds);
+    BrfsResult r = brfs(*holds, {.stop_at_goal = false});
     EXPECT_TRUE(r.exhausted);
     EXPECT_EQ(r.states, 2u);
     EXPECT_EQ(r.goal_states, 1u);
@@ -381,7 +384,7 @@ TEST(PddlSemantics, GoalAtomsNoStateHolds)
     EXPECT_FALSE(g.unsatisfiable);
     EXPECT_TRUE(std::ranges::all_of(g.neg, [](u64 w) { return w == 0; }));
     const auto never = make(domain, problem("(and (f a) (f b))"));
-    r = brfs(*never);
+    r = brfs(*never, {.stop_at_goal = false});
     EXPECT_TRUE(r.exhausted);
     EXPECT_EQ(r.goal_states, 0u);
     g = rl::goal_masks(*never);
