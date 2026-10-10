@@ -20,6 +20,7 @@ bool start_search(Context& c, S& store, Nodes& nodes, u32& root, f64& h0)
     const StateView s0 = c.start.view();
     root = store.insert(s0).first;
     nodes.add(k_none, k_none, nullptr, 0, c.g0);
+    c.start_status(nodes, root, s0);
     if (c.unsolvable())
     {
         c.begin_search();
@@ -32,7 +33,7 @@ bool start_search(Context& c, S& store, Nodes& nodes, u32& root, f64& h0)
         c.solved(nodes, root, s0, true);
         return false;
     }
-    h0 = c.evaluate(s0);
+    h0 = c.evaluate(s0, nodes, root);
     c.r.initial_h = h0;
     c.begin_search();
     if (h0 == k_inf)
@@ -58,6 +59,7 @@ struct GbfsEager
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
+        nodes.path_words = c.status_words;
         Q open;
         Transitions tr;
         Cur cur;
@@ -126,7 +128,7 @@ struct GbfsEager
                     done = true;
                     break;
                 }
-                const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v);
+                const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v, nodes, cid);
                 if (hv == k_inf)
                 {
                     nodes.set_status(cid, Nodes::DeadEnd);
@@ -156,6 +158,7 @@ struct GbfsLazy
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
+        nodes.path_words = c.status_words;
         // mimir's weights {.., 64, 1}: 64 pops from the preferred list per pop from the standard one
         Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 64, c.o.standard_weight);
         Transitions tr;
@@ -194,7 +197,7 @@ struct GbfsLazy
             const StateView sv = cur.view();
             if (!nodes.has(id, Nodes::Evaluated) || (use_preferred && last_evaluated != id))
             {
-                nodes.h[id] = c.evaluate(sv);
+                nodes.h[id] = c.evaluate(sv, nodes, id);
                 nodes.set(id, Nodes::Evaluated);
                 last_evaluated = id;
             }

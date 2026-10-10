@@ -38,9 +38,9 @@ public:
     [[nodiscard]] u64 bytes() const noexcept { return this->c.capacity() * sizeof(Entry); }
 };
 
-f64 evaluate(Context& c, StateView s)
+f64 evaluate(Context& c, StateView s, const Nodes& nodes, u32 id)
 {
-    const f64 h = c.evaluate(s);
+    const f64 h = c.evaluate(s, nodes, id);
     if (std::isnan(h) || h == -k_inf)
         throw std::invalid_argument("mymyr: AStarIW heuristic must return a finite value or positive infinity");
     return h;
@@ -54,6 +54,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
     r.queue = "heap";
     Nodes nodes;
     nodes.track_depth = o.control.budget.max_depth != std::numeric_limits<u32>::max();
+    nodes.path_words = c.status_words;
     Queue open;
     Cur cur;
     std::vector<u64> next;
@@ -67,6 +68,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
     const StateView s0 = c.start.view();
     const u32 root = store.insert(s0).first;
     nodes.add(k_none, k_none, nullptr, 0, c.g0);
+    c.start_status(nodes, root, s0);
     c.begin_search();
     if (c.unsolvable())
     {
@@ -78,7 +80,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
         c.solved(nodes, root, s0, false);
         return finish();
     }
-    const f64 h0 = evaluate(c, s0);
+    const f64 h0 = evaluate(c, s0, nodes, root);
     r.initial_h = h0;
     if (h0 == k_inf)
     {
@@ -163,6 +165,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
             const auto [id, fresh] = store.insert_successor(e.id, cur, next.data(), nw, delta);
             if (fresh)
                 nodes.add(k_none, k_none, nullptr, 0, k_inf);
+            c.progress(nodes, e.id, cur.view(), schema, binding, id, child, fresh);
             const u32 trimmed = bits::trimmed_size(next.data(), nw);
             tr.t.push_back({schema, id, tr.bind.size(), tr.words.size(), trimmed, g, fresh, false});
             tr.bind.insert(tr.bind.end(), binding, binding + c.succ.arity(schema));
@@ -211,7 +214,7 @@ void run(Context& c, const AStarIwOptions& o, AStarIwResult& r)
                     continue;
                 }
             }
-            const f64 h = evaluate(c, child);
+            const f64 h = evaluate(c, child, nodes, t.child);
             if (h == k_inf)
             {
                 nodes.set_status(t.child, Nodes::DeadEnd);

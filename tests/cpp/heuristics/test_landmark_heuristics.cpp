@@ -2,6 +2,8 @@
 // fractional costs are in mymyr_landmark_heuristics_tests):
 //   - LM-cut equals a from-scratch evaluation of its definition (lm_cut_reference.hpp) and h_max <= LM-cut <= h* on
 //     states of the whole state space, with unit and real costs;
+//   - every best-first search with landmark count (path-dependent) and with LM-cut solves suite tasks with plans that
+//     replay; A* with LM-cut finds the optimal cost;
 //   - one heuristic per thread over one shared task and grounding gives the single-threaded values (TSan build).
 
 #include "../support/suite.hpp"
@@ -10,7 +12,11 @@
 #include "mymyr/datasets/state_space.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
 #include "mymyr/heuristics/perfect.hpp"
+#include "mymyr/search/astar_iw.hpp"
+#include "mymyr/search/best_first.hpp"
+#include "mymyr/successor/successors.hpp"
 #include "mymyr/task/task.hpp"
+#include "mymyr/task/workspace.hpp"
 
 #include <gtest/gtest.h>
 
@@ -76,7 +82,7 @@ TEST(LandmarkHeuristics, KindNamesAndRefusals)
     EXPECT_STREQ(H::to_string(H::Kind::LmCount), "lmcount");
 
     const auto task = load("depot__p02");
-    for (const auto k : {H::Kind::LmCut})  // grounded only
+    for (const auto k : {H::Kind::LmCut, H::Kind::LmCount})  // grounded only
     {
         H::Options o;
         o.kind = k;
@@ -151,7 +157,7 @@ TEST(LandmarkHeuristics, OneHeuristicPerThreadOverASharedTask)
     ASSERT_TRUE(sp);
     const auto relaxed = H::ground(*task);
     const std::vector<u32> ids = sample(*sp, 120);
-    const H::Kind kinds[] = {H::Kind::LmCut};
+    const H::Kind kinds[] = {H::Kind::LmCut, H::Kind::LmCount};
     std::vector<std::vector<double>> expected;
     for (const H::Kind k : kinds)
     {
@@ -181,4 +187,77 @@ TEST(LandmarkHeuristics, OneHeuristicPerThreadOverASharedTask)
         for (usize k = 0; k < std::size(kinds); ++k)
             for (usize i = 0; i < ids.size(); ++i)
                 EXPECT_EQ(got[t][k][i], expected[k][(i + t * 7) % ids.size()]) << t << " " << k << " " << i;
+}
+
+namespace
+{
+/// Replays `plan` from the initial state: every action applicable, the last state a goal state.
+bool replays(const Task& task, const std::vector<Action>& plan)
+{
+    Successors& succ = task.workspace().successors();
+    State s = task.initial_state();
+    for (const Action& a : plan)
+    {
+        bool found = false;
+        for (const Action& b : succ.applicable_actions(s.view()))
+            found |= b.schema == a.schema && b.binding == a.binding;
+        if (!found)
+            return false;
+        s = succ.apply(s, a.label());
+    }
+    return succ.is_goal(s.view());
+}
+}  // namespace
+
+TEST(LandmarkHeuristics, EveryBestFirstSearchUsesThem)
+{
+    for (const char* name : {"depot__p02", "openstacks-opt08-adl__p03", "miconic-simpleadl__s10-2", "philosophers__p03-phil4"})
+    {
+        SCOPED_TRACE(name);
+        const auto task = load(name);
+        search::BestFirstOptions blind;
+        blind.heuristic.kind = H::Kind::Blind;
+        const auto opt = search::astar_eager(*task, blind);
+        ASSERT_EQ(opt.status, search::SearchStatus::Solved);
+        for (const H::Kind k : {H::Kind::LmCount, H::Kind::LmCut})
+        {
+            search::BestFirstOptions o;
+            o.heuristic.kind = k;
+            o.control.budget.max_expanded = 2000000;
+            using Search = search::BestFirstResult (*)(const Task&, const search::BestFirstOptions&);
+            const std::pair<const char*, Search> searches[] = {{"astar_eager", &search::astar_eager},
+                                                               {"astar_lazy", &search::astar_lazy},
+                                                               {"gbfs_eager", &search::gbfs_eager},
+                                                               {"gbfs_lazy", &search::gbfs_lazy},
+                                                               {"beam", &search::beam}};
+            for (const auto& [sname, run] : searches)
+            {
+                const auto r = run(*task, o);
+                ASSERT_EQ(r.status, search::SearchStatus::Solved) << H::to_string(k) << " " << sname << " " << r.message;
+                EXPECT_TRUE(replays(*task, r.plan)) << H::to_string(k) << " " << sname;
+                if (k == H::Kind::LmCut && std::string(sname).starts_with("astar"))
+                {
+                    EXPECT_EQ(r.cost, opt.cost) << sname;
+                }
+                std::printf("SEARCH %-28s %-8s %-12s cost %g expanded %llu evaluations %llu\n", name, H::to_string(k), sname,
+                            r.cost, static_cast<unsigned long long>(r.stats.expanded),
+                            static_cast<unsigned long long>(r.evaluations));
+            }
+            if (!task->compiled().has_conditional_effects && task->numeric_slots() == 0 && opt.cost == static_cast<double>(opt.plan.size()))
+            {
+                search::AStarIwOptions ao;
+                ao.heuristic.kind = k;
+                ao.control.budget.max_expanded = 200000;
+                const auto r = search::astar_iw(*task, ao);
+                if (r.status == search::SearchStatus::Solved)
+                {
+                    EXPECT_TRUE(replays(*task, r.plan)) << H::to_string(k) << " astar_iw";
+                }
+                else
+                {
+                    EXPECT_EQ(r.status, search::SearchStatus::Exhausted) << r.message;  // novelty pruning is incomplete
+                }
+            }
+        }
+    }
 }

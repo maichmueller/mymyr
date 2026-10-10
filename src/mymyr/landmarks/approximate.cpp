@@ -50,7 +50,9 @@ private:
         const u32 P = R.num_props(), NO = R.num_ops();
         m_cost.assign(P, k_inf);
         m_first.assign(P, {});
-        std::vector<u32> cnt(NO), acc(NO, 0);
+        std::vector<u32>& cnt = m_cnt0;
+        cnt.resize(NO);
+        std::vector<u32> acc(NO, 0);
         for (u32 o = 0; o < NO; ++o)
             cnt[o] = R.npos(o);
         for (u32 p = 0; p < P; ++p)
@@ -81,6 +83,7 @@ private:
             {
                 m_cost[pp] = 0;
                 push(0, pp);
+                m_init_props.push_back(pp);
             }
             if (np != RelaxedTask::k_none && m_cost[np] == 0)
             {
@@ -89,6 +92,7 @@ private:
                     ++cnt[o];
             }
         }
+        std::vector<u32> work = cnt;  // m_cnt0 keeps the counters of the initial state (possibly-before explorations)
         auto fire = [&](u32 o)
         {
             const u32 val = acc[o] + 1;
@@ -105,7 +109,7 @@ private:
             }
         };
         for (u32 o : R.zero_ops())
-            if (cnt[o] == 0)
+            if (work[o] == 0)
                 fire(o);
         for (u32 c = 0; c < buckets.size(); ++c)
             for (usize i = 0; i < buckets[c].size(); ++i)
@@ -116,10 +120,77 @@ private:
                 for (u32 o : R.pre_of(p))
                 {
                     acc[o] = std::max(acc[o], c);
-                    if (--cnt[o] == 0)
+                    if (--work[o] == 0)
                         fire(o);
                 }
             }
+    }
+
+    /// FirstAchievers::PossiblyBefore: the operators adding proposition `pp` that are applicable in the delete
+    /// relaxation of the initial state without the operators adding it (empty when `pp` holds initially).
+    const std::vector<u32>& possibly_before(u32 pp)
+    {
+        if (m_pb_done.empty())
+        {
+            m_pb_done.assign(R.num_props(), 0);
+            m_pb.resize(R.num_props());
+            m_adders_begin.assign(R.num_props() + 1, 0);
+            for (u32 o = 0; o < R.num_ops(); ++o)
+                for (u32 q : R.eff(o))
+                    ++m_adders_begin[q + 1];
+            for (u32 q = 0; q < R.num_props(); ++q)
+                m_adders_begin[q + 1] += m_adders_begin[q];
+            m_adders.resize(m_adders_begin.back());
+            std::vector<u32> fill(m_adders_begin.begin(), m_adders_begin.end() - 1);
+            for (u32 o = 0; o < R.num_ops(); ++o)
+                for (u32 q : R.eff(o))
+                    m_adders[fill[q]++] = o;
+        }
+        std::vector<u32>& out = m_pb[pp];
+        if (m_pb_done[pp])
+            return out;
+        m_pb_done[pp] = 1;
+        if (m_cost[pp] == 0 || m_cost[pp] == k_inf)
+            return out;  // holds initially, or unreachable
+        std::vector<u32> cnt = m_cnt0;
+        std::vector<u8> reached(R.num_props(), 0);
+        std::vector<u32> stack;
+        auto fire = [&](u32 o)
+        {
+            const auto e = R.eff(o);
+            if (std::find(e.begin(), e.end(), pp) != e.end())
+                return;  // an achiever of pp: excluded
+            for (u32 q : e)
+                if (!reached[q])
+                {
+                    reached[q] = 1;
+                    stack.push_back(q);
+                }
+        };
+        for (u32 p : m_init_props)
+            if (!reached[p])
+            {
+                reached[p] = 1;
+                stack.push_back(p);
+            }
+        for (u32 o : R.zero_ops())
+            if (cnt[o] == 0)
+                fire(o);
+        while (!stack.empty())
+        {
+            const u32 p = stack.back();
+            stack.pop_back();
+            for (u32 o : R.pre_of(p))
+                if (--cnt[o] == 0)
+                    fire(o);
+        }
+        for (u32 i = m_adders_begin[pp]; i < m_adders_begin[pp + 1]; ++i)
+        {
+            const u32 o = m_adders[i];
+            if (cnt[o] == 0 && (out.empty() || out.back() != o))
+                out.push_back(o);
+        }
+        return out;
     }
 
     /// Positive fluent preconditions of an operator: canonical ids, ascending, distinct.
@@ -142,11 +213,13 @@ private:
         return v;
     }
 
-    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c) const
+    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c)
     {
         const u32 pp = R.fluent_props(c).first;
         if (pp == RelaxedTask::k_none)
             return {};
+        if (O.first_achievers == FirstAchievers::PossiblyBefore)
+            return possibly_before(pp);
         return m_first[pp];
     }
 
@@ -294,9 +367,10 @@ private:
         }
         std::sort(ach.begin(), ach.end());
         ach.erase(std::unique(ach.begin(), ach.end()), ach.end());
+        const bool pb = O.first_achievers == FirstAchievers::PossiblyBefore;
         for (u32 q = 0; q < R.num_props(); ++q)
-            if (positive_fluent(q))
-                for (u32 o : m_first[q])
+            if (positive_fluent(q) && (!pb || (!m_pb_done.empty() && m_pb_done[q])))
+                for (u32 o : pb ? m_pb[q] : m_first[q])
                     if (!R.is_axiom(o))
                         first.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
         std::sort(first.begin(), first.end());
@@ -361,6 +435,12 @@ private:
     std::vector<u32> m_args;
     std::vector<u32> m_cost;
     std::vector<std::vector<u32>> m_first;  // per proposition: operators of minimal firing cost
+    std::vector<u32> m_cnt0;                // per operator: unsatisfied preconditions in the initial state
+    std::vector<u32> m_init_props;          // the initial state's "true" propositions
+    // FirstAchievers::PossiblyBefore, per proposition on demand
+    std::vector<std::vector<u32>> m_pb;
+    std::vector<u8> m_pb_done;
+    std::vector<u32> m_adders_begin, m_adders;
     std::vector<std::vector<CanonicalAtom>> m_pre_cache;
     std::vector<u8> m_pre_done;
     std::vector<CanonicalAtom> m_landmarks;

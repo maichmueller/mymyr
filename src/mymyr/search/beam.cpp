@@ -34,6 +34,7 @@ struct Beam
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
+        nodes.path_words = c.status_words;
         Transitions tr;
         Cur cur;
         std::vector<u64> next, cand_words;
@@ -55,6 +56,7 @@ struct Beam
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
         nodes.add(k_none, k_none, nullptr, 0, c.g0);
+        c.start_status(nodes, root, s0);
         if (c.unsolvable())
         {
             c.begin_search();
@@ -67,7 +69,7 @@ struct Beam
             c.solved(nodes, root, s0, true);
             return finish();
         }
-        const f64 h0 = c.evaluate(s0);
+        const f64 h0 = c.evaluate(s0, nodes, root);
         r.initial_h = h0;
         c.begin_search();
         if (h0 == k_inf)
@@ -135,7 +137,7 @@ struct Beam
                             pending = true;  // evaluated with the rest of the layer
                         else
                         {
-                            const f64 hv = c.evaluate(v);
+                            const f64 hv = c.evaluate(v, nodes, cid);
                             if (hv == k_inf)
                             {
                                 nodes.set_status(cid, Nodes::DeadEnd);
