@@ -83,7 +83,7 @@ public:
         m_init_count.resize(t->size());
         if (!device.is_none())
         {
-            m_device = nb::cast<int>(device);
+            m_device = int_arg<int>(device, "device", 0);
             if (m_device < 0)
                 throw nb::value_error("mymyr: device must be a CUDA device index (>= 0) or None (the CPU)");
 #if defined(MYMYR_HAS_CUDA)
@@ -611,9 +611,12 @@ void bind_rl_torch(nb::module_& parent)
                       "(global ids over a suite).")
         .def(
             "__init__",
-            [](PyEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, u64 seed, u32 max_steps, f32 step_reward,
+            [](PyEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg seed_in, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
-               bool canonical, bool witness, PathArg path, u32 threads) {
+               bool canonical, bool witness, PathArg path, IntArg threads_in) {
+                const u64 seed = int_arg<u64>(seed_in, "seed");
+                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
+                const u32 threads = threads_arg(threads_in);
                 rl::EnvConfig c;
                 c.seed = seed;
                 c.max_steps = max_steps;
@@ -693,7 +696,8 @@ void bind_rl_torch(nb::module_& parent)
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg draws, ArrayArg counts,
                ArrayArg views, ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg action, ArrayArg next_task_ids,
                ArrayArg reward, ArrayArg terminated, ArrayArg truncated, ArrayArg count, ArrayArg final_states,
-               ArrayArg schema, ArrayArg binding, ArrayArg invalid, ArrayArg goal, u64 first_env, StreamArg stream) {
+               ArrayArg schema, ArrayArg binding, ArrayArg invalid, ArrayArg goal, IntArg first_env_in, StreamArg stream) {
+                const u64 first_env = int_arg<u64>(first_env_in, "first_env");
                 e.step(states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, next_task_ids, reward,
                        terminated, truncated, count, final_states, schema, binding, invalid, goal, first_env, stream);
             },
@@ -724,7 +728,9 @@ void bind_rl_torch(nb::module_& parent)
              "random_actions() on data pointers (draws, count, out) of checked tensors.")
         .def(
             "random_actions",
-            [](PyEnv& e, ArrayArg draws, ArrayArg count, ArrayArg out, u64 first_env, u32 max_actions, StreamArg stream) {
+            [](PyEnv& e, ArrayArg draws, ArrayArg count, ArrayArg out, IntArg first_env_in, IntArg max_actions_in, StreamArg stream) {
+                const u64 first_env = int_arg<u64>(first_env_in, "first_env");
+                const u32 max_actions = int_arg<u32>(max_actions_in, "max_actions");
                 e.random_actions(draws, count, out, first_env, max_actions, stream);
             },
             "draws"_a, "count"_a, "out"_a, nb::kw_only(), "first_env"_a = 0, "max_actions"_a = 0, "stream"_a = nb::none(),
@@ -762,7 +768,8 @@ void bind_rl_torch(nb::module_& parent)
 
     m.def(
         "philox",
-        [](ArrayArg counters, u64 seed) {
+        [](ArrayArg counters, IntArg seed_in) {
+            const u64 seed = int_arg<u64>(seed_in, "seed");
             Imports in(-1, dl::k_stream_default);
             std::vector<i64> ext;
             const u32* c = in.get<const u32>(counters, "counters", {u32t, i32t}, {-1, 4}, false, &ext);
@@ -783,7 +790,8 @@ void bind_rl_torch(nb::module_& parent)
 
     m.def(
         "successor_indices",
-        [](u64 seed, ArrayArg envs, ArrayArg draws, ArrayArg counts) {
+        [](IntArg seed_in, ArrayArg envs, ArrayArg draws, ArrayArg counts) {
+            const u64 seed = int_arg<u64>(seed_in, "seed");
             Imports in(-1, dl::k_stream_default);
             std::vector<i64> ext;
             const u64* e = in.get<const u64>(envs, "envs", {i64t, u64t}, {-1}, false, &ext);

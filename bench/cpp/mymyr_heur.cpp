@@ -110,7 +110,8 @@ struct Json
 /// The first `n` states of a BrFS from the initial state (the probe's evalbench samples).
 std::vector<State> brfs_sample(const Task& task, u32 n)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     FlatStateStore store(std::max<u32>(1, task.words()));
     const State s0 = task.initial_state();
     store.insert(s0.data(), s0.size_words());

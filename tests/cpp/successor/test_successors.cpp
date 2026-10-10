@@ -55,7 +55,8 @@ TEST_P(OracleWalk, ApplicableSetsAndSuccessorsMatch)
     opt.atoms = p.mode.atoms;
     const auto task = Task::from_text_file(task_path(p.task), opt);
     Oracle oracle(task->data());
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     succ.set_witness_pruning(false);
     succ.set_canonical_order(true);
 
@@ -120,7 +121,8 @@ TEST_P(OracleWalk, WitnessPruningCoversRelevantProjections)
     opt.atoms = p.mode.atoms;
     const auto task = Task::from_text_file(task_path(p.task), opt);
     Oracle oracle(task->data());
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     succ.set_witness_pruning(true);
     succ.set_canonical_order(true);
     std::mt19937_64 rng(99);
@@ -194,7 +196,8 @@ TEST(Successors, CanonicalOrderOffEmitsTheSameMultiset)
     for (const auto& t : suite())
     {
         const auto task = Task::from_text_file(task_path(t.name));
-        Successors& succ = task->workspace().successors();
+        const WorkspaceLease lease = task->workspace();
+        Successors& succ = lease->successors();
         succ.set_witness_pruning(false);
         std::mt19937_64 rng(5);
         State s = task->initial_state();
@@ -218,7 +221,8 @@ TEST(Successors, CanonicalOrderOffEmitsTheSameMultiset)
 TEST(Successors, RejectsInapplicableAndMalformedLabels)
 {
     const auto task = Task::from_text_file(task_path("blocks__probBLOCKS-8-0"));
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s = task->initial_state();
     const auto acts = succ.applicable_actions(s);
     ASSERT_FALSE(acts.empty());

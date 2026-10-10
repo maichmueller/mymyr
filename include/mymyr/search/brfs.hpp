@@ -10,16 +10,20 @@
 // concurrent store. Ids are deterministic by default: an atomic-min discoverer key (parent id,
 // successor index) plus a per-layer counting sort reproduces the single-threaded ids at every thread count.
 //
-// Every expanded state is goal-tested (goal_states counts them); stop_at_goal ends the search at the first goal
-// state expanded and returns its plan, a shortest one (multi-threaded: the goal state of the smallest id among those
-// the threads reached before they stopped, so which plan of that length can depend on the timing). max_depth caps the expanded layers: with max_depth = D the
-// states of depth < D are expanded and those of depth D stored (exhausted then says whether depth D was empty).
+// Every expanded state is goal-tested (goal_states counts them). The plan reaches the first goal state expanded, a
+// shortest plan (multi-threaded: the goal state of the smallest id among those the threads reached before they
+// stopped, so which plan of that length can depend on the timing), and the status is then Solved. stop_at_goal (the
+// default) ends the search there; without it the search expands the whole reachable space (or what its budgets allow)
+// and `exhausted` says whether it did. max_depth caps the expanded layers: with max_depth = D the states of depth < D
+// are expanded and those of depth D stored (exhausted then says whether depth D was empty).
 //
 // Numeric tasks: states are [bits | slots] rows; every store keeps the numeric words next to the atom part and
 // deduplicates on both.
 //
-// Control (search/control.hpp): max_seconds and cancel stop the search (status OutOfTime, Cancelled); the time and the
-// token are checked every few expansions. Observer events: on_start(initial state) and, at the end, on_solution(plan,
+// Control (search/control.hpp): max_states stops the search (OutOfStates) as soon as that many states are stored, at
+// the new state that fills the store, inside its parent's expansion; max_seconds and cancel stop it (OutOfTime,
+// Cancelled), checked every few expansions and every search::k_check_transitions transitions inside one. Observer
+// events: on_start(initial state) and, at the end, on_solution(plan,
 // plan length) when a plan was found, then on_end(status, totals), all on the calling thread; on_expand(id, state)
 // for every counted expansion; on_generate(parent, action, child, state, is_new) for every successor (is_new: it was
 // stored by this transition); on_pass(depth, layer statistics) for every layer expanded (partly, if the search stopped
@@ -61,10 +65,10 @@ struct BrfsOptions
     bool witness_pruning = true;
     bool canonical_order = true;     // per state, successors in (schema, binding) order
     bool deterministic_ids = true;   // multi-threaded: ids independent of the thread count
-    u64 max_states = ~u64{0};        // stop expanding once this many states are stored
+    u64 max_states = ~u64{0};        // stop (OutOfStates) once this many states are stored (search/control.hpp)
     u32 max_depth = ~u32{0};         // expand only states of depth < max_depth (depth-max_depth states are stored)
     bool layer_stats = false;        // fill BrfsResult::layer_counts
-    bool stop_at_goal = false;
+    bool stop_at_goal = true;        // false: go on through the whole space after the first goal state
     /// What counts as a goal state (stop_at_goal, BrfsResult::goal_states): the task's goal by default. A custom test
     /// (GoalSpec::Kind::Custom) needs threads == 1.
     search::GoalSpec goal{};
@@ -84,10 +88,10 @@ struct BrfsOptions
 
 struct BrfsResult
 {
-    /// Solved (stop_at_goal found a goal state), Exhausted, OutOfStates (max_states or max_depth stopped it),
-    /// OutOfTime or Cancelled (the token, or an observer's on_progress).
+    /// Solved (a goal state was expanded; the plan reaches the first one), Exhausted, OutOfStates (max_states or
+    /// max_depth stopped it), OutOfTime or Cancelled (the token, or an observer's on_progress).
     search::SearchStatus status = search::SearchStatus::Exhausted;
-    u64 states = 0;     // stored states
+    u64 states = 0;     // stored states (at most max(max_states, 1))
     u64 expanded = 0;
     u64 generated = 0;  // successors generated (with duplicates)
     u64 goal_states = 0;
@@ -95,8 +99,8 @@ struct BrfsResult
     /// With layer_stats: per expanded layer {expanded, generated, new states} (mimir's "layers").
     std::vector<std::array<u64, 3>> layer_counts;
     bool exhausted = false;  // the whole reachable space was expanded
-    bool solved = false;     // stop_at_goal found a goal state
-    std::vector<Action> plan;
+    bool solved = false;     // a goal state was expanded
+    std::vector<Action> plan;  // to the first goal state expanded (empty unless solved)
     double search_s = 0;
     u32 words = 0;         // fluent width at the end
     u32 fluent_slots = 0;  // assigned fluent atom slots at the end

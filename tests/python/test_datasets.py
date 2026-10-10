@@ -109,7 +109,7 @@ def test_arrays_are_consistent(depot, depot_space):
     with pytest.raises(ValueError):
         a["goal"][0] = True
     # the same count as the BrFS without witness pruning
-    assert search.brfs(depot, witness_pruning=False).states == n
+    assert search.brfs(depot, witness_pruning=False, stop_at_goal=False).states == n
 
 
 def test_states_labels_and_transitions(depot, depot_space):

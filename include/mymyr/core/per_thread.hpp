@@ -1,7 +1,7 @@
 #pragma once
-// PerThread<W>: lazily created per-thread mutable scratch owned by an immutable object. A Task owns one
-// PerThread<Workspace>; every thread that touches the task gets its own workspace on first use and then reaches it
-// without locks.
+// PerThread<W>: lazily created per-thread mutable state owned by an immutable object. A Task owns one PerThread of
+// workspace pools (task/task.hpp, Task::workspace()); every thread that touches the task gets its own pool on first
+// use and then reaches it without locks.
 //
 // Lifetime rules, so thousands of short-lived tasks (multi-instance RL) and churning thread pools do not leak:
 //   - the owner holds every workspace it created and frees them all when it dies;
@@ -80,6 +80,15 @@ public:
             if (e.uid == m_uid)
                 return *static_cast<W*>(e.workspace);
         return insert_slow(cache, static_cast<Make&&>(make));
+    }
+
+    /// The calling thread's instance if it has one, else nullptr (creates nothing).
+    [[nodiscard]] W* find() const noexcept
+    {
+        for (const auto& e : detail::PerThreadCache::get().entries)
+            if (e.uid == m_uid)
+                return static_cast<W*>(e.workspace);
+        return nullptr;
     }
 
     [[nodiscard]] u64 uid() const noexcept { return m_uid; }

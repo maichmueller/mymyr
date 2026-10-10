@@ -60,7 +60,8 @@ TaskPtr task_of(const std::string& name, const TaskOptions& options = {})
 
 std::vector<State> walks(const Task& task, u32 n = 8)
 {
-    auto& successors = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& successors = lease->successors();
     std::vector<State> states{task.initial_state()};
     for (u32 i = 1; i < n; ++i)
     {
@@ -146,9 +147,9 @@ TEST_P(DeviceNumeric, BrfsEqualsCpu)
     {
         TaskOptions to; to.numeric_storage = storage;
         const auto task = task_of(GetParam(), to);
-        BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true;
+        BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true; cpu.stop_at_goal = false;
         const auto expected = brfs(*task, cpu);
-        cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.chunk_states = 17;
+        cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.stop_at_goal = false; options.chunk_states = 17;
         const auto actual = cuda::brfs(ctx, task, options).result;
         EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
         EXPECT_EQ(actual.expanded, expected.expanded); EXPECT_EQ(actual.goal_states, expected.goal_states);
@@ -319,7 +320,9 @@ void compare_cost_programs(const cuda::ContextPtr& ctx, TaskPtr task)
                 static_cast<const f64*>(pg.data()), count, static_cast<f64*>(cg.data()), static_cast<u32*>(control.data()), stream),
                 "cost programs");
             std::vector<f64> actual(count), expected;
-            auto& succ = task->workspace().successors(); succ.prepare(state.view());
+            const WorkspaceLease lease = task->workspace();
+            auto& succ = lease->successors();
+            succ.prepare(state.view());
             succ.generate<false>([&](u32, const ObjectId*, const Delta& delta) { expected.push_back(costs.next(g, delta)); return true; }, false, true);
             cuda::check(cudaMemcpyAsync(actual.data(), cg.data(), u64{count} * 8, cudaMemcpyDeviceToHost, stream), "cost values");
             u32 error = 0;
@@ -500,9 +503,10 @@ TEST(DeviceNumericRules, ExhaustiveCountsOnFiniteTasks)
                              "m-tpp-numeric", "m-woodworking", "m-barman", "m-transport"})
     {
         const auto task = task_of(name);
-        BrfsOptions cpu; cpu.fingerprint = true;
+        BrfsOptions cpu; cpu.fingerprint = true; cpu.stop_at_goal = false;
         const auto expected = brfs(*task, cpu);
         cuda::DeviceBrfsOptions options; options.fingerprint = true; options.chunk_states = 257;
+        options.stop_at_goal = false;
         const auto actual = cuda::brfs(ctx, task, options).result;
         EXPECT_TRUE(actual.exhausted) << name;
         EXPECT_EQ(actual.states, expected.states) << name;
@@ -567,9 +571,9 @@ TEST_P(DeviceNumericPddl, ExpandBrfsAndIwEqualCpu)
     compare_cost_programs(ctx, task);
     compare_best_first(ctx, task, true);
     compare_expand(ctx, task, states, true, 3);
-    BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true;
+    BrfsOptions cpu; cpu.max_depth = 4; cpu.fingerprint = true; cpu.stop_at_goal = false;
     const auto expected = brfs(*task, cpu);
-    cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true;
+    cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.stop_at_goal = false;
     const auto actual = cuda::brfs(ctx, task, options).result;
     EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
     EXPECT_EQ(actual.goal_states, expected.goal_states); EXPECT_EQ(actual.fingerprint, expected.fingerprint);
@@ -608,7 +612,8 @@ TEST(DeviceNumericRules, Int32OverflowIsReportedBeforeWriting)
 )", "overflow1.pddl");
     const auto task = Task::create(*data);
     ASSERT_EQ(task->numeric_storage(), NumericStorage::I32);
-    EXPECT_THROW((void)task->workspace().successors().applicable_actions(task->initial_state().view()), std::overflow_error);
+    const WorkspaceLease lease = task->workspace();
+    EXPECT_THROW((void)lease->successors().applicable_actions(task->initial_state().view()), std::overflow_error);
     cuda::DeviceBrfsOptions options; options.max_depth = 1;
     EXPECT_THROW((void)cuda::brfs(context(), task, options), std::overflow_error);
     TaskOptions f64; f64.numeric_storage = TaskOptions::NumericStorageMode::F64;
@@ -1001,7 +1006,9 @@ TEST(DeviceNumericRules, OnlyEffectsThatFireConflictAndAssignDefines)
                                                       "d.pddl");
     const TaskPtr task = Task::create(*domain->instantiate_string(
         "(define (problem p) (:domain d) (:init (q) (= (y) 2)) (:goal (and (done) (>= (u) 0))))", "p.pddl"));
-    for (const BrfsResult& r : {brfs(*task), cuda::brfs(context(), task, {}).result})
+    BrfsOptions cpu; cpu.stop_at_goal = false;
+    cuda::DeviceBrfsOptions device; device.stop_at_goal = false;
+    for (const BrfsResult& r : {brfs(*task, cpu), cuda::brfs(context(), task, device).result})
     {
         EXPECT_TRUE(r.exhausted);
         EXPECT_EQ(r.states, 8u);
@@ -1025,7 +1032,8 @@ TEST(DeviceGoals, AtomsNoStateHolds)
         SCOPED_TRACE(goal);
         const TaskPtr task = Task::create(*domain->instantiate_string(
             std::string("(define (problem p) (:domain d) (:objects a b) (:init (g a)) (:goal ") + goal + "))", "p.pddl"));
-        const BrfsResult r = cuda::brfs(ctx, task, {}).result;
+        cuda::DeviceBrfsOptions whole; whole.stop_at_goal = false;
+        const BrfsResult r = cuda::brfs(ctx, task, whole).result;
         EXPECT_TRUE(r.exhausted);
         EXPECT_EQ(r.states, 2u);
         EXPECT_EQ(r.goal_states, goals);
@@ -1070,10 +1078,10 @@ TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
     // c only grows from the value reset gives it, up to 2: a finite state space
     const TaskPtr assigned = make(" (:action reset :parameters () :precondition (and) :effect (assign (c) 0))");
     ASSERT_EQ(assigned->numeric_slots(), 1u);
-    BrfsOptions bounded; bounded.max_states = 1000;
+    BrfsOptions bounded; bounded.max_states = 1000; bounded.stop_at_goal = false;
     const BrfsResult cpu = brfs(*assigned, bounded);
     ASSERT_TRUE(cpu.exhausted);
-    cuda::DeviceBrfsOptions device_bounded; device_bounded.max_states = 1000;
+    cuda::DeviceBrfsOptions device_bounded; device_bounded.max_states = 1000; device_bounded.stop_at_goal = false;
     const BrfsResult device = cuda::brfs(ctx, assigned, device_bounded).result;
     EXPECT_TRUE(device.exhausted);
     EXPECT_EQ(device.states, cpu.states);

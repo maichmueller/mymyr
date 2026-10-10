@@ -34,9 +34,10 @@ The primitive is :func:`expand`: a batch of states ``[N, W]`` in, the flat CSR e
     exp.pad(K)    # the padded [N, K] view: succ [N, K, W], schema, binding, index, mask, count (count > K = overflow)
 
 Per state, successors come in canonical order (schema, then binding); witness pruning is off, so every applicable
-ground action is one row. Outputs are sized automatically (``capacity=`` fixes the size: rows past it are counted in
-``total`` and ``overflow`` is set). ``pool=ThreadPool(T)`` splits one batch over T threads; any number of Python threads
-may call ``expand`` on one shared table at once.
+ground action is one row. Outputs are sized automatically (``capacity=`` fixes the size, at most 2**31 - 1 rows: rows
+past it are counted in ``total`` and ``overflow`` is set; a batch holds at most 2**31 - 1 states and successors).
+``pool=ThreadPool(T)`` splits one batch over T threads; any number of Python threads may call ``expand`` on one shared
+table at once.
 
 State words: little-endian u64, atom slot i at word i >> 6, bit i & 63. NumPy uses uint64 [N, W], torch int64
 [N, W], JAX uint32 [N, 2W] (the same bytes); inputs may use any of them, outputs follow the input. Inputs are read

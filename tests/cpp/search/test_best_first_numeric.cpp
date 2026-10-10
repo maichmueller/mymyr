@@ -76,7 +76,8 @@ BestFirstResult run(const Task& task, const ForkRun& f)
 /// NaN if an action is not applicable or the last state is not a goal state.
 double replay(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const heuristics::ActionCosts costs(task);
     State s = task.initial_state();
     double g = costs.initial(s.view());
@@ -184,7 +185,8 @@ TEST(BestFirstNumeric, StatesDifferingOnlyInTheirValuesAreDistinctInEveryStore)
 TEST(BestFirstNumeric, BlockedStatesCompareTheirValues)
 {
     const auto task = Task::from_text_file(numeric_dir() + "/cs-counters.txt");
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     const State s0 = task->initial_state();
     std::vector<State> next;
     for (const Action& a : succ.applicable_actions(s0.view()))

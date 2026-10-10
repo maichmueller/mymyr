@@ -20,7 +20,6 @@ namespace mymyr::cuda
 {
 namespace
 {
-constexpr u64 k_i32_max = static_cast<u64>(std::numeric_limits<i32>::max());
 /// Views of one chunk at most (larger batches are expanded in chunks of parents).
 constexpr u64 k_view_budget = u64{256} << 20;
 
@@ -758,7 +757,7 @@ struct DeviceExpander::Impl
         if (out.binding && out.label_width < table->label_width())
             throw std::invalid_argument("mymyr: expand: label width " + std::to_string(out.label_width) +
                                         " is below the largest schema arity " + std::to_string(table->label_width()));
-        if (out.capacity > k_i32_max)
+        if (out.capacity > rl::k_max_rows)
             throw std::invalid_argument("mymyr: expand: capacity above 2^31 - 1 rows");
         if (out.succ && out.words == 0 && out.capacity)
             throw std::invalid_argument("mymyr: expand: successor rows of zero words");
@@ -770,7 +769,7 @@ struct DeviceExpander::Impl
                                         ")");
         if (mapped ? out.numeric_words < table->numeric_words() : out.numeric_words != table->numeric_words())
             throw std::invalid_argument("mymyr: device expand: output numeric width differs from the table");
-        if (out.offsets && total > k_i32_max)
+        if (out.offsets && total > rl::k_max_rows)
             throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     }
 };
@@ -884,7 +883,7 @@ u64 DeviceExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::
         throw std::invalid_argument("mymyr: expand: row stride smaller than the row width");
     if (in.numeric_words != I.table->numeric_words())
         throw std::invalid_argument("mymyr: device expand: input numeric width differs from the table");
-    if (in.rows > k_i32_max)
+    if (in.rows > rl::k_max_rows)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
     if (in.words + I.max_numeric_slots() > lifted::k_max_words)
         throw std::invalid_argument("mymyr: device expand: state rows of " + std::to_string(in.words) +
@@ -927,7 +926,7 @@ void DeviceExpander::offsets(i32* out)
         throw std::logic_error("mymyr: DeviceExpander::offsets: count() first");
     if (!out)
         throw std::invalid_argument("mymyr: DeviceExpander::offsets: null destination");
-    if (I.total > k_i32_max)
+    if (I.total > rl::k_max_rows)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     DeviceGuard guard(I.ctx->device());
     switch (I.mode)

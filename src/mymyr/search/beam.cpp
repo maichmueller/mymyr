@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace mymyr::search
@@ -80,7 +81,7 @@ struct Beam
         nodes.set(root, Nodes::Evaluated);
         nodes.set_status(root, Nodes::Open);
         layer.push_back(store.make_ref(root, s0));
-        const u32 width = std::max<u32>(1, c.o.beam_width);
+        const u32 width = c.o.beam_width;
         const u32 max_depth = c.o.control.budget.max_depth;
         u64 order = 0;
         bool stop = false;
@@ -111,8 +112,7 @@ struct Beam
                     c.obs->on_expand(id, cur.view());
                 if (!expand(c, store, nodes, id, cur, next, tr, false))
                 {
-                    r.status = SearchStatus::OutOfStates;
-                    stop = true;
+                    stop = true;  // r.status is set
                     break;
                 }
                 for (const Transitions::T& t : tr.t)
@@ -235,6 +235,8 @@ struct Beam
 
 BestFirstResult beam(const Task& task, const BestFirstOptions& options)
 {
+    if (options.beam_width == 0)
+        throw std::invalid_argument("mymyr beam: beam_width must be positive");
     return bf::run<Beam>(task, options, "beam");
 }
 }  // namespace mymyr::search

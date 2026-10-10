@@ -1,5 +1,6 @@
 #include "mymyr/datasets/knowledge_base.hpp"
 
+#include "mymyr/core/threads.hpp"
 #include "mymyr/novelty/novelty_table.hpp"
 
 #include <algorithm>
@@ -17,7 +18,7 @@ std::shared_ptr<const KnowledgeBase> KnowledgeBase::create(rl::TaskTablePtr task
     if (options.tuple_graphs && options.tuple_graphs->width > novelty::k_max_arity)
         throw std::invalid_argument("mymyr: tuple graph width must be in 0.." + std::to_string(novelty::k_max_arity) + ", got " +
                                     std::to_string(options.tuple_graphs->width));
-    const u32 threads = options.threads == 0 ? std::max<u32>(1, std::thread::hardware_concurrency()) : options.threads;
+    const u32 threads = resolve_threads(options.threads);
     auto kb = std::make_shared<KnowledgeBase>();
     kb->m_tasks = tasks;
     kb->m_options = options;
