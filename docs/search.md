@@ -173,10 +173,10 @@ translator produces; mymyr works on the PDDL atoms. This accounts for most of th
   (lookahead landmarks) and finds reasonable orderings. On some tasks it finds many more landmarks (rubiks cube: about
   twice as many, which lets its greedy search solve tasks that mymyr's landmark count alone does not). mymyr finds
   derived atoms as landmarks too.
-- Landmark progression: Fast Downward also carries the landmarks still needed along the path (a landmark needed again
-  stays needed until a transition adds it) and merges two paths by intersecting what they reached and joining what they
-  still need. mymyr derives the needed landmarks from the reached ones and the state, and its orderings are
-  greedy-necessary only.
+- Landmark progression: Fast Downward also stores the landmarks still needed per state (joined over the paths into a
+  state) and requires a landmark again through its reasonable orderings. mymyr computes the needed landmarks from the
+  reached ones and the state; for goals and greedy-necessary orderings, mymyr's only orderings, both give the same
+  landmarks.
 - States off the path: Fast Downward assumes its heuristic sees states reached from the initial state; mymyr infers the
   status of another start state (above).
 
