@@ -1590,7 +1590,7 @@ bool DeviceMultiIw::Impl::enqueue_body(Run& r, miw::Loop* loop, unsigned long lo
                                              scan_state(miw::k_scan_cut), s),
                   "launch_scan_flag_pair");
             check(miw::launch_cut(g, c, sv, r.lim, r.cut_scan, s), "launch_cut");
-            check(miw::launch_keep(g, c, sv, s), "launch_keep");
+            check(miw::launch_keep(g, c, sv, r.lim, s), "launch_keep");
         }
     }
     if (novel_kept)
