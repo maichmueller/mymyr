@@ -15,8 +15,8 @@
 //      d. h_max is updated incrementally: the operators of the cheaper actions propagate their new costs, and an
 //         operator whose supporter became cheaper takes the first of its most expensive preconditions again.
 // Operators: one per ground action and distinct precondition (the action's precondition with the condition of an
-// effect instance; instances without a condition of their own form one operator, as in a STRIPS task), and one per
-// ground axiom. Costs are shared per ground action: the operators of one action all cost its remaining cost, and a cut
+// effect instance; instances without a condition of their own form one operator, as in a STRIPS task; an instance
+// whose static condition fails never fires and has none), and one per ground axiom. Costs are shared per ground action: the operators of one action all cost its remaining cost, and a cut
 // lowers it once. Each cut, mapped to its actions, is an action landmark of the task (every plan's actions with the
 // effects that fire form a relaxed plan, which must contain an operator of the cut), and the cut costs never exceed
 // what the actions have left, so h is a cost partitioning of action landmarks: admissible with conditional effects.
@@ -24,8 +24,9 @@
 // the cuts can fall below h_max; h is the larger of the two (both are admissible). Without conditional effects every
 // action is one operator and h is the sum of the cuts, which is at least h_max. Axioms are zero-cost operators: a
 // zero-cost operator's supporter lies in the goal zone whenever one of its effects does, so no cut holds one, and the
-// derived atoms of a state are reachable in the relaxation from its fluent atoms. "False" propositions (negative preconditions) hold where their atom is false and are otherwise
-// added by the operators deleting it, which over-approximates every plan as well. Numeric conditions are ignored.
+// derived atoms of a state are reachable in the relaxation from its fluent atoms. "False" propositions (negative
+// preconditions) hold where their atom is false and are otherwise added by the operators deleting it, which
+// over-approximates every plan as well. Numeric conditions are ignored.
 // Grounded only: a state outside the grounding raises std::runtime_error.
 
 #include "landmark_heuristics.hpp"

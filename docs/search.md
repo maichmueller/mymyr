@@ -110,8 +110,9 @@ subtracts it from the cut's operators, and repeats until the goal costs 0.
   fractional costs are exact up to 6 decimal places.
 - Conditional effects: the relaxation has an operator per effect, but an action's cost is charged once. A cut lowers
   each of its actions once, however many of the action's effects it holds: every plan applies some action of the cut,
-  so the cuts form a cost partitioning over actions. Effects of one action with the same conditions are one operator.
-  Lowering an action lowers its other effects too, so the cuts can sum to less than h_max; the value is then h_max.
+  so the cuts form a cost partitioning over actions. Effects of one action with the same conditions are one operator,
+  and an effect whose static condition fails is left out. Lowering an action lowers its other effects too, so the cuts
+  can sum to less than h_max; the value is then h_max.
 - Derived predicates: the axioms are operators of cost 0, which no cut contains.
 - A search goal of several alternatives (`goal=[...]`): the smallest value over them.
 
@@ -148,6 +149,35 @@ with an effect that fires in the state and adds an atom of a needed landmark tha
 
 A search goal of several alternatives fails (`Status.FAILED`): the landmarks are those of the task's goal. There is no
 admissible variant (cost partitioning over the landmarks).
+
+### Differences from Fast Downward
+
+Fast Downward (`lmcut()`, and `landmark_sum(lm_factory=lm_rhw())` for the landmark count) works on the SAS+ task its
+translator produces; mymyr works on the PDDL atoms. This accounts for most of the differences:
+
+- State space: the translator drops facts and operators that cannot matter for the goal, and states that differ only
+  in them are one state for Fast Downward. A* can then expand far fewer states there, also with the same heuristic
+  values (and even without a heuristic).
+- Language: Fast Downward's LM-cut refuses conditional effects and axioms that its translator does not simplify away.
+  mymyr's LM-cut supports both: conditional effects through action-level cost sharing (each cut lowers an action
+  once), derived predicates as free operators. Effects whose static condition fails never fire and are left out, as
+  the translator does; the other relaxation heuristics (`max`, `add`, `ff`) keep them, as mimir does.
+- LM-cut ties: both take the first of an operator's most expensive preconditions as its supporter, but Fast Downward
+  orders preconditions by SAS+ variable and mymyr by the grounding. On ties the cuts can differ, and so can the value
+  (both are admissible).
+- Negated atoms: Fast Downward has a fact for an atom being false, so a negative goal (snake: `(not (ispoint ?p))`) is
+  a landmark there. mymyr's landmarks are positive atoms; a negative precondition costs 0 in LM-cut when the atom is
+  false and is otherwise achieved by an action deleting it.
+- Landmark generation: Fast Downward's RHW factory also follows the domain transition graphs of the SAS+ variables
+  (lookahead landmarks) and finds reasonable orderings. On some tasks it finds many more landmarks (rubiks cube: about
+  twice as many, which lets its greedy search solve tasks that mymyr's landmark count alone does not). mymyr finds
+  derived atoms as landmarks too.
+- Landmark progression: Fast Downward also carries the landmarks still needed along the path (a landmark needed again
+  stays needed until a transition adds it) and merges two paths by intersecting what they reached and joining what they
+  still need. mymyr derives the needed landmarks from the reached ones and the state, and its orderings are
+  greedy-necessary only.
+- States off the path: Fast Downward assumes its heuristic sees states reached from the initial state; mymyr infers the
+  status of another start state (above).
 
 ## Goals, budgets and callbacks
 
