@@ -19,13 +19,13 @@ states, search and parse time, plan length and cost.
 | Option | Meaning |
 | --- | --- |
 | `--search` | `astar` (default), `gbfs`, `brfs`, `iw`, `siw` or `astar_iw` |
-| `--heuristic` | `blind`, `max`, `add`, `ff`, `h2`, `set_additive` or `perfect`, for `astar`, `gbfs` and `astar_iw` (default: `max` for A*, `ff` for GBFS) |
+| `--heuristic` | `blind`, `max`, `add`, `ff`, `h2`, `set_additive`, `lmcut`, `lmcount` or `perfect`, for `astar`, `gbfs` and `astar_iw` (default: `max` for A*, `ff` for GBFS) |
 | `--width` | the largest novelty arity of `iw` and `siw` (default 2), the width of `astar_iw` (default 1) |
 | `--threads` | threads of `brfs`; the other searches run on one thread |
 | `--max-seconds`, `--max-states` | budgets |
 | `--debug` | show the traceback of an error |
 
-A* finds an optimal plan with an admissible heuristic: `blind`, `max`, `h2` or `perfect`. It and GBFS use the task's
+A* finds an optimal plan with an admissible heuristic: `blind`, `max`, `h2`, `lmcut` or `perfect`. It and GBFS use the task's
 action costs. BrFS finds a shortest plan. IW, SIW and AStarIW prune by novelty and can miss plans of a task whose width
 is larger than the one given. Numeric tasks run in every search but AStarIW, which refuses them with an error.
 

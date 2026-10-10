@@ -34,8 +34,8 @@ EXIT_BUDGET = 3
 EXIT_INTERRUPTED = 130
 
 SEARCHES = ("astar", "gbfs", "brfs", "iw", "siw", "astar_iw")
-HEURISTICS = ("blind", "max", "add", "ff", "h2", "set_additive", "perfect")
-ADMISSIBLE = ("blind", "max", "h2", "perfect")
+HEURISTICS = ("blind", "max", "add", "ff", "h2", "set_additive", "lmcut", "lmcount", "perfect")
+ADMISSIBLE = ("blind", "max", "h2", "lmcut", "perfect")
 DEFAULT_HEURISTIC = {"astar": "max", "gbfs": "ff", "astar_iw": "max"}
 WIDTH_SEARCHES = ("iw", "siw", "astar_iw")
 
@@ -81,7 +81,8 @@ def _parser() -> argparse.ArgumentParser:
         "--heuristic",
         choices=HEURISTICS,
         help="the heuristic of astar, gbfs and astar_iw (default: max for astar and astar_iw, ff for gbfs). A* finds "
-        f"optimal plans with an admissible one: {', '.join(ADMISSIBLE)}; add, ff and set_additive are not admissible. "
+        f"optimal plans with an admissible one: {', '.join(ADMISSIBLE)}; add, ff, set_additive and lmcount are not "
+        "admissible. "
         "perfect computes the state space first.",
     )
     plan.add_argument(

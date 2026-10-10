@@ -96,7 +96,7 @@ def test_every_search_on_a_numeric_task(search_name):
         assert cost == search.astar(task, heuristic="blind", costs="real").cost == 6
 
 
-@pytest.mark.parametrize("heuristic", ["max", "blind", "h2"])
+@pytest.mark.parametrize("heuristic", ["max", "blind", "h2", "lmcut"])
 @pytest.mark.parametrize("name", sorted(GOLDEN))
 def test_astar_finds_the_optimal_cost_of_the_goldens(name, heuristic):
     golden = json.loads((EXPECTED / f"{name}.json").read_text())["astar"]
