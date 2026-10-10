@@ -1077,22 +1077,20 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             report(s, b, w, nn, tree.size(), TransitionOutcome::Opened);
             return admit_node(s, b, w, nn, false);
         };
-        // inside the expansion: the time and the token every k_check_transitions transitions
-        u32 since_check = 0;
+        // inside the expansion: the time and the token every k_check_transitions transitions (process counts each in
+        // st.generated)
         driver.run(env, cv,
                    [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                    {
-                       if (++since_check == k_check_transitions)
-                       {
-                           since_check = 0;
-                           if (env.out_of_time() || env.cancelled())
-                           {
-                               finish(env.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
-                               stop = true;
-                               return false;
-                           }
-                       }
-                       return process(s, b, d);
+                       if (!process(s, b, d))
+                           return false;
+                       if (st.generated % k_check_transitions != 0) [[likely]]
+                           return true;
+                       if (!env.out_of_time() && !env.cancelled())
+                           return true;
+                       finish(env.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
+                       stop = true;
+                       return false;
                    });
         if (env.tracker && env.tracker->pending())
             env.tracker->flush_derived(succ);

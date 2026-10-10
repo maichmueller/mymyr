@@ -439,25 +439,23 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     std::vector<std::array<u32, 3>> buf_ranges;  // (first slot, adds, dels)
     std::vector<u32> order, perm;
     std::vector<u8> taken;
-    // inside an expansion: the time and the token every k_check_transitions transitions (false stops the pass)
-    u32 since_check = 0;
-    auto keep_generating = [&]() -> bool
+    // inside an expansion: the time and the token (true stops the pass)
+    auto interrupted = [&]() -> bool
     {
-        if (++since_check != k_check_transitions) [[likely]]
-            return true;
-        since_check = 0;
         if (c.out_of_time())
             finish(SearchStatus::OutOfTime);
         else if (cancel.requested())
             finish(SearchStatus::Cancelled);
         else
-            return true;
+            return false;
         stop = true;
-        return false;
+        return true;
     };
     auto drive = [&](StateView cv, auto&& process)
     {
-        auto checked = [&](u32 s, const ObjectId* b, const Delta& d) -> bool { return keep_generating() && process(s, b, d); };
+        // every process counts its transition in st.generated: the check every k_check_transitions of them
+        auto checked = [&](u32 s, const ObjectId* b, const Delta& d) -> bool
+        { return process(s, b, d) && (st.generated % k_check_transitions != 0 || !interrupted()); };
         if constexpr (Slow)
         {
             if (o.successor_order)
@@ -466,10 +464,11 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                 buf_slots.clear();
                 buf_num.clear();
                 buf_ranges.clear();
+                u32 buffered = 0;
                 succ.generate<true>(
                     [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                     {
-                        if (!keep_generating())
+                        if (++buffered % k_check_transitions == 0 && interrupted())
                             return false;
                         buf_actions.emplace_back(SchemaId{s}, std::vector<ObjectId>(b, b + succ.arity(s)));
                         if (NN)

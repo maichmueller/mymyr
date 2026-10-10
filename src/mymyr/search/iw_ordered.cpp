@@ -197,19 +197,16 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             }
             if (!prepared)
                 succ.prepare(cv);
-            u32 since_check = 0;
             succ.generate<true>(
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
-                    if (++since_check == k_check_transitions)  // the time and the token inside the expansion
+                    // the time and the token inside the expansion, every k_check_transitions transitions
+                    if (st.generated % k_check_transitions == k_check_transitions - 1 &&
+                        (c.out_of_time() || cancel.requested()))
                     {
-                        since_check = 0;
-                        if (c.out_of_time() || cancel.requested())
-                        {
-                            finish(c.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
-                            stop = true;
-                            return false;
-                        }
+                        finish(c.out_of_time() ? SearchStatus::OutOfTime : SearchStatus::Cancelled);
+                        stop = true;
+                        return false;
                     }
                     ++st.generated;
                     const u32 nn = apply_delta(cur.data(), n, d, next);
