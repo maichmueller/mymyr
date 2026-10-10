@@ -1006,7 +1006,9 @@ TEST(DeviceNumericRules, OnlyEffectsThatFireConflictAndAssignDefines)
                                                       "d.pddl");
     const TaskPtr task = Task::create(*domain->instantiate_string(
         "(define (problem p) (:domain d) (:init (q) (= (y) 2)) (:goal (and (done) (>= (u) 0))))", "p.pddl"));
-    for (const BrfsResult& r : {brfs(*task), cuda::brfs(context(), task, {}).result})
+    BrfsOptions cpu; cpu.stop_at_goal = false;
+    cuda::DeviceBrfsOptions device; device.stop_at_goal = false;
+    for (const BrfsResult& r : {brfs(*task, cpu), cuda::brfs(context(), task, device).result})
     {
         EXPECT_TRUE(r.exhausted);
         EXPECT_EQ(r.states, 8u);
@@ -1030,7 +1032,8 @@ TEST(DeviceGoals, AtomsNoStateHolds)
         SCOPED_TRACE(goal);
         const TaskPtr task = Task::create(*domain->instantiate_string(
             std::string("(define (problem p) (:domain d) (:objects a b) (:init (g a)) (:goal ") + goal + "))", "p.pddl"));
-        const BrfsResult r = cuda::brfs(ctx, task, {}).result;
+        cuda::DeviceBrfsOptions whole; whole.stop_at_goal = false;
+        const BrfsResult r = cuda::brfs(ctx, task, whole).result;
         EXPECT_TRUE(r.exhausted);
         EXPECT_EQ(r.states, 2u);
         EXPECT_EQ(r.goal_states, goals);
@@ -1075,10 +1078,10 @@ TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
     // c only grows from the value reset gives it, up to 2: a finite state space
     const TaskPtr assigned = make(" (:action reset :parameters () :precondition (and) :effect (assign (c) 0))");
     ASSERT_EQ(assigned->numeric_slots(), 1u);
-    BrfsOptions bounded; bounded.max_states = 1000;
+    BrfsOptions bounded; bounded.max_states = 1000; bounded.stop_at_goal = false;
     const BrfsResult cpu = brfs(*assigned, bounded);
     ASSERT_TRUE(cpu.exhausted);
-    cuda::DeviceBrfsOptions device_bounded; device_bounded.max_states = 1000;
+    cuda::DeviceBrfsOptions device_bounded; device_bounded.max_states = 1000; device_bounded.stop_at_goal = false;
     const BrfsResult device = cuda::brfs(ctx, assigned, device_bounded).result;
     EXPECT_TRUE(device.exhausted);
     EXPECT_EQ(device.states, cpu.states);
