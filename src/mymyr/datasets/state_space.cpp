@@ -10,8 +10,6 @@
 
 #include "mymyr/core/team.hpp"
 #include "mymyr/core/threads.hpp"
-#include "mymyr/datasets/certificates.hpp"
-#include "mymyr/datasets/object_graph.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/state/concurrent_store.hpp"
 #include "mymyr/state/flat_store.hpp"
@@ -29,8 +27,6 @@
 #include <queue>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace mymyr::datasets
 {
@@ -387,7 +383,7 @@ private:
 
 public:
     // fields for the generators
-    static void set_basic(StateSpace& S, TaskPtr task, u32 n, u32 words, u32 nn, bool labels, u32 width, bool symmetric)
+    static void set_basic(StateSpace& S, TaskPtr task, u32 n, u32 words, u32 nn, bool labels, u32 width)
     {
         S.m_task = std::move(task);
         S.m_n = n;
@@ -395,13 +391,6 @@ public:
         S.m_numeric_words = nn;
         S.m_has_labels = labels;
         S.m_label_width = width;
-        S.m_symmetry_reduced = symmetric;
-    }
-    static void set_certificate(StateSpace& S, CertificateKind kind, u32 k, const KfwlLimits& limits)
-    {
-        S.m_certificate = kind;
-        S.m_fwl_k = k;
-        S.m_fwl_limits = limits;
     }
     static std::vector<u64>& states(StateSpace& S) { return S.m_states; }
     static std::vector<u64>& offsets(StateSpace& S) { return S.m_offsets; }
@@ -457,7 +446,7 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
     auto space = std::make_shared<StateSpace>();
     StateSpace& S = *space;
     StateSpaceBuilder::set_basic(S, std::move(a.task), a.num_states, a.words, a.numeric_words, a.labels,
-                                 a.labels ? a.label_width : 0, false);
+                                 a.labels ? a.label_width : 0);
     S.m_states = std::move(a.state_words);
     S.m_offsets = std::move(a.forward_offsets);
     S.m_targets = std::move(a.forward_targets);
@@ -799,7 +788,7 @@ private:
         const u32 W = std::max<u32>(1, m_task.words());
         const u32 NN = m_task.numeric_words();
         const u32 RW = W + NN;
-        StateSpaceBuilder::set_basic(S, m_taskp, static_cast<u32>(N), W, NN, m_o.labels, m_o.labels ? m_width : 0, false);
+        StateSpaceBuilder::set_basic(S, m_taskp, static_cast<u32>(N), W, NN, m_o.labels, m_o.labels ? m_width : 0);
         // handle -> id
         // handle decoding outlives the store: thread = h >> lb, local index = h & mask (lb = 32 for one thread)
         const u32 lb = T == 1 ? 32 : static_cast<u32>(std::countr_zero(store.make_handle(1, 0)));
@@ -1016,7 +1005,7 @@ public:
         const u32 N = store.size();
         const u32 W = std::max<u32>(1, m_task.words());
         const u32 RW = W + NN;
-        StateSpaceBuilder::set_basic(S, m_taskp, N, W, NN, labels, labels ? K : 0, false);
+        StateSpaceBuilder::set_basic(S, m_taskp, N, W, NN, labels, labels ? K : 0);
         std::vector<u64>& rows = StateSpaceBuilder::states(S);
         if (store.stride() == W)
             rows.assign(store.words(StateId{0}), store.words(StateId{0}) + static_cast<usize>(N) * RW);
@@ -1066,203 +1055,12 @@ private:
     u32 m_width = 0;
 };
 
-// ------------------------------------------------------------------------------------------------- symmetry pruning
-/// State space generation with symmetry pruning (as in mimir's SymmetryReducedProblemGraphEventHandler with
-/// SymmetryStatePruning), single-threaded: a breadth-first search that keeps the first state of every certificate
-/// class as its representative and expands only representatives. A transition from a representative to a successor
-/// becomes an edge to the successor's class; the first transition to each class is kept, but, for a class that the
-/// same expansion creates, also one parallel edge, matching mimir's behaviour.
-class SymmetricGenerator
-{
-public:
-    SymmetricGenerator(TaskPtr task, const StateSpaceOptions& o) : m_taskp(std::move(task)), m_task(*m_taskp), m_o(o), m_costs(m_task) {}
-
-    StateSpaceResult run()
-    {
-        StateSpaceResult r;
-        const auto t0 = Clock::now();
-        if (m_task.compiled().goal.unsatisfiable)
-        {
-            r.status = StateSpaceStatus::Unsolvable;
-            r.seconds = seconds_since(t0);
-            return r;
-        }
-        const bool timed = std::isfinite(m_o.max_seconds);
-        const u32 NN = m_task.numeric_words();
-        const u32 K = max_arity(m_task);
-        const bool unit = m_costs.unit(), metric = m_costs.kind() == heuristics::ActionCosts::Kind::StateMetric;
-        ObjectGraphBuilder ogb(m_task);
-        ObjectGraph graph;
-        auto certificate = [&](StateView s)
-        {
-            ogb.build(s, graph);
-            return m_o.certificate == CertificateKind::KFwl ? kfwl_certificate(graph, m_o.fwl_k, m_o.fwl_limits)
-                                                            : color_refinement_certificate(graph);
-        };
-        std::unordered_map<Certificate, u32, CertificateHash> class_of;
-        std::unordered_map<State, u32> seen;  // every generated state -> its class
-        std::vector<State> reps;               // the representative of each class
-        std::vector<u32> depth;
-        std::vector<u8> goal;
-        std::vector<u64> offsets{0};
-        std::vector<u32> targets, schemas, bindings;
-        std::vector<f64> costs;
-        const State& s0 = m_task.initial_state();
-        class_of.emplace(certificate(s0.view()), 0);
-        reps.push_back(s0);
-        depth.push_back(0);
-        seen.emplace(s0, 0);
-        const WorkspaceLease lease = m_task.workspace();
-        Successors& succ = lease->successors();
-        std::vector<u64> next;
-        // the successors of the current representative, collected first: certificates evaluate axioms on this
-        // thread's workspace, which must not happen inside the generator's callback
-        std::vector<State> succ_states;
-        std::vector<u32> succ_schema, succ_binding;
-        std::vector<f64> succ_cost;
-        std::vector<u32> hit;  // classes reached from the current source
-        for (u32 id = 0; id < reps.size(); ++id)
-        {
-            if (timed && seconds_since(t0) > m_o.max_seconds)
-            {
-                r.status = StateSpaceStatus::Timeout;
-                r.states = seen.size();
-                r.seconds = seconds_since(t0);
-                return r;
-            }
-            const State cur = reps[id];
-            const StateView sv = cur.view();
-            succ.prepare(sv);
-            goal.push_back(succ.goal_holds());
-            const f64 g = metric ? m_costs.initial(sv) : static_cast<f64>(depth[id]);
-            succ_states.clear();
-            succ_schema.clear();
-            succ_binding.clear();
-            succ_cost.clear();
-            succ.generate<false>(
-                [&](u32 schema, const ObjectId* b, const Delta& d)
-                {
-                    const u32 nn = apply_delta(sv.w, sv.nw, d, next);
-                    succ_states.emplace_back(next.data(), nn, d.num, NN);
-                    succ_schema.push_back(schema);
-                    const u32 arity = succ.arity(schema);
-                    for (u32 i = 0; i < K; ++i)
-                        succ_binding.push_back(i < arity ? b[i].v : ~u32{0});
-                    if (!unit)
-                        succ_cost.push_back(m_costs.transition(g, d));
-                    return true;
-                },
-                false, true);
-            hit.clear();
-            for (usize j = 0; j < succ_states.size(); ++j)
-            {
-                State& t = succ_states[j];
-                u32 c;
-                if (auto it = seen.find(t); it != seen.end())
-                    c = it->second;
-                else
-                {
-                    const Certificate cert = certificate(t.view());
-                    bool fresh = false;
-                    if (auto jt = class_of.find(cert); jt != class_of.end())
-                        c = jt->second;
-                    else
-                    {
-                        c = static_cast<u32>(reps.size());
-                        class_of.emplace(cert, c);
-                        reps.push_back(t);
-                        depth.push_back(depth[id] + 1);
-                        fresh = true;
-                    }
-                    seen.emplace(std::move(t), c);
-                    // mimir's BrFS: after a new (unpruned) state, fail if it has created max_states states or more
-                    // (every generated state counts, representative or not)
-                    if (fresh && seen.size() >= std::max<u64>(m_o.max_states, 2))
-                    {
-                        r.status = StateSpaceStatus::OutOfStates;
-                        r.states = seen.size();
-                        r.seconds = seconds_since(t0);
-                        return r;
-                    }
-                }
-                if (std::find(hit.begin(), hit.end(), c) != hit.end())
-                    continue;  // no parallel edges between classes
-                hit.push_back(c);
-                targets.push_back(c);
-                if (m_o.labels)
-                {
-                    schemas.push_back(succ_schema[j]);
-                    bindings.insert(bindings.end(), succ_binding.begin() + static_cast<i64>(j * K),
-                                    succ_binding.begin() + static_cast<i64>((j + 1) * K));
-                }
-                if (!unit)
-                    costs.push_back(succ_cost[j]);
-            }
-            offsets.push_back(targets.size());
-        }
-        const f64 search_s = seconds_since(t0);
-        const auto t1 = Clock::now();
-        auto space = std::make_shared<StateSpace>();
-        StateSpace& S = *space;
-        const u32 N = static_cast<u32>(reps.size());
-        const u32 W = std::max<u32>(1, m_task.words());
-        const u32 RW = W + NN;
-        StateSpaceBuilder::set_basic(S, m_taskp, N, W, NN, m_o.labels, m_o.labels ? K : 0, true);
-        StateSpaceBuilder::set_certificate(S, m_o.certificate, m_o.fwl_k, m_o.fwl_limits);
-        std::vector<u64>& rows = StateSpaceBuilder::states(S);
-        rows.assign(static_cast<u64>(N) * RW, 0);
-        for (u32 i = 0; i < N; ++i)
-        {
-            u64* row = rows.data() + static_cast<u64>(i) * RW;
-            std::copy(reps[i].data(), reps[i].data() + reps[i].size_words(), row);
-            if (NN)
-                std::copy(reps[i].numeric().begin(), reps[i].numeric().end(), row + W);
-        }
-        StateSpaceBuilder::offsets(S).swap(offsets);
-        StateSpaceBuilder::targets(S).swap(targets);
-        StateSpaceBuilder::schemas(S).swap(schemas);
-        StateSpaceBuilder::bindings(S).swap(bindings);
-        if (!unit)
-            drop_unit_costs(costs);
-        StateSpaceBuilder::costs(S).swap(costs);
-        StateSpaceBuilder::goal(S).swap(goal);
-        Team team(1);
-        if (!StateSpaceBuilder::finish(S, team, m_o.remove_if_unsolvable))
-        {
-            r.status = StateSpaceStatus::Unsolvable;
-            r.states = N;
-            r.seconds = seconds_since(t0);
-            return r;
-        }
-        u32 layers = 0;
-        for (u32 d : depth)
-            layers = std::max(layers, d + 1);
-        StateSpaceBuilder::set_stats(S, 1, layers, search_s, seconds_since(t1));
-        r.states = N;
-        r.space = std::move(space);
-        r.seconds = seconds_since(t0);
-        return r;
-    }
-
-private:
-    TaskPtr m_taskp;
-    const Task& m_task;
-    const StateSpaceOptions& m_o;
-    heuristics::ActionCosts m_costs;
-};
 }  // namespace
 
 StateSpaceResult generate_state_space(TaskPtr task, const StateSpaceOptions& options)
 {
     if (!task)
         throw std::invalid_argument("mymyr: generate_state_space needs a task");
-    if (options.symmetry_pruning)
-    {
-        if (options.certificate == CertificateKind::KFwl && (options.fwl_k < 2 || options.fwl_k > 4))
-            throw std::invalid_argument("mymyr: k-FWL certificates support k = 2, 3 and 4");
-        SymmetricGenerator g(std::move(task), options);
-        return g.run();
-    }
     const u32 T = resolve_threads(options.threads);
     if (T == 1)
     {

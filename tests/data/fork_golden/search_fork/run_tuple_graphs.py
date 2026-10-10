@@ -7,9 +7,9 @@ tests/cpp/datasets/test_tuple_graphs.cpp and tests/python/test_tuple_graphs.py.
     python3 tests/data/fork_golden/search_fork/run_tuple_graphs.py --only gripper
     python3 tests/data/fork_golden/search_fork/run_tuple_graphs.py --time blocks_4/p02-easy.pddl ...
 
-Per task: the state space (remove_if_unsolvable = false, no symmetry pruning) and the tuple graphs of width 0, and of
-widths 1 and 2 with and without dominance pruning, of every vertex (every ceil(N / sample)-th vertex on spaces of more
-than --sample vertices). The format is described in tests/data/fork_golden/README.md ("Tuple graphs").
+Per task: the state space (remove_if_unsolvable = false) and the tuple graphs of width 0, and of widths 1 and 2 with
+and without dominance pruning, of every vertex (every ceil(N / sample)-th vertex on spaces of more than --sample
+vertices). The format is described in tests/data/fork_golden/README.md ("Tuple graphs").
 
 --time runs only the timing mode on the given tasks (<dir>/<problem>): the fork's TupleGraphImpl::create over every
 vertex at widths 1 and 2 with dominance pruning, its seconds and peak RSS, printed as JSON lines.

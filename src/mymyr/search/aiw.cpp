@@ -606,7 +606,6 @@ IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& o)
     detail::Env env(task, succ, goal, blocked, o.control);
     env.witness = o.witness_pruning;
     env.canonical = o.canonical_order;
-    env.symmetry = o.symmetry_pruning;
     env.successor_order = &o.successor_order;
     detail::LayerOrderer layers;
     std::unique_ptr<detail::BeamTeam> team;

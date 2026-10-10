@@ -2,8 +2,7 @@
 
 - state_spaces over a TaskTable or a sequence of tasks equals the instance pool (generate_many) and state_space per task;
 - generalized_state_space takes a TaskTable;
-- device= on a CPU build raises ValueError (CUDA builds: tests/python/test_cuda_state_space.py); symmetry pruning stays on the
-  CPU;
+- device= on a CPU build raises ValueError (CUDA builds: tests/python/test_cuda_state_space.py);
 - the float64 arrays (costs, cost goal distances) are exported like the others (NumPy, dlpack, torch);
 - a sampler's id views outlive the sampler.
 """
@@ -41,8 +40,6 @@ def test_state_spaces_over_tables_and_sequences(tasks):
 
 
 def test_device_dispatch_errors(tasks):
-    with pytest.raises(ValueError, match="symmetry"):
-        datasets.state_space(tasks[0], device=0, symmetry_pruning=True)
     if HAS_CUDA:
         pytest.skip("a CUDA build: the device path is tests/python/test_cuda_state_space.py")
     with pytest.raises(ValueError, match="CUDA"):

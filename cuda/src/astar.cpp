@@ -102,8 +102,6 @@ std::string best_first_unsupported(const Task& task, const DeviceBestFirstOption
         return "search observers";
     if (so.evaluator)
         return "a caller-owned evaluator (the device builds its heuristic from search.heuristic)";
-    if (so.symmetry_pruning != SymmetryPruning::Off)
-        return "symmetry pruning (search.symmetry_pruning; the device generates every applicable action)";
     if (o.batch == 0)
         return "a batch of 0 states";
     const heuristics::Kind k = so.heuristic.kind;

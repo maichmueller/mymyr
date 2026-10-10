@@ -41,13 +41,6 @@ Successors::Successors(detail::Engine& engine, AxiomEvaluator& axioms) : m_e(eng
     }
 }
 
-detail::SymmetryPruner& Successors::symmetry_pruner()
-{
-    if (!m_sym)
-        m_sym = std::make_unique<detail::SymmetryPruner>(m_e.task(), m_e.ow());
-    return *m_sym;
-}
-
 // The applicability rules for the numeric and total-cost effects of one (conditional) effect that fires, checked in
 // mimir's order (ActionSatisficingBindingGenerator::is_valid_binding): fluent effects, then the total-cost effect; each
 // records its family on its target before its value is checked. The effects are appended to `writes` / `auxes`.

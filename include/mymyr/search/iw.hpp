@@ -49,7 +49,6 @@
 #include "mymyr/search/layer_ordering.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
-#include "mymyr/successor/symmetry.hpp"
 
 #include <functional>
 #include <memory>
@@ -82,9 +81,6 @@ struct IwOptions
     bool optimize_iw1 = true;       // mimir's optimized IW(1) when max_arity == 1 (see above)
     bool witness_pruning = false;   // off: every applicable action is a transition (mimir's generated counts)
     bool canonical_order = true;    // successors per state in (schema, binding) order
-    /// Wl1: successors only by actions over representatives of the objects' colour classes (successor/symmetry.hpp);
-    /// the search may then miss every plan.
-    SymmetryPruning symmetry_pruning = SymmetryPruning::Off;
     novelty::TableOptions tables;   // dense/sparse budget of the novelty tables
     std::optional<State> start;     // default: the task's initial state
     /// Optional successor order. Called once per expanded state with its actions in generation order; writes into

@@ -54,8 +54,6 @@ std::unique_ptr<Heuristic> perfect(datasets::StateSpacePtr space, Costs costs)
 {
     if (!space)
         throw std::invalid_argument("mymyr: the perfect heuristic needs a state space (got none)");
-    if (space->symmetry_reduced())
-        throw std::invalid_argument("mymyr: the perfect heuristic needs a state space without symmetry pruning");
     return std::make_unique<PerfectHeuristic>(std::move(space), costs);
 }
 }  // namespace mymyr::heuristics
