@@ -156,6 +156,8 @@ private:
         std::vector<u32> pre, eff;
         for (u32 o = 0; o < R.num_ops(); ++o)
         {
+            if (!R.static_condition_holds(o))
+                continue;  // never fires
             pre.assign(R.pre(o).begin(), R.pre(o).end());
             // first occurrence order: the supporter is the first of the most expensive preconditions in this order
             u32 k = 0;

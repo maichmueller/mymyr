@@ -19,7 +19,8 @@
 //      a landmark although a costlier achiever does without it). FirstAchievers::PossiblyBefore makes them sound, as in
 //      the landmark generators of Zhu and Givan (2003) and of Richter, Helmert and Westphal (2008): the first
 //      achievers of an atom are all operators adding it that are applicable in the delete relaxation of the initial
-//      state without the operators adding it (one exploration per atom). Every plan first makes the atom true by one of
+//      state without the operators adding it (one exploration per atom; operators whose static effect condition fails
+//      never fire and take no part). Every plan first makes the atom true by one of
 //      them, so their shared preconditions hold right before, and the disjunctive landmarks of step 3 drawn from the
 //      fact landmarks (max_disjunctive_landmark_depth = 1) are sound as well.
 //   3. Disjunctive landmarks (max_disjunctive_landmark_size > 0): for every expanded atom and every predicate for which

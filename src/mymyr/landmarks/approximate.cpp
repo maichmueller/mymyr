@@ -93,6 +93,9 @@ private:
                     ++cnt[o];
             }
         }
+        for (u32 p = 0; p < P; ++p)
+            if (R.negative(p) && m_cost[p] == 0)
+                m_init_neg_props.push_back(p);
         std::vector<u32> work = cnt;  // m_cnt0 keeps the counters of the initial state (possibly-before explorations)
         auto fire = [&](u32 o)
         {
@@ -159,8 +162,8 @@ private:
         auto fire = [&](u32 o)
         {
             const auto e = R.eff(o);
-            if (std::find(e.begin(), e.end(), pp) != e.end())
-                return;  // an achiever of pp: excluded
+            if (!R.static_condition_holds(o) || std::find(e.begin(), e.end(), pp) != e.end())
+                return;  // never fires, or an achiever of pp: excluded
             for (u32 q : e)
                 if (!reached[q])
                 {
@@ -174,6 +177,8 @@ private:
                 reached[p] = 1;
                 stack.push_back(p);
             }
+        for (u32 p : m_init_neg_props)
+            reached[p] = 1;  // m_cnt0 does not count them: an operator deleting the atom again changes nothing
         for (u32 o : R.zero_ops())
             if (cnt[o] == 0)
                 fire(o);
@@ -188,7 +193,7 @@ private:
         for (u32 i = m_adders_begin[pp]; i < m_adders_begin[pp + 1]; ++i)
         {
             const u32 o = m_adders[i];
-            if (cnt[o] == 0 && (out.empty() || out.back() != o))
+            if (cnt[o] == 0 && R.static_condition_holds(o) && (out.empty() || out.back() != o))
                 out.push_back(o);
         }
         return out;
@@ -441,6 +446,7 @@ private:
     std::vector<std::vector<u32>> m_first;  // per proposition: operators of minimal firing cost
     std::vector<u32> m_cnt0;                // per operator: unsatisfied preconditions in the initial state
     std::vector<u32> m_init_props;          // the initial state's "true" propositions
+    std::vector<u32> m_init_neg_props;      // the "false" propositions of the atoms false in the initial state
     // FirstAchievers::PossiblyBefore, per proposition on demand
     std::vector<std::vector<u32>> m_pb;
     std::vector<u8> m_pb_done;

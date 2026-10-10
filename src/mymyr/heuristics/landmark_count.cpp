@@ -324,7 +324,7 @@ private:
         std::vector<std::vector<std::pair<u32, u32>>> adds(R.num_ground_actions());
         for (u32 o = 0; o < R.num_ops(); ++o)
         {
-            if (R.is_axiom(o))
+            if (R.is_axiom(o) || !R.static_condition_holds(o))
                 continue;
             const u32 ga = R.ground_action(o);
             for (u32 q : R.eff(o))

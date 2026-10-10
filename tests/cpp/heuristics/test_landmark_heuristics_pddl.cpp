@@ -124,6 +124,43 @@ TEST(LandmarkHeuristicsPddl, LmCutChargesAnActionOnceForAllOfItsConditionalEffec
     EXPECT_EQ(r.cost, 2);
 }
 
+TEST(LandmarkHeuristicsPddl, EffectsWhoseStaticConditionFailsNeverFire)
+{
+    // workat d maintains the planes at d, a static fact; mimir's relaxation (and h_max) ignores it and lets either
+    // action maintain both planes
+    const auto t = make(R"((define (domain d) (:requirements :adl :typing)
+ (:types plane day)
+ (:predicates (done ?p - plane) (today ?d - day) (at ?p - plane ?d - day))
+ (:action workat :parameters (?d - day) :precondition (today ?d)
+  :effect (and (not (today ?d)) (forall (?p - plane) (when (at ?p ?d) (done ?p)))))))",
+                        R"((define (problem p) (:domain d) (:objects p1 p2 - plane d1 d2 - day)
+ (:init (today d1) (today d2) (at p1 d1) (at p2 d2)) (:goal (and (done p1) (done p2)))))");
+    const State s0 = t->initial_state();
+    EXPECT_EQ(h(*t, H::Kind::Max, s0.view()), 1);
+    EXPECT_EQ(h(*t, H::Kind::LmCut, s0.view()), 2);
+    landmarks::ApproximateFactLandmarkOptions o;
+    o.first_achievers = landmarks::FirstAchievers::PossiblyBefore;
+    const auto g = landmarks::approximate_fact_landmarks(*t, o);
+    const auto& ix = g.achievers();
+    bool seen = false;
+    for (CanonicalAtom c : g.landmarks())
+    {
+        if (landmarks::format_atom(*t, c) != "done(p1)")
+            continue;
+        seen = true;
+        const auto first = ix.first_achievers_of(c);
+        ASSERT_EQ(first.size(), 1u);
+        EXPECT_EQ(t->format(ix.actions[first[0]].label()), "(workat d1)");
+    }
+    EXPECT_TRUE(seen);
+    EXPECT_EQ(h(*t, H::Kind::LmCount, s0.view()), 2);
+    search::BestFirstOptions so;
+    so.heuristic.kind = H::Kind::LmCut;
+    const auto r = search::astar_eager(*t, so);
+    ASSERT_EQ(r.status, search::SearchStatus::Solved) << r.message;
+    EXPECT_EQ(r.cost, 2);
+}
+
 TEST(LandmarkHeuristicsPddl, DerivedPredicatesAreFreeOperatorsOutsideEveryCut)
 {
     const auto t = make(R"((define (domain d) (:requirements :strips :derived-predicates)
@@ -239,6 +276,26 @@ TEST(LandmarkHeuristicsPddl, PossiblyBeforeFirstAchieversAreSound)
     EXPECT_EQ(landmark_names(*t, landmarks::approximate_fact_landmarks(*t, o)), (std::set<std::string>{"g()"}));
     o.first_achievers = landmarks::FirstAchievers::HMax;
     EXPECT_EQ(landmark_names(*t, landmarks::approximate_fact_landmarks(*t, o)), (std::set<std::string>{"g()", "x()"}));
+    EXPECT_EQ(h(*t, H::Kind::LmCount, t->initial_state().view()), 1);
+}
+
+TEST(LandmarkHeuristicsPddl, PossiblyBeforeFirstAchieversKeepNegativePreconditionsThatHoldInitially)
+{
+    // work needs busy false, as it is initially; rest makes it false again, which changes nothing for work
+    const auto t = make(R"((define (domain d) (:requirements :strips :negative-preconditions)
+ (:predicates (busy) (g) (s))
+ (:action work :parameters () :precondition (not (busy)) :effect (and (g) (busy)))
+ (:action start :parameters () :precondition (and) :effect (s))
+ (:action rest :parameters () :precondition (s) :effect (not (busy)))))",
+                        "(define (problem p) (:domain d) (:init) (:goal (g)))");
+    landmarks::ApproximateFactLandmarkOptions o;
+    o.first_achievers = landmarks::FirstAchievers::PossiblyBefore;
+    const auto g = landmarks::approximate_fact_landmarks(*t, o);
+    ASSERT_EQ(landmark_names(*t, g), (std::set<std::string>{"g()"}));
+    const auto& ix = g.achievers();
+    const auto first = ix.first_achievers_of(g.landmarks()[0]);
+    ASSERT_EQ(first.size(), 1u);
+    EXPECT_EQ(t->format(ix.actions[first[0]].label()), "(work)");
     EXPECT_EQ(h(*t, H::Kind::LmCount, t->initial_state().view()), 1);
 }
 
