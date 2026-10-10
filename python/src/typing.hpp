@@ -74,12 +74,13 @@ using FloatArg = Arg<double>;
 
 namespace arg_detail
 {
+/// The range [lo, hi] as text. Only the 64-bit limits go unnamed (a narrower type's limit is part of the range a
+/// caller has to know), unless the value was beyond that limit (name_lo / name_hi).
 template<class T>
-std::string range_text(T lo, T hi)
+std::string range_text(T lo, T hi, bool name_lo = false, bool name_hi = false)
 {
-    // only the 64-bit limits go unnamed: a narrower type's limit is part of the range a caller has to know
-    const bool lo_open = std::is_signed_v<T> && sizeof(T) == 8 && lo == std::numeric_limits<T>::lowest();
-    const bool hi_open = sizeof(T) == 8 && hi == std::numeric_limits<T>::max();
+    const bool lo_open = !name_lo && std::is_signed_v<T> && sizeof(T) == 8 && lo == std::numeric_limits<T>::lowest();
+    const bool hi_open = !name_hi && sizeof(T) == 8 && hi == std::numeric_limits<T>::max();
     if (lo_open && hi_open)
         return "in the 64-bit range";
     if (hi_open)
@@ -131,7 +132,11 @@ T int_value(nb::handle h, const char* name, T lo, T hi, bool none)
         }
     }
     if (!ok)
-        range_error(name, "an int", range_text(lo, hi), none, h);
+    {
+        const bool below = overflow < 0 || (overflow == 0 && std::cmp_less(v, lo));
+        const bool above = overflow > 0 || (overflow == 0 && std::cmp_greater(v, hi));
+        range_error(name, "an int", range_text(lo, hi, below, above), none, h);
+    }
     return out;
 }
 }  // namespace arg_detail
