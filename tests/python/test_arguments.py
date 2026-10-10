@@ -82,7 +82,9 @@ def test_budgets_name_the_argument_and_its_range(task):
         search.iw(task, max_seconds=float("nan"))
     with pytest.raises(ValueError, match=r"^mymyr: max_states must be None or an int >= 0, got -1$"):
         datasets.state_space(task, max_states=-1)
-    with pytest.raises(ValueError, match=r"got 18446744073709551616$"):
+    # beyond the 64-bit limit the message names it
+    with pytest.raises(ValueError, match=r"^mymyr: max_states must be None or an int in \[0, 18446744073709551615\], "
+                                         r"got 18446744073709551616$"):
         search.astar(task, max_states=2**64)
     with pytest.raises(ValueError, match=r"^mymyr: max_depth must be None or an int in \[0, 4294967295\], got 4294967296$"):
         search.astar(task, max_depth=2**32)
