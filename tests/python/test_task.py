@@ -30,14 +30,14 @@ def test_construction_paths_agree(blocks):
     assert blocks.objects == ["h", "g", "f", "e", "c", "b", "d", "a"]
     assert set(blocks.schemas) == {"pick-up", "put-down", "stack", "unstack"}
     assert isinstance(blocks.formalism, mymyr.formalism.NormalizedTask)
-    assert blocks.atom_mode == "frozen" and blocks.words == 2
+    assert blocks.atom_mode == "dense" and blocks.words == 2
     assert "blocks" in repr(blocks)
 
 
 def test_options_and_text_tasks():
     lazy = text_task("gripper__prob05", atoms="lazy", matching="fc")
-    frozen = text_task("gripper__prob05", atoms="frozen")
-    assert lazy.atom_mode == "lazy" and frozen.atom_mode == "frozen"
+    frozen = text_task("gripper__prob05", atoms="dense")
+    assert lazy.atom_mode == "lazy" and frozen.atom_mode == "dense"
     assert lazy.options["matching"] == "fc" and frozen.options["atoms"] == "frozen"
     assert lazy.fingerprint == frozen.fingerprint  # the content, not the options
     with pytest.raises(ValueError):

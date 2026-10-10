@@ -309,7 +309,7 @@ def test_jax_gpu_zero_copy_and_kernels(ctx):
     jax, gpu = jax_gpu()
     import jax.numpy as jnp
 
-    task = text_task("gripper__prob05", atoms="frozen")
+    task = text_task("gripper__prob05", atoms="dense")
     r = reference(task)
     dt = mc.DeviceTask(task, ctx)
     # mymyr -> JAX: word arrays as uint32 pairs, no copy

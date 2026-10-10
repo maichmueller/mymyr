@@ -510,7 +510,7 @@ def small_suite():
              FORK / "blocks_4/test_problem.pddl"]
     if not all(p.is_file() for p in paths):
         pytest.skip("fork data missing")
-    return rl.TaskSuite.group([mymyr.Task.from_pddl(p.parent / "domain.pddl", p, atoms="frozen") for p in paths])
+    return rl.TaskSuite.group([mymyr.Task.from_pddl(p.parent / "domain.pddl", p, atoms="dense") for p in paths])
 
 
 def test_state_spaces_over_a_suite():

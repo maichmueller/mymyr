@@ -16,6 +16,8 @@ namespace mymyr::rl
 {
 namespace
 {
+const char* storage_name(NumericStorage s) { return s == NumericStorage::I32 ? "i32" : "f64"; }
+
 i32 kind_code(formalism::PredKind k)
 {
     return k == formalism::PredKind::Static ? k_pred_static : k == formalism::PredKind::Fluent ? k_pred_fluent : k_pred_derived;
@@ -171,7 +173,20 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         m_words = std::max(m_words, in.words);
         m_numeric_words = std::max(m_numeric_words, in.numeric_words);
         m_max_objects = std::max(m_max_objects, in.num_objects);
-        m_numeric = m_numeric || T.numeric_slots() > 0;
+        if (T.numeric_slots() > 0)
+        {
+            if (m_numeric && T.numeric_storage() != m_numeric_storage)
+                throw std::invalid_argument(
+                    "mymyr: TaskTable: instance " + std::to_string(i) + " stores numeric values as " +
+                    storage_name(T.numeric_storage()) + ", instance " + std::to_string(m_numeric_instance) + " as " +
+                    storage_name(m_numeric_storage) +
+                    ": the numeric columns of a table have one storage (build the tasks with numeric_storage 'f64'; "
+                    "TaskTable.from_pddl does so when its instances differ)");
+            if (!m_numeric)
+                m_numeric_instance = ii;
+            m_numeric = true;
+            m_numeric_storage = T.numeric_storage();
+        }
         m_inst.push_back(std::move(in));
     }
     // the problem-local predicates after the domain's, in (instance, predicate) order

@@ -132,7 +132,7 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
 
 def test_device_brfs_state_space_and_plans(ctx):
     torch = torch_cuda()
-    task = text_task("gripper__prob05", atoms="frozen")
+    task = text_task("gripper__prob05", atoms="dense")
     r = mc.brfs(task, ctx=ctx)
     words = r.state_words("torch")
     nodes = r.nodes("torch")
@@ -241,7 +241,7 @@ def test_expand_into_torch_destinations(ctx):
 
 def test_expand_validates_like_the_cpu(ctx):
     torch = torch_cuda()
-    task = text_task("gripper__prob05", atoms="frozen")
+    task = text_task("gripper__prob05", atoms="dense")
     x = words_of([task.initial_state] * 2, task.words + 1)
     x[1, -1] = 1  # an unassigned slot
     with pytest.raises(ValueError, match="state row 1"):
@@ -253,7 +253,7 @@ def test_expand_validates_like_the_cpu(ctx):
 
 def test_expand_stream_semantics(ctx):
     torch = torch_cuda()
-    task = text_task("blocks__probBLOCKS-8-0", atoms="frozen")
+    task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
     states = walk(task, steps=30, seed=1, walks=4)
     x = words_of(states, task.words)
     cpu = rl.expand(task, x)
@@ -300,7 +300,7 @@ def test_expand_stream_semantics(ctx):
 
 
 def test_expand_dlarray_and_jax_inputs(ctx):
-    task = text_task("logistics00__probLOGISTICS-6-1", atoms="frozen")
+    task = text_task("logistics00__probLOGISTICS-6-1", atoms="dense")
     states = walk(task, steps=15, seed=2)
     x = words_of(states, task.words)
     cpu = rl.expand(task, x, K=0)

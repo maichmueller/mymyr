@@ -19,7 +19,7 @@ HAS_CUDA = hasattr(mymyr._core, "_cuda")
 
 @pytest.fixture(scope="module")
 def tasks():
-    return [text_task("gripper__prob05", atoms="frozen") for _ in range(2)]
+    return [text_task("gripper__prob05", atoms="dense") for _ in range(2)]
 
 
 def test_state_spaces_over_tables_and_sequences(tasks):
@@ -49,7 +49,7 @@ def test_device_dispatch_errors(tasks):
 
 
 def test_float64_exports():
-    task = text_task("depot__p02", atoms="frozen")
+    task = text_task("depot__p02", atoms="dense")
     s = datasets.state_space(task, remove_if_unsolvable=False)
     a = s.arrays()
     d = a["cost_goal_distances"]
@@ -62,7 +62,7 @@ def test_float64_exports():
 
 
 def test_sampler_views_outlive_the_sampler():
-    s = datasets.state_space(text_task("gripper__prob05", atoms="frozen"))
+    s = datasets.state_space(text_task("gripper__prob05", atoms="dense"))
     sampler = datasets.StateSpaceSampler(s, seed=1)
     ids = sampler.states_n_steps_from_goal(2)
     want = np.array(ids)

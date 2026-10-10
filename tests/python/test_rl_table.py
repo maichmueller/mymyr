@@ -58,7 +58,7 @@ def sets():
     for name, (dom, probs) in SETS.items():
         if not dom.is_file() or not all(p.is_file() for p in probs):
             pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
-        out[name] = [mymyr.Task.from_pddl(dom, p, atoms="frozen") for p in probs]
+        out[name] = [mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]
     return out
 
 

@@ -1,7 +1,7 @@
 """State spaces, generalized state spaces, knowledge bases, tuple graphs and samplers (datasets/*.hpp in the C++
 core), on the CPU or a CUDA device, for classical and numeric tasks.
 
-    task = mymyr.Task.from_pddl("domain.pddl", "p01.pddl", atoms="frozen")
+    task = mymyr.Task.from_pddl("domain.pddl", "p01.pddl", atoms="dense")
     space = mymyr.datasets.state_space(task, threads=8)         # None if the generation failed
     a = space.arrays(framework="torch")                          # zero-copy: state_words, forward/backward CSR,
     a["forward_targets"], a["unit_goal_distances"], a["goal"]    # labels, costs, goal distances, flags

@@ -877,6 +877,21 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
         for (const std::exception_ptr& e : errors)
             if (e)
                 std::rethrow_exception(e);
+        // one numeric storage per table: under numeric_storage 'auto', instances that came out i32 are rebuilt as
+        // f64 when another one needs f64
+        if (options.numeric_storage == TaskOptions::NumericStorageMode::Auto)
+        {
+            const auto f64 = [](const TaskPtr& t) { return t->numeric_slots() > 0 && t->numeric_storage() == NumericStorage::F64; };
+            const auto i32 = [](const TaskPtr& t) { return t->numeric_slots() > 0 && t->numeric_storage() == NumericStorage::I32; };
+            if (std::any_of(tasks.begin(), tasks.end(), f64) && std::any_of(tasks.begin(), tasks.end(), i32))
+            {
+                TaskOptions wide = options;
+                wide.numeric_storage = TaskOptions::NumericStorageMode::F64;
+                for (usize i = 0; i < n; ++i)
+                    if (i32(tasks[i]))
+                        tasks[i] = Task::create(formalism::TaskData(*data[i]), wide);
+            }
+        }
     }
     std::vector<CorePtr> cores;
     std::vector<nb::object> objs;
@@ -1274,7 +1289,9 @@ void bind_rl(nb::module_& parent)
             "directory or among the matches are skipped. The problems are instantiated and compiled on `threads` "
             "threads (default: min(8, the hardware threads), as more threads gain little here while each reserves about 72 "
             "MB of address space for its stack and malloc arena; 0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i])) "
-            "with these options. Raises ValueError when a directory or pattern has no problem files.")
+            "with these options, except that under numeric_storage='auto' the numeric instances store their values "
+            "as 'f64' when one of them needs it (a table has one numeric storage). Raises ValueError when a directory "
+            "or pattern has no problem files.")
 #endif
         .def("__len__", [](const PyTable& t) { return t.table->size(); })
         .def(
@@ -1306,6 +1323,12 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("num_schemas", [](const PyTable& t) { return t.table->num_schemas(); })
         .def_prop_ro("max_objects", [](const PyTable& t) { return t.table->max_objects(); },
                      "The most objects of an instance (the columns of rl.prefix_masks over the table).")
+        .def_prop_ro("numeric_storage", [](const PyTable& t) -> Arg<std::optional<std::string>> {
+            if (!t.table->numeric())
+                return nb::none();
+            return nb::str(t.table->numeric_storage() == NumericStorage::I32 ? "i32" : "f64");
+        }, "The storage of the numeric columns, the same in every row: 'f64' (one double per word) or 'i32' (two "
+           "int32 per word, slot 2k in the low half); None for a classical table.")
         .def_prop_ro("numeric", [](const PyTable& t) { return t.table->numeric(); },
                      "Whether an instance has numeric fluents (numeric tables run on the CPU only).")
         .def_prop_ro("fingerprint", [](const PyTable& t) { return t.table->fingerprint(); },

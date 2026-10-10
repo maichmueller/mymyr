@@ -19,7 +19,7 @@ if not hasattr(mymyr, "Domain"):
 
 @pytest.fixture(scope="module")
 def blocks():
-    return mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl", atoms="frozen")
+    return mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl", atoms="dense")
 
 
 @pytest.fixture(scope="module")
