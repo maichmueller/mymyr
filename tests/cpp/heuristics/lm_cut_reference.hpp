@@ -2,7 +2,7 @@
 // Test support: LM-cut written out from its definition over a RelaxedTask, recomputing h_max from scratch in every
 // round (Bellman-Ford until nothing changes) instead of updating it incrementally. The rules are the documented ones:
 // one operator per ground action and precondition (none for an effect whose static condition fails), costs shared per
-// ground action, h at least h_max, an operator's supporter the first of its most expensive preconditions unless its
+// ground action, h at least h_max, an operator's supporter the last of its most expensive preconditions unless its
 // supporter kept its cost, the goal zone depth first with the border and goal-zone tie-breaks of zero-cost achievers,
 // and the cut from the state's propositions along supporter edges.
 
@@ -97,18 +97,18 @@ public:
             }
             for (u32 o = 0; o <= O; ++o)
             {
-                u32 first = ~u32{0};
+                u32 last = ~u32{0};
                 u64 m = 0;
                 for (u32 q : pr[o])
-                    if (first == ~u32{0} || cost[q] > m)
+                    if (last == ~u32{0} || cost[q] >= m)
                     {
-                        first = q;
+                        last = q;
                         m = cost[q];
                     }
                 if (m == k_inf)
                     continue;
                 if (supp[o] == ~u32{0} || cost[supp[o]] != supp_cost[o])
-                    supp[o] = first;
+                    supp[o] = last;
                 supp_cost[o] = m;
             }
         };

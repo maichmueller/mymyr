@@ -103,8 +103,9 @@ that reach the goal through zero-cost operators and their supporters), takes the
 initial state without entering the goal zone that have an effect in it), adds the cut's cheapest cost to the value and
 subtracts it from the cut's operators, and repeats until the goal costs 0.
 
-- Ties: an operator's supporter is the first of its most expensive preconditions in the grounding's order. While the
-  goal zone is marked, a zero-cost achiever's supporter moves to an equally expensive precondition without zero-cost
+- Ties: an operator's supporter is the last of its most expensive preconditions in the grounding's order (the
+  action's precondition, then the condition of the effect, each in the order of the schema). While the goal zone is
+  marked, a zero-cost achiever's supporter moves to an equally expensive precondition without zero-cost
   achievers, else to one in the goal zone (Fast Downward's border and goal-zone detection).
 - Costs: unit costs, or the task's action costs on the relaxation's integer scale (`costs="real"`): zero and
   fractional costs are exact up to 6 decimal places.
@@ -162,9 +163,9 @@ translator produces; mymyr works on the PDDL atoms. This accounts for most of th
   mymyr's LM-cut supports both: conditional effects through action-level cost sharing (each cut lowers an action
   once), derived predicates as free operators. Effects whose static condition fails never fire and are left out, as
   the translator does; the other relaxation heuristics (`max`, `add`, `ff`) keep them, as mimir does.
-- LM-cut ties: both take the first of an operator's most expensive preconditions as its supporter, but Fast Downward
-  orders preconditions by SAS+ variable and mymyr by the grounding. On ties the cuts can differ, and so can the value
-  (both are admissible).
+- LM-cut ties: Fast Downward takes the first of an operator's most expensive preconditions in the order of its SAS+
+  variables, mymyr the last in the order of the grounding. On ties the cuts can differ, and so can the value (both are
+  admissible) and the number of states A* expands before its last f-layer, in either direction.
 - Negated atoms: Fast Downward has a fact for an atom being false, so a negative goal (snake: `(not (ispoint ?p))`) is
   a landmark there. mymyr's landmarks are positive atoms; a negative precondition costs 0 in LM-cut when the atom is
   false and is otherwise achieved by an action deleting it.

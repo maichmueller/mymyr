@@ -354,6 +354,8 @@ int main(int argc, char** argv)
         j.u("reopened", r.reopened);
         if (algo == "beam")
             j.u("layers", r.layers);
+        if (algo == "astar")
+            j.u("expanded_until_last_jump", r.expanded_until_last_jump);
         j.num("initial_h", r.initial_h);
         j.num("setup_s", r.setup_seconds);
         j.num("ground_s", r.heuristic.grounding_seconds);

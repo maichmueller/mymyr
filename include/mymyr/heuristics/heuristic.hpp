@@ -40,7 +40,7 @@
 //              cost is shared by all of its effects (a cut lowers each of its actions once, however many of their
 //              conditional effects it holds), and axioms are free operators, which no cut contains. With conditional
 //              effects, lowering an action lowers its other effects too and the cuts can sum to less than h_max: h is
-//              then h_max. h_max <= LM-cut <= h*. Ties: an operator's h_max supporter is the first of its most
+//              then h_max. h_max <= LM-cut <= h*. Ties: an operator's h_max supporter is the last of its most
 //              expensive preconditions in the grounding's order; while the goal zone is marked, a zero-cost
 //              achiever's supporter moves to an equally expensive precondition without zero-cost achievers, else to
 //              one already in the goal zone (Fast Downward's border and goal-zone detection).

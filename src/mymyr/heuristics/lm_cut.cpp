@@ -1,7 +1,7 @@
 // LM-cut (Helmert and Domshlak 2009) over the grounded relaxation (relaxed_task.hpp), following Fast Downward's
 // implementation (lm_cut_landmarks.cc):
-//   1. h_max from the state with each operator's h_max supporter: the first of its most expensive preconditions in the
-//      grounding's order. Operators without preconditions get an artificial one that holds in every state; the goal
+//   1. h_max from the state with each operator's h_max supporter: the last of its most expensive preconditions in the
+//      grounding's order (the action's precondition, then the effect's condition, each in the schema's order). Operators without preconditions get an artificial one that holds in every state; the goal
 //      is an artificial zero-cost operator whose preconditions are the goal's propositions.
 //   2. While h_max of the goal is positive:
 //      a. the goal zone: the goal and, recursively, the supporters of the zero-cost achievers of goal-zone
@@ -13,7 +13,7 @@
 //      c. h grows by the cheapest cost in the cut, which is subtracted from the remaining cost of every ground action
 //         with an operator in the cut (once per action);
 //      d. h_max is updated incrementally: the operators of the cheaper actions propagate their new costs, and an
-//         operator whose supporter became cheaper takes the first of its most expensive preconditions again.
+//         operator whose supporter became cheaper takes the last of its most expensive preconditions again.
 // Operators: one per ground action and distinct precondition (the action's precondition with the condition of an
 // effect instance; instances without a condition of their own form one operator, as in a STRIPS task; an instance
 // whose static condition fails never fires and has none), and one per ground axiom. Costs are shared per ground action: the operators of one action all cost its remaining cost, and a cut
@@ -160,7 +160,7 @@ private:
             if (!R.static_condition_holds(o))
                 continue;  // never fires
             pre.assign(R.pre(o).begin(), R.pre(o).end());
-            // first occurrence order: the supporter is the first of the most expensive preconditions in this order
+            // first occurrence order: the supporter is the last of the most expensive preconditions in this order
             u32 k = 0;
             for (u32 i = 0; i < pre.size(); ++i)
                 if (std::find(pre.begin(), pre.begin() + k, pre[i]) == pre.begin() + k)
@@ -318,12 +318,12 @@ private:
         }
     }
 
-    /// The first of the most expensive preconditions of an enabled operator.
+    /// The last of the most expensive preconditions of an enabled operator.
     void choose_supporter(u32 o)
     {
         u32 best = k_none, bc = 0;
         for (u32 q : pre(o))
-            if (best == k_none || m_cost[q] > bc)
+            if (best == k_none || m_cost[q] >= bc)
             {
                 best = q;
                 bc = m_cost[q];
