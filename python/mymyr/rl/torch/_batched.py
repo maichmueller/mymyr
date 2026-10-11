@@ -46,6 +46,12 @@ class StepResult(NamedTuple):
     goal_neg: Tensor
 
 
+def _mark_static(t: Tensor) -> None:
+    """What ``torch._dynamo.mark_static_address(t)`` does. Calling that would import torch._dynamo, and with it triton,
+    which enables the GIL of a free-threaded interpreter, for every environment constructed."""
+    t._dynamo_static_input_type = "unguarded"
+
+
 def _device_index(device: torch.device) -> Optional[int]:
     if device.type == "cpu":
         return None
@@ -104,7 +110,7 @@ class BatchedEnv:
 
     CUDA graphs: on a device's fast path (``capturable``) reset, refresh, step and random_actions synchronize nothing
     and allocate nothing (the environment's scratch is sized for N at construction), and the state tensors are marked
-    static (``torch._dynamo.mark_static_address``: they keep their addresses; assign into them in place). So loops of
+    static for torch.compile (they keep their addresses; assign into them in place). So loops of
     steps capture into CUDA graphs: :meth:`capture` (``torch.cuda.CUDAGraph``), ``torch.cuda.graph`` around the calls,
     or ``torch.compile(mode="reduce-overhead")`` of a function that steps. On the general path the compiled calls are
     the ``cudagraph_unsafe`` ops ``mymyr::step_sync`` / ``refresh_sync``, which torch.compile leaves out of its graphs.
@@ -170,7 +176,7 @@ class BatchedEnv:
         if index is not None:
             self.core.reserve(n)
             for t in self._tensors():
-                torch._dynamo.mark_static_address(t)
+                _mark_static(t)
         initial_ids = None if task_ids is None else _task_ids(self.core, task_ids, None, n, d, "task_ids")
         self.reset(task_ids=initial_ids)
 

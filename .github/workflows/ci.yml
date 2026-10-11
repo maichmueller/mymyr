@@ -156,7 +156,7 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ""
           JAX_PLATFORMS: cpu
-        run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+        run: .venv/bin/python ci/run_pytest.py --runtimes ${{ matrix.python == '3.14t' && 'rl' || 'none' }} -W error -q -rs -p no:cacheprovider tests/python
       - name: C++ consumer of the installed package
         run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer
 
@@ -346,6 +346,6 @@ jobs:
       - name: Test
         env:
           JAX_PLATFORMS: cpu
-        run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+        run: .venv/bin/python ci/run_pytest.py --runtimes none -W error -q -rs -p no:cacheprovider tests/python
       - name: C++ consumer of the installed package
         run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer-wheel
