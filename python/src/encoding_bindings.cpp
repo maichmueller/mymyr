@@ -118,6 +118,10 @@ PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg t
         for (u32 instance = 0; instance < table.size(); ++instance)
             if (action_table.table->task(instance)->uid() != table.task(instance)->uid())
                 throw nb::value_error("mymyr: encoding: expansion belongs to another task table");
+        const auto source_ids = nb::cast<std::vector<i32>>(action_arg.attr("task_ids"));
+        for (u64 row = 0; row < states.view.rows; ++row)
+            if (source_ids[row] != (ids ? ids[row] : 0))
+                throw nb::value_error("mymyr: encoding: expansion and states have different source task ids");
         std::vector<i64> shape;
         actions.schema = imports.get<i32>(action_arg.attr("schema"), "action_schema", {rlimp::i32t}, {-1}, false, &shape);
         actions.size = static_cast<u64>(shape[0]);

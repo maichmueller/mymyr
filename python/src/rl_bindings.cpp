@@ -1624,6 +1624,12 @@ void bind_rl(nb::module_& parent)
                      "Action schemas of the table, the most of any domain of a suite (the columns of rl.schema_masks).")
         .def_prop_ro("table", [](const PyExpansion& e) { return SuiteArg(e.ref.obj); },
                      "The suite, table or Task the expansion was made over.")
+        .def_prop_ro("task_ids", [](const PyExpansion& expansion) {
+            std::vector<i32> ids(expansion.flat.rows);
+            for (u64 row = 0; row < expansion.flat.rows; ++row)
+                ids[row] = static_cast<i32>(expansion.instance_of_state(row));
+            return ids;
+        }, "Owned source instance IDs, one per expanded state, including rows without actions.")
         .def_prop_ro("overflow", [](const PyExpansion& e) {
             return e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words;
         })
@@ -1745,8 +1751,9 @@ void bind_rl(nb::module_& parent)
     };
     nb::class_<PyPoolBatch>(m, "PoolBatch",
                             "The results of a CpuEnvPool call: arrays of B rows in the order of their env ids "
-                            "(zero-copy, read-only views in the pool's framework). The step results are None after a "
-                            "reset. Once the batch and every array taken from it are dropped, its memory goes back to "
+                            "(zero-copy, read-only views in the pool's framework). Reward, truncation, invalid and "
+                            "action labels are None after a reset; goal and termination describe its initial states. "
+                            "Once the batch and every array taken from it are dropped, its memory goes back to "
                             "the pool for later results (CpuEnvPool::recycle).")
         .def_prop_ro("rows", [](const PyPoolBatch& p) { return p.b->rows; })
         .def_prop_ro("stepped", &PyPoolBatch::stepped, "Whether these are step results (False: a reset's).")

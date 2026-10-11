@@ -138,3 +138,44 @@ def test_default_her_reward_matches_goal_reaching_objective():
     done = np.ones((1, 1), np.bool_)
     result = rl.her_relabel(states, done, strategy="final", k=1)
     assert np.asarray(result.reward).item() == 1.0
+
+
+def test_torchrl_instance_reset_does_not_reuse_observed_goals():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchrl")
+    from mymyr.rl.torch import PlanningEnv
+
+    tasks = [toggle_task(init="(p)", goal="(q)"), toggle_task(init="(q)", goal="(p)")]
+    table = rl.TaskTable(tasks)
+    env = PlanningEnv(table, 4, goals=True, task_ids=[0] * 4)
+    source = env.reset()
+    source["_reset"] = torch.tensor([[True], [True], [False], [False]])
+    source["next_task_id"] = torch.ones(4, dtype=torch.int64)
+    result = env.reset(source)
+    assert result["task_id"].tolist() == [1, 1, 0, 0]
+    assert not bool(result["terminated"].any())
+    expected_pos, expected_neg = rl.goal_masks(table, np.array([1, 1, 0, 0], np.int32))
+    np.testing.assert_array_equal(result["goal_pos"].numpy().view(np.uint64), expected_pos)
+    np.testing.assert_array_equal(result["goal_neg"].numpy().view(np.uint64), expected_neg)
+    env.close()
+
+
+@pytest.mark.parametrize("via_tensordict", [False, True])
+def test_torchrl_explicit_reset_goals_remain_supported(via_tensordict):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchrl")
+    from mymyr.rl.torch import PlanningEnv
+
+    env = PlanningEnv(toggle_task(), 2, goals=True)
+    source = env.reset()
+    positive = torch.zeros_like(source["goal_pos"])
+    negative = torch.zeros_like(source["goal_neg"])
+    if via_tensordict:
+        source["next_goal_pos"], source["next_goal_neg"] = positive, negative
+        result = env.reset(source)
+    else:
+        result = env.reset(goal_pos=positive, goal_neg=negative)
+    assert bool(result["terminated"].all())
+    assert not bool(result["goal_pos"].any())
+    assert not bool(result["goal_neg"].any())
+    env.close()

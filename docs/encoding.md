@@ -82,6 +82,10 @@ conjunctive classical literals, not arbitrary Python goal strings or numeric con
 `task_ids`. The encoder does not enumerate actions or generate successors. The following arrays preserve every
 original expansion action and its ordering:
 
+The expansion's owned `task_ids` list records every source row, including rows without actions. The encoder checks
+those IDs against its input. Matching instance IDs do not prove that two raw rows describe the same state;
+the caller must still supply the source states in their original order.
+
 | Field | Shape | Meaning |
 |---|---|---|
 | `action_offsets` | `[N+1]` | Original action CSR offsets |
