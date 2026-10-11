@@ -437,6 +437,13 @@ def test_save_and_load_knowledge_bases_and_tuple_graphs(tmp_path):
                 same_graph(x, y)
         same_arrays(kb.generalized_state_space.arrays(), back.generalized_state_space.arrays())
     assert datasets.load(tmp_path / "kb.mymyr", tasks=list(table.tasks)).tasks[0] is table[0]
+    for i, (edit, message) in enumerate([
+            (lambda h: h["knowledge_base"]["options"].update(width=-1), "corrupt knowledge base options"),
+            (lambda h: h["knowledge_base"].update(task_indices=[0, 0]), "a task index is out of range or repeated"),
+            (lambda h: h["knowledge_base"].update(tuple_graphs=[0, 0]), "one tuple graph per state")]):
+        rewrite(tmp_path / "kb.mymyr", tmp_path / f"kb{i}.mymyr", edit_header=edit)
+        with pytest.raises(ValueError, match=f"^mymyr: .*{message}"):
+            datasets.load(tmp_path / f"kb{i}.mymyr")
     with zipfile.ZipFile(tmp_path / "kb.mymyr") as z:
         assert sum(n.startswith("domains/") for n in z.namelist()) == 1  # one domain file for the table
     gss = kb.generalized_state_space
@@ -495,8 +502,15 @@ def test_load_refuses_other_tasks_newer_versions_and_corrupt_files(tmp_path):
     def fingerprint(h):
         h["tasks"][0]["fingerprint"] = "zz"
 
+    def other_fingerprint(h):
+        h["tasks"][0]["fingerprint"] = "0" * 16
+
+    def statistics(h):
+        h["state_spaces"][0]["statistics"]["threads"] = "many"
+
     cases = [(version, "dataset format version 2"), (kind, "holds a 'replay_buffer'"), (fmt, "not a mymyr dataset file"),
-             (fingerprint, "corrupt dataset file")]
+             (fingerprint, "corrupt dataset file"), (other_fingerprint, "restored task differs from the pickled or saved"),
+             (statistics, "corrupt state space statistics")]
     for i, (edit, message) in enumerate(cases):
         rewrite(path, tmp_path / f"{i}.mymyr", edit_header=edit)
         with pytest.raises(ValueError, match=f"^mymyr: .*{message}"):

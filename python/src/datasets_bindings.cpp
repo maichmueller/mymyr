@@ -334,6 +334,27 @@ nb::object mapping_item(nb::handle mapping, const char* key)
     return r == 0 ? nb::none() : nb::steal(out);
 }
 
+/// A value of a pickled or saved object (ValueError "mymyr: corrupt <what>" if it is not a T).
+template<class T>
+T field(nb::handle h, const char* what)
+{
+    T v{};
+    if (!nb::try_cast(h, v, false))
+        throw nb::value_error((std::string("mymyr: corrupt ") + what).c_str());
+    return v;
+}
+
+/// The items of a pickled or saved tuple or list of `n` values (ValueError "mymyr: corrupt <what>" otherwise).
+std::vector<nb::handle> items(nb::handle h, usize n, const char* what)
+{
+    if (!(nb::isinstance<nb::tuple>(h) || nb::isinstance<nb::list>(h)) || nb::len(h) != n)
+        throw nb::value_error((std::string("mymyr: corrupt ") + what).c_str());
+    std::vector<nb::handle> out;
+    for (nb::handle x : h)
+        out.push_back(x);
+    return out;
+}
+
 /// TypeError unless `arrays` is a mapping whose keys are among `known`.
 void check_keys(nb::handle arrays, std::initializer_list<std::string_view> known, const char* what)
 {
@@ -486,21 +507,19 @@ StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stat
     a.alive_flags = take_required<u8>(arrays, "alive", 1, what);
     if (!stats.is_none())
     {
-        const nb::tuple t = nb::cast<nb::tuple>(stats);
-        if (t.size() != 4)
-            throw nb::value_error("mymyr: corrupt state space statistics");
-        a.threads = nb::cast<u32>(t[0]);
-        a.layers = nb::cast<u32>(t[1]);
-        a.search_seconds = nb::cast<f64>(t[2]);
-        a.post_seconds = nb::cast<f64>(t[3]);
+        const char* corrupt = "state space statistics";
+        const std::vector<nb::handle> t = items(stats, 4, corrupt);
+        a.threads = field<u32>(t[0], corrupt);
+        a.layers = field<u32>(t[1], corrupt);
+        a.search_seconds = field<f64>(t[2], corrupt);
+        a.post_seconds = field<f64>(t[3], corrupt);
     }
     a.task = std::move(task);
     nb::gil_scoped_release release;  // validation: linear in the size of the arrays
     return StateSpace::create(std::move(a));
 }
 
-/// The generation statistics of a space: (threads, layers, search_seconds, post_seconds).
-/// (threads, layers, search seconds, post seconds) of a state space.
+/// The generation statistics of a state space: (threads, layers, search seconds, post seconds).
 using SpaceStats = nb::typed<nb::tuple, u32, u32, double, double>;
 /// Arrays by name, as given to from_arrays and the reconstructors.
 using ArraysArg = Arg<nb::typed<nb::mapping, std::string, ann::ArrayLike>>;
@@ -802,12 +821,12 @@ PyKnowledgeBase restore_kb(nb::handle table, nb::handle options, nb::handle spac
     if (!nb::isinstance<PyTable>(table))
         throw nb::type_error("mymyr: a knowledge base's tasks must be a mymyr.rl.TaskTable");
     const PyTable& t = *nb::inst_ptr<PyTable>(table);
-    const nb::tuple a = nb::cast<nb::tuple>(options);
-    if (a.size() != 9)
-        throw nb::value_error("mymyr: corrupt knowledge base options");
-    const KnowledgeBaseOptions o = kb_options(nb::cast<u32>(a[0]), a[1], a[2], nb::cast<bool>(a[3]), nb::cast<bool>(a[4]),
-                                              nb::cast<bool>(a[5]), nb::cast<bool>(a[6]), nb::cast<std::optional<u32>>(a[7]),
-                                              nb::cast<bool>(a[8]));
+    const char* corrupt = "knowledge base options";
+    const std::vector<nb::handle> a = items(options, 9, corrupt);
+    const KnowledgeBaseOptions o = kb_options(field<u32>(a[0], corrupt), a[1], a[2], field<bool>(a[3], corrupt), field<bool>(a[4], corrupt),
+                                              field<bool>(a[5], corrupt), field<bool>(a[6], corrupt),
+                                              a[7].is_none() ? std::nullopt : std::optional<u32>(field<u32>(a[7], corrupt)),
+                                              field<bool>(a[8], corrupt));
     KnowledgeBaseParts parts;
     for (nb::handle s : nb::borrow<nb::sequence>(spaces))
     {
@@ -816,7 +835,7 @@ PyKnowledgeBase restore_kb(nb::handle table, nb::handle options, nb::handle spac
         parts.state_spaces.push_back(nb::inst_ptr<PyStateSpace>(s)->space);
     }
     for (nb::handle i : nb::borrow<nb::sequence>(indices))
-        parts.task_indices.push_back(nb::cast<u32>(i));
+        parts.task_indices.push_back(field<u32>(i, "knowledge base (task indices)"));
     if (!packs.is_none())
     {
         const nb::sequence p = nb::borrow<nb::sequence>(packs);

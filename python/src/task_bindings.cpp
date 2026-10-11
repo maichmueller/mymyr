@@ -1872,7 +1872,7 @@ void restore_encoding(const Task& T, nb::tuple encoding)
         adopt_lazy_slots(T, lazy, "task pickle");
     }
     if (T.encoding_fingerprint() != nb::cast<u64>(encoding[0]))
-        throw nb::value_error("mymyr: the unpickled task encodes states differently from the pickled one (encoding "
+        throw nb::value_error("mymyr: the restored task encodes states differently from the pickled or saved one (encoding "
                               "fingerprint mismatch): its atom slots or numeric storage changed with mymyr's version");
 }
 
@@ -1907,7 +1907,7 @@ nb::object restore_task(std::string_view kind, std::string a, std::string b, std
         throw nb::value_error("mymyr: unknown task pickle kind");
     CorePtr core = build_core(std::move(data), std::move(source), options);
     if (core->task->fingerprint() != fingerprint)
-        throw nb::value_error("mymyr: the unpickled task differs from the pickled one (content fingerprint mismatch): "
+        throw nb::value_error("mymyr: the restored task differs from the pickled or saved one (content fingerprint mismatch): "
                               "the PDDL or mymyr's normalization changed");
     restore_encoding(*core->task, encoding);
     return nb::cast(PyTask{std::move(core)}, nb::rv_policy::move);
