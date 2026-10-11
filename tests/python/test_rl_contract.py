@@ -6,6 +6,8 @@ import pytest
 import mymyr
 from mymyr import rl
 
+needs_frontend = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+
 
 def toggle_task(*, init="", goal="(q)"):
     domain = mymyr.Domain.from_string("""
@@ -30,6 +32,7 @@ def jax_rl():
     return rj
 
 
+@needs_frontend
 def test_expand_single_empty_state_matches_sequence():
     task = toggle_task()
     assert task.initial_state.num_words == 0
@@ -39,6 +42,7 @@ def test_expand_single_empty_state_matches_sequence():
         np.testing.assert_array_equal(getattr(single, field), getattr(sequence, field))
 
 
+@needs_frontend
 @pytest.mark.parametrize("autoreset", [False, True])
 @pytest.mark.parametrize("final_state", [False, True])
 def test_replay_reached_state_or_clear_error(autoreset, final_state):
@@ -62,6 +66,7 @@ def test_replay_reached_state_or_clear_error(autoreset, final_state):
         np.testing.assert_array_equal(rj.as_words(item["next_state"])[0], expected)
 
 
+@needs_frontend
 def test_goal_replay_copies_source_masks():
     rj = jax_rl()
     import jax.numpy as jnp
@@ -76,6 +81,7 @@ def test_goal_replay_copies_source_masks():
     np.testing.assert_array_equal(item["goal_neg"], obs.goal_neg)
 
 
+@needs_frontend
 def test_torch_observations_survive_steps_and_resets():
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import BatchedEnv
@@ -108,6 +114,7 @@ def failure_choice_task():
     return mymyr.Task(domain.instantiate_string(problem), atoms="frozen")
 
 
+@needs_frontend
 def test_default_return_prefers_success_over_early_failure():
     task = failure_choice_task()
     expansion = rl.expand(task, [task.initial_state])

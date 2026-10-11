@@ -6,6 +6,8 @@ import pytest
 import mymyr
 from mymyr import rl
 
+pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+
 
 def task_from_strings(domain, problem):
     return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem), atoms="frozen")
