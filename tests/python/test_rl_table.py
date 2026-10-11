@@ -471,6 +471,20 @@ def pool_rollout(t, ids, steps, threads, split, goals, next_ids, seed=5, **cfg):
     return out
 
 
+def assert_same_batches(got, ref, numeric_words, where):
+    """Pool batches equal the host env's. A pool batch's state rows are as wide as its widest instance (unless the
+    pool fixes words=), the host env's as wide as the table: the host's atom words past the pool's are zero, and the
+    numeric words follow the atom words in both."""
+    for s, (g, r) in enumerate(zip(got, ref)):
+        for f, v in g.items():
+            want = r[f]
+            if f in ("states", "final_states") and v.shape[1] != want.shape[1]:
+                a, b = v.shape[1] - numeric_words, want.shape[1] - numeric_words
+                assert a < b and not np.any(want[:, a:b]), (where, s, f)
+                want = np.concatenate([want[:, :a], want[:, b:]], 1)
+            assert np.array_equal(v, want), (where, s, f)
+
+
 @pytest.mark.parametrize("name", list(SETS))
 def test_pool_equals_host_env(sets, name):
     tasks = sets[name]
@@ -480,12 +494,11 @@ def test_pool_equals_host_env(sets, name):
     goals = name in MASK_SETS
     rot = ROT(n, len(tasks))
     ref = host_rollout(t, ids, steps, goals=goals, next_ids=rot, **rollout_config(name))
-    for threads, split in ((1, False), (4, True), (3, False)):
-        got = pool_rollout(t, ids, steps, threads, split, goals, rot, **rollout_config(name))
-        for s in range(steps + 1):
-            for f, v in got[s].items():
-                want = ref[s][f]
-                assert np.array_equal(v, want), (threads, split, s, f)
+    for threads, split, words in ((1, False, None), (4, True, None), (3, False, t.words)):
+        got = pool_rollout(t, ids, steps, threads, split, goals, rot, words=words, **rollout_config(name))
+        if words is not None:
+            assert all(g["states"].shape == r["states"].shape for g, r in zip(got, ref))
+        assert_same_batches(got, ref, t.numeric_words, (threads, split, words))
 
 
 def test_pool_from_python_threads(sets):

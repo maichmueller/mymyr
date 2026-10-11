@@ -116,6 +116,10 @@ def test_smoke_kernels_agree_with_the_cpu(ctx, name, atoms):
     r = reference(task)
     dt = mc.DeviceTask(task, ctx)
     states = torch.from_numpy(r["states"].view(np.int64)).cuda()
+    if task.has_axioms and atoms == "lazy":
+        with pytest.raises(ValueError, match="lazy atom slots"):  # rows of lazy slots do not enter a task
+            dt.host_derived(r["states"])
+        return
     derived = torch.from_numpy(dt.host_derived(r["states"]).view(np.int64)).cuda() if task.has_axioms else None
     idx, schema, binding = (torch.from_numpy(r[k]).cuda() for k in ("idx", "schema", "binding"))
 

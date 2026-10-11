@@ -211,10 +211,9 @@ as `'f64'` when any of them needs it under `'auto'`. Building a table from tasks
 `ValueError`, and `rl.TaskTable` refuses lazy tasks. Each instance keeps its own `words`: `table.words` is the widest
 instance, and `table.instance_words` lists the widths. A batch's rows are as wide as their widest instance, or as wide
 as requested (`words=`). Words past a row's own instance width are zero padding: the CPU paths never read them, and
-the CUDA paths only check that they are zero. Expansion, environment steps, goal tests and decoding cost each row its
-own width. `rl.numeric_values(table, states, task_ids)`
-decodes the numeric words of mixed rows to float64. The CUDA paths take tasks of at most 64 atom words and 512
-objects ([CUDA](cuda.md)).
+the CUDA paths reject a row whose padding is not zero. Expansion, environment steps, goal tests and decoding cost
+each row its own width. `rl.numeric_values(table, states, task_ids)` decodes the numeric words of mixed rows to
+float64. The CUDA paths take tasks of at most 64 atom words and 512 objects ([CUDA](cuda.md)).
 
 ## Binding generators
 

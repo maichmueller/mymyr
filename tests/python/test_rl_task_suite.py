@@ -31,6 +31,7 @@ from test_rl_table import (  # noqa: F401
     FORK,
     MASK_SETS,
     ROT,
+    assert_same_batches,
     env_arrays,
     given_actions,
     gpu_device,
@@ -432,11 +433,9 @@ def test_pool_suite_equals_host(sets, key):
     goals = key in FAST
     rot = ROT(n, len(s))
     ref = host_rollout(s, ids, steps, goals=goals, next_ids=rot, **rollout_config(key))
-    for threads, split in ((1, False), (4, True)):
-        got = pool_rollout(s, ids, steps, threads, split, goals, rot, **rollout_config(key))
-        for k in range(steps + 1):
-            for f, v in got[k].items():
-                assert np.array_equal(v, ref[k][f]), (threads, split, k, f)
+    for threads, split, words in ((1, False, None), (4, True, s.words)):
+        got = pool_rollout(s, ids, steps, threads, split, goals, rot, words=words, **rollout_config(key))
+        assert_same_batches(got, ref, s.numeric_words, (threads, split, words))
     pool = rl.CpuEnvPool(s, 4)
     assert pool.table is s and pool.words is None and rl.CpuEnvPool(s, 4, words=s.words).words == s.words
     with pytest.raises(ValueError, match="outside the suite"):

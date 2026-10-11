@@ -242,13 +242,20 @@ def test_expand_into_torch_destinations(ctx):
 def test_expand_validates_like_the_cpu(ctx):
     torch = torch_cuda()
     task = text_task("gripper__prob05", atoms="dense")
+    assert task.num_atoms % 64
     x = words_of([task.initial_state] * 2, task.words + 1)
-    x[1, -1] = 1  # an unassigned slot
+    x[1, task.num_atoms // 64] |= np.uint64(1) << np.uint64(task.num_atoms % 64)  # an unassigned slot
     with pytest.raises(ValueError, match="state row 1"):
         rl.expand(task, x)
     with pytest.raises(ValueError, match="state row 1"):
         rl.expand(task, torch.from_numpy(x.view(np.int64)).cuda(), ctx=ctx)
     assert rl.expand(task, torch.from_numpy(x.view(np.int64)).cuda(), ctx=ctx, validate=False).total > 0
+    # padding: the CPU does not read it, the device rejects a row whose padding is not zero
+    y = words_of([task.initial_state] * 2, task.words + 1)
+    y[1, -1] = 1
+    assert rl.expand(task, y).total == rl.expand(task, y[:, :-1]).total
+    with pytest.raises(ValueError, match="state row 1"):
+        rl.expand(task, torch.from_numpy(y.view(np.int64)).cuda(), ctx=ctx)
 
 
 def test_expand_stream_semantics(ctx):
