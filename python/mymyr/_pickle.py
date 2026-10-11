@@ -9,6 +9,10 @@ can store by reference (native nanobind functions cannot be pickled).
 - An Action pickles as its task, the fingerprint and its label (schema, binding).
 - A formula (Variable, Atom, Literal, GroundAtom, GroundLiteral, ConjunctiveCondition, GroundCondition) made by a Task
   pickles as that task, the fingerprint and its content in ids; loading checks it against the task.
+- A StateSpace pickles as its task, the task's fingerprints, its lazy atom slots (if any), its generation statistics and
+  its arrays (rows included); loading validates the arrays against the task (mymyr.datasets.StateSpace.from_arrays).
+- A TupleGraph pickles as its state space, root, options and arrays; a GeneralizedStateSpace as its state spaces; a
+  KnowledgeBase as its tasks, options, state spaces, task indices and packed tuple graphs. Nothing is generated again.
 """
 
 from mymyr import _core
@@ -32,3 +36,19 @@ def _restore_formula(task, fingerprint, kind, payload):
 
 def _restore_handle(task):
     return _core._restore_handle(task)
+
+
+def _restore_state_space(task, fingerprint, encoding_fingerprint, slots, stats, arrays):
+    return _core._datasets._restore_state_space(task, fingerprint, encoding_fingerprint, slots, stats, arrays)
+
+
+def _restore_tuple_graph(space, root, width, dominance_pruning, arrays):
+    return _core._datasets._restore_tuple_graph(space, root, width, dominance_pruning, arrays)
+
+
+def _restore_knowledge_base(tasks, options, spaces, task_indices, tuple_graphs):
+    return _core._datasets._restore_knowledge_base(tasks, options, spaces, task_indices, tuple_graphs)
+
+
+def _restore_generation_result(status, space, states, seconds):
+    return _core._datasets._restore_generation_result(status, space, states, seconds)
