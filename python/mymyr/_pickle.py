@@ -13,6 +13,10 @@ can store by reference (native nanobind functions cannot be pickled).
   its arrays (rows included); loading validates the arrays against the task (mymyr.datasets.StateSpace.from_arrays).
 - A TupleGraph pickles as its state space, root, options and arrays; a GeneralizedStateSpace as its state spaces; a
   KnowledgeBase as its tasks, options, state spaces, task indices and packed tuple graphs. Nothing is generated again.
+- A search result pickles as its task, the fingerprint and its fields: the plan as action labels (schema, objects),
+  states as States, statistics and statuses as numbers; loading checks the labels and atoms against the task.
+- A mymyr.search.Heuristic pickles as its specification (task, kind, costs, evaluation; a perfect heuristic: its state
+  space and costs) and is built again when loaded.
 """
 
 from mymyr import _core
@@ -52,3 +56,15 @@ def _restore_knowledge_base(tasks, options, spaces, task_indices, tuple_graphs):
 
 def _restore_generation_result(status, space, states, seconds):
     return _core._datasets._restore_generation_result(status, space, states, seconds)
+
+
+def _restore_search_result(kind, task, fingerprint, fields):
+    return _core._search._restore_search_result(kind, task, fingerprint, fields)
+
+
+def _restore_heuristic(task, kind, costs, evaluation):
+    return _core._search.Heuristic(task, kind, costs=costs, evaluation=evaluation)
+
+
+def _restore_perfect_heuristic(space, costs):
+    return _core._search.Heuristic.perfect(space, costs=costs)
