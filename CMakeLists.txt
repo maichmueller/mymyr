@@ -190,6 +190,7 @@ if(MYMYR_FRONTEND)
         src/mymyr/frontend/diagnose.cpp
         src/mymyr/frontend/domain.cpp
         src/mymyr/frontend/init_reader.cpp
+        src/mymyr/frontend/normalize.cpp
         src/mymyr/frontend/translate.cpp
     )
     add_library(mymyr::frontend ALIAS mymyr_frontend)
