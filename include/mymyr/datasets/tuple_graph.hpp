@@ -52,9 +52,31 @@ struct TupleGraphOptions
     u32 threads = 1;                // tuple_graphs(): worker threads (0: std::thread::hardware_concurrency())
 };
 
+/// The arrays of a tuple graph (TupleGraph::to_arrays), for TupleGraph::create; each has the size and meaning of the
+/// TupleGraph accessor of the same name.
+struct TupleGraphArrays
+{
+    StateSpacePtr space;
+    u32 root = 0, width = 0;
+    bool dominance_pruning = true;
+    std::vector<u32> distance_offsets, tuple_offsets, tuple_atoms, problem_offsets, problem_vertex_ids, successor_offsets,
+        successor_ids, predecessor_offsets, predecessor_ids, layer_offsets, layer_vertex_ids;
+};
+
 class TupleGraph
 {
 public:
+    /// A tuple graph from its arrays (moved in). Throws std::invalid_argument unless they are a tuple graph of a
+    /// vertex of `space`: width at most novelty::k_max_arity, the root a state, every offset array a CSR (one row per
+    /// vertex, per distance), at least one vertex per distance, tuples of at most `width` assigned fluent slots of the
+    /// space's task, ascending; problem vertices nonempty, ascending, and states of the vertex's breadth-first layer;
+    /// layers of ascending states, layer 0 the root alone; successors at the next distance, ascending, and
+    /// predecessors exactly the reversed edges. Linear in the size of the arrays (problem vertices: times the log of
+    /// a layer's size). Whether the tuples are novel where the arrays say is taken as given.
+    [[nodiscard]] static TupleGraph create(TupleGraphArrays&& arrays);
+    /// A copy of the arrays: create(to_arrays()) == *this.
+    [[nodiscard]] TupleGraphArrays to_arrays() const;
+
     /// The state space and its vertex this graph is of, and the options it was built with.
     [[nodiscard]] const StateSpacePtr& space() const noexcept { return m_space; }
     [[nodiscard]] u32 root() const noexcept { return m_root; }

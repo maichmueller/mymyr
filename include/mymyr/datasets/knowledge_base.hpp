@@ -35,12 +35,29 @@ struct KnowledgeBaseOptions
     u32 threads = 0;                                 // worker threads of every step (0: hardware concurrency)
 };
 
+/// What a knowledge base computed (its state_spaces(), task_indices() and tuple_graphs()), for KnowledgeBase::create
+/// without recomputing it.
+struct KnowledgeBaseParts
+{
+    std::vector<StateSpacePtr> state_spaces;
+    std::vector<u32> task_indices;
+    std::vector<std::vector<TupleGraph>> tuple_graphs;  // empty unless options.tuple_graphs
+};
+
 class KnowledgeBase
 {
 public:
     /// Builds the knowledge base of the tasks of `tasks`. Throws std::invalid_argument for a null table or a tuple
     /// graph width above novelty::k_max_arity.
     [[nodiscard]] static std::shared_ptr<const KnowledgeBase> create(rl::TaskTablePtr tasks, const KnowledgeBaseOptions& options = {});
+    /// The knowledge base of `tasks` from what it computed (moved in): the state spaces and their task indices, and
+    /// the tuple graphs; the generalized state space is built from the spaces (linear time) if options.generalized.
+    /// Throws std::invalid_argument unless they are what create(tasks, options) gives up to the generation's failures:
+    /// space i is of task task_indices[i] (the same Task object), the indices are distinct and in range, in task
+    /// order or (sort_by_size) ascending by size with ties in task order; with tuple graphs, space i has one per
+    /// state (graph v of space i: root v, of that space, with the options' width and dominance pruning), else none.
+    [[nodiscard]] static std::shared_ptr<const KnowledgeBase> create(rl::TaskTablePtr tasks, const KnowledgeBaseOptions& options,
+                                                                     KnowledgeBaseParts&& parts);
 
     [[nodiscard]] const rl::TaskTablePtr& tasks() const noexcept { return m_tasks; }
     [[nodiscard]] const KnowledgeBaseOptions& options() const noexcept { return m_options; }

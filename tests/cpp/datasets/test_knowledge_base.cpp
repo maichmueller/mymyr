@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -159,5 +160,65 @@ TEST(KnowledgeBase, PartsAndOrder)
     KnowledgeBaseOptions wide;
     wide.tuple_graphs = TupleGraphOptions{.width = 6};
     EXPECT_THROW((void)KnowledgeBase::create(table, wide), std::invalid_argument);
+}
+
+TEST(KnowledgeBase, FromParts)
+{
+    if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
+        GTEST_SKIP();
+    const auto table = fork_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
+    ASSERT_TRUE(table);
+    const auto kb = KnowledgeBase::create(table, options(1));
+    auto parts = [&] {
+        return KnowledgeBaseParts{kb->state_spaces(), {kb->task_indices().begin(), kb->task_indices().end()}, kb->tuple_graphs()};
+    };
+    const auto back = KnowledgeBase::create(table, kb->options(), parts());
+    EXPECT_EQ(back->state_spaces(), kb->state_spaces());
+    EXPECT_TRUE(std::ranges::equal(back->task_indices(), kb->task_indices()));
+    ASSERT_TRUE(back->generalized_state_space());
+    EXPECT_TRUE(std::ranges::equal(back->generalized_state_space()->forward_targets(), kb->generalized_state_space()->forward_targets()));
+    EXPECT_EQ(back->tuple_graphs(), kb->tuple_graphs());
+    // without tuple graphs or the generalized state space
+    KnowledgeBaseOptions plain;
+    const auto bare = KnowledgeBase::create(table, plain, KnowledgeBaseParts{kb->state_spaces(), parts().task_indices, {}});
+    EXPECT_FALSE(bare->generalized_state_space());
+    EXPECT_FALSE(bare->has_tuple_graphs());
+
+    struct Case
+    {
+        const char* what;  // part of the message
+        std::function<void(KnowledgeBaseParts&)> mutate;
+    };
+    const Case cases[] = {
+        {"one per state space", [](KnowledgeBaseParts& p) { p.task_indices.pop_back(); }},
+        {"out of range or repeated", [](KnowledgeBaseParts& p) { p.task_indices[0] = 3; }},
+        {"out of range or repeated", [](KnowledgeBaseParts& p) { p.task_indices[1] = p.task_indices[0]; }},
+        {"not of its task", [](KnowledgeBaseParts& p) { std::swap(p.task_indices[0], p.task_indices[1]); }},
+        {"knowledge-base order", [](KnowledgeBaseParts& p) {
+             std::ranges::reverse(p.state_spaces);
+             std::ranges::reverse(p.task_indices);
+             std::ranges::reverse(p.tuple_graphs);
+         }},
+        {"one list per state space", [](KnowledgeBaseParts& p) { p.tuple_graphs.pop_back(); }},
+        {"one tuple graph per state", [](KnowledgeBaseParts& p) { p.tuple_graphs[0].pop_back(); }},
+        {"not of its state", [](KnowledgeBaseParts& p) { std::swap(p.tuple_graphs[1][0], p.tuple_graphs[1][1]); }},
+    };
+    for (const Case& c : cases)
+    {
+        SCOPED_TRACE(c.what);
+        KnowledgeBaseParts p = parts();
+        c.mutate(p);
+        try
+        {
+            (void)KnowledgeBase::create(table, kb->options(), std::move(p));
+            ADD_FAILURE() << "accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(c.what), std::string::npos) << e.what();
+        }
+    }
+    EXPECT_THROW((void)KnowledgeBase::create(table, plain, parts()), std::invalid_argument);  // tuple graphs without options
+    EXPECT_THROW((void)KnowledgeBase::create(nullptr, plain, {}), std::invalid_argument);
 }
 }  // namespace

@@ -1838,22 +1838,11 @@ void bind_task_api(nb::class_<C>& cls)
 nb::object restore_task(std::string_view kind, std::string a, std::string b, std::string apath, std::string bpath,
                         nb::tuple opts, u64 fingerprint, nb::tuple encoding);
 
-/// The encoding part of a task pickle: (encoding_fingerprint, lazy slots). Lazy slots: the canonical ids of the
-/// assigned fluent slots, then of the derived ones, in slot order, with their counts (u64 [2 + F + D] as bytes), so
-/// the restored task numbers its atoms as the pickled one did when it was pickled; empty for frozen slots.
+/// The encoding part of a task pickle: (encoding_fingerprint, lazy slots as bytes; lazy_slots), so the restored task
+/// numbers its atoms as the pickled one did when it was pickled.
 nb::tuple encoding_state(const Task& T)
 {
-    std::vector<u64> lazy;
-    if (!T.atoms().frozen())
-    {
-        const u32 nf = T.atoms().fluent_slots(), nd = T.atoms().derived_slots();
-        lazy.push_back(nf);
-        lazy.push_back(nd);
-        for (u32 s = 0; s < nf; ++s)
-            lazy.push_back(T.atoms().canonical(AtomKind::Fluent, s));
-        for (u32 s = 0; s < nd; ++s)
-            lazy.push_back(T.atoms().canonical(AtomKind::Derived, s));
-    }
+    const std::vector<u64> lazy = lazy_slots(T);
     return nb::make_tuple(T.encoding_fingerprint(),
                           nb::bytes(reinterpret_cast<const char*>(lazy.data()), lazy.size() * sizeof(u64)));
 }
@@ -1882,21 +1871,10 @@ void restore_encoding(const Task& T, nb::tuple encoding)
     {
         std::vector<u64> lazy(n);
         std::memcpy(lazy.data(), lazy_bytes.c_str(), n * sizeof(u64));
-        const CanonicalLayout& L = T.compiled().layout;
-        if (T.atoms().frozen() || n < 2 || n != 2 + lazy[0] + lazy[1])
-            throw nb::value_error("mymyr: corrupt task pickle (lazy atom slots)");
-        for (usize i = 0; i < n - 2; ++i)
-        {
-            const u64 c = lazy[2 + i];
-            const bool fluent = i < lazy[0];
-            const u64 slot = fluent ? i : i - lazy[0];
-            if (c >= L.total || (c < L.fluent_count) != fluent || T.atoms().intern(c) != slot)
-                throw nb::value_error("mymyr: the unpickled task cannot number its lazy atom slots as the pickled one "
-                                      "did (its atoms got slots in another order)");
-        }
+        adopt_lazy_slots(T, lazy, "task pickle");
     }
     if (T.encoding_fingerprint() != nb::cast<u64>(encoding[0]))
-        throw nb::value_error("mymyr: the unpickled task encodes states differently from the pickled one (encoding "
+        throw nb::value_error("mymyr: the restored task encodes states differently from the pickled or saved one (encoding "
                               "fingerprint mismatch): its atom slots or numeric storage changed with mymyr's version");
 }
 
@@ -1931,7 +1909,7 @@ nb::object restore_task(std::string_view kind, std::string a, std::string b, std
         throw nb::value_error("mymyr: unknown task pickle kind");
     CorePtr core = build_core(std::move(data), std::move(source), options);
     if (core->task->fingerprint() != fingerprint)
-        throw nb::value_error("mymyr: the unpickled task differs from the pickled one (content fingerprint mismatch): "
+        throw nb::value_error("mymyr: the restored task differs from the pickled or saved one (content fingerprint mismatch): "
                               "the PDDL or mymyr's normalization changed");
     restore_encoding(*core->task, encoding);
     return nb::cast(PyTask{std::move(core)}, nb::rv_policy::move);
@@ -2050,6 +2028,51 @@ std::vector<std::optional<ObjectId>> condition_partial(PyTaskCore& core, const s
                                                        nb::handle partial)
 {
     return partial_arg(core, Target{0, c, c->arity()}, partial);
+}
+
+std::vector<u64> lazy_slots(const Task& T)
+{
+    std::vector<u64> lazy;
+    if (!T.atoms().frozen())
+    {
+        const u32 nf = T.atoms().fluent_slots(), nd = T.atoms().derived_slots();
+        lazy.reserve(2 + u64{nf} + nd);
+        lazy.push_back(nf);
+        lazy.push_back(nd);
+        for (u32 s = 0; s < nf; ++s)
+            lazy.push_back(T.atoms().canonical(AtomKind::Fluent, s));
+        for (u32 s = 0; s < nd; ++s)
+            lazy.push_back(T.atoms().canonical(AtomKind::Derived, s));
+    }
+    return lazy;
+}
+
+void adopt_lazy_slots(const Task& T, std::span<const u64> lazy, const char* what)
+{
+    const CanonicalLayout& L = T.compiled().layout;
+    const usize n = lazy.size();
+    if (T.atoms().frozen() || n < 2 || n != 2 + lazy[0] + lazy[1])
+        throw nb::value_error((std::string("mymyr: corrupt ") + what + " (lazy atom slots)").c_str());
+    const auto refuse = [&] {
+        throw nb::value_error((std::string("mymyr: the task cannot number its lazy atom slots as the ") + what +
+                               " does (its atoms got slots in another order)")
+                                  .c_str());
+    };
+    // first without assigning slots: the task's numbering so far must agree with the saved one
+    const u64 have[2] = {T.atoms().fluent_slots(), T.atoms().derived_slots()};
+    for (usize i = 0; i < n - 2; ++i)
+    {
+        const u64 c = lazy[2 + i];
+        const bool fluent = i < lazy[0];
+        const u64 slot = fluent ? i : i - lazy[0];
+        if (c >= L.total || (c < L.fluent_count) != fluent)
+            throw nb::value_error((std::string("mymyr: corrupt ") + what + " (lazy atom slots)").c_str());
+        if (T.atoms().find(c) != (slot < have[fluent ? 0 : 1] ? slot : AtomIndex::k_empty))
+            refuse();
+    }
+    for (usize i = 0; i < n - 2; ++i)
+        if (T.atoms().intern(lazy[2 + i]) != (i < lazy[0] ? i : i - lazy[0]))
+            refuse();  // another thread gave the task's atoms slots meanwhile
 }
 
 u64 limit_value(nb::handle limit) { return limit_arg(limit); }
