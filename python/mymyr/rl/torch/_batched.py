@@ -46,6 +46,12 @@ class StepResult(NamedTuple):
     goal_neg: Tensor
 
 
+def _mark_static(t: Tensor) -> None:
+    """What ``torch._dynamo.mark_static_address(t)`` does. Calling that would import torch._dynamo, and with it triton,
+    which enables the GIL of a free-threaded interpreter, for every environment constructed."""
+    t._dynamo_static_input_type = "unguarded"
+
+
 def _device_index(device: torch.device) -> Optional[int]:
     if device.type == "cpu":
         return None
@@ -170,9 +176,7 @@ class BatchedEnv:
         if index is not None:
             self.core.reserve(n)
             for t in self._tensors():
-                # what torch._dynamo.mark_static_address sets; calling it would import torch._dynamo (and with it
-                # triton, which enables the GIL of a free-threaded interpreter) for every constructed environment
-                t._dynamo_static_input_type = "unguarded"
+                _mark_static(t)
         initial_ids = None if task_ids is None else _task_ids(self.core, task_ids, None, n, d, "task_ids")
         self.reset(task_ids=initial_ids)
 

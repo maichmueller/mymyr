@@ -689,3 +689,14 @@ def test_numeric_device_env_equals_cpu():
             for key in ("reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "count"):
                 assert torch.equal(getattr(a, key), getattr(b, key).cpu()), key
             assert torch.equal(cpu.states, device.states.cpu())
+
+
+@pytest.mark.needs_gil
+def test_static_marking_equals_torch_dynamo():
+    """The marking BatchedEnv applies to its tensors is what torch._dynamo.mark_static_address sets."""
+    from mymyr.rl.torch._batched import _mark_static
+
+    mine, reference = torch.zeros(1), torch.zeros(1)
+    _mark_static(mine)
+    torch._dynamo.mark_static_address(reference)
+    assert mine._dynamo_static_input_type == reference._dynamo_static_input_type
