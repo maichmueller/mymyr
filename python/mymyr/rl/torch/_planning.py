@@ -24,7 +24,7 @@ class PlanningEnv(EnvBase):
     move). Reward [N, 1] float32: step_reward, plus goal_reward on reaching a goal, plus dead_end_reward on reaching
     (or being stuck in) a dead end. ``terminated`` = goal or dead end (``dead_end_terminal``), ``truncated`` =
     max_steps reached (0: never), ``done`` = either. Finished environments are reset by TorchRL (``_reset`` masks); the
-    reset tensordict may carry ``task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
+    reset tensordict may carry ``next_task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
     ``goal_pos`` / ``goal_neg``. The environments never autoreset themselves. Every reset waits for the device work
     and raises the device environment's errors (``BatchedEnv.check_errors``: a ``task_id`` outside the table, states
     written into ``batched`` without ``refresh``).
@@ -52,6 +52,7 @@ class PlanningEnv(EnvBase):
         num_envs: int,
         *,
         task_ids: Optional[Any] = None,
+        sampler: Any = "auto",
         device: Union[str, torch.device] = "cpu",
         max_actions: Optional[int] = None,
         goals: bool = False,
@@ -70,7 +71,7 @@ class PlanningEnv(EnvBase):
         graph: bool = True,
     ) -> None:
         env = BatchedEnv(
-            table, num_envs, task_ids=task_ids, device=device, goals=goals, seed=seed, max_steps=max_steps,
+            table, num_envs, task_ids=task_ids, sampler=sampler, device=device, goals=goals, seed=seed, max_steps=max_steps,
             step_reward=step_reward, goal_reward=goal_reward, dead_end=dead_end, dead_end_reward=dead_end_reward,
             dead_end_terminal=dead_end_terminal, autoreset=False, witness=witness, path=path, threads=threads, ctx=ctx,
             first_env=first_env,
@@ -145,13 +146,14 @@ class PlanningEnv(EnvBase):
             self._static = self._outputs(self._action, copy=False)
 
     def _reset(self, tensordict: Optional[TensorDictBase] = None, **kwargs: Any) -> TensorDictBase:
-        mask = task_ids = goal_pos = goal_neg = None
+        mask = goal_pos = goal_neg = None
+        task_ids = kwargs.get("task_ids")
         if tensordict is not None:
             keys = tensordict.keys()
             if "_reset" in keys:
                 mask = tensordict.get("_reset").reshape(self._env.num_envs)
-            if "task_id" in keys:
-                task_ids = tensordict.get("task_id")
+            if "next_task_id" in keys:
+                task_ids = tensordict.get("next_task_id")
             if self._env.goals and "goal_pos" in keys and "goal_neg" in keys:
                 goal_pos, goal_neg = tensordict.get("goal_pos"), tensordict.get("goal_neg")
         self._env.reset(mask, task_ids=task_ids, goal_pos=goal_pos, goal_neg=goal_neg)

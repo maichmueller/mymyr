@@ -539,10 +539,10 @@ def test_device_task_ids_outside_the_table_raise():
     env.check_errors()
     penv = rt.PlanningEnv(table, 4, device=dev)
     td = penv.reset()
-    td["task_id"] = torch.tensor([0, 1, 0, 99], device=dev)
+    td["next_task_id"] = torch.tensor([0, 1, 0, 99], device=dev)
     with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
         penv.reset(td)  # the reset waits for the device and raises its errors
-    td["task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
+    td["next_task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
     assert penv.reset(td)["task_id"].tolist() == [1, 1, 0, 0]
 
 

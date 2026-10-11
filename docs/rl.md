@@ -68,6 +68,27 @@ The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, veri
 XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
 CPU framework bundle used for validation; those packages remain optional runtime dependencies for users.
 
+## Instance sampling and curricula
+
+Without constructor `task_ids`, the torch environments sample uniformly across a table or suite at each reset.
+Explicit constructor ids retain a fixed assignment (`sampler="auto"`); `sampler="uniform"` enables sampling even with
+an explicit initial assignment. JAX `Env.reset(key, N)` samples N instances uniformly; `reset(key, ids)` overrides
+the initial draw. In either framework, `sampler=None` disables sampling and
+`sampler=rl.InstanceSampler(num_instances, weights=[...])` selects a weighted distribution. Weights must be finite,
+nonnegative and not all zero; zero-weight instances are excluded.
+
+Instance draws use the seed, environment id (`first_env + i`) and a per-environment uint32 reset counter, independent
+of action selection. Masked resets advance only reset rows, so splitting a batch or resetting another row cannot
+change a stream. Torch `set_seed(seed)` restarts both action and sampling counters. JAX keeps sampling keys and
+counters in `EnvState`; `reset_where(state, mask, key=new_key)` reseeds only the reset rows. Its sampler contains no
+mutable host RNG and works with `jit`, `vmap` and `scan`.
+
+External curricula override a draw with `reset(task_ids=ids)` or `step(..., next_task_ids=ids)`. A TorchRL reset
+TensorDict uses `next_task_id`, not the observation's `task_id`: collectors therefore do not accidentally pin each
+new episode to the preceding one. For `CpuEnvPool`, use the same sampler's NumPy API and pass the resulting ids to
+`reset(..., task_ids=ids)` or `send(..., next_task_ids=ids)`; the caller owns each row's reset counter in asynchronous
+collection. Sampling does not change the pool's thread-safety or enqueue order.
+
 On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. Host and device
 environments and expansion support numeric fluents, preconditions, effects and goals, preserving the CPU I32/F64 row
 encoding. Numeric tables and suites run per-instance kernels. Numeric environments use the general path, which

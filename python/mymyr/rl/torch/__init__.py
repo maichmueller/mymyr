@@ -34,13 +34,16 @@ flagged ``invalid``; a state without successors is stuck: no move, terminated). 
 the reached state is a goal, + dead_end_reward if it is a non-goal state without successors); terminated = goal or
 dead end (``dead_end="no_successors"``, terminal unless ``dead_end_terminal=False``; ``"none"``: no dead ends);
 truncated = not terminated and max_steps > 0 and the episode reached max_steps steps. With autoreset (BatchedEnv's
-default) a finished environment restarts from the initial state of its instance (or of ``next_task_ids[i]``) within
+default) a finished environment restarts from a sampled instance (or of ``next_task_ids[i]``) within
 the step (``final=True`` returns the reached states); PlanningEnv leaves resets to TorchRL. With ``goals=True`` each
 env carries goal masks (``goal_pos`` / ``goal_neg``) and the goal test is the mask test (relabelled or multi-goal
 envs).
 
 Random draws (:mod:`mymyr.rl.torch.rng`): Philox-4x32-10 counters (seed, env id, draw counter), so an environment's
 trajectory does not depend on the batch, the thread count, the device or the launch configuration.
+Instance sampling has independent reset counters: ``sampler="auto"`` samples uniformly unless constructor task ids
+pin the assignment; ``sampler=None`` disables it, ``"uniform"`` always samples, and ``rl.InstanceSampler`` accepts
+weights. PlanningEnv reset TensorDicts use ``next_task_id`` for explicit curricula, separate from observation ids.
 
 Device environments support numeric tables through the general path. The fast device path (no host
 synchronization at all) needs frozen atom slots, no axioms and device-complete schemas in every instance

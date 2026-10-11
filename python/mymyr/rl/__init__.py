@@ -98,11 +98,13 @@ from mymyr._core._rl import (
     random_walks,
 )
 from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
+from mymyr.rl._sampling import InstanceSampler
 
 __all__ = [
     "CpuEnvPool",
     "Expansion",
     "HerBatch",
+    "InstanceSampler",
     "PaddedExpansion",
     "PoolBatch",
     "TaskSuite",
