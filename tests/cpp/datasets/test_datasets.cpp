@@ -19,6 +19,7 @@
 #include <cmath>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -833,5 +834,168 @@ TEST(GeneralizedStateSpace, DisjointUnion)
     const TaskPtr other = fork_task("blocks_3", "test_problem.pddl");
     ASSERT_TRUE(other);
     EXPECT_THROW((void)GeneralizedStateSpace::create({spaces[0], space_of(other, fork_ss())}), std::invalid_argument);
+}
+
+// ----------------------------------------------------------------------------------------------- from arrays
+void expect_same_space(const StateSpace& a, const StateSpace& b)
+{
+    auto eq = [](auto x, auto y) { return std::ranges::equal(x, y); };
+    EXPECT_EQ(a.task(), b.task());
+    EXPECT_EQ(a.num_states(), b.num_states());
+    EXPECT_EQ(a.words(), b.words());
+    EXPECT_EQ(a.numeric_words(), b.numeric_words());
+    EXPECT_EQ(a.has_labels(), b.has_labels());
+    EXPECT_EQ(a.label_width(), b.label_width());
+    EXPECT_TRUE(eq(a.state_words(), b.state_words()));
+    EXPECT_TRUE(eq(a.forward_offsets(), b.forward_offsets()));
+    EXPECT_TRUE(eq(a.forward_targets(), b.forward_targets()));
+    EXPECT_TRUE(eq(a.label_schemas(), b.label_schemas()));
+    EXPECT_TRUE(eq(a.label_bindings(), b.label_bindings()));
+    EXPECT_TRUE(eq(a.costs(), b.costs()));
+    EXPECT_TRUE(eq(a.backward_offsets(), b.backward_offsets()));
+    EXPECT_TRUE(eq(a.backward_sources(), b.backward_sources()));
+    EXPECT_TRUE(eq(a.backward_edges(), b.backward_edges()));
+    EXPECT_TRUE(eq(a.unit_goal_distances(), b.unit_goal_distances()));
+    EXPECT_TRUE(eq(a.cost_goal_distances(), b.cost_goal_distances()));
+    EXPECT_TRUE(eq(a.goal_flags(), b.goal_flags()));
+    EXPECT_TRUE(eq(a.unsolvable_flags(), b.unsolvable_flags()));
+    EXPECT_TRUE(eq(a.alive_flags(), b.alive_flags()));
+    EXPECT_EQ(a.num_goal_states(), b.num_goal_states());
+    EXPECT_EQ(a.num_unsolvable_states(), b.num_unsolvable_states());
+    EXPECT_EQ(a.max_goal_distance(), b.max_goal_distance());
+    EXPECT_EQ(a.threads(), b.threads());
+    EXPECT_EQ(a.layers(), b.layers());
+    EXPECT_EQ(a.search_seconds(), b.search_seconds());
+    EXPECT_EQ(a.post_seconds(), b.post_seconds());
+}
+
+const char* kCostProblem = R"(
+(define (problem p) (:domain count)
+ (:objects c0 c1 c2 c3 - cell)
+ (:init (at c0) (next c0 c1) (next c1 c2) (next c2 c3) (next c0 c3) (= (total-cost) 0)
+        (= (step-cost c0 c1) 1) (= (step-cost c1 c2) 2) (= (step-cost c2 c3) 3) (= (step-cost c0 c3) 7))
+ (:goal (at c3))
+ (:metric minimize (total-cost)))
+)";
+
+TEST(StateSpace, CreateFromArraysRoundTrips)
+{
+    // costs, numeric words, a fork task, lazy atom slots
+    std::vector<TaskPtr> tasks{pddl_task(kCountDomain, kCostProblem), pddl_task(R"(
+(define (domain counter2)
+ (:requirements :strips :numeric-fluents :negative-preconditions)
+ (:predicates (done))
+ (:functions (x))
+ (:action inc :parameters () :precondition (and (< (x) 3)) :effect (and (increase (x) 1)))
+ (:action dec :parameters () :precondition (and (> (x) 0)) :effect (and (decrease (x) 1)))
+ (:action finish :parameters () :precondition (and (= (x) 3) (not (done))) :effect (and (done)))
+)
+)",
+                                                                                                                 R"(
+(define (problem p) (:domain counter2)
+ (:init (= (x) 0))
+ (:goal (and (done) (= (x) 0))))
+)")};
+    if (TaskPtr t = fork_task("spanner", "p15-easy.pddl"))
+        tasks.push_back(t);
+    TaskOptions lazy;
+    lazy.atoms = TaskOptions::Atoms::Lazy;
+    if (TaskPtr t = fork_task("gripper", "p-2-0.pddl", lazy))
+        tasks.push_back(t);
+    for (const TaskPtr& task : tasks)
+        for (bool labels : {true, false})
+        {
+            StateSpaceOptions o = fork_ss();
+            o.labels = labels;
+            const StateSpacePtr S = space_of(task, o);
+            ASSERT_TRUE(S);
+            const StateSpacePtr R = StateSpace::create(S->to_arrays());
+            expect_same_space(*S, *R);
+            for (u32 i = 0; i < S->num_states(); i += std::max<u32>(1, S->num_states() / 11))
+                EXPECT_EQ(R->find(S->state(i)), i);
+            if (labels)
+            {
+                EXPECT_EQ(R->label(S->num_transitions() - 1), S->label(S->num_transitions() - 1));
+            }
+        }
+}
+
+TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
+{
+    const TaskPtr task = pddl_task(kCountDomain, kCostProblem);
+    const StateSpacePtr S = space_of(task, fork_ss());
+    ASSERT_TRUE(S);
+    ASSERT_GE(S->num_transitions(), 2u);
+    ASSERT_LT(task->atoms().fluent_slots(), 64u * S->words());
+    // another problem of the domain: its initial state differs
+    const TaskPtr other = pddl_task(kCountDomain, R"(
+(define (problem p) (:domain count)
+ (:objects c0 c1 c2 c3 - cell)
+ (:init (at c1) (next c0 c1) (next c1 c2) (next c2 c3) (next c0 c3) (= (total-cost) 0)
+        (= (step-cost c0 c1) 1) (= (step-cost c1 c2) 2) (= (step-cost c2 c3) 3) (= (step-cost c0 c3) 7))
+ (:goal (at c3))
+ (:metric minimize (total-cost)))
+)");
+    const u32 N = S->num_states(), RW = S->row_words(), alive = [&] {
+        for (u32 i = 0; i < N; ++i)
+            if (S->is_alive(i))
+                return i;
+        return 0u;
+    }();
+    ASSERT_TRUE(S->is_alive(alive));
+    struct Case
+    {
+        const char* what;  // part of the message
+        std::function<void(StateSpaceArrays&)> mutate;
+    };
+    const Case cases[] = {
+        {"no task", [](StateSpaceArrays& a) { a.task = nullptr; }},
+        {"initial state", [&](StateSpaceArrays& a) { a.task = other; }},
+        {"no states", [](StateSpaceArrays& a) {
+             StateSpaceArrays empty;
+             empty.task = a.task;
+             a = std::move(empty);
+         }},
+        {"state_words", [](StateSpaceArrays& a) { a.state_words.pop_back(); }},
+        {"target is not a state", [&](StateSpaceArrays& a) { a.forward_targets[0] = N; }},
+        {"backward CSR", [](StateSpaceArrays& a) { std::swap(a.backward_edges[0], a.backward_edges[1]); }},
+        {"backward CSR", [](StateSpaceArrays& a) { a.backward_sources[0] = a.backward_sources[0] == 0 ? 1 : 0; }},
+        {"words is not the task's", [&](StateSpaceArrays& a) {
+             a.words += 1;
+             a.state_words.assign(u64{N} * (RW + 1), 0);
+         }},
+        {"numeric_words", [&](StateSpaceArrays& a) {
+             a.numeric_words = 1;
+             a.state_words.assign(u64{N} * (RW + 1), 0);
+         }},
+        {"atom slot", [&](StateSpaceArrays& a) { a.state_words[u64{N - 1} * RW] |= u64{1} << 63; }},
+        {"schema", [](StateSpaceArrays& a) { a.label_schemas[0] = 99; }},
+        {"binds an object", [](StateSpaceArrays& a) { a.label_bindings[0] = 99; }},
+        {"label_width", [](StateSpaceArrays& a) {
+             a.label_width = 1;
+             a.label_bindings.resize(a.label_schemas.size());
+         }},
+        {"cost is NaN", [](StateSpaceArrays& a) { a.costs[0] = std::nan(""); }},
+        {"flag is not 0 or 1", [](StateSpaceArrays& a) { a.goal_flags[0] = 2; }},
+        {"goal and unsolvable flags", [](StateSpaceArrays& a) { a.goal_flags[0] = 1; }},
+        {"goal and unsolvable flags", [&](StateSpaceArrays& a) { a.unsolvable_flags[alive] = 1; }},
+        {"cost goal distances", [&](StateSpaceArrays& a) { a.cost_goal_distances[alive] = std::numeric_limits<f64>::infinity(); }},
+        {"alive flags", [&](StateSpaceArrays& a) { a.alive_flags[alive] = 0; }},
+    };
+    for (const Case& c : cases)
+    {
+        SCOPED_TRACE(c.what);
+        StateSpaceArrays a = S->to_arrays();
+        c.mutate(a);
+        try
+        {
+            (void)StateSpace::create(std::move(a));
+            ADD_FAILURE() << "accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(c.what), std::string::npos) << e.what();
+        }
+    }
 }
 }  // namespace

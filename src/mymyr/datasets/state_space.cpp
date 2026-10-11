@@ -408,16 +408,53 @@ public:
     }
 };
 
+namespace
+{
+/// Whether every row of `rows` ([n, row_words], the fluent part `words` wide) sets fluent slots below `slots` only.
+bool rows_within(std::span<const u64> rows, u64 n, u32 words, u32 row_words, u32 slots)
+{
+    const u32 full = slots >> 6;                    // words every bit of which may be set
+    const u64 tail = (slots & 63) ? (u64{1} << (slots & 63)) - 1 : 0;  // the bits the next word may set
+    for (u64 i = 0; i < n; ++i)
+    {
+        const u64* r = rows.data() + i * row_words;
+        for (u32 w = full; w < words; ++w)
+            if (r[w] & ~(w == full ? tail : u64{0}))
+                return false;
+    }
+    return true;
+}
+
+/// Whether the forward and backward CSRs describe the same transitions: the backward row of t lists, ascending, the
+/// forward edges into t, with their sources.
+bool reverse_matches(const StateSpaceArrays& a)
+{
+    const u64 N = a.num_states;
+    for (u64 t = 0; t < N; ++t)
+        for (u64 k = a.backward_offsets[t]; k < a.backward_offsets[t + 1]; ++k)
+        {
+            const u32 e = a.backward_edges[k], s = a.backward_sources[k];
+            if (a.forward_targets[e] != t || (k > a.backward_offsets[t] && a.backward_edges[k - 1] >= e) ||
+                e < a.forward_offsets[s] || e >= a.forward_offsets[s + 1])
+                return false;
+        }
+    // every row lists distinct edges into its own target, and the rows hold num_transitions entries in all: each
+    // transition once
+    return true;
+}
+}  // namespace
+
 std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
 {
-    if (!a.task)
-        throw std::invalid_argument("mymyr: StateSpace::create needs a task");
-    const u64 N = a.num_states, E = a.forward_targets.size(), RW = u64{a.words} + a.numeric_words;
     auto need = [](bool ok, const char* what)
     {
         if (!ok)
-            throw std::invalid_argument(std::string("mymyr: StateSpace::create: ") + what);
+            throw std::invalid_argument(std::string("mymyr: invalid state space arrays: ") + what);
     };
+    need(a.task != nullptr, "no task");
+    const Task& T = *a.task;
+    const u64 N = a.num_states, E = a.forward_targets.size(), RW = u64{a.words} + a.numeric_words;
+    need(N > 0, "no states (a state space has at least its initial state)");
     need(a.state_words.size() == N * RW, "state_words is not [num_states, words + numeric_words]");
     need(a.forward_offsets.size() == N + 1 && a.forward_offsets.front() == 0 && a.forward_offsets.back() == E,
          "forward_offsets is not a CSR over the transitions");
@@ -443,6 +480,54 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
     need(below(a.forward_targets, N), "a transition target is not a state");
     need(below(a.backward_sources, N), "a transition source is not a state");
     need(below(a.backward_edges, E), "a backward edge is not a transition");
+    need(reverse_matches(a), "the backward CSR does not list the forward transitions by target");
+
+    // the rows are states of this task: its row layout, no atom slot it lacks, and its initial state first
+    need(a.numeric_words == T.numeric_words(), "numeric_words is not the task's (the arrays belong to another task)");
+    if (T.atoms().frozen())
+        need(a.words == T.words(), "words is not the task's (the arrays belong to another task or atom mode)");
+    else
+        need(a.words <= T.max_words(), "words is wider than any state of the task (the arrays belong to another task)");
+    need(rows_within(a.state_words, N, a.words, static_cast<u32>(RW), T.atoms().fluent_slots()),
+         "a state row sets an atom slot the task does not have (the arrays belong to another task)");
+    const u64* r0 = a.state_words.data();
+    need(StateView{r0, a.words, a.numeric_words ? r0 + a.words : nullptr, a.numeric_words} == T.initial_state().view(),
+         "state 0 is not the task's initial state (the arrays belong to another task)");
+
+    // labels: schemas and objects of the task, unused binding positions ~0
+    if (a.labels)
+    {
+        const u32 S = T.num_schemas(), O = T.num_objects(), L = a.label_width;
+        for (u64 e = 0; e < E; ++e)
+        {
+            const u32 s = a.label_schemas[e];
+            need(s < S, "a label's schema is not one of the task's");
+            const u32 arity = T.data().schemas[s].arity();
+            need(arity <= L, "label_width is narrower than a label's schema arity");
+            const u32* b = a.label_bindings.data() + e * L;
+            for (u32 i = 0; i < L; ++i)
+                need(i < arity ? b[i] < O : b[i] == ~u32{0},
+                     "a label binds an object the task does not have, or an unused position is not 2^32 - 1");
+        }
+    }
+    for (const f64 c : a.costs)
+        need(!std::isnan(c), "a transition cost is NaN");
+
+    // distances and flags: flags are 0 or 1, goal states are at distance 0, unsolvable ones at -1 (cost +inf), and
+    // alive means neither
+    for (u64 i = 0; i < N; ++i)
+    {
+        const u8 g = a.goal_flags[i], u = a.unsolvable_flags[i], al = a.alive_flags[i];
+        const i32 d = a.unit_goal_distances[i];
+        const f64 c = a.cost_goal_distances[i];
+        need(g <= 1 && u <= 1 && al <= 1, "a flag is not 0 or 1");
+        need(d >= k_unsolvable_distance && (g != 0) == (d == 0) && (u != 0) == (d == k_unsolvable_distance),
+             "the goal and unsolvable flags do not match the unit goal distances");
+        need(u ? c == std::numeric_limits<f64>::infinity() : (c >= 0 && c < std::numeric_limits<f64>::infinity()),
+             "the cost goal distances do not match the unsolvable flags");
+        need(al == (!g && !u), "the alive flags are not the states neither goal nor unsolvable");
+    }
+
     auto space = std::make_shared<StateSpace>();
     StateSpace& S = *space;
     StateSpaceBuilder::set_basic(S, std::move(a.task), a.num_states, a.words, a.numeric_words, a.labels,
@@ -470,6 +555,36 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
     }
     StateSpaceBuilder::set_stats(S, a.threads, a.layers, a.search_seconds, a.post_seconds);
     return space;
+}
+
+StateSpaceArrays StateSpace::to_arrays() const
+{
+    StateSpaceArrays a;
+    a.task = m_task;
+    a.num_states = m_n;
+    a.words = m_words;
+    a.numeric_words = m_numeric_words;
+    a.labels = m_has_labels;
+    a.label_width = m_label_width;
+    a.state_words = m_states;
+    a.forward_offsets = m_offsets;
+    a.forward_targets = m_targets;
+    a.label_schemas = m_schemas;
+    a.label_bindings = m_bindings;
+    a.costs = m_costs;
+    a.backward_offsets = m_boffsets;
+    a.backward_sources = m_bsources;
+    a.backward_edges = m_bedges;
+    a.unit_goal_distances = m_unit;
+    a.cost_goal_distances = m_cost;
+    a.goal_flags = m_goal;
+    a.unsolvable_flags = m_unsolvable;
+    a.alive_flags = m_alive;
+    a.threads = m_threads;
+    a.layers = m_layers;
+    a.search_seconds = m_search_s;
+    a.post_seconds = m_post_s;
+    return a;
 }
 
 namespace
