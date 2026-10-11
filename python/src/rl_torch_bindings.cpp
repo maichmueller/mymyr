@@ -253,6 +253,22 @@ public:
         c.run([&] { run_refresh(b, cnt); });
     }
 
+    void goal(nb::handle states, nb::handle task_ids, nb::handle goal_pos, nb::handle goal_neg, nb::handle out,
+              nb::handle stream)
+    {
+        Call call(*this, stream);
+        const rl::EnvBatch batch = this->batch(call.in, states, task_ids, nb::none(), nb::none(), nb::none(), nb::none(),
+                                             goal_pos, goal_neg);
+        u8* flags = call.in.get<u8>(out, "out", {boolt, u8t}, {static_cast<i64>(batch.rows)}, true);
+        call.run([&] {
+#if defined(MYMYR_HAS_CUDA)
+            if (m_dev)
+                return m_dev->goal(batch, flags);
+#endif
+            m_host->goal(batch, flags);
+        });
+    }
+
     void step(nb::handle states, nb::handle task_ids, nb::handle steps, nb::handle draws, nb::handle counts,
               nb::handle views, nb::handle goal_pos, nb::handle goal_neg, nb::handle action, nb::handle next_task_ids,
               nb::handle reward, nb::handle terminated, nb::handle truncated, nb::handle count, nb::handle final_states,
@@ -670,6 +686,9 @@ void bind_rl_torch(nb::module_& parent)
              "(one launch per object-word group at its widest bucket; the default) or 'per_bucket'. The results do not "
              "depend on it; a no-op on the CPU.")
         .def("initial_states", &PyEnv::initial_states, "The instances' initial states as rows: NumPy uint64 [I, row_words].")
+        .def("goal", &PyEnv::goal, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),
+             "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(), "out"_a, "stream"_a = nb::none(),
+             "Writes the current goal flags into out [N] bool, without moving or changing counters.")
         .def(
             "reset",
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg counts, ArrayArg views,

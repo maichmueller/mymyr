@@ -84,9 +84,9 @@ struct PoolBatch
     PoolArray<i32> count;         // [B]: their successor counts
     PoolArray<i32> steps;         // [B]: the episodes' step counts
     PoolArray<u64> goal_pos, goal_neg;  // [B, words] with per-env goals, else empty
-    // step results (empty after a reset)
+    // transition results (reward, truncated, invalid and labels are empty after a reset)
     PoolArray<f32> reward;         // [B]
-    PoolArray<u8> terminated, truncated, invalid, goal;  // [B]
+    PoolArray<u8> terminated, truncated, invalid, goal;  // [B]; terminated and goal also report reset states
     PoolArray<u64> final_states;   // [B, words + numeric_words]: the reached states (before the autoreset)
     PoolArray<i32> schema;         // [B]: the actions' labels (-1: no move)
     PoolArray<i32> binding;        // [B, label_width]

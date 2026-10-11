@@ -22,6 +22,7 @@ enum Status : u8
     k_ok = 0,
     k_stuck = 1,    // no successors: no move
     k_invalid = 2,  // the given action is out of range: no move
+    k_goal = 3,
 };
 
 /// Writes the successor of cur (nw <= W words) under d into dst: W atom words (the row is wide enough for every
@@ -143,7 +144,7 @@ u32 HostEnv::reset_row(EnvBatch& b, u64 i, u32 instance, bool keep_goals) const
     return m_init_count[instance];
 }
 
-void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) const
+void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals, u8* goal) const
 {
     check_env(*m_suite, b, nullptr);
     m_suite->check_task_ids(b.task_ids, b.rows);
@@ -154,7 +155,28 @@ void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) co
         const u32 c = reset_row(b, i, b.instance(i), keep_goals);
         if (count)
             count[i] = static_cast<i32>(c);
+        if (goal)
+            goal[i] = goal_row(b, i) ? 1 : 0;
     }
+}
+
+bool HostEnv::goal_row(const EnvBatch& b, u64 i) const
+{
+    const u64* row = b.states + i * b.row_words();
+    if (b.goals())
+        return mask_goal(row, b.goal_pos + i * b.words, b.goal_neg + i * b.words, b.words);
+    const Task& task = *m_tasks[b.instance(i)];
+    return task.is_goal(view_of(row, b.words, task.numeric_words()));
+}
+
+void HostEnv::goal(const EnvBatch& b, u8* goal) const
+{
+    if (b.rows && !goal)
+        throw std::invalid_argument("mymyr: env: goal query needs an output array");
+    check_env(*m_suite, b, nullptr);
+    m_suite->check_task_ids(b.task_ids, b.rows);
+    for (u64 row = 0; row < b.rows; ++row)
+        goal[row] = goal_row(b, row) ? 1 : 0;
 }
 
 u32 HostEnv::count_row(const EnvBatch& b, u64 i) const
@@ -213,29 +235,35 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     // 1. the successors of the current state, in canonical order
     const u32 nw = bits::trimmed_size(row, W);
     succ.prepare(StateView{row, nw, nn ? row + W : nullptr, nn});
+    const bool already_goal = b.goals() ? mask_goal(row, b.goal_pos + i * W, b.goal_neg + i * W, W) : succ.goal_holds();
     S.succ.clear();
     S.schema.clear();
     S.binding.clear();
     u32 c = 0;
-    succ.generate<false>(
-        [&](u32 schema, const ObjectId* binding, const Delta& d) -> bool
-        {
-            const usize at = S.succ.size();
-            S.succ.resize(at + RW);
-            write_row(S.succ.data() + at, W, NN, row, nw, d);
-            S.schema.push_back(static_cast<i32>(schema));
-            const u32 arity = succ.arity(schema);
-            for (u32 k = 0; k < L; ++k)
-                S.binding.push_back(k < arity ? static_cast<i32>(binding[k].v) : -1);
-            ++c;
-            return true;
-        },
-        m_config.witness_pruning, m_config.canonical_order);
+    if (!already_goal)
+    {
+        succ.generate<false>(
+            [&](u32 schema, const ObjectId* binding, const Delta& d) -> bool
+            {
+                const usize at = S.succ.size();
+                S.succ.resize(at + RW);
+                write_row(S.succ.data() + at, W, NN, row, nw, d);
+                S.schema.push_back(static_cast<i32>(schema));
+                const u32 arity = succ.arity(schema);
+                for (u32 k = 0; k < L; ++k)
+                    S.binding.push_back(k < arity ? static_cast<i32>(binding[k].v) : -1);
+                ++c;
+                return true;
+            },
+            m_config.witness_pruning, m_config.canonical_order);
+    }
 
     // 2. the choice
-    u8 st = k_ok;
+    u8 st = already_goal ? k_goal : k_ok;
     u64 a = 0;
-    if (c == 0)
+    if (already_goal)
+        c = count_prepared(succ, m_config);
+    else if (c == 0)
         st = k_stuck;
     else if (!random)
     {
@@ -262,7 +290,7 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
 
     // 3. goal and successor count of the reached state (s' = s without a move)
     const u64* s2 = st == k_ok ? S.succ.data() + a * RW : row;
-    bool g = false;
+    bool g = already_goal;
     u32 c2 = c;
     if (st == k_ok)
     {
@@ -272,12 +300,13 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     }
 
     // 4. rewards, termination, truncation
-    const bool dead = m_config.dead_end == DeadEnd::NoSuccessors && ((st == k_ok && !g && c2 == 0) || st == k_stuck);
+    const bool dead = m_config.dead_end == DeadEnd::NoSuccessors && !g && ((st == k_ok && c2 == 0) || st == k_stuck);
     const bool term = g || (dead && m_config.dead_end_terminal);
-    const i32 t2 = b.steps ? b.steps[i] + 1 : 0;
+    const bool absorbed = already_goal || (st == k_stuck && dead && m_config.dead_end_terminal);
+    const i32 t2 = b.steps ? b.steps[i] + (absorbed ? 0 : 1) : 0;
     const bool trunc = !term && m_config.max_steps && t2 >= static_cast<i32>(m_config.max_steps);
     if (out.reward)
-        out.reward[o] = m_config.step_reward + (g ? m_config.goal_reward : 0.0f) + (dead ? m_config.dead_end_reward : 0.0f);
+        out.reward[o] = absorbed ? 0.0f : m_config.step_reward + (g ? m_config.goal_reward : 0.0f) + (dead ? m_config.dead_end_reward : 0.0f);
     if (out.terminated)
         out.terminated[o] = term ? 1 : 0;
     if (out.truncated)

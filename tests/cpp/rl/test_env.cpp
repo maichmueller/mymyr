@@ -122,6 +122,18 @@ void check_random_step(const rl::HostEnv& env, const Batch& x, const std::vector
     const Flat f = expand_rows(*env.suite(), before.data(), n, x.RW, x.L);
     for (u64 i = 0; i < n; ++i)
     {
+        const u64* previous = before.data() + i * x.RW;
+        const Task& task = *env.suite()->task(0);
+        if (task.is_goal(StateView{previous, x.b.words, task.numeric_words() ? previous + x.b.words : nullptr,
+                                  task.numeric_words()}))
+        {
+            EXPECT_EQ(x.goal[i], 1);
+            EXPECT_EQ(x.terminated[i], 1);
+            EXPECT_EQ(x.reward[i], 0.0f);
+            EXPECT_EQ(x.schema[i], -1);
+            EXPECT_TRUE(std::equal(previous, previous + x.RW, x.final_states.begin() + static_cast<std::ptrdiff_t>(i * x.RW)));
+            continue;
+        }
         const i32 c = f.offsets[i + 1] - f.offsets[i];
         ASSERT_GT(c, 0);
         const u64 j = static_cast<u64>(f.offsets[i]) + rl::rng::successor_index(cfg.seed, first_env + i, draws[i], static_cast<u32>(c));
@@ -332,11 +344,10 @@ TEST(HostEnv, DeadEndsStuckAndInvalidActions)
         {
             if (was_done[i])
             {
-                // stuck: no move, terminal, the dead-end reward again
                 EXPECT_TRUE(std::equal(x.row(i), x.row(i) + x.RW, before.begin() + static_cast<std::ptrdiff_t>(i * x.RW)));
                 EXPECT_EQ(x.terminated[i], 1);
                 EXPECT_EQ(x.schema[i], -1);
-                EXPECT_EQ(x.reward[i], -51.0f);
+                EXPECT_EQ(x.reward[i], 0.0f);
                 EXPECT_EQ(x.count[i], 0);
                 continue;
             }
@@ -399,10 +410,11 @@ TEST(HostEnv, DeadEndModes)
             const bool is_dead = x.terminated[i] && !x.goal[i];
             dead += is_dead ? 1 : 0;
             EXPECT_EQ(y.terminated[i], x.goal[i]);  // not terminal
-            EXPECT_EQ(y.reward[i], x.reward[i]);    // the dead-end reward still applies
+            const bool stuck = is_dead && x.count[i] == 0 && x.schema[i] == -1;
+            EXPECT_EQ(y.reward[i], stuck ? soft.step_reward + soft.dead_end_reward : x.reward[i]);
             EXPECT_EQ(z.terminated[i], x.goal[i]);
-            EXPECT_EQ(z.reward[i], x.reward[i] - (is_dead ? cfg.dead_end_reward : 0.0f));  // no dead-end reward
-            if (is_dead && x.count[i] == 0 && x.schema[i] == -1)
+            EXPECT_EQ(z.reward[i], stuck ? none.step_reward : x.reward[i] - (is_dead ? cfg.dead_end_reward : 0.0f));
+            if (stuck)
             {
                 EXPECT_EQ(z.schema[i], -1);  // stuck: no move in any mode
             }

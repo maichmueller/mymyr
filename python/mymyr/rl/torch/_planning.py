@@ -75,7 +75,7 @@ class PlanningEnv(EnvBase):
             dead_end_terminal=dead_end_terminal, autoreset=False, witness=witness, path=path, threads=threads, ctx=ctx,
             first_env=first_env,
         )  # fmt: skip
-        super().__init__(device=env.device, batch_size=torch.Size([num_envs]))
+        super().__init__(device=env.device, batch_size=torch.Size([num_envs]), allow_done_after_reset=True)
         self._env = env
         self._K = None if max_actions is None else int(max_actions)
         self._graph_on = bool(graph) and env.capturable
@@ -156,9 +156,15 @@ class PlanningEnv(EnvBase):
                 goal_pos, goal_neg = tensordict.get("goal_pos"), tensordict.get("goal_neg")
         self._env.reset(mask, task_ids=task_ids, goal_pos=goal_pos, goal_neg=goal_neg)
         self._env.check_errors()  # device errors (task ids outside the table, ...) surface here
+        env = self._env
+        goal = torch.empty((env.num_envs,), dtype=torch.bool, device=env.device)
+        env.core.goal(env.states, env.task_ids if env.multi else None, goal_pos=env.goal_pos, goal_neg=env.goal_neg, out=goal)
+        terminated = goal
+        if env.core.dead_end == "no_successors" and env.core.dead_end_terminal:
+            terminated = terminated | (env.count == 0)
         out = self._observation()
-        z = torch.zeros((self._env.num_envs, 1), dtype=torch.bool, device=self._env.device)
-        out.update(done=z, terminated=z.clone(), truncated=z.clone())
+        out.update(done=terminated.unsqueeze(-1), terminated=terminated.unsqueeze(-1).clone(),
+                   truncated=torch.zeros((env.num_envs, 1), dtype=torch.bool, device=env.device))
         return TensorDict(out, batch_size=self.batch_size, device=self.device)
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:

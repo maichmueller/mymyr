@@ -33,6 +33,14 @@ successor order.
 The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `step` methods work under
 `jax.jit`, `jax.vmap` and `jax.lax.scan`. JAX device arrays can use the CUDA path. `mymyr.rl.torch.BatchedEnv` provides
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
+
+Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step
+counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
+end from a nonterminal state still receives the configured transition reward once. Draw counters advance once per
+native step, including absorbing steps. `CpuEnvPool.reset()` reports `goal` and `terminated` for the initial states;
+TorchRL resets also report solved or terminal initial states rather than silently starting unfinished episodes.
+The mctx adapter preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero;
+zero-successor tree nodes are terminal even when the environment disables dead-end termination.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
 
 On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. Host and device

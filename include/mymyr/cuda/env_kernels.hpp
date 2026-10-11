@@ -19,6 +19,7 @@ enum Status : u8
     k_ok = 0,
     k_stuck = 1,    // the state has no successors
     k_invalid = 2,  // the given action is outside [0, count)
+    k_goal = 3,
 };
 
 /// Choose every environment's successor: an index into its canonical successor order (the action, or the counter-based
@@ -44,6 +45,7 @@ struct Select
     u32* pick_rank = nullptr;    // [rows] (cache): the index in the (row, schema) segment
     i64* pick_row = nullptr;     // [rows] (flat): the flat row of the pick, -1 for no move
     u8* status = nullptr;        // [rows]
+    const u8* goal = nullptr;
     // multi-instance tables: the cached row order (columns order_col, order_col + 1 of the count cache: the row at
     // position i, the position of row i); *order_bad is set when it is not a permutation of the rows (a batch
     // rearranged since the order was computed: the launches then take the rows in batch order)
@@ -154,6 +156,7 @@ struct Finish
     u64* views = nullptr;
 };
 cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStream_t s);
+cudaError_t launch_goal(const rl::dev::TaskView& t, const Finish& p, u8* goal, cudaStream_t s);
 
 /// Resets rows with mask[i] != 0 (all without a mask) to the initial state of their instance: the initial row, step 0,
 /// the initial count and cache, and (unless keep_goals) the instance's goal masks.

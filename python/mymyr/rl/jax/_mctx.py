@@ -59,12 +59,14 @@ def mctx_root(
     _check(env)
     obs = env.observation(state)
     k = int(num_actions)
+    goal = env.step(0, state, jnp.full(state.task_id.shape, -1, jnp.int32))[-1]["goal"]
+    terminal = goal | (state.count == 0)
     root = mctx.RootFnOutput(
         prior_logits=_logits(prior_fn, params, obs, k),
-        value=jnp.asarray(value_fn(params, obs), jnp.float32),
+        value=jnp.where(terminal, jnp.float32(0), jnp.asarray(value_fn(params, obs), jnp.float32)),
         embedding=state,
     )
-    return root, jnp.arange(k) >= state.count[..., None]
+    return root, terminal[..., None] | (jnp.arange(k) >= state.count[..., None])
 
 
 def mctx_recurrent_fn(
@@ -89,12 +91,21 @@ def mctx_recurrent_fn(
         del rng_key  # the dynamics are deterministic: the action is given
         state, obs, reward, terminated, truncated, info = env.step(0, embedding, action)
         invalid = info["invalid"]
+        absorbed = (embedding.count == 0) | (terminated & (info["schema"] < 0))
+
+        def keep_absorbing(previous: Any, current: Any) -> Any:
+            mask = absorbed.reshape(absorbed.shape + (1,) * (current.ndim - absorbed.ndim))
+            return jnp.where(mask, previous, current)
+
+        state = jax.tree.map(keep_absorbing, embedding, state)
+        obs = env.observation(state)
+        terminal = terminated | absorbed
         value = jnp.asarray(value_fn(params, obs), jnp.float32)
         out = mctx.RecurrentFnOutput(
-            reward=jnp.where(invalid, jnp.float32(invalid_reward), reward),
-            discount=jnp.where(terminated | invalid, jnp.float32(0.0), jnp.float32(discount)),
+            reward=jnp.where(absorbed, jnp.float32(0), jnp.where(invalid, jnp.float32(invalid_reward), reward)),
+            discount=jnp.where(terminal | invalid, jnp.float32(0.0), jnp.float32(discount)),
             prior_logits=_logits(prior_fn, params, obs, k),
-            value=jnp.where(terminated, jnp.float32(0.0), value),
+            value=jnp.where(terminal, jnp.float32(0.0), value),
         )
         return out, state
 
