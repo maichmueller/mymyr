@@ -55,12 +55,12 @@ struct type_caster<mymyr::python::ann::EncodingIndexDtype>
 template<>
 struct type_caster<mymyr::python::ann::EncodingHorizonMode>
 {
-    static constexpr auto Name = const_name("typing.Literal['full', 'delta', 'action'] | None");
+    static constexpr auto Name = const_name("typing.Literal['full', 'delta', 'action']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
 {
-    static constexpr auto Name = const_name("typing.Literal['include', 'exclude', 'encode_only'] | None");
+    static constexpr auto Name = const_name("typing.Literal['include', 'exclude', 'encode_only']");
 };
 }
 
@@ -266,7 +266,10 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.goal_derivations = choice_set<GoalDerivation>(
         goal_derivations, "goal_derivations", parse_goal_derivation,
         "'plain', 'satisfied', 'unsatisfied', 'added_satisfied', 'added_unsatisfied'");
-    options.max_goal_level = int_arg<u32>(max_goal_level, "max_goal_level", 0, 3);
+    const i64 level = int_arg<i64>(max_goal_level, "max_goal_level");
+    if (level < 0 || level > 3)
+        throw nb::value_error(("mymyr: encoding: max_goal_level must be in [0, 3], got " + std::to_string(level)).c_str());
+    options.max_goal_level = static_cast<u32>(level);
     options.include_static = include_static;
     options.include_derived = include_derived;
     options.nullary = nullary;
@@ -280,8 +283,6 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     if (!horizon_mode.is_none())
         options.horizon.mode =
             choice(horizon_mode, "horizon_mode", parse_horizon_mode, "'full', 'delta', 'action' or None");
-    if (options.horizon.mode == HorizonMode::None && !root_policy.is_none())
-        throw nb::value_error("mymyr: encoding: root_policy needs a horizon_mode");
     if (!root_policy.is_none())
         options.horizon.root =
             choice(root_policy, "root_policy", parse_root_policy, "'include', 'exclude', 'encode_only' or None");
@@ -405,12 +406,14 @@ void bind_encoding(nb::module_& parent)
             "The catalog of the domain of `table` (a Task, TaskHandle or TaskTable) under the options. "
             "goal_derivations: the variants of the goal relations (plain, satisfied, unsatisfied; added_satisfied and "
             "added_unsatisfied for the delta horizon). max_goal_level: subgoal layers beyond the goal (0 to 3). "
-            "include_static / include_derived: relations of the static (types included) / derived predicates. "
-            "nullary: relations of the predicates without arguments (their atoms are tuples over the graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate slot in "
+            "include_static / include_derived: the state relations of the static (types included) / derived "
+            "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
+            "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate slot in "
             "the predicate relations' tuples. include_actions: one relation per action schema. target_sources: "
-            "which of goal, subgoal, action and history literals become entities that tuples refer to. layout, "
+            "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
+            "targets need the plain goal derivation, action targets include_actions). layout, "
             "index_dtype: how a batch is stored. horizon_mode, root_policy, parent_relation: the horizon variants "
-            "(root_policy defaults to 'include'). Raises ValueError for invalid combinations and for numeric tasks.")
+            "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid combinations and for numeric tasks.")
         .def_prop_ro(
             "options", [](const PyEncodingSchema& self) { return options_dict(self.schema->options()); },
             "The options in normal form, as the keyword arguments that rebuild this schema.")
@@ -513,7 +516,7 @@ void bind_encoding(nb::module_& parent)
                 const auto names = self.schema->entity_role_names();
                 return std::vector<std::string>(names.begin(), names.end());
             },
-            "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role exists with nullary relations.")
+            "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by the nullary relations.")
         .def_prop_ro(
             "target_group_names",
             [](const PyEncodingSchema&)

@@ -54,7 +54,8 @@ struct DomainSignature
     std::vector<ActionSchema> schemas;
 
     /// The domain of a task table: its domain predicates (the front end's helper predicates for quantified conditions
-    /// among them; the predicates only a problem's axioms define are not part of it) and its action schemas. Throws std::invalid_argument for a table with numeric functions or constraints.
+    /// among them; the predicates only a problem's axioms define are not part of it) and its action schemas. Throws
+    /// std::invalid_argument for a table with numeric functions or constraints.
     [[nodiscard]] static DomainSignature of(const rl::TaskTable& table);
 };
 
@@ -66,7 +67,7 @@ enum class Lane : u8
     Derived,          // the atoms of a derived predicate in the state
     Goal,             // goal literals (and subgoal literals of a level above 0)
     GoalDerivation,   // goal literals that hold / do not hold in the state
-    GoalSatisfaction, // the same for the nodes of a horizon, and the goal literals a delta node newly satisfies / falsifies
+    GoalSatisfaction, // the same for the nodes of a horizon, and the goals a delta node newly satisfies / falsifies
     History,          // literals of earlier steps
     Action,           // the ground actions of one action schema
     Parent,           // the parent relation of a horizon
@@ -117,14 +118,18 @@ enum class TargetGroup : u8
 };
 
 inline constexpr std::array<std::string_view, 9> k_slot_role_names = {
-    "argument_slot",     "predicate_slot",     "state_slot",   "action_slot",
-    "goal_target_slot",  "subgoal_target_slot", "history_target_slot", "history_slot", "auxiliary_slot"};
+    "argument_slot",    "predicate_slot",      "state_slot",          "action_slot",   "goal_target_slot",
+    "subgoal_target_slot", "history_target_slot", "history_slot", "auxiliary_slot"};
 inline constexpr std::array<std::string_view, 9> k_entity_role_names = {
     "object", "predicate_virtual", "goal", "subgoal", "action", "history", "history_target", "state",
     k_auxiliary_entity_name};
-inline constexpr std::array<std::string_view, 5> k_target_group_names = {"goal", "subgoal", "action", "history", "state"};
+inline constexpr std::array<std::string_view, 5> k_target_group_names = {"goal", "subgoal", "action", "history",
+                                                                          "state"};
 
-[[nodiscard]] inline std::string_view to_string(SlotRole role) noexcept { return k_slot_role_names[static_cast<usize>(role)]; }
+[[nodiscard]] inline std::string_view to_string(SlotRole role) noexcept
+{
+    return k_slot_role_names[static_cast<usize>(role)];
+}
 [[nodiscard]] inline std::string_view to_string(EntityRole role) noexcept
 {
     return k_entity_role_names[static_cast<usize>(role)];
@@ -144,7 +149,7 @@ struct Relation
     std::optional<GoalDerivation> derivation;   // none for plain goal relations and relations without a goal
     bool state_anchored = false;                // the `[state]` variant of a full horizon without its root
     i32 predicate = -1;                         // domain predicate id, or -1
-    i32 schema = -1;                            // action schema id (the first of its name), or -1
+    i32 schema = -1;                            // first action schema of this name and arity, or -1
     u32 arity = 0;                              // encoded arity: the slots of the other roles plus the arguments
                                                 // (one auxiliary slot for a nullary predicate)
     u32 logical_arity = 0;                      // arguments: the arity of the predicate or action schema
@@ -154,8 +159,9 @@ class EncodingSchema
 {
 public:
     /// Builds the catalog of `domain` under `options` (checked and normalized, see normalized()). Throws
-    /// std::invalid_argument ("mymyr: encoding: ...") for invalid options, a domain whose predicates or action
-    /// schemas share a name, or two relations that would get the same name.
+    /// std::invalid_argument ("mymyr: encoding: ...") for invalid options, a domain with two predicates of one name, or
+    /// two relations that would get the same name. Action schemas may share a name: those of one name and arity share
+    /// a relation.
     [[nodiscard]] static std::shared_ptr<const EncodingSchema> create(const DomainSignature& domain,
                                                                      const FlatOptions& options = {});
     [[nodiscard]] static std::shared_ptr<const EncodingSchema> create(const rl::TaskTable& table,
@@ -183,20 +189,15 @@ public:
     /// relation, and a name with several arities has one relation `name#arity` per arity.
     [[nodiscard]] std::span<const i32> schema_relations() const noexcept { return m_schema_relation; }
 
-    /// The names of the entity roles and slot roles this schema uses, indexed by role value. The auxiliary entity role
-    /// and slot role exist only with nullary relations (options().nullary).
-    [[nodiscard]] std::span<const std::string_view> entity_role_names() const noexcept
-    {
-        return {k_entity_role_names.data(), m_options.nullary ? k_entity_role_names.size() : k_entity_role_names.size() - 1};
-    }
-    [[nodiscard]] std::span<const std::string_view> slot_role_names() const noexcept
-    {
-        return {k_slot_role_names.data(), m_options.nullary ? k_slot_role_names.size() : k_slot_role_names.size() - 1};
-    }
+    /// The names of all entity roles and slot roles, indexed by role value. The codes are fixed: the auxiliary role is
+    /// listed whether or not the schema has nullary relations.
+    [[nodiscard]] static std::span<const std::string_view> entity_role_names() noexcept { return k_entity_role_names; }
+    [[nodiscard]] static std::span<const std::string_view> slot_role_names() noexcept { return k_slot_role_names; }
 
-    /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the options that shape the output (those of
-    /// options(); the layout and the index type among them) and the rule version. It does not depend on the
-    /// declaration order of the domain, on predicate or schema ids, or on the process or the build.
+    /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
+    /// the encoded arrays beyond the catalog: the layout, the index type, the target sources and the horizon mode and
+    /// root policy. It does not depend on the declaration order of the domain, on predicate or schema ids, or on the
+    /// process or the build.
     [[nodiscard]] u64 fingerprint() const noexcept { return m_fingerprint; }
 
 private:

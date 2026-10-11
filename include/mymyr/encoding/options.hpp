@@ -7,7 +7,6 @@
 
 #include <initializer_list>
 #include <optional>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -110,7 +109,7 @@ enum class RootPolicy : u8
 struct HorizonOptions
 {
     HorizonMode mode = HorizonMode::None;
-    /// Ignored (and normalized to Include) when mode is None.
+    /// Include without a horizon mode: any other policy needs one.
     RootPolicy root = RootPolicy::Include;
     /// Adds the relation `_parent_` (state slot, state slot) between a node and its parent. Needs a horizon mode.
     bool parent_relation = false;
@@ -140,7 +139,8 @@ struct FlatOptions
     bool predicate_virtual_nodes = false;
     /// One relation per action schema.
     bool include_actions = true;
-    /// Entities for goal / subgoal / action / history literals; the tuples that mention them get a target slot.
+    /// Entities for the goal literals, subgoal literals, ground actions and history literals; the tuples that mention
+    /// them get a target slot. Goal and subgoal targets need the plain goal derivation, action targets include_actions.
     TargetSources targets{};
     Layout layout = Layout::Graph;
     IndexType index = IndexType::I32;
@@ -149,13 +149,14 @@ struct FlatOptions
     [[nodiscard]] friend bool operator==(const FlatOptions&, const FlatOptions&) noexcept = default;
 };
 
-/// Checks the options and returns them in normal form (the root policy is Include without a horizon mode). Throws
-/// std::invalid_argument ("mymyr: encoding: ...") for
+/// Checks the options and returns them in normal form. Throws std::invalid_argument ("mymyr: encoding: ...") for
 /// - max_goal_level above 3, or subgoal targets without subgoal levels;
+/// - action targets without action relations (include_actions);
+/// - goal or subgoal targets without the plain goal derivation: only the plain goal relations carry the target slot;
 /// - added goal derivations without the delta horizon mode;
 /// - targets together with a horizon mode (the state nodes are the targets of a horizon);
 /// - the action horizon mode without action relations;
-/// - a parent relation without a horizon mode.
+/// - a parent relation, or a root policy other than Include, without a horizon mode.
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",

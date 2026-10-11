@@ -128,12 +128,19 @@ relations.
 - **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
   (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
   predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`;
-  static predicates and derived predicates can be dropped (`include_static`, `include_derived`). Nullary predicates
-  (`nullary=True`, the default) have relations of arity 1: their atoms are tuples over one auxiliary entity per graph
-  (slot role `auxiliary_slot`, entity role `auxiliary`); with `nullary=False` they and the auxiliary role are absent.
+  the state relations of the static predicates (the types included) and of the derived predicates can be dropped
+  (`include_static`, `include_derived`); their goal and history relations stay. Nullary predicates (`nullary=True`,
+  the default) have relations of arity 1: their atoms are tuples over one auxiliary entity per graph (slot role
+  `auxiliary_slot`, entity role `auxiliary`); with `nullary=False` they have no relations. `slot_role_names` and
+  `entity_role_names` always list all nine roles.
   An action relation holds the schema's full parameter list (the written parameters and the ones normalization adds
   for existential variables). Schemas of one name and arity (a disjunctive precondition splits an action) share one
   relation; a name with several arities has one relation `name#arity` per arity.
+- **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
+  `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
+  derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
+  targets together with a horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
+  `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
   depend on declaration order, on predicate ids, on the process or on the build.

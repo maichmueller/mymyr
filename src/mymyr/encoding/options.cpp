@@ -2,6 +2,7 @@
 
 #include <array>
 #include <stdexcept>
+#include <string>
 
 namespace mymyr::encoding
 {
@@ -71,6 +72,11 @@ FlatOptions normalized(const FlatOptions& options)
                        out.goal_derivations.contains(GoalDerivation::AddedUnsatisfied);
     if (added && out.horizon.mode != HorizonMode::Delta)
         invalid("the goal derivations added_satisfied and added_unsatisfied need the delta horizon mode");
+    if (out.targets.contains(TargetSource::Action) && !out.include_actions)
+        invalid("action targets need the action relations (include_actions)");
+    if ((out.targets.contains(TargetSource::Goal) || out.targets.contains(TargetSource::Subgoal)) &&
+        !out.goal_derivations.contains(GoalDerivation::Plain))
+        invalid("goal and subgoal targets need the plain goal derivation: only its relations carry the target slot");
     if (horizon && !out.targets.empty())
         invalid("target sources cannot be combined with a horizon mode: the state nodes of a horizon are its targets");
     if (out.horizon.mode == HorizonMode::Action && !out.include_actions)
@@ -79,7 +85,8 @@ FlatOptions normalized(const FlatOptions& options)
     {
         if (out.horizon.parent_relation)
             invalid("parent_relation needs a horizon mode");
-        out.horizon.root = RootPolicy::Include;
+        if (out.horizon.root != RootPolicy::Include)
+            invalid("root_policy '" + std::string(to_string(out.horizon.root)) + "' needs a horizon mode");
     }
     return out;
 }

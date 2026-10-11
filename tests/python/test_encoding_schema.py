@@ -118,7 +118,7 @@ def test_catalog_equals_mifrost(tasks, name):
         "argument_slot", "predicate_slot", "state_slot", "action_slot",
         "goal_target_slot", "subgoal_target_slot", "history_target_slot", "history_slot",
     ]  # fmt: skip
-    assert len(schema.slot_role_names) == (9 if native_options(entry)["nullary"] else 8)
+    assert len(schema.slot_role_names) == len(schema.entity_role_names) == 9
 
 
 @needs_pddl
@@ -141,6 +141,20 @@ def test_include_static_false_drops_the_static_relations(tasks):
     expected = [row for row in mifrost_catalog(entry) if row[0] not in ("number", "object")]
     assert native_catalog(schema) == expected
     assert "object" not in schema.relation_names and "[+]object[hist]" in schema.relation_names
+
+
+@needs_pddl
+def test_include_static_false_drops_the_state_relation_of_every_static_predicate(tasks):
+    default = EncodingSchema(tasks["childsnack"])
+    schema = EncodingSchema(tasks["childsnack"], include_static=False)
+    static = {n for n, lane in zip(default.relation_names, default.relation_lanes) if lane == "static"}
+    assert len(static) == 13 and {"child", "waiting", "no_gluten_bread"} <= static
+    assert set(default.relation_names) - set(schema.relation_names) == static
+    assert not static & set(schema.relation_names)
+    assert "static" not in schema.relation_lanes
+    # their goal and history relations stay
+    assert {"[+]child[hist]", "[-]waiting[hist]"} <= set(schema.relation_names)
+    assert schema.schema_fingerprint != default.schema_fingerprint
 
 
 @needs_pddl
@@ -175,6 +189,27 @@ def test_helper_predicates_are_the_same_in_every_problem_of_a_domain():
     assert schemas[0].schema_fingerprint == schemas[1].schema_fingerprint
     both = EncodingSchema(rl.TaskTable([mymyr.Task.from_pddl(domain, p) for p in problems]))
     assert both.schema_fingerprint == schemas[0].schema_fingerprint
+
+
+@needs_pddl
+def test_problem_local_helpers_of_a_forall_goal_are_not_part_of_the_schema():
+    domain = DATA / "pddl/forall/domain.pddl"
+    tasks = [mymyr.Task.from_pddl(domain, DATA / f"pddl/forall/{name}.pddl") for name in ("p01", "p02")]
+    schemas = [EncodingSchema(task) for task in tasks]
+    for task in tasks:
+        table = rl.TaskTable([task])
+        local = list(table.predicate_names)[table.num_domain_predicates :]
+        assert local, "the forall goal compiles to a helper predicate of its problem"
+    names = schemas[0].relation_names
+    assert any(n.startswith("axiom_") for n in names)  # the domain's own helper, for the quantified precondition
+    for task, schema in zip(tasks, schemas):
+        table = rl.TaskTable([task])
+        for local in list(table.predicate_names)[table.num_domain_predicates :]:
+            assert not [n for n in schema.relation_names if local in n]
+    assert schemas[0].relation_names == schemas[1].relation_names
+    assert schemas[0].slot_roles == schemas[1].slot_roles
+    assert schemas[0].schema_fingerprint == schemas[1].schema_fingerprint
+    assert EncodingSchema(rl.TaskTable(tasks)).schema_fingerprint == schemas[0].schema_fingerprint
 
 
 @needs_pddl
@@ -246,7 +281,8 @@ def test_nullary_and_derived_predicates_follow_the_options():
     assert default.slot_roles[default.relation_id("[+]axiom_0[hist]")] == [7, 8]
     without_nullary = EncodingSchema(task, nullary=False)
     assert "axiom_0" not in without_nullary.relation_names and "[+]axiom_0[g]" not in without_nullary.relation_names
-    assert len(without_nullary.entity_role_names) == 8 and len(without_nullary.slot_role_names) == 8
+    assert without_nullary.entity_role_names == default.entity_role_names
+    assert without_nullary.slot_role_names == default.slot_role_names
     assert 8 not in {role for roles in without_nullary.slot_roles for role in roles}
     assert len(default.entity_role_names) == 9 and len(default.slot_role_names) == 9
     assert "=" not in default.relation_names and "[+]=[g]" not in default.relation_names
@@ -275,6 +311,7 @@ def test_options_round_trip_and_normalize():
 
 
 # ------------------------------------------------------------------------------------------------ fingerprint
+PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0x1A9BE3C01D8DC4E2, 0xEA8A7B999672E433, 0xCCB27EEFA062F265
 FINGERPRINT_VARIANTS = {
     "goal_derivations": {"goal_derivations": ["plain"]},
     "goal_derivations_unsat": {"goal_derivations": ["plain", "satisfied", "unsatisfied"]},
@@ -324,6 +361,21 @@ def test_fingerprint_ignores_the_order_of_options_and_their_spelling():
     )  # blocks has no derived predicates
 
 
+def test_fingerprint_values_are_pinned():
+    # the fingerprints are part of the contract: the same on every platform, standard library and build
+    philosophers = text_task("philosophers__p03-phil4")
+    gripper = text_task("gripper__prob05")
+    assert EncodingSchema(philosophers).schema_fingerprint == 0xA80E980B3FE26CF6
+    delta = EncodingSchema(philosophers, horizon_mode="delta", goal_derivations=["added_satisfied"],
+                           predicate_virtual_nodes=True)  # fmt: skip
+    assert delta.schema_fingerprint == PIN_DELTA
+    targets = EncodingSchema(gripper, max_goal_level=2, target_sources=["goal", "subgoal", "history", "action"],
+                             layout="relation", index_dtype="int64")  # fmt: skip
+    assert targets.schema_fingerprint == PIN_TARGETS
+    exclude = EncodingSchema(gripper, horizon_mode="full", root_policy="exclude", parent_relation=True)
+    assert exclude.schema_fingerprint == PIN_EXCLUDE
+
+
 def test_fingerprint_is_stable_across_processes():
     code = (
         "import sys; sys.path.insert(0, %r)\n"
@@ -347,8 +399,8 @@ def test_fingerprint_is_stable_across_processes():
 @pytest.mark.parametrize(
     "options, error, match",
     [
-        ({"max_goal_level": 4}, ValueError, "max_goal_level"),
-        ({"max_goal_level": -1}, ValueError, "max_goal_level"),
+        ({"max_goal_level": 4}, ValueError, "^mymyr: encoding: max_goal_level must be in"),
+        ({"max_goal_level": -1}, ValueError, "^mymyr: encoding: max_goal_level must be in"),
         ({"max_goal_level": 1.5}, TypeError, "int"),
         ({"target_sources": ["subgoal"]}, ValueError, "subgoal targets need max_goal_level"),
         ({"goal_derivations": ["added_satisfied"]}, ValueError, "delta horizon"),
@@ -356,7 +408,12 @@ def test_fingerprint_is_stable_across_processes():
         ({"horizon_mode": "full", "target_sources": ["goal"]}, ValueError, "horizon"),
         ({"horizon_mode": "action", "include_actions": False}, ValueError, "action"),
         ({"parent_relation": True}, ValueError, "parent_relation"),
-        ({"root_policy": "exclude"}, ValueError, "horizon_mode"),
+        ({"root_policy": "exclude"}, ValueError, "root_policy 'exclude' needs a horizon mode"),
+        ({"root_policy": "encode_only"}, ValueError, "root_policy 'encode_only' needs a horizon mode"),
+        ({"target_sources": ["action"], "include_actions": False}, ValueError, "action targets need"),
+        ({"target_sources": ["goal"], "goal_derivations": ["satisfied"]}, ValueError, "plain goal derivation"),
+        ({"target_sources": ["subgoal"], "max_goal_level": 1, "goal_derivations": ["unsatisfied"]}, ValueError,
+         "plain goal derivation"),
         ({"root_policy": "sideways", "horizon_mode": "full"}, ValueError, "root_policy"),
         ({"horizon_mode": "sideways"}, ValueError, "horizon_mode"),
         ({"layout": "row"}, ValueError, "layout"),
@@ -372,6 +429,20 @@ def test_fingerprint_is_stable_across_processes():
 def test_invalid_options_raise(options, error, match):
     with pytest.raises(error, match=match):
         EncodingSchema(text_task("gripper__prob05"), **options)
+
+
+def test_root_policy_include_is_accepted_without_a_horizon():
+    task = text_task("gripper__prob05")
+    assert EncodingSchema(task, root_policy="include").schema_fingerprint == EncodingSchema(task).schema_fingerprint
+    assert EncodingSchema(task, horizon_mode="full", root_policy="exclude").options["root_policy"] == "exclude"
+
+
+def test_numeric_tasks_are_refused():
+    numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    with pytest.raises(ValueError, match="^mymyr: encoding: numeric functions and constraints are not supported"):
+        EncodingSchema(numeric)
+    with pytest.raises(ValueError, match="numeric"):
+        EncodingSchema(rl.TaskTable([numeric]))
 
 
 def test_invalid_tables_raise():

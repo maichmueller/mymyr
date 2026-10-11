@@ -40,6 +40,9 @@ std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 
 using R = SlotRole;
 
+constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0x31e6ae6fd252e8a1,
+                PIN_FULL = 0x8f230d9913e98bf7;
+
 TEST(EncodingSchema, DefaultCatalogIsSortedBytewiseAndNamedLikeMifrost)
 {
     const auto schema = EncodingSchema::create(blocks());
@@ -104,8 +107,8 @@ TEST(EncodingSchema, NullaryStaticAndDerivedOptionsSelectRelations)
         const auto schema = EncodingSchema::create(blocks(), options);
         for (const char* name : {"handempty", "[+]handempty[g]", "[+]handempty[hist]"})
             EXPECT_FALSE(has(*schema, name)) << name;
-        EXPECT_EQ(schema->entity_role_names().size(), 8u);
-        EXPECT_EQ(schema->slot_role_names().size(), 8u);
+        EXPECT_EQ(schema->entity_role_names().size(), 9u);
+        EXPECT_EQ(schema->slot_role_names().size(), 9u);
         EXPECT_EQ(std::ranges::count(schema->all_slot_roles(), SlotRole::Auxiliary), 0);
         EXPECT_NE(schema->fingerprint(), EncodingSchema::create(blocks())->fingerprint());
     }
@@ -224,8 +227,22 @@ TEST(EncodingSchema, FingerprintIgnoresDeclarationOrderAndTracksTheOutput)
         EXPECT_EQ(names(*schema), names(*EncodingSchema::create(d)));
     }
     EXPECT_EQ(EncodingSchema::create(d)->fingerprint(), reference);
-    // pinned: the value is part of the contract (stable across processes and builds)
-    EXPECT_EQ(reference, EncodingSchema::create(blocks())->fingerprint());
+    // pinned: the values are part of the contract (stable across processes and builds)
+    EXPECT_EQ(reference, PIN_DEFAULT);
+    FlatOptions pin_delta;
+    pin_delta.horizon.mode = HorizonMode::Delta;
+    pin_delta.goal_derivations = {GoalDerivation::AddedSatisfied, GoalDerivation::Satisfied};
+    pin_delta.predicate_virtual_nodes = true;
+    EXPECT_EQ(EncodingSchema::create(d, pin_delta)->fingerprint(), PIN_DELTA);
+    FlatOptions pin_targets;
+    pin_targets.max_goal_level = 2;
+    pin_targets.targets = {TargetSource::Goal, TargetSource::Subgoal, TargetSource::History, TargetSource::Action};
+    pin_targets.layout = Layout::Relation;
+    pin_targets.index = IndexType::I64;
+    EXPECT_EQ(EncodingSchema::create(d, pin_targets)->fingerprint(), PIN_TARGETS);
+    FlatOptions pin_full;
+    pin_full.horizon = {HorizonMode::Full, RootPolicy::Exclude, true};
+    EXPECT_EQ(EncodingSchema::create(d, pin_full)->fingerprint(), PIN_FULL);
 
     DomainSignature renamed = d;
     renamed.predicates[2].name = "over";
@@ -296,6 +313,27 @@ TEST(EncodingSchema, InvalidOptionsAndDomainsThrow)
               o.include_actions = false;
           });
     fails([](FlatOptions& o) { o.horizon.parent_relation = true; });
+    fails([](FlatOptions& o) { o.horizon.root = RootPolicy::Exclude; });
+    fails([](FlatOptions& o) { o.horizon.root = RootPolicy::EncodeOnly; });
+    fails([](FlatOptions& o)
+          {
+              o.targets = {TargetSource::Action};
+              o.include_actions = false;
+          });
+    for (const GoalDerivations derivations : {GoalDerivations{GoalDerivation::Satisfied}, GoalDerivations{}})
+    {
+        fails([&](FlatOptions& o)
+              {
+                  o.goal_derivations = derivations;
+                  o.targets = {TargetSource::Goal};
+              });
+        fails([&](FlatOptions& o)
+              {
+                  o.goal_derivations = derivations;
+                  o.max_goal_level = 1;
+                  o.targets = {TargetSource::Subgoal};
+              });
+    }
     DomainSignature twice = blocks();
     twice.predicates.push_back({"on", 2, PredicateKind::Fluent});
     EXPECT_THROW((void)EncodingSchema::create(twice), std::invalid_argument);
@@ -312,7 +350,10 @@ TEST(EncodingOptions, NormalizationAndText)
 {
     FlatOptions o;
     o.horizon.root = RootPolicy::Exclude;
-    EXPECT_EQ(normalized(o).horizon.root, RootPolicy::Include);
+    EXPECT_THROW((void)normalized(o), std::invalid_argument);
+    o.horizon.mode = HorizonMode::Full;
+    EXPECT_EQ(normalized(o).horizon.root, RootPolicy::Exclude);
+    EXPECT_EQ(normalized(FlatOptions{}).horizon.root, RootPolicy::Include);
     for (const auto text : {"plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"})
         EXPECT_EQ(to_string(*parse_goal_derivation(text)), text);
     for (const auto text : {"goal", "subgoal", "action", "history"})
