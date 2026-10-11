@@ -1631,13 +1631,15 @@ void bind_task_api(nb::class_<C>& cls)
             [owner](Self self) { return make_encoding_goal(task_owner(owner(self))); },
             "The goal as written, expanded into signed ground literals for encodings: conjunctions flattened, `forall` "
             "expanded over the objects of the quantified types (constants included, in object order), `imply` with a "
-            "static antecedent expanded, negation pushed inward. A tuple of GroundLiterals, positive ones first, then by predicate and objects, "
-            "without duplicates. A literal over a static predicate that fails in the initial atoms is kept "
+            "static antecedent expanded, negation pushed inward, a disjunction (`or`, `exists`, `imply`, `not and`, "
+            "`not forall`) whose disjuncts static atoms decide but one expanded to that one. A tuple of GroundLiterals, "
+            "positive ones first, then by predicate and objects, without duplicates. A literal over a static predicate that fails in the initial atoms is kept "
             "(encoding_goal_unsatisfiable). A conjunct that cannot be expanded is left out and clears "
             "encoding_goal_complete. The planner's goal (goal_condition) is unaffected.")
         .def_prop_ro("encoding_goal_complete", [](Self self) { return self.p->core->task->encoding_goal_complete(); },
                      "Whether encoding_goal is the whole goal: False when it has a conjunct that is not expandable "
-                     "(`or`, `exists`, `imply` over fluents, `not and`, a numeric constraint, too many quantifier bindings). A task built from a text "
+                     "(a disjunction with two or more disjuncts that static atoms do not decide, a numeric constraint, "
+                     "too many quantifier bindings). A task built from a text "
                      "(Task.from_text) has no goal as written: its encoding goal is the goal without the predicates "
                      "that goal normalization introduced, complete iff none were left out.")
         .def_prop_ro("encoding_goal_unsatisfiable", [](Self self) { return self.p->core->task->encoding_goal_unsatisfiable(); },

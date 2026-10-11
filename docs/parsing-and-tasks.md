@@ -252,17 +252,25 @@ duplicates:
 - a literal over a static predicate (equality included) is kept, whether it holds in the initial atoms or not; when it
   fails, `task.encoding_goal_unsatisfiable` is true, because no state is a goal;
 - negation is pushed inward: `not or` is a conjunction of negations, `not exists` a `forall` of the negation,
-  `not imply ψ φ` with a static `ψ` that holds is `not φ`, and `not not φ` is `φ`.
+  `not imply ψ φ` with a static `ψ` that holds is `not φ`, and `not not φ` is `φ`;
+- a disjunction is decided by static atoms and equality where they can: `or`, `not and` (the disjunction of the
+  negated parts), `exists` and `not forall` (a disjunct per binding of the variables) and `imply ψ φ` whose `ψ` they
+  do not decide (`not ψ` or `φ`). When a disjunct holds, the disjunction contributes nothing; when all disjuncts but
+  one fail, that one is expanded like any conjunct (its static literals kept); when all fail, the last one is
+  expanded, and its failing static literals make the goal unsatisfiable. So
+  `(forall (?x - t) (or (not (s ?x)) (p ?x)))` with a static `s` is expanded like
+  `(forall (?x - t) (imply (s ?x) (p ?x)))`, and `(exists (?x - t) (and (s ?x) (p ?x)))` with a single object `o`
+  that has `s` is `(s o)` and `(p o)`.
 
-A conjunct that cannot be expanded (`or`, `exists`, `imply` over fluents, `not and`, `not forall`, a numeric constraint) is
-left out, and `task.encoding_goal_complete` is false. For a task whose goal is a conjunction of literals, the encoding
-goal is the goal itself and `encoding_goal_complete` is true. The planner's goal, `task.goal_condition` and the search
-are unaffected. `Task.from_text` has no goal as written: the encoding goal is the planner's goal without the `axiom_<k>`
-literals, complete if there were none, unless the text carries it (`NormalizedTask.to_text(encoding_goal=True)`).
-The bindings of the quantifiers of a goal are counted up front (the product of the sizes of their domains): a
-conjunct whose quantifiers would take the goal past 2^24 bindings in total is left out whole, and the goal is
-incomplete. A task built without a front end (a `TaskData` with no recorded encoding goal) gets the text derivation
-described above when the `Task` is created.
+A conjunct that cannot be expanded (a disjunction with two or more disjuncts that static atoms and equality do not
+decide, a numeric constraint) is left out, and `task.encoding_goal_complete` is false. For a task whose goal is a
+conjunction of literals, the encoding goal is the goal itself and `encoding_goal_complete` is true. The planner's
+goal, `task.goal_condition` and the search are unaffected. `Task.from_text` has no goal as written: the encoding goal
+is the planner's goal without the `axiom_<k>` literals, complete if there were none, unless the text carries it
+(`NormalizedTask.to_text(encoding_goal=True)`). The bindings of the quantifiers of a goal are counted up front (the
+product of the sizes of their domains): a conjunct whose quantifiers would take the goal past 2^24 bindings in total
+is left out whole, and the goal is incomplete. A task built without a front end (a `TaskData` with no recorded
+encoding goal) gets the text derivation described above when the `Task` is created.
 
 The text derivation recognizes the derived predicates that goal normalization introduced by their name (`axiom_<k>`),
 so a task read from text whose goal uses a user predicate of that name has it left out of the encoding goal (and the

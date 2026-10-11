@@ -273,8 +273,9 @@ private:
 
     /// Adds the literals that the condition (negated unless `positive`) requires; a part that cannot be expanded
     /// clears `m_complete`. Negation is pushed inward: not-or is a conjunction of negations, not-exists a forall of
-    /// the negation, not-imply with a static antecedent that holds the negated consequent; not-and and not-forall
-    /// cannot be expanded.
+    /// the negation, not-imply with a static antecedent that holds the negated consequent. A disjunction (or, not-and,
+    /// exists and not-forall over the bindings, imply with an undecided antecedent) is expanded when static atoms and
+    /// equality decide it (Disjunction, disjunct).
     void expand(const loki::Condition& c, bool positive)
     {
         std::visit(
@@ -295,27 +296,56 @@ private:
                 else if constexpr (std::is_same_v<T, loki::ConditionAnd> || std::is_same_v<T, loki::ConditionOr>)
                 {
                     constexpr bool is_and = std::is_same_v<T, loki::ConditionAnd>;
-                    if (positive != is_and)  // or, not and
-                        m_complete = false;
-                    else
+                    if (positive == is_and)
                         for (const auto& part : x->get_conditions())
                             expand(part, positive);
+                    else if (charge(c))  // or, not and: a disjunction of the parts
+                    {
+                        ++m_depth;
+                        Disjunction d;
+                        for (size_t i = 0; i < x->get_conditions().size() && !d.holds; ++i)
+                            d.add(evaluate(x->get_conditions()[i]), positive, {static_cast<u32>(i)});
+                        if (const auto part = disjunct(d))
+                            expand(x->get_conditions()[part->front()], positive);
+                        --m_depth;
+                    }
+                    else
+                        m_complete = false;
                 }
                 else if constexpr (std::is_same_v<T, loki::ConditionForall> || std::is_same_v<T, loki::ConditionExists>)
                 {
                     constexpr bool is_forall = std::is_same_v<T, loki::ConditionForall>;
-                    if (positive != is_forall || !charge(c))  // exists, not forall
+                    if (!charge(c))
                     {
                         m_complete = false;
                         return;
                     }
-                    auto visit = [&]
-                    {
-                        expand(x->get_condition(), positive);
-                        return true;
-                    };
                     ++m_depth;
-                    bind_all(x->get_parameters(), 0, visit);
+                    const loki::ParameterList& parameters = x->get_parameters();
+                    if (positive == is_forall)
+                    {
+                        auto visit = [&]
+                        {
+                            expand(x->get_condition(), positive);
+                            return true;
+                        };
+                        bind_all(parameters, 0, visit);
+                    }
+                    else  // exists, not forall: a disjunction over the bindings
+                    {
+                        Disjunction d;
+                        auto visit = [&]
+                        {
+                            std::vector<u32> binding;
+                            for (const auto& p : parameters)
+                                binding.push_back(m_binding.at(p->get_variable()));
+                            d.add(evaluate(x->get_condition()), positive, std::move(binding));
+                            return !d.holds;
+                        };
+                        bind_all(parameters, 0, visit);
+                        if (const auto binding = disjunct(d))
+                            with_binding(parameters, *binding, [&] { expand(x->get_condition(), positive); });
+                    }
                     --m_depth;
                 }
                 else if constexpr (std::is_same_v<T, loki::ConditionImply>)
@@ -327,16 +357,98 @@ private:
                     }
                     ++m_depth;
                     const Value antecedent = evaluate(x->get_left_condition());
-                    if (!antecedent || (!positive && !*antecedent))
+                    if (antecedent)
+                    {
+                        // a static antecedent that holds: the consequent (negated under not); one that fails: nothing,
+                        // or a false goal under not
+                        if (*antecedent)
+                            expand(x->get_right_condition(), positive);
+                        else if (!positive)
+                            m_complete = false;
+                    }
+                    else if (!positive)
                         m_complete = false;
-                    else if (*antecedent)
-                        expand(x->get_right_condition(), positive);
+                    else  // the disjunction of the negated antecedent (undecided) and the consequent
+                    {
+                        Disjunction d;
+                        d.add(antecedent, false, {0});
+                        d.add(evaluate(x->get_right_condition()), true, {1});
+                        if (const auto part = disjunct(d))
+                        {
+                            if (part->front() == 0)
+                                expand(x->get_left_condition(), false);
+                            else
+                                expand(x->get_right_condition(), true);
+                        }
+                    }
                     --m_depth;
                 }
                 else
                     m_complete = false;  // numeric constraints
             },
             c->get_condition());
+    }
+
+    /// The disjuncts of a disjunction, as static atoms and equality decide them: whether one holds, the disjuncts they
+    /// leave undecided (the first one and their number), and the last one that fails. A disjunct is identified by the
+    /// position of its part or by its binding.
+    struct Disjunction
+    {
+        bool holds = false;
+        u32 undecided = 0;
+        std::optional<std::vector<u32>> open, last_false;
+
+        /// Adds a disjunct whose condition has value `v`, required true when `positive`, false otherwise.
+        void add(Value v, bool positive, std::vector<u32> id)
+        {
+            if (!v)
+            {
+                if (undecided++ == 0)
+                    open = std::move(id);
+            }
+            else if (*v == positive)
+                holds = true;
+            else
+                last_false = std::move(id);
+        }
+    };
+
+    /// The disjunct to expand: none when one holds (the disjunction contributes nothing); the undecided one when it is
+    /// the only one; the last one when all fail (its expansion has a failing static literal, or is incomplete). With
+    /// two or more undecided disjuncts, or none at all, the disjunction is not expandable and the goal incomplete.
+    std::optional<std::vector<u32>> disjunct(const Disjunction& d)
+    {
+        if (d.holds)
+            return std::nullopt;
+        if (d.undecided == 1)
+            return d.open;
+        if (d.undecided == 0 && d.last_false)
+            return d.last_false;
+        m_complete = false;
+        return std::nullopt;
+    }
+
+    /// Calls `f` with the parameters bound to `objects`.
+    template<class F>
+    void with_binding(const loki::ParameterList& parameters, const std::vector<u32>& objects, F&& f)
+    {
+        std::vector<std::optional<u32>> saved;
+        for (size_t i = 0; i < parameters.size(); ++i)
+        {
+            const loki::Variable var = parameters[i]->get_variable();
+            const auto it = m_binding.find(var);
+            saved.push_back(it == m_binding.end() ? std::nullopt : std::optional<u32>(it->second));
+            m_binding[var] = objects[i];
+        }
+        f();
+        for (size_t i = 0; i < parameters.size(); ++i)
+        {
+            const loki::Variable var = parameters[i]->get_variable();
+            if (saved[i])
+                m_binding[var] = *saved[i];
+            else
+                m_binding.erase(var);
+        }
     }
 
     const DomainState& m_ds;

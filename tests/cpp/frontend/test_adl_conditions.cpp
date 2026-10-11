@@ -162,8 +162,8 @@ void expect_goal(const std::string& goal, const Formula& f, const std::set<std::
 TEST(AdlConditions, GoalsMatchTheFormula)
 {
     using A = Atoms;
-    // a static guard (s, r) is decided per binding in the encoding goal; a fluent guard, a disjunction or an
-    // existential is not, and leaves the encoding goal incomplete
+    // a static guard (s, r) is decided per binding in the encoding goal; a fluent guard, or a disjunction or an
+    // existential with two or more disjuncts that static atoms do not decide, leaves the encoding goal incomplete
     expect_goal("(forall (?x) (imply (s ?x) (p ?x)))", [](const A& at) { return A::all([&](auto& x) { return !at("s", x) || at("p", x); }); },
                 {"(p a)", "(p c)"}, true);
     expect_goal("(and (q a) (forall (?x) (imply (s ?x) (p ?x))))",
@@ -175,6 +175,13 @@ TEST(AdlConditions, GoalsMatchTheFormula)
                 {"(q b)", "(q c)"}, true);
     expect_goal("(forall (?x) (or (p ?x) (q ?x)))", [](const A& at) { return A::all([&](auto& x) { return at("p", x) || at("q", x); }); }, {},
                 false);
+    // disjunctions that static atoms decide but for one disjunct
+    expect_goal("(forall (?x) (or (not (s ?x)) (p ?x)))", [](const A& at) { return A::all([&](auto& x) { return !at("s", x) || at("p", x); }); },
+                {"(p a)", "(p c)"}, true);
+    expect_goal("(not (exists (?x) (and (s ?x) (q ?x))))", [](const A& at) { return !A::any([&](auto& x) { return at("s", x) && at("q", x); }); },
+                {"(not (q a))", "(not (q c))"}, true);
+    expect_goal("(exists (?x) (and (r ?x b) (p ?x)))", [](const A& at) { return A::any([&](auto& x) { return at("r", x, "b") && at("p", x); }); },
+                {"(r a b)", "(p a)"}, true);
     expect_goal("(exists (?x) (and (p ?x) (not (q ?x))))", [](const A& at) { return A::any([&](auto& x) { return at("p", x) && !at("q", x); }); },
                 {}, false);
     expect_goal("(or (and (p a) (q b)) (not (exists (?x) (q ?x))))",

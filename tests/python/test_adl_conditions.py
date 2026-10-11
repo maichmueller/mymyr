@@ -78,6 +78,10 @@ SHAPES = {
     "numeric-not": "(not (and (p X) (<= (f X) 1)))",
     "static-nested-forall": "(forall (?y - a) (imply (s ?y) (forall (?z - a) (imply (r ?y ?z) (q ?z)))))",
     "static-guard-false-body": "(forall (?y - a) (imply (s ?y) (r ?y ?y)))",
+    "or-static-guard": "(forall (?y - a) (or (not (s ?y)) (p ?y)))",
+    "or-static-true": "(or (s X) (p X))",
+    "or-equality-static": "(forall (?y - a) (or (= ?y X) (not (s ?y))))",
+    "not-forall-static": "(not (forall (?y - a) (or (not (s ?y)) (= ?y X) (q ?y))))",
 }
 
 CONTEXTS = ["goal", "goal-and", "pre", "when", "forall-when", "nested-when", "derived", "derived-goal"]
@@ -328,11 +332,18 @@ ENCODING_GOALS = {
     "forall-either": ({"(q o2)", "(q k)", "(q c1)"}, True, False),
     "forall-two": (set(), False, False),  # a fluent guard
     "nested-forall-forall": (set(), False, False),  # a fluent guard
-    "forall-or": (set(), False, False),
-    "forall-equality": (set(), False, False),  # a disjunction, though its first part is static
-    "exists-and": (set(), False, False),
-    "not-exists": (set(), False, False),  # a forall of a negated conjunction
-    "numeric-forall": (set(), False, False),
+    "numeric-forall": (set(), False, False),  # a fluent guard
+    "forall-or": (set(), False, False),  # two fluent disjuncts
+    "or-quantifiers": (set(), False, False),
+    # disjunctions that static atoms and equality decide but for one disjunct
+    "forall-equality": ({"(not (p o2))", "(not (p k))"}, True, False),
+    "or-static-guard": ({"(p o1)", "(p k)"}, True, False),
+    "or-static-true": (set(), True, False),
+    "exists-and": ({"(r o1 o2)", "(not (p o2))"}, True, False),
+    "not-exists": ({"(not (p o1))", "(not (p k))"}, True, False),
+    "not-forall-static": ({"(s k)", "(not (= k o1))", "(not (q k))"}, True, False),
+    # every disjunct fails for ?y = k: the last one is kept, a failing static literal
+    "or-equality-static": ({"(not (s k))"}, True, True),
 }
 
 
