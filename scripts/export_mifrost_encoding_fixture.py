@@ -67,7 +67,8 @@ One file per task, ``f<NN>_<slug>.json`` (``f01_blocks_smedium.json`` ...). Keys
     ``successor``
         Transition inputs: ``{"path": [...], "action": "(...)"}`` for the successor of the current state.
 
-``outputs`` is the decoded encoding of one graph, by name (all of it absent if ``error`` is present):
+``outputs`` is the decoded encoding of one graph, by name (all of it absent if ``error`` is present). Names are
+in mymyr's form, as in the inputs: a ground action without objects, which mifrost names ``(switch )``, is ``(switch)``.
     ``entities``
         ``by_role``: role name to the entity names in entity order; ``runs``: ``[role, count]`` pairs that give the
         role of each entity id in order, so that the id-ordered names are rebuilt by taking, run by run, the next
@@ -461,13 +462,13 @@ def payloads(task, state_record, config_id, config):
             second = clean(pick([g for g in goal if g not in first], 1, rng) + absent + pick(negated, 1, rng))
             layers.append(second)
         texts["subgoal_layers"] = layers
-    if feeds and feeds[-1] in ("history", "history_capped"):
+    if "history" in feeds or "history_capped" in feeds:
         steps = [
             [-3, clean(pick(fluent, 2, rng))],
             [-2, clean(pick(goal, 1, rng) + pick(fluent, 1, rng))],
             [-1, clean(absent + pick(fluent, 2, rng))],
         ]
-        if feeds[-1] == "history":
+        if "history" in feeds:
             steps = steps[1:]
         else:
             texts["history_max_steps"] = 2
@@ -598,6 +599,12 @@ def graph_arrays(tensors):
     }
 
 
+def canonical_name(name):
+    """mymyr's form of a mifrost entity or target name: no space before a closing parenthesis (mifrost names a ground
+    action without objects ``(switch )``)."""
+    return name.replace(" )", ")") if isinstance(name, str) else name
+
+
 def entity_block(names, tensors):
     """Names by role and the role of each entity as runs ``[role, count]`` in entity-id order."""
     roles = [ROLE_NAMES[int(r)] for r in tensors["__graph__/entity_role_ids"].reshape(-1)]
@@ -618,7 +625,7 @@ def target_block(tensors, graph_attrs, entity_names):
     def ints(key):
         return tensors[key].reshape(-1).tolist() if key in tensors else []
 
-    names = list(graph_attrs.get("target_names", []))
+    names = [canonical_name(n) for n in graph_attrs.get("target_names", [])]
     if any(n.startswith("State(") for n in names):
         names = [entity_names[e] for e in ints("__graph__/target_positions")]
     return dict(
@@ -642,7 +649,7 @@ def history_block(tensors, names):
 def decode_flat(encoder, encoding, pool):
     data = encoding.as_dict()
     tensors = {k: to_numpy(v) for k, v in data["tensors"].items()}
-    names = list(data["node_names"]["entity"])
+    names = [canonical_name(n) for n in data["node_names"]["entity"]]
     counts = tensors["__graph__/relation_counts"].reshape(-1)
     args = tensors["__graph__/relation_args"].reshape(-1)
     relations = {}
@@ -668,7 +675,7 @@ def decode_flat(encoder, encoding, pool):
 def decode_hgraph(encoder, encoding, pool):
     data = encoding.as_dict()
     tensors = {k: to_numpy(v) for k, v in data["tensors"].items()}
-    node_names = {k: list(v) for k, v in data["node_names"].items()}
+    node_names = {k: [canonical_name(n) for n in v] for k, v in data["node_names"].items()}
     nodes = {}
     for node_type in data["schema"]["node_types"]:
         ptr = tensors.get(f"{node_type}/ptr")
@@ -750,12 +757,13 @@ def run_record(task, encoder, config_id, state_record, pool, raise_errors=None):
             _, child, action = edges[0]
             extra = dict(successor=nodes[child]["obj"])
             inputs["successor"] = dict(path=nodes[child]["path"], action=action_name(action))
+    reraise = RAISE if raise_errors is None else raise_errors
     schema = None
     try:
         outputs = encode_record(task, encoder, kind, state_record, texts, objs, extra, pool)
         schema = outputs.pop("_schema", None)
     except Exception as error:  # noqa: BLE001 - recorded in the record's outputs as `error`
-        if RAISE if raise_errors is None else raise_errors:
+        if reraise:
             raise
         outputs = dict(error=f"{type(error).__name__}: {error}")
     return inputs, outputs, schema
