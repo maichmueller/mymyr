@@ -46,8 +46,8 @@ struct DomainSignature
     struct ActionSchema
     {
         std::string name;
-        /// The parameters written in the domain. Normalization may add parameters to a schema (for the variables of
-        /// an existential condition); those are not part of an action relation.
+        /// The parameters of the normalized schema: the written ones and those normalization adds for the variables of
+        /// an existential condition. An action relation holds all of them.
         u32 arity = 0;
     };
     std::vector<Predicate> predicates;
@@ -178,8 +178,9 @@ public:
     [[nodiscard]] std::span<const SlotRole> all_slot_roles() const noexcept { return m_roles; }
     [[nodiscard]] std::span<const u32> slot_role_offsets() const noexcept { return m_role_offsets; }
 
-    /// The relation of each action schema of the domain (empty without action relations). Schemas of one name share a
-    /// relation: the front end splits an action whose precondition has a disjunction into one schema per disjunct.
+    /// The relation of each action schema of the domain (empty without action relations). The front end splits an
+    /// action whose precondition has a disjunction into one schema per disjunct: schemas of one name and arity share a
+    /// relation, and a name with several arities has one relation `name#arity` per arity.
     [[nodiscard]] std::span<const i32> schema_relations() const noexcept { return m_schema_relation; }
 
     /// The names of the entity roles and slot roles this schema uses, indexed by role value. The auxiliary entity role

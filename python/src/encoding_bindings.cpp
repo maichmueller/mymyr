@@ -499,7 +499,7 @@ void bind_encoding(nb::module_& parent)
                 return std::vector<i32>(ids.begin(), ids.end());
             },
             "The relation id of each action schema of the domain (empty without action relations). Action schemas "
-            "of one name share a relation.")
+            "of one name and arity share a relation; a name with several arities has one relation `name#arity` each.")
         .def_prop_ro("slot_role_names",
                      [](const PyEncodingSchema& self)
                      {

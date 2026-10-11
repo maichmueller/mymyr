@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -17,6 +18,12 @@ namespace
 [[noreturn]] void invalid(const std::string& why)
 {
     throw std::invalid_argument("mymyr: encoding: " + why);
+}
+
+/// The relation name of an action schema: its name, with the arity behind a `#` when the name has several arities.
+std::string action_relation_name(const DomainSignature::ActionSchema& action, bool split)
+{
+    return split ? action.name + "#" + std::to_string(action.arity) : action.name;
 }
 
 /// The predicates every domain has for its types; they have no goal relations.
@@ -69,7 +76,7 @@ private:
 
     /// Adds a predicate relation: `lead` roles, the predicate slot with virtual nodes, then the arguments.
     void add_predicate(u32 predicate, Lane lane, const Key& key, std::initializer_list<SlotRole> lead);
-    void add_action(u32 schema, std::initializer_list<SlotRole> lead);
+    void add_action(u32 schema, bool split, std::initializer_list<SlotRole> lead);
     void add(Pending&& pending);
 
     [[nodiscard]] static Lane state_lane(PredicateKind kind)
@@ -124,11 +131,11 @@ void Catalog::add_predicate(u32 predicate, Lane lane, const Key& key, std::initi
     add(std::move(pending));
 }
 
-void Catalog::add_action(u32 schema, std::initializer_list<SlotRole> lead)
+void Catalog::add_action(u32 schema, bool split, std::initializer_list<SlotRole> lead)
 {
     const DomainSignature::ActionSchema& source = m_domain.schemas[schema];
     Pending pending;
-    pending.relation.name = source.name;
+    pending.relation.name = action_relation_name(source, split);
     pending.relation.lane = Lane::Action;
     pending.relation.schema = static_cast<i32>(schema);
     pending.relation.logical_arity = source.arity;
@@ -273,22 +280,21 @@ void Catalog::build()
     }
     if (o.include_actions)
     {
-        // Schemas of one name (the front end splits an action with a disjunctive precondition) share a relation.
-        std::unordered_map<std::string_view, u32> first;
+        // Schemas of one name and arity (the front end splits an action with a disjunctive precondition) share a
+        // relation; a name with several arities gets one relation per arity, named `name#arity`.
+        std::unordered_map<std::string_view, std::set<u32>> arities;
+        for (const DomainSignature::ActionSchema& source : m_domain.schemas)
+            arities[source.name].insert(source.arity);
+        std::set<std::string> seen;
         for (u32 schema = 0; schema < m_domain.schemas.size(); ++schema)
         {
             const DomainSignature::ActionSchema& source = m_domain.schemas[schema];
-            const auto [it, fresh] = first.emplace(source.name, schema);
-            if (!fresh)
-            {
-                if (m_domain.schemas[it->second].arity != source.arity)
-                    invalid("the domain has action schemas named '" + source.name + "' of different arities");
+            if (!seen.insert(action_relation_name(source, arities[source.name].size() > 1)).second)
                 continue;
-            }
             if (horizon)
-                add_action(schema, {SlotRole::State});
+                add_action(schema, arities[source.name].size() > 1, {SlotRole::State});
             else
-                add_action(schema, {SlotRole::Action});
+                add_action(schema, arities[source.name].size() > 1, {SlotRole::Action});
         }
     }
     if (o.horizon.parent_relation)
@@ -352,7 +358,7 @@ DomainSignature DomainSignature::of(const rl::TaskTable& table)
         domain.predicates.push_back(std::move(predicate));
     }
     for (u32 s = 0; s < table.num_schemas(); ++s)
-        domain.schemas.push_back({table.schema_names()[s], table.task(0)->data().schemas[s].original_arity});
+        domain.schemas.push_back({table.schema_names()[s], table.schema_arities()[s]});
     return domain;
 }
 
@@ -407,7 +413,11 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     }
     if (schema->m_options.include_actions)
         for (const auto& action : domain.schemas)
-            schema->m_schema_relation.push_back(static_cast<i32>(*schema->find(action.name)));
+        {
+            const bool split = std::ranges::any_of(domain.schemas, [&](const auto& other)
+                                                   { return other.name == action.name && other.arity != action.arity; });
+            schema->m_schema_relation.push_back(static_cast<i32>(*schema->find(action_relation_name(action, split))));
+        }
     const FlatOptions& o = schema->m_options;
     Hasher hasher;
     hasher.text("mymyr.encoding.schema");

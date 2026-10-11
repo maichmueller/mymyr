@@ -185,7 +185,7 @@ TEST(EncodingSchema, HorizonCatalogs)
     EXPECT_EQ(names(*EncodingSchema::create(blocks(), full)), names(*e));
 }
 
-TEST(EncodingSchema, ActionSchemasOfOneNameShareARelation)
+TEST(EncodingSchema, ActionSchemasOfOneNameAndArityShareARelation)
 {
     DomainSignature d = blocks();
     d.schemas = {{"stop", 1}, {"go", 2}, {"stop", 1}, {"stop", 1}};
@@ -196,8 +196,17 @@ TEST(EncodingSchema, ActionSchemasOfOneNameShareARelation)
     EXPECT_EQ(map[0], map[2]);
     EXPECT_EQ(map[0], map[3]);
     EXPECT_NE(map[0], map[1]);
-    d.schemas = {{"stop", 1}, {"stop", 2}};
-    EXPECT_THROW((void)EncodingSchema::create(d), std::invalid_argument);
+    // a name with several arities: one relation per arity
+    d.schemas = {{"stop", 1}, {"go", 2}, {"stop", 3}, {"stop", 1}};
+    const auto split = EncodingSchema::create(d);
+    EXPECT_FALSE(has(*split, "stop"));
+    ASSERT_TRUE(has(*split, "stop#1") && has(*split, "stop#3") && has(*split, "go"));
+    EXPECT_EQ(split->relation(*split->find("stop#3")).arity, 4u);
+    EXPECT_EQ(split->relation(*split->find("stop#3")).schema, 2);
+    const auto split_map = split->schema_relations();
+    EXPECT_EQ(split_map[0], split_map[3]);
+    EXPECT_EQ(split_map[0], static_cast<i32>(*split->find("stop#1")));
+    EXPECT_EQ(split_map[2], static_cast<i32>(*split->find("stop#3")));
 }
 
 TEST(EncodingSchema, FingerprintIgnoresDeclarationOrderAndTracksTheOutput)
@@ -318,7 +327,7 @@ TEST(EncodingOptions, NormalizationAndText)
     EXPECT_FALSE(parse_goal_derivation(""));
 }
 
-TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndOriginalActionArities)
+TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndFullActionArities)
 {
     const auto task = Task::from_text_file(test::task_path("philosophers__p03-phil4"), {});
     const auto table = rl::TaskTable::single(task);
@@ -334,6 +343,6 @@ TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndOriginalActionArities
     EXPECT_EQ(schema->fingerprint(), EncodingSchema::create(domain)->fingerprint());
     ASSERT_EQ(domain.schemas.size(), table->num_schemas());
     for (u32 s = 0; s < table->num_schemas(); ++s)
-        EXPECT_EQ(domain.schemas[s].arity, task->data().schemas[s].original_arity);
+        EXPECT_EQ(domain.schemas[s].arity, table->schema_arities()[s]);
 }
 }

@@ -187,11 +187,13 @@ def test_helper_predicates_are_stable_with_quantified_actions_in_other_domains()
                 generated / "simple-f6-p4-q.pddl"]  # fmt: skip
     schemas = [EncodingSchema(mymyr.Task.from_pddl(domain, p)) for p in problems]
     assert any(n.startswith("axiom_") for n in schemas[0].relation_names)
-    # the front end splits `stop` into one schema per disjunct and adds parameters: one relation of the original arity
-    stop = schemas[0].relation_id("stop")
-    assert schemas[0].relation_arities[stop] == 2  # action slot + the one written parameter
-    assert schemas[0].schema_relations.count(stop) > 1
-    assert len(schemas[0].schema_relations) == 38 and schemas[0].relation_schemas[stop] == 0
+    # the front end splits `stop` into one schema per disjunct and adds parameters for existential variables: one
+    # relation per arity (1 to 3 parameters), holding all of them
+    assert "stop" not in schemas[0].relation_names
+    ids = [schemas[0].relation_id(f"stop#{k}") for k in (1, 2, 3)]
+    assert [schemas[0].relation_arities[i] for i in ids] == [2, 3, 4]  # action slot + parameters
+    assert all(schemas[0].schema_relations.count(i) > 1 for i in ids) and len(schemas[0].schema_relations) == 38
+    assert [schemas[0].relation_schemas[i] for i in ids] == [6, 0, 1]
     for other in schemas[1:]:
         assert other.relation_names == schemas[0].relation_names
         assert other.schema_fingerprint == schemas[0].schema_fingerprint
@@ -377,3 +379,19 @@ def test_invalid_tables_raise():
         EncodingSchema("gripper")
     with pytest.raises(TypeError):
         EncodingSchema(rl.TaskSuite([rl.TaskTable([text_task("gripper__prob05")])]))
+
+
+@needs_pddl
+def test_equality_relations_have_the_static_equality_atoms(tasks):
+    # the table lists (= o o) among the static atoms of each instance, so the `=` relation has a tuple per object
+    import numpy as np
+
+    task = tasks["philosophers"]
+    table = rl.TaskTable([task])
+    metadata = table.atom_metadata()
+    equality = table.predicate_names.index("=")
+    atoms = np.asarray(metadata["static_args"])[np.asarray(metadata["static_pred"]) == equality]
+    assert sorted(map(tuple, atoms[:, :2].tolist())) == [(o, o) for o in range(task.num_objects)]
+    schema = EncodingSchema(task, equality=True)
+    assert schema.relation_predicates[schema.relation_id("=")] == equality
+    assert schema.relation_lanes[schema.relation_id("=")] == "static"
