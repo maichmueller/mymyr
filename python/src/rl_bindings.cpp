@@ -106,19 +106,19 @@ SuiteRef suite_of(nb::handle obj)
                              .c_str());
 }
 
-u32 current_words(const rl::TaskTable& table) noexcept
+u32 packed_words(nb::handle states)
 {
     u32 w = 1;
-    for (const auto& inst : table.instances())
-        w = std::max(w, inst.task->words());
-    return w;
-}
-
-u32 current_words(const rl::TaskSuite& suite) noexcept
-{
-    u32 w = 1;
-    for (const rl::TaskTablePtr& t : suite.tables())
-        w = std::max(w, current_words(*t));
+    auto add = [&](nb::handle h)
+    {
+        if (is_state(h))
+            w = std::max(w, state_of(h).core->task->words());
+    };
+    if (nb::isinstance<nb::list>(states) || nb::isinstance<nb::tuple>(states))
+        for (nb::handle h : nb::borrow<nb::sequence>(states))
+            add(h);
+    else
+        add(states);
     return w;
 }
 
@@ -401,10 +401,10 @@ void run_expand(const rl::TaskSuite& table, const rl::StateBatchView& in, const 
         rl::expand(table, in, ids, x, o);
 }
 
-/// The rows of a batch over a suite: [N, words + NN] (States packed at the suite's current width).
+/// The rows of a batch over a suite: [N, W + NN] (States packed at the widest of their tasks' words).
 StateBatch import_table_states(nb::handle states, const rl::TaskSuite& t)
 {
-    return import_rows(states, current_words(t), t.numeric_words());
+    return import_rows(states, packed_words(states), t.numeric_words());
 }
 
 /// The task ids of a batch (see import_task_ids) with what keeps them alive.
@@ -486,7 +486,11 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     const std::optional<u32> fixed_K = opt_int_arg<u32>(K, "K");
     std::atomic<u32>& branching = ref.branching();
     u64 cap = fixed_cap ? *fixed_cap : std::min(N * branching.load(std::memory_order_relaxed) + 16, rl::k_max_rows);
-    u32 W = fixed_words ? *fixed_words : std::max(in.view.words, current_words(tt));
+    // the batch's width: its rows' widest instance's, whatever the input's width (its words past a row's instance
+    // are padding)
+    if (!fixed_words)
+        tt.check_task_ids(ids.ptr, N);
+    u32 W = fixed_words ? *fixed_words : tt.batch_words(ids.ptr, N);
     if (W == 0)
         W = 1;
     FlatResult f;
@@ -711,15 +715,33 @@ nb::object goal_rows(const rl::TaskSuite& s, bool pos, Framework fw)
     return export_array(std::move(a), fw, default_words(fw));
 }
 
-/// The instances' initial states as rows [I, row_words] (a fresh block; TaskSuite::initial_row).
-nb::object initial_rows(const rl::TaskSuite& s, Framework fw)
+/// The initial states of instances `task_ids` (None: every instance, in order) as rows [n, W + NN], W their widest
+/// instance's words (a fresh block; TaskSuite::initial_row).
+nb::object initial_rows(const rl::TaskSuite& s, nb::handle task_ids, Framework fw)
 {
-    const u64 I = s.size(), RW = s.row_words();
-    auto block = Block::make(std::max<u64>(I * RW, 1) * sizeof(u64));
+    std::vector<i32> all, copy;
+    std::shared_ptr<void> keep;
+    const i32* ids = nullptr;
+    u64 n = s.size();
+    if (task_ids.is_none())
+    {
+        all.resize(n);
+        for (u64 g = 0; g < n; ++g)
+            all[g] = static_cast<i32>(g);
+        ids = all.data();
+    }
+    else
+    {
+        n = nb::len(task_ids);
+        ids = import_task_ids(task_ids, n, s.size(), copy, keep, "task_ids", s.noun());
+        s.check_task_ids(ids, n);
+    }
+    const u32 W = s.batch_words(ids, n), RW = W + s.numeric_words();
+    auto block = Block::make(std::max<u64>(n * RW, 1) * sizeof(u64));
     auto* w = reinterpret_cast<u64*>(block->data());
-    for (u64 g = 0; g < I; ++g)
-        s.initial_row(static_cast<u32>(g), w + g * RW, s.words(), s.numeric_words());
-    ArraySpec a{block, w, rl::DType::U64, {static_cast<i64>(I), static_cast<i64>(RW)}, {}, true, true};
+    for (u64 i = 0; i < n; ++i)
+        s.initial_row(static_cast<u32>(ids[i]), w + i * RW, W, s.numeric_words());
+    ArraySpec a{block, w, rl::DType::U64, {static_cast<i64>(n), static_cast<i64>(RW)}, {}, true, true};
     return export_array(std::move(a), fw, default_words(fw));
 }
 
@@ -1149,12 +1171,16 @@ public:
         const i32* ids = import_task_ids(task_ids, a.n, m_ref.suite->size(), a.id_copy, a.id_keep, "task_ids",
                                          m_ref.suite->noun());
         rlimp::Imports in(-1, dl::k_stream_default, false);
-        const u64* gp = in.words(goal_pos, "goal_pos", static_cast<i64>(a.n), m_pool->words(), false);
-        const u64* gn = in.words(goal_neg, "goal_neg", static_cast<i64>(a.n), m_pool->words(), false);
+        std::vector<i64> lead_p, lead_n;
+        u32 wp = 0, wn = 0;
+        const u64* gp = in.words_nd(goal_pos, "goal_pos", {static_cast<i64>(a.n)}, false, lead_p, wp);
+        const u64* gn = in.words_nd(goal_neg, "goal_neg", {static_cast<i64>(a.n)}, false, lead_n, wn);
+        if (gp && gn && wp != wn)
+            throw nb::value_error("mymyr: 'goal_pos' and 'goal_neg' have different widths");
         rl::PoolBatch b;
         {
             nb::gil_scoped_release release;
-            b = m_pool->reset(envs, a.n, ids, gp, gn);
+            b = m_pool->reset(envs, a.n, ids, gp, gn, wp);
         }
         return wrap(std::move(b));
     }
@@ -1251,8 +1277,10 @@ void bind_rl(nb::module_& parent)
         "rl.is_goal, the torch and JAX environments, CpuEnvPool; a TaskSuite mixes domains). A batch over a table says "
         "the instance of each row (task_ids, int32 [N]); a Task is accepted wherever a TaskTable is (its table of "
         "one). The instances must have "
-        "the same action schemas and domain predicates (in the same order); rows are words atom words wide (the "
-        "widest instance's), plus numeric_words. Immutable; picklable (it pickles its tasks).")
+        "the same action schemas and domain predicates (in the same order) and fixed atom slots (not atoms='lazy'). A "
+        "batch's rows have at least its widest instance's atom words (instance_words; at most words), plus "
+        "numeric_words; a row's words past its own instance's are padding, never read and written zero, so an "
+        "operation on a row costs its own instance's width. Immutable; picklable (it pickles its tasks).")
         .def(
             "__init__",
             [](PyTable* self, nb::typed<nb::sequence, std::variant<PyTask, PyHandle>> tasks) {
@@ -1315,7 +1343,7 @@ void bind_rl(nb::module_& parent)
             },
             "The instances' Tasks, in table order.")
         .def_prop_ro("words", [](const PyTable& t) { return t.table->words(); },
-                     "Atom words of a row: the widest instance's max_words (at least 1).")
+                     "Atom words of a row that holds any instance: the widest instance's words (at least 1).")
         .def_prop_ro("numeric_words", [](const PyTable& t) { return t.table->numeric_words(); },
                      "Numeric words of a row after the atom words (the most any instance has; 0 for classical tables).")
         .def_prop_ro("row_words", [](const PyTable& t) { return t.table->row_words(); }, "words + numeric_words.")
@@ -1350,7 +1378,7 @@ void bind_rl(nb::module_& parent)
                     v.push_back(inst.words);
                 return v;
             },
-            "Atom words per instance [I] (each instance's max_words; its rows leave the words past them zero).")
+            "Atom words per instance [I] (each instance's words, at least 1; its rows' words past them are padding).")
         .def_prop_ro("schema_names", [](const PyTable& t) { return t.table->schema_names(); })
         .def_prop_ro("schema_arities", [](const PyTable& t) { return t.table->schema_arities(); })
         .def_prop_ro("predicate_names", [](const PyTable& t) { return t.table->predicate_names(); },
@@ -1395,10 +1423,12 @@ void bind_rl(nb::module_& parent)
             "(read-only). rl.goal_masks(table, task_ids) gathers per-env copies.")
         .def(
             "initial_states",
-            [](const PyTable& t, FrameworkArg framework) {
-                return ArrayOut(initial_rows(*t.suite, parse_framework(framework, nb::none())));
+            [](const PyTable& t, TaskIdsArg task_ids, FrameworkArg framework) {
+                return ArrayOut(initial_rows(*t.suite, task_ids, parse_framework(framework, nb::none())));
             },
-            "framework"_a = nb::none(), "The instances' initial states as rows [I, row_words] (read-only).")
+            "task_ids"_a = nb::none(), "framework"_a = nb::none(),
+            "The initial states of instances task_ids [n] (None: every instance, in order) as rows [n, W + numeric_words] "
+            "(read-only), W the widest of these instances' words (words with task_ids=None).")
         .def("__reduce__", &table_reduce)
         .def("__repr__", [](const PyTable& t) {
             const auto& I = t.table->instances();
@@ -1414,8 +1444,9 @@ void bind_rl(nb::module_& parent)
         "RL entry point a TaskTable is (rl.expand, rl.is_goal, the torch and JAX environments, CpuEnvPool, the dataset "
         "and IW entry points). Task ids are global: int32 indices into the suite, [0, len(suite)); instance i is "
         "instance local_ids[i] of domain domain_of[i]'s table. Labels keep each domain's schema ids and instance-local "
-        "objects (schema_offsets flattens them), atom metadata each domain's predicate ids. Rows are words atom words "
-        "wide (the widest domain's), plus numeric_words. Immutable; picklable (it pickles its tasks).")
+        "objects (schema_offsets flattens them), atom metadata each domain's predicate ids. A batch's rows have at "
+        "least its widest instance's atom words (at most words), plus numeric_words; as in a TaskTable, a row's words "
+        "past its own instance's are padding. Immutable; picklable (it pickles its tasks).")
         .def(
             "__init__",
             [](PySuite* self, nb::typed<nb::sequence, PyTable> tables) {
@@ -1494,7 +1525,7 @@ void bind_rl(nb::module_& parent)
             "global_id", [](const PySuite& t, IntArg domain_in, IntArg local_in) { const u32 domain = int_arg<u32>(domain_in, "domain"); const u32 local = int_arg<u32>(local_in, "local"); return t.suite->global_id(domain, local); },
             "domain"_a, "local"_a, "The global id of instance `local` of domain `domain`'s table.")
         .def_prop_ro("words", [](const PySuite& t) { return t.suite->words(); },
-                     "Atom words of a row: the widest domain's table words.")
+                     "Atom words of a row that holds any instance: the widest domain's table words.")
         .def_prop_ro("numeric_words", [](const PySuite& t) { return t.suite->numeric_words(); },
                      "Numeric words of a row after the atom words (the most any domain has).")
         .def_prop_ro("row_words", [](const PySuite& t) { return t.suite->row_words(); }, "words + numeric_words.")
@@ -1540,10 +1571,12 @@ void bind_rl(nb::module_& parent)
             "(gpos, gneg) [I, words]: each instance's fluent goal literals as state words (read-only).")
         .def(
             "initial_states",
-            [](const PySuite& t, FrameworkArg framework) {
-                return ArrayOut(initial_rows(*t.suite, parse_framework(framework, nb::none())));
+            [](const PySuite& t, TaskIdsArg task_ids, FrameworkArg framework) {
+                return ArrayOut(initial_rows(*t.suite, task_ids, parse_framework(framework, nb::none())));
             },
-            "framework"_a = nb::none(), "The instances' initial states as rows [I, row_words] (read-only).")
+            "task_ids"_a = nb::none(), "framework"_a = nb::none(),
+            "The initial states of instances task_ids [n] (None: every instance, in order) as rows [n, W + numeric_words] "
+            "(read-only), W the widest of these instances' words (words with task_ids=None).")
         .def("__getstate__",
              [](nb::handle self) {
                  const SuiteRef r = suite_of(self);
@@ -1709,6 +1742,27 @@ void bind_rl(nb::module_& parent)
         },
         "table"_a, "states"_a, "task_ids"_a = nb::none(), "framework"_a = nb::none(),
         "Goal flags [N]: row i under the goal test of instance task_ids[i] (axioms evaluated where the goal needs them).");
+    m.def(
+        "numeric_values",
+        [](SuiteArg table, StatesLike states, TaskIdsArg task_ids, FrameworkArg framework) {
+            const SuiteRef ref = suite_of(table);
+            StateBatch in = import_table_states(states, *ref.suite);
+            const TaskIds ids(task_ids, in, *ref.suite);
+            const auto [fw, enc] = output_kind(in, framework, !in.packed);
+            const u32 S = rl::max_numeric_slots(*ref.suite);
+            const u64 N = in.view.rows;
+            auto block = Block::make(std::max<u64>(N * S, 1) * sizeof(f64));
+            auto* out = reinterpret_cast<f64*>(block->data());
+            {
+                nb::gil_scoped_release release;
+                rl::numeric_values(*ref.suite, in.view, ids.ptr, out, S);
+            }
+            ArraySpec a{block, out, rl::DType::F64, {static_cast<i64>(N), static_cast<i64>(S)}, {}, false, false};
+            return ArrayOut(export_array(std::move(a), fw, default_words(fw)));
+        },
+        "table"_a, "states"_a, "task_ids"_a = nb::none(), "framework"_a = nb::none(),
+        "The numeric values of rows [N, S] (float64; S the most numeric slots of any instance): row i holds instance "
+        "task_ids[i]'s values in its numeric_names order, decoded from the table's numeric storage, then NaN.");
     auto goal_fn = [](bool count) {
         return [count](StatesLike states, ArrayArg gpos, ArrayArg gneg, FrameworkArg framework) -> ArrayOut {
             StateBatch in = import_states(states, 0);
@@ -1769,6 +1823,9 @@ void bind_rl(nb::module_& parent)
                             "reset. Once the batch and every array taken from it are dropped, its memory goes back to "
                             "the pool for later results (CpuEnvPool::recycle).")
         .def_prop_ro("rows", [](const PyPoolBatch& p) { return p.b->rows; })
+        .def_prop_ro("words", [](const PyPoolBatch& p) { return p.b->words; },
+                     "Atom words of the rows: the pool's words, or the widest instance's among the batch's envs.")
+        .def_prop_ro("row_words", [](const PyPoolBatch& p) { return p.b->row_words(); }, "words + numeric_words.")
         .def_prop_ro("stepped", &PyPoolBatch::stepped, "Whether these are step results (False: a reset's).")
         .def_prop_ro("env_ids", [](const PyPoolBatch& p) {
             return ArrayOut(p.array(p.b->env_ids, rl::DType::I32, {p.rows()}));
@@ -1840,8 +1897,9 @@ void bind_rl(nb::module_& parent)
             "__init__",
             [](PyCpuPool* self, SuiteArg table, IntArg num_envs_in, IntArg threads_in, bool goals, IntArg seed_in, IntArg max_steps_in,
                f32 step_reward, f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal,
-               bool autoreset, bool canonical, bool witness, FrameworkArg framework) {
+               bool autoreset, bool canonical, bool witness, FrameworkArg framework, SizeArg words_in) {
                 const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1);
+                const std::optional<u32> words = opt_int_arg<u32>(words_in, "words", 1);
                 const u32 threads = threads_arg(threads_in);
                 const u64 seed = int_arg<u64>(seed_in, "seed");
                 const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
@@ -1859,23 +1917,32 @@ void bind_rl(nb::module_& parent)
                 rl::PoolOptions o;
                 o.threads = threads;
                 o.goals = goals;
+                o.words = words.value_or(0);
                 const Framework fw = framework.is_none() ? Framework::Numpy : parse_framework(framework, nb::none());
                 new (self) PyCpuPool(suite_of(table), c, num_envs, o, fw);
             },
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 0, "goals"_a = false, "seed"_a = 0, "max_steps"_a = 0,
             "step_reward"_a = -1.0f, "goal_reward"_a = 0.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
-            "framework"_a = nb::none(),
+            "framework"_a = nb::none(), "words"_a = nb::none(),
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "
             "results come as `framework` arrays (None: NumPy). Every env starts at instance 0's initial state: "
-            "reset(task_ids=...) places them.")
+            "reset(task_ids=...) places them. A batch's rows are as wide as the widest instance among its envs (after "
+            "a step: their instances and those they autoreset into), so a step costs each env's own instance width; "
+            "words fixes the width of every batch instead (at least table.words).")
         .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); })
         .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); })
         .def_prop_ro("threads", [](const PyCpuPool& p) { return p.pool().threads(); })
         .def_prop_ro("goals", [](const PyCpuPool& p) { return p.pool().goals(); })
-        .def_prop_ro("words", [](const PyCpuPool& p) { return p.pool().words(); })
+        .def_prop_ro(
+            "words",
+            [](const PyCpuPool& p) -> std::optional<u32> {
+                if (p.pool().words() == 0)
+                    return std::nullopt;
+                return p.pool().words();
+            },
+            "The fixed atom words of every batch's rows (words=), or None: each batch has its own (PoolBatch.words).")
         .def_prop_ro("numeric_words", [](const PyCpuPool& p) { return p.pool().numeric_words(); })
-        .def_prop_ro("row_words", [](const PyCpuPool& p) { return p.pool().words() + p.pool().numeric_words(); })
         .def_prop_ro("label_width", [](const PyCpuPool& p) { return p.pool().label_width(); })
         .def_prop_ro("framework", [](const PyCpuPool& p) { return framework_name(p.framework()); })
         .def_prop_ro("seed", [](const PyCpuPool& p) { return p.pool().config().seed; })
@@ -1890,8 +1957,9 @@ void bind_rl(nb::module_& parent)
             "env_ids"_a = nb::none(), "task_ids"_a = nb::none(), nb::kw_only(), "goal_pos"_a = nb::none(),
             "goal_neg"_a = nb::none(),
             "Resets envs env_ids [n] (None: every env) into instances task_ids [n] (None: their current ones), with "
-            "goal masks goal_pos / goal_neg [n, words] (None: their instances' goals; goals=True pools only); returns "
-            "their observations. Draw counters are kept. Raises if one of them has a step in flight.")
+            "goal masks goal_pos / goal_neg [n, W] (W at least each env's instance words; None: their instances' "
+            "goals; goals=True pools only); returns their observations. Draw counters are kept. Raises if one of them "
+            "has a step in flight.")
         .def(
             "send",
             [](PyCpuPool& p, TaskIdsArg env_ids, TaskIdsArg actions, TaskIdsArg next_task_ids) {

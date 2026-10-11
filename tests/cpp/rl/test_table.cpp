@@ -155,7 +155,7 @@ TEST(Table, OneDomainIsChecked)
 
 TEST(Table, PredicatesAndMetadataRoundTrip)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const Set& s : sets(atoms))
         {
             SCOPED_TRACE(s.name);
@@ -300,10 +300,10 @@ TEST(Table, DomainPredicateIdsAreTheDomains)
 
 TEST(TableExpand, MixedBatchEqualsSingleInstanceExpansions)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const Set& s : sets(atoms))
         {
-            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy"));
+            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Dense ? " dense" : " reachable"));
             const rl::TaskTable& T = *s.table;
             std::vector<u64> rows;
             std::vector<i32> ids;
@@ -500,10 +500,10 @@ std::vector<T> gather(const std::vector<T>& v, const std::vector<u64>& rows, u64
 
 TEST(TableEnv, MixedBatchEqualsSingleInstanceEnvs)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const Set& s : sets(atoms))
         {
-            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy"));
+            SCOPED_TRACE(s.name + (atoms == TaskOptions::Atoms::Dense ? " dense" : " reachable"));
             const rl::TaskTable& T = *s.table;
             const u32 I = T.size(), per = 5;
             std::vector<i32> ids;
@@ -675,13 +675,21 @@ TEST(TableEnv, NextTaskIdsAndPerEnvGoals)
 
 namespace
 {
+/// Whether row `a` of `aw` atom words and row `b` of `bw` atom words, each followed by NN numeric words, hold the same
+/// state: equal common words, zeros past the narrower one's, equal numeric words.
+bool same_row(const u64* a, u32 aw, const u64* b, u32 bw, u32 NN)
+{
+    const u32 w = std::min(aw, bw);
+    const auto zero = [](u64 x) { return x == 0; };
+    return std::equal(a, a + w, b) && std::all_of(a + w, a + aw, zero) && std::all_of(b + w, b + bw, zero) &&
+           std::equal(a + aw, a + aw + NN, b + bw);
+}
+
 void expect_batch_rows(const rl::PoolBatch& p, u64 pos, const Envs& e, u64 row, bool step)
 {
-    const u32 RW = e.RW;
-    ASSERT_TRUE(std::equal(p.states.begin() + static_cast<std::ptrdiff_t>(pos * RW),
-                           p.states.begin() + static_cast<std::ptrdiff_t>((pos + 1) * RW),
-                           e.states.begin() + static_cast<std::ptrdiff_t>(row * RW)))
-        << "env " << row;
+    const u32 PW = p.row_words(), NN = p.numeric_words;
+    ASSERT_LE(p.words, e.W);
+    ASSERT_TRUE(same_row(p.states.data() + pos * PW, p.words, e.states.data() + row * e.RW, e.W, NN)) << "env " << row;
     ASSERT_EQ(p.task_ids[pos], e.task_ids[row]);
     ASSERT_EQ(p.count[pos], e.count[row]);
     ASSERT_EQ(p.steps[pos], e.steps[row]);
@@ -693,13 +701,44 @@ void expect_batch_rows(const rl::PoolBatch& p, u64 pos, const Envs& e, u64 row, 
     ASSERT_EQ(p.goal[pos], e.goal[row]);
     ASSERT_EQ(p.invalid[pos], e.invalid[row]);
     ASSERT_EQ(p.schema[pos], e.schema[row]);
-    ASSERT_TRUE(std::equal(p.final_states.begin() + static_cast<std::ptrdiff_t>(pos * RW),
-                           p.final_states.begin() + static_cast<std::ptrdiff_t>((pos + 1) * RW),
-                           e.final_states.begin() + static_cast<std::ptrdiff_t>(row * RW)));
+    ASSERT_TRUE(same_row(p.final_states.data() + pos * PW, p.words, e.final_states.data() + row * e.RW, e.W, NN));
     for (u32 k = 0; k < e.L; ++k)
         ASSERT_EQ(p.binding[pos * p.label_width + k], e.binding[row * e.L + k]);
 }
 }  // namespace
+
+TEST(TablePool, BatchesAreAsWideAsTheirWidestInstance)
+{
+    for (const Set& s : sets(TaskOptions::Atoms::Reachable))
+    {
+        SCOPED_TRACE(s.name);
+        const rl::TaskTable& T = *s.table;
+        u32 narrow = 0;
+        for (u32 i = 0; i < T.size(); ++i)
+            if (T.instance(i).words < T.instance(narrow).words)
+                narrow = i;
+        const u32 N = 16;
+        const std::vector<i32> ids(N, static_cast<i32>(narrow));
+        rl::CpuEnvPool pool(s.table, config(), N, {.threads = 2});
+        EXPECT_EQ(pool.words(), 0u);
+        const rl::PoolBatch r = pool.reset(nullptr, 0, ids.data(), nullptr, nullptr);
+        EXPECT_EQ(r.words, T.instance(narrow).words);
+        const rl::PoolBatch p = pool.step(nullptr, 0, {}, nullptr);
+        EXPECT_EQ(p.words, T.instance(narrow).words);
+        // an autoreset into another instance widens the batch to it
+        std::vector<i32> next(N, static_cast<i32>(T.size() - 1));
+        const rl::PoolBatch q = pool.step(nullptr, 0, {}, next.data());
+        EXPECT_EQ(q.words, std::max(T.instance(narrow).words, T.instance(T.size() - 1).words));
+        // a fixed width
+        rl::CpuEnvPool fixed(s.table, config(), N, {.threads = 2, .words = T.words() + 1});
+        EXPECT_EQ(fixed.reset(nullptr, 0, ids.data(), nullptr, nullptr).words, T.words() + 1);
+        EXPECT_EQ(fixed.step(nullptr, 0, {}, nullptr).words, T.words() + 1);
+        if (T.words() > 1)
+        {
+            EXPECT_THROW(rl::CpuEnvPool(s.table, config(), N, {.threads = 1, .words = T.words() - 1}), std::invalid_argument);
+        }
+    }
+}
 
 TEST(TablePool, EqualsTheHostEnvForAnyThreadsSplitsAndOrder)
 {

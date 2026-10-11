@@ -210,7 +210,7 @@ std::vector<State> host_starts(nb::handle obj, const Task& task)
 /// Host start states over a table: States, or rows of at most the table's width.
 std::vector<State> table_starts(nb::handle obj, const rl::TaskTable& table)
 {
-    const StateBatch sb = import_rows(obj, current_words(table), table.numeric_words());
+    const StateBatch sb = import_rows(obj, packed_words(obj), table.numeric_words());
     std::vector<State> out;
     out.reserve(sb.view.rows);
     for (u64 i = 0; i < sb.view.rows; ++i)

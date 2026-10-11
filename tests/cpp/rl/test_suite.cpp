@@ -4,7 +4,7 @@
 //     mapping, widths, schema offsets, the refusals; a table is the suite of its domain (TaskSuite::of);
 //   - the atom metadata of a suite is its domains' tables' in global order, with the domain columns;
 //   - rl::expand over a suite equals each domain's table's expand apart, byte for byte, for interleaved and grouped
-//     batches, frozen and lazy, flat and through the thread pool;
+//     batches, dense and reachable slots, flat and through the thread pool;
 //   - rl::HostEnv over a suite equals each domain's env apart (the rows' RNG streams by env id), step by step;
 //     next_task_ids restart rows in instances of other domains; per-env goals; both dead-end modes;
 //   - rl::CpuEnvPool over a suite equals rl::HostEnv over it.
@@ -424,12 +424,12 @@ TEST(TaskSuite, CreateGroupAndIds)
 
 TEST(TaskSuite, AtomMetadataIsTheDomainsInGlobalOrder)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto ds = domains(atoms);
         for (const auto& names : suite_names())
         {
-            SCOPED_TRACE(joined(names) + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy"));
+            SCOPED_TRACE(joined(names) + (atoms == TaskOptions::Atoms::Dense ? " dense" : " reachable"));
             // a suite with a domain's instances in another order than its table's (group(): global ids interleave)
             std::vector<TaskPtr> tasks;
             for (u32 k = 0; k < 6; ++k)
@@ -500,13 +500,13 @@ TEST(TaskSuite, AtomMetadataIsTheDomainsInGlobalOrder)
 TEST(TaskSuiteExpand, SuiteEqualsTheDomainsApart)
 {
     ThreadPool pool(4);
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto ds = domains(atoms);
         for (const auto& names : suite_names())
             for (const bool interleaved : {true, false})
             {
-                SCOPED_TRACE(joined(names) + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy") +
+                SCOPED_TRACE(joined(names) + (atoms == TaskOptions::Atoms::Dense ? " dense" : " reachable") +
                              (interleaved ? " interleaved" : " grouped"));
                 const rl::TaskSuitePtr S = suite_of(ds, names);
                 const Batch b = suite_rows(*S, 6, interleaved);
@@ -562,13 +562,13 @@ TEST(TaskSuiteExpand, TaskIdsAreGlobal)
 
 TEST(TaskSuiteEnv, SuiteEqualsTheDomainEnvsApart)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto ds = domains(atoms);
         for (const auto& names : suite_names())
             for (const auto dead_end : {rl::DeadEnd::NoSuccessors, rl::DeadEnd::None})
             {
-                SCOPED_TRACE(joined(names) + (atoms == TaskOptions::Atoms::Dense ? " frozen" : " lazy") +
+                SCOPED_TRACE(joined(names) + (atoms == TaskOptions::Atoms::Dense ? " dense" : " reachable") +
                              (dead_end == rl::DeadEnd::None ? " no dead ends" : ""));
                 const rl::TaskSuitePtr S = suite_of(ds, names);
                 const u32 D = S->num_domains(), W = S->words(), L = std::max<u32>(1, S->label_width());

@@ -413,7 +413,7 @@ TEST(HostEnv, DeadEndModes)
 
 TEST(HostEnv, PoolAndBatchCompositionDoNotChangeTrajectories)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto task = load("logistics00__probLOGISTICS-6-1", atoms);
         rl::EnvConfig cfg;

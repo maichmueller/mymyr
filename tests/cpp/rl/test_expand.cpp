@@ -162,9 +162,9 @@ class RlExpand : public ::testing::TestWithParam<std::tuple<std::string, bool>>
 TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
     const std::vector<State> states = walk_states(*task, 3, 12, 7);
-    const Reference ref = reference(*task, states);  // interns every successor atom (lazy slots) first
+    const Reference ref = reference(*task, states);
     const u32 W = task->words(), L = rl::max_label_width(*task);
     const std::vector<u64> rows = pack(states, W);
     const rl::StateBatchView in{rows.data(), states.size(), W, 0};
@@ -188,7 +188,7 @@ TEST_P(RlExpand, EqualsPerStateSuccessorsInCanonicalOrder)
 TEST_P(RlExpand, CapacityOverflowCountsAndClips)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
     const std::vector<State> states = walk_states(*task, 2, 8, 3);
     const Reference ref = reference(*task, states);
     const u32 W = task->words(), L = rl::max_label_width(*task);
@@ -220,7 +220,7 @@ TEST_P(RlExpand, CapacityOverflowCountsAndClips)
 TEST_P(RlExpand, NarrowRowsReportTheWidthNeeded)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
     const std::vector<State> states = walk_states(*task, 2, 8, 5);
     const Reference ref = reference(*task, states);
     u32 need = 0;
@@ -240,7 +240,7 @@ TEST_P(RlExpand, NarrowRowsReportTheWidthNeeded)
 TEST_P(RlExpand, PaddedViewScattersTheFlatRows)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
     const std::vector<State> states = walk_states(*task, 2, 10, 11);
     const Reference ref = reference(*task, states);
     const u32 W = task->words(), L = rl::max_label_width(*task);
@@ -298,23 +298,48 @@ std::vector<std::tuple<std::string, bool>> params()
 INSTANTIATE_TEST_SUITE_P(Suite, RlExpand, ::testing::ValuesIn(params()),
                          [](const auto& info)
                          {
-                             std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_frozen" : "_lazy");
+                             std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_dense" : "_reachable");
                              std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
                              return n;
                          });
 
-TEST(RlExpandChecks, RejectsBitsBeyondTheAssignedSlots)
+TEST(RlExpandChecks, RejectsBitsBeyondTheAssignedSlotsAndIgnoresThePadding)
+{
+    const auto task = load("blocks__probBLOCKS-8-0", TaskOptions::Atoms::Reachable);
+    const u32 F = task->atoms().fluent_slots(), w = task->words(), W = w + 2;
+    ASSERT_NE(F % 64, 0u);
+    const auto table = rl::TaskTable::single(task);
+    const State s0 = task->initial_state();
+    std::vector<u64> row(W, 0);
+    std::copy_n(s0.data(), s0.size_words(), row.data());
+    auto run = [&](const std::vector<u64>& r)
+    {
+        std::vector<u64> succ(64 * w, 0);
+        rl::Expansion x;
+        x.capacity = 64;
+        x.words = w;
+        x.succ = succ.data();
+        rl::expand(*table, rl::StateBatchView{r.data(), 1, W, 0}, nullptr, x);
+        succ.resize(x.total * w);
+        return succ;
+    };
+    const std::vector<u64> clean = run(row);
+    std::vector<u64> padded = row;
+    padded[w] = ~u64{0};  // words past the instance's are padding: never read
+    padded[w + 1] = 1;
+    EXPECT_EQ(run(padded), clean);
+    std::vector<u64> bad = row;
+    bits::set(bad.data(), F);  // a slot no atom has, within the instance's words
+    EXPECT_THROW((void)run(bad), std::invalid_argument);
+    rl::Expansion none;
+    EXPECT_THROW(rl::expand(*table, rl::StateBatchView{row.data(), 1, w - 1, 0}, nullptr, none),
+                 std::invalid_argument);
+}
+
+TEST(RlExpandChecks, TablesRefuseLazySlots)
 {
     const auto task = load("blocks__probBLOCKS-8-0", TaskOptions::Atoms::Lazy);
-    const u32 W = task->words() + 1;
-    std::vector<u64> row(W, 0);
-    row[W - 1] = 1;  // a slot no atom has
-    std::vector<u64> succ(64 * W);
-    rl::Expansion x;
-    x.capacity = 64;
-    x.words = W;
-    x.succ = succ.data();
-    EXPECT_THROW(rl::expand(*rl::TaskTable::single(task), rl::StateBatchView{row.data(), 1, W, 0}, nullptr, x), std::invalid_argument);
+    EXPECT_THROW((void)rl::TaskTable::single(task), std::invalid_argument);
 }
 
 TEST(RlExpandChecks, StridedRowsAndRandomWalks)
@@ -344,8 +369,8 @@ class RlTaskArrays : public ::testing::TestWithParam<std::tuple<std::string, boo
 TEST_P(RlTaskArrays, AtomMetadataMatchesTheIndex)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
-    (void)walk_states(*task, 2, 10, 3);  // assign some lazy slots
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
+    (void)walk_states(*task, 2, 10, 3);
     const rl::ArrayBundle m = rl::atom_metadata(*task);
     const u32 F = static_cast<u32>(m.scalar("num_atoms"));
     EXPECT_EQ(F, task->atoms().fluent_slots());
@@ -382,7 +407,7 @@ TEST_P(RlTaskArrays, AtomMetadataMatchesTheIndex)
 TEST_P(RlTaskArrays, GoalMasksAgreeWithIsGoalAndLayoutEncodesCids)
 {
     const auto& [name, frozen] = GetParam();
-    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
+    const auto task = load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
     const std::vector<State> states = walk_states(*task, 3, 15, 9);
     const rl::ArrayBundle d = rl::device_arrays(*task, 1);  // the version-1 layout stays available (version 2 adds to it)
     EXPECT_EQ(d.scalar("version"), 1);
@@ -436,21 +461,21 @@ TEST_P(RlTaskArrays, GoalMasksAgreeWithIsGoalAndLayoutEncodesCids)
 INSTANTIATE_TEST_SUITE_P(Suite, RlTaskArrays, ::testing::ValuesIn(params()),
                          [](const auto& info)
                          {
-                             std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_frozen" : "_lazy");
+                             std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_dense" : "_reachable");
                              std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
                              return n;
                          });
 
 // ------------------------------------------------------------------------------------------------ concurrency gate
 
-/// 64 threads share one task (lazy slots, so slot interning races too) and call expand, apply and is_goal on
-/// overlapping batches. Every result must equal the single-threaded reference of a second instance, compared through
-/// layout-independent keys (labels, canonical hashes), since lazy slot numbers depend on the order of first touch.
+/// 64 threads share one task and call expand, apply and is_goal on overlapping batches. Every result must equal the
+/// single-threaded reference of a second instance, compared through layout-independent keys (labels, canonical
+/// hashes).
 TEST(RlConcurrency, SixtyFourThreadsShareOneTask)
 {
     for (const char* name : {"blocks__probBLOCKS-8-0", "openstacks-opt08-adl__p03"})
     {
-        const auto ref_task = load(name, TaskOptions::Atoms::Lazy);
+        const auto ref_task = load(name, TaskOptions::Atoms::Reachable);
         const std::vector<State> ref_states = walk_states(*ref_task, 4, 10, 17);
         const Reference ref = reference(*ref_task, ref_states);
         // the same states as canonical-id sets, to rebuild them in the shared task
@@ -462,7 +487,7 @@ TEST(RlConcurrency, SixtyFourThreadsShareOneTask)
         for (const State& s : ref.succ)
             ref_hash.push_back(ref_task->canonical_hash(s));
 
-        const auto task = load(name, TaskOptions::Atoms::Lazy);
+        const auto task = load(name, TaskOptions::Atoms::Reachable);
         const auto table = rl::TaskTable::single(task);  // shared by the 64 threads
         constexpr u32 T = 64;
         std::barrier sync(T);
@@ -473,7 +498,7 @@ TEST(RlConcurrency, SixtyFourThreadsShareOneTask)
             threads.emplace_back(
                 [&, t]
                 {
-                    // rebuild the states in the shared task (all 64 threads intern at once)
+                    // rebuild the states in the shared task (all 64 threads at once)
                     sync.arrive_and_wait();
                     std::vector<State> states;
                     for (const auto& cs : cids)

@@ -522,6 +522,39 @@ void is_goal(const TaskSuite& table, StateBatchView in, const i32* ids, u8* out)
         out[i] = goal_of(table.task_of(ids, i), in.row(i), in.words, in.numeric_words);
 }
 
+u32 max_numeric_slots(const TaskSuite& suite) noexcept
+{
+    u32 n = 0;
+    for (u32 g = 0; g < suite.size(); ++g)
+        n = std::max(n, suite.task(g)->numeric_slots());
+    return n;
+}
+
+void numeric_values(const TaskSuite& suite, StateBatchView in, const i32* ids, f64* out, u32 slots)
+{
+    check_numeric(suite, in.numeric_words, "the states");
+    if (slots < max_numeric_slots(suite))
+        throw std::invalid_argument("mymyr: numeric_values: " + std::to_string(slots) + " columns; the " + suite.noun() +
+                                    " has instances of " + std::to_string(max_numeric_slots(suite)) + " numeric slots");
+    if (!ids && in.rows && suite.size() > 1)
+        throw std::invalid_argument(std::string("mymyr: numeric_values: a batch over a ") + suite.noun() + " of " +
+                                    std::to_string(suite.size()) + " instances needs task ids");
+    suite.check_task_ids(ids, in.rows);
+    check_rows(suite, in, ids, true, "numeric_values");
+    for (u64 i = 0; i < in.rows; ++i)
+    {
+        const Task& task = suite.task_of(ids, i);
+        const u64* row = in.row(i);
+        const StateView s{row, std::min(in.words, task.words()), in.numeric_words ? row + in.words : nullptr,
+                          task.numeric_words()};
+        f64* o = out + i * slots;
+        const u32 n = task.numeric_slots();
+        for (u32 k = 0; k < n; ++k)
+            o[k] = task.numeric_value(s, k);
+        std::fill(o + n, o + slots, std::numeric_limits<f64>::quiet_NaN());
+    }
+}
+
 namespace
 {
 template<class F>
