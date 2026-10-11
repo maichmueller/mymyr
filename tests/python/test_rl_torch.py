@@ -408,7 +408,7 @@ def trajectories_equal(task, dev, n=256, steps=40, **cfg):
     return gpu_env
 
 
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable"])
 @pytest.mark.parametrize("name", SMALL_TASKS)
 def test_device_env_equals_cpu_env(name, atoms):
     dev = gpu()
@@ -489,9 +489,8 @@ def test_device_refusals():
     numeric = mymyr.Task.from_text(str(NUMERIC / "cs-counters.txt"))
     assert rt.BatchedEnv(numeric, 4, device=dev).core.numeric_words == numeric.numeric_words
     lazy = text_task("blocks__probBLOCKS-8-0", atoms="lazy")
-    assert "lazy" in rt.fast_unsupported(lazy)
-    with pytest.raises(ValueError, match="lazy"):
-        rt.BatchedEnv(lazy, 4, device=dev, path="fast")
+    with pytest.raises(ValueError, match="lazy atom slots"):
+        rt.BatchedEnv(lazy, 4, device=dev)
     env = rt.BatchedEnv(text_task("blocks__probBLOCKS-8-0", atoms="dense"), 4, device=dev)
     with pytest.raises(ValueError, match="cuda"):  # a CPU action for a device env (BatchedEnv.step moves it)
         rt._ops.step_impl(env.handle, env.states, None, env.steps, env.draws, env.counts, env.views, env.count,

@@ -28,7 +28,7 @@
 //     rows' positions only and run on a stream of their own (forked from the env's stream and joined back by events);
 //     select, the views (one launch over every domain's rows) and finish run once over the batch (the count cache is
 //     laid out with the suite's widest schema count, a domain's schemas past its own counting 0);
-//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects, axioms or lazy slots. A
+//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms. A
 //     step expands the current states into internal flat buffers with SuiteExpander (a table's DeviceExpander, or one
 //     per domain; canonical order, goal flags; it synchronizes), moves every environment to its chosen row, and counts
 //     the reached states' successors with a second expansion. The cache arrays are not used.

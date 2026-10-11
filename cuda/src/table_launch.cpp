@@ -33,8 +33,6 @@ std::string multi_unsupported(const rl::TaskTable& table)
             return at + "numeric states require per-instance kernels";
         if (task.has_axioms())
             return at + "axioms";
-        if (!task.atoms().frozen())
-            return at + "lazy atom slots";
         for (const bool witness : {true, false})
         {
             const SchemaPlacement pl = ChunkGenerator::place(task, witness);

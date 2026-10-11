@@ -163,7 +163,7 @@ def scan_rollout(env, key, state, acts):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable"])
 @pytest.mark.parametrize("name", SUITE)
 def test_jax_env_equals_host_env(name, atoms, device):
     if device == "cuda":

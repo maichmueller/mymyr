@@ -109,7 +109,7 @@ def test_upload_round_trip_is_byte_identical(ctx, name):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable", "lazy"])
 def test_smoke_kernels_agree_with_the_cpu(ctx, name, atoms):
     torch = torch_cuda()
     task = text_task(name, atoms=atoms)

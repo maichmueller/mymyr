@@ -101,7 +101,7 @@ def assert_same_padded(dev, cpu):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable", "lazy"])
 def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     task = text_task(name, atoms=atoms)
     r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
@@ -122,8 +122,8 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     small = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, chunk_states=97, stop_at_goal=False)
     assert (small.states, small.fingerprint) == (r.states, r.fingerprint)
     assert small.stats["chunks"] > r.stats["chunks"]
-    # small layers run in device loops (frozen slots); timings=True drives every chunk from the host: the same ids
-    if atoms == "frozen":
+    # small layers run in device loops (fixed slots); timings=True drives every chunk from the host: the same ids
+    if atoms != "lazy":
         assert r.stats["loops"] > 0 and r.stats["captures"] > 0
     timed = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, timings=True, stop_at_goal=False)
     assert (timed.states, timed.layers, timed.fingerprint) == (r.states, r.layers, r.fingerprint)
@@ -165,7 +165,7 @@ def test_device_brfs_state_space_and_plans(ctx):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable"])
 def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
     torch = torch_cuda()
     task = text_task(name, atoms=atoms)
@@ -181,7 +181,7 @@ def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
         dict(capacity=17, goal=True),
         dict(words=1),
     ):
-        dev = rl.expand(task, t, ctx=ctx, **kw)  # first: under lazy slots the device interns the new atoms
+        dev = rl.expand(task, t, ctx=ctx, **kw)
         cpu = rl.expand(task, x, **kw)
         if "capacity" in kw:
             assert dev.capacity == cpu.capacity == kw["capacity"]
@@ -326,7 +326,7 @@ def test_expand_dlarray_and_jax_inputs(ctx):
 
 def test_expand_from_many_threads(ctx):
     torch = torch_cuda()
-    task = text_task("gripper__prob05", atoms="lazy")
+    task = text_task("gripper__prob05", atoms="reachable")
     states = walk(task, steps=20, seed=9, walks=3)
     x = words_of(states, task.words)
     t = torch.from_numpy(x.view(np.int64)).cuda()
