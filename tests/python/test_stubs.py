@@ -17,7 +17,7 @@ import pytest
 import mymyr  # noqa: F401
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SUBMODULES = {"__init__.pyi", "_datasets.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi",
+SUBMODULES = {"__init__.pyi", "_datasets.pyi", "_encoding.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi",
               "_search.pyi"}
 
 

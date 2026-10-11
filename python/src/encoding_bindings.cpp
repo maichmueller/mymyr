@@ -1,9 +1,8 @@
 #include "arrays.hpp"
-#include "py_formula.hpp"
 #include "py_table.hpp"
 #include "rl_imports.hpp"
 
-#include "mymyr/encoding/flat.hpp"
+#include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/schema.hpp"
 
 #include <nanobind/nanobind.h>
@@ -14,13 +13,11 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace mymyr::python::ann
 {
-struct EncodingExpansion
-{
-};
 struct EncodingLayout
 {
 };
@@ -37,11 +34,6 @@ struct EncodingRootPolicy
 
 namespace nanobind::detail
 {
-template<>
-struct type_caster<mymyr::python::ann::EncodingExpansion>
-{
-    static constexpr auto Name = const_name("mymyr._core._rl.Expansion");
-};
 template<>
 struct type_caster<mymyr::python::ann::EncodingLayout>
 {
@@ -72,150 +64,28 @@ namespace
 {
 using ArrayOut = Arg<ann::Any>;
 using ResultDict = nb::typed<nb::dict, std::string, ann::Any>;
-using ActionsArg = Arg<ann::EncodingExpansion>;
-using GoalsArg = Arg<std::variant<PyGroundCondition, nb::typed<nb::sequence, std::optional<PyGroundCondition>>>>;
+using TextSequenceArg = Arg<std::vector<std::string>>;
+using DerivedArg = Arg<ann::ArrayLike>;
 
-struct PyFlatBatch
-{
-    encoding::FlatBatch value;
-    Framework framework = Framework::Numpy;
-};
-
-struct PyFlatEncoder
-{
-    TableRef reference;
-    encoding::FlatRelationEncoder encoder;
-
-    PyFlatEncoder(TableRef table, encoding::FlatRelationEncoderOptions options)
-        : reference(std::move(table)), encoder(reference.table, options)
-    {
-    }
-};
-
-nb::object batch_array(const PyFlatBatch& batch, const char* name)
-{
-    const auto& bundle = batch.value.arrays;
-    const rl::ArrayInfo* info = bundle->find(name);
-    ArraySpec spec;
-    spec.owner = std::shared_ptr<const void>(bundle, bundle->data(*info));
-    spec.data = bundle->data(*info);
-    spec.dtype = info->dtype;
-    spec.shape = info->shape;
-    spec.readonly = true;
-    return export_array(std::move(spec), batch.framework, default_words(batch.framework));
-}
-
-ResultDict schema_dict(const encoding::FlatSchema& schema)
-{
-    nb::dict output;
-    output["version"] = schema.version;
-    output["num_domain_predicates"] = schema.domain_predicates;
-    output["relation_names"] = nb::cast(schema.names);
-    output["relation_arities"] = nb::cast(schema.arities);
-    output["relation_sources"] = nb::cast(schema.sources);
-    output["relation_predicates"] = nb::cast(schema.predicates);
-    output["relation_schemas"] = nb::cast(schema.schemas);
-    output["relation_kinds"] = nb::cast(schema.kinds);
-    output["relation_instances"] = nb::cast(schema.instances);
-    output["relation_polarities"] = nb::cast(schema.polarities);
-    return ResultDict(output);
-}
-
-PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, ActionsArg action_arg,
-                   GoalsArg goal_arg, Arg<ann::Framework> framework)
-{
-    StateBatch states = import_states(state_arg, packed_words(state_arg));
-    std::vector<i32> ids_copy;
-    std::shared_ptr<void> ids_keep;
-    const auto& table = self.encoder.table();
-    const i32* ids = import_task_ids(task_ids, states.view.rows, table.size(), ids_copy, ids_keep);
-    if (states.view.rows && table.size() > 1 && !ids)
-        throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
-    table.check_task_ids(ids, states.view.rows);
-    for (u64 row = 0; row < states.owners.size(); ++row)
-        if (states.owners[row] != table.task(ids ? static_cast<u32>(ids[row]) : 0)->uid())
-            throw nb::value_error("mymyr: encoding: a State belongs to another task or task id");
-
-    rlimp::Imports imports(-1, dl::k_stream_default, false);
-    encoding::ActionBatchView actions;
-    if (!action_arg.is_none())
-    {
-        if (!nb::isinstance(action_arg, nb::module_::import_("mymyr._core._rl").attr("Expansion")))
-            throw nb::type_error("mymyr: encoding: actions must be an rl.Expansion");
-        if (nb::cast<bool>(action_arg.attr("overflow")))
-            throw nb::value_error("mymyr: encoding: an overflowing expansion cannot provide complete action targets");
-        if (nb::cast<u64>(action_arg.attr("num_states")) != states.view.rows)
-            throw nb::value_error("mymyr: encoding: expansion and states have different row counts");
-        const TableRef action_table = table_of(action_arg.attr("table"));
-        if (action_table.table->size() != table.size())
-            throw nb::value_error("mymyr: encoding: expansion belongs to another task table");
-        for (u32 instance = 0; instance < table.size(); ++instance)
-            if (action_table.table->task(instance)->uid() != table.task(instance)->uid())
-                throw nb::value_error("mymyr: encoding: expansion belongs to another task table");
-        const auto source_ids = nb::cast<std::vector<i32>>(action_arg.attr("task_ids"));
-        for (u64 row = 0; row < states.view.rows; ++row)
-            if (source_ids[row] != (ids ? ids[row] : 0))
-                throw nb::value_error("mymyr: encoding: expansion and states have different source task ids");
-        std::vector<i64> shape;
-        actions.schema = imports.get<i32>(action_arg.attr("schema"), "action_schema", {rlimp::i32t}, {-1}, false, &shape);
-        actions.size = static_cast<u64>(shape[0]);
-        actions.offsets = imports.get<i32>(action_arg.attr("offsets"), "action_offsets", {rlimp::i32t},
-                                           {static_cast<i64>(states.view.rows) + 1}, false);
-        actions.binding = imports.get<i32>(action_arg.attr("binding"), "action_binding", {rlimp::i32t},
-                                           {static_cast<i64>(actions.size), -1}, false, &shape);
-        actions.label_width = static_cast<u32>(shape[1]);
-    }
-
-    std::vector<const GroundCondition*> goals;
-    nb::object goals_keep = nb::borrow(goal_arg);
-    if (!goal_arg.is_none())
-    {
-        auto take_goal = [&](nb::handle value, u64 row) -> const GroundCondition*
-        {
-            if (value.is_none())
-                return nullptr;
-            if (!nb::isinstance<PyGroundCondition>(value))
-                throw nb::type_error("mymyr: encoding: goals must be native GroundConditions or None");
-            const auto& goal = *nb::inst_ptr<PyGroundCondition>(value);
-            const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
-            if (goal.o.data.get() != self.reference.core_of(instance).data.get())
-                throw nb::value_error("mymyr: encoding: a goal belongs to another task or task id");
-            return goal.c.get();
-        };
-        if (nb::isinstance<PyGroundCondition>(goal_arg))
-        {
-            if (table.size() != 1)
-                throw nb::value_error("mymyr: encoding: table goals require one native condition per state row");
-            for (u64 row = 0; row < states.view.rows; ++row)
-                goals.push_back(take_goal(goal_arg, row));
-        }
-        else
-        {
-            if (!nb::isinstance<nb::list>(goal_arg) && !nb::isinstance<nb::tuple>(goal_arg))
-                throw nb::type_error("mymyr: encoding: goals must be a GroundCondition or an aligned list");
-            nb::sequence sequence = nb::borrow<nb::sequence>(goal_arg);
-            if (nb::len(sequence) != states.view.rows)
-                throw nb::value_error("mymyr: encoding: goals need one condition per state row");
-            for (u64 row = 0; row < states.view.rows; ++row)
-                goals.push_back(take_goal(sequence[row], row));
-        }
-    }
-    PyFlatBatch output;
-    output.framework = parse_framework(framework, state_arg);
-    {
-        nb::gil_scoped_release release;
-        output.value = self.encoder.encode(states.view, ids, actions, goals);
-    }
-    return output;
-}
-
-// ------------------------------------------------------------------------------------------------ EncodingSchema
 struct PyEncodingSchema
 {
     std::shared_ptr<const encoding::EncodingSchema> schema;
 };
 
-using TextSequenceArg = Arg<std::vector<std::string>>;
+struct PyFlatEncoder
+{
+    TableRef reference;
+    std::shared_ptr<const encoding::FlatEncoder> encoder;
+};
+
+struct PyFlatBatch
+{
+    std::shared_ptr<const rl::ArrayBundle> arrays;
+    std::shared_ptr<const encoding::EncodingSchema> schema;
+    Framework framework = Framework::Numpy;
+};
+
+// ------------------------------------------------------------------------------------------------ options
 
 [[noreturn]] void option_error(const char* name, const std::string& allowed, nb::handle got)
 {
@@ -320,174 +190,143 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     return out;
 }
 
+constexpr const char* k_option_doc =
+    "goal_derivations: the variants of the goal relations (plain, satisfied, unsatisfied; added_satisfied and "
+    "added_unsatisfied for the delta horizon). max_goal_level: subgoal layers beyond the goal (0 to 3). "
+    "include_static / include_derived: the state relations of the static (types included) / derived "
+    "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
+    "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
+    "slot in the predicate relations' tuples. include_actions: one relation per action schema. target_sources: "
+    "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
+    "targets need the plain goal derivation, action targets include_actions). layout, "
+    "index_dtype: how a batch is stored. horizon_mode, root_policy, parent_relation: the horizon variants "
+    "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid "
+    "combinations and for numeric tasks.";
+
+/// The constructor of the classes that are built from a table and the encoding options (EncodingSchema,
+/// FlatRelationEncoder): the keyword arguments are parsed here once. `make(self, reference, options)` constructs the
+/// object.
+template<class Py, class Make>
+void define_init(nb::class_<Py>& cls, Make make, const char* doc)
+{
+    cls.def(
+        "__init__",
+        [make](Py* self, TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static,
+               bool include_derived, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
+               TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,
+               Arg<ann::EncodingHorizonMode> horizon_mode, Arg<ann::EncodingRootPolicy> root_policy,
+               bool parent_relation)
+        {
+            const TableRef reference = table_of(table);
+            const encoding::FlatOptions options = schema_options(
+                max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes,
+                include_actions, goal_derivations, target_sources, layout, index_dtype, horizon_mode, root_policy,
+                parent_relation);
+            make(self, reference, options);
+        },
+        "table"_a, nb::kw_only(), "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0,
+        "include_static"_a = true, "include_derived"_a = true, "nullary"_a = true, "equality"_a = false,
+        "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
+        "layout"_a = "graph", "index_dtype"_a = "int32", "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(),
+        "parent_relation"_a = false, doc);
+}
+
+// ------------------------------------------------------------------------------------------------ the catalog
+
 template<class Field>
-auto relation_column(const PyEncodingSchema& self, Field field)
+auto relation_column(const encoding::EncodingSchema& schema, Field field)
 {
     using Out = std::decay_t<decltype(field(std::declval<const encoding::Relation&>()))>;
     std::vector<Out> out;
-    out.reserve(self.schema->num_relations());
-    for (const encoding::Relation& relation : self.schema->relations())
+    out.reserve(schema.num_relations());
+    for (const encoding::Relation& relation : schema.relations())
         out.push_back(field(relation));
     return out;
 }
-}
 
-void bind_encoding(nb::module_& parent)
+/// The read-only properties that describe the catalog of an EncodingSchema, defined on every class that has one;
+/// `schema_of(self)` returns it.
+template<class Py, class SchemaOf>
+void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
 {
-    nb::module_ module = parent.def_submodule("_encoding", "Native classical relational encodings");
-    nb::class_<PyFlatBatch> batch(module, "FlatBatch");
-    batch.def_prop_ro("num_graphs", [](const PyFlatBatch& value) { return value.value.graphs; })
-        .def_prop_ro("version", [](const PyFlatBatch&) { return encoding::k_flat_version; })
-        .def_prop_ro("schema", [](const PyFlatBatch& value) { return schema_dict(*value.value.schema); })
-        .def_prop_ro("relation_names", [](const PyFlatBatch& value) { return value.value.schema->names; })
-        .def_prop_ro("relation_sources", [](const PyFlatBatch& value) { return value.value.schema->sources; })
-        .def_prop_ro("object_names", [](const PyFlatBatch& value) { return value.value.object_names; })
-        .def_prop_ro("task_fingerprints", [](const PyFlatBatch& value) { return value.value.task_fingerprints; })
-        .def("as_dict", [](const PyFlatBatch& value, Arg<ann::Framework> framework)
-        {
-            const Framework target = framework.is_none() ? value.framework : parse_framework(framework);
-            nb::dict output = nb::cast<nb::dict>(export_bundle(value.value.arrays, target, default_words(target)));
-            output["schema"] = schema_dict(*value.value.schema);
-            output["object_names"] = nb::cast(value.value.object_names);
-            output["task_fingerprints"] = nb::cast(value.value.task_fingerprints);
-            return ResultDict(output);
-        }, "framework"_a = nb::none());
-    for (const char* name : {"relation_counts", "relation_offsets", "relation_tuple_offsets", "relation_args",
-                             "object_offsets", "task_ids", "action_offsets", "action_schema", "action_binding",
-                             "action_parent", "action_tuple", "relation_arities", "relation_predicates",
-                             "relation_schemas", "relation_kinds", "relation_instances", "relation_polarities"})
-        batch.def_prop_ro(name, [name](const PyFlatBatch& value) { return ArrayOut(batch_array(value, name)); });
-
-    nb::class_<PyFlatEncoder>(module, "FlatRelationEncoder")
-        .def("__init__", [](PyFlatEncoder* self, TableArg table, bool include_static, bool include_derived)
-        {
-            new (self) PyFlatEncoder(table_of(table), {include_static, include_derived});
-        }, "table"_a, nb::kw_only(), "include_static"_a = true, "include_derived"_a = true)
-        .def_prop_ro("table", [](const PyFlatEncoder& value) { return TableArg(value.reference.obj); })
-        .def_prop_ro("schema", [](const PyFlatEncoder& value) { return schema_dict(*value.encoder.schema()); })
-        .def_prop_ro("relation_names", [](const PyFlatEncoder& value) { return value.encoder.schema()->names; })
-        .def_prop_ro("relation_arities", [](const PyFlatEncoder& value) { return value.encoder.schema()->arities; })
-        .def_prop_ro("relation_sources", [](const PyFlatEncoder& value) { return value.encoder.schema()->sources; })
-        .def("encode", &encode, "states"_a, nb::kw_only(), "task_ids"_a = nb::none(), "actions"_a = nb::none(),
-             "goals"_a = nb::none(), "framework"_a = nb::none(),
-             "Encode facts, signed goal satisfaction and optional existing expansion labels into owned arrays.");
-
-    nb::class_<PyEncodingSchema>(
-        module, "EncodingSchema",
-        "The relation catalog of an encoding: the relations a batch of encoded states holds, sorted by name, with their "
-        "arities and slot roles. It depends on the domain of the task or table and on the options, never on the "
-        "instances, so tables over the same domain agree on the relation ids.")
-        .def(
-            "__init__",
-            [](PyEncodingSchema* self, TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level,
-               bool include_static, bool include_derived, bool nullary, bool equality, bool predicate_virtual_nodes,
-               bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
-               Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingHorizonMode> horizon_mode,
-               Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation)
-            {
-                const TableRef reference = table_of(table);
-                const encoding::FlatOptions options = schema_options(
-                    max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
-                    goal_derivations, target_sources, layout, index_dtype, horizon_mode, root_policy, parent_relation);
-                try
-                {
-                    new (self) PyEncodingSchema{encoding::EncodingSchema::create(*reference.table, options)};
-                }
-                catch (const std::invalid_argument& error)
-                {
-                    throw nb::value_error(error.what());
-                }
-            },
-            "table"_a, nb::kw_only(), "goal_derivations"_a = nb::make_tuple("plain", "satisfied"),
-            "max_goal_level"_a = 0, "include_static"_a = true, "include_derived"_a = true, "nullary"_a = true, "equality"_a = false,
-            "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
-            "layout"_a = "graph", "index_dtype"_a = "int32", "horizon_mode"_a = nb::none(),
-            "root_policy"_a = nb::none(), "parent_relation"_a = false,
-            "The catalog of the domain of `table` (a Task, TaskHandle or TaskTable) under the options. "
-            "goal_derivations: the variants of the goal relations (plain, satisfied, unsatisfied; added_satisfied and "
-            "added_unsatisfied for the delta horizon). max_goal_level: subgoal layers beyond the goal (0 to 3). "
-            "include_static / include_derived: the state relations of the static (types included) / derived "
-            "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
-            "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate slot in "
-            "the predicate relations' tuples. include_actions: one relation per action schema. target_sources: "
-            "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
-            "targets need the plain goal derivation, action targets include_actions). layout, "
-            "index_dtype: how a batch is stored. horizon_mode, root_policy, parent_relation: the horizon variants "
-            "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid combinations and for numeric tasks.")
-        .def_prop_ro(
-            "options", [](const PyEncodingSchema& self) { return options_dict(self.schema->options()); },
-            "The options in normal form, as the keyword arguments that rebuild this schema.")
-        .def_prop_ro("num_relations", [](const PyEncodingSchema& self) { return self.schema->num_relations(); })
+    cls.def_prop_ro(
+           "options", [schema_of](const Py& self) { return options_dict(schema_of(self).options()); },
+           "The options in normal form, as the keyword arguments that rebuild this schema.")
+        .def_prop_ro("num_relations", [schema_of](const Py& self) { return schema_of(self).num_relations(); })
         .def_prop_ro(
             "relation_names",
-            [](const PyEncodingSchema& self)
-            { return relation_column(self, [](const encoding::Relation& r) { return r.name; }); },
+            [schema_of](const Py& self)
+            { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.name; }); },
             "The relation names in catalog order; a relation's id is its position.")
         .def_prop_ro(
             "relation_arities",
-            [](const PyEncodingSchema& self)
-            { return relation_column(self, [](const encoding::Relation& r) { return r.arity; }); },
+            [schema_of](const Py& self)
+            { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.arity; }); },
             "The encoded arity of each relation: its slots plus its arguments.")
         .def_prop_ro(
             "relation_logical_arities",
-            [](const PyEncodingSchema& self)
-            { return relation_column(self, [](const encoding::Relation& r) { return r.logical_arity; }); },
+            [schema_of](const Py& self)
+            { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.logical_arity; }); },
             "The number of arguments of each relation (the arity of its predicate or action schema).")
         .def_prop_ro(
             "relation_lanes",
-            [](const PyEncodingSchema& self)
+            [schema_of](const Py& self)
             {
                 return relation_column(
-                    self, [](const encoding::Relation& r) { return std::string(encoding::to_string(r.lane)); });
+                    schema_of(self), [](const encoding::Relation& r) { return std::string(encoding::to_string(r.lane)); });
             },
             "The lane of each relation: fluent, static, derived, goal, goal_derivation, goal_satisfaction, history, "
             "action or parent.")
         .def_prop_ro(
             "relation_signs",
-            [](const PyEncodingSchema& self)
-            { return relation_column(self, [](const encoding::Relation& r) { return static_cast<int>(r.sign); }); },
+            [schema_of](const Py& self)
+            {
+                return relation_column(schema_of(self),
+                                       [](const encoding::Relation& r) { return static_cast<int>(r.sign); });
+            },
             "1 for `[+]` relations, -1 for `[-]` relations, 0 for relations without a sign.")
         .def_prop_ro(
             "relation_levels",
-            [](const PyEncodingSchema& self)
+            [schema_of](const Py& self)
             {
-                return relation_column(
-                    self, [](const encoding::Relation& r) { return r.level ? static_cast<int>(*r.level) : -1; });
+                return relation_column(schema_of(self), [](const encoding::Relation& r)
+                                       { return r.level ? static_cast<int>(*r.level) : -1; });
             },
             "The goal level of each relation (0: the goal, 1: first subgoal layer, ...), -1 for none.")
         .def_prop_ro(
             "relation_derivations",
-            [](const PyEncodingSchema& self)
+            [schema_of](const Py& self)
             {
-                return relation_column(self,
-                                       [](const encoding::Relation& r)
-                                       {
-                                           return r.derivation
-                                                      ? std::optional<std::string>(std::string(encoding::to_string(*r.derivation)))
-                                                      : std::nullopt;
-                                       });
+                return relation_column(
+                    schema_of(self),
+                    [](const encoding::Relation& r)
+                    {
+                        return r.derivation ? std::optional<std::string>(std::string(encoding::to_string(*r.derivation)))
+                                            : std::nullopt;
+                    });
             },
             "The goal derivation of each relation (satisfied, unsatisfied, added_satisfied, added_unsatisfied), None "
             "for plain goal relations and relations without a goal.")
         .def_prop_ro(
             "relation_predicates",
-            [](const PyEncodingSchema& self)
-            { return relation_column(self, [](const encoding::Relation& r) { return r.predicate; }); },
+            [schema_of](const Py& self)
+            { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.predicate; }); },
             "The domain predicate id of each relation, -1 for action and parent relations.")
         .def_prop_ro(
             "relation_schemas",
-            [](const PyEncodingSchema& self)
-            { return relation_column(self, [](const encoding::Relation& r) { return r.schema; }); },
+            [schema_of](const Py& self)
+            { return relation_column(schema_of(self), [](const encoding::Relation& r) { return r.schema; }); },
             "The first action schema id of each action relation, -1 for the others.")
         .def_prop_ro(
-            "slot_roles",
-            [](const PyEncodingSchema& self)
+            "relation_slot_roles",
+            [schema_of](const Py& self)
             {
+                const encoding::EncodingSchema& schema = schema_of(self);
                 std::vector<std::vector<int>> out;
-                for (u32 id = 0; id < self.schema->num_relations(); ++id)
+                for (u32 id = 0; id < schema.num_relations(); ++id)
                 {
                     std::vector<int> roles;
-                    for (encoding::SlotRole role : self.schema->slot_roles(id))
+                    for (encoding::SlotRole role : schema.slot_roles(id))
                         roles.push_back(static_cast<int>(role));
                     out.push_back(std::move(roles));
                 }
@@ -496,47 +335,184 @@ void bind_encoding(nb::module_& parent)
             "The role of each position of each relation's tuples, as indices into slot_role_names.")
         .def_prop_ro(
             "schema_relations",
-            [](const PyEncodingSchema& self)
+            [schema_of](const Py& self)
             {
-                const auto ids = self.schema->schema_relations();
+                const auto ids = schema_of(self).schema_relations();
                 return std::vector<i32>(ids.begin(), ids.end());
             },
             "The relation id of each action schema of the domain (empty without action relations). Action schemas "
             "of one name and arity share a relation; a name with several arities has one relation `name#arity` each.")
         .def_prop_ro("slot_role_names",
-                     [](const PyEncodingSchema& self)
+                     [schema_of](const Py& self)
                      {
-                         const auto names = self.schema->slot_role_names();
+                         const auto names = schema_of(self).slot_role_names();
                          return std::vector<std::string>(names.begin(), names.end());
                      })
         .def_prop_ro(
             "entity_role_names",
-            [](const PyEncodingSchema& self)
+            [schema_of](const Py& self)
             {
-                const auto names = self.schema->entity_role_names();
+                const auto names = schema_of(self).entity_role_names();
                 return std::vector<std::string>(names.begin(), names.end());
             },
-            "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by the nullary relations.")
+            "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by "
+            "the nullary relations.")
         .def_prop_ro(
             "target_group_names",
-            [](const PyEncodingSchema&)
+            [](const Py&)
             {
                 return std::vector<std::string>(encoding::k_target_group_names.begin(),
                                                 encoding::k_target_group_names.end());
             },
             "The target groups: the group code of a target is its index.")
         .def_prop_ro(
-            "schema_fingerprint", [](const PyEncodingSchema& self) { return self.schema->fingerprint(); },
+            "schema_fingerprint", [schema_of](const Py& self) { return schema_of(self).fingerprint(); },
             "A 64-bit hash of the catalog and the options that shape the output; stable across processes and builds.")
         .def(
             "relation_id",
-            [](const PyEncodingSchema& self, const std::string& name)
+            [schema_of](const Py& self, const std::string& name)
             {
-                const auto id = self.schema->find(name);
+                const auto id = schema_of(self).find(name);
                 if (!id)
                     throw nb::key_error(("mymyr: encoding: no relation named '" + name + "'").c_str());
                 return *id;
             },
             "name"_a, "The id of the relation with this name. Raises KeyError for an unknown name.");
+}
+
+// ------------------------------------------------------------------------------------------------ encoding
+
+nb::object batch_array(const PyFlatBatch& batch, const char* name)
+{
+    const rl::ArrayInfo* info = batch.arrays->find(name);
+    ArraySpec spec;
+    spec.owner = std::shared_ptr<const void>(batch.arrays, batch.arrays->data(*info));
+    spec.data = batch.arrays->data(*info);
+    spec.dtype = info->dtype;
+    spec.shape = info->shape;
+    spec.readonly = true;
+    return export_array(std::move(spec), batch.framework, default_words(batch.framework));
+}
+
+PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
+                   Arg<ann::Framework> framework)
+{
+    StateBatch states = import_states(state_arg, packed_words(state_arg));
+    std::vector<i32> ids_copy;
+    std::shared_ptr<void> ids_keep;
+    const rl::TaskTable& table = self.encoder->table();
+    const i32* ids = import_task_ids(task_ids, states.view.rows, table.size(), ids_copy, ids_keep);
+    if (states.view.rows && table.size() > 1 && !ids)
+        throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
+    table.check_task_ids(ids, states.view.rows);
+    for (u64 row = 0; row < states.owners.size(); ++row)
+        if (states.owners[row] != table.task(ids ? static_cast<u32>(ids[row]) : 0)->uid())
+            throw nb::value_error("mymyr: encoding: a State belongs to another task or task id");
+
+    rlimp::Imports imports(-1, dl::k_stream_default, false);
+    encoding::EncodeInput input;
+    input.states = states.view;
+    input.task_ids = ids;
+    std::vector<i64> rows;
+    u32 derived_words = 0;
+    input.derived =
+        imports.words_nd(derived_arg, "derived", {static_cast<i64>(states.view.rows)}, false, rows, derived_words);
+    input.derived_stride = derived_words;
+
+    PyFlatBatch output;
+    output.framework = parse_framework(framework, state_arg);
+    output.schema = self.encoder->schema_ptr();
+    {
+        nb::gil_scoped_release release;
+        output.arrays = self.encoder->encode(input);
+    }
+    return output;
+}
+
+constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
+    {"task_ids", "int32 [G]: the instance of each graph."},
+    {"num_objects", "index [G]: the objects of each graph's instance (the auxiliary entity is not counted)."},
+    {"entity_offsets",
+     "index [G + 1]: graph g's entities are [entity_offsets[g], entity_offsets[g + 1]); entity ids are batch-global."},
+    {"entity_role", "uint8 [E]: the role of each entity, an index into entity_role_names."},
+    {"entity_ref", "index [E]: an object's instance-local id, -1 for the auxiliary entity."},
+    {"relation_counts", "index [G, R]: the tuples of each (graph, relation) cell."},
+    {"relation_offsets",
+     "index [G * R + 1]: cell g * R + r holds the tuples [relation_offsets[g * R + r], relation_offsets[g * R + r + 1])."},
+    {"relation_arg_offsets", "index [G * R + 1]: the same offsets into relation_args."},
+    {"relation_args", "index [A]: the entities of the tuples, tuple after tuple, `arity` per tuple of the relation."},
+};
+}  // namespace
+
+void bind_encoding(nb::module_& parent)
+{
+    nb::module_ module = parent.def_submodule("_encoding", "Native classical relational encodings");
+
+    nb::class_<PyEncodingSchema> schema_class(
+        module, "EncodingSchema",
+        "The relation catalog of an encoding: the relations a batch of encoded states holds, sorted by name, with their "
+        "arities and slot roles. It depends on the domain of the task or table and on the options, never on the "
+        "instances, so tables over the same domain agree on the relation ids.");
+    static const std::string schema_doc =
+        std::string("The catalog of the domain of `table` (a Task, TaskHandle or TaskTable) under the options. ") +
+        k_option_doc;
+    define_init(
+        schema_class,
+        [](PyEncodingSchema* self, const TableRef& reference, const encoding::FlatOptions& options)
+        { new (self) PyEncodingSchema{encoding::EncodingSchema::create(*reference.table, options)}; },
+        schema_doc.c_str());
+    define_schema_properties(schema_class,
+                             [](const PyEncodingSchema& self) -> const encoding::EncodingSchema& { return *self.schema; });
+
+    nb::class_<PyFlatBatch> batch(
+        module, "FlatBatch",
+        "The graphs of a batch of states: one graph per row, with the tuples of every relation of the schema. The arrays "
+        "are read-only and keep the batch alive; every export shares their memory.");
+    batch.def_prop_ro("num_graphs", [](const PyFlatBatch& self) { return self.arrays->scalar("num_graphs"); })
+        .def_prop_ro("num_relations", [](const PyFlatBatch& self) { return self.arrays->scalar("num_relations"); })
+        .def_prop_ro(
+            "schema", [](const PyFlatBatch& self) { return PyEncodingSchema{self.schema}; },
+            "The EncodingSchema the batch was encoded for.")
+        .def(
+            "as_dict",
+            [](const PyFlatBatch& self, Arg<ann::Framework> framework)
+            {
+                const Framework target = framework.is_none() ? self.framework : parse_framework(framework);
+                return ResultDict(nb::cast<nb::dict>(export_bundle(self.arrays, target, default_words(target))));
+            },
+            "framework"_a = nb::none(),
+            "The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics) and the "
+            "arrays of the batch, zero-copy, in the framework (default: the batch's).");
+    for (const auto& [name, doc] : k_batch_arrays)
+        batch.def_prop_ro(name, [name = name](const PyFlatBatch& self) { return ArrayOut(batch_array(self, name)); }, doc);
+
+    nb::class_<PyFlatEncoder> encoder_class(
+        module, "FlatRelationEncoder",
+        "Encodes states into relational graphs: one graph per state, with the instance's objects as entities (plus one "
+        "auxiliary entity when a nullary tuple exists) and, for every relation of the schema, the tuples of the state's "
+        "fluent, derived and static atoms. A graph holds nothing that its state and instance do not have.");
+    static const std::string encoder_doc =
+        std::string("The encoder of a Task, TaskHandle or one-domain TaskTable under the options of EncodingSchema. "
+                    "Options that this encoder does not encode raise ValueError (\"mymyr: encoding: ...\"); among them "
+                    "are goal derivations, whose default is therefore refused: pass `goal_derivations=()`. ") +
+        k_option_doc;
+    define_init(
+        encoder_class,
+        [](PyFlatEncoder* self, const TableRef& reference, const encoding::FlatOptions& options)
+        { new (self) PyFlatEncoder{reference, encoding::FlatEncoder::create(reference.table, options)}; },
+        encoder_doc.c_str());
+    define_schema_properties(encoder_class,
+                             [](const PyFlatEncoder& self) -> const encoding::EncodingSchema& { return self.encoder->schema(); });
+    encoder_class.def_prop_ro("table", [](const PyFlatEncoder& self) { return TableArg(self.reference.obj); })
+        .def_prop_ro(
+            "schema", [](const PyFlatEncoder& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
+            "The EncodingSchema of the encoder.")
+        .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
+             "framework"_a = nb::none(),
+             "Encodes the rows `states` (an array of state words [N, W] of any DLPack framework, u64 words or u32 halves "
+             "[N, 2W], or a State or list of States) into one graph each. task_ids: the instance of each row (required "
+             "for a table of several instances). derived: the derived atom words of each row [N, D] (default: evaluated "
+             "here). The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
+             "ValueError for invalid input.");
 }
 }

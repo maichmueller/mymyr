@@ -588,4 +588,68 @@ TEST(EncoderBatches, ActionRelationsHaveNoTuplesAndAnEncoderOfATaskWorks)
     for (const Graph& graph : decoded)
         EXPECT_TRUE(graph[pick].empty());
 }
+
+// FNV-1a 64 over the scalars (name, then the value as 8 little-endian bytes), then each array's name, extents (8 bytes
+// each) and bytes. tests/python/test_encoding.py computes the same digest of the arrays that Python exports and asserts
+// the same constants, so what Python exports is what this encoder wrote.
+u64 bundle_digest(const rl::ArrayBundle& bundle)
+{
+    u64 h = 0xCBF29CE484222325ull;
+    const auto feed = [&h](const void* data, u64 bytes)
+    {
+        const auto* p = static_cast<const unsigned char*>(data);
+        for (u64 i = 0; i < bytes; ++i)
+            h = (h ^ p[i]) * 0x100000001B3ull;
+    };
+    for (const auto& [name, value] : bundle.scalars())
+    {
+        feed(name.data(), name.size());
+        feed(&value, sizeof(value));
+    }
+    for (const rl::ArrayInfo& info : bundle.arrays())
+    {
+        feed(info.name.data(), info.name.size());
+        for (const i64 extent : info.shape)
+            feed(&extent, sizeof(extent));
+        feed(bundle.data(info), info.elements() * rl::dtype_bytes(info.dtype));
+    }
+    return h;
+}
+
+/// `length` rows: the initial state, then each row's first successor.
+test::Rows first_successor_chain(const rl::TaskTable& table, u64 length)
+{
+    test::Rows rows;
+    rows.words = table.words();
+    std::vector<u64> current(table.instance(0).init.begin(), table.instance(0).init.end());
+    const i32 id = 0;
+    for (u64 i = 0; i < length; ++i)
+    {
+        rows.data.insert(rows.data.end(), current.begin(), current.end());
+        rows.task_ids.push_back(id);
+        rl::Expansion out;
+        out.words = rows.words;
+        out.capacity = 4096;
+        std::vector<u64> succ(out.capacity * rows.words, 0);
+        out.succ = succ.data();
+        rl::expand(table, {current.data(), 1, rows.words, 0, 0}, &id, out);
+        EXPECT_FALSE(out.overflow());
+        EXPECT_GT(out.total, 0u);
+        current.assign(succ.begin(), succ.begin() + rows.words);
+    }
+    return rows;
+}
+
+TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
+{
+    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 14883951552709315966ull},
+                                                               {"philosophers__p03-phil4", 12253892925669182561ull}};
+    for (const auto& [name, digest] : expected)
+    {
+        const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/" + name + ".txt");
+        const auto encoder = FlatEncoder::create(task, test::encoder_options());
+        const test::Rows rows = first_successor_chain(encoder->table(), 6);
+        EXPECT_EQ(bundle_digest(*encode_checked(*encoder, rows)), digest) << name;
+    }
+}
 }  // namespace

@@ -1,132 +1,112 @@
 # Native relational encoding
 
-`mymyr.encoding` produces classical planning observations as packed arrays. It runs in C++, consumes native state
-words directly, and needs neither mifrost nor a model framework. It is a first native flat contract informed by
-mifrost's relational semantics, not a replacement for every mifrost encoder family.
+`mymyr.encoding` encodes states of classical tasks into relational graphs: one graph per state, with the task's objects
+as entities and, for every relation of an `EncodingSchema`, the tuples of the state's atoms. It runs in C++, reads
+native state words directly, and needs neither a model framework nor mifrost. The result is a batch of flat integer
+arrays that every framework imports without a copy.
 
 ```python
 import numpy as np
 import mymyr
-from mymyr import encoding, rl
+from mymyr import encoding
 
 task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
-states = [task.initial_state]
-expansion = rl.expand(task, states)
-encoder = encoding.FlatRelationEncoder(task)
-batch = encoder.encode(states, actions=expansion)
+encoder = encoding.FlatRelationEncoder(task, goal_derivations=())
+state = task.initial_state
+batch = encoder.encode([state])
 assert batch.num_graphs == 1
-assert np.array_equal(batch.action_schema, expansion.schema)
-assert np.array_equal(batch.action_parent, expansion.parent)
-assert len(batch.action_tuple) == expansion.total
+
+at = encoder.relation_id("at")
+assert batch.relation_counts[0, at] == sum(str(atom).startswith("(at ") for atom in state.atoms())
 assert not batch.relation_args.flags.writeable
+assert np.array_equal(encoder.encode(state).relation_args, batch.relation_args)
 ```
 
-## Schema and tuple layout
+## The encoder
 
-The immutable schema is exposed through `encoder.schema` and retained in `batch.schema`. Its version is 1.
-`relation_names`, `relation_arities` and `relation_sources` describe a fixed vocabulary for that encoder's table.
-Every table predicate has five lanes: its positive state facts, positive satisfied/unsatisfied goals, and negative
-satisfied/unsatisfied goals. A signed goal emits exactly one status tuple, including negative, static and derived
-literals. State names use the predicate name; goal names use the mifrost convention, e.g. `[+]on[g][sat]` and
-`[-]clear[g][unsat]`. Action relation names end in `[action]`.
+`FlatRelationEncoder(table_or_task, *, <options>)` takes a `Task`, a `TaskHandle` or a one-domain `rl.TaskTable` and the
+options of the [schema](#encoding-schema). `encoder.encode(states, task_ids=None, *, derived=None, framework=None)`
+returns a `FlatBatch`. It is reentrant: one encoder serves any number of concurrent calls.
 
-`relation_predicates`, `relation_schemas`, `relation_kinds`, `relation_instances` and `relation_polarities` retain the
-structured identity alongside the names. Predicate kinds are static=0, fluent=1, derived=2; absent IDs/kinds/polarity
-are -1. Domain predicate IDs are the table's stable prefix. Problem-local predicates remain separate, with an
-instance-qualified name and explicit `relation_instances`; they are not a shared cross-problem learned vocabulary.
-Action schema IDs retain normalization-introduced parameters and distinct schemas even when their source names agree.
-Names are descriptive labels, not unique planning identities; use the structured IDs for model/readout keys.
+- **`states`:**
+  - an array of state words `[N, W]` of any DLPack framework: u64 words, or u32 halves `[N, 2W]` that are reinterpreted
+    as the little-endian halves of the words (the layout JAX uses);
+  - or a `State` or a list of `State`s, which are packed first (the output is then NumPy).
 
-For N graphs and R relations, all indices/counts are int32:
+  A row may be wider than its instance needs: the words past the instance's own are padding and are not read. A row
+  narrower than its instance, or one that sets an atom bit its instance does not have, raises `ValueError`. Tasks with
+  lazy atom slots are refused, since their rows have no fixed layout ([State encodings](parsing-and-tasks.md#state-encodings)).
+- **`task_ids`:** the instance of each row, an int32 array or a sequence of ints. It is required for a table of several
+  instances; a `State` must belong to the task of its row.
+- **`derived`:** the derived atom words of each row, `[N, D]` u64 (or u32 halves), as `rl.expand` computes them. By
+  default they are evaluated here, and only for rows whose instance has derived relations in the schema.
+- **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).
 
-| Field | Shape | Meaning |
+Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `goal_derivations`,
+`max_goal_level` above 0, `target_sources`, `predicate_virtual_nodes`, `horizon_mode` and `layout='relation'`. The
+default of `goal_derivations` is among them: **pass `goal_derivations=()`**. Numeric tasks raise as well. Every
+other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed `derived`
+array) raises `ValueError` too; a batch that needs more indices than the index type holds raises `OverflowError`
+(`index_dtype='int64'` lifts the limit).
+
+## Lanes
+
+A graph has the objects of its instance as entities, in the task's object order. Its relations hold:
+
+- the tuples of the **fluent** atoms of the row, the **derived** atoms (from `derived` or evaluated), and the **static**
+  atoms of the instance, each atom in the relation of its predicate, with its arguments as the tuple. The types are
+  static unary predicates, so `object` has one tuple per object. The `=` predicate has relations only with
+  `equality=True`.
+- the **nullary** atoms (`nullary=True`, the default): all nullary atoms of a graph share one auxiliary entity, and each
+  one is the unary tuple over it. The graph has the auxiliary entity exactly when it has such a tuple. With
+  `nullary=False` there are no nullary relations and no auxiliary entity.
+
+A graph contains nothing that its state and instance do not have: no entity or tuple stands for something absent.
+The goal, history and action relations of the schema have no tuples in a batch.
+
+## The batch
+
+For `G` graphs and `R = schema.num_relations` relations, with `I` the index type (`int32` by default, `int64` with
+`index_dtype='int64'`); entity ids are batch-global, and graph `g`'s first entity is `entity_offsets[g]`:
+
+| Array | dtype, shape | Meaning |
 |---|---|---|
-| `relation_counts` | `[N,R]` | Tuple counts, including nullary facts/goals/actions |
-| `relation_offsets` | `[N*R+1]` | CSR argument offsets in graph-major, then relation-major order |
-| `relation_tuple_offsets` | `[N*R+1]` | CSR tuple offsets, including tuples with no arguments |
-| `relation_args` | `[A]` | Packed batch-global object IDs |
-| `object_offsets` | `[N+1]` | Exclusive object counts of each graph |
-| `task_ids` | `[N]` | Original instance ID of each input row |
+| `task_ids` | int32 `[G]` | the instance of each row |
+| `num_objects` | I `[G]` | the objects of the instance (the auxiliary entity is not counted) |
+| `entity_offsets` | I `[G + 1]` | graph `g`'s entities are `[entity_offsets[g], entity_offsets[g + 1])` |
+| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 8 auxiliary (`schema.entity_role_names`) |
+| `entity_ref` | I `[E]` | an object's instance-local id; -1 for the auxiliary entity |
+| `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)` |
+| `relation_offsets` | I `[G * R + 1]` | cell `g * R + r` holds the tuples `[relation_offsets[c], relation_offsets[c + 1])` |
+| `relation_arg_offsets` | I `[G * R + 1]` | the same offsets into `relation_args` |
+| `relation_args` | I `[A]` | the entities of the tuples, tuple after tuple, `relation_arities[r]` per tuple |
 
-Cell `graph * R + relation` has `relation_counts[graph,relation]` tuples of that relation's arity, encoded in
-`relation_args[relation_offsets[cell]:relation_offsets[cell+1]]`. Tuples are sorted lexicographically by object
-binding within each cell, so the atom slot layout (`atoms='auto'`, `'reachable'` or `'dense'`) never becomes model
-input. Zero-arity predicates are not dropped: they carry a count even though their argument segment is empty.
-Counts/offsets beyond int32 capacity fail explicitly rather than wrapping or truncating.
-Repeated initial facts have set semantics, while repeated caller action labels remain distinct readout rows.
+The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph), `index_dtype` (0: int32, 1: int64),
+`schema_fingerprint` (the schema's fingerprint as a signed 64-bit value) and `statics` (0: the static tuples are
+repeated in every graph) come with `batch.as_dict()`.
 
-`batch.object_names` and `batch.task_fingerprints` retain portable name/content metadata. Batch-global object IDs
-are not global planning identities: subtract `object_offsets[graph]` to recover the instance-local object ID.
-The result owns its schema, metadata and packed arrays and remains valid after the encoder, task or inputs are gone.
+The tuples of a cell are the atoms of its predicate in the lexicographic order of their objects, so the atom slot
+layout of a task (`atoms='auto'`, `'reachable'`, `'dense'`) never reaches a model. A static tuple appears once per
+graph. Encoding a slice of a batch gives the slice of the batch's encoding with the offsets rebased. An object's
+instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]` is its name.
 
-## Multi-instance batches and goals
-
-Construct an encoder from one `Task`/`TaskHandle`, or a one-domain `rl.TaskTable`. A multi-instance table requires an
-aligned `task_ids` vector. Native State and GroundCondition values are checked against their row's task ownership;
-raw word-array callers remain responsible for supplying the matching task/slot encoding. Invalid or unassigned bits
-are rejected. A row's words past its instance's own are padding and are not read; a row narrower than its instance's
-states raises `ValueError`. Tasks with lazy atom slots are refused, since their rows have no fixed layout
-([State encodings](parsing-and-tasks.md#state-encodings)).
-
-Default state facts include static and axiom-derived atoms; `include_static=False` or `include_derived=False` chooses
-an explicit projection. Derived goal satisfaction is evaluated correctly even when derived state facts are omitted.
-Each encode uses its own WorkspaceLease. Shared encoders support concurrent calls; the caller must not concurrently
-overwrite input array rows while a call reads them.
-
-`goals=None` uses each instance's default normalized goal. For a single-task encoder, `goals=task.ground_condition(...)`
-overrides the goal for every row. A list of native GroundConditions/None supplies one per row, including table batches;
-None entries use that instance's default. An empty native GroundCondition is an explicit empty goal. This accepts
-conjunctive classical literals, not arbitrary Python goal strings or numeric constraints.
-
-## Action readouts
-
-`actions=expansion` reuses an existing, non-overflowing `rl.Expansion` over the same table, input row order and
-`task_ids`. The encoder does not enumerate actions or generate successors. The expansion's `task_ids` list records
-the instance of every source row, including rows without actions, and the encoder checks it against its input. Matching
-instance IDs do not prove that two raw rows describe the same state: the caller supplies the source states in their
-original order. The following arrays preserve every original expansion action and its ordering:
-
-| Field | Shape | Meaning |
-|---|---|---|
-| `action_offsets` | `[N+1]` | Original action CSR offsets |
-| `action_schema` | `[M]` | Original schema IDs |
-| `action_binding` | `[M,L]` | Instance-local object IDs, -1 after the schema arity |
-| `action_parent` | `[M]` | Original parent graph index |
-| `action_tuple` | `[M]` | Each original action's unique packed tuple index |
-
-Canonical tuple sorting does not reorder action readouts. Index `relation_tuple_offsets` to locate an action's
-graph/relation cell; then its local tuple number and arity locate its arguments. Omitting actions yields empty label
-arrays and zero action counts, not an implicit applicability query. Capacity-truncated expansions are rejected.
-
-## Frameworks and current limits
-
-The output framework follows the input arrays, or uses NumPy for State values/lists. `framework="numpy"`, `"torch"`,
-`"jax"` or `"dlpack"` overrides it. `batch.as_dict(framework=...)` exports the same owned storage using existing
-mymyr DLPack support; framework packages are imported only when requested. NumPy outputs are read-only. Do not
-mutate the shared buffers through frameworks whose tensor APIs cannot enforce that flag. This ragged CPU encoder
-is not a JAX-jitted, CUDA or CUDA-graph-capturable operation; GPU inputs are not silently copied back to the CPU.
-
-Numeric functions/constraints, including tasks declaring action-cost functions, are explicitly unsupported. Their
-values must not disappear into an apparently complete Boolean observation. TaskSuite/cross-domain batches, history,
-subgoal layers, lookahead DAGs, custom graph projections, automatic PyG/jraph conversion and WL features are not in
-this version.
-
-The C++ API is in `mymyr/encoding/flat.hpp`, linked with `mymyr::encoding`. It accepts caller-owned StateBatchView,
-TaskTable instance IDs, ActionBatchView label columns and optional per-row GroundConditions. Output storage uses
-the existing immutable ArrayBundle. No planning-backend ABI/type registry is imported.
+`batch.as_dict(framework)` exports the scalars and arrays without a copy; `batch.<array name>` exports one array in the
+batch's framework. NumPy arrays are read-only; do not mutate the shared buffers through frameworks whose tensor APIs
+cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
+`batch.schema` is its `EncodingSchema`.
 
 ## Encoding schema
 
 `mymyr.encoding.EncodingSchema(table_or_task, **options)` (C++: `mymyr/encoding/schema.hpp`) is the relation catalog of
 an encoding: which relations a batch holds, with their arities, lanes and slot roles. It is a function of the domain
 and the options, never of the instances of a table, so tables over one domain give the same relation ids to the same
-relations.
+relations. An encoder has the same properties.
 
 - **Names and order.** Relations are named `[+]on[g][sat]`: a sign for goal and history relations, the predicate or
   action schema name, `[hist]`, a goal level (`[g]`, `[sg]`, `[ssg]`, `[sssg]`) and a derivation (`[sat]`, `[unsat]`,
   `[sat+]`, `[sat-]`). State relations carry the plain name. The catalog is sorted by name, bytewise; a relation's id
   is its position. `relation_lanes`, `relation_signs`, `relation_levels`, `relation_derivations`,
-  `relation_predicates` and `relation_schemas` describe each relation, `slot_roles` each position of its tuples.
+  `relation_predicates` and `relation_schemas` describe each relation, `relation_slot_roles` each position of its tuples.
 - **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
   (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
   predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`;
@@ -146,3 +126,10 @@ relations.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
   depend on declaration order, on predicate ids, on the process or on the build.
+
+## C++
+
+`mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
+encoder (pass `options.goal_derivations = {}`), and `encode(EncodeInput{states, task_ids, derived, derived_stride})`
+returns the batch as an `rl::ArrayBundle` with the arrays and scalars above. `mymyr/encoding/validate.hpp` checks a
+batch against the contract. The encoder runs on the calling thread and is not a CUDA or JAX-jitted operation.
