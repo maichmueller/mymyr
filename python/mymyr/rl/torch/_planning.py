@@ -161,9 +161,7 @@ class PlanningEnv(EnvBase):
         self._env.reset(mask, task_ids=task_ids, goal_pos=goal_pos, goal_neg=goal_neg)
         self._env.check_errors()  # device errors (task ids outside the table, ...) surface here
         env = self._env
-        goal = torch.empty((env.num_envs,), dtype=torch.bool, device=env.device)
-        env.core.goal(env.states, env.task_ids if env.multi else None, goal_pos=env.goal_pos, goal_neg=env.goal_neg, out=goal)
-        terminated = goal
+        terminated = env.is_goal()
         if env.core.dead_end == "no_successors" and env.core.dead_end_terminal:
             terminated = terminated | (env.count == 0)
         out = self._observation()

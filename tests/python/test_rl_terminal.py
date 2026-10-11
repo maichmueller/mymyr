@@ -253,10 +253,7 @@ def absorbing_rollout(env, steps, autoreset):
     for step in range(steps):
         action = None if step % 2 else torch.from_numpy((np.arange(env.num_envs) * 7 + step) % 4).to(env.device)
         record = {f"step_{k}": v for k, v in step_arrays(env.step(action, final=True)).items()}
-        flags = torch.empty(env.num_envs, dtype=torch.bool, device=env.device)
-        env.core.goal(env.states, env.task_ids if env.multi else None, goal_pos=env.goal_pos, goal_neg=env.goal_neg,
-                      out=flags)
-        record["goal_query"] = flags.cpu().numpy()
+        record["goal_query"] = env.is_goal().cpu().numpy()
         if not autoreset and step % 3 == 2:
             done = torch.from_numpy(record["step_terminated"] | record["step_truncated"]).to(env.device)
             record["reset_count"] = env.reset(done).cpu().numpy().copy()
