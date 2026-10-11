@@ -534,10 +534,10 @@ def parity_case(request):
 def test_c1_state_static_and_derived_lanes_equal_mifrost(parity_case):
     """mifrost's default flat encoding (config C1) against the state, static and derived lanes of the native one.
 
-    Catalogs are compared as ordered lists and tuples as name multisets. The differences are the allowed ones: A1
-    (tuple order: the multisets are compared), A2 (object ids: names are compared), A13 (nullary relations: mifrost drops
-    them, mymyr has one auxiliary entity), A14 (the equality predicate is absent) and A18 (the arguments of the helper
-    predicates `axiom_<k>` are compared sorted)."""
+    Catalogs are compared as ordered lists and tuples as name multisets. The differences are the allowed ones: tuple
+    order (the multisets are compared), object ids (names are compared), nullary relations (mifrost drops them, mymyr
+    has one auxiliary entity), the equality predicate (absent) and the argument order of the helper predicates
+    `axiom_<k>` (compared sorted)."""
     fixture, task = parity_case
     config = fixture["configs"]["C1"]
     assert config["encoder"] == "FlatRelationEncoder" and not config["options"]
@@ -546,13 +546,13 @@ def test_c1_state_static_and_derived_lanes_equal_mifrost(parity_case):
     mifrost = [
         (name, arity)
         for name, arity, source in zip(catalog["names"], catalog["arities"], catalog["sources"])
-        if source == "state" and name != "="  # A14
+        if source == "state" and name != "="  # the equality predicate is absent
     ]
     encoder = encoder_of(task, include_actions=False)
     state_ids = lane_relations(encoder)
     native = [(encoder.relation_names[i], encoder.relation_logical_arities[i]) for i in state_ids]
     nullary = {name for name, arity in native if arity == 0}
-    # A13: mifrost lists a nullary predicate with arity 0 or not at all
+    # mifrost lists a nullary predicate with arity 0 or not at all
     assert [(n, a) for n, a in mifrost if a != 0] == [(n, a) for n, a in native if a != 0]
     assert {n for n, a in mifrost if a == 0} <= nullary
 
@@ -577,7 +577,7 @@ def test_c1_state_static_and_derived_lanes_equal_mifrost(parity_case):
         recorded = {n for n in outputs["relations"] if source_of[n] == "state"}
         assert recorded <= {n for n, _ in mifrost} | {"="}, recorded
         assert sorted(outputs["entities"]["by_role"]["object"]) == sorted(names)
-        # A13: the nullary relations hold the auxiliary entity exactly for the nullary atoms that hold
+        # the nullary relations hold the auxiliary entity exactly for the nullary atoms that hold
         fixture_state = paths[record["state"]]
         holding = {a.strip("()") for a in fixture_state["fluent"] + fixture_state["derived"]
                    if " " not in a.strip("()")} | static_nullary
