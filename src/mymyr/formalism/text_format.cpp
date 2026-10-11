@@ -112,10 +112,9 @@ public:
         const u32 ns = u();
         for (u32 i = 0; i < ns; ++i)
             t.schemas.push_back(schema());
-        if (m_in >> tag)
+        bool more = static_cast<bool>(m_in >> tag);
+        if (more && tag == "X")
         {
-            if (tag != "X")
-                fail("expected X, got " + tag);
             const u32 nx = u();
             for (u32 i = 0; i < nx; ++i)
             {
@@ -132,7 +131,28 @@ public:
                 a.body = condition();
                 t.axioms.push_back(a);
             }
+            more = static_cast<bool>(m_in >> tag);
         }
+        if (more && tag == "EG")
+        {
+            const bool complete = u() != 0;
+            const u32 k = u();
+            std::vector<GroundLiteralData> lits;
+            for (u32 i = 0; i < k; ++i)
+            {
+                GroundLiteralData g;
+                g.pred = PredicateId{u()};
+                g.positive = u() != 0;
+                for (u32 j = 0; j < t.predicates.at(g.pred.v).arity; ++j)
+                    g.objects.push_back(ObjectId{u()});
+                lits.push_back(std::move(g));
+            }
+            set_encoding_goal(t, std::move(lits), complete);
+        }
+        else if (more)
+            fail("unexpected section " + tag);
+        else
+            set_encoding_goal_from_normalized(t);
         validate(t);
         return std::move(t);
     }
@@ -391,7 +411,10 @@ private:
 class Writer
 {
 public:
-    explicit Writer(const TaskData& t) : t(t), m_numeric(t.has_numerics() || t.metric.has_value()) {}
+    Writer(const TaskData& t, bool encoding_goal)
+        : t(t), m_encoding_goal(encoding_goal), m_numeric(t.has_numerics() || t.metric.has_value())
+    {
+    }
 
     std::string write()
     {
@@ -495,6 +518,17 @@ public:
                     o << " " << x;
                 o << "\n";
                 condition(a.body);
+            }
+        }
+        if (m_encoding_goal && t.encoding_goal_recorded)
+        {
+            o << "EG " << (t.encoding_goal_complete ? 1 : 0) << " " << t.encoding_goal.count << "\n";
+            for (const auto& l : t.encoding_goal_literals())
+            {
+                o << l.pred.v << " " << (l.positive ? 1 : 0);
+                for (Term x : t.terms_of(l))
+                    o << " " << term_object(x).v;
+                o << "\n";
             }
         }
         return o.str();
@@ -609,6 +643,7 @@ private:
     }
 
     const TaskData& t;
+    bool m_encoding_goal;
     bool m_numeric;
     std::ostringstream o;
 };
@@ -624,5 +659,5 @@ TaskData read_task_text_file(const std::string& path)
     return read_task_text(in);
 }
 
-std::string write_task_text(const TaskData& t) { return Writer(t).write(); }
+std::string write_task_text(const TaskData& t, bool encoding_goal) { return Writer(t, encoding_goal).write(); }
 }  // namespace mymyr::formalism

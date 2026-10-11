@@ -216,6 +216,15 @@ public:
     [[nodiscard]] State make_state(std::span<const AtomArgs> atoms, std::span<const f64> values = {}) const;
     /// Goal test. Evaluates the axioms (in a workspace of its own) when the goal mentions derived predicates.
     [[nodiscard]] bool is_goal(StateView s) const;
+    /// The goal as written, expanded into signed ground literals (TaskData::encoding_goal), for encodings; sorted by
+    /// (positive first, predicate id, objects) without duplicates. The planner's goal test is unaffected.
+    [[nodiscard]] std::span<const formalism::Literal> encoding_goal() const noexcept { return m_data.encoding_goal_literals(); }
+    /// Whether encoding_goal() is the whole goal: false when a conjunct could not be expanded (`or`, `exists`, `imply`
+    /// over fluents, `not and`, numeric constraints, too many quantifier bindings), or when the task came from a text without the goal as written and its
+    /// planner goal mentions predicates that goal normalization introduced.
+    [[nodiscard]] bool encoding_goal_complete() const noexcept { return m_data.encoding_goal_complete; }
+    /// Whether a literal of encoding_goal() over a static predicate fails in the initial atoms: no state is a goal.
+    [[nodiscard]] bool encoding_goal_unsatisfiable() const noexcept { return m_data.encoding_goal_unsatisfiable; }
     /// Order-independent hash of a state over the canonical ids of its atoms: equal for equal states under any slot
     /// numbering (lazy slots depend on the order of first touch), so it identifies states across runs and threads.
     /// Numeric tasks: it also covers the numeric values, as canonical doubles (the same under I32 and F64 slots).

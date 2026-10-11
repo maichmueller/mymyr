@@ -27,6 +27,8 @@ std::shared_ptr<const Task> Task::from_text_file(const std::string& path, const 
 Task::Task(Private, formalism::TaskData data, const TaskOptions& options) : m_data(std::move(data)), m_options(options)
 {
     const auto t0 = std::chrono::steady_clock::now();
+    if (!m_data.encoding_goal_recorded)
+        formalism::set_encoding_goal_from_normalized(m_data);
     formalism::validate(m_data);
     detail::check_supported(m_data);
     detail::compile_task(m_data, m_options, m_compiled);
