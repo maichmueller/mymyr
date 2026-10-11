@@ -28,6 +28,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -815,7 +816,10 @@ void bind_datasets(nb::module_& parent)
                 const Owner& o = g.space.owner;
                 const Task& task = *o.core->task;
                 nb::typed<nb::list, PyGroundAtom> out{nb::list()};
-                for (const u32 s : g.graph->tuple(tuple_vertex(*g.graph, v)))
+                std::vector<u32> slots = to_vector(g.graph->tuple(tuple_vertex(*g.graph, v)));
+                if (!task.atoms().frozen())
+                    std::ranges::sort(slots, {}, [&](u32 s) { return task.atoms().canonical(mymyr::AtomKind::Fluent, s); });
+                for (const u32 s : slots)
                 {
                     const SlotId slot{s};
                     const auto args = task.atoms().arguments(slot);
@@ -824,7 +828,7 @@ void bind_datasets(nb::module_& parent)
                 }
                 return out;
             },
-            "vertex"_a, "The vertex's tuple as GroundAtoms (slot order).")
+            "vertex"_a, "The vertex's tuple as GroundAtoms, in the task's canonical atom order (the same under every atom mode).")
         .def("problem_vertices",
              [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->problem_vertices(tuple_vertex(*g.graph, v))); }, "vertex"_a,
              "The states at the vertex's distance in which its tuple is novel (state ids, ascending).")

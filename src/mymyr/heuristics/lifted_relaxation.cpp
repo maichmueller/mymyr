@@ -12,7 +12,6 @@
 #include <map>
 #include <string>
 #include <unordered_set>
-#include <utility>
 
 namespace mymyr::heuristics::detail
 {
@@ -348,8 +347,8 @@ struct LiftedRelaxation::Impl
     std::vector<u32> rec_op, rec_begin, rec_bind;
     // slot cache: task fluent slot -> canonical id
     std::vector<u64> slot_canon;
-    // lazy slots: the state's slots sorted by canonical id
-    std::vector<std::pair<u64, u64>> slot_order;
+    // lazy slots: the canonical ids of the state's atoms, sorted
+    std::vector<u64> lazy_order;
 };
 
 void LiftedRelaxation::Impl::build()
@@ -784,7 +783,7 @@ Value LiftedRelaxation::Impl::evaluate(StateView s, const std::vector<std::vecto
     // the state's atoms: cost 0, queued in ascending canonical id (fixed slots ascend with it; lazy ones follow the
     // order in which searches met the atoms), so that the ties of the exploration do not depend on the slot numbering
     const AtomIndex& TA = T.atoms();
-    const auto canon = [&](u64 slot)
+    const auto canonical_of = [&](u64 slot)
     {
         if (slot >= slot_canon.size())
             slot_canon.resize(slot + 1, ~u64{0});
@@ -804,13 +803,13 @@ Value LiftedRelaxation::Impl::evaluate(StateView s, const std::vector<std::vecto
         queue.push(0, x);
     };
     if (TA.frozen())
-        bits::for_each(s.w, s.nw, [&](u64 slot) { start(canon(slot)); });
+        bits::for_each(s.w, s.nw, [&](u64 slot) { start(canonical_of(slot)); });
     else
     {
-        slot_order.clear();
-        bits::for_each(s.w, s.nw, [&](u64 slot) { slot_order.push_back({canon(slot), slot}); });
-        std::sort(slot_order.begin(), slot_order.end());
-        for (const auto& [c, slot] : slot_order)
+        lazy_order.clear();
+        bits::for_each(s.w, s.nw, [&](u64 slot) { lazy_order.push_back(canonical_of(slot)); });
+        std::sort(lazy_order.begin(), lazy_order.end());
+        for (const u64 c : lazy_order)
             start(c);
     }
 

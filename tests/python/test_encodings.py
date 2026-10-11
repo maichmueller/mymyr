@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import mymyr
-from mymyr import datasets, rl
+from mymyr import datasets, rl, search
 
 from conftest import ROOT, text_task, walk
 
@@ -237,3 +237,42 @@ def test_options_reach_the_table_loaders(grippers):
         rl.TaskTable.from_pddl(domain, grippers, atoms="lazy")
     with pytest.raises(ValueError):
         rl.TaskTable.from_pddl(domain, grippers, numeric_quantum=-0.5)
+
+
+def lazy_after_a_search(name):
+    """A lazy task whose slots a randomized search numbered (in an order unlike the canonical one)."""
+    task = text_task(name, atoms="lazy")
+    search.brfs(task, max_states=3000, layer_order="randomized", seed=3, stop_at_goal=False)
+    return task
+
+
+def test_heuristics_and_atom_listings_do_not_depend_on_lazy_slots():
+    fixed, lazy = text_task("depot__p02"), lazy_after_a_search("depot__p02")
+    kinds = ("ff", "add", "max", "set_additive", "h2", "goal_count")
+    hf = {k: search.Heuristic(fixed, k) for k in kinds}
+    hl = {k: search.Heuristic(lazy, k) for k in kinds}
+    a, b = fixed.initial_state, lazy.initial_state
+    for s in walk(fixed, steps=60, seed=4, walks=1)[1:] + [None]:
+        assert [str(x) for x in a.atoms()] == [str(x) for x in b.atoms()]
+        assert str(a) == str(b)
+        for k in kinds:
+            assert hf[k].evaluate(a) == hl[k].evaluate(b), k
+        assert sorted(map(str, hf["ff"].relaxed_plan(a))) == sorted(map(str, hl["ff"].relaxed_plan(b)))
+        if s is None:
+            break
+        label = next(str(x) for x in fixed.applicable_actions(a) if fixed.apply(a, x) == s)
+        a, b = s, lazy.apply(b, next(x for x in lazy.applicable_actions(b) if str(x) == label))
+    for run in (lambda t: search.gbfs(t, heuristic="ff", max_expanded=5000),
+                lambda t: search.beam(t, width=32, max_expanded=5000)):
+        rf, rl_ = run(fixed), run(lazy)
+        assert [str(x) for x in rf.plan] == [str(x) for x in rl_.plan] and rf.stats.expanded == rl_.stats.expanded
+
+
+def test_tuple_graph_atoms_do_not_depend_on_lazy_slots():
+    fixed, lazy = text_task("gripper__prob05"), lazy_after_a_search("gripper__prob05")
+    sf, sl = datasets.state_space(fixed), datasets.state_space(lazy)
+    for root in range(0, sf.num_states, sf.num_states // 5):
+        gf, gl = datasets.tuple_graph(sf, root, width=2), datasets.tuple_graph(sl, root, width=2)
+        assert len(gf) == len(gl)
+        for v in range(len(gf)):
+            assert [str(x) for x in gf.atoms(v)] == [str(x) for x in gl.atoms(v)]
