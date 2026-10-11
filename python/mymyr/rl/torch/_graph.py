@@ -25,6 +25,10 @@ class Rollout(NamedTuple):
     binding: Tensor  # int32 [K, N, label_width]
     final_states: Tensor  # int64 [K, N, row_words] with final=True, else [K, 0, row_words]
     count: Tensor  # int32 [K, N]: successors after each step
+    states: Tensor
+    task_ids: Tensor
+    goal_pos: Tensor
+    goal_neg: Tensor
 
 
 class CapturedRollout:
@@ -93,6 +97,10 @@ class CapturedRollout:
                 torch.empty((K, n, env.label_width), dtype=torch.int32, device=dev),
                 torch.empty((K, rows, env.row_words), dtype=env.states.dtype, device=dev),
                 torch.empty((K, n), dtype=torch.int32, device=dev),
+                torch.empty((K, n, env.row_words), dtype=env.states.dtype, device=dev),
+                torch.empty((K, n), dtype=torch.int32, device=dev),
+                torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
+                torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
             )  # fmt: skip
             actions = None if policy is None else torch.empty((K, n), dtype=torch.int64, device=dev)
             for k in range(K):

@@ -3,6 +3,7 @@
 //   consumer <task.txt>                     (core only)
 #include "mymyr/search/iw.hpp"
 #include "mymyr/search/astar_iw.hpp"
+#include "mymyr/encoding/flat.hpp"
 #include "mymyr/novelty/minimum_g_table.hpp"
 #include "mymyr/task/task.hpp"
 #include "mymyr/version.hpp"
@@ -34,6 +35,11 @@ int main(int argc, char** argv)
         }
         const auto task = mymyr::Task::from_text_file(argv[1]);
 #endif
+        const mymyr::encoding::FlatRelationEncoder encoder(task);
+        const mymyr::State initial = task->initial_state();
+        const auto encoded = encoder.encode({initial.data(), 1, initial.size_words()});
+        if (encoded.graphs != 1 || encoded.schema->version != 1)
+            return 1;
         const mymyr::search::IwResult result = mymyr::search::iw(*task);
         std::printf("mymyr %.*s: IW %s, plan length %zu\n", static_cast<int>(mymyr::version().size()), mymyr::version().data(),
                     mymyr::search::to_string(result.status), result.plan.size());

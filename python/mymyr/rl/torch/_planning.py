@@ -24,7 +24,7 @@ class PlanningEnv(EnvBase):
     move). Reward [N, 1] float32: step_reward, plus goal_reward on reaching a goal, plus dead_end_reward on reaching
     (or being stuck in) a dead end. ``terminated`` = goal or dead end (``dead_end_terminal``), ``truncated`` =
     max_steps reached (0: never), ``done`` = either. Finished environments are reset by TorchRL (``_reset`` masks); the
-    reset tensordict may carry ``task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
+    reset tensordict may carry ``next_task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
     ``goal_pos`` / ``goal_neg``. The environments never autoreset themselves. Every reset waits for the device work
     and raises the device environment's errors (``BatchedEnv.check_errors``: a ``task_id`` outside the table, states
     written into ``batched`` without ``refresh``).
@@ -52,13 +52,14 @@ class PlanningEnv(EnvBase):
         num_envs: int,
         *,
         task_ids: Optional[Any] = None,
+        sampler: Any = "auto",
         device: Union[str, torch.device] = "cpu",
         max_actions: Optional[int] = None,
         goals: bool = False,
         seed: int = 0,
         max_steps: int = 0,
-        step_reward: float = -1.0,
-        goal_reward: float = 0.0,
+        step_reward: float = 0.0,
+        goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
@@ -70,12 +71,12 @@ class PlanningEnv(EnvBase):
         graph: bool = True,
     ) -> None:
         env = BatchedEnv(
-            table, num_envs, task_ids=task_ids, device=device, goals=goals, seed=seed, max_steps=max_steps,
+            table, num_envs, task_ids=task_ids, sampler=sampler, device=device, goals=goals, seed=seed, max_steps=max_steps,
             step_reward=step_reward, goal_reward=goal_reward, dead_end=dead_end, dead_end_reward=dead_end_reward,
             dead_end_terminal=dead_end_terminal, autoreset=False, witness=witness, path=path, threads=threads, ctx=ctx,
             first_env=first_env,
         )  # fmt: skip
-        super().__init__(device=env.device, batch_size=torch.Size([num_envs]))
+        super().__init__(device=env.device, batch_size=torch.Size([num_envs]), allow_done_after_reset=True)
         self._env = env
         self._K = None if max_actions is None else int(max_actions)
         self._graph_on = bool(graph) and env.capturable
@@ -125,7 +126,7 @@ class PlanningEnv(EnvBase):
 
     def _outputs(self, action: Any, copy: bool = True) -> dict:
         """The step's outputs: the observation after stepping with ``action``, reward and flags."""
-        r = self._env.step(action)
+        r = self._env.step(action, final=False, copy=False)
         out = self._observation(copy)
         out.update(
             reward=r.reward.unsqueeze(-1),
@@ -145,20 +146,27 @@ class PlanningEnv(EnvBase):
             self._static = self._outputs(self._action, copy=False)
 
     def _reset(self, tensordict: Optional[TensorDictBase] = None, **kwargs: Any) -> TensorDictBase:
-        mask = task_ids = goal_pos = goal_neg = None
+        mask = goal_pos = goal_neg = None
+        task_ids = kwargs.get("task_ids")
         if tensordict is not None:
             keys = tensordict.keys()
             if "_reset" in keys:
                 mask = tensordict.get("_reset").reshape(self._env.num_envs)
-            if "task_id" in keys:
-                task_ids = tensordict.get("task_id")
+            if "next_task_id" in keys:
+                task_ids = tensordict.get("next_task_id")
             if self._env.goals and "goal_pos" in keys and "goal_neg" in keys:
                 goal_pos, goal_neg = tensordict.get("goal_pos"), tensordict.get("goal_neg")
         self._env.reset(mask, task_ids=task_ids, goal_pos=goal_pos, goal_neg=goal_neg)
         self._env.check_errors()  # device errors (task ids outside the table, ...) surface here
+        env = self._env
+        goal = torch.empty((env.num_envs,), dtype=torch.bool, device=env.device)
+        env.core.goal(env.states, env.task_ids if env.multi else None, goal_pos=env.goal_pos, goal_neg=env.goal_neg, out=goal)
+        terminated = goal
+        if env.core.dead_end == "no_successors" and env.core.dead_end_terminal:
+            terminated = terminated | (env.count == 0)
         out = self._observation()
-        z = torch.zeros((self._env.num_envs, 1), dtype=torch.bool, device=self._env.device)
-        out.update(done=z, terminated=z.clone(), truncated=z.clone())
+        out.update(done=terminated.unsqueeze(-1), terminated=terminated.unsqueeze(-1).clone(),
+                   truncated=torch.zeros((env.num_envs, 1), dtype=torch.bool, device=env.device))
         return TensorDict(out, batch_size=self.batch_size, device=self.device)
 
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:

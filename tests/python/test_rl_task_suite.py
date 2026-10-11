@@ -359,7 +359,7 @@ def test_captured_suite_rollout_equals_host(sets):
         assert env.capturable
         nxt = torch.zeros(n, dtype=torch.int32, device=dev)
         g = env.capture(K, next_task_ids=nxt, final=True)
-        fields = ("reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "final_states", "count")
+        fields = rt.StepResult._fields
         for r in range(R):
             nxt.copy_(torch.from_numpy(ROT(n, I)(r)))
             out = g.replay()

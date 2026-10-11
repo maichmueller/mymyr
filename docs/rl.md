@@ -33,7 +33,61 @@ successor order.
 The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `step` methods work under
 `jax.jit`, `jax.vmap` and `jax.lax.scan`. JAX device arrays can use the CUDA path. `mymyr.rl.torch.BatchedEnv` provides
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
+
+Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step
+counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
+end from a nonterminal state still receives the configured transition reward once. Draw counters advance once per
+native step, including absorbing steps. `CpuEnvPool.reset()` reports `goal` and `terminated` for the initial states;
+TorchRL resets also report solved or terminal initial states rather than silently starting unfinished episodes.
+The mctx adapter preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero;
+zero-successor tree nodes are terminal even when the environment disables dead-end termination.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
+
+## Transition ownership and replay
+
+Environment and HER defaults use a sparse reach-goal objective: `step_reward=0`, `goal_reward=1`,
+`dead_end_reward=0`. Successful episodes therefore beat early failures instead of paying a negative cost for each
+additional step toward success. Discounting below one favours earlier success; undiscounted sparse returns do not
+distinguish successful plan lengths. For unit-cost shaping, configure `step_reward=-1` explicitly and choose goal
+bonuses/failure penalties consistently with the episode horizon and discount. These rewards do not automatically
+optimize a PDDL action-cost metric.
+
+Torch `BatchedEnv.observation()` snapshots states, task ids, counts and per-environment goals. `step()` returns those
+next-observation tensors in `StepResult`, along with `final_states`, the reached states before autoreset. These
+snapshots survive subsequent steps and resets. The public environment tensors are live buffers for native calls and
+CUDA graphs: use `observation(copy=False)` or `step(copy=False)` only when intentionally borrowing them, and consume
+or copy them before the next mutation. Captured rollout results remain borrowed graph outputs overwritten on replay.
+
+JAX `transition_item` records the source observation's instance and goals and uses the reached state, not the
+autoreset observation, as its next state. Autoreset replay requires `Env(final_state=True)` (the default); the helper
+raises rather than recording an unrelated reset row when final states are disabled. An environment without autoreset
+may disable final states because its next observation is the reached state. Goal-conditioned observations propagate
+their source masks automatically; initialize replay with `transition_example(env, goals=True)` for those items.
+
+The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, verifies that the framework imports and
+XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
+CPU framework bundle used for validation; those packages remain optional runtime dependencies for users.
+
+## Instance sampling and curricula
+
+Without constructor `task_ids`, the torch environments sample uniformly across a table or suite at each reset.
+Explicit constructor ids retain a fixed assignment (`sampler="auto"`); `sampler="uniform"` enables sampling even with
+an explicit initial assignment. JAX `Env.reset(key, N)` samples N instances uniformly; `reset(key, ids)` overrides
+the initial draw. In either framework, `sampler=None` disables sampling and
+`sampler=rl.InstanceSampler(num_instances, weights=[...])` selects a weighted distribution. Weights must be finite,
+nonnegative and not all zero; zero-weight instances are excluded.
+
+Instance draws use the seed, environment id (`first_env + i`) and a per-environment uint32 reset counter, independent
+of action selection. Masked resets advance only reset rows, so splitting a batch or resetting another row cannot
+change a stream. Torch `set_seed(seed)` restarts both action and sampling counters. JAX keeps sampling keys and
+counters in `EnvState`; `reset_where(state, mask, key=new_key)` reseeds only the reset rows. Its sampler contains no
+mutable host RNG and works with `jit`, `vmap` and `scan`.
+
+External curricula override a draw with `reset(task_ids=ids)` or `step(..., next_task_ids=ids)`. A TorchRL reset
+TensorDict uses `next_task_id`, not the observation's `task_id`: collectors therefore do not accidentally pin each
+new episode to the preceding one. For `CpuEnvPool`, use the same sampler's NumPy API and pass the resulting ids to
+`reset(..., task_ids=ids)` or `send(..., next_task_ids=ids)`; the caller owns each row's reset counter in asynchronous
+collection. Sampling does not change the pool's thread-safety or enqueue order.
 
 On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. Host and device
 environments and expansion support numeric fluents, preconditions, effects and goals, preserving the CPU I32/F64 row

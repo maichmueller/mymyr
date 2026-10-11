@@ -42,7 +42,7 @@ function(_mymyr_dependency_closure out_archives)
     set(${out_archives} "${archives}" PARENT_SCOPE)
 endfunction()
 
-set(_sdk_targets mymyr_core)
+set(_sdk_targets mymyr_core mymyr_encoding)
 if(TARGET mymyr_frontend)
     list(APPEND _sdk_targets mymyr_frontend)
     _mymyr_dependency_closure(_frontend_archives

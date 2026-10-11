@@ -67,10 +67,10 @@ void size_batch(PoolBatch& b, u64 n, u32 W, u32 NN, u32 L, bool goals, bool step
     b.goal_pos.resize(goals ? n * W : 0);
     b.goal_neg.resize(goals ? n * W : 0);
     b.reward.resize(step ? n : 0);
-    b.terminated.resize(step ? n : 0);
+    b.terminated.resize(n);
     b.truncated.resize(step ? n : 0);
     b.invalid.resize(step ? n : 0);
-    b.goal.resize(step ? n : 0);
+    b.goal.resize(n);
     b.final_states.resize(step ? n * (W + NN) : 0);
     b.schema.resize(step ? n : 0);
     b.binding.resize(step ? n * L : 0);
@@ -415,6 +415,9 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
             std::copy_n(goal_pos + p * I.W, I.W, I.gpos.begin() + static_cast<std::ptrdiff_t>(u64{e} * I.W));
             std::copy_n(goal_neg + p * I.W, I.W, I.gneg.begin() + static_cast<std::ptrdiff_t>(u64{e} * I.W));
         }
+        out.goal[p] = I.env.goal_row(I.batch, e) ? 1 : 0;
+        out.terminated[p] = out.goal[p] || (out.count[p] == 0 && I.env.config().dead_end == DeadEnd::NoSuccessors &&
+                                          I.env.config().dead_end_terminal) ? 1 : 0;
         I.observe(e, out, p);
     }
     return out;

@@ -270,8 +270,8 @@ void bind_rl_ops(nb::module_& parent)
           "s.");
     m.def("her_relabel", &her_relabel, "states"_a, "done"_a, "goal"_a, "source"_a = nb::none(), "achieved"_a = nb::none(),
           "reward"_a = nb::none(), nb::kw_only(), "strategy"_a = "future", "subset"_a = 0, "seed"_a = 0,
-          "first_env"_a = 0, "env_ids"_a = nb::none(), "goal_atoms"_a = nb::none(), "step_reward"_a = -1.0f,
-          "goal_reward"_a = 0.0f, "stream"_a = nb::none(),
+          "first_env"_a = 0, "env_ids"_a = nb::none(), "goal_atoms"_a = nb::none(), "step_reward"_a = 0.0f,
+          "goal_reward"_a = 1.0f, "stream"_a = nb::none(),
           "Hindsight relabels (rl/her.hpp) of states [T, N, RW] (64-bit words or 32-bit halves; the reached states) "
           "and done [T, N] into goal [T, N, k, W] (k relabels, W <= RW goal words), source [T, N, k] int32, achieved "
           "[T, N, k] bool and reward [T, N, k] float32. subset 0: every atom of the source state (restricted to "

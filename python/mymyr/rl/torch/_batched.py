@@ -6,15 +6,30 @@ import torch
 from torch import Tensor
 
 from mymyr._core import _rl, _rl_torch
+from mymyr.rl._sampling import _instance_sampler
 
 from . import _ops
 from ._graph import CapturedRollout
 
-__all__ = ["BatchedEnv", "StepResult"]
+__all__ = ["BatchedEnv", "Observation", "StepResult"]
+
+
+class Observation(NamedTuple):
+    """Owned policy inputs by default; :meth:`BatchedEnv.observation` can explicitly borrow live tensors."""
+
+    states: Tensor
+    task_ids: Tensor
+    count: Tensor
+    goal_pos: Tensor
+    goal_neg: Tensor
 
 
 class StepResult(NamedTuple):
-    """The outputs of one :meth:`BatchedEnv.step` ([N] each, on the environments' device)."""
+    """The outputs of one :meth:`BatchedEnv.step`, including a stable next observation.
+
+    ``final_states`` precedes autoreset; ``states`` / ``task_ids`` / goal masks describe the next policy observation.
+    Empty goal masks have shape [N, 0]. The native environment's public tensors remain borrowed live buffers.
+    """
 
     reward: Tensor  # float32
     terminated: Tensor  # bool: goal reached, or a dead end (dead_end_terminal)
@@ -25,6 +40,10 @@ class StepResult(NamedTuple):
     binding: Tensor  # [N, label_width] int32 objects of the row's instance (-1 padding)
     final_states: Tensor  # [N, row_words] int64 with final=True (the reached states before the autoreset), else [0, *]
     count: Tensor  # int32: successors of the state after the step (a copy)
+    states: Tensor
+    task_ids: Tensor
+    goal_pos: Tensor
+    goal_neg: Tensor
 
 
 def _device_index(device: torch.device) -> Optional[int]:
@@ -75,7 +94,10 @@ class BatchedEnv:
     in place (on torch's current stream), so they trace under ``torch.compile``. Writing ``states`` or ``task_ids``
     directly needs :meth:`refresh`.
 
-    ``autoreset=True`` restarts finished environments within the step, in their own instance or in
+    ``sampler="auto"`` samples instances uniformly unless constructor ``task_ids`` pin the assignment. ``sampler=None``
+    keeps instances, ``"uniform"`` always samples, and ``rl.InstanceSampler(I, weights)`` specifies a weighted
+    curriculum. Sampling uses independent per-env reset counters, so partial resets and batch splits agree.
+    ``autoreset=True`` restarts finished environments within the step in sampled instances or explicit
     ``next_task_ids[i]`` (``final=True`` returns the reached states); TorchRL's convention is ``autoreset=False`` plus
     ``reset(mask)``. ``step(action=None)`` is the random policy: a uniform successor from the counter-based RNG (seed,
     env id ``first_env + i``, draw counter), the same on the CPU and on any device and batch split.
@@ -94,12 +116,13 @@ class BatchedEnv:
         num_envs: int,
         *,
         task_ids: Optional[Any] = None,
+        sampler: Any = "auto",
         device: Union[str, torch.device] = "cpu",
         goals: bool = False,
         seed: int = 0,
         max_steps: int = 0,
-        step_reward: float = -1.0,
-        goal_reward: float = 0.0,
+        step_reward: float = 0.0,
+        goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
@@ -123,11 +146,15 @@ class BatchedEnv:
         self.num_envs = int(num_envs)
         self.first_env = int(first_env)
         self.multi = self.core.num_instances > 1
+        self.sampler = _instance_sampler(sampler, self.core.num_instances, default_uniform=task_ids is None)
+        self._autoreset = bool(autoreset)
         n, d = self.num_envs, self.device
         self.states = torch.zeros((n, self.core.row_words), dtype=torch.int64, device=d)
         self.task_ids = torch.zeros(n, dtype=torch.int32, device=d)
-        if task_ids is not None:
-            self.task_ids.copy_(_task_ids(self.core, task_ids, None, n, d, "task_ids"))
+        self._reset_counts = torch.zeros(n, dtype=torch.int64, device=d)
+        self._sampling_seed = torch.tensor([int(seed) & 0xFFFFFFFF, (int(seed) >> 32) & 0xFFFFFFFF], device=d)
+        self._sampling_env_ids = torch.arange(self.first_env, self.first_env + n, dtype=torch.int64, device=d)
+        self._sampling_arrays = None if self.sampler is None else self.sampler._arrays(self.task_ids)
         self.steps = torch.zeros(n, dtype=torch.int32, device=d)
         self.draws = torch.zeros(n, dtype=torch.int64, device=d)
         self.counts = torch.zeros((n, self.core.cache_schemas), dtype=torch.int32, device=d)
@@ -144,7 +171,8 @@ class BatchedEnv:
             self.core.reserve(n)
             for t in self._tensors():
                 torch._dynamo.mark_static_address(t)
-        self.reset()
+        initial_ids = None if task_ids is None else _task_ids(self.core, task_ids, None, n, d, "task_ids")
+        self.reset(task_ids=initial_ids)
 
     @property
     def table(self) -> Any:
@@ -173,9 +201,29 @@ class BatchedEnv:
     def _ids(self) -> Optional[Tensor]:
         return self.task_ids if self.multi else None
 
+    def observation(self, *, copy: bool = True) -> Observation:
+        """Policy inputs that survive later steps/resets by default. ``copy=False`` borrows the live buffers."""
+        keep = (lambda tensor: tensor.clone()) if copy else (lambda tensor: tensor)
+        empty = self.states.new_empty((self.num_envs, 0))
+        return Observation(
+            keep(self.states), keep(self.task_ids), keep(self.count),
+            keep(self.goal_pos) if self.goals else empty, keep(self.goal_neg) if self.goals else empty,
+        )
+
     def _tensors(self) -> list[Tensor]:
-        t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count]
+        t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count,
+             self._reset_counts, self._sampling_seed, self._sampling_env_ids]
         return t + ([self.goal_pos, self.goal_neg] if self.goals else [])
+
+    def _sample_task_ids(self) -> Tensor:
+        return self.sampler.sample(
+            self._sampling_seed, self._sampling_env_ids, self._reset_counts, _arrays=self._sampling_arrays
+        )
+
+    def _advance_resets(self, mask: Optional[Tensor] = None) -> None:
+        if self.sampler is not None:
+            increment = 1 if mask is None else mask.to(torch.int64)
+            self._reset_counts.copy_((self._reset_counts + increment) & 0xFFFFFFFF)
 
     def reset(
         self,
@@ -185,12 +233,15 @@ class BatchedEnv:
         goal_pos: Optional[Tensor] = None,
         goal_neg: Optional[Tensor] = None,
     ) -> Tensor:
-        """Resets all environments, or those with mask[i] ([N] bool), to the initial states of their instances;
-        returns ``count``. ``task_ids`` [N] moves the reset rows to those instances first; ``goal_pos`` / ``goal_neg``
+        """Resets all environments, or those with mask[i] ([N] bool), to sampled instances (their current instances
+        with sampler=None); returns ``count``. ``task_ids`` [N] overrides sampling for reset rows; ``goal_pos`` / ``goal_neg``
         [N, words] (goals=True) set the reset rows' goals (default: their instances' goals)."""
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
-        if task_ids is not None:
+        if task_ids is None and self.sampler is not None:
+            new = self._sample_task_ids()
+            self.task_ids.copy_(_where(mask, new, self.task_ids))
+        elif task_ids is not None:
             new = _task_ids(self.core, task_ids, mask, self.num_envs, self.device, "reset")
             self.task_ids.copy_(_where(mask, new, self.task_ids))
         keep = goal_pos is not None or goal_neg is not None
@@ -207,6 +258,7 @@ class BatchedEnv:
             torch.ops.mymyr.reset(*args)
         else:
             _ops.reset_impl(*args)  # eager: without the dispatcher's round trip
+        self._advance_resets(mask)
         return self.count
 
     def refresh(self) -> Tensor:
@@ -219,23 +271,33 @@ class BatchedEnv:
         return self.count
 
     def step(
-        self, action: Optional[Tensor] = None, *, next_task_ids: Optional[Tensor] = None, final: bool = False
+        self, action: Optional[Tensor] = None, *, next_task_ids: Optional[Tensor] = None, final: bool = True,
+        copy: bool = True,
     ) -> StepResult:
         """One step of every environment; ``action`` [N] int64 indexes the canonical successor order (None: the
-        random policy); ``next_task_ids`` [N] names the instances autoresetting environments restart in (None: their
-        own)."""
+        random policy); ``next_task_ids`` [N] overrides sampling for autoresetting environments (None: sample,
+        or keep their instances with sampler=None). ``final=True`` retains the reached state before reset;
+        ``copy=True`` owns the next observation. ``copy=False`` explicitly borrows live observation buffers."""
         args = self._step_args(action, next_task_ids, final)
         if torch.compiler.is_compiling():
             r = (torch.ops.mymyr.step if self.capturable else torch.ops.mymyr.step_sync)(*args)
         else:
             r = _ops.step_impl(*args)
-        return StepResult(*r, count=self.count.clone())
+        if self._autoreset:
+            self._advance_resets(r[1] | r[2])
+        observation = self.observation(copy=copy)
+        return StepResult(*r, observation.count, observation.states, observation.task_ids,
+                          observation.goal_pos, observation.goal_neg)
 
     def _step_args(self, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool) -> tuple:
         if action is not None:
             action = action.reshape(self.num_envs).to(device=self.device, dtype=torch.int64).contiguous()
+        sampled = next_task_ids is None and self.sampler is not None and self._autoreset
+        if sampled:
+            next_task_ids = self._sample_task_ids()
         if next_task_ids is not None:
-            next_task_ids = _task_ids(self.core, next_task_ids, None, self.num_envs, self.device, "next_task_ids")
+            if not sampled:
+                next_task_ids = _task_ids(self.core, next_task_ids, None, self.num_envs, self.device, "next_task_ids")
             if not self.multi:
                 next_task_ids = None  # a table of one: every instance is 0
         return (
@@ -249,7 +311,14 @@ class BatchedEnv:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
         outputs)."""
         _ops.step_impl(*self._step_args(action, next_task_ids, final), out=tuple(out)[:8])
+        if self._autoreset:
+            self._advance_resets(out.terminated | out.truncated)
         out.count.copy_(self.count)
+        out.states.copy_(self.states)
+        out.task_ids.copy_(self.task_ids)
+        if self.goals:
+            out.goal_pos.copy_(self.goal_pos)
+            out.goal_neg.copy_(self.goal_neg)
 
     def random_actions(self, max_actions: int = 0) -> Tensor:
         """The random policy's next choices without stepping ([N] int64 on ``device``): the successors ``step(None)``
@@ -262,11 +331,16 @@ class BatchedEnv:
         return _ops.random_actions_impl(*args)
 
     def set_seed(self, seed: int) -> None:
-        """A new RNG key; the draw counters restart at 0. On a device, both in stream order on torch's current stream:
+        """New action and sampling RNG keys; action draw and instance reset counters restart at 0. On a device,
+        both in stream order on torch's current stream:
         steps enqueued before draw with the old key, steps and graph replays after with the new one."""
         stream = torch.cuda.current_stream(self.device) if self.device.type == "cuda" else None
         self.core.set_seed(int(seed), stream=stream)
         self.draws.zero_()
+        self._sampling_seed.copy_(torch.tensor(
+            [int(seed) & 0xFFFFFFFF, (int(seed) >> 32) & 0xFFFFFFFF], device=self.device
+        ))
+        self._reset_counts.zero_()
 
     def capture(
         self,

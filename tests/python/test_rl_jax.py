@@ -422,7 +422,7 @@ def test_flashbax_item_buffer():
             ]
             assert len(j) == 1 and np.array_equal(x.succ[j[0]], nxt[i])
             assert bool(sample["goal"][i]) == bool(x.goal[j[0]])
-            assert float(sample["reward"][i]) == -1.0 + float(x.goal[j[0]])
+            assert float(sample["reward"][i]) == float(x.goal[j[0]])
 
 
 # ------------------------------------------------------------------------------------------------ jnp helpers

@@ -39,6 +39,7 @@ void bind_datasets(nb::module_& parent);
 void bind_rl_torch(nb::module_& parent);
 void bind_rl_jax(nb::module_& parent);
 void bind_rl_ops(nb::module_& parent);
+void bind_encoding(nb::module_& parent);
 #if defined(MYMYR_HAS_CUDA)
 void bind_cuda(nb::module_& parent);
 void bind_cuda_datasets(nb::module_& parent);
@@ -125,6 +126,7 @@ NB_MODULE(_core, m)
     mymyr::python::bind_rl_torch(m);
     mymyr::python::bind_rl_jax(m);
     mymyr::python::bind_rl_ops(m);
+    mymyr::python::bind_encoding(m);
     mymyr::python::bind_search(m);
     mymyr::python::bind_datasets(m);
     mymyr::python::bind_ext_api(m);
