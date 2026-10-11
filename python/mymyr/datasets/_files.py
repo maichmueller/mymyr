@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
+import secrets
 import zipfile
 from collections.abc import Sequence
 from typing import Any, BinaryIO
@@ -205,9 +205,9 @@ def save(obj: Dataset, path: str | os.PathLike[str] | BinaryIO, *, compress: boo
     their tasks (their PDDL, or the normalized text of a task made from one) and the tasks' fingerprints.
 
     The file is a zip archive of a JSON header and NumPy .npy arrays (format "mymyr.datasets", version 1), which
-    numpy.load also opens; it contains no pickle. compress: deflate the members (smaller,
-    slower). A path is written to a temporary file next to it first and then renamed, so an interrupted save leaves no
-    partial file. Read it back with mymyr.datasets.load.
+    numpy.load also opens; it contains no pickle. compress: deflate the members (smaller, slower). A path is written
+    to a new file next to it first and then renamed, so an interrupted save leaves no partial file. Read it back with
+    mymyr.datasets.load.
     """
     method = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     if hasattr(path, "write"):
@@ -215,13 +215,16 @@ def save(obj: Dataset, path: str | os.PathLike[str] | BinaryIO, *, compress: boo
             _write(zf, obj)
         return
     target = os.fspath(path)
-    fd, tmp = tempfile.mkstemp(prefix=".mymyr-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(target)))
+    # a new file next to the target (permissions from the umask, as open() gives them), renamed when complete
+    head, tail = os.path.split(os.path.abspath(target))
+    tmp = os.path.join(head, f".{tail}.{secrets.token_hex(8)}.tmp")
     try:
-        with os.fdopen(fd, "wb") as f, zipfile.ZipFile(f, "w", compression=method, allowZip64=True) as zf:
+        with open(tmp, "xb") as f, zipfile.ZipFile(f, "w", compression=method, allowZip64=True) as zf:
             _write(zf, obj)
         os.replace(tmp, target)
     except BaseException:
-        os.unlink(tmp)
+        if os.path.exists(tmp):
+            os.unlink(tmp)
         raise
 
 

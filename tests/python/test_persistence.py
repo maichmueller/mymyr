@@ -392,6 +392,9 @@ def test_save_and_load_state_spaces(tmp_path):
     s = datasets.state_space(task)
     path = tmp_path / "counters.mymyr"
     datasets.save(s, path)
+    (tmp_path / "plain").write_bytes(b"")
+    assert path.stat().st_mode & 0o777 == (tmp_path / "plain").stat().st_mode & 0o777  # as open() creates files
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["counters.mymyr", "plain"]
     same_space(s, datasets.load(path))
     same_space(s, datasets.load(str(path), task=task))
     assert datasets.load(path, task=task).task is task
