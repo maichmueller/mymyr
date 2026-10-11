@@ -617,7 +617,8 @@ struct DeviceEnv::Impl
         if (b.words != W)
             throw std::invalid_argument("mymyr: device env: state rows of " + std::to_string(b.words) + " words; the device "
                                         "env takes exactly " + std::to_string(W));
-        if (fast && b.rows && (!b.counts || !b.views))
+        // views of zero words (instances whose kernels read no view) may come as a null pointer
+        if (fast && b.rows && (!b.counts || (V && !b.views)))
             throw std::invalid_argument("mymyr: device env: the fast path needs the cache arrays (counts [rows, " +
                                         std::to_string(C) + "], views [rows, " + std::to_string(V) + "])");
     }
