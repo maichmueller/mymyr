@@ -98,8 +98,7 @@ C4_L1 and C4_L2 subgoal layers at levels 1 and 2 (layer one is ``[sg]``, layer t
 targets; C5B history without targets and ``history_max_steps``; C7A to C7F horizon encoders (full/include,
 delta/exclude, delta/encode_only with parent relation and actions, action/exclude, the rooted encoder with defaults and
 with sibling and cousin relations); C8A and C8B the transition and transition-effects encoders; C9A to C9C HGraph
-(default, nullary predicates, actions). Horizon, transition and HGraph configs encode two states per task. The id
-C6 is unused.
+(default, nullary predicates, actions). Horizon, transition and HGraph configs encode two states per task.
 
 Every option the configurations use exists in mifrost 0.6.0. Behaviours that shaped the selection of configurations
 are listed in ``FINDINGS`` and printed by ``--introspect``.
@@ -142,7 +141,7 @@ ROLE_NAMES = (
 )
 
 # Behaviours of mifrost 0.6.0 that shape the selection of configurations; `--introspect` prints them.
-#  * Every option the configurations use exists; none had to be left out.
+#  * Every option the configurations use exists.
 #  * HGraphEncoder(add_nullary_predicates=True) rejects a nullary goal literal ("Node feature dim mismatch"), so C9B
 #    only runs on tasks whose goals have no nullary literal.
 #  * Packing relation arguments relation-major only differs from graph-major for batches; single-graph fixtures
@@ -669,7 +668,7 @@ def export_task(mifrost, entry):
                 schema = outputs.pop("_schema", None)
                 if schema is not None and configs[config_id]["catalog"] is None:
                     configs[config_id]["catalog"] = catalogs.add(schema)
-            except Exception as error:  # noqa: BLE001 - recorded as a finding
+            except Exception as error:  # noqa: BLE001 - recorded in the record's outputs as `error`
                 if RAISE:
                     raise
                 outputs = dict(error=f"{type(error).__name__}: {error}")
