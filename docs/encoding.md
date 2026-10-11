@@ -131,7 +131,9 @@ relations.
   static predicates and derived predicates can be dropped (`include_static`, `include_derived`). Nullary predicates
   (`nullary=True`, the default) have relations of arity 1: their atoms are tuples over one auxiliary entity per graph
   (slot role `auxiliary_slot`, entity role `auxiliary`); with `nullary=False` they and the auxiliary role are absent.
-  Action schemas of one name (a disjunctive precondition splits an action) share one relation of the written arity.
+  An action relation holds the schema's full parameter list (the written parameters and the ones normalization adds
+  for existential variables). Schemas of one name and arity (a disjunctive precondition splits an action) share one
+  relation; a name with several arities has one relation `name#arity` per arity.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
   depend on declaration order, on predicate ids, on the process or on the build.
