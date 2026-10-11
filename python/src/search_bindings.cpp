@@ -2652,7 +2652,16 @@ void bind_search(nb::module_& parent)
             return result_reduce("astar_iw", x.o, nb::tuple(fields));
         });
 
-    m.def("_restore_search_result", &restore_result, "kind"_a, "task"_a, "fingerprint"_a, "fields"_a,
+    using RestoredResult =
+        nb::typed<nb::object, std::variant<PyIwResult, PySiwResult, PyBestFirstResult, PyBrfsResult, PyRolloutIwResult,
+                                           PyLandingState, PyMergedLandingStates, PyParallelRollouts, PyRolloutResult,
+                                           PyPortfolioResult>>;
+    m.def(
+        "_restore_search_result",
+        [](std::string_view kind, TaskArg task, u64 fingerprint, nb::typed<nb::tuple, ann::Any, nb::ellipsis> fields) {
+            return RestoredResult(restore_result(kind, task, fingerprint, fields));
+        },
+        "kind"_a, "task"_a, "fingerprint"_a, "fields"_a,
           "The search result of a result pickle (mymyr._pickle).");
 
     // searches --------------------------------------------------------------------------------------------------------

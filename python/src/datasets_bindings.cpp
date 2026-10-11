@@ -503,7 +503,15 @@ StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stat
 }
 
 /// The generation statistics of a space: (threads, layers, search_seconds, post_seconds).
-nb::tuple space_stats(const StateSpace& S) { return nb::make_tuple(S.threads(), S.layers(), S.search_seconds(), S.post_seconds()); }
+/// (threads, layers, search seconds, post seconds) of a state space.
+using SpaceStats = nb::typed<nb::tuple, u32, u32, double, double>;
+/// Arrays by name, as given to from_arrays and the reconstructors.
+using ArraysArg = Arg<nb::typed<nb::mapping, std::string, ann::ArrayLike>>;
+
+SpaceStats space_stats(const StateSpace& S)
+{
+    return SpaceStats(nb::make_tuple(S.threads(), S.layers(), S.search_seconds(), S.post_seconds()));
+}
 
 /// A fresh NumPy u64 array (the lazy slot table).
 nb::object fresh_u64(const std::vector<u64>& v)
@@ -693,7 +701,7 @@ KnowledgeBaseOptions kb_options(u32 threads, nb::handle max_states, nb::handle m
     return o;
 }
 
-using SpaceState = nb::typed<nb::tuple, PyTask, int, int, std::optional<ann::Any>, nb::tuple, ArrayDict>;
+using SpaceState = nb::typed<nb::tuple, PyTask, int, int, std::optional<ann::Any>, SpaceStats, ArrayDict>;
 
 /// The pickled (and saved) state of a state space: (task, fingerprint, encoding fingerprint, lazy slots (None for
 /// frozen slots), statistics, arrays with the rows).
@@ -1545,15 +1553,17 @@ void bind_datasets(nb::module_& parent)
           "StateSpace pickles and saves.");
     m.def(
         "_restore_state_space",
-        [](TaskArg task, u64 fingerprint, u64 encoding_fingerprint, nb::handle slots, nb::tuple stats, nb::handle arrays) {
-            return restore_space(task, fingerprint, encoding_fingerprint, slots, stats, arrays);
+        [](TaskArg task, u64 fingerprint, u64 encoding_fingerprint, std::optional<Arg<ann::ArrayLike>> slots, Arg<SpaceStats> stats,
+           ArraysArg arrays) {
+            return restore_space(task, fingerprint, encoding_fingerprint, slots ? nb::handle(*slots) : nb::none(), stats,
+                                 arrays);
         },
         "task"_a, "fingerprint"_a, "encoding_fingerprint"_a, "slots"_a.none(), "stats"_a, "arrays"_a,
         "The state space of _state_space_state's parts, of `task` (checked against the fingerprints; a task with lazy "
         "atom slots takes the saved numbering).");
     m.def(
         "_restore_tuple_graph",
-        [](Arg<PyStateSpace> space, u32 root, u32 width, bool dominance_pruning, nb::handle arrays) {
+        [](Arg<PyStateSpace> space, u32 root, u32 width, bool dominance_pruning, ArraysArg arrays) {
             return PyTupleGraph{
                 std::make_shared<const TupleGraph>(tuple_graph_from_arrays(space_arg(space).space, root, width, dominance_pruning, arrays)),
                 space};
@@ -1574,13 +1584,13 @@ void bind_datasets(nb::module_& parent)
                 space = g.graph->space().get();
                 gs.push_back(g.graph.get());
             }
-            return pack_tuple_graphs(gs);
+            return ArrayDict(pack_tuple_graphs(gs));
         },
         "graphs"_a, "Tuple graphs of one state space packed into arrays: meta [G, 3] (root, width, dominance_pruning), "
         "sizes [G, 11] and the graphs' arrays concatenated.");
     m.def(
         "_unpack_tuple_graphs",
-        [](Arg<PyStateSpace> space, nb::handle packed) {
+        [](Arg<PyStateSpace> space, ArraysArg packed) {
             std::vector<TupleGraph> gs = unpack_tuple_graphs(space_arg(space).space, packed);
             nb::typed<nb::list, PyTupleGraph> out{nb::list()};
             for (TupleGraph& g : gs)
@@ -1593,13 +1603,15 @@ void bind_datasets(nb::module_& parent)
           "pickles and saves.");
     m.def(
         "_restore_knowledge_base",
-        [](nb::handle table, nb::handle options, nb::handle spaces, nb::handle indices, nb::handle packs) {
-            return restore_kb(table, options, spaces, indices, packs);
+        [](Arg<PyTable> table, Arg<KbOptions> options, Arg<nb::typed<nb::sequence, PyStateSpace>> spaces,
+           Arg<nb::typed<nb::sequence, int>> indices, std::optional<Arg<nb::typed<nb::sequence, ArraysArg>>> packs) {
+            return restore_kb(table, options, spaces, indices, packs ? nb::handle(*packs) : nb::none());
         },
         "tasks"_a, "options"_a, "spaces"_a, "task_indices"_a, "tuple_graphs"_a.none());
     m.def(
         "_restore_generation_result",
-        [](int status, nb::handle space, u64 states, f64 seconds) {
+        [](int status, std::optional<Arg<PyStateSpace>> space_arg, u64 states, f64 seconds) {
+            const nb::handle space = space_arg ? nb::handle(*space_arg) : nb::none();
             if (status < 0 || status > static_cast<int>(StateSpaceStatus::Unsolvable) ||
                 space.is_none() == (status == static_cast<int>(StateSpaceStatus::Ok)) ||
                 (!space.is_none() && !nb::isinstance<PyStateSpace>(space)))

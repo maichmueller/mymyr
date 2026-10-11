@@ -168,7 +168,13 @@ def test_stubs_parse_and_are_typed():
     assert "generalized: bool = False, width: int | None = None, dominance_pruning: bool = True) -> None:" in ds
     assert "def generalized_state_space(self) -> GeneralizedStateSpace | None:" in ds
     assert "def tuple_graphs(self, space: int) -> list[TupleGraph]:" in ds
-    assert "def __getstate__(self) -> tuple[mymyr._core._rl.TaskTable, int," in ds
+    # persistence: rebuilt from arrays, pickled by reduction (mymyr._pickle)
+    arrays = "arrays: Mapping[str, mymyr._typing.SupportsDLPack]"
+    assert f"def from_arrays(task: mymyr._core.Task | mymyr._core.TaskHandle, {arrays}) -> StateSpace:" in ds
+    assert f"def from_arrays(space: StateSpace, root: int, {arrays}, *, width: int, dominance_pruning: bool = True) -> TupleGraph:" in ds
+    assert ds.count("def __reduce__(self) -> tuple[object, ...]: ...") == 5  # spaces, results, GSS, tuple graphs, KBs
+    assert "__getstate__" not in ds and "-> object" not in ds
+    assert ": object" not in ds.replace("def __eq__(self, other: object, /)", "")
     # task suites (several domains), taken wherever a table is
     assert "class TaskSuite:" in rl and "def __init__(self, tables: Sequence[TaskTable]) -> None" in rl
     assert "def group(tasks: Sequence[mymyr._core.Task | mymyr._core.TaskHandle]) -> TaskSuite" in rl
