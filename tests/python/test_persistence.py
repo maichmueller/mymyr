@@ -331,8 +331,16 @@ def test_lazy_atom_slots_round_trip_exactly(tmp_path):
     # a task whose atoms got their slots in another order cannot hold these rows
     other = mymyr.Task.from_pddl(g / "domain.pddl", g / "p02.pddl", atoms="lazy")
     other.state([str(a) for a in reversed(s.state(s.num_states - 1).atoms())])
+    slots = other.num_atoms
     with pytest.raises(ValueError, match="cannot number its lazy atom slots as the state space does"):
         datasets.load(tmp_path / "lazy.mymyr", task=other)
+    assert other.num_atoms == slots  # refused before any slot is assigned
+    # a task whose slots so far agree with the saved numbering takes the rest
+    prefix = mymyr.Task.from_pddl(g / "domain.pddl", g / "p02.pddl", atoms="lazy")
+    prefix.successor_states(prefix.initial_state)
+    assert 0 < prefix.num_atoms < task.num_atoms
+    same_space(s, datasets.load(tmp_path / "lazy.mymyr", task=prefix))
+    assert prefix.num_atoms == task.num_atoms
     with pytest.raises(ValueError, match="saved under lazy atom slots; the task has frozen ones"):
         datasets.load(tmp_path / "lazy.mymyr", task=mymyr.Task.from_pddl(g / "domain.pddl", g / "p02.pddl"))
 

@@ -2051,16 +2051,26 @@ void adopt_lazy_slots(const Task& T, std::span<const u64> lazy, const char* what
     const usize n = lazy.size();
     if (T.atoms().frozen() || n < 2 || n != 2 + lazy[0] + lazy[1])
         throw nb::value_error((std::string("mymyr: corrupt ") + what + " (lazy atom slots)").c_str());
+    const auto refuse = [&] {
+        throw nb::value_error((std::string("mymyr: the task cannot number its lazy atom slots as the ") + what +
+                               " does (its atoms got slots in another order)")
+                                  .c_str());
+    };
+    // first without assigning slots: the task's numbering so far must agree with the saved one
+    const u64 have[2] = {T.atoms().fluent_slots(), T.atoms().derived_slots()};
     for (usize i = 0; i < n - 2; ++i)
     {
         const u64 c = lazy[2 + i];
         const bool fluent = i < lazy[0];
         const u64 slot = fluent ? i : i - lazy[0];
-        if (c >= L.total || (c < L.fluent_count) != fluent || T.atoms().intern(c) != slot)
-            throw nb::value_error((std::string("mymyr: the task cannot number its lazy atom slots as the ") + what +
-                                   " does (its atoms got slots in another order)")
-                                      .c_str());
+        if (c >= L.total || (c < L.fluent_count) != fluent)
+            throw nb::value_error((std::string("mymyr: corrupt ") + what + " (lazy atom slots)").c_str());
+        if (T.atoms().find(c) != (slot < have[fluent ? 0 : 1] ? slot : AtomIndex::k_empty))
+            refuse();
     }
+    for (usize i = 0; i < n - 2; ++i)
+        if (T.atoms().intern(lazy[2 + i]) != (i < lazy[0] ? i : i - lazy[0]))
+            refuse();  // another thread gave the task's atoms slots meanwhile
 }
 
 u64 limit_value(nb::handle limit) { return limit_arg(limit); }
