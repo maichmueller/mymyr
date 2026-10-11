@@ -139,6 +139,7 @@ def test_pool_initial_dead_end(dead_end, terminal, expected):
     assert step.reward[0] == (0 if expected else -6 if dead_end == "no_successors" else -1)
 
 
+@pytest.mark.needs_gil
 def test_torchrl_solved_reset(solved_task, device_path):
     torch = pytest.importorskip("torch")
     device, path = device_path

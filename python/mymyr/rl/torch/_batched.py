@@ -104,7 +104,7 @@ class BatchedEnv:
 
     CUDA graphs: on a device's fast path (``capturable``) reset, refresh, step and random_actions synchronize nothing
     and allocate nothing (the environment's scratch is sized for N at construction), and the state tensors are marked
-    static (``torch._dynamo.mark_static_address``: they keep their addresses; assign into them in place). So loops of
+    static for torch.compile (they keep their addresses; assign into them in place). So loops of
     steps capture into CUDA graphs: :meth:`capture` (``torch.cuda.CUDAGraph``), ``torch.cuda.graph`` around the calls,
     or ``torch.compile(mode="reduce-overhead")`` of a function that steps. On the general path the compiled calls are
     the ``cudagraph_unsafe`` ops ``mymyr::step_sync`` / ``refresh_sync``, which torch.compile leaves out of its graphs.
@@ -170,7 +170,9 @@ class BatchedEnv:
         if index is not None:
             self.core.reserve(n)
             for t in self._tensors():
-                torch._dynamo.mark_static_address(t)
+                # what torch._dynamo.mark_static_address sets; calling it would import torch._dynamo (and with it
+                # triton, which enables the GIL of a free-threaded interpreter) for every constructed environment
+                t._dynamo_static_input_type = "unguarded"
         initial_ids = None if task_ids is None else _task_ids(self.core, task_ids, None, n, d, "task_ids")
         self.reset(task_ids=initial_ids)
 

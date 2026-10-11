@@ -440,6 +440,7 @@ def test_pool_suite_equals_host(sets, key):
         pool.reset(task_ids=np.full(4, len(s), np.int32))
 
 
+@pytest.mark.needs_gil
 def test_torchrl_over_suites(sets):
     pytest.importorskip("torchrl")
     import torch

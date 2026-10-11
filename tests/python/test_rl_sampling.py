@@ -48,6 +48,7 @@ def test_numpy_sampler_distribution_and_streams():
     assert not np.array_equal(draws, high_seed)
 
 
+@pytest.mark.needs_gil
 def test_torch_numpy_sampling_and_compile():
     torch = pytest.importorskip("torch")
     for sampler in [rl.InstanceSampler(5), rl.InstanceSampler(5, [0, 1, 0, 3, 2])]:
@@ -89,6 +90,7 @@ def test_batched_sampler_partial_reset_and_reseed(table):
     assert torch.equal(whole._reset_counts, expected + mask.long())
 
 
+@pytest.mark.needs_gil
 def test_batched_sampler_compiled_autoreset_and_fixed_ids(table):
     torch = pytest.importorskip("torch")
     rt = pytest.importorskip("mymyr.rl.torch")
@@ -109,6 +111,7 @@ def test_batched_sampler_compiled_autoreset_and_fixed_ids(table):
     assert weighted.task_ids.tolist() == [1] * 16
 
 
+@pytest.mark.needs_gil
 def test_planning_sampler_rollout_and_external_curriculum(table):
     torch = pytest.importorskip("torch")
     pytest.importorskip("torchrl")
