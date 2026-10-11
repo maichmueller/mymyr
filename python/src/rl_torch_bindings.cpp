@@ -631,7 +631,7 @@ void bind_rl_torch(nb::module_& parent)
                 new (self) PyEnv(std::move(table), std::move(device), std::move(ctx), c, std::move(path), threads);
             },
             "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "seed"_a = 0, "max_steps"_a = 0,
-            "step_reward"_a = -1.0f, "goal_reward"_a = 0.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
+            "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
             "path"_a = "auto", "threads"_a = 1)
         .def_prop_ro("table", [](const PyEnv& e) { return SuiteArg(e.ref.obj); })

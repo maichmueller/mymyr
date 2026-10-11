@@ -57,8 +57,8 @@ struct EnvConfig
 {
     u64 seed = 0;              // key of the successor draws (rl/rng.hpp)
     u32 max_steps = 0;         // truncation after this many steps of an episode (0: never)
-    f32 step_reward = -1.0f;   // every step (unit cost)
-    f32 goal_reward = 0.0f;    // added when the step reaches a goal state
+    f32 step_reward = 0.0f;
+    f32 goal_reward = 1.0f;
     f32 dead_end_reward = 0.0f;  // added when the step reaches (or is stuck in) a dead end
     DeadEnd dead_end = DeadEnd::NoSuccessors;
     bool dead_end_terminal = true;  // a dead end terminates the episode

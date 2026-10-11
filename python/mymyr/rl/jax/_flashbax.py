@@ -76,9 +76,13 @@ def transition_item(
     successor slots (None: -1; the random policy's slots are ``env.random_actions(key, state)`` before the step),
     ``step`` the tuple ``env.step`` returned. The next state is ``info["final_state"]`` (the reached state, before the
     autoreset) when the environment reports it, else the new observation's state (equal without autoreset).
-    ``goal_pos`` / ``goal_neg`` ([W2] or [N, W2]) add goal masks (the spec with goals=True; an environment with
-    per-env goals has them in ``obs.goal_pos`` / ``obs.goal_neg``)."""
+    Autoreset environments must report final states: otherwise replay cannot recover the reached state.
+    ``goal_pos`` / ``goal_neg`` ([W2] or [N, W2]) override the source observation's goal masks; otherwise its
+    nonempty masks are included automatically (the spec with goals=True)."""
     _, obs2, reward, terminated, truncated, info = step
+    if "final_state" not in info:
+        if "no_autoreset" not in info:
+            raise ValueError("mymyr: replay needs final_state=True with autoreset; the reached state is unavailable")
     n = obs.count.shape[0]
     act = jnp.full((n,), -1, jnp.int32) if action is None else jnp.asarray(action, jnp.int32)
     item: dict[str, Any] = {
@@ -98,6 +102,8 @@ def transition_item(
         item["binding"] = info["binding"]
     if (goal_pos is None) != (goal_neg is None):
         raise ValueError("mymyr: pass both goal_pos and goal_neg, or neither")
+    if goal_pos is None and obs.goal_pos.shape[-1]:
+        goal_pos, goal_neg = obs.goal_pos, obs.goal_neg
     if goal_pos is not None:
         gp = jnp.asarray(goal_pos, jnp.uint32)
         gn = jnp.asarray(goal_neg, jnp.uint32)

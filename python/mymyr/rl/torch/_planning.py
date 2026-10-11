@@ -57,8 +57,8 @@ class PlanningEnv(EnvBase):
         goals: bool = False,
         seed: int = 0,
         max_steps: int = 0,
-        step_reward: float = -1.0,
-        goal_reward: float = 0.0,
+        step_reward: float = 0.0,
+        goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
@@ -125,7 +125,7 @@ class PlanningEnv(EnvBase):
 
     def _outputs(self, action: Any, copy: bool = True) -> dict:
         """The step's outputs: the observation after stepping with ``action``, reward and flags."""
-        r = self._env.step(action)
+        r = self._env.step(action, final=False, copy=False)
         out = self._observation(copy)
         out.update(
             reward=r.reward.unsqueeze(-1),

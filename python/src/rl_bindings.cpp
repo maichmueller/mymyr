@@ -1843,7 +1843,7 @@ void bind_rl(nb::module_& parent)
                 new (self) PyCpuPool(suite_of(table), c, num_envs, o, fw);
             },
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 0, "goals"_a = false, "seed"_a = 0, "max_steps"_a = 0,
-            "step_reward"_a = -1.0f, "goal_reward"_a = 0.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
+            "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
             "framework"_a = nb::none(),
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "

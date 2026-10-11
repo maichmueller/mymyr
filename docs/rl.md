@@ -35,6 +35,31 @@ The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `s
 batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL and needs `torchrl` and `tensordict`.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
 
+## Transition ownership and replay
+
+Environment and HER defaults use a sparse reach-goal objective: `step_reward=0`, `goal_reward=1`,
+`dead_end_reward=0`. Successful episodes therefore beat early failures instead of paying a negative cost for each
+additional step toward success. Discounting below one favours earlier success; undiscounted sparse returns do not
+distinguish successful plan lengths. For unit-cost shaping, configure `step_reward=-1` explicitly and choose goal
+bonuses/failure penalties consistently with the episode horizon and discount. These rewards do not automatically
+optimize a PDDL action-cost metric.
+
+Torch `BatchedEnv.observation()` snapshots states, task ids, counts and per-environment goals. `step()` returns those
+next-observation tensors in `StepResult`, along with `final_states`, the reached states before autoreset. These
+snapshots survive subsequent steps and resets. The public environment tensors are live buffers for native calls and
+CUDA graphs: use `observation(copy=False)` or `step(copy=False)` only when intentionally borrowing them, and consume
+or copy them before the next mutation. Captured rollout results remain borrowed graph outputs overwritten on replay.
+
+JAX `transition_item` records the source observation's instance and goals and uses the reached state, not the
+autoreset observation, as its next state. Autoreset replay requires `Env(final_state=True)` (the default); the helper
+raises rather than recording an unrelated reset row when final states are disabled. An environment without autoreset
+may disable final states because its next observation is the reached state. Goal-conditioned observations propagate
+their source masks automatically; initialize replay with `transition_example(env, goals=True)` for those items.
+
+The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, verifies that the framework imports and
+XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
+CPU framework bundle used for validation; those packages remain optional runtime dependencies for users.
+
 On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. Host and device
 environments and expansion support numeric fluents, preconditions, effects and goals, preserving the CPU I32/F64 row
 encoding. Numeric tables and suites run per-instance kernels. Numeric environments use the general path, which

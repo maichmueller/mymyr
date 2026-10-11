@@ -260,7 +260,8 @@ def env_arrays(env):
 
 def step_arrays(r):
     out = {f: getattr(r, f).cpu().numpy().copy() for f in r._fields}
-    out["final_states"] = out["final_states"].view(np.uint64)
+    for field in ("final_states", "states", "goal_pos", "goal_neg"):
+        out[field] = out[field].view(np.uint64)
     return out
 
 

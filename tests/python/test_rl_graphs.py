@@ -27,7 +27,7 @@ from test_rl_table import MASK_SETS, ROT, SETS, env_arrays, gpu_device, host_rol
 torch = pytest.importorskip("torch")
 rt = pytest.importorskip("mymyr.rl.torch")
 
-FIELDS = ("reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "final_states", "count")
+FIELDS = rt.StepResult._fields
 CFG = dict(max_steps=6, goal_reward=1.0, dead_end="no_successors", dead_end_reward=-2.0)
 
 

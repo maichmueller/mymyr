@@ -160,8 +160,8 @@ class Env:
         device: Any = None,
         goals: bool = False,
         max_steps: int = 0,
-        step_reward: float = -1.0,
-        goal_reward: float = 0.0,
+        step_reward: float = 0.0,
+        goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
@@ -361,6 +361,8 @@ class Env:
             info["binding"] = binding
         if self.final_state:
             info["final_state"] = final
+        if not self.native.autoreset:
+            info["no_autoreset"] = ()
         return s, self.observation(s), reward, terminated, truncated, info
 
     def random_actions(self, key: Any, state: EnvState, max_actions: int = 0) -> Any:

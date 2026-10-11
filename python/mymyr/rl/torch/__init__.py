@@ -52,7 +52,7 @@ on its table's path, on a stream of its own (captured graphs included).
 from mymyr._core._rl_torch import Env, fast_unsupported
 
 from . import rng
-from ._batched import BatchedEnv, StepResult
+from ._batched import BatchedEnv, Observation, StepResult
 from ._graph import CapturedRollout, Rollout
 from ._ops import (
     expand,
@@ -72,6 +72,7 @@ __all__ = [
     "BatchedEnv",
     "CapturedRollout",
     "Env",
+    "Observation",
     "PlanningEnv",
     "Rollout",
     "StepResult",

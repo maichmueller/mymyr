@@ -10,11 +10,25 @@ from mymyr._core import _rl, _rl_torch
 from . import _ops
 from ._graph import CapturedRollout
 
-__all__ = ["BatchedEnv", "StepResult"]
+__all__ = ["BatchedEnv", "Observation", "StepResult"]
+
+
+class Observation(NamedTuple):
+    """Owned policy inputs by default; :meth:`BatchedEnv.observation` can explicitly borrow live tensors."""
+
+    states: Tensor
+    task_ids: Tensor
+    count: Tensor
+    goal_pos: Tensor
+    goal_neg: Tensor
 
 
 class StepResult(NamedTuple):
-    """The outputs of one :meth:`BatchedEnv.step` ([N] each, on the environments' device)."""
+    """The outputs of one :meth:`BatchedEnv.step`, including a stable next observation.
+
+    ``final_states`` precedes autoreset; ``states`` / ``task_ids`` / goal masks describe the next policy observation.
+    Empty goal masks have shape [N, 0]. The native environment's public tensors remain borrowed live buffers.
+    """
 
     reward: Tensor  # float32
     terminated: Tensor  # bool: goal reached, or a dead end (dead_end_terminal)
@@ -25,6 +39,10 @@ class StepResult(NamedTuple):
     binding: Tensor  # [N, label_width] int32 objects of the row's instance (-1 padding)
     final_states: Tensor  # [N, row_words] int64 with final=True (the reached states before the autoreset), else [0, *]
     count: Tensor  # int32: successors of the state after the step (a copy)
+    states: Tensor
+    task_ids: Tensor
+    goal_pos: Tensor
+    goal_neg: Tensor
 
 
 def _device_index(device: torch.device) -> Optional[int]:
@@ -98,8 +116,8 @@ class BatchedEnv:
         goals: bool = False,
         seed: int = 0,
         max_steps: int = 0,
-        step_reward: float = -1.0,
-        goal_reward: float = 0.0,
+        step_reward: float = 0.0,
+        goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
@@ -173,6 +191,15 @@ class BatchedEnv:
     def _ids(self) -> Optional[Tensor]:
         return self.task_ids if self.multi else None
 
+    def observation(self, *, copy: bool = True) -> Observation:
+        """Policy inputs that survive later steps/resets by default. ``copy=False`` borrows the live buffers."""
+        keep = (lambda tensor: tensor.clone()) if copy else (lambda tensor: tensor)
+        empty = self.states.new_empty((self.num_envs, 0))
+        return Observation(
+            keep(self.states), keep(self.task_ids), keep(self.count),
+            keep(self.goal_pos) if self.goals else empty, keep(self.goal_neg) if self.goals else empty,
+        )
+
     def _tensors(self) -> list[Tensor]:
         t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count]
         return t + ([self.goal_pos, self.goal_neg] if self.goals else [])
@@ -219,17 +246,21 @@ class BatchedEnv:
         return self.count
 
     def step(
-        self, action: Optional[Tensor] = None, *, next_task_ids: Optional[Tensor] = None, final: bool = False
+        self, action: Optional[Tensor] = None, *, next_task_ids: Optional[Tensor] = None, final: bool = True,
+        copy: bool = True,
     ) -> StepResult:
         """One step of every environment; ``action`` [N] int64 indexes the canonical successor order (None: the
         random policy); ``next_task_ids`` [N] names the instances autoresetting environments restart in (None: their
-        own)."""
+        own). ``final=True`` retains the reached state before reset; ``copy=True`` owns the next observation.
+        ``copy=False`` explicitly borrows the environment's live observation buffers."""
         args = self._step_args(action, next_task_ids, final)
         if torch.compiler.is_compiling():
             r = (torch.ops.mymyr.step if self.capturable else torch.ops.mymyr.step_sync)(*args)
         else:
             r = _ops.step_impl(*args)
-        return StepResult(*r, count=self.count.clone())
+        observation = self.observation(copy=copy)
+        return StepResult(*r, observation.count, observation.states, observation.task_ids,
+                          observation.goal_pos, observation.goal_neg)
 
     def _step_args(self, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool) -> tuple:
         if action is not None:
@@ -250,6 +281,11 @@ class BatchedEnv:
         outputs)."""
         _ops.step_impl(*self._step_args(action, next_task_ids, final), out=tuple(out)[:8])
         out.count.copy_(self.count)
+        out.states.copy_(self.states)
+        out.task_ids.copy_(self.task_ids)
+        if self.goals:
+            out.goal_pos.copy_(self.goal_pos)
+            out.goal_neg.copy_(self.goal_neg)
 
     def random_actions(self, max_actions: int = 0) -> Tensor:
         """The random policy's next choices without stepping ([N] int64 on ``device``): the successors ``step(None)``

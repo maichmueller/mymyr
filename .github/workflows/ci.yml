@@ -134,11 +134,22 @@ jobs:
           .venv/bin/python -VV
           .venv/bin/python -c "import sys; assert not sys._is_gil_enabled(), 'not a free-threaded build'"
       - name: Build and install the package
+        if: matrix.python != '3.14t'
         # $GITHUB_WORKSPACE, not the github.workspace expression: in a container job the expression gives the
         # host path, which only action inputs (the cache paths above) translate into the container
         run: |
           CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/release" \
             uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
+      - name: Install the tested RL runtimes
+        if: matrix.python == '3.14t'
+        run: uv pip install --python .venv/bin/python -r ci/rl-requirements.txt
+      - name: Build with RL framework support
+        if: matrix.python == '3.14t'
+        run: |
+          xla_include="$(.venv/bin/python -c 'import pathlib, jaxlib; print(pathlib.Path(jaxlib.__file__).parent / "include")')"
+          CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/release -DMYMYR_XLA_FFI_INCLUDE=$xla_include" \
+            uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
+          .venv/bin/python -c "import torch, torchrl, tensordict, jax, flashbax, mctx; from mymyr._core import _rl_jax; assert _rl_jax.has_ffi(), 'RL runtime coverage requires XLA FFI'"
       - name: Check for warnings
         run: ci/check_no_warnings.sh build.log
       - name: Test

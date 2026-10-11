@@ -279,6 +279,7 @@ TEST(HostEnv, PlanActionsReachTheGoal)
         ASSERT_TRUE(r.solved);
         rl::EnvConfig cfg;
         cfg.goal_reward = 100.0f;
+        cfg.step_reward = -1.0f;
         rl::HostEnv env(rl::TaskTable::single(task), cfg);
         Batch x(env, 3);
         env.reset(x.b);
@@ -318,6 +319,7 @@ TEST(HostEnv, DeadEndsStuckAndInvalidActions)
     rl::EnvConfig cfg;
     cfg.autoreset = false;
     cfg.dead_end_reward = -50.0f;
+    cfg.step_reward = -1.0f;
     rl::HostEnv env(rl::TaskTable::single(task), cfg);
     Batch x(env, 64);
     env.reset(x.b, nullptr, x.count.data());
@@ -361,7 +363,7 @@ TEST(HostEnv, DeadEndsStuckAndInvalidActions)
     {
         EXPECT_EQ(y.invalid[i], 1);
         EXPECT_EQ(y.terminated[i], 0);
-        EXPECT_EQ(y.reward[i], -1.0f);
+        EXPECT_EQ(y.reward[i], env.config().step_reward);
         EXPECT_EQ(y.schema[i], -1);
         EXPECT_EQ(y.steps[i], 1);
         EXPECT_TRUE(std::equal(y.row(i), y.row(i) + y.RW, env.suite()->instance(0).init.begin()));
