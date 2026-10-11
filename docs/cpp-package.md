@@ -1,7 +1,8 @@
 # C++ package
 
 An installed mymyr package exports CMake targets in the `mymyr::` namespace. `mymyr::core` contains the planning
-core; `mymyr::frontend` adds PDDL parsing; `mymyr::cuda` is present when the package was built with CUDA. Request only
+core; `mymyr::encoding` adds native relational observations; `mymyr::frontend` adds PDDL parsing; `mymyr::cuda` is present
+when the package was built with CUDA. Request only
 the components the consumer uses:
 
 ```cmake

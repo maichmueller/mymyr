@@ -11,6 +11,8 @@ These pages describe the Python package, optional CUDA backend, plain-C API and 
 - [Heuristics](heuristics.md): relaxation heuristics, h², set-additive and perfect heuristics.
 - [Datasets](datasets.md): state spaces, generalized state spaces, samplers, knowledge bases and tuple graphs.
 - [Reinforcement learning](rl.md): batched expansion, CPU environments and JAX/PyTorch interop.
+- [Native encoding](encoding.md): packed relational facts, signed goal status and action readouts as owned arrays.
+- [Encoding design](native-encoding-design.md): mifrost capabilities, integration boundaries and extension roadmap.
 - [CUDA](cuda.md): device requirements, supported operations and current task limits.
 - [C API](c-api.md): the versioned `mymyr/ext.h` function table and a C consumer.
 - [C++ package](cpp-package.md): install layout, CMake targets and a downstream consumer.
