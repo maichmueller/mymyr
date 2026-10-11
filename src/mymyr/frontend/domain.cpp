@@ -2,6 +2,7 @@
 
 #include "diagnose.hpp"
 #include "init_reader.hpp"
+#include "normalize.hpp"
 #include "translate.hpp"
 
 #include <loki/details/pddl/parser.hpp>
@@ -62,7 +63,7 @@ struct Domain::Impl
         reading(text, path, [&] {
             detail::reject_dropped_constructs(text, path.string());
             parser = std::make_unique<loki::Parser>(text, path, loki::ParserOptions());
-            translation = std::make_unique<loki::DomainTranslationResult>(loki::translate(parser->get_domain()));
+            translation = std::make_unique<loki::DomainTranslationResult>(detail::translate_loki_domain(parser->get_domain()));
             for (const auto& pred : parser->get_domain()->get_predicates())
                 origin.declared.insert(pred->get_name());
             origin.argument_order = &options.generated_argument_order;
