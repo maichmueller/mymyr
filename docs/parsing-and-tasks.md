@@ -221,6 +221,26 @@ the CUDA paths reject a row whose padding is not zero. Expansion, environment st
 each row its own width. `rl.numeric_values(table, states, task_ids)` decodes the numeric words of mixed rows to
 float64. The CUDA paths take tasks of at most 64 atom words and 512 objects ([CUDA](cuda.md)).
 
+**Encoding goal.** The planner works on the normalized goal, in which `forall`, `or` and `imply` have become derived
+predicates (`axiom_<k>`). `task.encoding_goal` is the goal as written, expanded into signed ground literals, for
+encodings of the goal. A tuple of `GroundLiteral`, positive literals first, then by predicate and objects, without
+duplicates:
+
+- conjunctions are flattened;
+- `forall (?v - t) φ` is expanded over the objects of type `t` (constants included, in object order; a variable of
+  type `(either a b)` ranges over the objects of either type);
+- `imply ψ φ` is expanded to `φ` when `ψ` is decided by static atoms and equality alone and holds, and contributes
+  nothing when `ψ` fails;
+- a literal over a static predicate (equality included) is kept, whether it holds in the initial atoms or not; when it
+  fails, `task.encoding_goal_unsatisfiable` is true, because no state is a goal.
+
+A conjunct that cannot be expanded (`or`, `exists`, `imply` over fluents, a negated compound, a numeric constraint) is
+left out, and `task.encoding_goal_complete` is false. For a task whose goal is a conjunction of literals, the encoding
+goal is the goal itself and `encoding_goal_complete` is true. The planner's goal, `task.goal_condition` and the search
+are unaffected. `Task.from_text` has no goal as written: the encoding goal is the planner's goal without the `axiom_<k>`
+literals, complete if there were none, unless the text carries it (`NormalizedTask.to_text(encoding_goal=True)`).
+A `forall` is expanded over at most 2^24 bindings; beyond that the goal is left incomplete.
+
 ## Binding generators
 
 `task.precondition(schema)` returns a `ConjunctiveCondition`; `task.goal_condition` is a `GroundCondition`.

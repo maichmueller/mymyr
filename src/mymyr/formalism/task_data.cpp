@@ -1,7 +1,11 @@
 #include "mymyr/formalism/task_data.hpp"
 
+#include <algorithm>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <tuple>
 
 namespace mymyr::formalism
 {
@@ -110,6 +114,9 @@ void validate(const TaskData& t)
             invalid("fluent initial atom over a non-fluent predicate");
     }
     check_condition(t, t.goal, 0, "goal");
+    check_range(t.literals, t.encoding_goal, "encoding goal");
+    for (const auto& l : t.encoding_goal_literals())
+        check_literal(t, l, 0, "encoding goal");
     for (const auto& s : t.schemas)
     {
         check_range(t.params, s.params, "schema params");
@@ -144,5 +151,128 @@ void validate(const TaskData& t)
     }
     if (t.metric)
         check_expr(t, t.metric->expr, 0, "metric");
+}
+
+namespace
+{
+std::vector<u32> key_of(PredicateId pred, std::span<const ObjectId> objects)
+{
+    std::vector<u32> k{pred.v};
+    for (ObjectId o : objects)
+        k.push_back(o.v);
+    return k;
+}
+
+/// Whether goal normalization introduced the predicate: loki names these "axiom_<k>".
+bool introduced_by_normalization(std::string_view name)
+{
+    constexpr std::string_view prefix = "axiom_";
+    return name.size() > prefix.size() && name.starts_with(prefix) &&
+           std::ranges::all_of(name.substr(prefix.size()), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+/// The literals of the planner's goal that the encoding goal keeps by default, and whether they are all of it.
+bool default_goal(const TaskData& t, std::vector<GroundLiteralData>& out)
+{
+    std::vector<u8> normalized(t.predicates.size(), 0);
+    for (u32 p = 0; p < t.predicates.size(); ++p)
+        normalized[p] = t.predicates[p].kind == PredKind::Derived && introduced_by_normalization(t.str(t.predicates[p].name));
+    bool complete = t.goal.constraints.count == 0;
+    for (const Literal& l : t.literals_of(t.goal))
+    {
+        if (normalized[l.pred.v])
+        {
+            complete = false;
+            continue;
+        }
+        GroundLiteralData g{l.pred, l.positive, {}};
+        for (Term x : t.terms_of(l))
+            g.objects.push_back(term_object(x));
+        out.push_back(std::move(g));
+    }
+    return complete;
+}
+
+void sort_unique(std::vector<GroundLiteralData>& v)
+{
+    auto less = [](const GroundLiteralData& a, const GroundLiteralData& b)
+    {
+        if (a.positive != b.positive)
+            return a.positive;
+        if (a.pred.v != b.pred.v)
+            return a.pred.v < b.pred.v;
+        return std::ranges::lexicographical_compare(a.objects, b.objects, {}, &ObjectId::v, &ObjectId::v);
+    };
+    std::ranges::sort(v, less);
+    v.erase(std::unique(v.begin(), v.end(), [&](const auto& a, const auto& b) { return !less(a, b) && !less(b, a); }), v.end());
+}
+}  // namespace
+
+void set_encoding_goal(TaskData& t, std::vector<GroundLiteralData> literals, bool complete)
+{
+    sort_unique(literals);
+    std::vector<Literal> out;
+    std::set<std::vector<u32>> wanted_true, wanted_false;  // static literals by (predicate, objects): positive / negative
+    std::vector<u8> is_static(t.predicates.size(), 0);
+    for (const GroundLiteralData& g : literals)
+    {
+        Literal l;
+        l.pred = g.pred;
+        l.positive = g.positive;
+        std::vector<Term> terms;
+        for (ObjectId o : g.objects)
+            terms.push_back(object_term(o));
+        l.terms = TaskData::append<Term>(t.terms, terms);
+        out.push_back(l);
+        if (t.predicates[g.pred.v].kind == PredKind::Static)
+        {
+            is_static[g.pred.v] = 1;
+            (g.positive ? wanted_true : wanted_false).insert(key_of(g.pred, g.objects));
+        }
+    }
+    t.encoding_goal = TaskData::append<Literal>(t.literals, out);
+    t.encoding_goal_complete = complete;
+    // a static literal fails when its atom is absent (positive) or present (negative)
+    t.encoding_goal_unsatisfiable = false;
+    std::set<std::vector<u32>> present;
+    if (!wanted_true.empty() || !wanted_false.empty())
+        for (const GroundAtom& a : t.static_init)
+            if (is_static[a.pred.v])
+                if (auto k = key_of(a.pred, t.objects_of(a)); wanted_true.contains(k) || wanted_false.contains(k))
+                    present.insert(std::move(k));
+    for (const auto& k : wanted_true)
+        t.encoding_goal_unsatisfiable = t.encoding_goal_unsatisfiable || !present.contains(k);
+    for (const auto& k : wanted_false)
+        t.encoding_goal_unsatisfiable = t.encoding_goal_unsatisfiable || present.contains(k);
+}
+
+void set_encoding_goal_from_normalized(TaskData& t)
+{
+    std::vector<GroundLiteralData> lits;
+    const bool complete = default_goal(t, lits);
+    set_encoding_goal(t, std::move(lits), complete);
+}
+
+bool has_default_encoding_goal(const TaskData& t)
+{
+    std::vector<GroundLiteralData> lits;
+    const bool complete = default_goal(t, lits);
+    if (complete != t.encoding_goal_complete)
+        return false;
+    sort_unique(lits);
+    const auto have = t.encoding_goal_literals();
+    if (have.size() != lits.size())
+        return false;
+    for (size_t i = 0; i < lits.size(); ++i)
+    {
+        const Literal& l = have[i];
+        if (l.pred != lits[i].pred || l.positive != lits[i].positive || l.terms.count != lits[i].objects.size())
+            return false;
+        const auto terms = t.terms_of(l);
+        for (size_t j = 0; j < terms.size(); ++j)
+            if (term_object(terms[j]) != lits[i].objects[j])
+                return false;
+    }
+    return true;
 }
 }  // namespace mymyr::formalism

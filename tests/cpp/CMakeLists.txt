@@ -78,7 +78,7 @@ if(TARGET mymyr_frontend)
     target_compile_definitions(mymyr_export_task PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}" MYMYR_WORK_DIR="${MYMYR_WORK_DIR}" MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
 
-    add_executable(mymyr_frontend_tests frontend/golden.cpp frontend/test_frontend.cpp)
+    add_executable(mymyr_frontend_tests frontend/golden.cpp frontend/test_frontend.cpp frontend/test_encoding_goal.cpp)
     target_link_libraries(mymyr_frontend_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_frontend_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"

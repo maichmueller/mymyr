@@ -189,6 +189,7 @@ if(MYMYR_FRONTEND)
     add_library(mymyr_frontend STATIC
         src/mymyr/frontend/diagnose.cpp
         src/mymyr/frontend/domain.cpp
+        src/mymyr/frontend/encoding_goal.cpp
         src/mymyr/frontend/init_reader.cpp
         src/mymyr/frontend/translate.cpp
     )

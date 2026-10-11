@@ -701,6 +701,19 @@ std::string ConjunctiveCondition::str(const Task& task) const { return str(task.
 GroundCondition GroundCondition::goal(const Task& task) { return goal(task.data()); }
 std::string GroundCondition::str(const Task& task) const { return str(task.data()); }
 
+std::vector<GroundLiteral> encoding_goal(const TaskData& T)
+{
+    std::vector<GroundLiteral> out;
+    for (const Literal& l : T.encoding_goal_literals())
+    {
+        GroundLiteral x{{l.pred, {}}, l.positive};
+        for (Term t : T.terms_of(l))
+            x.atom.objects.push_back(term_object(t));
+        out.push_back(std::move(x));
+    }
+    return out;
+}
+
 GroundCondition GroundCondition::goal(const TaskData& T)
 {
     GroundCondition g;

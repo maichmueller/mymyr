@@ -135,6 +135,8 @@ using PartialArg = Arg<std::variant<nb::typed<nb::dict, std::variant<int, std::s
 [[nodiscard]] nb::object make_ground_literal(const FormulaOwner& o, GroundLiteral l);
 [[nodiscard]] nb::object make_conjunctive_condition(const FormulaOwner& o, ConjunctiveCondition c);
 [[nodiscard]] nb::object make_ground_condition(const FormulaOwner& o, GroundCondition c);
+/// The task's encoding goal as a tuple of GroundLiterals (Task.encoding_goal).
+[[nodiscard]] nb::tuple make_encoding_goal(const FormulaOwner& o);
 
 /// PDDL text of a term, literal or condition part (variables as "?name").
 [[nodiscard]] std::string literal_text(const formalism::TaskData& d, PredicateId predicate, bool positive,
