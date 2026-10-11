@@ -140,6 +140,7 @@ def test_default_her_reward_matches_goal_reaching_objective():
     assert np.asarray(result.reward).item() == 1.0
 
 
+@needs_frontend
 def test_torchrl_instance_reset_does_not_reuse_observed_goals():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torchrl")
@@ -160,6 +161,7 @@ def test_torchrl_instance_reset_does_not_reuse_observed_goals():
     env.close()
 
 
+@needs_frontend
 @pytest.mark.parametrize("via_tensordict", [False, True])
 def test_torchrl_explicit_reset_goals_remain_supported(via_tensordict):
     torch = pytest.importorskip("torch")

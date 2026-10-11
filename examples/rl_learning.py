@@ -91,7 +91,6 @@ def evaluate(tasks, weights, seed, episodes=64, *, greedy=False):
         "success_rate": np.mean([result["success"] for result in results]).item(),
         "mean_success_length": float(np.mean(solved_lengths)) if solved_lengths else None,
         "truncations": sum(result["truncated"] for result in results),
-        "action_overflow": 0,
         "peak_counted_array_bytes": max(result["peak_array_bytes"] for result in results),
     }
 
