@@ -1,6 +1,6 @@
 """Conditions of the ADL fragment (negation, disjunction, implication, quantifiers and their nesting, equality,
-constants, numeric comparisons) in goals, preconditions, conditional effects (also under forall effects) and derived
-predicate bodies, against an evaluation of the formula as written.
+constants, numeric comparisons) in goals, preconditions, conditional effects (also under forall effects and nested in
+each other) and derived predicate bodies, against an evaluation of the formula as written.
 
 For every shape and position the task is built from PDDL, and in every state the base actions reach (every combination
 of the fluents the formulas read) the goal test, the derived atoms, the applicable instances of the action under test
