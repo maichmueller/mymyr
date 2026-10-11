@@ -18,15 +18,16 @@ def assert_result(batch, i, expected):
     ]
 
 
+@pytest.mark.parametrize("atoms", ["auto", "lazy"])
 @pytest.mark.parametrize("case", ["numeric", "arithmetic", "negative", "undefined", "initial", "f64", "derived", "not_derived"])
-def test_ground_conjunction_searches(case):
+def test_ground_conjunction_searches(case, atoms):
     if case in {"derived", "not_derived"}:
-        task = text_task("philosophers__p03-phil4", atoms="lazy")
+        task = text_task("philosophers__p03-phil4", atoms=atoms)
         literal = task.goal_condition.literals[0]
         goal = task.ground_condition([literal if case == "derived" else task.literal(literal, positive=False)])
     else:
         name = "cs-hydropower" if case == "f64" else "cs-counters"
-        task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks" / f"{name}.txt"), atoms="lazy")
+        task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks" / f"{name}.txt"), atoms=atoms)
         value = task.initial_state.numeric_values()[3] if case != "f64" else 0
         constraints = {
             "numeric": f"(> (value o3) {value + 1})",
@@ -62,6 +63,10 @@ def test_ground_conjunction_searches(case):
                                            max_next_layer_states=3, **options))
     from mymyr.rl import TaskTable
 
+    if atoms == "lazy":  # a table's rows need a fixed slot layout
+        with pytest.raises(ValueError, match="lazy atom slots"):
+            TaskTable([task, task])
+        return
     table = TaskTable([task, task])
     ids = [1, 0]
     b = cuda.batched_iw1(table, starts, task_ids=ids, goals=[goal, goal], ctx=ctx, max_states=3000)
