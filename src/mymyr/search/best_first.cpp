@@ -241,9 +241,9 @@ BestFirstOptions::Store store_kind(const Context& c)
 {
     if (c.o.store != BestFirstOptions::Store::Auto)
         return c.o.store;
-    // Flat for W <= 8 words, Chunked above (the width estimate: frozen W, else the pilot's W_lazy)
+    // Flat for W <= 8 words, Chunked above (the width: frozen W, else the width lazy slots may grow to)
     const Task& t = c.task;
-    const u32 w = t.atoms().mode() == AtomMode::Frozen ? t.words() : std::max(t.words(), t.info().pilot_words);
+    const u32 w = t.atoms().frozen() ? t.words() : t.max_words();
     return w <= 8 ? BestFirstOptions::Store::Flat : BestFirstOptions::Store::Chunked;
 }
 }  // namespace mymyr::search::bf

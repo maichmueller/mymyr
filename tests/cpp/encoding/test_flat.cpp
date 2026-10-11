@@ -14,7 +14,7 @@ using namespace mymyr;
 
 namespace
 {
-TaskPtr task(TaskOptions::Atoms mode = TaskOptions::Atoms::Frozen)
+TaskPtr task(TaskOptions::Atoms mode = TaskOptions::Atoms::Auto)
 {
     TaskOptions options;
     options.atoms = mode;
@@ -104,19 +104,32 @@ TEST(FlatEncoding, ActionTargetsRetainCallerOrder)
     EXPECT_THROW(static_cast<void>(encoder.encode({state.data(), 1, state.size_words()}, nullptr, invalid)), std::invalid_argument);
 }
 
-TEST(FlatEncoding, EmptyBatchAndZeroWidthState)
+TEST(FlatEncoding, EmptyBatchNarrowRowsUnassignedSlotsAndPadding)
 {
-    const auto source = task(TaskOptions::Atoms::Lazy);
+    const auto source = task();
     const encoding::FlatRelationEncoder encoder(source);
     const auto empty = encoder.encode({nullptr, 0, 0});
     EXPECT_EQ(empty.graphs, 0u);
     EXPECT_EQ(array(empty, "relation_offsets")[0], 0);
-    const auto zero = encoder.encode({nullptr, 1, 0});
-    EXPECT_EQ(zero.graphs, 1u);
+    EXPECT_THROW(static_cast<void>(encoder.encode({nullptr, 1, 0})), std::invalid_argument);  // narrower than its states
     EXPECT_THROW(static_cast<void>(encoder.encode({nullptr, 1, 1})), std::invalid_argument);
-    std::vector<u64> invalid(source->max_words() + 1, 0);
-    invalid.back() = 1;
-    EXPECT_THROW(static_cast<void>(encoder.encode({invalid.data(), 1, static_cast<u32>(invalid.size())})), std::invalid_argument);
+    // a slot past the task's atoms within its last word is refused; the words past its own are padding, not read
+    const u32 slots = source->atoms().fluent_slots();
+    ASSERT_NE(slots % 64, 0u);
+    const State state = source->initial_state();
+    std::vector<u64> row(source->words() + 1, 0);
+    std::copy(state.words().begin(), state.words().end(), row.begin());
+    const auto plain = encoder.encode({row.data(), 1, source->words()});
+    row.back() = 1;
+    const auto padded = encoder.encode({row.data(), 1, static_cast<u32>(row.size())});
+    EXPECT_TRUE(std::ranges::equal(array(padded, "relation_args"), array(plain, "relation_args")));
+    row[slots / 64] |= u64{1} << (slots % 64);
+    EXPECT_THROW(static_cast<void>(encoder.encode({row.data(), 1, static_cast<u32>(row.size())})), std::invalid_argument);
+}
+
+TEST(FlatEncoding, LazyAtomSlotsAreRefused)
+{
+    EXPECT_THROW(encoding::FlatRelationEncoder(task(TaskOptions::Atoms::Lazy)), std::invalid_argument);
 }
 
 TEST(FlatEncoding, BatchOwnsMetadataAndArrayStorage)
@@ -176,7 +189,7 @@ TEST(FlatEncoding, InvalidStrideAndOversizedAddressSpanAreRejected)
 
 TEST(FlatEncoding, SharedEncoderIsReentrant)
 {
-    const auto source = task(TaskOptions::Atoms::Lazy);
+    const auto source = task();
     const encoding::FlatRelationEncoder encoder(source);
     const State state = source->initial_state();
     const auto expected = encoder.encode({state.data(), 1, state.size_words()});

@@ -81,12 +81,42 @@ void append(V& dst, const V& src)
 {
     dst.insert(dst.end(), src.begin(), src.end());
 }
+
+/// Re-lays `rows` rows of `from` words, each followed by `tail` words, as rows of `to` >= `from` words (zeros between).
+template<class V>
+void widen_rows(V& v, u64 rows, u32 from, u32 to, u32 tail)
+{
+    if (rows == 0 || from == to || v.empty())
+        return;
+    v.resize(rows * (to + tail));
+    for (u64 r = rows; r-- > 0;)
+    {
+        u64* src = v.data() + r * (from + tail);
+        u64* dst = v.data() + r * (to + tail);
+        std::copy_backward(src + from, src + from + tail, dst + to + tail);
+        std::fill(dst + from, dst + to, u64{0});
+        std::copy_backward(src, src + from, dst + from);
+    }
+}
+
+/// Widens a batch's rows to W atom words (W >= b.words).
+void widen(PoolBatch& b, u32 W)
+{
+    widen_rows(b.states, b.rows, b.words, W, b.numeric_words);
+    widen_rows(b.final_states, b.rows, b.words, W, b.numeric_words);
+    widen_rows(b.goal_pos, b.rows, b.words, W, 0);
+    widen_rows(b.goal_neg, b.rows, b.words, W, 0);
+    b.words = W;
+}
 }  // namespace
 
 struct CpuEnvPool::Impl
 {
     HostEnv env;
     u32 N = 0, T = 1, W = 1, NN = 0, L = 1;
+    u32 fixed_words = 0;  // PoolOptions::words: the batches' row width (0: each batch's widest instance's)
+    std::vector<u32> inst_words;  // the atom words of each instance (global ids)
+    bool uniform = true;          // every instance has W atom words
     bool goals = false;
     std::vector<u64> states, draws, gpos, gneg;
     std::vector<i32> task_ids, steps;
@@ -146,21 +176,50 @@ struct CpuEnvPool::Impl
             spare.push_back(std::move(b));
     }
 
-    /// Copies env `e`'s observation into row `pos` of `out`.
+    /// The atom words of instance g's rows.
+    [[nodiscard]] u32 instance_words(i32 g) const { return inst_words[static_cast<u32>(g)]; }
+
+    /// The row width of a batch of envs `ids` (under the lock: none in flight) whose rows end in instances `next`
+    /// (null: their current ones; else both count, the step may autoreset into `next`).
+    [[nodiscard]] u32 batch_words(const u32* ids, u64 n, const i32* next, bool current) const
+    {
+        if (fixed_words)
+            return fixed_words;
+        if (uniform)
+            return W;
+        u32 w = 1;
+        for (u64 p = 0; p < n; ++p)
+        {
+            const u32 e = ids ? ids[p] : static_cast<u32>(p);
+            if (current)
+                w = std::max(w, instance_words(task_ids[e]));
+            if (next)
+                w = std::max(w, instance_words(next[p]));
+        }
+        return w;
+    }
+
+    /// Copies env `e`'s observation into row `pos` of `out`: its instance's words, zeros up to out.words, its numeric
+    /// words.
     void observe(u32 e, PoolBatch& out, u64 pos) const
     {
-        const u32 RW = W + NN;
-        std::copy_n(states.begin() + static_cast<std::ptrdiff_t>(u64{e} * RW), RW,
-                    out.states.begin() + static_cast<std::ptrdiff_t>(pos * RW));
+        const u32 RW = W + NN, OW = out.words, w = instance_words(task_ids[e]);
+        const u64* s = states.data() + u64{e} * RW;
+        u64* d = out.states.data() + pos * (OW + NN);
+        std::copy_n(s, w, d);
+        std::fill(d + w, d + OW, u64{0});
+        std::copy_n(s + W, NN, d + OW);
         out.task_ids[pos] = task_ids[e];
         out.steps[pos] = steps[e];
         out.env_ids[pos] = e;
         if (goals)
         {
-            std::copy_n(gpos.begin() + static_cast<std::ptrdiff_t>(u64{e} * W), W,
-                        out.goal_pos.begin() + static_cast<std::ptrdiff_t>(pos * W));
-            std::copy_n(gneg.begin() + static_cast<std::ptrdiff_t>(u64{e} * W), W,
-                        out.goal_neg.begin() + static_cast<std::ptrdiff_t>(pos * W));
+            u64* gp = out.goal_pos.data() + pos * OW;
+            u64* gn = out.goal_neg.data() + pos * OW;
+            std::copy_n(gpos.data() + u64{e} * W, w, gp);
+            std::fill(gp + w, gp + OW, u64{0});
+            std::copy_n(gneg.data() + u64{e} * W, w, gn);
+            std::fill(gn + w, gn + OW, u64{0});
         }
     }
 
@@ -251,10 +310,15 @@ struct CpuEnvPool::Impl
             std::rethrow_exception(err);
         if (take.size() == 1)
             return std::move(take[0]->out);
+        u32 width = 1;
+        for (const auto& j : take)
+            width = std::max(width, j->out.words);
         PoolBatch out = std::move(take[0]->out);
+        widen(out, width);
         for (usize k = 1; k < take.size(); ++k)
         {
             PoolBatch& o = take[k]->out;
+            widen(o, width);
             out.rows += o.rows;
             append(out.env_ids, o.env_ids);
             append(out.states, o.states);
@@ -338,6 +402,16 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     I.T = resolve_threads(options.threads);
     I.W = tt.words();
     I.NN = tt.numeric_words();
+    if (options.words && options.words < I.W)
+        throw std::invalid_argument("mymyr: CpuEnvPool: rows of " + std::to_string(options.words) + " words; the " +
+                                    tt.noun() + "'s widest instance has " + std::to_string(I.W));
+    I.fixed_words = options.words;
+    I.inst_words.resize(tt.size());
+    for (u32 g = 0; g < tt.size(); ++g)
+    {
+        I.inst_words[g] = tt.instance(g).words;
+        I.uniform = I.uniform && I.inst_words[g] == I.W;
+    }
     I.L = std::max<u32>(1, tt.label_width());
     I.goals = options.goals;
     const u64 RW = I.W + I.NN;
@@ -388,11 +462,12 @@ const EnvConfig& CpuEnvPool::config() const noexcept { return m_impl->env.config
 u32 CpuEnvPool::num_envs() const noexcept { return m_impl->N; }
 u32 CpuEnvPool::threads() const noexcept { return m_impl->T; }
 bool CpuEnvPool::goals() const noexcept { return m_impl->goals; }
-u32 CpuEnvPool::words() const noexcept { return m_impl->W; }
+u32 CpuEnvPool::words() const noexcept { return m_impl->fixed_words; }
 u32 CpuEnvPool::numeric_words() const noexcept { return m_impl->NN; }
 u32 CpuEnvPool::label_width() const noexcept { return m_impl->L; }
 
-PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos, const u64* goal_neg)
+PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos, const u64* goal_neg,
+                            u32 goal_words)
 {
     Impl& I = *m_impl;
     if ((goal_pos == nullptr) != (goal_neg == nullptr))
@@ -403,17 +478,35 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
     I.env.suite()->check_task_ids(task_ids, ids.size());
     std::lock_guard lock(I.mu);
     I.check_envs(ids, env_ids == nullptr, "reset");
+    const bool current = task_ids == nullptr;
+    const u32 W = I.batch_words(ids.data(), ids.size(), task_ids, current);
+    if (goal_pos)
+        for (u64 p = 0; p < ids.size(); ++p)
+        {
+            const u32 w = I.instance_words(task_ids ? task_ids[p] : I.task_ids[ids[p]]);
+            if (goal_words < w)
+                throw std::invalid_argument("mymyr: CpuEnvPool.reset: goal masks of " + std::to_string(goal_words) +
+                                            " words; env " + std::to_string(ids[p]) + "'s instance has " +
+                                            std::to_string(w));
+        }
     PoolBatch out = I.take_spare();
-    size_batch(out, ids.size(), I.W, I.NN, I.L, I.goals, false);
+    size_batch(out, ids.size(), W, I.NN, I.L, I.goals, false);
     for (u64 p = 0; p < ids.size(); ++p)
     {
         const u32 e = ids[p];
         const u32 inst = task_ids ? static_cast<u32>(task_ids[p]) : static_cast<u32>(I.task_ids[e]);
-        out.count[p] = static_cast<i32>(I.env.reset_row(I.batch, e, inst, goal_pos != nullptr));
+        const u32 held = I.instance_words(I.task_ids[e]);  // the env's words that may be nonzero
+        out.count[p] = static_cast<i32>(I.env.reset_row(I.batch, e, inst, goal_pos != nullptr, held));
         if (goal_pos)
         {
-            std::copy_n(goal_pos + p * I.W, I.W, I.gpos.begin() + static_cast<std::ptrdiff_t>(u64{e} * I.W));
-            std::copy_n(goal_neg + p * I.W, I.W, I.gneg.begin() + static_cast<std::ptrdiff_t>(u64{e} * I.W));
+            // the instance's words of the given masks; the rest of the env's masks is zero
+            const u32 w = I.instance_words(static_cast<i32>(inst)), z = std::max(w, held);
+            u64* gp = I.gpos.data() + u64{e} * I.W;
+            u64* gn = I.gneg.data() + u64{e} * I.W;
+            std::copy_n(goal_pos + p * goal_words, w, gp);
+            std::fill(gp + w, gp + z, u64{0});
+            std::copy_n(goal_neg + p * goal_words, w, gn);
+            std::fill(gn + w, gn + z, u64{0});
         }
         out.goal[p] = I.env.goal_row(I.batch, e) ? 1 : 0;
         out.terminated[p] = out.goal[p] || (out.count[p] == 0 && I.env.config().dead_end == DeadEnd::NoSuccessors &&
@@ -443,10 +536,6 @@ u64 CpuEnvPool::send(const u32* env_ids, u64 n, Actions actions, const i32* next
     if (next_task_ids)
         job->next.assign(next_task_ids, next_task_ids + B);
     job->out = I.take_spare();
-    size_batch(job->out, B, I.W, I.NN, I.L, I.goals, true);
-    PoolBatch& o = job->out;
-    job->so = StepOutputs{o.reward.data(), o.terminated.data(), o.truncated.data(), o.count.data(),
-                          o.final_states.data(), o.schema.data(), o.binding.data(), I.L, o.invalid.data(), o.goal.data()};
     // home ranges of at least 128 rows, at most one per worker, claimed in pieces of about a quarter of a range
     job->parts = static_cast<u32>(std::clamp<u64>(B / 128, 1, I.T));
     job->ranges = std::make_unique<Job::Range[]>(job->parts);
@@ -460,6 +549,14 @@ u64 CpuEnvPool::send(const u32* env_ids, u64 n, Actions actions, const i32* next
     {
         std::lock_guard lock(I.mu);
         I.check_envs(job->env_ids, job->all, "send");
+        // the batch's width: the envs' instances' and those they may autoreset into (read under the lock: no env of
+        // the send is in flight)
+        const u32 W = I.batch_words(job->all ? nullptr : job->env_ids.data(), B, next_task_ids, true);
+        size_batch(job->out, B, W, I.NN, I.L, I.goals, true);
+        PoolBatch& o = job->out;
+        job->so = StepOutputs{o.reward.data(), o.terminated.data(), o.truncated.data(), o.count.data(),
+                              o.final_states.data(), o.schema.data(), o.binding.data(), I.L, o.invalid.data(),
+                              o.goal.data(), W};
         job->ticket = I.next_ticket++;
         if (job->all)
             std::fill(I.busy.begin(), I.busy.end(), u8{1});

@@ -176,20 +176,30 @@ struct StateBatch;  // arrays.hpp
 /// words, then task.numeric_words() numeric words), for arrays and for packed States alike. Checked with
 /// check_task_rows.
 [[nodiscard]] StateBatch import_task_states(nb::handle obj, const Task& task);
-/// ValueError unless the batch holds states of `task`: its States belong to the task; array rows set no atom slot the
-/// task has not assigned and, for frozen atom slots, are at least task.words() wide.
+/// ValueError unless the batch holds states of `task`: its States belong to the task; array rows are at least
+/// task.words() wide and set no atom slot the task does not have (the words past task.words() are padding, not read);
+/// a task with lazy atom slots takes no array rows.
 void check_task_rows(const StateBatch& b, const Task& task);
 /// import_task_states for rows of at least `words` atom words (packed States) and NN numeric words (a task table's
-/// rows: words = TaskTable::words(), NN = TaskTable::numeric_words(); a State may carry fewer numeric words).
+/// rows: NN = TaskTable::numeric_words(); a State may carry fewer numeric words).
 [[nodiscard]] StateBatch import_rows(nb::handle obj, u32 words, u32 NN);
 
-/// The TaskOptions of the Python keyword arguments (MYMYR_TASK_OPTION_ARGS); raises ValueError for unknown names.
-[[nodiscard]] TaskOptions make_options(std::string_view atoms, std::string_view matching, u32 fc_free_params,
-                                       u32 frozen_max_words, u32 pilot_expansions);
-/// The keyword arguments of make_options (after the positional ones), with their defaults.
+/// The TaskOptions of the Python keyword arguments (MYMYR_TASK_OPTION_ARGS); raises ValueError for unknown names and
+/// values out of range.
+[[nodiscard]] TaskOptions make_options(std::string_view atoms, std::string_view matching, IntArg fc_free_params,
+                                       std::string_view numeric_storage, FloatArg numeric_quantum, bool numeric_tolerant,
+                                       IntArg reachability_budget);
+/// The task options as binding parameters, their names as arguments of make_options, and their keyword arguments
+/// (after the positional ones) with their defaults.
+#define MYMYR_TASK_OPTION_PARAMS                                                                                       \
+    std::string_view atoms, std::string_view matching, IntArg fc_free_params, std::string_view numeric_storage,         \
+        FloatArg numeric_quantum, bool numeric_tolerant, IntArg reachability_budget
+#define MYMYR_TASK_OPTION_VALUES                                                                                       \
+    atoms, matching, fc_free_params, numeric_storage, numeric_quantum, numeric_tolerant, reachability_budget
 #define MYMYR_TASK_OPTION_ARGS                                                                                         \
-    nb::kw_only(), "atoms"_a = "auto", "matching"_a = "auto", "fc_free_params"_a = 4, "frozen_max_words"_a = 8,         \
-        "pilot_expansions"_a = 1024
+    nb::kw_only(), "atoms"_a = "auto", "matching"_a = "auto", "fc_free_params"_a = 4, "numeric_storage"_a = "auto",     \
+        "numeric_quantum"_a = 0.0, "numeric_tolerant"_a = false,                                                        \
+        "reachability_budget"_a = ::mymyr::TaskOptions::k_reachability_budget
 
 void bind_task(nb::module_& m);
 void bind_rl(nb::module_& m);

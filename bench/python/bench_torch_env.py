@@ -84,7 +84,7 @@ def main():
     ap.add_argument("--graph-steps", type=int, default=10)
     a = ap.parse_args()
     for name in a.tasks.split(","):
-        task = mymyr.Task.from_text(str(ROOT / "tests/data/tasks" / f"{name}.txt"), atoms="frozen")
+        task = mymyr.Task.from_text(str(ROOT / "tests/data/tasks" / f"{name}.txt"), atoms="dense")
         for n in map(int, a.envs.split(",")):
             if "batched" in a.modes:
                 env = rt.BatchedEnv(task, n, device="cuda", seed=1)

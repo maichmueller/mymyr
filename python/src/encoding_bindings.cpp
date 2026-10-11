@@ -90,7 +90,7 @@ ResultDict schema_dict(const encoding::FlatSchema& schema)
 PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, ActionsArg action_arg,
                    GoalsArg goal_arg, Arg<ann::Framework> framework)
 {
-    StateBatch states = import_states(state_arg, current_words(self.encoder.table()));
+    StateBatch states = import_states(state_arg, packed_words(state_arg));
     std::vector<i32> ids_copy;
     std::shared_ptr<void> ids_keep;
     const auto& table = self.encoder.table();

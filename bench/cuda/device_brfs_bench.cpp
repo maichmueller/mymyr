@@ -1,6 +1,6 @@
 // mymyr_device_brfs_bench: the device BrFS on an exported task text file, printing one JSON line.
 //
-//   mymyr_device_brfs_bench task.txt [--atoms auto|lazy|frozen] [--match auto|fixed|fc] [--no-witness] [--no-canonical]
+//   mymyr_device_brfs_bench task.txt [--atoms auto|reachable|dense|lazy] [--match auto|fixed|fc] [--no-witness] [--no-canonical]
 //                 [--chunk N] [--expected N] [--max-states N] [--stop-at-goal] [--fp] [--cpu T] [--reps R]
 //                 [--max-bytes B] [--timings] [--candidate-bytes B]
 //
@@ -29,7 +29,7 @@ namespace
 [[noreturn]] void usage(const char* msg)
 {
     std::fprintf(stderr,
-                 "error: %s\nusage: mymyr_device_brfs_bench task.txt [--atoms auto|lazy|frozen] [--match auto|fixed|fc] [--no-witness]\n"
+                 "error: %s\nusage: mymyr_device_brfs_bench task.txt [--atoms auto|reachable|dense|lazy] [--match auto|fixed|fc] [--no-witness]\n"
                  "       [--no-canonical] [--chunk N] [--expected N] [--max-states N] [--stop-at-goal] [--fp] [--cpu T]\n"
                  "       [--reps R] [--max-bytes B] [--timings] [--candidate-bytes B]\n",
                  msg);
@@ -59,7 +59,7 @@ int main(int argc, char** argv)
         if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else if (a == "--match")
         {
@@ -125,7 +125,7 @@ int main(int argc, char** argv)
                     "\"groups\":%llu,\"resumed\":%llu,\"redone\":%llu,\"loops\":%llu,\"captures\":%llu,\"cuts\":%llu,"
                     "\"rehashes\":%u,\"uploads\":%u,\"widenings\":%u,\"host_schemas\":%u,\"table_slots\":%llu,"
                     "\"device_mb\":%.1f,\"words\":%u",
-                    name.c_str(), task->atoms().mode() == AtomMode::Frozen ? "frozen" : "lazy", o.witness_pruning ? "true" : "false",
+                    name.c_str(), atom_mode_name(task->atoms().mode()), o.witness_pruning ? "true" : "false",
                     o.canonical_order ? "true" : "false", o.chunk_states, static_cast<unsigned long long>(o.expected_states),
                     static_cast<unsigned long long>(r.states), static_cast<unsigned long long>(r.expanded),
                     static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.goal_states), r.layers,

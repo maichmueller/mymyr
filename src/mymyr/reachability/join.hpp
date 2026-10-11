@@ -358,6 +358,14 @@ public:
     }
     [[nodiscard]] u32* bind() noexcept { return m_bind.data(); }
 
+    /// A work bound in steps (candidate objects tried, plus what the caller charges), counted across runs: a run that
+    /// passes it stops as if emit() had asked to, and exhausted() turns true. The count is a function of the plans and
+    /// their inputs alone, so a bounded caller stops at the same point in every run.
+    void set_step_limit(u64 limit) noexcept { m_step_limit = limit; }
+    void charge(u64 steps) noexcept { m_steps += steps; }
+    [[nodiscard]] u64 steps() const noexcept { return m_steps; }
+    [[nodiscard]] bool exhausted() const noexcept { return m_steps > m_step_limit; }
+
     /// Runs the plan with the prebound variables already in bind(). Returns false iff emit() asked to stop.
     template<class Ctx>
     bool run(const Plan& p, Ctx& ctx)
@@ -760,6 +768,11 @@ private:
             {
                 const u32 o = w * 64 + static_cast<u32>(bits::ctz64(word));
                 word &= word - 1;
+                if (++m_steps > m_step_limit)
+                {
+                    m_stop = true;
+                    return false;
+                }
                 b[var] = o;
                 bool ok = true;
                 for (u32 ci = st.check_begin; ci < st.check_end; ++ci)
@@ -787,5 +800,7 @@ private:
     std::vector<u64> m_cand;
     std::vector<u32> m_bind;
     bool m_stop = false;
+    u64 m_steps = 0;
+    u64 m_step_limit = ~u64{0};
 };
 }  // namespace mymyr::reach

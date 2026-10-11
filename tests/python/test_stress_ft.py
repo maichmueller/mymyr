@@ -1,6 +1,7 @@
-"""Free-threaded stress: 64 Python threads share one lazy-slot Task (atoms are interned while they run) and
-drive the per-state API and rl.expand on it; every thread's results equal a single-threaded run on a separate Task.
-Labels, goal flags and canonical hashes are slot-order independent, so the two tasks are comparable."""
+"""Free-threaded stress: 64 Python threads share one Task and drive the per-state API on it, and rl.expand where its
+atom slots are fixed; with lazy slots, atoms are interned while they run. Every thread's results equal a
+single-threaded run on a separate Task. Labels, goal flags and canonical hashes are slot-order independent, so the two
+tasks are comparable."""
 
 import random
 import sys
@@ -47,12 +48,13 @@ def check_expand(task, seen, steps, kw):
     assert np.array_equal(rl.is_goal(task, seen), [g for _, _, g in steps[: len(seen)]])
 
 
+@pytest.mark.parametrize("atoms", ["lazy", "reachable"])
 @pytest.mark.parametrize("name", ["openstacks-opt08-adl__p03", "logistics00__probLOGISTICS-6-1", "blocks__probBLOCKS-8-0"])
-def test_sixty_four_threads_share_one_lazy_task(name):
-    reference = text_task(name, atoms="lazy")
+def test_sixty_four_threads_share_one_task(name, atoms):
+    reference = text_task(name, atoms=atoms)
     expected = [trace(reference, reference, seed)[0] for seed in range(THREADS)]
 
-    task = text_task(name, atoms="lazy")  # fresh: no slots assigned yet
+    task = text_task(name, atoms=atoms)  # fresh: under lazy slots, no slots assigned yet
     shared_pool = rl.ThreadPool(4)
     barrier = threading.Barrier(THREADS)
     results, errors = [None] * THREADS, []
@@ -63,8 +65,9 @@ def test_sixty_four_threads_share_one_lazy_task(name):
             barrier.wait()
             steps, seen = trace(task, api, i)
             results[i] = steps
-            kw = ({}, {"pool": shared_pool}, {"threads": 2}, {"canonical": True})[i % 4]
-            check_expand(task, seen, steps, kw)
+            if atoms != "lazy":  # tables take fixed atom slots only
+                kw = ({}, {"pool": shared_pool}, {"threads": 2}, {"canonical": True})[i % 4]
+                check_expand(task, seen, steps, kw)
         except Exception as e:  # noqa: BLE001 - reported below
             errors.append((i, repr(e)))
 
@@ -78,9 +81,10 @@ def test_sixty_four_threads_share_one_lazy_task(name):
     assert not sys._is_gil_enabled()
 
 
-def test_threads_share_states_across_handles():
+@pytest.mark.parametrize("atoms", ["lazy", "reachable"])
+def test_threads_share_states_across_handles(atoms):
     """States made by one thread's handle are used by all others (value semantics across handles)."""
-    task = text_task("gripper__prob05", atoms="lazy")
+    task = text_task("gripper__prob05", atoms=atoms)
     rng = random.Random(0)
     states = [task.initial_state]
     for _ in range(40):
@@ -97,7 +101,8 @@ def test_threads_share_states_across_handles():
             barrier.wait()
             for _ in range(5):
                 assert [[a.label for a in h.applicable_actions(s)] for s in states] == expected
-                assert h.decode(words) == states
+                if atoms != "lazy":  # rows of lazy slots cannot be checked against the task: decode refuses them
+                    assert h.decode(words) == states
                 assert set(h.successor_states(states[i % len(states)])) == set(task.successor_states(states[i % len(states)]))
         except Exception as e:  # noqa: BLE001 - reported below
             errors.append((i, repr(e)))

@@ -1,9 +1,9 @@
 // Device tests for conditional effects and axiom strata.
 //   - on every task with conditional effects or axioms of the suite (tests/data/tasks) and of the
-//     fork's data (MYMYR_FORK_DATA_DIR, PDDL through the front end), frozen and lazy: no schema with conditional effects
+//     fork's data (MYMYR_FORK_DATA_DIR, PDDL through the front end), dense and lazy slots: no schema with conditional effects
 //     is left on the CPU fallback and the axioms run on the device; the device BrFS equals the CPU BrFS (counts, layers,
 //     deterministic ids), stop_at_goal returns the CPU's plan, and the device expand is byte-equal to rl::expand (goal
-//     flags over derived atoms included); the ids do not depend on the chunk size; the device goal test over derived
+//     flags over derived atoms included; dense and reachable slots: a table takes fixed slots); the ids do not depend on the chunk size; the device goal test over derived
 //     atoms equals Task::is_goal;
 //   - the CPU fallback still works next to the device paths (forward-checking conditions stay on the CPU).
 // MYMYR_TEST_FULL_SUITE=1 also runs the tasks above 100,000 states; MYMYR_TEST_SANITIZER=1 shrinks the expand batches.
@@ -113,10 +113,10 @@ const ConditionalTask& conditional_task(const std::string& name)
 }
 
 /// The task, or null when its PDDL is not there (the test skips).
-TaskPtr load(const ConditionalTask& g, bool frozen, TaskOptions::Matching matching = TaskOptions::Matching::Auto)
+TaskPtr load(const ConditionalTask& g, TaskOptions::Atoms atoms, TaskOptions::Matching matching = TaskOptions::Matching::Auto)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+    o.atoms = atoms;
     o.matching = matching;
     if (!g.text.empty())
         return Task::from_text_file(task_path(g.text), o);
@@ -124,6 +124,11 @@ TaskPtr load(const ConditionalTask& g, bool frozen, TaskOptions::Matching matchi
     if (!std::filesystem::exists(d / g.domain) || !std::filesystem::exists(d / g.problem))
         return nullptr;
     return Task::create(*frontend::load_task(d / g.domain, d / g.problem), o);
+}
+
+TaskPtr load(const ConditionalTask& g, bool frozen, TaskOptions::Matching matching = TaskOptions::Matching::Auto)
+{
+    return load(g, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy, matching);
 }
 
 std::vector<std::tuple<std::string, bool>> params()
@@ -334,7 +339,7 @@ TEST_P(DeviceConditionalEffectsSuite, ExpandByteEqualToRlExpand)
     for (bool device_first : {true, false})
     {
         SCOPED_TRACE(device_first ? "device first" : "cpu first");
-        const auto task = load(conditional_task(name), frozen);
+        const auto task = load(conditional_task(name), frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
         if (!task)
             GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
         u32 Win = 0;
@@ -352,7 +357,7 @@ TEST_P(DeviceConditionalEffectsSuite, ExpandByteEqualToRlExpand)
                 SCOPED_TRACE(std::string(canonical ? "canonical" : "matcher order") + (witness ? ", witness" : ""));
                 const rl::ExpandOptions o{canonical, witness, true};
                 if (!device_first)
-                    (void)cpu_expand(task, states, N, Win, 1, Win, L, o);  // interns first under lazy slots
+                    (void)cpu_expand(task, states, N, Win, 1, Win, L, o);
                 const u64 total = ex.count({static_cast<const u64*>(d_states.data()), N, Win, 0}, nullptr, o);
                 const u32 Wfull = std::max(Win, task->max_words());
                 for (auto [cap, W] : {std::pair<u64, u32>{total + 3, Wfull}, {total / 2 + 1, Wfull}, {std::max<u64>(total, 1), 1u}})

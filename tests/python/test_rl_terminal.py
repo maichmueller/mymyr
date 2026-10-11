@@ -10,7 +10,7 @@ pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built with
 
 
 def task_from_strings(domain, problem):
-    return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem), atoms="frozen")
+    return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
 
 
 @pytest.fixture(params=[("cpu", "auto"), ("cuda", "auto"), ("cuda", "general")])
@@ -89,7 +89,7 @@ def test_partial_pool_reset_uses_each_instances_goal():
         mymyr.Task(domain.instantiate_string(
             f"""(define (problem mixed-{level}) (:domain mixed) (:init (= (level) {level}))
             (:goal (>= (level) 1)))"""
-        ), atoms="frozen")
+        ))
         for level in [0, 1]
     ]
     pool = rl.CpuEnvPool(rl.TaskTable(tasks), num_envs=2, threads=2, autoreset=False)
@@ -248,7 +248,7 @@ def table_of(domain, problems):
     parsed = mymyr.Domain.from_string(domain)
     name = domain.split("(domain ")[1].split(")")[0]
     return rl.TaskTable([
-        mymyr.Task(parsed.instantiate_string(f"(define (problem {name}-{k}) (:domain {name}) {body})"), atoms="frozen")
+        mymyr.Task(parsed.instantiate_string(f"(define (problem {name}-{k}) (:domain {name}) {body})"))
         for k, body in enumerate(problems)
     ])
 

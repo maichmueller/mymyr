@@ -10,10 +10,16 @@
 //
 // Level 2, the slot: the bit position of an atom in a state (fluent) or in the per-state derived bitset (derived).
 //   Fluent and derived atoms have separate slot spaces, so stored states never carry derived bits.
+//   - Reachable mode: the slots are the relaxed-reachable atoms (reachability/relaxed_reachability.hpp), numbered in
+//     ascending canonical id. Every atom of a state reachable from the initial state is relaxed-reachable, and so is
+//     every atom of a successor of a state made of such atoms; other atoms have no slot (find() gives k_empty, and they
+//     are false in every state).
+//   - Dense mode: slot = cid (minus F_fluent for derived atoms), every atom of the typed-dense space.
+//   Both are frozen: the slot table is a function of the task, every record exists up front, nothing is mutated.
 //   - Lazy mode: slots are assigned on first touch through `std::atomic<u32> slot_of[cid]` (a read is one load, a
 //     first touch one CAS plus a fetch_add). The slot's (pred, args) record and view op are written before the slot is
-//     published with a release store, so any thread that obtains the slot can read its record.
-//   - Frozen mode: slot = cid (minus F_fluent for derived atoms); every record exists up front, nothing is mutated.
+//     published with a release store, so any thread that obtains the slot can read its record. The numbering depends
+//     on the order in which searches first meet the atoms.
 //
 // The record arrays are ChunkedArrays: readers never see a reallocation while other threads intern.
 
@@ -30,9 +36,16 @@ namespace mymyr
 {
 enum class AtomMode : u8
 {
-    Lazy,
-    Frozen,
+    Reachable,  // frozen: the relaxed-reachable atoms in canonical order
+    Dense,      // frozen: slot = canonical id
+    Lazy,       // slots on first touch
 };
+
+/// "reachable", "dense" or "lazy" (the names of the Python option atoms=).
+[[nodiscard]] constexpr const char* atom_mode_name(AtomMode m) noexcept
+{
+    return m == AtomMode::Reachable ? "reachable" : m == AtomMode::Dense ? "dense" : "lazy";
+}
 
 enum class AtomKind : u8
 {
@@ -118,22 +131,24 @@ public:
     AtomIndex(const AtomIndex&) = delete;
     AtomIndex& operator=(const AtomIndex&) = delete;
 
-    /// Sets up the index. `layout` and `view` must outlive it. Not thread-safe (construction only), as is reset().
-    void init(const CanonicalLayout* layout, const ViewLayout* view, AtomMode mode);
-    void reset(AtomMode mode);
+    /// Sets up the index. `layout` and `view` must outlive it. Reachable mode takes the atoms that get slots in
+    /// `reachable` (ascending canonical ids, every one below layout->total); the other modes ignore it. Not
+    /// thread-safe (construction only), as is reset().
+    void init(const CanonicalLayout* layout, const ViewLayout* view, AtomMode mode,
+              std::span<const CanonicalAtom> reachable = {});
+    void reset(AtomMode mode, std::span<const CanonicalAtom> reachable = {});
 
     [[nodiscard]] AtomMode mode() const noexcept { return m_mode; }
+    /// Whether the slot table is fixed at construction (every mode but Lazy).
+    [[nodiscard]] bool frozen() const noexcept { return m_mode != AtomMode::Lazy; }
     [[nodiscard]] const CanonicalLayout& layout() const noexcept { return *m_layout; }
 
     /// Assigned fluent slots: a state has at most words_for(fluent_slots()) words.
     [[nodiscard]] u32 fluent_slots() const noexcept { return m_next[0].load(std::memory_order_acquire); }
     [[nodiscard]] u32 derived_slots() const noexcept { return m_next[1].load(std::memory_order_acquire); }
-    /// Upper bounds (the canonical space sizes).
-    [[nodiscard]] u32 max_fluent_slots() const noexcept { return static_cast<u32>(m_layout->fluent_count); }
-    [[nodiscard]] u32 max_derived_slots() const noexcept
-    {
-        return static_cast<u32>(m_layout->total - m_layout->fluent_count);
-    }
+    /// Upper bounds: the slots a frozen index has, the canonical space sizes under lazy slots.
+    [[nodiscard]] u32 max_fluent_slots() const noexcept { return m_max[0]; }
+    [[nodiscard]] u32 max_derived_slots() const noexcept { return m_max[1]; }
 
     /// Slot of canonical atom c (any value; c >= total means "outside the domains"), or k_empty if it has none. A
     /// pending or absent atom is false in every published state, so this never waits.
@@ -142,12 +157,16 @@ public:
         const u32 v = m_slot_of[c < m_layout->total ? c : m_layout->total].load(std::memory_order_relaxed);
         return v < k_pending ? v : k_empty;
     }
-    /// Slot of canonical atom c < total, assigning one on first touch. Thread-safe.
+    /// Slot of canonical atom c < total, assigning one on first touch under lazy slots. Thread-safe. Frozen slots:
+    /// throws std::logic_error for an atom without a slot (find() asks without throwing).
     u32 intern(CanonicalAtom c) const
     {
         const u32 v = m_slot_of[c < m_layout->total ? c : m_layout->total].load(std::memory_order_acquire);
         return v < k_pending ? v : intern_slow(c);
     }
+    /// The slot of canonical atom c < total if it can have one: find() for frozen slots (k_empty for an atom without a
+    /// slot, which no state holds), intern() under lazy slots.
+    [[nodiscard]] u32 slot_if_any(CanonicalAtom c) const { return frozen() ? find(c) : intern(c); }
     /// Raw table for hot paths: entries are slots, k_pending or k_empty. Entry `total` is a permanent k_empty.
     [[nodiscard]] const std::atomic<u32>* slot_table() const noexcept { return m_slot_of.get(); }
 
@@ -155,6 +174,10 @@ public:
     [[nodiscard]] const u32* record(AtomKind k, u32 slot) const noexcept { return m_records[idx(k)].get(slot); }
     [[nodiscard]] const ViewOp& view_op(AtomKind k, u32 slot) const noexcept { return *m_ops[idx(k)].get(slot); }
     [[nodiscard]] CanonicalAtom canonical(AtomKind k, u32 slot) const noexcept { return *m_cid[idx(k)].get(slot); }
+    /// The slots set in the slot bitset w[0, nw) of kind k, in ascending canonical id of their atoms: the slot order
+    /// under frozen slots, sorted under lazy ones (numbered in the order searches met the atoms), so that a listing of a
+    /// state's atoms does not depend on that history.
+    [[nodiscard]] std::vector<u32> slots_in_canonical_order(AtomKind k, const u64* w, u32 nw) const;
 
     [[nodiscard]] PredicateId predicate(SlotId s) const noexcept { return PredicateId{record(AtomKind::Fluent, s.v)[0]}; }
     [[nodiscard]] std::span<const u32> arguments(SlotId s) const noexcept
@@ -176,6 +199,7 @@ private:
     std::unique_ptr<std::atomic<u32>[]> m_slot_of;  // total + 1 entries
     // The only mutation of an otherwise immutable task: append-only slot assignment and records.
     mutable std::atomic<u32> m_next[2] = {0, 0};
+    u32 m_max[2] = {0, 0};
     mutable ChunkedArray<u32> m_records[2];
     mutable ChunkedArray<ViewOp> m_ops[2];
     mutable ChunkedArray<CanonicalAtom> m_cid[2];

@@ -9,7 +9,7 @@ import numpy as np
 import mymyr
 from mymyr import encoding, rl
 
-task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt", atoms="lazy")
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
 states = [task.initial_state]
 expansion = rl.expand(task, states)
 encoder = encoding.FlatRelationEncoder(task)
@@ -50,9 +50,9 @@ For N graphs and R relations, all indices/counts are int32:
 
 Cell `graph * R + relation` has `relation_counts[graph,relation]` tuples of that relation's arity, encoded in
 `relation_args[relation_offsets[cell]:relation_offsets[cell+1]]`. Tuples are sorted lexicographically by object
-binding within each cell, so lazy slot allocation order never becomes model input. Zero-arity predicates are not
-dropped: they carry a count even though their argument segment is empty. Counts/offsets beyond int32 capacity fail
-explicitly rather than wrapping or truncating.
+binding within each cell, so the atom slot layout (`atoms='auto'`, `'reachable'` or `'dense'`) never becomes model
+input. Zero-arity predicates are not dropped: they carry a count even though their argument segment is empty.
+Counts/offsets beyond int32 capacity fail explicitly rather than wrapping or truncating.
 Repeated initial facts have set semantics, while repeated caller action labels remain distinct readout rows.
 
 `batch.object_names` and `batch.task_fingerprints` retain portable name/content metadata. Batch-global object IDs
@@ -64,7 +64,9 @@ The result owns its schema, metadata and packed arrays and remains valid after t
 Construct an encoder from one `Task`/`TaskHandle`, or a one-domain `rl.TaskTable`. A multi-instance table requires an
 aligned `task_ids` vector. Native State and GroundCondition values are checked against their row's task ownership;
 raw word-array callers remain responsible for supplying the matching task/slot encoding. Invalid or unassigned bits
-are rejected. The encoder reads the task's current atom index directly rather than retaining stale lazy metadata.
+are rejected. A row's words past its instance's own are padding and are not read; a row narrower than its instance's
+states raises `ValueError`. Tasks with lazy atom slots are refused, since their rows have no fixed layout
+([State encodings](parsing-and-tasks.md#state-encodings)).
 
 Default state facts include static and axiom-derived atoms; `include_static=False` or `include_derived=False` chooses
 an explicit projection. Derived goal satisfaction is evaluated correctly even when derived state facts are omitted.

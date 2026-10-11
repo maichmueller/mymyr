@@ -686,7 +686,7 @@ int main(int argc, char** argv)
         else if (s == "--atoms")
         {
             const std::string v = value();
-            a.to.atoms = v == "auto" ? TaskOptions::Atoms::Auto : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+            a.to.atoms = v == "auto" ? TaskOptions::Atoms::Auto : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Lazy;
         }
         else if (!s.empty() && s[0] != '-' && a.task_file.empty())
             a.task_file = s;

@@ -109,18 +109,32 @@ TaskSuite::TaskSuite(Private, std::vector<TaskTablePtr> tables, std::vector<Ref>
         m_numeric = m_numeric || t->numeric();
         m_schema_offsets.push_back(m_schema_offsets.back() + t->num_schemas());
     }
+    m_instance_words.resize(m_size);
+    for (u32 g = 0; g < m_size; ++g)
+        m_instance_words[g] = instance(g).words;
+}
+
+u32 TaskSuite::batch_words(const i32* task_ids, u64 n) const noexcept
+{
+    if (!task_ids)
+        return m_instance_words[0];
+    u32 w = 1;
+    for (u64 i = 0; i < n; ++i)
+        w = std::max(w, m_instance_words[static_cast<u32>(task_ids[i])]);
+    return w;
 }
 
 std::string TaskSuite::domain_name(u32 domain) const { return table(domain)->task(0)->data().domain_name; }
 
-void TaskSuite::initial_row(u32 g, u64* row, u32 words, u32 numeric_words) const
+void TaskSuite::initial_row(u32 g, u64* row, u32 words, u32 numeric_words, u32 dirty) const
 {
     const Ref r = ref(g);
     const TaskTable& t = *m_tables[r.domain];
-    const std::vector<u64>& init = t.instance(r.local).init;  // [t.words() | t.numeric_words()]
-    std::fill_n(row, u64{words} + numeric_words, u64{0});
-    std::copy_n(init.begin(), t.words(), row);
-    std::copy_n(init.begin() + t.words(), t.numeric_words(), row + words);
+    const TaskTable::Instance& in = t.instance(r.local);  // init: [t.words() | t.numeric_words()]
+    std::copy_n(in.init.begin(), in.words, row);
+    std::fill(row + in.words, row + std::min(words, std::max(in.words, dirty)), u64{0});
+    std::copy_n(in.init.begin() + t.words(), t.numeric_words(), row + words);
+    std::fill(row + words + t.numeric_words(), row + words + numeric_words, u64{0});
 }
 
 u64 TaskSuite::fingerprint() const

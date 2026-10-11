@@ -66,7 +66,7 @@ cuda::ContextPtr context()
 
 std::filesystem::path data(const std::string& rel) { return test::fork_data_dir() / rel; }
 
-TaskPtr fork_task(const std::string& dir, const std::string& problem, TaskOptions::Atoms atoms = TaskOptions::Atoms::Frozen)
+TaskPtr fork_task(const std::string& dir, const std::string& problem, TaskOptions::Atoms atoms = TaskOptions::Atoms::Dense)
 {
     const auto d = data(dir + "/domain.pddl"), p = data(dir + "/" + problem);
     if (!std::filesystem::exists(d) || !std::filesystem::exists(p))
@@ -76,7 +76,7 @@ TaskPtr fork_task(const std::string& dir, const std::string& problem, TaskOption
     return Task::create(*frontend::load_task(d, p), to);
 }
 
-TaskPtr pddl_task(const char* domain, const char* problem, TaskOptions::Atoms atoms = TaskOptions::Atoms::Frozen)
+TaskPtr pddl_task(const char* domain, const char* problem, TaskOptions::Atoms atoms = TaskOptions::Atoms::Dense)
 {
     TaskOptions to;
     to.atoms = atoms;
@@ -168,14 +168,14 @@ TEST(DeviceStateSpace, SuiteEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         for (const auto& t : test::suite())
         {
             if (t.states > (sanitizer_size() ? 50'000 : test::suite_state_limit()))
                 continue;
             TaskOptions to;
             to.atoms = atoms;
-            const bool frozen = atoms == TaskOptions::Atoms::Frozen;
+            const bool frozen = atoms == TaskOptions::Atoms::Dense;
             const std::string what = t.name + (frozen ? " frozen" : " lazy");
             const auto cpu_task = Task::from_text_file(test::task_path(t.name), to);
             const StateSpaceResult ref = generate_state_space(cpu_task, cpu_options(false));
@@ -214,7 +214,7 @@ TEST(DeviceStateSpace, ForkInstancesEqualHost)
     const auto ctx = context();
     u32 ran = 0, ce = 0, axioms = 0, costs = 0;
     for (const ForkCase& c : kForkCases)
-        for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+        for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         {
             const TaskPtr cpu_task = fork_task(c.dir, c.problem, atoms);
             if (!cpu_task)
@@ -224,7 +224,7 @@ TEST(DeviceStateSpace, ForkInstancesEqualHost)
             }
             if (!cuda::state_space_unsupported(*cpu_task).empty())
                 continue;  // numeric
-            const bool frozen = atoms == TaskOptions::Atoms::Frozen;
+            const bool frozen = atoms == TaskOptions::Atoms::Dense;
             for (const bool remove : {false, true})
             {
                 const std::string what = std::string(c.dir) + "/" + c.problem + (frozen ? " frozen" : " lazy") +
@@ -294,14 +294,14 @@ TEST(DeviceStateSpace, TransitionCostsEqualHost)
     // real costs: (g + c) - g is not c, and the cost distances add reals in the order Dijkstra does
     const std::string real = ring_problem(9, [](u32 i) { return "0." + std::to_string(1 + (i * 3) % 9) + "7"; });
     for (const std::string& p : {integral, real})
-        for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+        for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         {
             const TaskPtr cpu = pddl_task(kCountDomain, p.c_str(), atoms);
             const StateSpaceResult ref = generate_state_space(cpu, cpu_options());
             ASSERT_EQ(ref.status, StateSpaceStatus::Ok);
             ASSERT_FALSE(ref.space->unit_costs());
-            const TaskPtr task = atoms == TaskOptions::Atoms::Frozen ? cpu : pddl_task(kCountDomain, p.c_str(), atoms);
-            expect_device_equals(ctx, task, ref, dev_options(cpu_options()), atoms == TaskOptions::Atoms::Frozen, "ring costs");
+            const TaskPtr task = atoms == TaskOptions::Atoms::Dense ? cpu : pddl_task(kCountDomain, p.c_str(), atoms);
+            expect_device_equals(ctx, task, ref, dev_options(cpu_options()), atoms == TaskOptions::Atoms::Dense, "ring costs");
         }
     // state-dependent costs (a conditional total-cost effect): the CPU regenerates the costs
     const char* cond = R"(
@@ -499,7 +499,7 @@ std::vector<Set> sets(TaskOptions::Atoms atoms)
 
 /// Each instance of the table's run `rs` against its single run (same options) and the host.
 void expect_table_equals(const cuda::ContextPtr& ctx, const Set& set, const std::vector<cuda::DeviceStateSpaceResult>& rs,
-                         const std::vector<StateSpaceResult>& cpu, const cuda::DeviceStateSpaceOptions& o, bool frozen,
+                         const std::vector<StateSpaceResult>& cpu, const cuda::DeviceStateSpaceOptions& o,
                          const std::string& what)
 {
     ASSERT_EQ(rs.size(), set.tasks.size());
@@ -514,15 +514,12 @@ void expect_table_equals(const cuda::ContextPtr& ctx, const Set& set, const std:
         if (rs[i].status == StateSpaceStatus::Ok)
         {
             ASSERT_TRUE(rs[i].host) << w;
-            expect_equal(*cpu[i].space, *rs[i].host, frozen, w + " vs CPU");
+            expect_equal(*cpu[i].space, *rs[i].host, true, w + " vs CPU");
         }
-        if (frozen)  // lazy: a single run would intern into the same tasks again
-        {
-            const cuda::DeviceStateSpaceResult one = cuda::state_space(ctx, set.tasks[i], o);
-            ASSERT_EQ(one.status, rs[i].status) << w;
-            if (one.status == StateSpaceStatus::Ok)
-                expect_equal(*one.host, *rs[i].host, true, w + " vs single");
-        }
+        const cuda::DeviceStateSpaceResult one = cuda::state_space(ctx, set.tasks[i], o);
+        ASSERT_EQ(one.status, rs[i].status) << w;
+        if (one.status == StateSpaceStatus::Ok)
+            expect_equal(*one.host, *rs[i].host, true, w + " vs single");
     }
 }
 
@@ -532,18 +529,12 @@ TEST(DeviceStateSpaces, SetsTogetherEqualSinglesAndCpu)
     const auto ctx = context();
     StateSpaceOptions so = cpu_options(false);
     so.max_states = sanitizer_size() ? 4000 : 40000;  // the larger instances fail on both sides (OutOfStates)
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
-        const bool frozen = atoms == TaskOptions::Atoms::Frozen;
-        const std::vector<Set> fresh = frozen ? std::vector<Set>{} : sets(atoms);  // lazy: the CPU on tasks of its own
         for (const Set& set : sets(atoms))
         {
             std::vector<StateSpaceResult> cpu;
-            const Set* cpu_set = &set;
-            for (const Set& f : fresh)
-                if (f.name == set.name)
-                    cpu_set = &f;
-            for (const TaskPtr& t : cpu_set->tasks)
+            for (const TaskPtr& t : set.tasks)
             {
                 cpu.push_back(generate_state_space(t, so));
                 if (cpu.back().status == StateSpaceStatus::OutOfStates)
@@ -560,26 +551,24 @@ TEST(DeviceStateSpaces, SetsTogetherEqualSinglesAndCpu)
             EXPECT_GT(ok, 0u) << set.name;
             const cuda::DeviceStateSpaceOptions o = dev_options(so);
             const cuda::DeviceStateSpaces all = cuda::state_spaces(ctx, set.table, o);
-            EXPECT_EQ(all.stats.multi, frozen && set.name != "miconic-simpleadl") << set.name;
-            expect_table_equals(ctx, set, all.results, cpu, o, frozen, frozen ? "frozen" : "lazy");
-            if (!frozen)
-                continue;
+            EXPECT_EQ(all.stats.multi, set.name != "miconic-simpleadl") << set.name;
+            expect_table_equals(ctx, set, all.results, cpu, o, atoms == TaskOptions::Atoms::Dense ? "dense" : "reachable");
             // chunk sizes, waves, a stream of its own: the same results
             cuda::DeviceStateSpaceOptions small = o;
             small.chunk_states = 777;
             small.wave_states = sanitizer_size() ? 1000 : 3000;
-            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, small).results, cpu, o, true, "waves of 3000");
+            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, small).results, cpu, o, "waves of 3000");
             cuda::DeviceStateSpaceOptions pairs = o;
             pairs.wave_instances = 2;
             pairs.chunk_states = 4096;
             const cuda::DeviceStateSpaces p = cuda::state_spaces(ctx, set.table, pairs);
             EXPECT_GE(p.stats.waves, 2u);
-            expect_table_equals(ctx, set, p.results, cpu, o, true, "waves of 2 instances");
+            expect_table_equals(ctx, set, p.results, cpu, o, "waves of 2 instances");
             const cuda::Stream stream;
             cuda::DeviceStateSpaceOptions own = o;
             own.stream = stream.get();
             own.view_bytes = 1 << 16;
-            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, own).results, cpu, o, true, "own stream");
+            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, own).results, cpu, o, "own stream");
         }
     }
 }
@@ -682,7 +671,7 @@ TEST(DeviceStateSpaceIw, TablesEqualPerInstanceRunsAndCpu)
     SKIP_WITHOUT_GPU();
     const auto ctx = context();
     u32 solved = 0, total = 0;
-    for (const Set& set : sets(TaskOptions::Atoms::Frozen))
+    for (const Set& set : sets(TaskOptions::Atoms::Dense))
     {
         const rl::TaskTable& table = *set.table;
         std::vector<u64> rows;

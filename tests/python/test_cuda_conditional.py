@@ -38,7 +38,7 @@ def ctx():
 
 
 @pytest.mark.parametrize("name,ce,axioms", TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable", "lazy"])
 def test_device_brfs_runs_conditional_effects_and_axioms(ctx, name, ce, axioms, atoms):
     task = text_task(name, atoms=atoms)
     r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)

@@ -46,7 +46,7 @@ pin the assignment; ``sampler=None`` disables it, ``"uniform"`` always samples, 
 weights. PlanningEnv reset TensorDicts use ``next_task_id`` for explicit curricula, separate from observation ids.
 
 Device environments support numeric tables through the general path. The fast device path (no host
-synchronization at all) needs frozen atom slots, no axioms and device-complete schemas in every instance
+synchronization at all) needs no axioms and device-complete schemas in every instance
 (``fast_unsupported(table)`` says why not); other tables take the general path (a device expansion per step, which
 synchronizes on the successor count). Over a suite the device groups each step's rows by domain and runs every domain
 on its table's path, on a stream of its own (captured graphs included).

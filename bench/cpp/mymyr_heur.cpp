@@ -12,7 +12,7 @@
 // options: --h blind|gc|max|add|ff|set_additive|h2 (default: max for astar*, ff otherwise)  --hcosts unit|real
 //          --impl auto|grounded|lifted  --store auto|flat|chunked|compact  --queue auto|bucket|heap
 //          --timeout S  --max-states N  --max-expanded N  --beam-width B  --no-requeue  --no-preferred
-//          --witness  --atoms auto|lazy|frozen  --samples N  --instance NAME  --plan (plan lines on stderr)
+//          --witness  --atoms auto|reachable|dense|lazy  --samples N  --instance NAME  --plan (plan lines on stderr)
 
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -65,7 +65,7 @@ double peak_rss_mb()
                  "       [--h blind|gc|max|add|ff|set_additive|h2] [--hcosts unit|real] [--impl auto|grounded|lifted]\n"
                  "       [--store auto|flat|chunked|compact] [--queue auto|bucket|heap] [--timeout S] [--max-states N]\n"
                  "       [--max-expanded N] [--beam-width B] [--no-requeue] [--no-preferred] [--witness]\n"
-                 "       [--atoms auto|lazy|frozen] [--samples N] [--instance NAME] [--plan]\n",
+                 "       [--atoms auto|reachable|dense|lazy] [--samples N] [--instance NAME] [--plan]\n",
                  msg.c_str());
     std::exit(2);
 }
@@ -195,7 +195,7 @@ int main(int argc, char** argv)
         else if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else if (!a.empty() && a[0] != '-' && task_file.empty())
             task_file = a;

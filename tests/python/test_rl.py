@@ -29,7 +29,7 @@ def reference(task, states):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["lazy", "frozen"])
+@pytest.mark.parametrize("atoms", ["reachable", "dense"])
 def test_expand_equals_the_per_state_api(name, atoms):
     task = text_task(name, atoms=atoms)
     states = walk(task, steps=10, seed=4)
@@ -77,7 +77,7 @@ def test_padded_view(blocks):
 
 
 def test_capacity_and_width_overflow():
-    task = text_task("logistics00__probLOGISTICS-6-1", atoms="lazy")
+    task = text_task("logistics00__probLOGISTICS-6-1")
     states = walk(task, steps=10, seed=1)
     full = rl.expand(task, states)
     cut = rl.expand(task, states, capacity=full.total // 3)
@@ -122,6 +122,9 @@ def test_input_encodings_are_read_in_place(blocks):
         rl.expand(blocks, u64.view(np.uint32)[:, :3])  # odd number of 32-bit columns
     with pytest.raises(ValueError):
         rl.expand(blocks, np.full((1, 3), 1 << 63, dtype=np.uint64))  # unassigned slots
+    with pytest.raises(ValueError):
+        rl.expand(rl.TaskTable([text_task("gripper__prob05", atoms="lazy")]), states)  # tables refuse lazy slots
+
 
 
 def test_outputs_are_views_of_one_block(blocks):
@@ -180,13 +183,14 @@ def test_derived_goals_refuse_masks():
     assert rl.is_goal(task, states).tolist() == [s.is_goal() for s in states]
 
 
-@pytest.mark.parametrize("atoms", ["lazy", "frozen"])
+@pytest.mark.parametrize("atoms", ["lazy", "dense", "reachable"])
 def test_atom_metadata(atoms):
     task = text_task("logistics00__probLOGISTICS-6-1", atoms=atoms)
     walk(task, steps=20)
     m = task.atom_metadata()
     F = m["num_atoms"]
-    assert F == task.num_atoms and m["num_objects"] == task.num_objects and m["atom_mode"] == (atoms == "frozen")
+    assert F == task.num_atoms and m["num_objects"] == task.num_objects
+    assert m["atom_mode"] == {"lazy": 0, "dense": 1, "reachable": 2}[atoms]
     off, args = m["atom_args_offsets"], m["atom_args"]
     for slot in range(F):
         atom = task.atom(slot)

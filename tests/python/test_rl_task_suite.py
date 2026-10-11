@@ -31,6 +31,7 @@ from test_rl_table import (  # noqa: F401
     FORK,
     MASK_SETS,
     ROT,
+    assert_same_batches,
     env_arrays,
     given_actions,
     gpu_device,
@@ -204,8 +205,10 @@ def test_suite_expand_equals_domains_apart(sets, key, grouped):
     for f in ("succ", "parent", "schema", "binding", "goal", "offsets"):
         assert np.array_equal(getattr(x, f), getattr(y, f)) and np.array_equal(getattr(x, f), getattr(z, f)), f
     h = len(ids) // 2
-    a, b = rl.expand(s, states[:h], ids[:h]), rl.expand(s, states[h:], ids[h:])
+    a, b = rl.expand(s, states[:h], ids[:h], words=x.words), rl.expand(s, states[h:], ids[h:], words=x.words)
     assert np.array_equal(np.concatenate([a.succ, b.succ]), x.succ)
+    # without words=, a batch's successors are as wide as its widest instance
+    assert rl.expand(s, states[:h], ids[:h]).words == max(s.instance_words[i] for i in ids[:h])
     assert np.array_equal(np.concatenate([a.binding, b.binding]), x.binding)
     # is_goal per row; expand_into
     flags = rl.is_goal(s, states, ids)
@@ -429,13 +432,11 @@ def test_pool_suite_equals_host(sets, key):
     goals = key in FAST
     rot = ROT(n, len(s))
     ref = host_rollout(s, ids, steps, goals=goals, next_ids=rot, **rollout_config(key))
-    for threads, split in ((1, False), (4, True)):
-        got = pool_rollout(s, ids, steps, threads, split, goals, rot, **rollout_config(key))
-        for k in range(steps + 1):
-            for f, v in got[k].items():
-                assert np.array_equal(v, ref[k][f]), (threads, split, k, f)
+    for threads, split, words in ((1, False, None), (4, True, s.words)):
+        got = pool_rollout(s, ids, steps, threads, split, goals, rot, words=words, **rollout_config(key))
+        assert_same_batches(got, ref, s.numeric_words, (threads, split, words))
     pool = rl.CpuEnvPool(s, 4)
-    assert pool.table is s and pool.words == s.words
+    assert pool.table is s and pool.words is None and rl.CpuEnvPool(s, 4, words=s.words).words == s.words
     with pytest.raises(ValueError, match="outside the suite"):
         pool.reset(task_ids=np.full(4, len(s), np.int32))
 
@@ -509,7 +510,7 @@ def small_suite():
              FORK / "blocks_4/test_problem.pddl"]
     if not all(p.is_file() for p in paths):
         pytest.skip("fork data missing")
-    return rl.TaskSuite.group([mymyr.Task.from_pddl(p.parent / "domain.pddl", p, atoms="frozen") for p in paths])
+    return rl.TaskSuite.group([mymyr.Task.from_pddl(p.parent / "domain.pddl", p, atoms="dense") for p in paths])
 
 
 def test_state_spaces_over_a_suite():

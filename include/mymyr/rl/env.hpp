@@ -31,8 +31,10 @@
 // advance; draw counters still advance. An action outside [0, count) in a nonterminal state does not move (s' = s,
 // reward step_reward, not a goal, not a dead end; flagged in `invalid`); a stuck environment does not move either.
 //
-// Rows are `words` atom words wide (at least the suite's words(), so no successor is ever too wide), plus the suite's
-// numeric words ([bits | slots]; the numeric encoding follows each instance's storage mode). Every step of a row is a
+// Rows are `words` atom words wide (at least the suite's words(), so a reset into any instance fits), plus the suite's
+// numeric words ([bits | slots]; the numeric encoding follows each instance's storage mode). A step reads and writes
+// the row's own instance's words only (TaskSuite::instance(t).words): the words past them are padding, never read,
+// and zero once a reset has written the row; goal masks are read over the same words. Every step of a row is a
 // function of that row's state, action and RNG stream alone, so results do not depend on the batch composition, the
 // batch split or the thread count.
 
@@ -103,12 +105,13 @@ struct StepOutputs
     u8* terminated = nullptr;   // [rows]: goal reached, or a dead end (dead_end_terminal)
     u8* truncated = nullptr;    // [rows]: max_steps reached (not terminated)
     i32* count = nullptr;       // [rows]: successors of the environment's state after the step (and the autoreset)
-    u64* final_states = nullptr;  // [rows, row_words]: the state the step reached (before the autoreset)
+    u64* final_states = nullptr;  // [rows, words + numeric_words]: the state the step reached (before the autoreset)
     i32* schema = nullptr;      // [rows]: the label of the step's action (-1: no move)
     i32* binding = nullptr;     // [rows, label_width]: its objects, -1 past the arity (and for no move)
     u32 label_width = 0;        // columns of `binding` (>= the suite's label_width() when set)
     u8* invalid = nullptr;      // [rows]: the given action was outside [0, count)
     u8* goal = nullptr;         // [rows]: the reached state is a goal state
+    u32 words = 0;  // atom words of a final_states row (0: the batch's; at least each stepped row's instance width)
 };
 
 /// The given actions of a step: [rows] indices into the canonical successor order, as int64 or int32 (at most one of
@@ -173,8 +176,9 @@ public:
     void step_row(EnvBatch& b, u64 row, const StepOutputs& out, u64 out_row, i64 action, bool random,
                   i32 next_instance, Scratch& scratch) const;
     /// Resets row `row` into instance `instance` (steps 0, goal masks unless keep_goals, the task id); returns the
-    /// initial state's successor count.
-    u32 reset_row(EnvBatch& b, u64 row, u32 instance, bool keep_goals) const;
+    /// initial state's successor count. `dirty`: how many of the row's atom words (and goal mask words) may be nonzero,
+    /// the words of the instance it held (the rest is zero padding); the reset writes max(dirty, the instance's words).
+    u32 reset_row(EnvBatch& b, u64 row, u32 instance, bool keep_goals, u32 dirty) const;
     /// Successors of one row.
     [[nodiscard]] u32 count_row(const EnvBatch& b, u64 row) const;
     [[nodiscard]] bool goal_row(const EnvBatch& b, u64 row) const;

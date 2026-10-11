@@ -136,6 +136,91 @@ except mymyr.PddlError as e:
 `Domain.formalism` gives the normalized domain alone (types, constants, predicates, functions, schemas and axioms),
 without instantiating a problem.
 
+## State encodings
+
+A state is stored as a row of 64-bit words: `task.words` atom words, one bit per fluent atom slot, and for numeric
+tasks `task.numeric_words` words of numeric values after them. `task.encode(states)` returns these rows and
+`task.decode(rows)` turns them back into states; `mymyr.rl` and `mymyr.datasets` exchange states in the same layout.
+Derived atoms have slots too, but rows do not store them: they follow from the fluent atoms.
+
+`Task.from_pddl`, `Task.from_text`, `Task(normalized)` and `rl.TaskTable.from_pddl` take the same keyword options,
+and `task.options` returns them:
+
+| Option | Values | Effect |
+| --- | --- | --- |
+| `atoms` | `'auto'` (default), `'reachable'`, `'dense'`, `'lazy'` | how atoms get their slots (below) |
+| `reachability_budget` | steps, default `2**25`; `0` is unbounded | work bound of the analysis behind `'auto'` and `'reachable'` |
+| `numeric_storage` | `'auto'` (default), `'i32'`, `'f64'` | the type of a numeric slot |
+| `numeric_quantum` | `0` (default) or `q > 0` | stored values snap to multiples of `q` |
+| `numeric_tolerant` | `False` (default) | mimir-C# numeric semantics |
+| `matching`, `fc_free_params` | `'auto'`, `'fixed'`, `'fc'`; `4` | how bindings are matched (no effect on the encoding) |
+
+**Atom slots.** The *typed-dense* space of a task has one atom per predicate and object tuple whose objects can occur
+at those positions: objects of the types that the effects and axioms adding the predicate allow there, plus constants
+and the objects of initial atoms. The *relaxed-reachable* atoms are those that a delete relaxation of the task reaches from
+the initial state, where actions keep every atom they add and ignore negative and numeric conditions. Every reachable
+state holds only relaxed-reachable atoms.
+
+- `'reachable'` gives one slot to each relaxed-reachable atom, in canonical order (by predicate, then by object
+  tuple). It raises `ValueError` when the analysis needs more than `reachability_budget` steps.
+- `'dense'` gives every atom of the typed-dense space a slot, at its canonical id. It needs no analysis.
+- `'auto'` runs the analysis and keeps the dense layout when it is no wider in words, else the reachable one. When the
+  analysis passes its budget, `'auto'` uses dense slots.
+- `'lazy'` assigns a slot to an atom the first time a state or search meets it.
+
+Under `'reachable'` and `'dense'` the slots of one predicate form a single range, ascending in the lexicographic
+order of the atoms' object indices, and the ranges follow the predicate indices. Fluent and derived atoms number
+their slots separately. `task.atom_metadata()` gives the ranges: predicate `p`'s fluent slots are
+`pred_slot_offsets[p]` to `pred_slot_offsets[p + 1] - 1`, and its derived slots are given by
+`derived_pred_slot_offsets` in the same way. Lazy slots have no such order.
+
+Pick the mode that matches how you use the states:
+
+- Keep `'auto'` for learning, datasets and anything else that stores or exchanges rows.
+- Use `'lazy'` for searches on large tasks. Its states hold only the atoms the search met, which on large tasks can
+  be a few dozen words instead of thousands.
+
+The budget counts the analysis' join steps, not seconds, so whether it suffices depends only on the task. The default
+takes a few seconds and about a gigabyte of memory at most. `task.info` reports the mode, the typed-dense and
+reachable atom counts (`dense_fluent`, `reachable_fluent`, and their derived counterparts), `reachability_steps` and
+`reachability_complete`. `task.num_atoms` is the number of fluent slots, `task.words` is `ceil(num_atoms / 64)`, and
+`task.atom_mode` names the mode in use. For example, in gripper with 100 balls, 404 of the 10 816 typed-dense atoms are
+reachable, so `'auto'` stores a state in 7 words instead of 170.
+
+**Determinism.** Except under `'lazy'`, the encoding is a function of the task and its options. The same PDDL and
+options give the same slots, words and rows in every run, thread count and process, and after pickling.
+`task.encoding_fingerprint` hashes the encoding: the slot of every fluent and derived atom, plus the numeric slots and
+their storage. Two tasks with equal fingerprints read and write rows alike. A task pickle carries the fingerprint, and
+loading it raises `ValueError` if the rebuilt task encodes states differently.
+
+**Lazy slots.** Under `'lazy'`, the numbering depends on the order in which searches meet atoms, including their
+threads and earlier searches on the same task object. `task.words` grows as slots are assigned, up to
+`task.max_words`. A row from such a task means nothing outside the task object, so the library refuses raw rows for
+it:
+
+- `decode`, `task.state(words)` and `rl.expand` raise `ValueError`;
+- `rl.TaskTable` refuses the task;
+- `StateSpace.arrays()` leaves out `state_words`.
+
+States, searches, datasets and pickles still work. A task pickle carries the slots assigned so far, and the loaded task
+numbers its atoms as the pickled one did.
+
+**Numeric storage.** `'auto'` stores values as `'i32'` (two per word) when the task is statically integral and no
+quantum is set. A task is statically integral when its initial values, constants and static values in fluent effects
+are integers and its effects neither divide nor scale down. Otherwise values are stored as `'f64'`, one double per
+word. Values are computed in double precision either way. An `'i32'` task raises `OverflowError` when a value leaves
+the int32 range. `task.numeric_storage`, `task.numeric_slots` and `task.numeric_names` describe the slots.
+`numeric_quantum` and `numeric_tolerant` change the state space, so neither is ever applied implicitly.
+
+**Tables.** All instances of an `rl.TaskTable` share one numeric storage. `TaskTable.from_pddl` stores every instance
+as `'f64'` when any of them needs it under `'auto'`. Building a table from tasks with different storages raises
+`ValueError`, and `rl.TaskTable` refuses lazy tasks. Each instance keeps its own `words`: `table.words` is the widest
+instance, and `table.instance_words` lists the widths. A batch's rows are as wide as their widest instance, or as wide
+as requested (`words=`). Words past a row's own instance width are zero padding: the CPU paths never read them, and
+the CUDA paths reject a row whose padding is not zero. Expansion, environment steps, goal tests and decoding cost
+each row its own width. `rl.numeric_values(table, states, task_ids)` decodes the numeric words of mixed rows to
+float64. The CUDA paths take tasks of at most 64 atom words and 512 objects ([CUDA](cuda.md)).
+
 ## Binding generators
 
 `task.precondition(schema)` returns a `ConjunctiveCondition`; `task.goal_condition` is a `GroundCondition`.

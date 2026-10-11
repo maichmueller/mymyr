@@ -162,26 +162,23 @@ FlatBatch FlatRelationEncoder::encode(rl::StateBatchView states, const i32* task
         const u32 instance_id = task_ids ? static_cast<u32>(task_ids[graph]) : 0;
         const auto& instance = m_table->instance(instance_id);
         const Task& task = *instance.task;
+        // the row's own words: the instance's (the words past them are padding and are not read)
+        if (graphs && states.words < task.words())
+            throw std::invalid_argument("mymyr: encoding: state rows of " + std::to_string(states.words) +
+                                        " atom words; the states of instance " + std::to_string(instance_id) +
+                                        " have " + std::to_string(task.words()));
         const u64* state = states.words ? states.row(graph) : nullptr;
+        const u32 width = std::min(states.words, task.words());
         const u32 assigned = task.atoms().fluent_slots();
-        for (u32 word_index = 0; word_index < states.words; ++word_index)
-        {
-            u64 word = state[word_index];
-            while (word)
-            {
-                const u64 slot = static_cast<u64>(word_index) * 64 + std::countr_zero(word);
-                if (slot >= assigned)
-                    throw std::invalid_argument("mymyr: encoding: a state sets an unassigned atom slot");
-                word &= word - 1;
-            }
-        }
+        if ((assigned & 63) && (assigned >> 6) < width && (state[assigned >> 6] >> (assigned & 63)))
+            throw std::invalid_argument("mymyr: encoding: a state sets an unassigned atom slot");
         const GroundCondition& condition = goals.empty() || !goals[graph] ? m_goals[instance_id] : *goals[graph];
         condition.validate(task);
         if (!condition.constraints.empty())
             throw std::invalid_argument("mymyr: encoding: numeric goals are not supported");
         const WorkspaceLease workspace = task.workspace();
         detail::Engine& engine = workspace->engine();
-        engine.set_state(state, states.words);
+        engine.set_state(state, width);
         engine.build_view();
         workspace->axioms().evaluate();
         tuples.clear();
@@ -206,7 +203,7 @@ FlatBatch FlatRelationEncoder::encode(rl::StateBatchView states, const i32* task
                            [&](u32 position) { return record[position + 1]; });
                 }
         };
-        append_slots(AtomKind::Fluent, state, states.words);
+        append_slots(AtomKind::Fluent, state, width);
         if (m_options.include_static)
             for (const formalism::GroundAtom& atom : task.data().static_init)
             {

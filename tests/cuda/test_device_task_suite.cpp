@@ -1,7 +1,7 @@
 // Device task-suite tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device): instances of several
 // domains in one batch (rl/task_suite.hpp), on device, against the host over the suite (which equals each domain's
-// table apart: tests/cpp/rl/test_suite.cpp), on suites of the table instance sets (tests/cpp/rl/table_instance_sets.hpp), frozen
-// and lazy:
+// table apart: tests/cpp/rl/test_suite.cpp), on suites of the table instance sets (tests/cpp/rl/table_instance_sets.hpp), dense
+// and reachable slots:
 //   - the device expand over a suite (cuda::SuiteExpander: one DeviceExpander per domain, in place over one run per
 //     domain, or gathered and written at the batch rows: DeviceExpander::write with a RowMap, in each mode) equals
 //     rl::expand byte for byte, flat (capacity clipping) and padded, for interleaved batches, batches grouped by
@@ -40,7 +40,7 @@ struct NamedSuite
 {
     std::string name;
     rl::TaskSuitePtr suite;
-    bool fast = false;  // the fast path runs it (frozen slots, no domain with axioms or conditional effects)
+    bool fast = false;  // the fast path runs it (no domain with axioms or conditional effects)
 };
 
 /// Suites of two and four domains, and one with conditional effects and goal axioms (the general path).
@@ -55,7 +55,7 @@ std::vector<NamedSuite> suites(TaskOptions::Atoms atoms)
     {
         std::vector<rl::TaskTablePtr> tables;
         std::string name;
-        bool fast = atoms == TaskOptions::Atoms::Frozen;
+        bool fast = true;
         for (const auto& n : names)
         {
             if (!by.count(n))
@@ -505,7 +505,7 @@ TEST(DeviceTaskSuiteExpand, SuiteEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto all = suites(atoms);
         ASSERT_EQ(all.size(), 3u);
@@ -522,7 +522,7 @@ TEST(DeviceTaskSuiteExpand, SuiteEqualsHost)
                 suite_rows(S, 6, o, rows, ids);
                 const u32 W = S.words(), L = std::max<u32>(1, S.label_width()) + 1;  // a column of -1 padding more
                 const u64 N = ids.size();
-                const Flat full = host_expand(S, rows, ids, 1, L);  // counts (and interns first under lazy slots)
+                const Flat full = host_expand(S, rows, ids, 1, L);
                 const cudaStream_t s = ex.stream();
                 const cuda::DeviceBuffer d_rows = to_device(ctx, rows, s);
                 const cuda::DeviceBuffer d_ids = to_device(ctx, ids, s);
@@ -611,27 +611,28 @@ TEST(DeviceTaskSuiteExpand, SuiteEqualsHost)
 }
 
 /// Gathered domains write at their batch rows (DeviceExpander::write with a RowMap) in every mode: a Multi table's
-/// successor kernel puts the rows there, single-instance domains (Single) and lazy tables (PerInstance) expand into
-/// scratch and scatter; each domain's offsets come first (DeviceExpander::offsets). Suites with single-instance
+/// successor kernel puts the rows there, single-instance domains (Single) and tables with conditional effects
+/// (PerInstance) expand into scratch and scatter; each domain's offsets come first (DeviceExpander::offsets). Suites with single-instance
 /// domains, interleaved and reversed, against the host.
 TEST(DeviceTaskSuiteExpand, MappedWritesOfEveryModeEqualHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         std::map<std::string, Set> by;
         for (Set& s : sets(atoms))
             by[s.name] = s;
-        ASSERT_TRUE(by.count("gripper") && by.count("blocks") && by.count("miconic"));
+        ASSERT_TRUE(by.count("gripper") && by.count("blocks") && by.count("miconic") && by.count("miconic-simpleadl"));
         const rl::TaskSuitePtr suite = rl::TaskSuite::create({rl::TaskTable::single(by.at("gripper").tasks[3]),
                                                               by.at("blocks").table,
-                                                              rl::TaskTable::single(by.at("miconic").tasks[4])});
+                                                              rl::TaskTable::single(by.at("miconic").tasks[4]),
+                                                              by.at("miconic-simpleadl").table});
         const rl::TaskSuite& S = *suite;
         cuda::SuiteExpander ex(ctx, suite);
         ASSERT_EQ(ex.domain(0).mode(), cuda::DeviceExpander::Mode::Single);
-        ASSERT_EQ(ex.domain(1).mode(), atoms == TaskOptions::Atoms::Frozen ? cuda::DeviceExpander::Mode::Multi
-                                                                             : cuda::DeviceExpander::Mode::PerInstance);
+        ASSERT_EQ(ex.domain(1).mode(), cuda::DeviceExpander::Mode::Multi);
+        ASSERT_EQ(ex.domain(3).mode(), cuda::DeviceExpander::Mode::PerInstance);
         for (const Order o : {Order::Interleaved, Order::Reversed})
         {
             SCOPED_TRACE(std::string(atoms_name(atoms)) + order_name(o));
@@ -665,7 +666,7 @@ TEST(DeviceTaskSuiteExpand, TaskIdsAndRowsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = suites(TaskOptions::Atoms::Frozen);
+    const auto all = suites(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const rl::TaskSuite& S = *all[0].suite;
     std::vector<u64> rows;
@@ -710,7 +711,7 @@ TEST(DeviceTaskSuiteEnv, FastPathPerDomain)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const NamedSuite& ns : suites(atoms))
         {
             SCOPED_TRACE(ns.name);
@@ -736,7 +737,7 @@ TEST(DeviceTaskSuiteEnv, SuiteEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const NamedSuite& ns : suites(atoms))
             for (const auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
                 for (const bool grouped : {false, true})
@@ -756,7 +757,7 @@ TEST(DeviceTaskSuiteEnv, GoalsDeadEndsChunksAndStreams)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Frozen))
+    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Dense))
     {
         if (!ns.fast)
             continue;  // goal axioms: per-env goal masks cannot express them
@@ -910,7 +911,7 @@ TEST(DeviceTaskSuiteEnv, LaunchOrderGroupsTheRowsByDomain)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Frozen))
+    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Dense))
     {
         if (!ns.fast)
             continue;
@@ -957,7 +958,7 @@ TEST(DeviceTaskSuiteEnv, TaskIdsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = suites(TaskOptions::Atoms::Frozen);
+    const auto all = suites(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const rl::TaskSuitePtr& suite = all[0].suite;
     const u32 I = suite->size();
@@ -995,7 +996,7 @@ TEST(DeviceTaskSuiteEnv, CapturedStepsEqualEagerAndHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Frozen))
+    for (const NamedSuite& ns : suites(TaskOptions::Atoms::Dense))
     {
         if (!ns.fast)
             continue;

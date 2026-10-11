@@ -5,7 +5,7 @@ instance of each row (``task_ids``, int32 [N]). A ``Task`` is accepted wherever 
 may then be None)::
 
     table = mymyr.rl.TaskTable([task_a, task_b, task_c])   # same schemas and domain predicates; immutable, picklable
-    exp = mymyr.rl.expand(table, states, task_ids)         # states [N, table.words]; row i is of instance task_ids[i]
+    exp = mymyr.rl.expand(table, states, task_ids)         # states [N, W]; row i is of instance task_ids[i]
 
 Suites: a :class:`TaskSuite` holds one table per domain, and every entry point
 that takes a table takes a suite (expand, expand_into, is_goal, the torch and JAX environments and ops, CpuEnvPool,
@@ -14,7 +14,7 @@ the suite), so one batch mixes domains; each domain's rows run on its table's pa
 each group on its own stream)::
 
     suite = mymyr.rl.TaskSuite([blocks_table, gripper_table])   # or TaskSuite.group(tasks): one table per domain
-    exp = mymyr.rl.expand(suite, states, task_ids)               # states [N, suite.words]; any instance of any domain
+    exp = mymyr.rl.expand(suite, states, task_ids)               # states [N, W]; any instance of any domain
     dom = mymyr.rl.task_domains(suite, task_ids)                 # [N] the rows' domains (per-domain policy heads)
 
 Labels keep the domain's schema ids (``suite.schema_offsets`` flattens them) and instance-local objects; the atom
@@ -41,14 +41,23 @@ table at once.
 
 State words: little-endian u64, atom slot i at word i >> 6, bit i & 63. NumPy uses uint64 [N, W], torch int64
 [N, W], JAX uint32 [N, 2W] (the same bytes); inputs may use any of them, outputs follow the input. Inputs are read
-in place (zero-copy); outputs are views of one mymyr-owned block per call (zero-copy DLPack for torch and JAX). Rows
-over a table are ``table.words`` wide (the widest instance's; a smaller instance leaves its extra words zero).
+in place (zero-copy); outputs are views of one mymyr-owned block per call (zero-copy DLPack for torch and JAX).
+
+Row width: a batch's rows have W atom words, at least the widest of its rows' instances' words
+(``table.instance_words``) and at most ``table.words`` (the widest instance's). A row's words past its own instance's
+are padding: never read, and written zero, so the cost of a row follows its own instance's width, not the table's.
+Outputs are as wide as the widest instance among the batch's rows: ``expand`` successors (``words=`` fixes the
+width), ``table.initial_states(task_ids)``, and each ``CpuEnvPool`` batch (``CpuEnvPool(words=)`` fixes it); with
+every instance (``initial_states()``) that is ``table.words``. The slot layout of a row is the task's encoding, a
+function of the task and its options (``Task.from_pddl``: atoms, numeric_storage); tables refuse tasks with lazy
+atom slots.
 
 Numeric tasks (``task.numeric_slots > 0``): a row is ``[W + NN]``, the atom words followed by the table's
 ``NN = table.numeric_words`` numeric words (``task.numeric_storage``: two int32 or one float64 per word, slots in
 ``task.numeric_names`` order; ``State.numeric_words`` / ``State.numeric_values()``). ``expand``, ``expand_into``,
 ``is_goal``, ``task.encode`` and ``task.decode`` read and write such rows; ``words=`` and ``Expansion.words`` count atom
-words, ``Expansion.numeric_words`` the rest. The mask tests (``goal_test``, ``goal_count``) see atom words only: pass
+words, ``Expansion.numeric_words`` the rest. Every numeric instance of a table stores its values alike
+(``table.numeric_storage``), and :func:`numeric_values` decodes the numeric words of rows into float64 values. The mask tests (``goal_test``, ``goal_count``) see atom words only: pass
 ``states[:, :W]`` (numeric goal constraints need ``is_goal``). Classical tasks are unchanged (NN = 0).
 
 Device inputs (CUDA builds): ``expand`` and ``expand_into`` also take CUDA device arrays (torch CUDA tensors, JAX
@@ -95,6 +104,7 @@ from mymyr._core._rl import (
     goal_count,
     goal_test,
     is_goal,
+    numeric_values,
     random_walks,
 )
 from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
@@ -119,6 +129,7 @@ __all__ = [
     "her_relabel",
     "is_goal",
     "novelty_update",
+    "numeric_values",
     "object_offsets",
     "prefix_masks",
     "random_walks",

@@ -84,7 +84,7 @@ def test_captured_rollout_equals_eager(name):
     """A policy's graph (given actions, invalid ones too) and the random policy's, with set_seed, masked resets and a
     side stream between replays: byte for byte the eager steps."""
     dev = gpu_device()
-    task = text_task(name, atoms="frozen")
+    task = text_task(name, atoms="dense")
     n, K = 200, 4
 
     def policy(e):  # a function of the state: indices in [0, count], count itself invalid
@@ -125,7 +125,7 @@ def test_captured_rollout_equals_eager(name):
 def test_torch_cuda_graph_around_env_calls():
     """torch.cuda.graph around reset (a mask), random_actions and steps == the same calls eagerly."""
     dev = gpu_device()
-    task = text_task("blocks__probBLOCKS-8-0", atoms="frozen")
+    task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
     n = 128
     a = rt.BatchedEnv(task, n, device=dev, seed=2, autoreset=False, max_steps=5)
     b = rt.BatchedEnv(task, n, device=dev, seed=2, autoreset=False, max_steps=5)
@@ -148,7 +148,7 @@ def test_torch_cuda_graph_around_env_calls():
 
 def test_capture_on_the_general_path_and_the_cpu_is_refused():
     dev = gpu_device()
-    task = text_task("blocks__probBLOCKS-8-0", atoms="frozen")
+    task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
     env = rt.BatchedEnv(task, 16, device=dev, path="general")
     assert not env.capturable and "general path" in env.core.capture_unsupported
     with pytest.raises(ValueError, match="general path"):
@@ -176,7 +176,7 @@ def test_planning_env_graph_equals_eager(sets, name):
     if name in SETS:
         t, I = rl.TaskTable(sets[name]), len(sets[name])
     else:
-        t, I = text_task(name, atoms="frozen"), 1
+        t, I = text_task(name, atoms="dense"), 1
     n = 64
     ids = torch.as_tensor(np.arange(n) * 5 % I, dtype=torch.int32)
     kw = dict(task_ids=ids, seed=3, max_steps=5, goal_reward=1.0, max_actions=6, goals=True, device=dev)
@@ -239,7 +239,7 @@ def test_reduce_overhead_rollout_equals_eager(path):
     from torch._dynamo.utils import counters
 
     dev = gpu_device()
-    task = text_task("blocks__probBLOCKS-8-0", atoms="frozen")
+    task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
     a = rt.BatchedEnv(task, 256, device=dev, seed=7, path=path, **CFG)
     b = rt.BatchedEnv(task, 256, device=dev, seed=7, path=path, **CFG)
     torch._dynamo.reset()
@@ -288,10 +288,10 @@ from test_rl_table import MASK_SETS, ROT, SETS
 n, K = 96, 7
 if name in SETS:
     dom, probs = SETS[name]
-    table = rl.TaskTable([mymyr.Task.from_pddl(dom, p, atoms="frozen") for p in probs])
+    table = rl.TaskTable([mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs])
     I, goals = len(probs), name in MASK_SETS
 else:
-    table, I, goals = text_task(name, atoms="frozen"), 1, False
+    table, I, goals = text_task(name, atoms="dense"), 1, False
 ids = (np.arange(n) * 5 % I).astype(np.int32)
 nxt = jnp.stack([jnp.asarray(ROT(n, I)(s)) for s in range(K)])
 res = {}

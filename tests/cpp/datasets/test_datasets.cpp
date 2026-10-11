@@ -160,14 +160,14 @@ TaskPtr fork_task(const std::string& dir, const std::string& problem, TaskOption
     if (!std::filesystem::exists(d) || !std::filesystem::exists(p))
         return nullptr;
     if (to.atoms == TaskOptions::Atoms::Auto)
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
     return Task::create(*frontend::load_task(d, p), to);
 }
 
 TaskPtr pddl_task(const char* domain, const char* problem)
 {
     TaskOptions to;
-    to.atoms = TaskOptions::Atoms::Frozen;
+    to.atoms = TaskOptions::Atoms::Dense;
     return Task::create(*frontend::Domain::from_string(domain, "d.pddl")->instantiate_string(problem, "p.pddl"), to);
 }
 
@@ -390,7 +390,7 @@ TEST(StateSpace, NumericTasksMatchTheFork)
     for (const Case& c : cases)
     {
         TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
         const TaskPtr task = Task::create(*frontend::load_task(dir + "domain.pddl", dir + c.problem), to);
         ASSERT_GT(task->numeric_slots(), 0u);
         for (u32 T : {1u, 3u})
@@ -421,14 +421,14 @@ TEST(StateSpace, ArraysIndependentOfThreadCount)
 {
     for (const char* name : {"depot__p02", "philosophers__p03-phil4"})
     {
-        for (auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+        for (auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         {
             TaskOptions to;
             to.atoms = atoms;
             const auto task = Task::from_text_file(test::task_path(name), to);
             const StateSpacePtr ref = space_of(task, fork_ss(1));
             ASSERT_TRUE(ref);
-            const bool frozen = atoms == TaskOptions::Atoms::Frozen;
+            const bool frozen = atoms == TaskOptions::Atoms::Dense;
             const u64 h = arrays_hash(*ref, frozen);  // lazy slots: the state words depend on the interning order
             for (u32 T : {2u, 3u, 8u})
             {

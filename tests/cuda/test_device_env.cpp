@@ -1,7 +1,7 @@
 // Device RL environment tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device):
 //   - the device RNG: rl::rng's Philox-4x32-10 on the device equals the host and cuRAND's curand_Philox4x32_10;
 //   - the device step (cuda::DeviceEnv, the fast and the general path) equals the host step (rl::HostEnv) bit
-//     for bit on every suite task, frozen and lazy: states, step and draw counters, rewards, terminated, truncated, goal
+//     for bit on every suite task, dense and reachable slots: states, step and draw counters, rewards, terminated, truncated, goal
 //     and invalid flags, counts, final states and labels, over steps of the random policy and of given actions
 //     (including invalid ones), with truncation and autoreset; the TorchRL convention (no autoreset, masked resets);
 //   - the results do not depend on the chunk sizes, the path, or the batch an environment runs in (first_env).
@@ -43,10 +43,10 @@ cuda::ContextPtr context()
     return cuda::DeviceContext::create(0, o);
 }
 
-TaskPtr load(const std::string& name, bool frozen)
+TaskPtr load(const std::string& name, bool dense)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+    o.atoms = dense ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable;
     return Task::from_text_file(task_path(name), o);
 }
 
@@ -230,14 +230,14 @@ std::vector<std::tuple<std::string, bool>> params()
 {
     std::vector<std::tuple<std::string, bool>> out;
     for (const SuiteTask& t : suite())
-        for (bool frozen : {true, false})
-            out.emplace_back(t.name, frozen);
+        for (bool dense : {true, false})
+            out.emplace_back(t.name, dense);
     return out;
 }
 
 std::string param_name(const ::testing::TestParamInfo<std::tuple<std::string, bool>>& info)
 {
-    std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_frozen" : "_lazy");
+    std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_dense" : "_reachable");
     std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
     return n;
 }
@@ -284,10 +284,10 @@ class DeviceEnvStepSuite : public ::testing::TestWithParam<std::tuple<std::strin
 TEST_P(DeviceEnvStepSuite, DeviceStepEqualsHostStep)
 {
     SKIP_WITHOUT_GPU();
-    const auto& [name, frozen] = GetParam();
+    const auto& [name, dense] = GetParam();
     const u64 N = sanitizer_size() ? 64 : full_suite() ? 1024 : 256;
     const int T = sanitizer_size() ? 12 : full_suite() ? 300 : 60;
-    const auto task = load(name, frozen);
+    const auto task = load(name, dense);
     auto ctx = context();
     rl::EnvConfig cfg = config(0x5eed0000 + N, true);
     if (sanitizer_size())
@@ -317,7 +317,6 @@ TEST_P(DeviceEnvStepSuite, DeviceStepEqualsHostStep)
         const std::vector<i64> act = actions(h.v.count, t);
         for (usize k = 0; k < envs.size(); ++k)
         {
-            // the device steps first: under lazy slots it interns the atoms it meets, the host then finds them
             if (given)
                 to_device(dev[k]->action, act, dev[k]->s);
             envs[k]->step(dev[k]->b, dev[k]->out,
@@ -494,12 +493,8 @@ TEST(DeviceEnvStep, Refusals)
     SKIP_WITHOUT_GPU();
     auto ctx = context();
     const auto numeric = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt");
-    EXPECT_NO_THROW(cuda::DeviceEnv(ctx, rl::TaskTable::single(numeric), {}));
-    const auto lazy = load("gripper__prob05", false);
-    EXPECT_FALSE(cuda::DeviceEnv::fast_unsupported(*rl::TaskTable::single(lazy), {}).empty());
-    EXPECT_THROW(cuda::DeviceEnv(ctx, rl::TaskTable::single(lazy), {}, cuda::DeviceEnv::Path::Fast), std::invalid_argument);
-    cuda::DeviceEnv env(ctx, rl::TaskTable::single(lazy), {});
-    EXPECT_FALSE(env.fast());
+    cuda::DeviceEnv general(ctx, rl::TaskTable::single(numeric), {});
+    EXPECT_FALSE(general.fast());
     const auto axioms = load("philosophers__p03-phil4", true);
     EXPECT_NE(cuda::DeviceEnv::fast_unsupported(*rl::TaskTable::single(axioms), {}).find("axioms"), std::string::npos);
     const auto frozen = load("gripper__prob05", true);
