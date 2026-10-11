@@ -22,6 +22,7 @@ states, search and parse time, plan length and cost.
 | `--heuristic` | `blind`, `max`, `add`, `ff`, `h2`, `set_additive`, `lmcut`, `lmcount` or `perfect`, for `astar`, `gbfs` and `astar_iw` (default: `max` for A*, `ff` for GBFS) |
 | `--width` | the largest novelty arity of `iw` and `siw` (default 2), the width of `astar_iw` (default 1) |
 | `--threads` | threads of `brfs`; the other searches run on one thread |
+| `--atoms` | the task's atom slots: `lazy` (default), `auto`, `reachable` or `dense` ([State encodings](parsing-and-tasks.md#state-encodings)) |
 | `--max-seconds`, `--max-states` | budgets |
 | `--debug` | show the traceback of an error |
 

@@ -1,5 +1,5 @@
 // Costs of the CUDA foundations on this machine, as JSON lines.
-//   mymyr_device_costs_bench upload [--reps R] [--atoms frozen|lazy]   per suite task: export (host), upload (wall, device), bytes
+//   mymyr_device_costs_bench upload [--reps R] [--atoms dense|lazy]   per suite task: export (host), upload (wall, device), bytes
 //   mymyr_device_costs_bench sync [--reps R]                          the probe's round trip, and tail syncs of DeviceArena
 //                                                           against the raw pinned copies of probes/gpu/sync_cost.cu
 // Run with CUDA_VISIBLE_DEVICES=0.
@@ -56,7 +56,7 @@ int upload(int reps, bool frozen)
     for (const test::SuiteTask& st : test::suite())
     {
         TaskOptions o;
-        o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+        o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
         const auto task = Task::from_text_file(test::task_path(st.name), o);
         std::vector<double> export_s, wall_s, device_ms, total_s;
         u64 bytes = 0;
@@ -84,7 +84,7 @@ int upload(int reps, bool frozen)
         }
         std::printf("{\"bench\":\"upload\",\"task\":\"%s\",\"atoms\":\"%s\",\"bytes\":%llu,\"export_ms\":%.3f,"
                     "\"upload_ms\":%.3f,\"h2d_device_ms\":%.4f,\"total_ms\":%.3f,\"h2d_GBps\":%.2f,\"round_trip\":%s,\"reps\":%d}\n",
-                    st.name.c_str(), frozen ? "frozen" : "lazy", static_cast<unsigned long long>(bytes),
+                    st.name.c_str(), frozen ? "dense" : "lazy", static_cast<unsigned long long>(bytes),
                     median(export_s) * 1e3, median(wall_s) * 1e3, median(device_ms), median(total_s) * 1e3,
                     bytes / (median(device_ms) * 1e6), round_trip ? "true" : "false", reps);
         std::fflush(stdout);
@@ -218,7 +218,7 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: %s upload|sync [--reps R] [--atoms frozen|lazy]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s upload|sync [--reps R] [--atoms dense|lazy]\n", argv[0]);
         return 2;
     }
     int reps = 20;

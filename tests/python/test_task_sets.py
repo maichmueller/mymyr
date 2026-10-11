@@ -73,10 +73,10 @@ def test_a_glob_gives_its_matches_sorted(problems_dir):
 
 def test_options_and_threads(problems_dir):
     files = sorted(problems_dir.glob("**/[abc].pddl"))
-    one = TaskTable.from_pddl(problems_dir / "domain.pddl", files, atoms="frozen", threads=1)
-    many = TaskTable.from_pddl(problems_dir / "domain.pddl", files, atoms="frozen", threads=4)
-    assert fingerprints(one) == fingerprints(many) == instantiated(problems_dir / "domain.pddl", files, atoms="frozen")
-    assert all(t.atom_mode == "frozen" for t in many.tasks)
+    one = TaskTable.from_pddl(problems_dir / "domain.pddl", files, atoms="dense", threads=1)
+    many = TaskTable.from_pddl(problems_dir / "domain.pddl", files, atoms="dense", threads=4)
+    assert fingerprints(one) == fingerprints(many) == instantiated(problems_dir / "domain.pddl", files, atoms="dense")
+    assert all(t.atom_mode == "dense" for t in many.tasks)
 
 
 def test_pickling_and_indexing(problems_dir):
@@ -102,7 +102,7 @@ def test_errors(problems_dir, tmp_path_factory):
 
 
 def test_the_apis_of_one_domain_take_it(problems_dir):
-    table = TaskTable.from_pddl(problems_dir / "domain.pddl", problems_dir, atoms="frozen")
+    table = TaskTable.from_pddl(problems_dir / "domain.pddl", problems_dir, atoms="dense")
     tasks = list(table.tasks)
     g = datasets.generalized_state_space(table, max_states=2000, threads=1)
     assert g.num_vertices == datasets.generalized_state_space(tasks, max_states=2000, threads=1).num_vertices

@@ -28,7 +28,7 @@
 //     rows' positions only and run on a stream of their own (forked from the env's stream and joined back by events);
 //     select, the views (one launch over every domain's rows) and finish run once over the batch (the count cache is
 //     laid out with the suite's widest schema count, a domain's schemas past its own counting 0);
-//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects, axioms or lazy slots. A
+//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms. A
 //     step expands the current states into internal flat buffers with SuiteExpander (a table's DeviceExpander, or one
 //     per domain; canonical order, goal flags; it synchronizes), moves every environment to its chosen row, and counts
 //     the reached states' successors with a second expansion. The cache arrays are not used.
@@ -145,6 +145,7 @@ public:
     /// Recomputes the cache (fast path: counts, views, launch order) and the successor counts of the current states,
     /// after the caller wrote states or task ids.
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
+    void goal(const rl::EnvBatch& b, u8* goal);
     /// rl::HostEnv::step on device arrays; action [rows] (device, none: the random policy); next_task_ids [rows]
     /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it
     /// keeps the row's instance and is reported by check_errors()).

@@ -237,15 +237,18 @@ public:
     [[nodiscard]] const std::vector<LiftedLandmark>& lifted() const noexcept { return m_lifted; }
 
     // ------------------------------------------------------------------------------------ against a task's states
-    /// Slots of `atoms` in `task` (assigned on first touch; thread-safe). An atom outside the task's canonical space
-    /// maps to SlotId::invalid().
+    /// Slots of `atoms` in `task` (assigned on first touch under lazy slots; thread-safe). An atom outside the task's
+    /// canonical space, or without a slot (no state holds it), maps to SlotId::invalid().
     [[nodiscard]] static std::vector<SlotId> slots(const Task& task, std::span<const CanonicalAtom> atoms)
     {
         std::vector<SlotId> out;
         out.reserve(atoms.size());
         const AtomIndex& ix = task.atoms();
         for (CanonicalAtom c : atoms)
-            out.push_back(c < ix.layout().fluent_count ? SlotId{ix.intern(c)} : SlotId::invalid());
+        {
+            const u32 s = c < ix.layout().fluent_count ? ix.slot_if_any(c) : AtomIndex::k_empty;
+            out.push_back(s == AtomIndex::k_empty ? SlotId::invalid() : SlotId{s});
+        }
         return out;
     }
     /// Fact landmarks true in s (discovery order).

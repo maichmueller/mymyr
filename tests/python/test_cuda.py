@@ -109,13 +109,17 @@ def test_upload_round_trip_is_byte_identical(ctx, name):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable", "lazy"])
 def test_smoke_kernels_agree_with_the_cpu(ctx, name, atoms):
     torch = torch_cuda()
     task = text_task(name, atoms=atoms)
     r = reference(task)
     dt = mc.DeviceTask(task, ctx)
     states = torch.from_numpy(r["states"].view(np.int64)).cuda()
+    if task.has_axioms and atoms == "lazy":
+        with pytest.raises(ValueError, match="lazy atom slots"):  # rows of lazy slots do not enter a task
+            dt.host_derived(r["states"])
+        return
     derived = torch.from_numpy(dt.host_derived(r["states"]).view(np.int64)).cuda() if task.has_axioms else None
     idx, schema, binding = (torch.from_numpy(r[k]).cuda() for k in ("idx", "schema", "binding"))
 
@@ -309,7 +313,7 @@ def test_jax_gpu_zero_copy_and_kernels(ctx):
     jax, gpu = jax_gpu()
     import jax.numpy as jnp
 
-    task = text_task("gripper__prob05", atoms="frozen")
+    task = text_task("gripper__prob05", atoms="dense")
     r = reference(task)
     dt = mc.DeviceTask(task, ctx)
     # mymyr -> JAX: word arrays as uint32 pairs, no copy

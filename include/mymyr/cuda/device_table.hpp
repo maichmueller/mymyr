@@ -5,9 +5,8 @@
 // (cuda/lifted.hpp, "several instances") read views[inst[row]].
 //
 // Shareable across streams like DeviceTask: the upload runs on the context's stream and records an event; acquire(s)
-// makes stream s wait for it and records s as a user of the block. Immutable on the device after an upload; refresh()
-// re-exports and uploads a new block when an instance's lazy atom slots grew (the old block is freed after the work of
-// its user streams).
+// makes stream s wait for it and records s as a user of the block. Immutable on the device after the upload (a table's
+// instances have fixed atom slots).
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/rl/task_arrays.hpp"
@@ -61,9 +60,6 @@ public:
     [[nodiscard]] u64 bytes() const noexcept { return m_block.size(); }
     /// Makes `s` wait for the latest upload and records it as a user of the block. Thread-safe.
     void acquire(cudaStream_t s) const;
-    /// Lazy slots: re-exports and uploads the table if an instance's slots grew since the last upload; true if it did.
-    /// The views change: re-read them (and acquire the new block) after a refresh.
-    bool refresh();
     [[nodiscard]] u32 uploads() const noexcept { return m_uploads; }
 
 private:
@@ -72,7 +68,6 @@ private:
     ContextPtr m_ctx;
     rl::TaskTablePtr m_table;
     std::vector<std::shared_ptr<const rl::ArrayBundle>> m_bundles;
-    std::vector<u32> m_exported_fluent, m_exported_derived;
     std::vector<rl::dev::TaskView> m_views;
     mutable DeviceBuffer m_block;
     u64 m_views_offset = 0;

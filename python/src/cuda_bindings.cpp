@@ -742,7 +742,7 @@ nb::object device_expand(const ExpandArgs& a)
         ex->set_stream(os.s);
         const u64 total = ex->count({w.data, w.rows, atom_words, w.stride, NN}, ids, opt);
         const u64 cap = fixed_cap.value_or(std::min(total, rl::k_max_rows));  // more: the write raises
-        u32 W = fixed_words.value_or(std::max(atom_words, current_words(tt)));
+        u32 W = fixed_words.value_or(std::max(atom_words, tt.words()));
         if (W == 0)
             W = 1;
         for (int attempt = 0;; ++attempt)
@@ -752,7 +752,6 @@ nb::object device_expand(const ExpandArgs& a)
             ex->write(x);
             f.total = x.total;
             f.words_needed = x.words_needed;
-            // lazy slots: the device may have interned atoms past the width chosen above
             if (x.words_needed <= W || fixed_words || attempt >= 3)
                 break;
             W = x.words_needed;

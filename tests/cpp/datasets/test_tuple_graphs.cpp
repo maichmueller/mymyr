@@ -34,7 +34,7 @@ TaskPtr fork_task(const std::string& dir, const std::string& problem)
     if (!std::filesystem::exists(d) || !std::filesystem::exists(p))
         return nullptr;
     TaskOptions to;
-    to.atoms = TaskOptions::Atoms::Frozen;
+    to.atoms = TaskOptions::Atoms::Dense;
     return Task::create(*frontend::load_task(d, p), to);
 }
 
@@ -335,7 +335,7 @@ constexpr const char* kChainProblem = R"((define (problem chain3) (:domain chain
 TaskPtr chain_task()
 {
     TaskOptions to;
-    to.atoms = TaskOptions::Atoms::Frozen;
+    to.atoms = TaskOptions::Atoms::Dense;
     return Task::create(*frontend::Domain::from_string(kChainDomain, "d.pddl")->instantiate_string(kChainProblem, "p.pddl"), to);
 }
 

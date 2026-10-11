@@ -1358,7 +1358,7 @@ void bind_rl_jax(nb::module_& parent)
                 new (self) PyJaxEnv(std::move(table), std::move(device), std::move(ctx), c, nb::cast<std::string>(path));
             },
             "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "max_steps"_a = 0,
-            "step_reward"_a = -1.0f, "goal_reward"_a = 0.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
+            "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
             "path"_a = "auto")
         .def_prop_ro("handle", &PyJaxEnv::handle, "The FFI attribute `handle` of this environment's calls.")

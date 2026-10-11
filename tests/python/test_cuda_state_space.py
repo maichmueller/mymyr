@@ -70,7 +70,7 @@ def fork_task(d, p):
     dom, prob = FORK / d / "domain.pddl", FORK / d / p
     if not dom.is_file() or not prob.is_file():
         pytest.skip(f"fork data missing: {prob}")
-    return mymyr.Task.from_pddl(dom, prob, atoms="frozen")
+    return mymyr.Task.from_pddl(dom, prob, atoms="dense")
 
 
 @pytest.fixture(scope="module")
@@ -80,7 +80,7 @@ def sets():
     for name, (dom, probs) in SETS.items():
         if not dom.is_file() or not all(p.is_file() for p in probs):
             pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
-        out[name] = [mymyr.Task.from_pddl(dom, p, atoms="frozen") for p in probs]
+        out[name] = [mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]
     return out
 
 
@@ -127,7 +127,7 @@ def cpu_space(task, **kw):
 
 @pytest.mark.parametrize("name", TEXT)
 def test_state_space_equals_cpu_text(ctx, name):
-    task = text_task(name, atoms="frozen")
+    task = text_task(name, atoms="dense")
     c = cpu_space(task, max_states=60000)
     d = datasets.state_space(task, device=ctx, remove_if_unsolvable=False, max_states=60000)
     assert (c is None) == (d is None)

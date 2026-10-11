@@ -37,8 +37,14 @@ std::optional<GoalSpec::AtomGoal> atom_goal(const Task& task, const GroundCondit
                 return std::nullopt;  // never true
             continue;                 // never true: its negation always holds
         }
+        if (task.atoms().slot_if_any(c) == AtomIndex::k_empty)
+        {
+            if (l.positive)
+                return std::nullopt;  // no slot: not relaxed-reachable, never true
+            continue;
+        }
         if (C.kinds[p] == PredKind::Fluent)
-            (l.positive ? g.positive : g.negative).push_back(SlotId{task.atoms().intern(c)});
+            (l.positive ? g.positive : g.negative).push_back(SlotId{task.atoms().slot_if_any(c)});
         else
             (l.positive ? g.derived_positive : g.derived_negative).push_back(c);
     }

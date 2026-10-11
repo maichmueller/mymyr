@@ -11,7 +11,7 @@
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 
-set(_mymyr_components core frontend cuda)
+set(_mymyr_components core encoding frontend cuda)
 if(NOT mymyr_FIND_COMPONENTS)
     set(mymyr_FIND_COMPONENTS core frontend)
     set(mymyr_FIND_REQUIRED_core FALSE)

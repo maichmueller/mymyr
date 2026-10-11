@@ -11,16 +11,14 @@
 // lexicographically by binding), the same rows, labels (binding -1 past the arity; instance-local object ids), parents,
 // CSR offsets, goal flags, capacity clipping (rows past the capacity are counted, not written; their widths still
 // count) and width rules (a successor wider than out.words is zeroed and out.words_needed reports the width that fits
-// all). Lazy slots: atoms the device meets without a slot are interned per chunk in canonical-id order (rl::expand
-// interns them in generation order), so a fresh task may number them differently than the CPU would; on the same task
-// state the bytes agree.
+// all).
 //
 // A batch over a table of several instances (task_ids [rows], device, required) runs in one of two modes (mode()):
 //   - Multi: one pass of the multi-instance kernels over the mixed batch (each thread resolves its row's instance;
 //     launches per object-bitset width group, concurrently on the expander's auxiliary streams, and row-width bucket,
 //     set_launch; rows grouped by instance), when every
-//     instance runs completely on the multi-instance kernels (no numeric fluents, CPU-fallback schema, conditional effects or axioms; frozen
-//     slots: detail::multi_unsupported);
+//     instance runs completely on the multi-instance kernels (no numeric fluents, CPU-fallback schema, conditional effects or axioms:
+//     detail::multi_unsupported);
 //   - PerInstance: otherwise each instance's rows are gathered and expanded apart by the single-instance path (below),
 //     and the results are scattered back into batch order (one synchronization per instance in count() and write()).
 // A table of one instance (Single) runs the single-instance path: the task's kernels, conditional effects and axioms on

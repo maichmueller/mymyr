@@ -1,7 +1,7 @@
 // mymyr_device_conditional_bench: the device BrFS on tasks with conditional effects and axioms, printing one JSON
 // line. The task is an exported text file or a PDDL domain and problem (the loki front end).
 //
-//   mymyr_device_conditional_bench task.txt | domain.pddl problem.pddl [--atoms auto|lazy|frozen] [--info] [--no-witness]
+//   mymyr_device_conditional_bench task.txt | domain.pddl problem.pddl [--atoms auto|reachable|dense|lazy] [--info] [--no-witness]
 //                  [--no-canonical] [--chunk N] [--expected N] [--max-states N] [--stop-at-goal] [--fp] [--reps R]
 //                  [--cpu T[,T...]] [--cpu-reps R] [--max-bytes B] [--view-bytes B] [--matching auto|fixed|fc]
 //                  [--timings]
@@ -40,7 +40,7 @@ namespace
 [[noreturn]] void usage(const char* msg)
 {
     std::fprintf(stderr,
-                 "error: %s\nusage: mymyr_device_conditional_bench task.txt | domain.pddl problem.pddl [--atoms auto|lazy|frozen] [--info]\n"
+                 "error: %s\nusage: mymyr_device_conditional_bench task.txt | domain.pddl problem.pddl [--atoms auto|reachable|dense|lazy] [--info]\n"
                  "       [--no-witness] [--no-canonical] [--chunk N] [--expected N] [--max-states N] [--stop-at-goal] [--fp]\n"
                  "       [--reps R] [--cpu T[,T...]] [--cpu-reps R] [--max-bytes B] [--view-bytes B] [--matching auto|fixed|fc]\n"
                  "       [--timings]\n",
@@ -200,7 +200,7 @@ int main(int argc, char** argv)
         if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else if (a == "--info")
             only_info = true;
@@ -266,7 +266,7 @@ int main(int argc, char** argv)
             usage("this build has no PDDL front end");
 #endif
         }
-        std::printf("{\"task\":\"%s\",\"atoms\":\"%s\",%s", name.c_str(), task->atoms().mode() == AtomMode::Frozen ? "frozen" : "lazy",
+        std::printf("{\"task\":\"%s\",\"atoms\":\"%s\",%s", name.c_str(), atom_mode_name(task->atoms().mode()),
                     info(task).c_str());
         if (only_info)
         {

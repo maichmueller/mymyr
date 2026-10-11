@@ -26,10 +26,10 @@ namespace H = mymyr::heuristics;
 
 namespace
 {
-std::shared_ptr<const Task> make(const std::string& domain, const std::string& problem)
+std::shared_ptr<const Task> make(const std::string& domain, const std::string& problem, const TaskOptions& options = {})
 {
     const auto d = frontend::Domain::from_string(domain, "d.pddl");
-    return Task::create(*d->instantiate_string(problem, "p.pddl"));
+    return Task::create(*d->instantiate_string(problem, "p.pddl"), options);
 }
 
 std::unique_ptr<H::Heuristic> heuristic(const Task& t, H::Kind k, H::Costs costs = H::Costs::Auto)
@@ -231,33 +231,40 @@ TEST(LandmarkHeuristicsPddl, ZeroAndFractionalCosts)
 
 TEST(LandmarkHeuristicsPddl, StatesOutsideTheGroundingAreRefused)
 {
-    // (u a a) lies in the domains of u's arguments but is never reachable: the grounding has no proposition for it
-    const auto t = make(R"((define (domain d) (:requirements :strips)
+    // (u a a) lies in the domains of u's arguments but is never reachable: the grounding has no proposition for it.
+    // Only dense and lazy slots give it a slot (reachable slots leave it out, so no state holds it).
+    for (const TaskOptions::Atoms atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    {
+        SCOPED_TRACE(atoms == TaskOptions::Atoms::Dense ? "dense" : "lazy");
+        TaskOptions to;
+        to.atoms = atoms;
+        const auto t = make(R"((define (domain d) (:requirements :strips)
  (:predicates (ok ?x ?y) (u ?x ?y) (g))
  (:action mark :parameters (?x ?y) :precondition (ok ?x ?y) :effect (u ?x ?y))
  (:action use :parameters (?x ?y) :precondition (u ?x ?y) :effect (g))))",
-                        "(define (problem p) (:domain d) (:objects a b) (:init (ok a b) (ok b a)) (:goal (g)))");
-    const State s0 = t->initial_state();
-    const formalism::TaskData& D = t->data();
-    auto index = [&](const auto& v, std::string_view name)
-    {
-        for (u32 i = 0; i < v.size(); ++i)
-            if (D.str(v[i].name) == name)
-                return i;
-        ADD_FAILURE() << name;
-        return u32{0};
-    };
-    const CanonicalLayout& L = t->atoms().layout();
-    const u32 args[] = {index(D.objects, "a"), index(D.objects, "a")};
-    const CanonicalAtom c = L.encode(index(D.predicates, "u"), args);
-    ASSERT_LT(c, L.fluent_count);
-    StateBuilder b(s0.view());
-    b.set(SlotId{t->atoms().intern(c)});
-    for (H::Kind k : {H::Kind::LmCut, H::Kind::LmCount})
-    {
-        auto hk = heuristic(*t, k);
-        EXPECT_EQ(hk->evaluate(s0.view()), 2) << H::to_string(k);
-        EXPECT_THROW((void)hk->evaluate(b.view()), std::runtime_error) << H::to_string(k);
+                            "(define (problem p) (:domain d) (:objects a b) (:init (ok a b) (ok b a)) (:goal (g)))", to);
+        const State s0 = t->initial_state();
+        const formalism::TaskData& D = t->data();
+        auto index = [&](const auto& v, std::string_view name)
+        {
+            for (u32 i = 0; i < v.size(); ++i)
+                if (D.str(v[i].name) == name)
+                    return i;
+            ADD_FAILURE() << name;
+            return u32{0};
+        };
+        const CanonicalLayout& L = t->atoms().layout();
+        const u32 args[] = {index(D.objects, "a"), index(D.objects, "a")};
+        const CanonicalAtom c = L.encode(index(D.predicates, "u"), args);
+        ASSERT_LT(c, L.fluent_count);
+        StateBuilder b(s0.view());
+        b.set(SlotId{t->atoms().intern(c)});
+        for (H::Kind k : {H::Kind::LmCut, H::Kind::LmCount})
+        {
+            auto hk = heuristic(*t, k);
+            EXPECT_EQ(hk->evaluate(s0.view()), 2) << H::to_string(k);
+            EXPECT_THROW((void)hk->evaluate(b.view()), std::runtime_error) << H::to_string(k);
+        }
     }
 }
 

@@ -55,7 +55,7 @@ def main():
     a = ap.parse_args()
     key = jax.random.key(1)
     for name in a.tasks.split(","):
-        task = mymyr.Task.from_text(str(ROOT / "tests/data/tasks" / f"{name}.txt"), atoms="frozen")
+        task = mymyr.Task.from_text(str(ROOT / "tests/data/tasks" / f"{name}.txt"), atoms="dense")
         for n in map(int, a.envs.split(",")):
             env = rj.Env(task, device="cuda", max_steps=a.max_steps, labels=a.labels, final_state=a.final)
             common = {"task": name, "envs": n, "fast": env.fast, "labels": a.labels, "final": a.final,

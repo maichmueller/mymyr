@@ -114,10 +114,8 @@ using SuiteArg = Arg<std::variant<PySuite, PyTable, PyTask, PyHandle>>;
 /// ints (host).
 using TaskIdsArg = Arg<std::variant<ann::ArrayLike, nb::typed<nb::sequence, int>>>;
 
-/// The current atom words of a table's (suite's) rows: the widest instance's Task::words() (lazy slots grow it up to
-/// words()).
-[[nodiscard]] u32 current_words(const rl::TaskTable& table) noexcept;
-[[nodiscard]] u32 current_words(const rl::TaskSuite& suite) noexcept;
+/// The atom words States are packed at: the widest of their tasks' words (at least 1; 1 for anything but States).
+[[nodiscard]] u32 packed_words(nb::handle states);
 
 /// The host task ids of a batch of `rows` rows: an int32 array (read in place), an int64 array or a sequence of ints
 /// (converted into `copy`, range-checked against `instances`), or None (null, which the entry points accept for a table

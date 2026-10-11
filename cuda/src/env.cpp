@@ -77,8 +77,6 @@ std::string fast_why(const Task& task, const rl::EnvConfig& config)
         return "numeric applicability and effects require the general expansion path";
     if (task.has_axioms())
         return "axioms (their derived atoms are evaluated on the CPU)";
-    if (task.atoms().mode() != AtomMode::Frozen)
-        return "lazy atom slots (the device may meet atoms without a slot)";
     const plan::Compiled& C = task.compiled();
     const u32 wi = config.witness_pruning ? 0 : 1;
     for (const plan::Schema& ps : C.schemas)
@@ -186,7 +184,10 @@ struct DeviceEnv::Impl
     // the RNG key and the control words (k_ctl_words u32, zeroed at construction; check_errors() clears them)
     DeviceBuffer seed, ctl;
     // scratch (grow())
-    DeviceBuffer pick_schema, pick_rank, pick_row, status, goal_flag, order_temp, part_ids;
+    DeviceBuffer pick_schema, pick_rank, pick_row, status, goal_flag, current_goal, order_temp, part_ids;
+    std::vector<u64> goal_rows;
+    std::vector<i32> goal_ids;
+    std::vector<u8> goal_host;
     DeviceBuffer f_succ, f_schema, f_binding, f_goal, f_offsets, f_offsets2;
     PinnedBuffer host_ctl{k_ctl_words * sizeof(u32)};
     detail::Fanout lanes;  // several domains: one stream per domain, forked from s and joined back
@@ -212,7 +213,7 @@ struct DeviceEnv::Impl
                                      &inst_view_words, &goal_off, &goal_word, &goal_wpos, &goal_wneg,  &goal_never,
                                      &okey,        &dom_of,      &loc_of,      &all_views, &init_ids,   &iota,
                                      &starts,      &seed,        &ctl,
-                                     &pick_schema, &pick_rank,   &pick_row,    &status,    &goal_flag,  &order_temp,
+                                     &pick_schema, &pick_rank,   &pick_row,    &status,    &goal_flag, &current_goal, &order_temp,
                                      &part_ids,    &f_succ,      &f_schema,    &f_binding, &f_goal,     &f_offsets,
                                      &f_offsets2};
         for (Part& P : parts)
@@ -549,6 +550,42 @@ struct DeviceEnv::Impl
         return in;
     }
 
+    void goals(const rl::EnvBatch& batch, u8* goal)
+    {
+        envk::Finish query;
+        query.rows = batch.rows;
+        query.words = W;
+        query.row_words = W + NN;
+        query.states = batch.states;
+        query.goal_pos = batch.goal_pos;
+        query.goal_neg = batch.goal_neg;
+        query.in = instances(batch.task_ids);
+        query.error = dctl() + k_err;
+        if (fast || batch.goals())
+        {
+            const rl::dev::TaskView task = fast && !several() ? parts[0].dt->view(0) : rl::dev::TaskView{};
+            check(envk::launch_goal(task, query, goal, s), "launch_goal");
+            return;
+        }
+        no_capture("goal");
+        goal_rows.resize(batch.rows * (W + NN));
+        goal_ids.resize(batch.task_ids ? batch.rows : 0);
+        goal_host.resize(batch.rows);
+        if (batch.rows)
+        {
+            check(cudaMemcpyAsync(goal_rows.data(), batch.states, goal_rows.size() * sizeof(u64), cudaMemcpyDeviceToHost, s),
+                  "cudaMemcpyAsync");
+            if (batch.task_ids)
+                check(cudaMemcpyAsync(goal_ids.data(), batch.task_ids, goal_ids.size() * sizeof(i32), cudaMemcpyDeviceToHost, s),
+                      "cudaMemcpyAsync");
+            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+            rl::is_goal(*suite, rl::StateBatchView{goal_rows.data(), batch.rows, W, W + NN, NN},
+                        batch.task_ids ? goal_ids.data() : nullptr, goal_host.data());
+            check(cudaMemcpyAsync(goal, goal_host.data(), batch.rows, cudaMemcpyHostToDevice, s), "cudaMemcpyAsync");
+            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+        }
+    }
+
     /// General path: the offsets (and, with `full`, the rows) of the expansion of `rows` states into the flat buffers.
     rl::Expansion expand(const u64* states, const i32* inst, u64 rows, bool full, i32* offsets)
     {
@@ -578,7 +615,8 @@ struct DeviceEnv::Impl
         if (b.words != W)
             throw std::invalid_argument("mymyr: device env: state rows of " + std::to_string(b.words) + " words; the device "
                                         "env takes exactly " + std::to_string(W));
-        if (fast && b.rows && (!b.counts || !b.views))
+        // views of zero words (instances whose kernels read no view) may come as a null pointer
+        if (fast && b.rows && (!b.counts || (V && !b.views)))
             throw std::invalid_argument("mymyr: device env: the fast path needs the cache arrays (counts [rows, " +
                                         std::to_string(C) + "], views [rows, " + std::to_string(V) + "])");
     }
@@ -893,12 +931,19 @@ void DeviceEnv::set_stream(cudaStream_t s)
 {
     Impl& I = *m;
     s = s ? s : I.home;
-    if (s == I.s)
+    const bool move_x = I.x && I.x->stream() != s;
+    if (s == I.s && !move_x)
         return;
     DeviceGuard g(I.ctx->device());
     // a capturing stream cannot wait on work outside its graph (the capture was begun after the work it depends on:
     // the calls before, and the upload of the device table, which the constructor waited for)
     const bool cap = detail::capturing(s);
+    // the general path's expander moves outside captures only (it waits on its earlier work): the calls a capture can
+    // hold (reset) do not expand, and the next call on that stream that expands is not captured and moves it
+    if (move_x && !cap)
+        I.x->set_stream(s);
+    if (s == I.s)
+        return;
     if (!cap)
         stream_wait(s, I.s);
     for (DeviceBuffer* b : I.buffers())
@@ -911,8 +956,6 @@ void DeviceEnv::set_stream(cudaStream_t s)
         if (P.multi)
             P.plan.record_stream(s);
     }
-    if (I.x)
-        I.x->set_stream(s);
     I.s = s;
 }
 
@@ -939,6 +982,7 @@ void DeviceEnv::reserve(u64 rows)
     DeviceGuard g(I.ctx->device());
     I.begin_call();
     (void)I.grow<u8>(I.status, rows);
+    (void)I.grow<u8>(I.current_goal, rows);
     if (I.fast)
     {
         (void)I.grow<u32>(I.pick_schema, rows);
@@ -953,6 +997,19 @@ void DeviceEnv::reserve(u64 rows)
     (void)I.grow<u8>(I.goal_flag, rows);
     (void)I.grow<i32>(I.f_offsets, rows + 1);
     (void)I.grow<i32>(I.f_offsets2, rows + 1);
+}
+
+void DeviceEnv::goal(const rl::EnvBatch& batch, u8* goal)
+{
+    if (batch.rows && !goal)
+        throw std::invalid_argument("mymyr: env: goal query needs an output array");
+    Impl& impl = *m;
+    rl::check_env(*impl.suite, batch, nullptr);
+    if (batch.words != impl.W)
+        throw std::invalid_argument("mymyr: device env: goal query width differs from the environment");
+    DeviceGuard guard(impl.ctx->device());
+    impl.begin_call();
+    impl.goals(batch, goal);
 }
 
 void DeviceEnv::random_actions(const u64* draws, const i32* count, u64 rows, u64 first_env, u32 max_actions, i64* out)
@@ -1043,6 +1100,8 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     const cudaStream_t s = I.s;
     u32* ctl = I.dctl();
     auto* status = I.grow<u8>(I.status, N);
+    auto* current_goal = I.grow<u8>(I.current_goal, N);
+    I.goals(b, current_goal);
     envk::Select sel;
     sel.rows = N;
     sel.action = action.v64;
@@ -1054,6 +1113,7 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
     sel.seeds = b.seeds;
     sel.env_ids = b.env_ids;
     sel.status = status;
+    sel.goal = current_goal;
     envk::Finish f;
     f.rows = N;
     f.words = I.W;

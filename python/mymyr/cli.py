@@ -94,6 +94,13 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "-j", "--threads", type=int, default=1, help="threads of brfs (the other searches run on one thread; default: 1)"
     )
+    plan.add_argument(
+        "--atoms",
+        choices=("lazy", "auto", "reachable", "dense"),
+        default="lazy",
+        help="atom slots of the task (Task.from_pddl): lazy gives slots to the atoms the search meets, the narrowest "
+        "states on large tasks; auto, reachable and dense fix them before the search (default: lazy)",
+    )
     plan.add_argument("--max-seconds", type=float, help="stop the search after this many seconds (exit code 3)")
     plan.add_argument(
         "--max-states", type=int, help="stop the search after storing this many states (per IW pass; exit code 3)"
@@ -192,7 +199,7 @@ def _statistics(r: Any) -> tuple[int, int, int, float]:
 def _plan(a: argparse.Namespace) -> int:
     _check_options(a)
     t0 = time.perf_counter()
-    task = mymyr.Task.from_pddl(a.domain, a.problem)
+    task = mymyr.Task.from_pddl(a.domain, a.problem, atoms=a.atoms)
     parse_s = time.perf_counter() - t0
     r = _cancellable(lambda token: _search(task, a, token))
     status = r.status

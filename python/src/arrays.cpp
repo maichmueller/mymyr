@@ -659,7 +659,9 @@ StateBatch import_states(nb::handle obj, u32 task_words)
     if (is_state(obj))
     {
         const State& s = state_of(obj).s;
-        b.packed = std::make_shared<std::vector<u64>>(s.words().begin(), s.words().end());
+        const u32 words = std::max<u32>({1, task_words, s.size_words()});
+        b.packed = std::make_shared<std::vector<u64>>(words, 0);
+        std::copy(s.words().begin(), s.words().end(), b.packed->begin());
         b.view = {b.packed->data(), 1, static_cast<u32>(b.packed->size()), 0};
         b.single = true;
         b.enc = {64, false};

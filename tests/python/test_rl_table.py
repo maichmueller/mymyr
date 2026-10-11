@@ -58,7 +58,7 @@ def sets():
     for name, (dom, probs) in SETS.items():
         if not dom.is_file() or not all(p.is_file() for p in probs):
             pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
-        out[name] = [mymyr.Task.from_pddl(dom, p, atoms="frozen") for p in probs]
+        out[name] = [mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]
     return out
 
 
@@ -260,7 +260,8 @@ def env_arrays(env):
 
 def step_arrays(r):
     out = {f: getattr(r, f).cpu().numpy().copy() for f in r._fields}
-    out["final_states"] = out["final_states"].view(np.uint64)
+    for field in ("final_states", "states", "goal_pos", "goal_neg"):
+        out[field] = out[field].view(np.uint64)
     return out
 
 
@@ -317,8 +318,6 @@ def host_rollout(t, ids, steps, goals=False, next_ids=None, seed=5, **cfg):
         r = step_arrays(env.step(next_task_ids=nxt, final=True))
         a = env_arrays(env)
         a.update(r)
-        if goals:
-            a["goal_pos"] = env.goal_pos.numpy().view(np.uint64).copy()
         out.append(a)
     return out
 
@@ -353,10 +352,7 @@ def test_device_env_equals_host_env(sets, name):
                 r = step_arrays(env.step(next_task_ids=torch.from_numpy(ROT(n, len(tasks))(s)).to(dev), final=True))
                 a = env_arrays(env)
                 for f, v in ref[s + 1].items():
-                    got = r.get(f, a.get(f))
-                    if f == "goal_pos":
-                        got = env.goal_pos.cpu().numpy().view(np.uint64)
-                    assert np.array_equal(got, v), (path, launch, s, f)
+                    assert np.array_equal(r.get(f, a.get(f)), v), (path, launch, s, f)
             env.check_errors()
     # a batch split (two envs, first_env = the second half's first env id) on a side stream
     h = n // 3
@@ -471,6 +467,20 @@ def pool_rollout(t, ids, steps, threads, split, goals, next_ids, seed=5, **cfg):
     return out
 
 
+def assert_same_batches(got, ref, numeric_words, where):
+    """Pool batches equal the host env's. A pool batch's state rows are as wide as its widest instance (unless the
+    pool fixes words=), the host env's as wide as the table: the host's atom words past the pool's are zero, and the
+    numeric words follow the atom words in both."""
+    for s, (g, r) in enumerate(zip(got, ref)):
+        for f, v in g.items():
+            want = r[f]
+            if f in ("states", "final_states") and v.shape[1] != want.shape[1]:
+                a, b = v.shape[1] - numeric_words, want.shape[1] - numeric_words
+                assert a < b and not np.any(want[:, a:b]), (where, s, f)
+                want = np.concatenate([want[:, :a], want[:, b:]], 1)
+            assert np.array_equal(v, want), (where, s, f)
+
+
 @pytest.mark.parametrize("name", list(SETS))
 def test_pool_equals_host_env(sets, name):
     tasks = sets[name]
@@ -480,12 +490,11 @@ def test_pool_equals_host_env(sets, name):
     goals = name in MASK_SETS
     rot = ROT(n, len(tasks))
     ref = host_rollout(t, ids, steps, goals=goals, next_ids=rot, **rollout_config(name))
-    for threads, split in ((1, False), (4, True), (3, False)):
-        got = pool_rollout(t, ids, steps, threads, split, goals, rot, **rollout_config(name))
-        for s in range(steps + 1):
-            for f, v in got[s].items():
-                want = ref[s][f]
-                assert np.array_equal(v, want), (threads, split, s, f)
+    for threads, split, words in ((1, False, None), (4, True, None), (3, False, t.words)):
+        got = pool_rollout(t, ids, steps, threads, split, goals, rot, words=words, **rollout_config(name))
+        if words is not None:
+            assert all(g["states"].shape == r["states"].shape for g, r in zip(got, ref))
+        assert_same_batches(got, ref, t.numeric_words, (threads, split, words))
 
 
 def test_pool_from_python_threads(sets):
@@ -575,7 +584,7 @@ def last_successor(td):
 
 
 def test_torchrl_over_tables(sets):
-    """TorchRL over a mixed table: the specs, resets that carry task_id (curriculum), SerialEnv == ParallelEnv (the
+    """TorchRL over a mixed table: the specs, resets that carry next_task_id (curriculum), SerialEnv == ParallelEnv (the
     table pickled into spawned workers), a collector, and rollouts equal to a BatchedEnv with the same actions."""
     pytest.importorskip("torchrl")
     import functools
@@ -596,10 +605,9 @@ def test_torchrl_over_tables(sets):
     check_env_specs(env, seed=3)
     td = env.reset()
     assert torch.equal(td["task_id"], ids.to(torch.int64)) and torch.equal(td["state"], init[ids.long()])
-    # a partial reset with task_id moves the reset rows to other instances; the others keep theirs
     mask = torch.arange(n) % 3 == 0
     new = (ids + 1) % I
-    td = env.reset(TensorDict({"_reset": mask.unsqueeze(-1), "task_id": new.to(torch.int64)}, batch_size=[n]))
+    td = env.reset(TensorDict({"_reset": mask.unsqueeze(-1), "next_task_id": new.to(torch.int64)}, batch_size=[n]))
     want = torch.where(mask, new, ids).to(torch.int64)
     # (TorchRL fills the rows not reset from the input tensordict: the env's own task ids are the truth)
     assert torch.equal(env.batched.task_ids.long(), want)
@@ -607,7 +615,7 @@ def test_torchrl_over_tables(sets):
 
     # a rollout with a deterministic policy == BatchedEnv with the same actions (resets of finished rows keep the
     # rows' instances; the rollout's first reset keeps the current ones)
-    env.reset(TensorDict({"task_id": ids.to(torch.int64)}, batch_size=[n]))
+    env.reset(TensorDict({"next_task_id": ids.to(torch.int64)}, batch_size=[n]))
     env.set_seed(4)
     roll = env.rollout(8, last_successor, break_when_any_done=False)
     twin = rt.BatchedEnv(t, n, task_ids=ids, seed=4, max_steps=5, goal_reward=1.0, autoreset=True)

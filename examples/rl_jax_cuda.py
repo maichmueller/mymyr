@@ -8,7 +8,7 @@ from mymyr.rl.jax import Env
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "tests/data/pddl/blocks"
-task = mymyr.Task.from_pddl(DATA / "domain.pddl", DATA / "probBLOCKS-8-0.pddl", atoms="frozen")
+task = mymyr.Task.from_pddl(DATA / "domain.pddl", DATA / "probBLOCKS-8-0.pddl", atoms="dense")
 env = Env(task, device="cuda", max_steps=4)
 key = jax.random.key(0)
 state, observation = env.reset(key, 4)

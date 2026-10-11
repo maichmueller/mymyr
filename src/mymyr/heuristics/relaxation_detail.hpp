@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <utility>
 #include <vector>
 
 namespace mymyr::heuristics::detail
@@ -88,7 +89,9 @@ private:
 };
 
 /// The propositions of a state: its fluent atoms' "true" propositions (pos) and the "false" propositions of those of
-/// its atoms that have one (neg: these do not hold). Caches the slot -> proposition mapping.
+/// its atoms that have one (neg: these do not hold), in ascending canonical id of the atoms, so that the exploration's
+/// ties (and the heuristic values they decide) do not depend on the slot numbering. Caches the slot -> proposition
+/// mapping.
 class StateProps
 {
 public:
@@ -101,37 +104,48 @@ public:
         pos.clear();
         neg.clear();
         bool ok = true;
-        bits::for_each(s.w, s.nw,
-                       [&](u64 slot)
-                       {
-                           if (!ok)
-                               return;
-                           if (slot >= m_slot_pos.size())
-                           {
-                               m_slot_pos.resize(slot + 1, k_unknown);
-                               m_slot_neg.resize(slot + 1, k_unknown);
-                           }
-                           if (m_slot_pos[slot] == k_unknown)
-                           {
-                               const auto [pp, np] = R.fluent_props(A.canonical(AtomKind::Fluent, static_cast<u32>(slot)));
-                               m_slot_pos[slot] = pp;
-                               m_slot_neg[slot] = np;
-                           }
-                           const u32 p = m_slot_pos[slot];
-                           if (p == k_none)
-                           {
-                               ok = false;
-                               return;
-                           }
-                           pos.push_back(p);
-                           if (m_slot_neg[slot] != k_none)
-                               neg.push_back(m_slot_neg[slot]);
-                       });
+        const auto visit = [&](u64 slot)
+        {
+            if (!ok)
+                return;
+            if (slot >= m_slot_pos.size())
+            {
+                m_slot_pos.resize(slot + 1, k_unknown);
+                m_slot_neg.resize(slot + 1, k_unknown);
+            }
+            if (m_slot_pos[slot] == k_unknown)
+            {
+                const auto [pp, np] = R.fluent_props(A.canonical(AtomKind::Fluent, static_cast<u32>(slot)));
+                m_slot_pos[slot] = pp;
+                m_slot_neg[slot] = np;
+            }
+            const u32 p = m_slot_pos[slot];
+            if (p == k_none)
+            {
+                ok = false;
+                return;
+            }
+            pos.push_back(p);
+            if (m_slot_neg[slot] != k_none)
+                neg.push_back(m_slot_neg[slot]);
+        };
+        // fixed slots ascend with the canonical id; lazy ones follow the order in which searches met the atoms
+        if (A.frozen())
+            bits::for_each(s.w, s.nw, visit);
+        else
+        {
+            m_order.clear();
+            bits::for_each(s.w, s.nw, [&](u64 slot) { m_order.push_back({A.canonical(AtomKind::Fluent, static_cast<u32>(slot)), slot}); });
+            std::sort(m_order.begin(), m_order.end());
+            for (const auto& [c, slot] : m_order)
+                visit(slot);
+        }
         return ok;
     }
 
 private:
     static constexpr u32 k_unknown = ~u32{0} - 1;
     std::vector<u32> m_slot_pos, m_slot_neg;
+    std::vector<std::pair<CanonicalAtom, u64>> m_order;  // lazy slots: (canonical id, slot) of the state's atoms
 };
 }  // namespace mymyr::heuristics::detail

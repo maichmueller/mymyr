@@ -150,6 +150,13 @@ inline void is_goal(const TaskTable& table, StateBatchView in, const i32* task_i
     is_goal(*TaskSuite::of(table), in, task_ids, out);
 }
 
+/// The most numeric slots any instance of the suite has (the columns of numeric_values).
+[[nodiscard]] u32 max_numeric_slots(const TaskSuite& suite) noexcept;
+/// The numeric values of a batch: out [rows, slots] row-major, row i holding the values of instance task_ids[i]'s
+/// numeric slots (Task::numeric_value, in its numeric_names order, decoded from its storage) and NaN past them.
+/// `slots` is at least max_numeric_slots(suite). Throws std::invalid_argument as is_goal does.
+void numeric_values(const TaskSuite& suite, StateBatchView in, const i32* task_ids, f64* out, u32 slots);
+
 /// Pure mask goal test: out[i] = (s & gpos) == gpos && (s & gneg) == 0 over the words of row i.
 /// gpos / gneg hold one row (shared by every state) or in.rows rows (one goal per env); rows may differ in width.
 void goal_test(StateBatchView in, StateBatchView gpos, StateBatchView gneg, u8* out);

@@ -36,7 +36,7 @@ def gpu():
 
 @pytest.fixture(scope="module")
 def blocks():
-    return text_task("blocks__probBLOCKS-8-0", atoms="frozen")
+    return text_task("blocks__probBLOCKS-8-0", atoms="dense")
 
 
 def expand_rows(task, states):
@@ -51,9 +51,13 @@ def check_step(task, env, before, action, r):
     L = binding.shape[1]
     count = off[1:] - off[:-1]
     after = env.states.cpu()
+    previous_goals = rl.is_goal(task, before.cpu()).tolist()
     for i in range(before.shape[0]):
         a, c = int(action[i]), int(count[i])
-        if c == 0:  # stuck: no move, terminated
+        if previous_goals[i]:
+            assert torch.equal(after[i], before[i]) and bool(r.goal[i]) and bool(r.terminated[i])
+            assert int(r.schema[i]) == -1 and not bool(r.invalid[i]) and float(r.reward[i]) == 0
+        elif c == 0:  # stuck: no move, terminated
             assert torch.equal(after[i], before[i]) and bool(r.terminated[i]) and not bool(r.invalid[i])
             assert int(r.schema[i]) == -1
         elif a < 0 or a >= c:  # invalid: no move
@@ -115,14 +119,16 @@ def test_rewards_truncation_and_autoreset(blocks):
 
 
 def test_dead_ends_and_stuck_states():
-    task = text_task("pegsol-08-strips__p22", atoms="frozen")
+    task = text_task("pegsol-08-strips__p22", atoms="dense")
     n = 64
     env = rt.BatchedEnv(task, n, autoreset=False, step_reward=-1.0, dead_end_reward=-10.0)
     seen = 0
     for _ in range(40):
+        stuck = env.count == 0
         r = env.step()
         dead = r.terminated & ~r.goal
-        assert torch.all(r.reward[dead] == -11.0)
+        assert torch.all(r.reward[dead & ~stuck] == -11.0)
+        assert torch.all(r.reward[dead & stuck] == 0)
         assert torch.all(env.count[dead] == 0)
         seen += int(dead.sum())
     assert seen > 0
@@ -408,7 +414,7 @@ def trajectories_equal(task, dev, n=256, steps=40, **cfg):
     return gpu_env
 
 
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable"])
 @pytest.mark.parametrize("name", SMALL_TASKS)
 def test_device_env_equals_cpu_env(name, atoms):
     dev = gpu()
@@ -489,10 +495,9 @@ def test_device_refusals():
     numeric = mymyr.Task.from_text(str(NUMERIC / "cs-counters.txt"))
     assert rt.BatchedEnv(numeric, 4, device=dev).core.numeric_words == numeric.numeric_words
     lazy = text_task("blocks__probBLOCKS-8-0", atoms="lazy")
-    assert "lazy" in rt.fast_unsupported(lazy)
-    with pytest.raises(ValueError, match="lazy"):
-        rt.BatchedEnv(lazy, 4, device=dev, path="fast")
-    env = rt.BatchedEnv(text_task("blocks__probBLOCKS-8-0", atoms="frozen"), 4, device=dev)
+    with pytest.raises(ValueError, match="lazy atom slots"):
+        rt.BatchedEnv(lazy, 4, device=dev)
+    env = rt.BatchedEnv(text_task("blocks__probBLOCKS-8-0", atoms="dense"), 4, device=dev)
     with pytest.raises(ValueError, match="cuda"):  # a CPU action for a device env (BatchedEnv.step moves it)
         rt._ops.step_impl(env.handle, env.states, None, env.steps, env.draws, env.counts, env.views, env.count,
                           None, None, torch.zeros(4, dtype=torch.int64), None, 0, False)  # fmt: skip
@@ -504,7 +509,7 @@ def gripper_table():
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
     g = ROOT / "tests/data/pddl/gripper"
-    return rl.TaskTable([mymyr.Task.from_pddl(g / "domain.pddl", g / p, atoms="frozen") for p in ("p01.pddl", "p02.pddl")])
+    return rl.TaskTable([mymyr.Task.from_pddl(g / "domain.pddl", g / p, atoms="dense") for p in ("p01.pddl", "p02.pddl")])
 
 
 def test_host_task_ids_outside_the_table_raise_before_they_are_written():
@@ -533,10 +538,10 @@ def test_device_task_ids_outside_the_table_raise():
     env.check_errors()
     penv = rt.PlanningEnv(table, 4, device=dev)
     td = penv.reset()
-    td["task_id"] = torch.tensor([0, 1, 0, 99], device=dev)
+    td["next_task_id"] = torch.tensor([0, 1, 0, 99], device=dev)
     with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
         penv.reset(td)  # the reset waits for the device and raises its errors
-    td["task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
+    td["next_task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
     assert penv.reset(td)["task_id"].tolist() == [1, 1, 0, 0]
 
 

@@ -37,15 +37,11 @@ void DeviceTaskTable::upload_all()
 {
     const u32 I = m_table->size();
     m_bundles.clear();
-    m_exported_fluent.assign(I, 0);
-    m_exported_derived.assign(I, 0);
     std::vector<u64> at(I);
     u64 bytes = 0;
     for (u32 i = 0; i < I; ++i)
     {
         auto b = std::make_shared<const rl::ArrayBundle>(rl::device_arrays(*m_table->task(i), rl::k_device_arrays_version));
-        m_exported_fluent[i] = static_cast<u32>(b->scalar("plan_fluent_slots", 0));
-        m_exported_derived[i] = static_cast<u32>(b->scalar("plan_derived_slots", 0));
         at[i] = bytes;
         bytes += (b->bytes() + 63) & ~u64{63};
         m_bundles.push_back(std::move(b));
@@ -81,20 +77,5 @@ void DeviceTaskTable::acquire(cudaStream_t s) const
     if (s != m_block.stream())
         m_ready.wait_on(s);
     m_block.record_stream(s);
-}
-
-bool DeviceTaskTable::refresh()
-{
-    bool grew = false;
-    for (u32 i = 0; i < m_table->size() && !grew; ++i)
-    {
-        const AtomIndex& a = m_table->task(i)->atoms();
-        grew = a.fluent_slots() != m_exported_fluent[i] || a.derived_slots() != m_exported_derived[i];
-    }
-    if (!grew)
-        return false;
-    DeviceGuard g(m_ctx->device());
-    upload_all();
-    return true;
 }
 }  // namespace mymyr::cuda

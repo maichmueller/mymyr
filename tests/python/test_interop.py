@@ -28,7 +28,7 @@ def jax():
 
 @pytest.fixture(scope="module")
 def batch():
-    task = text_task("logistics00__probLOGISTICS-6-1", atoms="lazy")
+    task = text_task("logistics00__probLOGISTICS-6-1")
     states = walk(task, steps=12, seed=3, walks=3)
     ref = rl.expand(task, states, goal=True)
     return task, states, task.encode(states), ref

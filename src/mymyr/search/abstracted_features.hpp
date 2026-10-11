@@ -45,7 +45,8 @@ public:
                     args.push_back(formalism::term_object(x).v);
                 const CanonicalAtom c = L.encode(l.pred.v, args.data());
                 if (c < L.fluent_count)
-                    m_preserved.push_back(task.atoms().intern(c));
+                    if (const u32 s = task.atoms().slot_if_any(c); s != AtomIndex::k_empty)
+                        m_preserved.push_back(s);
             }
         }
         if (coords && preserve_landmark_atoms)

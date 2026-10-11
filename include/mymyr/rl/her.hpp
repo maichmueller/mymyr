@@ -36,8 +36,8 @@ struct HerConfig
     u32 subset = 0;       // atoms per goal (0: all atoms of the source state)
     u64 seed = 0;
     u64 first_env = 0;    // env id of column 0 (without env_ids)
-    f32 step_reward = -1.0f;
-    f32 goal_reward = 0.0f;
+    f32 step_reward = 0.0f;
+    f32 goal_reward = 1.0f;
 };
 
 /// The window and the outputs (caller-owned).

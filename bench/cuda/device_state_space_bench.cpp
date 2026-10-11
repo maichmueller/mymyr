@@ -115,7 +115,7 @@ void single(const std::vector<std::string>& names, const std::vector<u32>& threa
     for (const std::string& name : names)
     {
         TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
         const TaskPtr task = Task::from_text_file(test::task_path(name), to);
         datasets::StateSpaceOptions so;
         so.remove_if_unsolvable = false;
@@ -227,7 +227,7 @@ void table(u32 instances, const std::vector<u32>& blocks, u32 threads, u32 reps,
     const fs::path dom = fs::path(MYMYR_FORK_DATA_DIR) / "ipc" / "blocksworld-ipc" / "train" / "domain.pddl";
     const auto domain = frontend::Domain::from_file(dom);
     TaskOptions to;
-    to.atoms = TaskOptions::Atoms::Frozen;
+    to.atoms = TaskOptions::Atoms::Dense;
     std::vector<TaskPtr> tasks;
     u64 rng = 0x5eed;
     for (u32 k = 0; k < instances; ++k)

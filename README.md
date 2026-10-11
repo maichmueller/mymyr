@@ -67,7 +67,7 @@ carries the same under `mymyr/include` and `mymyr/lib`. A consumer needs only th
 or clang 22 with libc++): the front end's parser dependencies are part of `libmymyr_frontend.a`.
 
 ```cmake
-find_package(mymyr CONFIG REQUIRED COMPONENTS core frontend)   # components: core, frontend, cuda
+find_package(mymyr CONFIG REQUIRED COMPONENTS core frontend)   # components: core, encoding, frontend, cuda
 target_link_libraries(app PRIVATE mymyr::core mymyr::frontend)
 ```
 
@@ -106,6 +106,11 @@ print(batch.states.shape, batch.reward, batch.terminated)
 ```
 
 User guides and tested scripts are in [docs/](docs/README.md) and [examples/](examples/).
+
+`mymyr.encoding.FlatRelationEncoder(task_or_table)` produces native packed classical observations: state facts,
+signed goal satisfaction and action readouts from an existing `rl.Expansion`. Outputs own their flat arrays and
+portable metadata; NumPy, Torch, JAX and DLPack exports use the existing interop without a mifrost/Pymimir/PyG dependency.
+See [native encoding](docs/encoding.md) for the batch contract and explicit numeric/CUDA limitations.
 
 ## License
 

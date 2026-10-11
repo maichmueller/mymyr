@@ -161,6 +161,20 @@ private:
     std::unique_ptr<detail::WitnessMemo> m_memo;
 };
 
+/// The relaxed-reachable atoms of a task (Task derives its atom slots from them, task/task.hpp).
+struct ReachableAtoms
+{
+    std::vector<CanonicalAtom> atoms;  // ascending canonical ids: the fluent atoms (below F_fluent), then the derived
+    u64 fluent = 0;                    // how many of them are fluent
+    u64 steps = 0;                     // the fixpoint's work: join steps (candidate objects tried) and anchor attempts
+    bool complete = true;              // false: the fixpoint passed max_steps, and `atoms` is empty
+};
+
+/// The unrestricted fixpoint of `task`, bounded by `max_steps` steps of work. The step count is a function of the
+/// task alone, so the outcome (complete or not) is the same in every run. Reads only the task's normalized data and
+/// compiled tables, never its atom index, so it can run while the task is being built; holds no scratch afterwards.
+[[nodiscard]] ReachableAtoms reachable_atoms(const Task& task, u64 max_steps);
+
 class RelaxedReachability
 {
 public:

@@ -13,7 +13,8 @@
 
 namespace mymyr::search::detail
 {
-/// Slots of canonical fluent atoms (interned on first touch); atoms outside the fluent space are dropped.
+/// Slots of canonical fluent atoms (interned on first touch under lazy slots); atoms outside the fluent space and
+/// atoms without a slot (no state holds them) are dropped.
 inline std::vector<u32> fluent_slots_of(const Task& task, std::span<const CanonicalAtom> atoms)
 {
     std::vector<u32> out;
@@ -21,7 +22,8 @@ inline std::vector<u32> fluent_slots_of(const Task& task, std::span<const Canoni
     const AtomIndex& ix = task.atoms();
     for (CanonicalAtom c : atoms)
         if (c < ix.layout().fluent_count)
-            out.push_back(ix.intern(c));
+            if (const u32 s = ix.slot_if_any(c); s != AtomIndex::k_empty)
+                out.push_back(s);
     return out;
 }
 

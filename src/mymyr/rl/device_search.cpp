@@ -312,7 +312,7 @@ DeviceSearchCosts device_search_costs(const Task& task)
     detail::Engine& e = succ.engine();
     // sample states: the initial state and, in frozen mode, its successors in canonical order (under lazy slots the
     // generation, and the axioms, would intern atoms: the probe must not change the task)
-    const bool frozen = task.atoms().mode() == AtomMode::Frozen;
+    const bool frozen = task.atoms().frozen();
     std::vector<State> states{task.initial_state()};
     if (frozen)
     {

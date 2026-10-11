@@ -7,7 +7,9 @@
 //   rl::PoolBatch out = pool.recv();                            // the oldest send's results (blocks until done)
 //
 // The pool owns N environments over a TaskSuite or a TaskTable (states, task ids, step and draw counters, optional
-// per-env goal masks) and worker threads that step them. A send enqueues a step of some environments (env ids, each at
+// per-env goal masks) and worker threads that step them. A batch's rows are as wide as the widest instance among its
+// envs (PoolOptions::words fixes the width), and a step reads and writes an env's own instance words only, so its
+// cost follows the env's instance, not the suite's widest. A send enqueues a step of some environments (env ids, each at
 // most once, none of them in flight); the workers step the queued sends' rows in send order; recv returns the results
 // of whole sends in send order (or of one given ticket). An environment's step is rl::HostEnv::step_row, the host env's
 // own row step: the same semantics, the same RNG streams (env id = the env's index, draws from the config's seed), so a
@@ -69,13 +71,16 @@ struct PoolOptions
 {
     u32 threads = 0;     // worker threads (0: the hardware's)
     bool goals = false;  // per-env goal masks
+    /// Atom words of every batch's rows (at least the suite's words()); 0: each batch is as wide as the widest instance
+    /// of its envs (after a reset: their new instances; after a step: their instances and those they autoreset into).
+    u32 words = 0;
 };
 
 /// The results of one or more sends (recv), or of a reset: arrays of B rows in the order of their env ids.
 struct PoolBatch
 {
     u64 rows = 0;
-    u32 words = 0, numeric_words = 0, label_width = 0;
+    u32 words = 0, numeric_words = 0, label_width = 0;  // words: PoolOptions::words, or the batch's widest instance's
     bool goals = false;  // per-env goal masks (goal_pos, goal_neg) are set
     bool step = false;   // step results (reward ... binding) are set: a send's, not a reset's
     PoolArray<u32> env_ids;       // [B]
@@ -84,9 +89,8 @@ struct PoolBatch
     PoolArray<i32> count;         // [B]: their successor counts
     PoolArray<i32> steps;         // [B]: the episodes' step counts
     PoolArray<u64> goal_pos, goal_neg;  // [B, words] with per-env goals, else empty
-    // step results (empty after a reset)
     PoolArray<f32> reward;         // [B]
-    PoolArray<u8> terminated, truncated, invalid, goal;  // [B]
+    PoolArray<u8> terminated, truncated, invalid, goal;  // [B]; terminated and goal also report reset states
     PoolArray<u64> final_states;   // [B, words + numeric_words]: the reached states (before the autoreset)
     PoolArray<i32> schema;         // [B]: the actions' labels (-1: no move)
     PoolArray<i32> binding;        // [B, label_width]
@@ -111,14 +115,17 @@ public:
     [[nodiscard]] u32 num_envs() const noexcept;
     [[nodiscard]] u32 threads() const noexcept;
     [[nodiscard]] bool goals() const noexcept;
+    /// PoolOptions::words (0: each batch has its own width, PoolBatch::words).
     [[nodiscard]] u32 words() const noexcept;
     [[nodiscard]] u32 numeric_words() const noexcept;
     [[nodiscard]] u32 label_width() const noexcept;
 
     /// Resets envs `env_ids` [n] (null: every env, n ignored) into instances `task_ids` [n] (null: their current
-    /// ones) with goal masks `goal_pos` / `goal_neg` [n, words] (null: their instances' goals; per-env goals only);
-    /// returns their observations. Draw counters are kept. Throws if one of them has a step in flight.
-    PoolBatch reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos, const u64* goal_neg);
+    /// ones) with goal masks `goal_pos` / `goal_neg` [n, goal_words] (null: their instances' goals; per-env goals
+    /// only; each row's words past its instance's are not read); returns their observations. Draw counters are kept.
+    /// Throws if one of them has a step in flight.
+    PoolBatch reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos = nullptr,
+                    const u64* goal_neg = nullptr, u32 goal_words = 0);
     /// Enqueues one step of envs `env_ids` [n] (null: every env): `actions` [n] (none: the random policy),
     /// `next_task_ids` [n] (optional: the instances autoresetting envs restart in). Returns the send's ticket.
     /// Throws for an unknown or repeated env id, or one with a step in flight.

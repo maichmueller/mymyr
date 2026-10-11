@@ -110,7 +110,7 @@ struct DeviceExpander::Impl
         }
         if (bad_row != 0xFFFFFFFFu)
             throw std::invalid_argument("mymyr: expand: state row " + std::to_string(bad_row) +
-                                        " sets atom slots its instance has not assigned (a state of another task?)");
+                                        " sets atom slots its instance does not have (a state of another task?)");
     }
 
     /// Chunks of parents: the views (view_words each) within the budget, the (state, schema) segments within int32.
@@ -535,7 +535,7 @@ struct DeviceExpander::Impl
             check(cudaMemcpyAsync(host_ids.data(), ids, n * sizeof(i32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
         check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
         table->check_task_ids(host_ids.data(), n);
-        // rows with bits past their instance's assigned slots (the slots of lazy instances as they are now)
+        // rows with bits past their instance's atom slots
         if (opt.validate && n)
         {
             std::vector<u32> lim(I);

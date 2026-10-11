@@ -352,7 +352,7 @@ const OracleVariant k_variants[] = {
     {"ladder2", 2, -1, WidthZero::ExpandDepthOne, false, true, TaskOptions::Atoms::Auto, u64{256} << 20, ~u64{0}},
     {"ladder1_optimized", 1, -1, WidthZero::ExpandDepthOne, false, true, TaskOptions::Atoms::Lazy, u64{256} << 20, ~u64{0}},
     {"ladder2_rootonly_witness_nocanonical", 2, -1, WidthZero::RootOnly, true, false, TaskOptions::Atoms::Lazy, u64{256} << 20, ~u64{0}},
-    {"ladder2_frozen_sparse", 2, -1, WidthZero::ExpandDepthOne, false, true, TaskOptions::Atoms::Frozen, 0, ~u64{0}},
+    {"ladder2_frozen_sparse", 2, -1, WidthZero::ExpandDepthOne, false, true, TaskOptions::Atoms::Dense, 0, ~u64{0}},
     {"pass3", 3, 3, WidthZero::ExpandDepthOne, false, true, TaskOptions::Atoms::Lazy, u64{256} << 20, 1500},
     {"pass3_sparse_witness", 3, 3, WidthZero::ExpandDepthOne, true, true, TaskOptions::Atoms::Auto, 0, 1500},
 };

@@ -1,7 +1,7 @@
 // Device env CUDA-graph tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device): the device env's calls
 // captured into CUDA graphs (stream capture in global mode, so a call that synchronizes, queries or allocates fails
 // the capture) and replayed equal the same calls run eagerly and rl::HostEnv, byte for byte, on the table instance
-// sets (frozen: the fast
+// sets (dense slots: the fast
 // path over several instances, the launch groups forked onto the env's auxiliary streams inside the capture) and on
 // tables of one of their instances:
 //   - graphs of K steps (random steps, given actions from a device buffer the test rewrites between replays,
@@ -211,11 +211,11 @@ void run_graph(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const
     cuda::check(cudaStreamSynchronize(other), "sync");
 }
 
-/// The sets as tables (frozen slots: the fast path), and tables of one of their smallest and largest instances.
+/// The sets as tables (dense slots: the fast path), and tables of one of their smallest and largest instances.
 std::vector<Set> graph_sets()
 {
     std::vector<Set> out;
-    for (Set& s : sets(TaskOptions::Atoms::Frozen))
+    for (Set& s : sets(TaskOptions::Atoms::Dense))
     {
         if (!cuda::DeviceEnv::fast_unsupported(*s.table, config(0)).empty())
             continue;  // miconic-simpleadl: axioms
@@ -318,7 +318,7 @@ TEST(DeviceGraphEnv, GeneralPathRefusesCapture)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    const auto all = sets(TaskOptions::Atoms::Frozen);
+    const auto all = sets(TaskOptions::Atoms::Dense);
     ASSERT_FALSE(all.empty());
     const cuda::Stream cs;
     cuda::DeviceEnv env(ctx, all[0].table, config(5), cuda::DeviceEnv::Path::General);

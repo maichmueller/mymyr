@@ -128,7 +128,7 @@ int api_task_from_py(PyObject* obj, mymyr_task_view* out)
         out->max_words = T.max_words();
         out->label_width = core->label_width;
         out->num_atoms = T.atoms().fluent_slots();
-        out->atom_mode = T.atoms().mode() == AtomMode::Frozen ? 1 : 0;
+        out->atom_mode = rl::atom_mode_code(T.atoms().mode());
         return 0;
     }
     catch (const std::exception& e)

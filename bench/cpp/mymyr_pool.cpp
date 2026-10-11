@@ -80,7 +80,7 @@ int main(int argc, char** argv)
     {
         const auto dom = frontend::Domain::from_file(files[0]);
         TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
         std::vector<TaskPtr> tasks;
         for (usize k = 1; k < files.size(); ++k)
             tasks.push_back(Task::create(*dom->instantiate_file(files[k]), to));
@@ -155,7 +155,7 @@ int main(int argc, char** argv)
                     b.steps = stp.data();
                     b.draws = draws.data();
                     for (u32 e = 0; e < envs; ++e)
-                        (void)env.reset_row(b, e, static_cast<u32>(tid[e]), false);
+                        (void)env.reset_row(b, e, static_cast<u32>(tid[e]), false, 0);  // rows of zeros
                     const rl::StepOutputs out{reward.data(), term.data(), trunc.data(), count.data(), nullptr,
                                               schema.data(), binding.data(), L, inval.data(), goal.data()};
                     std::barrier sync(static_cast<std::ptrdiff_t>(T) + 1);

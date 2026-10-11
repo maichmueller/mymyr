@@ -205,7 +205,6 @@ public:
         {
             TaskOptions eo;
             eo.atoms = TaskOptions::Atoms::Lazy;
-            eo.pilot_expansions = 0;
             eo.matching = m_task.options().matching;
             eo.fc_auto_free_params = m_task.options().fc_auto_free_params;
             explore = Task::create(make_explore_data(T), eo);
