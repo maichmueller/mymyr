@@ -5,7 +5,10 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 
 using namespace mymyr;
 using namespace mymyr::encoding;
@@ -32,6 +35,22 @@ std::set<std::string> cell_names(const EncodingContext& context, u32 instance)
     for (const Cell& cell : cells_of(context, instance))
         out.insert(context.schema().relation(cell.relation).name);
     return out;
+}
+
+std::string file_text(const std::string& path)
+{
+    std::ifstream in(path);
+    std::stringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+/// The bytes of one named array of the context.
+std::vector<std::byte> bytes_of(const EncodingContext& context, const char* name)
+{
+    const rl::ArrayInfo& info = *context.arrays().find(name);
+    const std::byte* at = static_cast<const std::byte*>(context.arrays().data(info));
+    return {at, at + info.elements() * rl::dtype_bytes(info.dtype)};
 }
 
 u32 count_op(const std::vector<Cell>& cells, CellOp op)
@@ -205,5 +224,85 @@ TEST(EncodingContext, ASchemaOfAnotherDomainIsRefused)
     const auto gripper = rl::TaskTable::single(test::pddl_task("gripper", "p01"));
     EXPECT_THROW((void)EncodingContext::create(blocks, EncodingSchema::create(*gripper, test::encoder_options())), std::invalid_argument);
     EXPECT_THROW((void)EncodingContext::create(nullptr, EncodingSchema::create(*blocks, test::encoder_options())), std::invalid_argument);
+}
+
+TEST(EncodingContext, PredicatesAreMappedThroughTheTablesOwnSchemaWhateverTheDeclarationOrder)
+{
+    // The same blocks domain with its predicates declared in the opposite order: equal schemas (the fingerprint and
+    // the sorted relation names do not depend on the order), different predicate ids.
+    const std::string directory = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/blocks/";
+    std::string domain = file_text(directory + "domain.pddl");
+    const std::string declared = "(:predicates (on ?x ?y)\n\t       (ontable ?x)\n\t       (clear ?x)\n\t       (handempty)\n\t       (holding ?x)\n\t       )";
+    const std::size_t at = domain.find(declared);
+    ASSERT_NE(at, std::string::npos);
+    domain.replace(at, declared.size(), "(:predicates (holding ?x)\n\t       (handempty)\n\t       (clear ?x)\n\t       (ontable ?x)\n\t       (on ?x ?y))");
+    const std::filesystem::path reordered = std::filesystem::path(::testing::TempDir()) / "reordered_blocks_domain.pddl";
+    std::ofstream(reordered) << domain;
+
+    const auto a = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const auto b = rl::TaskTable::single(Task::create(*frontend::load_task(reordered, directory + "smedium.pddl")));
+    std::filesystem::remove(reordered);
+    ASSERT_NE(a->predicate_names(), b->predicate_names());
+    const auto schema_a = EncodingSchema::create(*a, test::encoder_options());
+    const auto schema_b = EncodingSchema::create(*b, test::encoder_options());
+    ASSERT_EQ(schema_a->fingerprint(), schema_b->fingerprint());
+
+    const auto own = EncodingContext::create(a, schema_a);
+    const auto foreign = EncodingContext::create(a, schema_b);
+    for (const char* name : {"inst", "cell", "slot_args", "derived_args", "static_args"})
+        EXPECT_EQ(bytes_of(*own, name), bytes_of(*foreign, name)) << name;
+    // every cell is the relation named like its predicate
+    const auto& names = a->predicate_names();
+    const auto& arities = a->predicate_arities();
+    for (const Cell& cell : cells_of(*foreign, 0))
+    {
+        const std::string& relation = foreign->schema().relation(cell.relation).name;
+        const auto predicate = std::ranges::find(names, relation);
+        ASSERT_NE(predicate, names.end()) << relation;
+        EXPECT_EQ(cell.logical_arity, static_cast<u32>(arities[static_cast<std::size_t>(predicate - names.begin())])) << relation;
+    }
+}
+
+TEST(EncodingContext, SlotRangesAreCheckedToBeOneAscendingRangePerPredicate)
+{
+    // slots 0..3: predicate 1 with binary atoms (0,1) (0,2) (1,0), then predicate 2
+    const std::vector<i32> pred = {1, 1, 1, 2};
+    const std::vector<i32> padded = {0, 1, 0, 2, 1, 0, 5, -1};
+    using lanes::check_slot_range;
+    EXPECT_NO_THROW(check_slot_range(pred, padded, 2, 0, 3, 1, 2, "p"));
+    EXPECT_NO_THROW(check_slot_range(pred, padded, 2, 3, 4, 2, 1, "q"));
+    EXPECT_NO_THROW(check_slot_range(pred, padded, 2, 2, 2, 7, 2, "empty"));
+    EXPECT_THROW(check_slot_range(pred, padded, 2, 0, 4, 1, 2, "a range that spills into the next predicate"), std::logic_error);
+    EXPECT_THROW(check_slot_range(pred, padded, 2, 0, 3, 2, 2, "the wrong predicate"), std::logic_error);
+    const std::vector<i32> descending = {0, 2, 0, 1, 1, 0, 5, -1};
+    EXPECT_THROW(check_slot_range(pred, descending, 2, 0, 3, 1, 2, "descending atoms"), std::logic_error);
+    const std::vector<i32> repeated = {0, 1, 0, 1, 1, 0, 5, -1};
+    EXPECT_THROW(check_slot_range(pred, repeated, 2, 0, 3, 1, 2, "a repeated atom"), std::logic_error);
+}
+
+TEST(EncodingContext, EveryFixedSlotLayoutGivesContiguousSlotRanges)
+{
+    for (const auto atoms : {TaskOptions::Atoms::Reachable, TaskOptions::Atoms::Dense})
+    {
+        TaskOptions options;
+        options.atoms = atoms;
+        const auto table = rl::TaskTable::single(Task::create(test::pddl_task("blocks", "smedium")->data(), options));
+        const auto context = context_of(table, test::encoder_options());
+        EXPECT_GT(count_op(cells_of(*context, 0), CellOp::Fluent), 0u);
+    }
+}
+
+TEST(EncodingContext, DuplicateStaticAtomsGiveTheTuplesOfTheTaskWithoutThem)
+{
+    const TaskPtr original = test::pddl_task("gripper", "p01");
+    formalism::TaskData data = original->data();
+    ASSERT_FALSE(data.static_init.empty());
+    data.static_init.push_back(data.static_init.front());
+    data.static_init.push_back(data.static_init.back());
+    const auto repeated = rl::TaskTable::single(Task::create(std::move(data)));
+    const auto expected = context_of(rl::TaskTable::single(original), test::encoder_options());
+    const auto actual = context_of(repeated, test::encoder_options());
+    for (const char* name : {"cell", "static_args"})
+        EXPECT_EQ(bytes_of(*actual, name), bytes_of(*expected, name)) << name;
 }
 }  // namespace

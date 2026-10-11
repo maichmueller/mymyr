@@ -30,6 +30,9 @@ struct Batch
     std::vector<u8> entity_role{0, 0, 8, 0, 0};
     std::vector<std::vector<std::vector<std::vector<i32>>>> tuples;  // [graph][relation][tuple]
     std::vector<i32> counts, offsets, arg_offsets, args;
+    i64 fingerprint_xor = 0;       // flips bits of the stored schema_fingerprint
+    bool wide_num_objects = false;  // num_objects as int64 instead of int32
+    bool flat_counts = false;       // relation_counts with shape [G * R] instead of [G, R]
 
     Batch()
     {
@@ -65,11 +68,15 @@ struct Batch
         rl::ArrayBundle::Builder b;
         auto size = [](const auto& v) { return static_cast<i64>(v.size()); };
         b.add("task_ids", rl::DType::I32, {2}, task_ids);
-        b.add("num_objects", rl::DType::I32, {2}, num_objects);
+        if (wide_num_objects)
+            b.add("num_objects", rl::DType::I64, {2}, std::vector<i64>(num_objects.begin(), num_objects.end()));
+        else
+            b.add("num_objects", rl::DType::I32, {2}, num_objects);
         b.add("entity_offsets", rl::DType::I32, {3}, entity_offsets);
         b.add("entity_role", rl::DType::U8, {size(entity_role)}, entity_role);
         b.add("entity_ref", rl::DType::I32, {size(entity_ref)}, entity_ref);
-        b.add("relation_counts", rl::DType::I32, {2, static_cast<i64>(R)}, counts);
+        b.add("relation_counts", rl::DType::I32,
+              flat_counts ? std::vector<i64>{2 * static_cast<i64>(R)} : std::vector<i64>{2, static_cast<i64>(R)}, counts);
         b.add("relation_offsets", rl::DType::I32, {size(offsets)}, offsets);
         b.add("relation_arg_offsets", rl::DType::I32, {size(arg_offsets)}, arg_offsets);
         b.add("relation_args", rl::DType::I32, {size(args)}, args);
@@ -78,7 +85,7 @@ struct Batch
         b.scalar("num_relations", R);
         b.scalar("layout", 0);
         b.scalar("index_dtype", 0);
-        b.scalar("schema_fingerprint", std::bit_cast<i64>(schema()->fingerprint()));
+        b.scalar("schema_fingerprint", std::bit_cast<i64>(schema()->fingerprint()) ^ fingerprint_xor);
         b.scalar("statics", 0);
         return b.build();
     }
@@ -136,6 +143,16 @@ TEST(EncodingValidate, ScalarsDtypesAndShapesAreChecked)
     Batch batch;
     batch.assemble();
     EXPECT_THROW(validate(batch.bundle(), *schema(IndexType::I64)), std::invalid_argument);
+    batch.wide_num_objects = true;
+    EXPECT_THROW(validate(batch.bundle(), *schema()), std::invalid_argument);
+    batch.wide_num_objects = false;
+    batch.flat_counts = true;
+    EXPECT_THROW(validate(batch.bundle(), *schema()), std::invalid_argument);
+    batch.flat_counts = false;
+    EXPECT_NO_THROW(validate(batch.bundle(), *schema()));
+    batch.fingerprint_xor = 1;
+    EXPECT_THROW(validate(batch.bundle(), *schema()), std::invalid_argument);
+    batch.fingerprint_xor = 0;
     rl::ArrayBundle::Builder wrong_version;
     wrong_version.scalar("version", 2);
     EXPECT_THROW(validate(wrong_version.build(), *schema()), std::invalid_argument);

@@ -36,28 +36,6 @@ struct InstanceRows
     u64 fingerprint = 0;
 };
 
-[[noreturn]] void not_a_range(const std::string& name)
-{
-    throw std::logic_error("mymyr: encoding: the atom slots of predicate " + name + " are not one ascending range");
-}
-
-/// Checks that the slots [begin, end) are the atoms of `predicate` and that their objects ascend strictly.
-void check_slot_range(std::span<const i32> pred, std::span<const i32> padded, u32 width, u32 begin, u32 end, u32 predicate,
-                      u32 arity, const std::string& name)
-{
-    for (u32 slot = begin; slot < end; ++slot)
-    {
-        if (static_cast<u32>(pred[slot]) != predicate)
-            not_a_range(name);
-        if (slot > begin &&
-            !std::lexicographical_compare(padded.begin() + static_cast<std::ptrdiff_t>((slot - 1) * u64{width}),
-                                          padded.begin() + static_cast<std::ptrdiff_t>((slot - 1) * u64{width} + arity),
-                                          padded.begin() + static_cast<std::ptrdiff_t>(slot * u64{width}),
-                                          padded.begin() + static_cast<std::ptrdiff_t>(slot * u64{width} + arity)))
-            not_a_range(name);
-    }
-}
-
 /// The objects of every slot of `pred` / `padded`, as rows of max_arity entries.
 void append_slot_rows(std::vector<i32>& to, std::span<const i32> pred, std::span<const i32> padded, u32 width,
                       std::span<const i32> arity, u32 max_arity)
@@ -118,14 +96,14 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
             cell.op = static_cast<u32>(CellOp::Fluent);
             cell.a = static_cast<u32>(fluent_offsets[ip]);
             cell.b = static_cast<u32>(fluent_offsets[ip + 1]);
-            check_slot_range(atom_pred, atom_padded, fluent_width, cell.a, cell.b, ip, logical, relation.name);
+            detail::check_slot_range(atom_pred, atom_padded, fluent_width, cell.a, cell.b, ip, logical, relation.name);
         }
         else if (lane == Lane::Derived)
         {
             cell.op = static_cast<u32>(CellOp::Derived);
             cell.a = static_cast<u32>(derived_offsets[ip]);
             cell.b = static_cast<u32>(derived_offsets[ip + 1]);
-            check_slot_range(derived_pred, derived_padded, derived_width, cell.a, cell.b, ip, logical, relation.name);
+            detail::check_slot_range(derived_pred, derived_padded, derived_width, cell.a, cell.b, ip, logical, relation.name);
         }
         else
         {
@@ -156,19 +134,41 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
 }
 }  // namespace
 
+void detail::check_slot_range(std::span<const i32> pred, std::span<const i32> padded, u32 width, u32 begin, u32 end,
+                              u32 predicate, u32 arity, const std::string& name)
+{
+    auto not_a_range = [&]
+    { throw std::logic_error("mymyr: encoding: the atom slots of predicate " + name + " are not one ascending range"); };
+    for (u32 slot = begin; slot < end; ++slot)
+    {
+        if (static_cast<u32>(pred[slot]) != predicate)
+            not_a_range();
+        if (slot > begin &&
+            !std::lexicographical_compare(padded.begin() + static_cast<std::ptrdiff_t>((slot - 1) * u64{width}),
+                                          padded.begin() + static_cast<std::ptrdiff_t>((slot - 1) * u64{width} + arity),
+                                          padded.begin() + static_cast<std::ptrdiff_t>(slot * u64{width}),
+                                          padded.begin() + static_cast<std::ptrdiff_t>(slot * u64{width} + arity)))
+            not_a_range();
+    }
+}
+
 std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr table,
                                                               std::shared_ptr<const EncodingSchema> schema)
 {
     if (!table || !schema)
         throw std::invalid_argument("mymyr: encoding: a context needs a table and a schema");
-    if (EncodingSchema::create(*table, schema->options())->fingerprint() != schema->fingerprint())
+    // The schema of the table's own domain. Relation ids follow the sorted names, so they agree with the passed schema
+    // when the fingerprints are equal, but a relation's predicate id follows the table's declaration order, which the
+    // fingerprint ignores: predicates are mapped to relations through this schema only.
+    const std::shared_ptr<const EncodingSchema> own = EncodingSchema::create(*table, schema->options());
+    if (own->fingerprint() != schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the schema is not the schema of the table's domain");
     // The relation of each domain predicate's state atoms, and the widest of them.
     std::vector<i32> state_relation(table->num_domain_predicates(), -1);
     u32 max_arity = 1;
-    for (u32 id = 0; id < schema->num_relations(); ++id)
+    for (u32 id = 0; id < own->num_relations(); ++id)
     {
-        const Relation& relation = schema->relation(id);
+        const Relation& relation = own->relation(id);
         if (!is_state_relation(relation))
             continue;
         state_relation.at(static_cast<u32>(relation.predicate)) = static_cast<i32>(id);

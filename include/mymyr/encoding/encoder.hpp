@@ -47,6 +47,7 @@ class FlatEncoder
 public:
     /// Throws std::invalid_argument ("mymyr: encoding: ...") for invalid options and for options this encoder does not
     /// encode: goal derivations, subgoal levels, targets, predicate virtual nodes, horizons and the relation layout.
+    /// A default-constructed FlatOptions lists goal derivations and is therefore refused: pass `goal_derivations = {}`.
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(rl::TaskTablePtr table, const FlatOptions& options);
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(TaskPtr task, const FlatOptions& options);
 
