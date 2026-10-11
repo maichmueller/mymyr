@@ -25,7 +25,8 @@ class PlanningEnv(EnvBase):
     (or being stuck in) a dead end. ``terminated`` = goal or dead end (``dead_end_terminal``), ``truncated`` =
     max_steps reached (0: never), ``done`` = either. Finished environments are reset by TorchRL (``_reset`` masks); the
     reset tensordict may carry ``next_task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
-    ``goal_pos`` / ``goal_neg``. The environments never autoreset themselves. Every reset waits for the device work
+    ``next_goal_pos`` / ``next_goal_neg``. Explicit reset kwargs also accept ``goal_pos`` / ``goal_neg``.
+    Observation goal masks are not reset assignments. Every reset waits for the device work
     and raises the device environment's errors (``BatchedEnv.check_errors``: a ``task_id`` outside the table, states
     written into ``batched`` without ``refresh``).
 
@@ -146,22 +147,21 @@ class PlanningEnv(EnvBase):
             self._static = self._outputs(self._action, copy=False)
 
     def _reset(self, tensordict: Optional[TensorDictBase] = None, **kwargs: Any) -> TensorDictBase:
-        mask = goal_pos = goal_neg = None
+        mask = None
         task_ids = kwargs.get("task_ids")
+        goal_pos, goal_neg = kwargs.get("goal_pos"), kwargs.get("goal_neg")
         if tensordict is not None:
             keys = tensordict.keys()
             if "_reset" in keys:
                 mask = tensordict.get("_reset").reshape(self._env.num_envs)
             if "next_task_id" in keys:
                 task_ids = tensordict.get("next_task_id")
-            if self._env.goals and "goal_pos" in keys and "goal_neg" in keys:
-                goal_pos, goal_neg = tensordict.get("goal_pos"), tensordict.get("goal_neg")
+            if "next_goal_pos" in keys or "next_goal_neg" in keys:
+                goal_pos, goal_neg = tensordict.get("next_goal_pos"), tensordict.get("next_goal_neg")
         self._env.reset(mask, task_ids=task_ids, goal_pos=goal_pos, goal_neg=goal_neg)
         self._env.check_errors()  # device errors (task ids outside the table, ...) surface here
         env = self._env
-        goal = torch.empty((env.num_envs,), dtype=torch.bool, device=env.device)
-        env.core.goal(env.states, env.task_ids if env.multi else None, goal_pos=env.goal_pos, goal_neg=env.goal_neg, out=goal)
-        terminated = goal
+        terminated = env.is_goal()
         if env.core.dead_end == "no_successors" and env.core.dead_end_terminal:
             terminated = terminated | (env.count == 0)
         out = self._observation()

@@ -617,7 +617,8 @@ struct DeviceEnv::Impl
         if (b.words != W)
             throw std::invalid_argument("mymyr: device env: state rows of " + std::to_string(b.words) + " words; the device "
                                         "env takes exactly " + std::to_string(W));
-        if (fast && b.rows && (!b.counts || !b.views))
+        // views of zero words (instances whose kernels read no view) may come as a null pointer
+        if (fast && b.rows && (!b.counts || (V && !b.views)))
             throw std::invalid_argument("mymyr: device env: the fast path needs the cache arrays (counts [rows, " +
                                         std::to_string(C) + "], views [rows, " + std::to_string(V) + "])");
     }
@@ -932,12 +933,19 @@ void DeviceEnv::set_stream(cudaStream_t s)
 {
     Impl& I = *m;
     s = s ? s : I.home;
-    if (s == I.s)
+    const bool move_x = I.x && I.x->stream() != s;
+    if (s == I.s && !move_x)
         return;
     DeviceGuard g(I.ctx->device());
     // a capturing stream cannot wait on work outside its graph (the capture was begun after the work it depends on:
     // the calls before, and the upload of the device table, which the constructor waited for)
     const bool cap = detail::capturing(s);
+    // the general path's expander moves outside captures only (it waits on its earlier work): the calls a capture can
+    // hold (reset) do not expand, and the next call on that stream that expands is not captured and moves it
+    if (move_x && !cap)
+        I.x->set_stream(s);
+    if (s == I.s)
+        return;
     if (!cap)
         stream_wait(s, I.s);
     for (DeviceBuffer* b : I.buffers())
@@ -950,8 +958,6 @@ void DeviceEnv::set_stream(cudaStream_t s)
         if (P.multi)
             P.plan.record_stream(s);
     }
-    if (I.x)
-        I.x->set_stream(s);
     I.s = s;
 }
 

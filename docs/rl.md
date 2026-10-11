@@ -38,10 +38,13 @@ Goal states and terminal dead ends are absorbing until reset. Stepping them pres
 counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
 end from a nonterminal state still receives the configured transition reward once. Draw counters advance once per
 native step, including absorbing steps. `CpuEnvPool.reset()` reports `goal` and `terminated` for the initial states;
-TorchRL resets also report solved or terminal initial states rather than silently starting unfinished episodes.
+TorchRL resets also report solved and terminal initial states as terminated.
 The mctx adapter preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero;
 zero-successor tree nodes are terminal even when the environment disables dead-end termination.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
+A padded action space of K slots (`PlanningEnv(max_actions=K)`, padded expansions) holds a state's first K successors
+in canonical order: later successors are out of reach even when only they lead to a goal (a padded expansion reports
+such states by `count > K`).
 
 ## Transition ownership and replay
 
@@ -64,6 +67,10 @@ raises rather than recording an unrelated reset row when final states are disabl
 may disable final states because its next observation is the reached state. Goal-conditioned observations propagate
 their source masks automatically; initialize replay with `transition_example(env, goals=True)` for those items.
 
+HER helpers recompute rewards from reached states. They do not receive source states and cannot detect a relabelled
+goal that was already satisfied before the action. Filter such transitions or cut the relabelled episode at first
+achievement; next-state reward recomputation alone does not reproduce absorbing dynamics.
+
 The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, verifies that the framework imports and
 XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
 CPU framework bundle used for validation; those packages remain optional runtime dependencies for users.
@@ -85,15 +92,19 @@ mutable host RNG and works with `jit`, `vmap` and `scan`.
 
 External curricula override a draw with `reset(task_ids=ids)` or `step(..., next_task_ids=ids)`. A TorchRL reset
 TensorDict uses `next_task_id`, not the observation's `task_id`: collectors therefore do not accidentally pin each
-new episode to the preceding one. For `CpuEnvPool`, use the same sampler's NumPy API and pass the resulting ids to
+new episode to the preceding one. Likewise custom reset goals use `next_goal_pos` / `next_goal_neg` or explicit
+`reset(goal_pos=..., goal_neg=...)` kwargs; observed goal masks do not override a new instance's default goals.
+For `CpuEnvPool`, use the same sampler's NumPy API and pass the resulting ids to
 `reset(..., task_ids=ids)` or `send(..., next_task_ids=ids)`; the caller owns each row's reset counter in asynchronous
 collection. Sampling does not change the pool's thread-safety or enqueue order.
+
+## CUDA
 
 On CUDA, array exchange uses DLPack without copying and follows the producer/consumer stream protocol. Host and device
 environments and expansion support numeric fluents, preconditions, effects and goals, preserving the CPU I32/F64 row
 encoding. Numeric tables and suites run per-instance kernels. Numeric environments use the general path, which
 synchronizes; the environment fast path and CUDA graph capture require tasks that path can run. mymyr supplies
-expansion, environment and interoperability primitives, not encoders or replay buffers.
+expansion, environment and interoperability primitives and [native classical encodings](encoding.md), not replay buffers.
 
 The following JAX rollout uses CUDA and the JAX/CUDA package in the optional CUDA environment:
 
@@ -129,3 +140,12 @@ env = BatchedEnv(task, 4, device=torch.device("cuda", 0), max_steps=4, seed=0)
 step = env.step(final=True)
 print(env.states.shape, step.reward.shape)
 ```
+
+## A learning smoke example
+
+Run `python examples/rl_learning.py` for a NumPy REINFORCE successor scorer using native goal-relation counts and
+action-schema readouts. It trains on three chain instances with 3–5 objects, then evaluates on held-out 8- and
+12-object instances against a random policy. The report includes success, solved plan length, instance coverage,
+truncations, elapsed time and a counted subset of live array storage (not process peak memory).
+The scorer is intentionally small: it pools goal counts and scores action schemas, not object-level relational
+reasoning. It exercises the path from collection through native encoding to a policy update, not general planning ability.

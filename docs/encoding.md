@@ -79,8 +79,10 @@ conjunctive classical literals, not arbitrary Python goal strings or numeric con
 ## Action readouts
 
 `actions=expansion` reuses an existing, non-overflowing `rl.Expansion` over the same table, input row order and
-`task_ids`. The encoder does not enumerate actions or generate successors. The following arrays preserve every
-original expansion action and its ordering:
+`task_ids`. The encoder does not enumerate actions or generate successors. The expansion's `task_ids` list records
+the instance of every source row, including rows without actions, and the encoder checks it against its input. Matching
+instance IDs do not prove that two raw rows describe the same state: the caller supplies the source states in their
+original order. The following arrays preserve every original expansion action and its ordering:
 
 | Field | Shape | Meaning |
 |---|---|---|

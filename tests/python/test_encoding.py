@@ -241,6 +241,29 @@ def test_empty_states_batches_and_no_actions():
     assert no_labels.action_offsets.tolist() == [0, 0]
 
 
+@pytest.mark.parametrize("with_actions", [False, True])
+def test_action_readouts_reject_source_instance_mismatch(with_actions):
+    first, second = feature_task(), feature_task("a b c")
+    table = rl.TaskTable([first, second])
+    first_state = first.initial_state
+    if not with_actions:
+        domain = mymyr.Domain.from_string("""(define (domain stuck) (:requirements :strips)
+            (:predicates (ready) (done))
+            (:action finish :parameters () :precondition (ready) :effect (done)))""")
+        tasks = [mymyr.Task(domain.instantiate_string(f"""(define (problem p{index}) (:domain stuck)
+            (:init) (:goal (done)))"""), atoms="frozen") for index in range(2)]
+        first, second = tasks
+        table = rl.TaskTable(tasks)
+        first_state = first.initial_state
+    expansion = rl.expand(table, [first_state], task_ids=np.array([0], np.int32))
+    assert bool(expansion.total) == with_actions
+    assert expansion.task_ids == [0]
+    with pytest.raises(ValueError, match="source task ids"):
+        encoding.FlatRelationEncoder(table).encode(
+            [second.initial_state], task_ids=np.array([1], np.int32), actions=expansion
+        )
+
+
 def test_owned_results_and_readonly_numpy():
     task = feature_task()
     encoder = encoding.FlatRelationEncoder(task)

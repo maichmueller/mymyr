@@ -9,6 +9,8 @@ from mymyr import rl
 
 @pytest.fixture(scope="module")
 def table():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
     domain = mymyr.Domain.from_string("""
     (define (domain toggles)
       (:requirements :strips :negative-preconditions)

@@ -6,6 +6,8 @@ import pytest
 import mymyr
 from mymyr import rl
 
+needs_frontend = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+
 
 def toggle_task(*, init="", goal="(q)"):
     domain = mymyr.Domain.from_string("""
@@ -30,6 +32,7 @@ def jax_rl():
     return rj
 
 
+@needs_frontend
 def test_expand_single_empty_state_matches_sequence():
     task = toggle_task()
     assert task.initial_state.num_words == 0
@@ -39,6 +42,7 @@ def test_expand_single_empty_state_matches_sequence():
         np.testing.assert_array_equal(getattr(single, field), getattr(sequence, field))
 
 
+@needs_frontend
 @pytest.mark.parametrize("autoreset", [False, True])
 @pytest.mark.parametrize("final_state", [False, True])
 def test_replay_reached_state_or_clear_error(autoreset, final_state):
@@ -62,6 +66,7 @@ def test_replay_reached_state_or_clear_error(autoreset, final_state):
         np.testing.assert_array_equal(rj.as_words(item["next_state"])[0], expected)
 
 
+@needs_frontend
 def test_goal_replay_copies_source_masks():
     rj = jax_rl()
     import jax.numpy as jnp
@@ -76,6 +81,7 @@ def test_goal_replay_copies_source_masks():
     np.testing.assert_array_equal(item["goal_neg"], obs.goal_neg)
 
 
+@needs_frontend
 def test_torch_observations_survive_steps_and_resets():
     torch = pytest.importorskip("torch")
     from mymyr.rl.torch import BatchedEnv
@@ -108,6 +114,7 @@ def failure_choice_task():
     return mymyr.Task(domain.instantiate_string(problem), atoms="frozen")
 
 
+@needs_frontend
 def test_default_return_prefers_success_over_early_failure():
     task = failure_choice_task()
     expansion = rl.expand(task, [task.initial_state])
@@ -131,3 +138,46 @@ def test_default_her_reward_matches_goal_reaching_objective():
     done = np.ones((1, 1), np.bool_)
     result = rl.her_relabel(states, done, strategy="final", k=1)
     assert np.asarray(result.reward).item() == 1.0
+
+
+@needs_frontend
+def test_torchrl_instance_reset_does_not_reuse_observed_goals():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchrl")
+    from mymyr.rl.torch import PlanningEnv
+
+    tasks = [toggle_task(init="(p)", goal="(q)"), toggle_task(init="(q)", goal="(p)")]
+    table = rl.TaskTable(tasks)
+    env = PlanningEnv(table, 4, goals=True, task_ids=[0] * 4)
+    source = env.reset()
+    source["_reset"] = torch.tensor([[True], [True], [False], [False]])
+    source["next_task_id"] = torch.ones(4, dtype=torch.int64)
+    result = env.reset(source)
+    assert result["task_id"].tolist() == [1, 1, 0, 0]
+    assert not bool(result["terminated"].any())
+    expected_pos, expected_neg = rl.goal_masks(table, np.array([1, 1, 0, 0], np.int32))
+    np.testing.assert_array_equal(result["goal_pos"].numpy().view(np.uint64), expected_pos)
+    np.testing.assert_array_equal(result["goal_neg"].numpy().view(np.uint64), expected_neg)
+    env.close()
+
+
+@needs_frontend
+@pytest.mark.parametrize("via_tensordict", [False, True])
+def test_torchrl_explicit_reset_goals_remain_supported(via_tensordict):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchrl")
+    from mymyr.rl.torch import PlanningEnv
+
+    env = PlanningEnv(toggle_task(), 2, goals=True)
+    source = env.reset()
+    positive = torch.zeros_like(source["goal_pos"])
+    negative = torch.zeros_like(source["goal_neg"])
+    if via_tensordict:
+        source["next_goal_pos"], source["next_goal_neg"] = positive, negative
+        result = env.reset(source)
+    else:
+        result = env.reset(goal_pos=positive, goal_neg=negative)
+    assert bool(result["terminated"].all())
+    assert not bool(result["goal_pos"].any())
+    assert not bool(result["goal_neg"].any())
+    env.close()

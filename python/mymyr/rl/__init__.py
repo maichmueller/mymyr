@@ -70,7 +70,7 @@ RL helpers: :func:`prefix_masks` / :func:`schema_masks` (factored action masks f
 relabels with atom-set goals, counter-based RNG), in the inputs' framework: NumPy and torch (CPU and CUDA) run the
 native helpers, JAX arrays the jnp versions of :mod:`mymyr.rl.jax`.
 
-For encoders and environments (mymyr ships no encoders; mifrost does): ``table.atom_metadata()`` (the instances'
+For custom encoders and environments (see also :mod:`mymyr.encoding`): ``table.atom_metadata()`` (the instances'
 atoms with ``atom_offsets``, table predicate ids), :func:`object_offsets` (PyG ``ptr``), :func:`goal_masks`,
 ``table.initial_states()``, ``task.device_arrays()``, and :func:`goal_test`, :func:`goal_count`,
 :func:`is_goal` here. There is no replay buffer: feed these arrays to TorchRL / flashbax buffers.

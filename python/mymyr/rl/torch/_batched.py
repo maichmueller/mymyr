@@ -210,6 +210,14 @@ class BatchedEnv:
             keep(self.goal_pos) if self.goals else empty, keep(self.goal_neg) if self.goals else empty,
         )
 
+    def is_goal(self) -> Tensor:
+        """Whether each environment's current state is a goal (the goal masks' test with goals=True): [N] bool on
+        ``device``, computed on torch's current stream without stepping."""
+        out = torch.empty(self.num_envs, dtype=torch.bool, device=self.device)
+        self.core.goal(self.states, self._ids(), goal_pos=self.goal_pos, goal_neg=self.goal_neg, out=out,
+                       stream=_ops._stream(self.states))
+        return out
+
     def _tensors(self) -> list[Tensor]:
         t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count,
              self._reset_counts, self._sampling_seed, self._sampling_env_ids]
