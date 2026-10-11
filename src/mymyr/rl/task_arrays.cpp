@@ -169,19 +169,23 @@ void add_metadata(ArrayBundle::Builder& b, const Task& task, const Slots& fluent
     add_atoms(b, task, AtomKind::Fluent, fluent, "atom", true);
     add_atoms(b, task, AtomKind::Derived, derived, "derived", false);
 
-    // fluent slots grouped by predicate (ascending slot within a group)
-    std::vector<i32> group_offsets(P + 1, 0), group(fluent.count);
-    for (u32 i = 0; i < fluent.count; ++i)
-        ++group_offsets[task.atoms().record(AtomKind::Fluent, i)[0] + 1];
-    for (u32 p = 0; p < P; ++p)
-        group_offsets[p + 1] += group_offsets[p];
+    // fluent and derived slots grouped by predicate (ascending slot within a group); under fixed slots the groups are
+    // the identity, each predicate's slots one range
+    auto add_groups = [&](AtomKind kind, u32 count, const std::string& prefix)
     {
+        std::vector<i32> group_offsets(P + 1, 0), group(count);
+        for (u32 i = 0; i < count; ++i)
+            ++group_offsets[task.atoms().record(kind, i)[0] + 1];
+        for (u32 p = 0; p < P; ++p)
+            group_offsets[p + 1] += group_offsets[p];
         std::vector<i32> fill(group_offsets.begin(), group_offsets.end() - 1);
-        for (u32 i = 0; i < fluent.count; ++i)
-            group[fill[task.atoms().record(AtomKind::Fluent, i)[0]]++] = static_cast<i32>(i);
-    }
-    b.add("pred_slots", DType::I32, shape1(fluent.count), group);
-    b.add("pred_slot_offsets", DType::I32, shape1(P + 1), group_offsets);
+        for (u32 i = 0; i < count; ++i)
+            group[fill[task.atoms().record(kind, i)[0]]++] = static_cast<i32>(i);
+        b.add(prefix + "pred_slots", DType::I32, shape1(count), group);
+        b.add(prefix + "pred_slot_offsets", DType::I32, shape1(P + 1), group_offsets);
+    };
+    add_groups(AtomKind::Fluent, fluent.count, "");
+    add_groups(AtomKind::Derived, derived.count, "derived_");
 
     std::vector<i32> parity(P), pkind(P);
     for (u32 p = 0; p < P; ++p)

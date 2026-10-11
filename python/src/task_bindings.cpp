@@ -2221,8 +2221,12 @@ void bind_task(nb::module_& m)
             "framework"_a = nb::none(),
             "Atom metadata for encoders (mifrost), zero-copy views of a cached snapshot: atom_pred, atom_args (CSR with "
             "atom_args_offsets), atom_args_padded, atom_cid, pred_slots / pred_slot_offsets, pred_arity, pred_kind, "
-            "derived_* and static_* atoms, and scalars (num_atoms, num_objects, atom_mode: 0 lazy, 1 dense, 2 "
-            "reachable, ...). Under lazy slots the snapshot covers the slots assigned so far.")
+            "derived_* (with derived_pred_slots / derived_pred_slot_offsets) and static_* atoms, and scalars "
+            "(num_atoms, num_objects, atom_mode: 0 lazy, 1 dense, 2 reachable, ...). Under fixed slots (every mode but "
+            "lazy) the slots of a predicate are one range, ascending in the lexicographic order of their object "
+            "tuples: predicate p's fluent slots are pred_slot_offsets[p] .. pred_slot_offsets[p + 1] - 1 (pred_slots "
+            "is the identity; derived ones likewise). Under lazy slots the snapshot covers the slots assigned so far, "
+            "and pred_slots lists each predicate's slots.")
         .def(
             "device_arrays",
             [](const PyTask& t, IntArg version_in, FrameworkArg framework) {

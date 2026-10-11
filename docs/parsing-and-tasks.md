@@ -168,6 +168,12 @@ state holds only relaxed-reachable atoms.
   analysis passes its budget, `'auto'` uses dense slots.
 - `'lazy'` assigns a slot to an atom the first time a state or search meets it.
 
+Under `'reachable'` and `'dense'` the slots of one predicate form a single range, ascending in the lexicographic
+order of the atoms' object indices, and the ranges follow the predicate indices. Fluent and derived atoms number
+their slots separately. `task.atom_metadata()` gives the ranges: predicate `p`'s fluent slots are
+`pred_slot_offsets[p]` to `pred_slot_offsets[p + 1] - 1`, and its derived slots are given by
+`derived_pred_slot_offsets` in the same way. Lazy slots have no such order.
+
 Pick the mode that matches how you use the states:
 
 - Keep `'auto'` for learning, datasets and anything else that stores or exchanges rows.

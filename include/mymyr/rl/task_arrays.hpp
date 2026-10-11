@@ -4,7 +4,13 @@
 //   - atom_metadata(task): what an observation encoder needs, and nothing more (mymyr ships no encoders):
 //       atom_pred [F], atom_args (CSR: atom_args_offsets [F+1] + atom_args), atom_args_padded [F, A] (-1 padding),
 //       atom_cid [F] (the portable canonical id), predicate-grouped slots (pred_slot_offsets [P+1] + pred_slots [F]),
-//       pred_arity / pred_kind [P], the derived atoms' pred / args, the static atoms, and object counts.
+//       pred_arity / pred_kind [P], the derived atoms' pred / args and predicate groups (derived_pred_slot_offsets
+//       [P+1] + derived_pred_slots [D]), the static atoms, and object counts.
+//       Under fixed slots (every mode but lazy) the slots of one predicate are one range, ascending in the
+//       lexicographic order of their object tuples (object ids), and the predicates' ranges follow their ids: so
+//       pred_slots and derived_pred_slots are the identity, and predicate p's fluent slots are
+//       [pred_slot_offsets[p], pred_slot_offsets[p + 1]) (derived ones likewise). Under lazy slots the groups list the
+//       slots of each predicate in ascending slot order.
 //   - goal_masks(task): gpos / gneg as state words. Positive and negative fluent goal literals; the goal's
 //     derived literals, if any, are listed separately (a mask test cannot decide them).
 //   - device_arrays(task): the flat, versioned POD export: scalars plus named arrays, a superset of the above

@@ -276,3 +276,25 @@ def test_tuple_graph_atoms_do_not_depend_on_lazy_slots():
         assert len(gf) == len(gl)
         for v in range(len(gf)):
             assert [str(x) for x in gf.atoms(v)] == [str(x) for x in gl.atoms(v)]
+
+
+@pytest.mark.parametrize("name", ["logistics00__probLOGISTICS-6-1", "philosophers__p03-phil4", "depot__p02",
+                                  "miconic-simpleadl__s10-2", "openstacks-opt08-adl__p03"])
+@pytest.mark.parametrize("atoms", ["auto", "reachable", "dense"])
+def test_fixed_slots_of_a_predicate_are_one_ascending_range(name, atoms):
+    task = text_task(name, atoms=atoms)
+    m = task.atom_metadata()
+    P = m["num_predicates"]
+    for kind, groups in (("atom", "pred_slot"), ("derived", "derived_pred_slot")):
+        pred, args, off = m[kind + "_pred"], m[kind + "_args_padded"], m[groups + "_offsets"]
+        count = pred.shape[0]
+        assert np.array_equal(m[groups + "s"], np.arange(count))
+        assert off.shape == (P + 1,) and off[0] == 0 and off[-1] == count
+        for p in range(P):
+            assert (pred[off[p]: off[p + 1]] == p).all()
+            k = int(m["pred_arity"][p])
+            tuples = [tuple(row[:k]) for row in args[off[p]: off[p + 1]].tolist()]
+            assert all(a < b for a, b in zip(tuples, tuples[1:])), (kind, p)
+    assert m["atom_pred"].shape[0] == task.num_atoms
+    if task.has_axioms:
+        assert m["derived_pred"].shape[0] > 0
