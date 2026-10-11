@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Check a ctest log against the expected counts for its build configuration.
 
-usage: check_ctest_log.py [--sanitized] LOG
+usage: check_ctest_log.py [--sanitized] [--platform {linux,macos}] LOG
 
 Tests that need the benchmark data skip when it is missing, so a run with a misconfigured data
 directory exits 0 with most of the suite skipped. This check turns that into a failure. Sanitized
 builds use their own minimum total and maximum skipped counts because they register a different set
-of tests. The counts are also written to the GitHub step summary when available.
+of tests. Some test cases exist only on Linux (ctest_linux_only_tests in expected_counts.json), so
+the minimum total on macOS is lower by that many; the platform defaults to the one running the check.
+The counts are also written to the GitHub step summary when available.
 """
 
 import argparse
@@ -21,6 +23,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitized", action="store_true",
                         help="use the expected counts for sanitizer builds")
+    parser.add_argument("--platform", choices=("linux", "macos"),
+                        default="macos" if sys.platform == "darwin" else "linux",
+                        help="platform the log was produced on (default: this one)")
     parser.add_argument("log", type=Path)
     args = parser.parse_args(argv[1:])
     text = args.log.read_text(errors="replace")
@@ -30,6 +35,8 @@ def main(argv: list[str]) -> int:
         max_skipped = expected["ctest_sanitized_max_skipped"]
     else:
         min_total, max_skipped = expected["ctest_min_total"], expected["ctest_max_skipped"]
+        if args.platform == "macos":
+            min_total -= expected["ctest_linux_only_tests"]
     # CMake 4 leaves out ", 0 tests failed" when none failed: "100% tests passed out of 1205"
     m = re.search(r"(\d+)% tests passed(?:, (\d+) tests failed)? out of (\d+)", text)
     if m is None:
