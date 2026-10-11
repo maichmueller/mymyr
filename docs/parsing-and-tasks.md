@@ -39,6 +39,20 @@ mymyr implements the PDDL semantics of mimir, with the differences listed at the
 - **Types.** A parameter, a quantified variable or a `forall` effect variable of type `(either a b)` ranges over the
   objects of `a`, of `b` and of their subtypes. An object or constant declared `(either a b)` belongs to `a`, to `b`
   and to their supertypes.
+- **Conditions.** Goals, preconditions, effect conditions (also inside `forall` effects) and derived predicate bodies
+  may use every condition of the ADL fragment: `and`, `or`, `not` over any condition, `imply`, typed `exists` and
+  `forall` in any nesting, equality `(= ?x ?y)`, constants and numeric comparisons. They are compiled into
+  conjunctions of literals and comparisons plus derived predicates, as in Fast Downward's translator. Negations are
+  pushed down to literals and comparisons; a negated comparison is the complementary one. A universal quantifier
+  becomes the negated literal of a derived predicate `axiom_<k>` that holds when some binding satisfies the negated
+  body. Disjunctions split an action or a derived predicate rule into one copy per disjunct, and a conditional effect
+  into one effect per disjunct. An existential precondition adds its variables to the action's parameters, so the
+  actions list one instance per witness. A goal part that is not a literal or a comparison becomes a nullary derived
+  predicate `axiom_<k>`. So does the condition of an effect inside a `forall` effect that quantifies universally over
+  the effect's variable, as a derived predicate over its free variables. The helper predicates `axiom_<k>` appear in
+  `task.formalism` and among a state's derived atoms like any other derived predicate. Two consequences: a comparison
+  with an undefined side does not falsify a universal quantifier (it is false negated, too), and a derived predicate
+  that depends on itself through a universal quantifier is refused as not stratifiable (`ValueError`).
 - **Conditional effects.** The effects whose conditions hold in the state an action is applied to fire, and every
   effect reads the values of that state. A numeric effect that fires conflicts with an earlier one of the same action
   on the same ground function: an `assign` with any other effect, an additive effect (`increase`, `decrease`) with a
@@ -84,6 +98,8 @@ assert refused.status == search.Status.FAILED and "maximize" in refused.message
 Differences from mimir:
 
 - a variable of type `(either a b)` ranges over the objects of `a` and of `b` (mimir takes the objects of both);
+- goals with a quantifier or a disjunction over a conjunction (such as `(forall (?x - t) (imply (s ?x) (p ?x)))`)
+  and effect conditions with a universal quantifier over a `forall` effect's variable load (mimir refuses them);
 - a conditional effect that does not fire records no effect family, so it cannot make its action inapplicable;
 - in a numeric constraint without parameters, a unary minus over an expression with fluents is kept (mimir drops it);
 - a division by zero is undefined also between constants, and a `scale-down` by zero makes its action inapplicable;
