@@ -56,9 +56,17 @@ target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURC
 include(GoogleTest)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 
-add_executable(mymyr_encoding_tests encoding/test_flat.cpp encoding/test_schema.cpp)
+add_executable(mymyr_encoding_tests encoding/test_flat.cpp encoding/test_schema.cpp encoding/test_lanes.cpp
+    encoding/test_validate.cpp)
 target_link_libraries(mymyr_encoding_tests PRIVATE mymyr::encoding mymyr_warnings GTest::gtest_main)
-gtest_discover_tests(mymyr_encoding_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+gtest_discover_tests(mymyr_encoding_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600 LABELS encoding)
+
+# The encoder over PDDL tasks (tests/data/pddl) through the front end.
+if(TARGET mymyr_frontend)
+    add_executable(mymyr_encoder_tests encoding/test_context.cpp encoding/test_encoder.cpp)
+    target_link_libraries(mymyr_encoder_tests PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
+    gtest_discover_tests(mymyr_encoder_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800 LABELS encoding)
+endif()
 
 # Thread counts and thread creation; interposes pthread_create to simulate refused threads, so in an executable of
 # its own.

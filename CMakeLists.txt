@@ -169,7 +169,8 @@ target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/knowledge_base.cpp
 )
 
-add_library(mymyr_encoding STATIC src/mymyr/encoding/flat.cpp src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp)
+add_library(mymyr_encoding STATIC src/mymyr/encoding/flat.cpp src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
+    src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/validate.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)
 set_target_properties(mymyr_encoding PROPERTIES EXPORT_NAME encoding)
 target_link_libraries(mymyr_encoding PUBLIC mymyr::core PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
@@ -310,6 +311,11 @@ if(MYMYR_BENCH)
     target_link_libraries(mymyr_datasets PRIVATE mymyr::core mymyr_warnings)
     if(TARGET mymyr_frontend)
         target_link_libraries(mymyr_datasets PRIVATE mymyr::frontend)
+    endif()
+    # relational encoding of random-walk states (PDDL through the front end)
+    if(TARGET mymyr_frontend)
+        add_executable(mymyr_encoding_bench bench/cpp/mymyr_encoding.cpp)
+        target_link_libraries(mymyr_encoding_bench PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings)
     endif()
 endif()
 
