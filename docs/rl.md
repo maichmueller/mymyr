@@ -28,6 +28,11 @@ batch over a table or suite. The `CpuEnvPool` provides asynchronous CPU environm
 convenience for enqueueing and waiting for one batch. The environment action is an index into each state's canonical
 successor order.
 
+States travel as rows of atom words followed by numeric words, in the encoding of
+[State encodings](parsing-and-tasks.md#state-encodings). Tables refuse tasks with lazy atom slots and use one numeric
+storage for all instances. A batch's rows are as wide as their widest instance (`words=` fixes the width); each row
+costs its own instance's width, and the words past it are zero padding. `rl.numeric_values` decodes numeric words.
+
 ## JAX and PyTorch
 
 The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `step` methods work under

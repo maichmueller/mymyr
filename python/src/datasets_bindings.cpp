@@ -371,7 +371,7 @@ const char* k_space_doc =
 const char* k_options_doc =
     "Options: threads (0: all cores; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
     "or more, as in mimir), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
-    "labels (keep (schema, binding) per transition). State words are independent of the thread count when the task has frozen atoms (atoms='frozen').";
+    "labels (keep (schema, binding) per transition). State words are the same for every thread count (a task with lazy atom slots has none).";
 
 #define MYMYR_SS_ARGS                                                                                                      \
     nb::kw_only(), "threads"_a = 1, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \

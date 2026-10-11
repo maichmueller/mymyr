@@ -342,7 +342,7 @@ CorePtr build_core(std::shared_ptr<const formalism::TaskData> data, std::shared_
 }
 
 constexpr const char* k_options_doc =
-    "Options (docs/parsing-and-tasks.md, State encodings): atoms ('auto': one slot per relaxed-reachable atom, or the "
+    "Options: atoms ('auto': one slot per relaxed-reachable atom, or the "
     "typed-dense layout where that is no wider, and dense when the analysis passes reachability_budget; 'reachable'; "
     "'dense'; 'lazy': slots on first touch, for searches only), matching ('auto', 'fixed', 'fc'), fc_free_params, "
     "numeric_storage ('auto': 'i32' for statically integral tasks without a quantum, else 'f64'; 'f64'; 'i32'), "

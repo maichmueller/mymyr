@@ -58,7 +58,7 @@ equally cheap supporters by the lowest BFS level through tight h-max achievers, 
 their preconditions' achiever sets; each action contributes one `(operator, proposition)` member, weighted by its
 cost, and axioms contribute no member. An action supporting several propositions can contribute several members.
 The CPU heuristic picks supporters by its queue order, so its value can differ when a tie decides the result.
-On the 21 fitting heuristic-suite tasks, four seeded walks of up to 15 steps in each frozen/lazy configuration
+On the 21 fitting heuristic-suite tasks, four seeded walks of up to 15 steps in each fixed-slot and lazy configuration
 produce 2630 unit-cost samples: 968 (36.8%) differ from the CPU set-additive value, with zero mismatches against
 `reference()`. The remaining organic-synthesis task exceeds the grounding budget.
 

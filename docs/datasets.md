@@ -20,6 +20,10 @@ print(space.num_states, space.num_transitions, arrays["goal"].sum())
 
 Use `max_states=` and `max_seconds=` to bound generation. `threads=` controls CPU generation workers.
 
+`arrays()["state_words"]` holds the states as rows in the task's encoding, the same for every thread count and run
+([State encodings](parsing-and-tasks.md#state-encodings)). A task with lazy atom slots has no such rows, so its arrays
+leave `state_words` out.
+
 `datasets.generate(task)` returns a `GenerationResult` with status and counts when you need to distinguish a completed
 generation from a limit. `generate_many(tasks)` processes a task collection. `StateSpaceSampler(space, seed=...)`
 samples states and goal-distance layers deterministically for a seed.
