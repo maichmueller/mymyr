@@ -26,9 +26,11 @@ concatenated over the graphs. ``atom_slots`` is the lazy slot table of a task wi
 of fluent and derived slots, then their canonical ids in slot order).
 
 Compatibility: a reader takes every version up to its own, refuses a newer one and refuses a kind it does not know.
-Sections and fields a reader does not know are ignored, so objects that later versions attach to a dataset (for
-example the encoding schemas and encoders of mymyr.encoding) are added as new sections or kinds without changing the
-version of the sections above.
+Sections and fields a reader does not know are ignored, so objects that later versions attach to a dataset are added
+as new sections or kinds without changing the version of the sections above. An encoding schema, for example, fits a
+section ``"encodings": [{"options": {...}, "catalog": <member>, "fingerprint": <16 hex digits>, "version": int}]``
+and an encoder ``"encoders": [{"encoding": <index into encodings>, "tasks": [<index into tasks>], "options": {...}}]``:
+tasks are listed once with their fingerprints, so everything that refers to a task does so by its index.
 """
 
 from __future__ import annotations
