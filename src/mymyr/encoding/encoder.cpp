@@ -17,7 +17,7 @@ namespace
 constexpr usize k_cache_line = 64;
 // Graphs per tile of the relation-major scan: it runs over the tile's graphs one relation at a time, so that the strided
 // writes (G entries apart) fill whole cache lines.
-constexpr u64 k_scan_tile = 32;
+constexpr u64 k_scan_tile = 128;
 constexpr u64 k_none = std::numeric_limits<u64>::max();
 
 [[nodiscard]] u64 index_limit(IndexType index)
@@ -264,6 +264,12 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
             const u64 arity = p.s.arity[r];
             u64 tuples = m.run_tuples[r];
             u64 args = m.run_args[r];
+            if (m.tally[r] == 0)  // no graph of the slice has a tuple of the relation: the offsets do not advance
+            {
+                std::fill_n(offsets, width, static_cast<I>(tuples));
+                std::fill_n(arg_offsets, width, static_cast<I>(args));
+                continue;
+            }
             for (u64 j = 0; j < width; ++j)
             {
                 offsets[j] = static_cast<I>(tuples);
