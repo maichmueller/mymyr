@@ -27,7 +27,7 @@ def fork_task(d, p, **options):
         pytest.skip(f"fork data missing: {prob}")
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
-    options.setdefault("atoms", "frozen")
+    options.setdefault("atoms", "dense")
     return mymyr.Task.from_pddl(dom, prob, **options)
 
 

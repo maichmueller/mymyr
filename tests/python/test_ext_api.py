@@ -61,7 +61,7 @@ def test_task_view(blocks):
 
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "openstacks-opt08-adl__p03", "miconic-simpleadl__s10-2"])
 def test_successors_apply_goal_atoms(name):
-    task = text_task(name, atoms="lazy")
+    task = text_task(name, atoms="reachable")
     for s in walk(task, steps=8, seed=2):
         c = consumer.successors(task, s)
         py = task.successors(s)

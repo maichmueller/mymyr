@@ -36,14 +36,19 @@ def test_construction_paths_agree(blocks):
 
 def test_options_and_text_tasks():
     lazy = text_task("gripper__prob05", atoms="lazy", matching="fc")
-    frozen = text_task("gripper__prob05", atoms="dense")
-    assert lazy.atom_mode == "lazy" and frozen.atom_mode == "dense"
-    assert lazy.options["matching"] == "fc" and frozen.options["atoms"] == "frozen"
-    assert lazy.fingerprint == frozen.fingerprint  # the content, not the options
-    with pytest.raises(ValueError):
-        text_task("gripper__prob05", atoms="sometimes")
+    dense = text_task("gripper__prob05", atoms="dense")
+    assert lazy.atom_mode == "lazy" and dense.atom_mode == "dense"
+    assert lazy.options["matching"] == "fc" and dense.options["atoms"] == "dense"
+    assert lazy.fingerprint == dense.fingerprint  # the content, not the options
+    assert text_task("gripper__prob05").options == {
+        "atoms": "auto", "matching": "auto", "fc_free_params": 4, "numeric_storage": "auto", "numeric_quantum": 0.0,
+        "numeric_tolerant": False, "reachability_budget": 1 << 25}
+    for bad in ({"atoms": "sometimes"}, {"atoms": "frozen"}, {"numeric_storage": "f32"}, {"numeric_quantum": -1.0},
+                {"numeric_quantum": float("nan")}, {"reachability_budget": -1}):
+        with pytest.raises((ValueError, OverflowError)):
+            text_task("gripper__prob05", **bad)
     numeric = mymyr.Task.from_text(str(sorted((ROOT / "tests/data/numeric_tasks").glob("*.txt"))[0]))
-    assert numeric.numeric_slots > 0 and gripper_is_classical(frozen)
+    assert numeric.numeric_slots > 0 and gripper_is_classical(dense)
 
 
 def gripper_is_classical(task):
@@ -131,8 +136,11 @@ def test_states_are_values(blocks):
     assert blocks.atom(atom.slot) == atom and str(atom) == "(on d h)" and [str(o) for o in atom.objects] == ["d", "h"]
     with pytest.raises(ValueError):
         other.applicable_actions(s)  # a state of another task
+    assert blocks.num_atoms % 64 and blocks.words == 2
     with pytest.raises(ValueError):
-        blocks.state(np.array([0, 0, 1 << 60], dtype=np.uint64))  # an unassigned slot
+        blocks.state(np.array([0, 1 << 60], dtype=np.uint64))  # an unassigned slot
+    row = blocks.encode(s)[0]
+    assert blocks.state(np.array([*row, ~np.uint64(0)], dtype=np.uint64)) == s  # words past the task's are not read
 
 
 def test_static_and_derived_atoms():
@@ -179,9 +187,26 @@ def test_fingerprint_mismatch_is_detected(blocks):
     assert reducer is _pickle._restore_state
     with pytest.raises(ValueError, match="fingerprint"):
         reducer(blocks, args[1] ^ 1, *args[2:])
-    kind, a, b, ap, bp, opts, fp = blocks.__reduce__()[1]
+    kind, a, b, ap, bp, opts, fp, enc = blocks.__reduce__()[1]
     with pytest.raises(ValueError, match="fingerprint"):
-        _pickle._restore_task(kind, a, b.replace("(on a g)", "(on g a)"), ap, bp, opts, fp)
+        _pickle._restore_task(kind, a, b.replace("(on a g)", "(on g a)"), ap, bp, opts, fp, enc)
+    with pytest.raises(ValueError, match="encoding"):
+        _pickle._restore_task(kind, a, b, ap, bp, opts, fp, (enc[0] ^ 1, enc[1]))
+
+
+def test_pickles_keep_the_encoding():
+    for atoms in ("auto", "reachable", "dense", "lazy"):
+        task = text_task("logistics00__probLOGISTICS-6-1", atoms=atoms)
+        states = walk(task, steps=25, seed=5)
+        t2, s2 = pickle.loads(pickle.dumps((task, states)))
+        assert t2.atom_mode == task.atom_mode and t2.encoding_fingerprint == task.encoding_fingerprint
+        assert t2.num_atoms == task.num_atoms and t2.words == task.words
+        assert np.array_equal(t2.encode(s2), task.encode(states))  # lazy pickles carry their slot table
+        if atoms == "lazy":
+            with pytest.raises(ValueError, match="lazy atom slots"):
+                t2.decode(task.encode(states))
+        else:
+            assert t2.decode(task.encode(states)) == s2
 
 
 def test_gil_stays_disabled():

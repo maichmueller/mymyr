@@ -204,8 +204,10 @@ def test_suite_expand_equals_domains_apart(sets, key, grouped):
     for f in ("succ", "parent", "schema", "binding", "goal", "offsets"):
         assert np.array_equal(getattr(x, f), getattr(y, f)) and np.array_equal(getattr(x, f), getattr(z, f)), f
     h = len(ids) // 2
-    a, b = rl.expand(s, states[:h], ids[:h]), rl.expand(s, states[h:], ids[h:])
+    a, b = rl.expand(s, states[:h], ids[:h], words=x.words), rl.expand(s, states[h:], ids[h:], words=x.words)
     assert np.array_equal(np.concatenate([a.succ, b.succ]), x.succ)
+    # without words=, a batch's successors are as wide as its widest instance
+    assert rl.expand(s, states[:h], ids[:h]).words == max(s.instance_words[i] for i in ids[:h])
     assert np.array_equal(np.concatenate([a.binding, b.binding]), x.binding)
     # is_goal per row; expand_into
     flags = rl.is_goal(s, states, ids)
@@ -436,7 +438,7 @@ def test_pool_suite_equals_host(sets, key):
             for f, v in got[k].items():
                 assert np.array_equal(v, ref[k][f]), (threads, split, k, f)
     pool = rl.CpuEnvPool(s, 4)
-    assert pool.table is s and pool.words == s.words
+    assert pool.table is s and pool.words is None and rl.CpuEnvPool(s, 4, words=s.words).words == s.words
     with pytest.raises(ValueError, match="outside the suite"):
         pool.reset(task_ids=np.full(4, len(s), np.int32))
 

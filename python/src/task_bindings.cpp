@@ -194,7 +194,7 @@ void check_task_rows(const StateBatch& b, const Task& task)
         const u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
         if (bad)
             throw nb::value_error(("mymyr: " + row_name(b, i) +
-                                   " sets atom slots this task has not assigned (a state of another task?)")
+                                   " sets atom slots this task does not have (a state of another task?)")
                                       .c_str());
     }
 }
@@ -2148,11 +2148,21 @@ void bind_task(nb::module_& m)
             return v;
         }, "Predicate names by index.")
         .def_prop_ro("words", [](const PyTask& t) { return t.core->task->words(); },
-                     "Current state width W in u64 words (grows only under lazy slots).")
-        .def_prop_ro("max_words", [](const PyTask& t) { return t.core->task->max_words(); })
+                     "Atom words W of a state row: ceil(num_atoms / 64). Fixed, except under lazy slots (it grows as "
+                     "slots are assigned, up to max_words).")
+        .def_prop_ro("max_words", [](const PyTask& t) { return t.core->task->max_words(); },
+                     "The widest a state of this task can be: words, except under lazy slots (the typed-dense width).")
         .def_prop_ro("num_atoms", [](const PyTask& t) { return t.core->task->atoms().fluent_slots(); },
-                     "Assigned fluent atom slots.")
-        .def_prop_ro("atom_mode", [](const PyTask& t) { return atom_mode_name(t.core->task->atoms().mode()); })
+                     "Fluent atom slots, the bits of a row that can be set: the relaxed-reachable fluent atoms "
+                     "('reachable'), every atom of the typed-dense space ('dense'), or the slots assigned so far "
+                     "('lazy').")
+        .def_prop_ro("atom_mode", [](const PyTask& t) { return atom_mode_name(t.core->task->atoms().mode()); },
+                     "How atoms get slots: 'reachable', 'dense' (what atoms='auto' chose, or what was asked for) or "
+                     "'lazy'.")
+        .def_prop_ro("encoding_fingerprint", [](const PyTask& t) { return t.core->task->encoding_fingerprint(); },
+                     "A hash of the state encoding: the slot of every fluent and derived atom, the numeric slots and "
+                     "their storage. Two tasks with equal encoding fingerprints read and write rows alike. A function "
+                     "of the task and its options, except under lazy slots (it then changes as slots are assigned).")
         .def_prop_ro("label_width", [](const PyTask& t) { return t.core->label_width; }, "Largest schema arity.")
         .def_prop_ro("numeric_slots", [](const PyTask& t) { return t.core->task->numeric_slots(); },
                      "Numeric fluent slots (ground fluent functions with a value; 0 for classical tasks).")
@@ -2211,8 +2221,8 @@ void bind_task(nb::module_& m)
             "framework"_a = nb::none(),
             "Atom metadata for encoders (mifrost), zero-copy views of a cached snapshot: atom_pred, atom_args (CSR with "
             "atom_args_offsets), atom_args_padded, atom_cid, pred_slots / pred_slot_offsets, pred_arity, pred_kind, "
-            "derived_* and static_* atoms, and scalars (num_atoms, num_objects, ...). Under lazy slots the snapshot "
-            "covers the slots assigned so far.")
+            "derived_* and static_* atoms, and scalars (num_atoms, num_objects, atom_mode: 0 lazy, 1 dense, 2 "
+            "reachable, ...). Under lazy slots the snapshot covers the slots assigned so far.")
         .def(
             "device_arrays",
             [](const PyTask& t, IntArg version_in, FrameworkArg framework) {

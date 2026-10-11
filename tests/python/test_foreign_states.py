@@ -1,7 +1,8 @@
 """A State or a row enters a task only as a state of that task: the RL batch entry points (rl.expand, rl.expand_into,
 rl.is_goal) and the task's own (encode, decode, the state arguments) raise ValueError for a State of another task, a
-State of another instance than its row's task id, a row that sets atom slots its task has not assigned, and a row
-narrower than a frozen task's states. Rows of the task's width, or wider with zero padding, are its states."""
+State of another instance than its row's task id, a row that sets atom slots its task does not have, a row narrower
+than the task's states, and any row for a task with lazy atom slots. Rows of the task's width, or wider (the words past
+the task's own are padding and are not read), are its states."""
 
 import numpy as np
 import pytest
@@ -67,7 +68,7 @@ def test_the_task_entry_points_refuse_a_state_of_another_task(blocks, grippers):
     assert np.array_equal(np.asarray(blocks.encode([blocks.initial_state])), np.asarray(blocks.encode(blocks.initial_state)))
 
 
-def test_rows_narrower_than_a_frozen_task_raise(blocks):
+def test_rows_narrower_than_the_task_raise(blocks):
     rows = np.asarray(blocks.encode([blocks.initial_state]))
     assert blocks.words == 2 and rows.shape == (1, 2)
     first = np.ascontiguousarray(rows[:, :1])
@@ -75,22 +76,25 @@ def test_rows_narrower_than_a_frozen_task_raise(blocks):
         rl.expand(blocks, first)
     with pytest.raises(ValueError, match=r"^mymyr: is_goal: state rows of 1 atom words"):
         rl.is_goal(blocks, first)
-    with pytest.raises(ValueError, match=r"^mymyr: rows of 1 atom words; this task's states have 2 \(frozen atom slots\)$"):
+    with pytest.raises(ValueError, match=r"^mymyr: rows of 1 atom words; this task's states have 2$"):
         blocks.decode(first)
-    # wider rows with zero padding are the same states
-    wide = np.concatenate([rows, np.zeros((1, 1), np.uint64)], 1)
-    assert np.array_equal(rl.expand(blocks, wide).offsets, rl.expand(blocks, rows).offsets)
-    assert blocks.decode(wide) == [blocks.initial_state]
+    # wider rows are the same states: the padding is not read
+    for pad in (0, 1):
+        wide = np.concatenate([rows, np.full((1, 1), pad, np.uint64)], 1)
+        assert np.array_equal(rl.expand(blocks, wide).offsets, rl.expand(blocks, rows).offsets)
+        assert blocks.decode(wide) == [blocks.initial_state]
 
 
 def test_rows_with_unassigned_atom_slots_raise(blocks):
     rows = np.asarray(blocks.encode([blocks.initial_state]))
-    bad = np.concatenate([rows, np.ones((1, 1), np.uint64)], 1)
-    with pytest.raises(ValueError, match=r"^mymyr: is_goal: state row 0 sets atom slots its instance has not assigned"):
+    assert blocks.num_atoms < 128
+    bad = rows.copy()
+    bad[0, 1] |= np.uint64(1 << 63)  # slot 127: past the task's atoms, within its words
+    with pytest.raises(ValueError, match=r"^mymyr: is_goal: state row 0 sets atom slots its instance does not have"):
         rl.is_goal(blocks, bad)
     with pytest.raises(ValueError, match=r"^mymyr: expand: state row 0 sets atom slots"):
         rl.expand(blocks, bad)
-    with pytest.raises(ValueError, match=r"^mymyr: state 0 sets atom slots this task has not assigned"):
+    with pytest.raises(ValueError, match=r"^mymyr: state 0 sets atom slots this task does not have"):
         blocks.decode(bad)
-    with pytest.raises(ValueError, match=r"^mymyr: the state sets atom slots this task has not assigned"):
+    with pytest.raises(ValueError, match=r"^mymyr: the state sets atom slots this task does not have"):
         blocks.applicable_actions(bad[0])
