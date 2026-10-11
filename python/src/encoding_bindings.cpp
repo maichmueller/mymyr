@@ -4,6 +4,7 @@
 #include "rl_imports.hpp"
 
 #include "mymyr/encoding/flat.hpp"
+#include "mymyr/encoding/schema.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
@@ -12,11 +13,24 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mymyr::python::ann
 {
 struct EncodingExpansion
+{
+};
+struct EncodingLayout
+{
+};
+struct EncodingIndexDtype
+{
+};
+struct EncodingHorizonMode
+{
+};
+struct EncodingRootPolicy
 {
 };
 }
@@ -27,6 +41,26 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingExpansion>
 {
     static constexpr auto Name = const_name("mymyr._core._rl.Expansion");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingLayout>
+{
+    static constexpr auto Name = const_name("typing.Literal['graph', 'relation']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingIndexDtype>
+{
+    static constexpr auto Name = const_name("typing.Literal['int32', 'int64']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingHorizonMode>
+{
+    static constexpr auto Name = const_name("typing.Literal['full', 'delta', 'action']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingRootPolicy>
+{
+    static constexpr auto Name = const_name("typing.Literal['include', 'exclude', 'encode_only']");
 };
 }
 
@@ -52,7 +86,7 @@ struct PyFlatEncoder
     TableRef reference;
     encoding::FlatRelationEncoder encoder;
 
-    PyFlatEncoder(TableRef table, encoding::FlatOptions options)
+    PyFlatEncoder(TableRef table, encoding::FlatRelationEncoderOptions options)
         : reference(std::move(table)), encoder(reference.table, options)
     {
     }
@@ -174,6 +208,128 @@ PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg t
     }
     return output;
 }
+
+// ------------------------------------------------------------------------------------------------ EncodingSchema
+struct PyEncodingSchema
+{
+    std::shared_ptr<const encoding::EncodingSchema> schema;
+};
+
+using TextSequenceArg = Arg<std::vector<std::string>>;
+
+[[noreturn]] void option_error(const char* name, const std::string& allowed, nb::handle got)
+{
+    throw nb::value_error(("mymyr: encoding: " + std::string(name) + " must be one of " + allowed + ", got " +
+                           nb::cast<std::string>(nb::repr(got)))
+                              .c_str());
+}
+
+std::string text_of(nb::handle value, const char* name)
+{
+    if (!nb::isinstance<nb::str>(value))
+        throw nb::type_error(("mymyr: encoding: " + std::string(name) + " must be a string, not " +
+                              nb::cast<std::string>(nb::str(value.type().attr("__name__"))))
+                                 .c_str());
+    return nb::cast<std::string>(value);
+}
+
+/// The enumerator named by a string argument; `parse` maps text to an optional enumerator, `allowed` lists the texts.
+template<class Parse>
+auto choice(nb::handle value, const char* name, Parse parse, const std::string& allowed)
+{
+    const auto parsed = parse(text_of(value, name));
+    if (!parsed)
+        option_error(name, allowed, value);
+    return *parsed;
+}
+
+/// The enumerators named by an iterable of strings (a single string is not a collection of options).
+template<class E, class Parse>
+encoding::EnumSet<E> choice_set(nb::handle value, const char* name, Parse parse, const std::string& allowed)
+{
+    if (nb::isinstance<nb::str>(value) || !PyObject_HasAttrString(value.ptr(), "__iter__"))
+        throw nb::type_error(("mymyr: encoding: " + std::string(name) + " must be a collection of strings").c_str());
+    encoding::EnumSet<E> out;
+    for (nb::handle item : value)
+        out.insert(choice(item, name, parse, allowed));
+    return out;
+}
+
+encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_static, bool include_derived,
+                                     bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
+                                     nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
+                                     nb::handle index_dtype, nb::handle horizon_mode, nb::handle root_policy,
+                                     bool parent_relation)
+{
+    using namespace encoding;
+    FlatOptions options;
+    options.goal_derivations = choice_set<GoalDerivation>(
+        goal_derivations, "goal_derivations", parse_goal_derivation,
+        "'plain', 'satisfied', 'unsatisfied', 'added_satisfied', 'added_unsatisfied'");
+    const i64 level = int_arg<i64>(max_goal_level, "max_goal_level");
+    if (level < 0 || level > 3)
+        throw nb::value_error(("mymyr: encoding: max_goal_level must be in [0, 3], got " + std::to_string(level)).c_str());
+    options.max_goal_level = static_cast<u32>(level);
+    options.include_static = include_static;
+    options.include_derived = include_derived;
+    options.nullary = nullary;
+    options.equality = equality;
+    options.predicate_virtual_nodes = predicate_virtual_nodes;
+    options.include_actions = include_actions;
+    options.targets = choice_set<TargetSource>(target_sources, "target_sources", parse_target_source,
+                                               "'goal', 'subgoal', 'action', 'history'");
+    options.layout = choice(layout, "layout", parse_layout, "'graph', 'relation'");
+    options.index = choice(index_dtype, "index_dtype", parse_index_type, "'int32', 'int64'");
+    if (!horizon_mode.is_none())
+        options.horizon.mode =
+            choice(horizon_mode, "horizon_mode", parse_horizon_mode, "'full', 'delta', 'action' or None");
+    if (!root_policy.is_none())
+        options.horizon.root =
+            choice(root_policy, "root_policy", parse_root_policy, "'include', 'exclude', 'encode_only' or None");
+    options.horizon.parent_relation = parent_relation;
+    return options;
+}
+
+template<class E>
+nb::list texts_of(const std::vector<E>& values)
+{
+    nb::list out;
+    for (E value : values)
+        out.append(std::string(encoding::to_string(value)));
+    return out;
+}
+
+nb::dict options_dict(const encoding::FlatOptions& o)
+{
+    nb::dict out;
+    out["goal_derivations"] = nb::tuple(texts_of(o.goal_derivations.members()));
+    out["max_goal_level"] = o.max_goal_level;
+    out["include_static"] = o.include_static;
+    out["include_derived"] = o.include_derived;
+    out["nullary"] = o.nullary;
+    out["equality"] = o.equality;
+    out["predicate_virtual_nodes"] = o.predicate_virtual_nodes;
+    out["include_actions"] = o.include_actions;
+    out["target_sources"] = nb::tuple(texts_of(o.targets.members()));
+    out["layout"] = std::string(encoding::to_string(o.layout));
+    out["index_dtype"] = std::string(encoding::to_string(o.index));
+    const bool horizon = o.horizon.mode != encoding::HorizonMode::None;
+    out["horizon_mode"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.mode)))) : nb::none();
+    out["root_policy"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.root)))) : nb::none();
+    out["parent_relation"] = o.horizon.parent_relation;
+    return out;
+}
+
+template<class Field>
+auto relation_column(const PyEncodingSchema& self, Field field)
+{
+    using Out = std::decay_t<decltype(field(std::declval<const encoding::Relation&>()))>;
+    std::vector<Out> out;
+    out.reserve(self.schema->num_relations());
+    for (const encoding::Relation& relation : self.schema->relations())
+        out.push_back(field(relation));
+    return out;
+}
 }
 
 void bind_encoding(nb::module_& parent)
@@ -215,5 +371,172 @@ void bind_encoding(nb::module_& parent)
         .def("encode", &encode, "states"_a, nb::kw_only(), "task_ids"_a = nb::none(), "actions"_a = nb::none(),
              "goals"_a = nb::none(), "framework"_a = nb::none(),
              "Encode facts, signed goal satisfaction and optional existing expansion labels into owned arrays.");
+
+    nb::class_<PyEncodingSchema>(
+        module, "EncodingSchema",
+        "The relation catalog of an encoding: the relations a batch of encoded states holds, sorted by name, with their "
+        "arities and slot roles. It depends on the domain of the task or table and on the options, never on the "
+        "instances, so tables over the same domain agree on the relation ids.")
+        .def(
+            "__init__",
+            [](PyEncodingSchema* self, TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level,
+               bool include_static, bool include_derived, bool nullary, bool equality, bool predicate_virtual_nodes,
+               bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
+               Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingHorizonMode> horizon_mode,
+               Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation)
+            {
+                const TableRef reference = table_of(table);
+                const encoding::FlatOptions options = schema_options(
+                    max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
+                    goal_derivations, target_sources, layout, index_dtype, horizon_mode, root_policy, parent_relation);
+                try
+                {
+                    new (self) PyEncodingSchema{encoding::EncodingSchema::create(*reference.table, options)};
+                }
+                catch (const std::invalid_argument& error)
+                {
+                    throw nb::value_error(error.what());
+                }
+            },
+            "table"_a, nb::kw_only(), "goal_derivations"_a = nb::make_tuple("plain", "satisfied"),
+            "max_goal_level"_a = 0, "include_static"_a = true, "include_derived"_a = true, "nullary"_a = true, "equality"_a = false,
+            "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
+            "layout"_a = "graph", "index_dtype"_a = "int32", "horizon_mode"_a = nb::none(),
+            "root_policy"_a = nb::none(), "parent_relation"_a = false,
+            "The catalog of the domain of `table` (a Task, TaskHandle or TaskTable) under the options. "
+            "goal_derivations: the variants of the goal relations (plain, satisfied, unsatisfied; added_satisfied and "
+            "added_unsatisfied for the delta horizon). max_goal_level: subgoal layers beyond the goal (0 to 3). "
+            "include_static / include_derived: the state relations of the static (types included) / derived "
+            "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
+            "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate slot in "
+            "the predicate relations' tuples. include_actions: one relation per action schema. target_sources: "
+            "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
+            "targets need the plain goal derivation, action targets include_actions). layout, "
+            "index_dtype: how a batch is stored. horizon_mode, root_policy, parent_relation: the horizon variants "
+            "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid combinations and for numeric tasks.")
+        .def_prop_ro(
+            "options", [](const PyEncodingSchema& self) { return options_dict(self.schema->options()); },
+            "The options in normal form, as the keyword arguments that rebuild this schema.")
+        .def_prop_ro("num_relations", [](const PyEncodingSchema& self) { return self.schema->num_relations(); })
+        .def_prop_ro(
+            "relation_names",
+            [](const PyEncodingSchema& self)
+            { return relation_column(self, [](const encoding::Relation& r) { return r.name; }); },
+            "The relation names in catalog order; a relation's id is its position.")
+        .def_prop_ro(
+            "relation_arities",
+            [](const PyEncodingSchema& self)
+            { return relation_column(self, [](const encoding::Relation& r) { return r.arity; }); },
+            "The encoded arity of each relation: its slots plus its arguments.")
+        .def_prop_ro(
+            "relation_logical_arities",
+            [](const PyEncodingSchema& self)
+            { return relation_column(self, [](const encoding::Relation& r) { return r.logical_arity; }); },
+            "The number of arguments of each relation (the arity of its predicate or action schema).")
+        .def_prop_ro(
+            "relation_lanes",
+            [](const PyEncodingSchema& self)
+            {
+                return relation_column(
+                    self, [](const encoding::Relation& r) { return std::string(encoding::to_string(r.lane)); });
+            },
+            "The lane of each relation: fluent, static, derived, goal, goal_derivation, goal_satisfaction, history, "
+            "action or parent.")
+        .def_prop_ro(
+            "relation_signs",
+            [](const PyEncodingSchema& self)
+            { return relation_column(self, [](const encoding::Relation& r) { return static_cast<int>(r.sign); }); },
+            "1 for `[+]` relations, -1 for `[-]` relations, 0 for relations without a sign.")
+        .def_prop_ro(
+            "relation_levels",
+            [](const PyEncodingSchema& self)
+            {
+                return relation_column(
+                    self, [](const encoding::Relation& r) { return r.level ? static_cast<int>(*r.level) : -1; });
+            },
+            "The goal level of each relation (0: the goal, 1: first subgoal layer, ...), -1 for none.")
+        .def_prop_ro(
+            "relation_derivations",
+            [](const PyEncodingSchema& self)
+            {
+                return relation_column(self,
+                                       [](const encoding::Relation& r)
+                                       {
+                                           return r.derivation
+                                                      ? std::optional<std::string>(std::string(encoding::to_string(*r.derivation)))
+                                                      : std::nullopt;
+                                       });
+            },
+            "The goal derivation of each relation (satisfied, unsatisfied, added_satisfied, added_unsatisfied), None "
+            "for plain goal relations and relations without a goal.")
+        .def_prop_ro(
+            "relation_predicates",
+            [](const PyEncodingSchema& self)
+            { return relation_column(self, [](const encoding::Relation& r) { return r.predicate; }); },
+            "The domain predicate id of each relation, -1 for action and parent relations.")
+        .def_prop_ro(
+            "relation_schemas",
+            [](const PyEncodingSchema& self)
+            { return relation_column(self, [](const encoding::Relation& r) { return r.schema; }); },
+            "The first action schema id of each action relation, -1 for the others.")
+        .def_prop_ro(
+            "slot_roles",
+            [](const PyEncodingSchema& self)
+            {
+                std::vector<std::vector<int>> out;
+                for (u32 id = 0; id < self.schema->num_relations(); ++id)
+                {
+                    std::vector<int> roles;
+                    for (encoding::SlotRole role : self.schema->slot_roles(id))
+                        roles.push_back(static_cast<int>(role));
+                    out.push_back(std::move(roles));
+                }
+                return out;
+            },
+            "The role of each position of each relation's tuples, as indices into slot_role_names.")
+        .def_prop_ro(
+            "schema_relations",
+            [](const PyEncodingSchema& self)
+            {
+                const auto ids = self.schema->schema_relations();
+                return std::vector<i32>(ids.begin(), ids.end());
+            },
+            "The relation id of each action schema of the domain (empty without action relations). Action schemas "
+            "of one name and arity share a relation; a name with several arities has one relation `name#arity` each.")
+        .def_prop_ro("slot_role_names",
+                     [](const PyEncodingSchema& self)
+                     {
+                         const auto names = self.schema->slot_role_names();
+                         return std::vector<std::string>(names.begin(), names.end());
+                     })
+        .def_prop_ro(
+            "entity_role_names",
+            [](const PyEncodingSchema& self)
+            {
+                const auto names = self.schema->entity_role_names();
+                return std::vector<std::string>(names.begin(), names.end());
+            },
+            "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by the nullary relations.")
+        .def_prop_ro(
+            "target_group_names",
+            [](const PyEncodingSchema&)
+            {
+                return std::vector<std::string>(encoding::k_target_group_names.begin(),
+                                                encoding::k_target_group_names.end());
+            },
+            "The target groups: the group code of a target is its index.")
+        .def_prop_ro(
+            "schema_fingerprint", [](const PyEncodingSchema& self) { return self.schema->fingerprint(); },
+            "A 64-bit hash of the catalog and the options that shape the output; stable across processes and builds.")
+        .def(
+            "relation_id",
+            [](const PyEncodingSchema& self, const std::string& name)
+            {
+                const auto id = self.schema->find(name);
+                if (!id)
+                    throw nb::key_error(("mymyr: encoding: no relation named '" + name + "'").c_str());
+                return *id;
+            },
+            "name"_a, "The id of the relation with this name. Raises KeyError for an unknown name.");
 }
 }

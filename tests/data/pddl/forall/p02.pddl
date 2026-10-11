@@ -1,0 +1,5 @@
+(define (problem wiring-3)
+  (:domain wiring)
+  (:objects a b c d - room x y z - switch)
+  (:init (wired x a) (wired x b) (wired y c) (wired z d) (lit a))
+  (:goal (and (on z) (forall (?r - room) (lit ?r)))))
