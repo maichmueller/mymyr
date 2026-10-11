@@ -5,7 +5,7 @@
 //     id order;
 //   - the device expand is byte-equal to rl::expand (flat and padded; canonical order on and off, witness
 //     pruning on and off, clipped capacities, narrow rows, one chunk and chunks of 7 parents) on random-walk states of
-//     every suite task, frozen and lazy; launches of at most lifted::k_warp_rows rows search by warps, larger
+//     every suite task, dense and reachable slots; launches of at most lifted::k_warp_rows rows search by warps, larger
 //     ones a lane per state: both write rl::expand's bytes.
 // The full suite (every task in the BrFS test) runs with MYMYR_TEST_FULL_SUITE=1.
 
@@ -49,11 +49,16 @@ cuda::ContextPtr context()
     return cuda::DeviceContext::create(0, o);
 }
 
-TaskPtr load(const std::string& name, bool frozen)
+TaskPtr load(const std::string& name, TaskOptions::Atoms atoms)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
+    o.atoms = atoms;
     return Task::from_text_file(task_path(name), o);
+}
+
+TaskPtr load(const std::string& name, bool frozen)
+{
+    return load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
 }
 
 template<class T>
@@ -80,6 +85,23 @@ std::vector<std::tuple<std::string, bool>> params()
 std::string param_name(const ::testing::TestParamInfo<std::tuple<std::string, bool>>& info)
 {
     std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_frozen" : "_lazy");
+    std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
+    return n;
+}
+
+/// The device expander's parameters: every suite task with dense and with reachable slots (tables take fixed slots).
+std::vector<std::tuple<std::string, TaskOptions::Atoms>> expand_params()
+{
+    std::vector<std::tuple<std::string, TaskOptions::Atoms>> out;
+    for (const SuiteTask& t : suite())
+        for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
+            out.emplace_back(t.name, atoms);
+    return out;
+}
+
+std::string expand_param_name(const ::testing::TestParamInfo<std::tuple<std::string, TaskOptions::Atoms>>& info)
+{
+    std::string n = std::get<0>(info.param) + (std::get<1>(info.param) == TaskOptions::Atoms::Dense ? "_dense" : "_reachable");
     std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
     return n;
 }
@@ -406,18 +428,18 @@ struct Padded
     bool operator==(const Padded&) const = default;
 };
 
-class CudaExpandSuite : public ::testing::TestWithParam<std::tuple<std::string, bool>>
+class CudaExpandSuite : public ::testing::TestWithParam<std::tuple<std::string, TaskOptions::Atoms>>
 {
 };
 
 TEST_P(CudaExpandSuite, ByteEqualToRlExpand)
 {
     SKIP_WITHOUT_GPU();
-    const auto& [name, frozen] = GetParam();
+    const auto& [name, atoms] = GetParam();
     for (bool device_first : {true, false})
     {
         SCOPED_TRACE(device_first ? "device first" : "cpu first");
-        const auto task = load(name, frozen);
+        const auto task = load(name, atoms);
         // a batch of random-walk states at the task's current width
         const std::vector<State> walk = device_ref_walks(*task, 4, 25, 17);
         const u32 Win = std::max<u32>(task->words(), 1);
@@ -438,7 +460,7 @@ TEST_P(CudaExpandSuite, ByteEqualToRlExpand)
                 const rl::ExpandOptions o{canonical, witness, true};
                 Flat cpu_full;
                 if (!device_first)
-                    cpu_full = cpu_expand(task, states, N, Win, 1, Win, L, o);  // interns first under lazy slots
+                    cpu_full = cpu_expand(task, states, N, Win, 1, Win, L, o);
                 const u64 total = ex.count({static_cast<const u64*>(d_states.data()), N, Win, 0}, nullptr, o);
                 ASSERT_GT(total, 0u);
                 // full capacity at the task's width, a clipped capacity, and narrow rows (zeroed, words_needed)
@@ -514,7 +536,7 @@ TEST_P(CudaExpandSuite, ByteEqualToRlExpand)
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(Suite, CudaExpandSuite, ::testing::ValuesIn(params()), param_name);
+INSTANTIATE_TEST_SUITE_P(Suite, CudaExpandSuite, ::testing::ValuesIn(expand_params()), expand_param_name);
 
 TEST(CudaExpand, WarpAndLaneMatchersWriteTheSameRows)
 {
@@ -617,57 +639,10 @@ TEST(CudaExpand, ValidationAndDestinationChecksMatchRlExpand)
     EXPECT_EQ(to_host<i32>(off.data(), 1, s)[0], 0);
 }
 
-TEST(CudaExpand, LazySlotsFirstMetOnTheDevice)
-{
-    SKIP_WITHOUT_GPU();
-    // a fresh lazy task: the successors' atoms have no slots until the device meets them (interned in canonical id
-    // order); the CPU then expands the same rows on the same task byte for byte
-    for (const char* name : {"gripper__prob05", "logistics00__probLOGISTICS-6-1", "sokoban-opt08-strips__p14",
-                             "philosophers__p03-phil4", "caldera-split-opt18-adl__p04", "organic-synthesis-opt18-strips__p20"})
-    {
-        SCOPED_TRACE(name);
-        const auto task = load(name, false);
-        auto ctx = context();
-        const cudaStream_t s = ctx->stream();
-        cuda::DeviceExpander ex(ctx, rl::TaskTable::single(task));
-        const u32 W = task->max_words(), L = rl::max_label_width(*task);
-        std::vector<u64> frontier(W, 0);
-        const State s0 = task->initial_state();
-        std::copy(s0.words().begin(), s0.words().end(), frontier.begin());
-        const u32 slots0 = task->atoms().fluent_slots();
-        for (int depth = 0; depth < 3 && !frontier.empty(); ++depth)
-        {
-            const u64 N = frontier.size() / W;
-            cuda::DeviceBuffer d(ctx, frontier.size() * 8, s);
-            cuda::check(cudaMemcpyAsync(d.data(), frontier.data(), frontier.size() * 8, cudaMemcpyHostToDevice, s), "H2D");
-            const rl::StateBatchView in{static_cast<const u64*>(d.data()), N, W, 0};
-            const u64 total = ex.count(in, nullptr, {});
-            DeviceFlat df(ctx, N, total, W, L, s);
-            ex.write(df.x);
-            const Flat dev = df.host(N, s);
-            const Flat cpu = cpu_expand(task, frontier, N, W, total, W, L, {});
-            ASSERT_EQ(dev, cpu) << "depth " << depth;
-            // the next frontier: up to 48 distinct successors
-            std::vector<u64> next;
-            for (u64 j = 0; j < dev.total && next.size() < 48 * W; ++j)
-            {
-                const auto row = dev.succ.begin() + static_cast<std::ptrdiff_t>(j * W);
-                bool seen = std::equal(row, row + W, frontier.begin());
-                for (usize k = 0; k < next.size() && !seen; k += W)
-                    seen = std::equal(row, row + W, next.begin() + static_cast<std::ptrdiff_t>(k));
-                if (!seen)
-                    next.insert(next.end(), row, row + W);
-            }
-            frontier = std::move(next);
-        }
-        EXPECT_GT(task->atoms().fluent_slots(), slots0) << "no atom was first met on the device";
-    }
-}
-
 TEST(CudaExpand, ThreadsAndStreamsShareATask)
 {
     SKIP_WITHOUT_GPU();
-    const auto task = load("logistics00__probLOGISTICS-6-1", false);
+    const auto task = load("logistics00__probLOGISTICS-6-1", TaskOptions::Atoms::Reachable);
     const std::vector<State> walk = device_ref_walks(*task, 8, 30, 5);
     const u32 W = task->max_words();
     std::vector<u64> states(walk.size() * W, 0);

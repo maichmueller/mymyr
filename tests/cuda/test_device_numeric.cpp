@@ -127,7 +127,7 @@ TEST_P(DeviceNumeric, ExpandEqualsCpu)
 {
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const auto matching : {TaskOptions::Matching::FixedOrder, TaskOptions::Matching::ForwardChecking})
             for (const auto storage : {TaskOptions::NumericStorageMode::Auto, TaskOptions::NumericStorageMode::F64})
             {
@@ -767,60 +767,61 @@ TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
 {
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
-    {
-        const auto table = rl::TaskTable::create({instance(2, TaskOptions::NumericStorageMode::I32, atoms),
-                                                instance(4, TaskOptions::NumericStorageMode::F64, atoms),
-                                                instance(3, TaskOptions::NumericStorageMode::Auto, atoms)});
-        const std::vector<i32> ids{2, 0, 1, 2, 1, 0, 1, 2};
-        ASSERT_NO_THROW(mixed_expand(ctx, rl::TaskSuite::of(table), ids));
-        const auto suite = rl::TaskSuite::group({table->task(0), task_of("cs-drone"), table->task(1), task_of("m-woodworking"), table->task(2)});
-        ASSERT_NO_THROW(mixed_expand(ctx, suite, {4, 1, 2, 0, 3, 1, 4, 2}));
-        const std::vector<u32> search_ids{2, 0, 1, 2, 1, 0};
-        std::vector<State> starts;
-        for (u32 i : search_ids) starts.push_back(table->task(i)->initial_state());
-        cuda::MultiIwOptions options; options.max_arity = 2;
-        cuda::DeviceTableIw run(ctx, table, options);
-        const auto results = run.run(starts, search_ids);
-        ASSERT_EQ(results.numeric_words, table->numeric_words());
-        const u32 RW = table->words() + table->numeric_words();
-        std::vector<u64> rows(search_ids.size() * RW);
-        for (u32 i = 0; i < search_ids.size(); ++i)
-            rl::TaskSuite::of(table)->initial_row(search_ids[i], rows.data() + u64{i} * RW, table->words(), table->numeric_words());
-        auto ds = test::to_device(ctx, rows, ctx->stream());
-        const auto device_starts = run.run({static_cast<const u64*>(ds.data()), RW, RW, static_cast<u32>(search_ids.size()), table->numeric_words()}, search_ids);
-        const u32 internal_width = table->words() + 4;
-        std::vector<u64> internal(search_ids.size() * internal_width);
-        for (u32 i = 0; i < search_ids.size(); ++i)
-            cuda::numeric::encode(*table->task(search_ids[i]), starts[i].view(), internal.data() + u64{i} * internal_width,
-                                  table->words() + table->task(search_ids[i])->numeric_slots());
-        auto dis = test::to_device(ctx, internal, ctx->stream());
-        const auto internal_starts = run.run({static_cast<const u64*>(dis.data()), internal_width, internal_width,
-                                             static_cast<u32>(search_ids.size()), 0}, search_ids);
-        for (u32 i = 0; i < starts.size(); ++i)
+    // a table holds one numeric storage; a suite holds a table per domain, each with its own
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
+        for (const auto storage : {TaskOptions::NumericStorageMode::I32, TaskOptions::NumericStorageMode::F64})
         {
-            search::IwOptions cpu; cpu.max_arity = 2;
-            const auto expected = search::iw(*table->task(search_ids[i]), cpu);
-            const auto actual = results.result(i, *table->task(search_ids[i]), starts[i], true);
-            const auto actual_device = device_starts.result(i, *table->task(search_ids[i]), starts[i], true);
-            EXPECT_EQ(actual.status, expected.status); EXPECT_EQ(actual.plan, expected.plan);
-            EXPECT_EQ(actual.cost, expected.cost); EXPECT_EQ(actual.goal_state, expected.goal_state);
-            EXPECT_EQ(actual_device.status, expected.status); EXPECT_EQ(actual_device.goal_state, expected.goal_state);
-            EXPECT_EQ(internal_starts.result(i, *table->task(search_ids[i]), starts[i], true).goal_state, expected.goal_state);
+            const auto table = rl::TaskTable::create({instance(2, storage, atoms), instance(4, storage, atoms),
+                                                    instance(3, storage, atoms)});
+            const std::vector<i32> ids{2, 0, 1, 2, 1, 0, 1, 2};
+            ASSERT_NO_THROW(mixed_expand(ctx, rl::TaskSuite::of(table), ids));
+            const auto suite = rl::TaskSuite::group({table->task(0), task_of("cs-drone"), table->task(1), task_of("m-woodworking"), table->task(2)});
+            ASSERT_NO_THROW(mixed_expand(ctx, suite, {4, 1, 2, 0, 3, 1, 4, 2}));
+            const std::vector<u32> search_ids{2, 0, 1, 2, 1, 0};
+            std::vector<State> starts;
+            for (u32 i : search_ids) starts.push_back(table->task(i)->initial_state());
+            cuda::MultiIwOptions options; options.max_arity = 2;
+            cuda::DeviceTableIw run(ctx, table, options);
+            const auto results = run.run(starts, search_ids);
+            ASSERT_EQ(results.numeric_words, table->numeric_words());
+            const u32 RW = table->words() + table->numeric_words();
+            std::vector<u64> rows(search_ids.size() * RW);
+            for (u32 i = 0; i < search_ids.size(); ++i)
+                rl::TaskSuite::of(table)->initial_row(search_ids[i], rows.data() + u64{i} * RW, table->words(), table->numeric_words());
+            auto ds = test::to_device(ctx, rows, ctx->stream());
+            const auto device_starts = run.run({static_cast<const u64*>(ds.data()), RW, RW, static_cast<u32>(search_ids.size()), table->numeric_words()}, search_ids);
+            const u32 internal_width = table->words() + 4;
+            std::vector<u64> internal(search_ids.size() * internal_width);
+            for (u32 i = 0; i < search_ids.size(); ++i)
+                cuda::numeric::encode(*table->task(search_ids[i]), starts[i].view(), internal.data() + u64{i} * internal_width,
+                                      table->words() + table->task(search_ids[i])->numeric_slots());
+            auto dis = test::to_device(ctx, internal, ctx->stream());
+            const auto internal_starts = run.run({static_cast<const u64*>(dis.data()), internal_width, internal_width,
+                                                 static_cast<u32>(search_ids.size()), 0}, search_ids);
+            for (u32 i = 0; i < starts.size(); ++i)
+            {
+                search::IwOptions cpu; cpu.max_arity = 2;
+                const auto expected = search::iw(*table->task(search_ids[i]), cpu);
+                const auto actual = results.result(i, *table->task(search_ids[i]), starts[i], true);
+                const auto actual_device = device_starts.result(i, *table->task(search_ids[i]), starts[i], true);
+                EXPECT_EQ(actual.status, expected.status); EXPECT_EQ(actual.plan, expected.plan);
+                EXPECT_EQ(actual.cost, expected.cost); EXPECT_EQ(actual.goal_state, expected.goal_state);
+                EXPECT_EQ(actual_device.status, expected.status); EXPECT_EQ(actual_device.goal_state, expected.goal_state);
+                EXPECT_EQ(internal_starts.result(i, *table->task(search_ids[i]), starts[i], true).goal_state, expected.goal_state);
+            }
+            datasets::StateSpaceOptions cpu; cpu.remove_if_unsolvable = false;
+            cuda::DeviceStateSpaceOptions gpu; gpu.space = cpu; gpu.output = cuda::StateSpaceOutput::Both;
+            const auto spaces = cuda::state_spaces(ctx, table, gpu);
+            for (u32 i = 0; i < table->size(); ++i)
+            {
+                const auto expected = datasets::generate_state_space(table->task(i), cpu);
+                ASSERT_TRUE(spaces.results[i].host && expected.space);
+                EXPECT_EQ(spaces.results[i].host->num_states(), expected.space->num_states());
+                EXPECT_EQ(spaces.results[i].host->num_transitions(), expected.space->num_transitions());
+                EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->state_words(), expected.space->state_words()));
+                EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->costs(), expected.space->costs()));
+            }
         }
-        datasets::StateSpaceOptions cpu; cpu.remove_if_unsolvable = false;
-        cuda::DeviceStateSpaceOptions gpu; gpu.space = cpu; gpu.output = cuda::StateSpaceOutput::Both;
-        const auto spaces = cuda::state_spaces(ctx, table, gpu);
-        for (u32 i = 0; i < table->size(); ++i)
-        {
-            const auto expected = datasets::generate_state_space(table->task(i), cpu);
-            ASSERT_TRUE(spaces.results[i].host && expected.space);
-            EXPECT_EQ(spaces.results[i].host->num_states(), expected.space->num_states());
-            EXPECT_EQ(spaces.results[i].host->num_transitions(), expected.space->num_transitions());
-            EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->state_words(), expected.space->state_words()));
-            EXPECT_TRUE(std::ranges::equal(spaces.results[i].host->costs(), expected.space->costs()));
-        }
-    }
 }
 
 namespace
@@ -868,11 +869,6 @@ void user_goals_equal_cpu(const cuda::ContextPtr& ctx, const TaskPtr& task,
             EXPECT_EQ(result.passes[j].generated, expected.passes[j].generated);
         }
     }
-    const auto table = rl::TaskTable::create({task, task});
-    const std::vector<u32> ids{0, 1, 0, 1, 0, 1, 0, 1};
-    cuda::DeviceTableIw table_run(ctx, table, options);
-    const auto batched = table_run.run(starts, ids, goals);
-    EXPECT_EQ(batched.status, actual.status); EXPECT_EQ(batched.plan_length, actual.plan_length);
     const u32 width = std::max<u32>(1, task->words()) + task->numeric_slots();
     std::vector<u64> rows(u64{starts.size()} * width);
     for (u32 i = 0; i < starts.size(); ++i)
@@ -881,9 +877,17 @@ void user_goals_equal_cpu(const cuda::ContextPtr& ctx, const TaskPtr& task,
     const auto from_device = run.run({static_cast<const u64*>(device_rows.data()), width, width,
                                       static_cast<u32>(starts.size())}, goals);
     EXPECT_EQ(from_device.status, actual.status); EXPECT_EQ(from_device.goal_rows, actual.goal_rows);
-    const auto table_device = table_run.run({static_cast<const u64*>(device_rows.data()), width, width,
-                                            static_cast<u32>(starts.size())}, ids, goals);
-    EXPECT_EQ(table_device.status, batched.status); EXPECT_EQ(table_device.goal_rows, batched.goal_rows);
+    if (task->atoms().frozen())  // a table takes fixed atom slots
+    {
+        const auto table = rl::TaskTable::create({task, task});
+        const std::vector<u32> ids{0, 1, 0, 1, 0, 1, 0, 1};
+        cuda::DeviceTableIw table_run(ctx, table, options);
+        const auto batched = table_run.run(starts, ids, goals);
+        EXPECT_EQ(batched.status, actual.status); EXPECT_EQ(batched.plan_length, actual.plan_length);
+        const auto table_device = table_run.run({static_cast<const u64*>(device_rows.data()), width, width,
+                                                static_cast<u32>(starts.size())}, ids, goals);
+        EXPECT_EQ(table_device.status, batched.status); EXPECT_EQ(table_device.goal_rows, batched.goal_rows);
+    }
     const std::vector<u64> seeds{7, 17, 37, 47};
     const std::vector<search::GoalSpec::AtomGoal> rollout_goals(goals.begin(), goals.begin() + 4);
     for (u32 truncation : {2u, ~u32{0}})

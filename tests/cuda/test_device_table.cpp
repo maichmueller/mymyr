@@ -1,5 +1,5 @@
 // Device task-table tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device), on the instance sets of
-// tests/cpp/rl/table_instance_sets.hpp (the fork's PDDL through the front end, plus tests/data/table_instances), frozen and lazy:
+// tests/cpp/rl/table_instance_sets.hpp (the fork's PDDL through the front end, plus tests/data/table_instances), dense and reachable slots:
 //   - the device expand of a mixed batch over a table (cuda::DeviceExpander: one pass of the multi-instance kernels,
 //     or each instance's rows apart) equals rl::expand byte for byte, flat (with capacity clipping) and padded, for
 //     any chunk size and bucket launch (rl::expand's mixed batch equals the single-instance expansions:
@@ -269,7 +269,7 @@ TEST(DeviceTableExpand, MixedBatchEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const Set& set : sets(atoms))
         {
             SCOPED_TRACE(set.name + atoms_name(atoms));
@@ -279,10 +279,10 @@ TEST(DeviceTableExpand, MixedBatchEqualsHost)
             table_rows(T, 12, rows, ids);
             const u32 W = T.words(), L = std::max<u32>(1, T.label_width()) + 1;  // one column of -1 padding more
             const u64 N = ids.size();
-            const Flat full = host_expand(T, rows, ids, 1, L);  // counts (and interns first under lazy slots)
+            const Flat full = host_expand(T, rows, ids, 1, L);
             cuda::Stream other;  // (a stream the expander ran on must outlive its scratch)
             cuda::DeviceExpander ex(ctx, set.table);
-            const bool one_pass = atoms == TaskOptions::Atoms::Dense && set.name != "miconic-simpleadl";
+            const bool one_pass = set.name != "miconic-simpleadl";
             EXPECT_EQ(ex.mode(), one_pass ? cuda::DeviceExpander::Mode::Multi : cuda::DeviceExpander::Mode::PerInstance);
             const cudaStream_t s = ex.stream();
             const cuda::DeviceBuffer d_rows = to_device(ctx, rows, s);
@@ -376,7 +376,7 @@ TEST(DeviceTableExpand, TaskIdsAreChecked)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto all = sets(atoms);
         ASSERT_FALSE(all.empty());
@@ -430,7 +430,7 @@ TEST(DeviceTableEnv, MixedBatchEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
         for (const Set& set : sets(atoms))
             for (const auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
             {
@@ -438,7 +438,7 @@ TEST(DeviceTableEnv, MixedBatchEqualsHost)
                 if (path == cuda::DeviceEnv::Path::Auto)
                 {
                     const std::string why = cuda::DeviceEnv::fast_unsupported(*set.table, config(1));
-                    const bool fast = atoms == TaskOptions::Atoms::Dense && set.name != "miconic-simpleadl";
+                    const bool fast = set.name != "miconic-simpleadl";
                     EXPECT_EQ(why.empty(), fast) << why;
                 }
                 RunOptions r;

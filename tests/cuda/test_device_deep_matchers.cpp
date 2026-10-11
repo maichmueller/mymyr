@@ -1,7 +1,7 @@
 // Device deep-matcher tests (run on GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device):
 //   - deep matchers: organic-synthesis' reactions (matchers of 17 to 31 parameters) run in the deep kernels, not on the
 //     CPU fallback, and the device expand is byte-equal to rl::expand with them (canonical order and the matcher's,
-//     with and without witness pruning), frozen and lazy; exact IW(1) over them gives the same searches in chunks of one
+//     with and without witness pruning), dense and reachable slots; exact IW(1) over them gives the same searches in chunks of one
 //     state as in one chunk;
 //   - the deep kernels' second pass (several warps on a segment's search) gives the rows of the first (one warp),
 //     forward checking and fixed order; the device BrFS over them equals the CPU's in the memory it needs, with its
@@ -46,11 +46,16 @@ cuda::ContextPtr context()
     return cuda::DeviceContext::create(0, o);
 }
 
-TaskPtr load(const std::string& name, bool frozen)
+TaskPtr load(const std::string& name, TaskOptions::Atoms atoms)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
+    o.atoms = atoms;
     return Task::from_text_file(task_path(name), o);
+}
+
+TaskPtr load(const std::string& name, bool frozen)
+{
+    return load(name, frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy);
 }
 
 template<class T>
@@ -99,9 +104,9 @@ TEST(CudaDeep, OrganicSynthesisReactionsRunOnTheDevice)
 TEST(CudaDeep, OrganicSynthesisExpandEqualsRlExpand)
 {
     SKIP_WITHOUT_GPU();
-    for (bool frozen : {true, false})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
-        const auto task = load(k_organic, frozen);
+        const auto task = load(k_organic, atoms);
         const std::vector<State> walk = device_ref_walks(*task, 4, 20, 23);
         const u32 Win = std::max<u32>(task->words(), 1);
         std::vector<u64> states(walk.size() * Win, 0);
@@ -119,7 +124,8 @@ TEST(CudaDeep, OrganicSynthesisExpandEqualsRlExpand)
         for (bool canonical : {true, false})
             for (bool witness : {false, true})
             {
-                SCOPED_TRACE(std::string(frozen ? "frozen" : "lazy") + (canonical ? ", canonical" : ", matcher order") +
+                SCOPED_TRACE(std::string(atoms == TaskOptions::Atoms::Dense ? "dense" : "reachable") +
+                             (canonical ? ", canonical" : ", matcher order") +
                              (witness ? ", witness" : ""));
                 const rl::ExpandOptions o{canonical, witness, true};
                 const u64 total = ex.count({static_cast<const u64*>(d_states.data()), N, Win, 0}, nullptr, o);

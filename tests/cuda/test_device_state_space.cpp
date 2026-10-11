@@ -499,7 +499,7 @@ std::vector<Set> sets(TaskOptions::Atoms atoms)
 
 /// Each instance of the table's run `rs` against its single run (same options) and the host.
 void expect_table_equals(const cuda::ContextPtr& ctx, const Set& set, const std::vector<cuda::DeviceStateSpaceResult>& rs,
-                         const std::vector<StateSpaceResult>& cpu, const cuda::DeviceStateSpaceOptions& o, bool frozen,
+                         const std::vector<StateSpaceResult>& cpu, const cuda::DeviceStateSpaceOptions& o,
                          const std::string& what)
 {
     ASSERT_EQ(rs.size(), set.tasks.size());
@@ -514,15 +514,12 @@ void expect_table_equals(const cuda::ContextPtr& ctx, const Set& set, const std:
         if (rs[i].status == StateSpaceStatus::Ok)
         {
             ASSERT_TRUE(rs[i].host) << w;
-            expect_equal(*cpu[i].space, *rs[i].host, frozen, w + " vs CPU");
+            expect_equal(*cpu[i].space, *rs[i].host, true, w + " vs CPU");
         }
-        if (frozen)  // lazy: a single run would intern into the same tasks again
-        {
-            const cuda::DeviceStateSpaceResult one = cuda::state_space(ctx, set.tasks[i], o);
-            ASSERT_EQ(one.status, rs[i].status) << w;
-            if (one.status == StateSpaceStatus::Ok)
-                expect_equal(*one.host, *rs[i].host, true, w + " vs single");
-        }
+        const cuda::DeviceStateSpaceResult one = cuda::state_space(ctx, set.tasks[i], o);
+        ASSERT_EQ(one.status, rs[i].status) << w;
+        if (one.status == StateSpaceStatus::Ok)
+            expect_equal(*one.host, *rs[i].host, true, w + " vs single");
     }
 }
 
@@ -532,18 +529,12 @@ TEST(DeviceStateSpaces, SetsTogetherEqualSinglesAndCpu)
     const auto ctx = context();
     StateSpaceOptions so = cpu_options(false);
     so.max_states = sanitizer_size() ? 4000 : 40000;  // the larger instances fail on both sides (OutOfStates)
-    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
-        const bool frozen = atoms == TaskOptions::Atoms::Dense;
-        const std::vector<Set> fresh = frozen ? std::vector<Set>{} : sets(atoms);  // lazy: the CPU on tasks of its own
         for (const Set& set : sets(atoms))
         {
             std::vector<StateSpaceResult> cpu;
-            const Set* cpu_set = &set;
-            for (const Set& f : fresh)
-                if (f.name == set.name)
-                    cpu_set = &f;
-            for (const TaskPtr& t : cpu_set->tasks)
+            for (const TaskPtr& t : set.tasks)
             {
                 cpu.push_back(generate_state_space(t, so));
                 if (cpu.back().status == StateSpaceStatus::OutOfStates)
@@ -560,26 +551,24 @@ TEST(DeviceStateSpaces, SetsTogetherEqualSinglesAndCpu)
             EXPECT_GT(ok, 0u) << set.name;
             const cuda::DeviceStateSpaceOptions o = dev_options(so);
             const cuda::DeviceStateSpaces all = cuda::state_spaces(ctx, set.table, o);
-            EXPECT_EQ(all.stats.multi, frozen && set.name != "miconic-simpleadl") << set.name;
-            expect_table_equals(ctx, set, all.results, cpu, o, frozen, frozen ? "frozen" : "lazy");
-            if (!frozen)
-                continue;
+            EXPECT_EQ(all.stats.multi, set.name != "miconic-simpleadl") << set.name;
+            expect_table_equals(ctx, set, all.results, cpu, o, atoms == TaskOptions::Atoms::Dense ? "dense" : "reachable");
             // chunk sizes, waves, a stream of its own: the same results
             cuda::DeviceStateSpaceOptions small = o;
             small.chunk_states = 777;
             small.wave_states = sanitizer_size() ? 1000 : 3000;
-            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, small).results, cpu, o, true, "waves of 3000");
+            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, small).results, cpu, o, "waves of 3000");
             cuda::DeviceStateSpaceOptions pairs = o;
             pairs.wave_instances = 2;
             pairs.chunk_states = 4096;
             const cuda::DeviceStateSpaces p = cuda::state_spaces(ctx, set.table, pairs);
             EXPECT_GE(p.stats.waves, 2u);
-            expect_table_equals(ctx, set, p.results, cpu, o, true, "waves of 2 instances");
+            expect_table_equals(ctx, set, p.results, cpu, o, "waves of 2 instances");
             const cuda::Stream stream;
             cuda::DeviceStateSpaceOptions own = o;
             own.stream = stream.get();
             own.view_bytes = 1 << 16;
-            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, own).results, cpu, o, true, "own stream");
+            expect_table_equals(ctx, set, cuda::state_spaces(ctx, set.table, own).results, cpu, o, "own stream");
         }
     }
 }

@@ -45,16 +45,14 @@ struct SuiteExpander::Impl
     bool counted = false;
     rl::StateBatchView in{};
     u64 stride = 0, total = 0;
-    // the suite on the device: each instance's domain and local id, and its assigned fluent slots (frozen: uploaded
-    // once; lazy slots: at every validating count)
+    // the suite on the device: each instance's domain and local id, and its fluent slots (uploaded once)
     DeviceBuffer dom_of, loc_of, limits;
-    bool lazy = false;
     Scratch ctl, index, pos, order_temp, local, gathered, t_offsets, row_counts, batch_offsets, scan;
     PinnedBuffer host_ctl;
 
     [[nodiscard]] bool one() const noexcept { return subs.size() == 1; }
 
-    /// The instances' assigned fluent slots (rl::expand's validation).
+    /// The instances' fluent slots (rl::expand's validation).
     void upload_limits()
     {
         const u32 I = suite->size();
@@ -82,8 +80,6 @@ struct SuiteExpander::Impl
               "launch_classify");
         if (opt.validate && n)
         {
-            if (lazy)
-                upload_limits();
             check(lifted::launch_check_multi(static_cast<const u32*>(limits.data()), I, ids, in.data, stride, in.words, n,
                                              d + suitek::k_bad_id, d + suitek::k_bad_row, s),
                   "launch_check_multi");
@@ -101,7 +97,7 @@ struct SuiteExpander::Impl
         }
         if (h[suitek::k_bad_row] != 0xFFFFFFFFu)
             throw std::invalid_argument("mymyr: expand: state row " + std::to_string(h[suitek::k_bad_row]) +
-                                        " sets atom slots its instance has not assigned (a state of another task?)");
+                                        " sets atom slots its instance does not have (a state of another task?)");
         const u32* per = h + suitek::k_classify_words;
         const u32* first = per + D;
         u64 present = 0;
@@ -248,14 +244,13 @@ SuiteExpander::SuiteExpander(ContextPtr ctx, rl::TaskSuitePtr suite, cudaStream_
         I.subs.push_back(std::make_unique<DeviceExpander>(I.ctx, I.suite->table(d), I.s));
     if (D == 1)
         return;
-    // the instances' domains and local ids, and (frozen slots) their assigned fluent slots
+    // the instances' domains and local ids, and their fluent slots
     DeviceGuard guard(I.ctx->device());
     std::vector<u32> dom(I.suite->size()), loc(I.suite->size());
     for (u32 g = 0; g < I.suite->size(); ++g)
     {
         dom[g] = I.suite->domain_of(g);
         loc[g] = I.suite->local_id(g);
-        I.lazy = I.lazy || !I.suite->task(g)->atoms().frozen();
     }
     I.dom_of = DeviceBuffer(I.ctx, dom.size() * sizeof(u32), I.s);
     I.loc_of = DeviceBuffer(I.ctx, loc.size() * sizeof(u32), I.s);

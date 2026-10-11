@@ -1,7 +1,7 @@
 // Device env CUDA-graph tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device): the device env's calls
 // captured into CUDA graphs (stream capture in global mode, so a call that synchronizes, queries or allocates fails
 // the capture) and replayed equal the same calls run eagerly and rl::HostEnv, byte for byte, on the table instance
-// sets (frozen: the fast
+// sets (dense slots: the fast
 // path over several instances, the launch groups forked onto the env's auxiliary streams inside the capture) and on
 // tables of one of their instances:
 //   - graphs of K steps (random steps, given actions from a device buffer the test rewrites between replays,
@@ -211,7 +211,7 @@ void run_graph(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const
     cuda::check(cudaStreamSynchronize(other), "sync");
 }
 
-/// The sets as tables (frozen slots: the fast path), and tables of one of their smallest and largest instances.
+/// The sets as tables (dense slots: the fast path), and tables of one of their smallest and largest instances.
 std::vector<Set> graph_sets()
 {
     std::vector<Set> out;
