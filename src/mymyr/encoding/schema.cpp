@@ -426,8 +426,12 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     hasher.integer(k_schema_version);
     hasher.integer(static_cast<u64>(o.layout));
     hasher.integer(static_cast<u64>(o.index));
-    hasher.integer(o.emit_counts ? 1 : 0);
-    hasher.integer(schema->m_implicit_entities ? 1 : 0);
+    // the options of the stored arrays are hashed only when they omit an array, so that an encoding that stores every
+    // array keeps one fingerprint however it was asked for
+    if (!o.emit_counts)
+        hasher.text("omit relation_counts");
+    if (schema->m_implicit_entities)
+        hasher.text("omit entity_role, entity_ref");
     hasher.integer(o.targets.bits());
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));

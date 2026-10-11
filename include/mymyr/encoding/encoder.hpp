@@ -34,7 +34,12 @@
 // The tuples of a cell are the atoms of its predicate in the order of the instance's atom slots, which is the
 // lexicographic order of their objects; a nullary atom is the unary tuple [auxiliary entity]. A graph contains nothing
 // that its row and instance do not have. Encoding a slice of a batch gives the slice of the batch's encoding, with the
-// offsets rebased.
+// offsets rebased (in the graph-major layout; the cells of a relation-major slice are the same cells, in the order of
+// their own segments).
+//
+// Threads. The calls that take a ThreadPool split the graphs into one contiguous slice per member (ThreadPool::slice)
+// and run two parallel passes, count and fill, between which the members' sizes are scanned serially. Every position
+// is a sum over the graphs before it in batch order, so the output does not depend on the pool size.
 
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/encoding/context.hpp"
@@ -76,7 +81,6 @@ struct FlatSizes
     u64 tuples = 0;
     u64 args = 0;
     u32 overflow = 0;  // k_overflow_* flags; 0: the batch fits
-    u32 reserved = 0;
     [[nodiscard]] bool overflowed() const noexcept { return overflow != 0; }
 };
 
@@ -97,8 +101,8 @@ struct FlatBuffers
     void* relation_args = nullptr;
 };
 
-/// Working memory of one encoder call: per-graph sizes and bases, derived words, and per-thread tallies. Reused across
-/// calls (grown as needed), it makes repeated calls allocation-free. One scratch serves one call at a time.
+/// Working memory of encoder calls: per-member graph sizes, derived words and tallies. It is reused across calls (grown
+/// as needed). One scratch serves one call at a time, and fill() needs the scratch of the count() before it.
 class EncodeScratch
 {
 public:
@@ -148,8 +152,7 @@ public:
     void fill(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,
               EncodeScratch& scratch) const;
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
-    /// returned sizes are true; if they overflow, no array of `out` is written. Allocates nothing once `scratch` has
-    /// grown.
+    /// returned sizes are true; if they overflow, no array of `out` is written. Reuses the buffers of `scratch`.
     FlatSizes encode_into(const EncodeInput& in, const FlatCapacities& capacities, const FlatBuffers& out, ThreadPool& pool,
                           EncodeScratch& scratch) const;
 

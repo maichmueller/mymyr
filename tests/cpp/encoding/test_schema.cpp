@@ -40,8 +40,8 @@ std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 
 using R = SlotRole;
 
-constexpr u64 PIN_DEFAULT = 0x9cae243aca84741f, PIN_DELTA = 0xf0bf48ac76f3d206, PIN_TARGETS = 0x86f4e1f1a3be9f96,
-                PIN_FULL = 0xa3d6a87bdc752437;
+constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0x31e6ae6fd252e8a1,
+                PIN_FULL = 0x8f230d9913e98bf7;
 
 TEST(EncodingSchema, DefaultCatalogIsSortedBytewiseAndNamedLikeMifrost)
 {
