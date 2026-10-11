@@ -21,8 +21,9 @@ nanobind_add_module(_core FREE_THREADED NB_STATIC
     src/search_bindings.cpp
     src/landmarks_bindings.cpp
     src/datasets_bindings.cpp
+    src/encoding_bindings.cpp
 )
-target_link_libraries(_core PRIVATE mymyr::core mymyr_warnings)
+target_link_libraries(_core PRIVATE mymyr::core mymyr::encoding mymyr_warnings)
 # mymyr.Domain, when the loki front end is built (MYMYR_FRONTEND, the default).
 if(TARGET mymyr_frontend)
     target_sources(_core PRIVATE src/frontend_bindings.cpp)
