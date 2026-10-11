@@ -220,7 +220,7 @@ public:
     /// (positive first, predicate id, objects) without duplicates. The planner's goal test is unaffected.
     [[nodiscard]] std::span<const formalism::Literal> encoding_goal() const noexcept { return m_data.encoding_goal_literals(); }
     /// Whether encoding_goal() is the whole goal: false when a conjunct could not be expanded (`or`, `exists`, `imply`
-    /// over fluents, numeric constraints), or when the task came from a text without the goal as written and its
+    /// over fluents, `not and`, numeric constraints, too many quantifier bindings), or when the task came from a text without the goal as written and its
     /// planner goal mentions predicates that goal normalization introduced.
     [[nodiscard]] bool encoding_goal_complete() const noexcept { return m_data.encoding_goal_complete; }
     /// Whether a literal of encoding_goal() over a static predicate fails in the initial atoms: no state is a goal.

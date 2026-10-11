@@ -242,9 +242,11 @@ struct TaskData
     // (sign: positive first, predicate id, objects) and free of duplicates. It is the goal as written, with
     // conjunctions flattened, `forall` expanded over the objects of the quantified types (constants included, in
     // object order) and `imply` with a static antecedent that holds expanded (one that fails contributes nothing).
+    // Negation is pushed inward (`not or`, `not exists`, `not imply` with a static antecedent that holds, `not not`).
     // Literals over static predicates are evaluated: a true one is kept, a false one is kept too and sets
-    // `encoding_goal_unsatisfiable`. A conjunct that cannot be expanded (`or`, `exists`, `imply` with a fluent
-    // antecedent, a numeric constraint) is left out and clears `encoding_goal_complete`. The planner's goal (`goal`)
+    // `encoding_goal_unsatisfiable`. A conjunct that cannot be expanded (`or`, `exists`, `not and`, `not forall`,
+    // `imply` with a fluent antecedent, a numeric constraint) is left out and clears `encoding_goal_complete`; so is
+    // one whose quantifiers would take the goal past the budget of quantifier bindings. The planner's goal (`goal`)
     // is not affected.
     // `encoding_goal_recorded` is false for a TaskData whose front end did not record it (`encoding_goal` is then
     // empty); a Task derives it with set_encoding_goal_from_normalized.
