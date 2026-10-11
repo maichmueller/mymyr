@@ -686,9 +686,13 @@ void bind_rl_torch(nb::module_& parent)
              "(one launch per object-word group at its widest bucket; the default) or 'per_bucket'. The results do not "
              "depend on it; a no-op on the CPU.")
         .def("initial_states", &PyEnv::initial_states, "The instances' initial states as rows: NumPy uint64 [I, row_words].")
-        .def("goal", &PyEnv::goal, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),
-             "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(), "out"_a, "stream"_a = nb::none(),
-             "Writes the current goal flags into out [N] bool, without moving or changing counters.")
+        .def(
+            "goal",
+            [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg out,
+               StreamArg stream) { e.goal(states, task_ids, goal_pos, goal_neg, out, stream); },
+            "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),
+            "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(), "out"_a, "stream"_a = nb::none(),
+            "Writes the current goal flags into out [N] bool, without moving or changing counters.")
         .def(
             "reset",
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg counts, ArrayArg views,
