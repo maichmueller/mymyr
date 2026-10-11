@@ -1,7 +1,7 @@
 """LM-cut and the landmark count through mymyr.search: kind names, admissibility of LM-cut, the path-dependent status
 of the landmark count (initial_status, progress, merge, h(state, status), preferred actions), every best-first search
-with both, refusals, one heuristic per thread over a shared task, and searches on several threads sharing one
-landmark count object."""
+with both, refusals, one heuristic per thread over a shared task, searches on several threads sharing one
+landmark count object, and independence of the atom slots."""
 
 import math
 import threading
@@ -182,6 +182,45 @@ def test_searches_on_other_threads_share_a_landmark_count_object():
     for t in threads:
         t.join()
     assert not errors and ref and results == [ref] * 12
+
+
+def test_values_statuses_and_searches_do_not_depend_on_atom_slots():
+    """LM-cut, the landmark count with its statuses and preferred actions, and searches with them agree under every
+    atom mode, lazy slots numbered by a randomized search included."""
+    tasks = [text_task("depot__p02", atoms=m) for m in ("dense", "auto", "reachable", "lazy")]
+    search.brfs(tasks[-1], max_states=3000, layer_order="randomized", seed=3, stop_at_goal=False)
+    labels = [str(a) for a in search.astar(tasks[0], heuristic="max").plan]
+
+    def trace(task):
+        cut, count = search.Heuristic(task, "lmcut"), search.Heuristic(task, "lmcount")
+        s = task.initial_state
+        status = count.initial_status(s)
+        out = []
+        for name in labels + [None]:
+            for a in task.applicable_actions(s):  # every successor of the path, with its progressed status
+                t = task.apply(s, a)
+                st = count.progress(status, s, a, t)
+                out.append((str(a), cut(t), count(t, st), st, sorted(map(str, count.preferred_actions(t, st)))))
+            out.append((None, cut(s), count(s, status), status, sorted(map(str, count.preferred_actions(s, status)))))
+            if name is None:
+                break
+            a = next(x for x in task.applicable_actions(s) if str(x) == name)
+            t = task.apply(s, a)
+            status, s = count.progress(status, s, a, t), t
+        return sorted(out, key=lambda x: (x[0] or "",) + x[1:])
+
+    runs = (lambda t: search.astar(t, heuristic="lmcut"),
+            lambda t: search.astar(t, heuristic="lmcount", lazy=True),
+            lambda t: search.gbfs(t, heuristic="lmcount"),
+            lambda t: search.gbfs(t, heuristic="lmcount", lazy=True))
+    ref = trace(tasks[0])
+    ref_runs = [run(tasks[0]) for run in runs]
+    for task in tasks[1:]:
+        assert trace(task) == ref, task.atom_mode
+        for run, r in zip(runs, ref_runs):
+            got = run(task)
+            assert [str(a) for a in got.plan] == [str(a) for a in r.plan], task.atom_mode
+            assert got.stats.expanded == r.stats.expanded and got.evaluations == r.evaluations, task.atom_mode
 
 SHORTCUT_DOMAIN = """(define (domain d) (:requirements :strips)
  (:predicates (x) (y1) (y) (g))
