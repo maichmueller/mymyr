@@ -34,37 +34,57 @@ i64 ArrayBundle::scalar(std::string_view name, i64 fallback) const noexcept
 void ArrayBundle::Builder::add_bytes(std::string name, DType dtype, std::vector<i64> shape, std::vector<std::byte> bytes,
                                      bool words)
 {
-    ArrayInfo info;
-    info.name = std::move(name);
-    info.dtype = dtype;
-    info.shape = std::move(shape);
-    info.words = words;
-    if (info.elements() * dtype_bytes(dtype) != bytes.size())
-        throw std::logic_error("ArrayBundle: array '" + info.name + "' has a size that does not match its shape");
-    m_items.emplace_back(std::move(info), std::move(bytes));
+    Item item;
+    item.info.name = std::move(name);
+    item.info.dtype = dtype;
+    item.info.shape = std::move(shape);
+    item.info.words = words;
+    if (item.info.elements() * dtype_bytes(dtype) != bytes.size())
+        throw std::logic_error("ArrayBundle: array '" + item.info.name + "' has a size that does not match its shape");
+    item.size = bytes.size();
+    item.bytes = std::move(bytes);
+    m_items.push_back(std::move(item));
+}
+
+void ArrayBundle::Builder::add_uninitialized(std::string name, DType dtype, std::vector<i64> shape, bool words)
+{
+    Item item;
+    item.info.name = std::move(name);
+    item.info.dtype = dtype;
+    item.info.shape = std::move(shape);
+    item.info.words = words;
+    item.size = item.info.elements() * dtype_bytes(dtype);
+    item.uninitialized = true;
+    m_items.push_back(std::move(item));
 }
 
 ArrayBundle ArrayBundle::Builder::build()
 {
     ArrayBundle b;
     u64 off = 0;
-    for (auto& [info, bytes] : m_items)
+    for (Item& item : m_items)
     {
-        info.offset = off;
-        off += (bytes.size() + 63) & ~u64{63};
+        item.info.offset = off;
+        off += (item.size + 63) & ~u64{63};
     }
     b.m_bytes = std::max<u64>(off, 64);
     // 64-byte aligned block (zero-copy importers such as XLA's CPU client want aligned buffers): over-allocate and
-    // align by hand
-    b.m_block = std::make_unique<std::byte[]>(b.m_bytes + 64);
+    // align by hand. Only the padding is zeroed here, so that equal inputs give equal bytes; a reserved array is left
+    // for its writer.
+    b.m_block = std::make_unique_for_overwrite<std::byte[]>(b.m_bytes + 64);
     const auto addr = reinterpret_cast<std::uintptr_t>(b.m_block.get());
     b.m_base = b.m_block.get() + ((64 - addr % 64) % 64);
-    for (auto& [info, bytes] : m_items)
+    u64 end = 0;
+    for (Item& item : m_items)
     {
-        if (!bytes.empty())
-            std::memcpy(b.m_base + info.offset, bytes.data(), bytes.size());
-        b.m_arrays.push_back(std::move(info));
+        const u64 padded = (item.size + 63) & ~u64{63};
+        if (!item.uninitialized && !item.bytes.empty())
+            std::memcpy(b.m_base + item.info.offset, item.bytes.data(), item.bytes.size());
+        std::memset(b.m_base + item.info.offset + item.size, 0, padded - item.size);
+        end = item.info.offset + padded;
+        b.m_arrays.push_back(std::move(item.info));
     }
+    std::memset(b.m_base + end, 0, b.m_bytes - end);
     b.m_scalars = std::move(m_scalars);
     m_items.clear();
     return b;

@@ -1,0 +1,180 @@
+#include "mymyr/encoding/validate.hpp"
+
+#include <bit>
+#include <stdexcept>
+#include <string>
+
+namespace mymyr::encoding
+{
+namespace
+{
+[[noreturn]] void fail(const std::string& what) { throw std::invalid_argument("mymyr: encoding: " + what); }
+
+/// An index array of either width.
+struct Ints
+{
+    const void* data = nullptr;
+    u64 size = 0;
+    bool wide = false;
+    [[nodiscard]] i64 operator[](u64 i) const
+    {
+        return wide ? static_cast<const i64*>(data)[i] : static_cast<i64>(static_cast<const i32*>(data)[i]);
+    }
+};
+
+/// The entity role an argument position of this slot role must hold.
+EntityRole entity_role_of(SlotRole role)
+{
+    switch (role)
+    {
+        case SlotRole::Argument: return EntityRole::Object;
+        case SlotRole::Predicate: return EntityRole::PredicateVirtual;
+        case SlotRole::State: return EntityRole::State;
+        case SlotRole::Action: return EntityRole::Action;
+        case SlotRole::GoalTarget: return EntityRole::Goal;
+        case SlotRole::SubgoalTarget: return EntityRole::Subgoal;
+        case SlotRole::HistoryTarget: return EntityRole::HistoryTarget;
+        case SlotRole::History: return EntityRole::History;
+        case SlotRole::Auxiliary: return EntityRole::Auxiliary;
+    }
+    return EntityRole::Object;
+}
+
+const rl::ArrayInfo* array(const rl::ArrayBundle& batch, const char* name, rl::DType dtype, const std::vector<i64>& shape)
+{
+    const rl::ArrayInfo* info = batch.find(name);
+    if (!info)
+        fail(std::string("the array ") + name + " is missing");
+    if (info->dtype != dtype)
+        fail(std::string("the array ") + name + " has the wrong dtype");
+    if (info->shape != shape)
+        fail(std::string("the array ") + name + " has the wrong shape");
+    return info;
+}
+
+void check_offsets(const Ints& offsets, u64 end, const char* name)
+{
+    if (offsets.size == 0 || offsets[0] != 0)
+        fail(std::string(name) + " does not start at 0");
+    for (u64 i = 1; i < offsets.size; ++i)
+        if (offsets[i] < offsets[i - 1])
+            fail(std::string(name) + " decreases at " + std::to_string(i));
+    if (static_cast<u64>(offsets[offsets.size - 1]) != end)
+        fail(std::string(name) + " does not end at the size of the array it indexes");
+}
+}  // namespace
+
+void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+{
+    const i64 version = batch.scalar("version");
+    if (version != 1)
+        fail("unknown batch version " + std::to_string(version));
+    const i64 graphs_scalar = batch.scalar("num_graphs");
+    if (graphs_scalar < 0)
+        fail("num_graphs is missing");
+    const u64 G = static_cast<u64>(graphs_scalar);
+    const u64 R = schema.num_relations();
+    if (batch.scalar("num_relations") != static_cast<i64>(R))
+        fail("num_relations does not match the schema");
+    if (batch.scalar("layout") != 0)
+        fail("the layout is not graph-major");
+    const i64 index_dtype = batch.scalar("index_dtype");
+    if (index_dtype != 0 && index_dtype != 1)
+        fail("index_dtype is neither 0 nor 1");
+    if ((index_dtype == 1) != (schema.options().index == IndexType::I64))
+        fail("index_dtype does not match the schema's index type");
+    if (batch.scalar("schema_fingerprint", 0) != std::bit_cast<i64>(schema.fingerprint()))
+        fail("schema_fingerprint does not match the schema");
+    if (batch.scalar("statics") != 0)
+        fail("statics is not 0");
+    const bool wide = index_dtype == 1;
+    const rl::DType itype = wide ? rl::DType::I64 : rl::DType::I32;
+    auto ints = [&](const rl::ArrayInfo& info) { return Ints{batch.data(info), info.elements(), wide}; };
+    auto g_i64 = static_cast<i64>(G);
+    auto r_i64 = static_cast<i64>(R);
+
+    array(batch, "task_ids", rl::DType::I32, {g_i64});
+    const Ints num_objects = ints(*array(batch, "num_objects", itype, {g_i64}));
+    const Ints entity_offsets = ints(*array(batch, "entity_offsets", itype, {g_i64 + 1}));
+    if (entity_offsets[0] != 0)
+        fail("entity_offsets does not start at 0");
+    const u64 E = static_cast<u64>(entity_offsets[G]);
+    const Ints entity_ref = ints(*array(batch, "entity_ref", itype, {static_cast<i64>(E)}));
+    const rl::ArrayInfo& role_info = *array(batch, "entity_role", rl::DType::U8, {static_cast<i64>(E)});
+    const u8* entity_role = static_cast<const u8*>(batch.data(role_info));
+    const Ints counts = ints(*array(batch, "relation_counts", itype, {g_i64, r_i64}));
+    const Ints tuple_offsets = ints(*array(batch, "relation_offsets", itype, {g_i64 * r_i64 + 1}));
+    const Ints arg_offsets = ints(*array(batch, "relation_arg_offsets", itype, {g_i64 * r_i64 + 1}));
+    const u64 total_args = static_cast<u64>(arg_offsets[G * R]);
+    const Ints args = ints(*array(batch, "relation_args", itype, {static_cast<i64>(total_args)}));
+
+    check_offsets(entity_offsets, E, "entity_offsets");
+    check_offsets(tuple_offsets, static_cast<u64>(tuple_offsets[G * R]), "relation_offsets");
+    check_offsets(arg_offsets, total_args, "relation_arg_offsets");
+
+    constexpr u8 k_object = static_cast<u8>(EntityRole::Object);
+    constexpr u8 k_auxiliary = static_cast<u8>(EntityRole::Auxiliary);
+    for (u64 g = 0; g < G; ++g)
+    {
+        const i64 first = entity_offsets[g], last = entity_offsets[g + 1];
+        const i64 objects = num_objects[g];
+        if (objects < 0 || first + objects > last)
+            fail("graph " + std::to_string(g) + " has more objects than entities");
+        for (i64 e = first; e < last; ++e)
+        {
+            const bool is_object = e < first + objects;
+            if (is_object && (entity_role[e] != k_object || entity_ref[e] != e - first))
+                fail("entity " + std::to_string(e) + " of graph " + std::to_string(g) + " is not its object");
+            if (!is_object && entity_role[e] == k_auxiliary && (e != first + objects || entity_ref[e] != -1))
+                fail("graph " + std::to_string(g) + " has an auxiliary entity that is not at local index num_objects with ref -1");
+            if (!is_object && entity_role[e] == k_object)
+                fail("graph " + std::to_string(g) + " has an object after its objects");
+        }
+        bool auxiliary_used = false;
+        for (u64 r = 0; r < R; ++r)
+        {
+            const u64 cell = g * R + r;
+            const u64 n = static_cast<u64>(counts[cell]);
+            const u32 arity = schema.relation(static_cast<u32>(r)).arity;
+            const auto roles = schema.slot_roles(static_cast<u32>(r));
+            const std::string where = "cell (" + std::to_string(g) + ", " + schema.relation(static_cast<u32>(r)).name + ")";
+            if (counts[cell] < 0 || static_cast<u64>(tuple_offsets[cell + 1] - tuple_offsets[cell]) != n)
+                fail("relation_offsets and relation_counts disagree in " + where);
+            if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
+                fail("relation_arg_offsets and relation_counts disagree in " + where);
+            for (u64 t = 0; t < n; ++t)
+            {
+                const u64 at = static_cast<u64>(arg_offsets[cell]) + t * arity;
+                for (u32 k = 0; k < arity; ++k)
+                {
+                    const i64 id = args[at + k];
+                    if (id < first || id >= last)
+                        fail("a tuple of " + where + " has an entity outside its graph");
+                    if (entity_role[id] != static_cast<u8>(entity_role_of(roles[k])))
+                        fail("a tuple of " + where + " has an entity of the wrong role at position " + std::to_string(k));
+                    if (roles[k] == SlotRole::Auxiliary)
+                        auxiliary_used = true;
+                }
+                if (t > 0)
+                {
+                    u32 k = 0;
+                    while (k < arity && args[at + k] == args[at - arity + k])
+                        ++k;
+                    if (k == arity)
+                        fail("a tuple occurs twice in " + where);
+                    if (args[at + k] < args[at - arity + k])
+                        fail("the tuples of " + where + " are not ascending");
+                }
+            }
+        }
+        u32 auxiliaries = 0;
+        for (i64 e = first; e < last; ++e)
+            auxiliaries += entity_role[e] == k_auxiliary;
+        if (auxiliaries > 1)
+            fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
+        if ((auxiliaries == 1) != auxiliary_used)
+            fail("graph " + std::to_string(g) + (auxiliary_used ? " uses an auxiliary entity it does not have"
+                                                                : " has an auxiliary entity no tuple uses"));
+    }
+}
+}  // namespace mymyr::encoding

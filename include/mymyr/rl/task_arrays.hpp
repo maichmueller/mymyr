@@ -98,6 +98,14 @@ public:
     [[nodiscard]] u64 bytes() const noexcept { return m_bytes; }
     /// The block holding every array (64-byte aligned, bytes() long): uploads copy it as one piece.
     [[nodiscard]] const std::byte* block() const noexcept { return m_base; }
+    /// Write access to an array while the caller still owns the bundle non-const (to fill an array that was reserved
+    /// with Builder::add_uninitialized). A bundle that has been shared is only reachable as const.
+    [[nodiscard]] void* mutable_data(const ArrayInfo& a) noexcept { return m_base + a.offset; }
+    [[nodiscard]] void* mutable_data(std::string_view name) noexcept
+    {
+        const ArrayInfo* a = find(name);
+        return a ? m_base + a->offset : nullptr;
+    }
 
     class Builder;
 
@@ -120,11 +128,21 @@ public:
         add_bytes(std::move(name), dtype, std::move(shape), std::vector<std::byte>(p, p + values.size() * sizeof(T)), words);
     }
     void add_bytes(std::string name, DType dtype, std::vector<i64> shape, std::vector<std::byte> bytes, bool words);
+    /// Reserves an array in the block without copying anything in: its contents are unspecified until the caller writes
+    /// them through ArrayBundle::mutable_data (the padding between arrays is zero).
+    void add_uninitialized(std::string name, DType dtype, std::vector<i64> shape, bool words = false);
     void scalar(std::string name, i64 value) { m_scalars.emplace_back(std::move(name), value); }
     [[nodiscard]] ArrayBundle build();
 
 private:
-    std::vector<std::pair<ArrayInfo, std::vector<std::byte>>> m_items;
+    struct Item
+    {
+        ArrayInfo info;
+        std::vector<std::byte> bytes;
+        u64 size = 0;  // bytes of the array
+        bool uninitialized = false;
+    };
+    std::vector<Item> m_items;
     std::vector<std::pair<std::string, i64>> m_scalars;
 };
 
