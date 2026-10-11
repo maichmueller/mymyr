@@ -127,9 +127,6 @@ struct GroundLiteral
     friend bool operator==(const GroundLiteral&, const GroundLiteral&) = default;
 };
 
-/// The task's encoding goal (TaskData::encoding_goal) as ground literals, in its order.
-[[nodiscard]] std::vector<GroundLiteral> encoding_goal(const formalism::TaskData& task);
-
 /// A ground conjunctive condition (a value type): ground literals over static, fluent and derived predicates (the kind
 /// comes from the predicate) and numeric constraints over ground expressions.
 struct GroundCondition

@@ -232,14 +232,23 @@ duplicates:
 - `imply ψ φ` is expanded to `φ` when `ψ` is decided by static atoms and equality alone and holds, and contributes
   nothing when `ψ` fails;
 - a literal over a static predicate (equality included) is kept, whether it holds in the initial atoms or not; when it
-  fails, `task.encoding_goal_unsatisfiable` is true, because no state is a goal.
+  fails, `task.encoding_goal_unsatisfiable` is true, because no state is a goal;
+- negation is pushed inward: `not or` is a conjunction of negations, `not exists` a `forall` of the negation,
+  `not imply ψ φ` with a static `ψ` that holds is `not φ`, and `not not φ` is `φ`.
 
-A conjunct that cannot be expanded (`or`, `exists`, `imply` over fluents, a negated compound, a numeric constraint) is
+A conjunct that cannot be expanded (`or`, `exists`, `imply` over fluents, `not and`, `not forall`, a numeric constraint) is
 left out, and `task.encoding_goal_complete` is false. For a task whose goal is a conjunction of literals, the encoding
 goal is the goal itself and `encoding_goal_complete` is true. The planner's goal, `task.goal_condition` and the search
 are unaffected. `Task.from_text` has no goal as written: the encoding goal is the planner's goal without the `axiom_<k>`
 literals, complete if there were none, unless the text carries it (`NormalizedTask.to_text(encoding_goal=True)`).
-A `forall` is expanded over at most 2^24 bindings; beyond that the goal is left incomplete.
+The bindings of the quantifiers of a goal are counted up front (the product of the sizes of their domains): a
+conjunct whose quantifiers would take the goal past 2^24 bindings in total is left out whole, and the goal is
+incomplete. A task built without a front end (a `TaskData` with no recorded encoding goal) gets the text derivation
+described above when the `Task` is created.
+
+The text derivation recognizes the derived predicates that goal normalization introduced by their name (`axiom_<k>`),
+so a task read from text whose goal uses a user predicate of that name has it left out of the encoding goal (and the
+goal incomplete). Tasks from PDDL are not affected: they expand the goal as written.
 
 ## Binding generators
 

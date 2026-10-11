@@ -246,7 +246,10 @@ struct TaskData
     // `encoding_goal_unsatisfiable`. A conjunct that cannot be expanded (`or`, `exists`, `imply` with a fluent
     // antecedent, a numeric constraint) is left out and clears `encoding_goal_complete`. The planner's goal (`goal`)
     // is not affected.
+    // `encoding_goal_recorded` is false for a TaskData whose front end did not record it (`encoding_goal` is then
+    // empty); a Task derives it with set_encoding_goal_from_normalized.
     Range encoding_goal;
+    bool encoding_goal_recorded = false;
     bool encoding_goal_complete = true;
     bool encoding_goal_unsatisfiable = false;
 
@@ -303,10 +306,12 @@ void set_encoding_goal(TaskData& t, std::vector<GroundLiteralData> literals, boo
 
 /// The encoding goal of a task whose goal as written is not available: the literals of `goal` except those over the
 /// derived predicates that goal normalization introduced (loki names them "axiom_<k>"), complete iff nothing was left
-/// out and the goal has no numeric constraints. For a conjunctive goal this is the goal itself.
+/// out and the goal has no numeric constraints. For a conjunctive goal this is the goal itself. The derived
+/// predicates are recognized by their name, so a user predicate called "axiom_<k>" in the goal is left out too.
 void set_encoding_goal_from_normalized(TaskData& t);
 
-/// Whether the encoding goal of `t` is the one set_encoding_goal_from_normalized would give.
+/// Whether the encoding goal of `t` is the one set_encoding_goal_from_normalized would give (true if none is
+/// recorded).
 [[nodiscard]] bool has_default_encoding_goal(const TaskData& t);
 
 /// Structural validation (ranges in bounds, arities consistent, derived heads, ground goal). Throws on violation.

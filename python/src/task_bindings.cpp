@@ -1628,9 +1628,7 @@ void bind_task_api(nb::class_<C>& cls)
             "The goal as a GroundCondition (each literal once, then the numeric constraints).")
         .def_prop_ro(
             "encoding_goal",
-            [owner](Self self) {
-                return nb::typed<nb::tuple, PyGroundLiteral, nb::ellipsis>(make_encoding_goal(task_owner(owner(self))));
-            },
+            [owner](Self self) { return make_encoding_goal(task_owner(owner(self))); },
             "The goal as written, expanded into signed ground literals for encodings: conjunctions flattened, `forall` "
             "expanded over the objects of the quantified types (constants included, in object order), `imply` with a "
             "static antecedent expanded. A tuple of GroundLiterals, positive ones first, then by predicate and objects, "

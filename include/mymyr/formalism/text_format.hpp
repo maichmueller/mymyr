@@ -21,7 +21,7 @@ TaskData read_task_text_file(const std::string& path);
 
 /// Writes the task in this text format: the numeric variant iff the task has functions or a metric. With
 /// `encoding_goal`, a trailing section "EG <complete> <k>" followed by k ground literals (predicate, sign, objects)
-/// records the task's encoding goal; without it, reading derives the encoding goal from the planner's goal
+/// records the task's encoding goal (omitted when none is recorded); without it, reading derives the encoding goal from the planner's goal
 /// (set_encoding_goal_from_normalized).
 std::string write_task_text(const TaskData& t, bool encoding_goal = false);
 }  // namespace mymyr::formalism

@@ -5,7 +5,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
 
 namespace mymyr::formalism
 {
@@ -83,6 +82,8 @@ void check_condition(const TaskData& t, const Condition& c, u32 num_params, cons
         check_expr(t, nc.rhs, num_params, where);
     }
 }
+
+void check_encoding_goal(const TaskData& t);
 }  // namespace
 
 static void check_ground_atom(const TaskData& t, const GroundAtom& a, const char* where)
@@ -117,6 +118,7 @@ void validate(const TaskData& t)
     check_range(t.literals, t.encoding_goal, "encoding goal");
     for (const auto& l : t.encoding_goal_literals())
         check_literal(t, l, 0, "encoding goal");
+    check_encoding_goal(t);
     for (const auto& s : t.schemas)
     {
         check_range(t.params, s.params, "schema params");
@@ -206,14 +208,59 @@ void sort_unique(std::vector<GroundLiteralData>& v)
     std::ranges::sort(v, less);
     v.erase(std::unique(v.begin(), v.end(), [&](const auto& a, const auto& b) { return !less(a, b) && !less(b, a); }), v.end());
 }
+
+/// Whether a literal of the encoding goal over a static predicate fails against the initial atoms.
+bool static_goal_fails(const TaskData& t)
+{
+    std::set<std::vector<u32>> wanted_true, wanted_false;  // static literals by (predicate, objects): positive / negative
+    std::vector<u8> is_static(t.predicates.size(), 0);
+    for (const Literal& l : t.encoding_goal_literals())
+        if (t.predicates[l.pred.v].kind == PredKind::Static)
+        {
+            is_static[l.pred.v] = 1;
+            std::vector<ObjectId> objects;
+            for (Term x : t.terms_of(l))
+                objects.push_back(term_object(x));
+            (l.positive ? wanted_true : wanted_false).insert(key_of(l.pred, objects));
+        }
+    if (wanted_true.empty() && wanted_false.empty())
+        return false;
+    // a static literal fails when its atom is absent (positive) or present (negative)
+    std::set<std::vector<u32>> present;
+    for (const GroundAtom& a : t.static_init)
+        if (is_static[a.pred.v])
+            if (auto k = key_of(a.pred, t.objects_of(a)); wanted_true.contains(k) || wanted_false.contains(k))
+                present.insert(std::move(k));
+    return std::ranges::any_of(wanted_true, [&](const auto& k) { return !present.contains(k); })
+           || std::ranges::any_of(wanted_false, [&](const auto& k) { return present.contains(k); });
+}
+
+/// The encoding goal is sorted (positive first, predicate id, objects) without duplicates, and its unsatisfiable flag
+/// matches its static literals.
+void check_encoding_goal(const TaskData& t)
+{
+    if (!t.encoding_goal_recorded && t.encoding_goal.count != 0)
+        invalid("encoding goal literals without a recorded encoding goal");
+    const auto literals = t.encoding_goal_literals();
+    auto key = [&](const Literal& l)
+    {
+        std::vector<u32> k{l.positive ? 0u : 1u, l.pred.v};
+        for (Term x : t.terms_of(l))
+            k.push_back(term_object(x).v);
+        return k;
+    };
+    for (size_t i = 1; i < literals.size(); ++i)
+        if (!(key(literals[i - 1]) < key(literals[i])))
+            invalid("encoding goal is not sorted and unique");
+    if (t.encoding_goal_unsatisfiable != static_goal_fails(t))
+        invalid("encoding_goal_unsatisfiable does not match the static literals of the encoding goal");
+}
 }  // namespace
 
 void set_encoding_goal(TaskData& t, std::vector<GroundLiteralData> literals, bool complete)
 {
     sort_unique(literals);
     std::vector<Literal> out;
-    std::set<std::vector<u32>> wanted_true, wanted_false;  // static literals by (predicate, objects): positive / negative
-    std::vector<u8> is_static(t.predicates.size(), 0);
     for (const GroundLiteralData& g : literals)
     {
         Literal l;
@@ -224,26 +271,11 @@ void set_encoding_goal(TaskData& t, std::vector<GroundLiteralData> literals, boo
             terms.push_back(object_term(o));
         l.terms = TaskData::append<Term>(t.terms, terms);
         out.push_back(l);
-        if (t.predicates[g.pred.v].kind == PredKind::Static)
-        {
-            is_static[g.pred.v] = 1;
-            (g.positive ? wanted_true : wanted_false).insert(key_of(g.pred, g.objects));
-        }
     }
     t.encoding_goal = TaskData::append<Literal>(t.literals, out);
+    t.encoding_goal_recorded = true;
     t.encoding_goal_complete = complete;
-    // a static literal fails when its atom is absent (positive) or present (negative)
-    t.encoding_goal_unsatisfiable = false;
-    std::set<std::vector<u32>> present;
-    if (!wanted_true.empty() || !wanted_false.empty())
-        for (const GroundAtom& a : t.static_init)
-            if (is_static[a.pred.v])
-                if (auto k = key_of(a.pred, t.objects_of(a)); wanted_true.contains(k) || wanted_false.contains(k))
-                    present.insert(std::move(k));
-    for (const auto& k : wanted_true)
-        t.encoding_goal_unsatisfiable = t.encoding_goal_unsatisfiable || !present.contains(k);
-    for (const auto& k : wanted_false)
-        t.encoding_goal_unsatisfiable = t.encoding_goal_unsatisfiable || present.contains(k);
+    t.encoding_goal_unsatisfiable = static_goal_fails(t);
 }
 
 void set_encoding_goal_from_normalized(TaskData& t)
@@ -255,6 +287,8 @@ void set_encoding_goal_from_normalized(TaskData& t)
 
 bool has_default_encoding_goal(const TaskData& t)
 {
+    if (!t.encoding_goal_recorded)
+        return true;
     std::vector<GroundLiteralData> lits;
     const bool complete = default_goal(t, lits);
     if (complete != t.encoding_goal_complete)

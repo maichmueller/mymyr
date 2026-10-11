@@ -140,10 +140,11 @@ public:
             std::vector<GroundLiteralData> lits;
             for (u32 i = 0; i < k; ++i)
             {
-                const Literal l = literal(/*ground=*/true);
-                GroundLiteralData g{l.pred, l.positive, {}};
-                for (Term x : t.terms_of(l))
-                    g.objects.push_back(term_object(x));
+                GroundLiteralData g;
+                g.pred = PredicateId{u()};
+                g.positive = u() != 0;
+                for (u32 j = 0; j < t.predicates.at(g.pred.v).arity; ++j)
+                    g.objects.push_back(ObjectId{u()});
                 lits.push_back(std::move(g));
             }
             set_encoding_goal(t, std::move(lits), complete);
@@ -519,7 +520,7 @@ public:
                 condition(a.body);
             }
         }
-        if (m_encoding_goal)
+        if (m_encoding_goal && t.encoding_goal_recorded)
         {
             o << "EG " << (t.encoding_goal_complete ? 1 : 0) << " " << t.encoding_goal.count << "\n";
             for (const auto& l : t.encoding_goal_literals())

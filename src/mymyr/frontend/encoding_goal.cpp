@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -18,8 +19,18 @@ namespace
 {
 using namespace formalism;
 
-/// Expansion stops, and the goal is marked incomplete, after this many quantifier bindings.
+/// A goal may cost at most this many quantifier bindings (counted up front); a conjunct that would exceed what is left
+/// is left out and the goal is marked incomplete.
 constexpr u64 k_max_bindings = u64{1} << 24;
+
+u64 saturating_add(u64 a, u64 b) { return std::min(k_max_bindings + 1, a + b); }
+
+u64 saturating_mul(u64 a, u64 b)
+{
+    if (a == 0 || b == 0)
+        return 0;
+    return a > (k_max_bindings + 1) / b ? k_max_bindings + 1 : std::min(k_max_bindings + 1, a * b);
+}
 
 class Expander
 {
@@ -93,9 +104,13 @@ private:
         return m_type_pred[ty] != ~0u && static_holds(m_type_pred[ty], std::span<const ObjectId>(&o, 1));
     }
 
-    /// The objects a quantified parameter ranges over, in object order: those of any of its types.
-    std::vector<u32> domain_of(const loki::Parameter& parameter)
+    /// The objects a quantified parameter ranges over, in object order: those of any of its types. Computed once per
+    /// parameter.
+    const std::vector<u32>& domain_of(const loki::Parameter& parameter)
     {
+        auto it = m_domain.find(parameter);
+        if (it != m_domain.end())
+            return it->second;
         std::vector<u32> out;
         for (u32 o = 0; o < m_t.objects.size(); ++o)
         {
@@ -105,36 +120,67 @@ private:
             if (any)
                 out.push_back(o);
         }
-        return out;
+        return m_domain.emplace(parameter, std::move(out)).first->second;
     }
 
-    /// Calls `body` with the parameters bound to every tuple of objects of their types, in lexicographic order;
-    /// false once the binding budget is spent.
+    /// The number of bindings of the parameters: the product of their domain sizes, saturated.
+    u64 bindings_of(const loki::ParameterList& parameters)
+    {
+        u64 n = 1;
+        for (const auto& p : parameters)
+            n = saturating_mul(n, domain_of(p).size());
+        return n;
+    }
+
+    /// The number of quantifier bindings expanding or evaluating the condition visits, at most: a quantifier costs its
+    /// bindings times the cost of its body. Saturated above the budget.
+    u64 cost(const loki::Condition& c)
+    {
+        return std::visit(
+            [&](const auto& x) -> u64
+            {
+                using T = std::decay_t<decltype(x)>;
+                if constexpr (std::is_same_v<T, loki::ConditionNot>)
+                    return cost(x->get_condition());
+                else if constexpr (std::is_same_v<T, loki::ConditionAnd> || std::is_same_v<T, loki::ConditionOr>)
+                {
+                    u64 n = 0;
+                    for (const auto& part : x->get_conditions())
+                        n = saturating_add(n, cost(part));
+                    return n;
+                }
+                else if constexpr (std::is_same_v<T, loki::ConditionImply>)
+                    return saturating_add(cost(x->get_left_condition()), cost(x->get_right_condition()));
+                else if constexpr (std::is_same_v<T, loki::ConditionExists> || std::is_same_v<T, loki::ConditionForall>)
+                    return saturating_mul(bindings_of(x->get_parameters()), std::max<u64>(1, cost(x->get_condition())));
+                else
+                    return 0;
+            },
+            c->get_condition());
+    }
+
+    /// Calls `body` with the parameters bound to every tuple of objects of their types, in lexicographic order, until
+    /// it returns false.
     template<class F>
     bool bind_all(const loki::ParameterList& parameters, size_t position, F& body)
     {
         if (position == parameters.size())
-        {
-            if (m_bindings++ >= k_max_bindings)
-                return false;
-            body();
-            return true;
-        }
+            return body();
         const loki::Variable var = parameters[position]->get_variable();
         const auto outer = m_binding.find(var);
         const std::optional<u32> saved = outer == m_binding.end() ? std::nullopt : std::optional<u32>(outer->second);
-        bool ok = true;
+        bool more = true;
         for (u32 o : domain_of(parameters[position]))
         {
             m_binding[var] = o;
-            if (!(ok = bind_all(parameters, position + 1, body)))
+            if (!(more = bind_all(parameters, position + 1, body)))
                 break;
         }
         if (saved)
             m_binding[var] = *saved;
         else
             m_binding.erase(var);
-        return ok;
+        return more;
     }
 
     /// The truth value of a condition from static atoms and equality alone.
@@ -184,11 +230,12 @@ private:
                             undecided = true;
                         else if (*v == any)
                             decided = true;
+                        return !decided;
                     };
-                    const bool finished = bind_all(x->get_parameters(), 0, visit);
+                    bind_all(x->get_parameters(), 0, visit);
                     if (decided)
                         return any;
-                    return finished && !undecided ? Value(!any) : std::nullopt;
+                    return undecided ? std::nullopt : Value(!any);
                 }
                 else
                     return std::nullopt;  // numeric constraints
@@ -211,8 +258,23 @@ private:
         return undecided ? std::nullopt : Value(!any);
     }
 
+    /// Charges a quantified conjunct against the budget; false (nothing charged) when it does not fit. Conjuncts
+    /// inside an expanded one are already covered by its charge.
+    bool charge(const loki::Condition& c)
+    {
+        if (m_depth > 0)
+            return true;
+        const u64 n = cost(c);
+        if (n > m_budget)
+            return false;
+        m_budget -= n;
+        return true;
+    }
+
     /// Adds the literals that the condition (negated unless `positive`) requires; a part that cannot be expanded
-    /// clears `m_complete`.
+    /// clears `m_complete`. Negation is pushed inward: not-or is a conjunction of negations, not-exists a forall of
+    /// the negation, not-imply with a static antecedent that holds the negated consequent; not-and and not-forall
+    /// cannot be expanded.
     void expand(const loki::Condition& c, bool positive)
     {
         std::visit(
@@ -230,30 +292,49 @@ private:
                 }
                 else if constexpr (std::is_same_v<T, loki::ConditionNot>)
                     expand(x->get_condition(), !positive);
-                else if constexpr (std::is_same_v<T, loki::ConditionAnd>)
+                else if constexpr (std::is_same_v<T, loki::ConditionAnd> || std::is_same_v<T, loki::ConditionOr>)
                 {
-                    if (!positive)
+                    constexpr bool is_and = std::is_same_v<T, loki::ConditionAnd>;
+                    if (positive != is_and)  // or, not and
                         m_complete = false;
                     else
                         for (const auto& part : x->get_conditions())
-                            expand(part, true);
+                            expand(part, positive);
                 }
-                else if constexpr (std::is_same_v<T, loki::ConditionForall>)
+                else if constexpr (std::is_same_v<T, loki::ConditionForall> || std::is_same_v<T, loki::ConditionExists>)
                 {
-                    auto visit = [&] { expand(x->get_condition(), true); };
-                    if (!positive || !bind_all(x->get_parameters(), 0, visit))
+                    constexpr bool is_forall = std::is_same_v<T, loki::ConditionForall>;
+                    if (positive != is_forall || !charge(c))  // exists, not forall
+                    {
                         m_complete = false;
+                        return;
+                    }
+                    auto visit = [&]
+                    {
+                        expand(x->get_condition(), positive);
+                        return true;
+                    };
+                    ++m_depth;
+                    bind_all(x->get_parameters(), 0, visit);
+                    --m_depth;
                 }
                 else if constexpr (std::is_same_v<T, loki::ConditionImply>)
                 {
-                    const Value antecedent = positive ? evaluate(x->get_left_condition()) : std::nullopt;
-                    if (!antecedent)
+                    if (!charge(c))
+                    {
+                        m_complete = false;
+                        return;
+                    }
+                    ++m_depth;
+                    const Value antecedent = evaluate(x->get_left_condition());
+                    if (!antecedent || (!positive && !*antecedent))
                         m_complete = false;
                     else if (*antecedent)
-                        expand(x->get_right_condition(), true);
+                        expand(x->get_right_condition(), positive);
+                    --m_depth;
                 }
                 else
-                    m_complete = false;  // or, exists, numeric constraints
+                    m_complete = false;  // numeric constraints
             },
             c->get_condition());
     }
@@ -264,9 +345,11 @@ private:
     std::vector<u32> m_type_pred;
     absl::flat_hash_map<u32, absl::flat_hash_set<std::vector<u32>>> m_static;  // static atoms by predicate, on demand
     absl::flat_hash_map<loki::Variable, u32> m_binding;
+    absl::flat_hash_map<loki::Parameter, std::vector<u32>> m_domain;
     std::vector<GroundLiteralData> m_out;
     bool m_complete = true;
-    u64 m_bindings = 0;
+    u64 m_budget = k_max_bindings;
+    u32 m_depth = 0;  // 0 outside every quantified conjunct
 };
 }  // namespace
 

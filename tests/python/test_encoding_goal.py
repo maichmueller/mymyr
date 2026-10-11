@@ -11,6 +11,7 @@ from mymyr import formalism as fm
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GOALS = ROOT / "tests/data/pddl/goals"
 BLOCKS = ROOT / "tests/data/pddl/blocks"
+FEATURES = ROOT / "tests/data/pddl/features"
 
 pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 
@@ -33,6 +34,13 @@ CASES = {
     "exists": ({"(lit a)"}, False, False),
     "forall_exists": ({"(lit a)"}, False, False),
     "negated_forall": ({"(lit a)"}, False, False),
+    "not_or": ({"(lit a)", "(not (lit b))", "(not (ok t1))"}, True, False),
+    "not_exists": ({"(lit a)", "(not (ok k0))", "(not (ok t1))", "(not (ok t2))", "(not (ok b1))"}, True, False),
+    "not_imply": ({"(lit a)", "(not (ok t2))"}, True, False),
+    "not_imply_false": ({"(lit a)"}, False, False),
+    "not_not": ({"(lit a)", "(not (ok t1))"}, True, False),
+    "not_and": ({"(lit a)"}, False, False),
+    "contradiction": ({"(lit a)", "(not (lit a))", "(ok t1)"}, True, False),
     "forall_equality": ({"(not (= home a))", "(not (= a a))", "(not (= b a))"}, True, True),
     "static_false": ({"(heavy t2)", "(lit a)"}, True, True),
     "static_true": ({"(heavy t1)", "(not (heavy t2))", "(lit a)"}, True, False),
@@ -51,6 +59,12 @@ def task_of(domain, problem):
 
 def literals(task):
     return [str(literal) for literal in task.encoding_goal]
+
+
+def goal_key(task):
+    """The encoding goal as (positive, predicate, object indices) triples, which survive a text round trip."""
+    index = {o.name: i for i, o in enumerate(task.formalism.objects)}
+    return [(x.positive, x.predicate.name, [index[o.name] for o in x.objects]) for x in task.encoding_goal]
 
 
 @pytest.mark.parametrize("problem", sorted(CASES))
@@ -132,14 +146,16 @@ def test_pickle_round_trip(domain, problem):
     assert back.fingerprint == task.fingerprint
 
 
-@pytest.mark.parametrize("problem", ["forall", "or", "static_false", "conjunctive", "forall_nested"])
+@pytest.mark.parametrize(
+    "problem", ["forall", "or", "static_false", "conjunctive", "forall_nested", "not_or", "contradiction"]
+)
 def test_text_with_the_encoding_goal(domain, problem, tmp_path):
     normalized = domain.instantiate(GOALS / f"{problem}.pddl")
     path = tmp_path / "task.txt"
     path.write_text(normalized.to_text(encoding_goal=True))
     task = mymyr.Task.from_text(str(path))
     reference = mymyr.Task(normalized)
-    assert len(task.encoding_goal) == len(reference.encoding_goal)
+    assert goal_key(task) == goal_key(reference)
     assert task.encoding_goal_complete is reference.encoding_goal_complete
     assert task.encoding_goal_unsatisfiable is reference.encoding_goal_unsatisfiable
     # a task built from text pickles as text and keeps the goal
@@ -164,3 +180,43 @@ def test_text_without_the_goal_as_written(domain, problem, expected, complete, t
     assert len(task.encoding_goal) == expected
     assert task.encoding_goal_complete is complete
 
+
+
+def test_text_with_numeric_constraints_is_incomplete(tmp_path):
+    domain = mymyr.Domain.from_string(
+        "(define (domain n) (:requirements :strips :numeric-fluents) (:predicates (p)) (:functions (f))"
+        " (:action inc :parameters () :precondition (and) :effect (and (p) (increase (f) 1))))"
+    )
+    normalized = domain.instantiate_string(
+        "(define (problem q) (:domain n) (:init (= (f) 0)) (:goal (and (p) (>= (f) 2))))"
+    )
+    path = tmp_path / "task.txt"
+    path.write_text(normalized.to_text())
+    task = mymyr.Task.from_text(str(path))
+    assert [str(x) for x in task.encoding_goal] == ["(p)"]
+    assert not task.encoding_goal_complete
+
+
+def test_text_and_pddl_agree_on_a_negated_disjunction(domain, tmp_path):
+    normalized = domain.instantiate(GOALS / "not_or.pddl")
+    path = tmp_path / "task.txt"
+    path.write_text(normalized.to_text())
+    from_text = mymyr.Task.from_text(str(path))
+    assert goal_key(from_text) == goal_key(mymyr.Task(normalized))
+    assert from_text.encoding_goal_complete
+
+
+@pytest.mark.parametrize("stem", ["p02", "p03"])
+def test_expanded_goals_equal_their_written_out_twins(stem):
+    domain = mymyr.Domain.from_file(FEATURES / "domain.pddl")
+    written = mymyr.Task(domain.instantiate(FEATURES / f"{stem}.pddl"))
+    twin = mymyr.Task(domain.instantiate(FEATURES / f"{stem}_expanded.pddl"))
+    assert {str(x) for x in written.encoding_goal} == {str(x) for x in twin.goal_condition.literals}
+    assert written.encoding_goal_complete and not written.encoding_goal_unsatisfiable
+
+
+def test_a_false_static_literal_marks_the_problem_unsatisfiable():
+    domain = mymyr.Domain.from_file(FEATURES / "domain.pddl")
+    task = mymyr.Task(domain.instantiate(FEATURES / "p04.pddl"))
+    assert "(fixed b)" in {str(x) for x in task.encoding_goal}
+    assert task.encoding_goal_unsatisfiable
