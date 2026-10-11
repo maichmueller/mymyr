@@ -115,6 +115,8 @@ struct CpuEnvPool::Impl
     HostEnv env;
     u32 N = 0, T = 1, W = 1, NN = 0, L = 1;
     u32 fixed_words = 0;  // PoolOptions::words: the batches' row width (0: each batch's widest instance's)
+    std::vector<u32> inst_words;  // the atom words of each instance (global ids)
+    bool uniform = true;          // every instance has W atom words
     bool goals = false;
     std::vector<u64> states, draws, gpos, gneg;
     std::vector<i32> task_ids, steps;
@@ -175,7 +177,7 @@ struct CpuEnvPool::Impl
     }
 
     /// The atom words of instance g's rows.
-    [[nodiscard]] u32 instance_words(i32 g) const { return env.suite()->instance(static_cast<u32>(g)).words; }
+    [[nodiscard]] u32 instance_words(i32 g) const { return inst_words[static_cast<u32>(g)]; }
 
     /// The row width of a batch of envs `ids` (under the lock: none in flight) whose rows end in instances `next`
     /// (null: their current ones; else both count, the step may autoreset into `next`).
@@ -183,6 +185,8 @@ struct CpuEnvPool::Impl
     {
         if (fixed_words)
             return fixed_words;
+        if (uniform)
+            return W;
         u32 w = 1;
         for (u64 p = 0; p < n; ++p)
         {
@@ -402,6 +406,12 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
         throw std::invalid_argument("mymyr: CpuEnvPool: rows of " + std::to_string(options.words) + " words; the " +
                                     tt.noun() + "'s widest instance has " + std::to_string(I.W));
     I.fixed_words = options.words;
+    I.inst_words.resize(tt.size());
+    for (u32 g = 0; g < tt.size(); ++g)
+    {
+        I.inst_words[g] = tt.instance(g).words;
+        I.uniform = I.uniform && I.inst_words[g] == I.W;
+    }
     I.L = std::max<u32>(1, tt.label_width());
     I.goals = options.goals;
     const u64 RW = I.W + I.NN;

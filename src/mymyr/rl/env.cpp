@@ -197,7 +197,7 @@ void HostEnv::check_step(const EnvBatch& b, const StepOutputs& out, Actions acti
     if (m_config.max_steps && b.rows && !b.steps)
         throw std::invalid_argument("mymyr: env: truncation (max_steps) needs the step counters");
     m_suite->check_task_ids(next_task_ids, b.rows);
-    if (out.final_states && out.words)
+    if (out.final_states && out.words && out.words < m_suite->words())
         for (u64 i = 0; i < b.rows; ++i)
             if (out.words < m_suite->instance(b.instance(i)).words)
                 throw std::invalid_argument("mymyr: env: final state rows of " + std::to_string(out.words) +
