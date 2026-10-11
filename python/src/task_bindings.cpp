@@ -1626,6 +1626,22 @@ void bind_task_api(nb::class_<C>& cls)
                 return Arg<PyGroundCondition>(make_ground_condition(task_owner(owner(self)), GroundCondition::goal(*self.p->core->task)));
             },
             "The goal as a GroundCondition (each literal once, then the numeric constraints).")
+        .def_prop_ro(
+            "encoding_goal",
+            [owner](Self self) { return make_encoding_goal(task_owner(owner(self))); },
+            "The goal as written, expanded into signed ground literals for encodings: conjunctions flattened, `forall` "
+            "expanded over the objects of the quantified types (constants included, in object order), `imply` with a "
+            "static antecedent expanded, negation pushed inward. A tuple of GroundLiterals, positive ones first, then by predicate and objects, "
+            "without duplicates. A literal over a static predicate that fails in the initial atoms is kept "
+            "(encoding_goal_unsatisfiable). A conjunct that cannot be expanded is left out and clears "
+            "encoding_goal_complete. The planner's goal (goal_condition) is unaffected.")
+        .def_prop_ro("encoding_goal_complete", [](Self self) { return self.p->core->task->encoding_goal_complete(); },
+                     "Whether encoding_goal is the whole goal: False when it has a conjunct that is not expandable "
+                     "(`or`, `exists`, `imply` over fluents, `not and`, a numeric constraint, too many quantifier bindings). A task built from a text "
+                     "(Task.from_text) has no goal as written: its encoding goal is the goal without the predicates "
+                     "that goal normalization introduced, complete iff none were left out.")
+        .def_prop_ro("encoding_goal_unsatisfiable", [](Self self) { return self.p->core->task->encoding_goal_unsatisfiable(); },
+                     "Whether a static literal of encoding_goal fails in the initial atoms, so that no state is a goal.")
         .def(
             "iter_applicable_actions",
             [owner](Self self, StateLike state) {
@@ -1850,7 +1866,7 @@ nb::object task_reduce(nb::handle self)
     if (core.source && core.source->kind == TaskSource::Kind::Pddl)
         return nb::make_tuple(restore, nb::make_tuple("pddl", core.source->domain, core.source->problem, core.source->domain_path,
                                                       core.source->problem_path, opts, fp, enc));
-    return nb::make_tuple(restore, nb::make_tuple("text", formalism::write_task_text(*core.data), "", "", "", opts, fp, enc));
+    return nb::make_tuple(restore, nb::make_tuple("text", formalism::write_task_text(*core.data, true), "", "", "", opts, fp, enc));
 }
 
 /// Gives the lazy slots of `T` the pickled numbering (encoding_state), then checks the encoding fingerprint.

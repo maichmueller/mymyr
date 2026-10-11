@@ -14,11 +14,14 @@
 
 namespace mymyr::formalism
 {
-/// Reads either the plain lifted format (O P SI FI G A [X]) or the numeric one (O P N SI FI NI G NG M A X, with NC /
-/// NE / NA blocks per condition and effect). Throws std::runtime_error on malformed input.
+/// Reads either the plain lifted format (O P SI FI G A [X] [EG]) or the numeric one (O P N SI FI NI G NG M A X [EG], with
+/// NC / NE / NA blocks per condition and effect). Throws std::runtime_error on malformed input.
 TaskData read_task_text(std::istream& in);
 TaskData read_task_text_file(const std::string& path);
 
-/// Writes the task in this text format: the numeric variant iff the task has functions or a metric.
-std::string write_task_text(const TaskData& t);
+/// Writes the task in this text format: the numeric variant iff the task has functions or a metric. With
+/// `encoding_goal`, a trailing section "EG <complete> <k>" followed by k ground literals (predicate, sign, objects)
+/// records the task's encoding goal (omitted when none is recorded); without it, reading derives the encoding goal from the planner's goal
+/// (set_encoding_goal_from_normalized).
+std::string write_task_text(const TaskData& t, bool encoding_goal = false);
 }  // namespace mymyr::formalism

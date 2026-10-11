@@ -14,7 +14,8 @@
 //      pre(action) + fluent/derived literals of the effect condition and effect "add atoms / delete atoms". As in
 //      mimir, the static literals of an effect condition are ignored and the instances of a universally quantified
 //      effect are the product of each quantified parameter's objects that pass mimir's single-parameter static
-//      consistency test (StaticConsistencyGraph::compute_vertices). Axioms become 0-cost operators.
+//      consistency test (StaticConsistencyGraph::compute_vertices); static_condition_holds tells the operators whose
+//      static effect literals hold (the others never fire). Axioms become 0-cost operators.
 //   4. Propositions: an atom true (fluent or derived) and, for fluent atoms of R used negatively somewhere, an atom
 //      false. "p false" costs 0 in a state without p and is otherwise achieved by operators deleting p. Negated
 //      derived atoms always cost 0 (mimir's "not y <- T"). Preconditions keep their multiplicity (h_add counts a
@@ -108,6 +109,10 @@ public:
     }
     /// Whether the operator's effect has no condition, i.e. applies whenever its ground action does (axioms: true).
     [[nodiscard]] bool unconditional(u32 op) const noexcept { return m_uncond[op] != 0; }
+    /// Whether the static literals of the operator's effect condition hold and the condition requires no fluent atom
+    /// both true and false. The operators where this is false never fire; they stay for mimir's heuristic values,
+    /// and LM-cut and the landmark count leave them out.
+    [[nodiscard]] bool static_condition_holds(u32 op) const noexcept { return m_can_fire[op] != 0; }
     /// Precondition entries that are not "false" propositions (the counter of unsatisfied entries starts here).
     [[nodiscard]] u32 npos(u32 op) const noexcept { return m_npos[op]; }
     [[nodiscard]] bool is_axiom(u32 op) const noexcept { return m_ga[op] == k_none; }
@@ -156,7 +161,7 @@ private:
     u64 m_cid_mask = 0;
     // operators
     std::vector<u32> m_pre_begin{0}, m_pre, m_eff_begin{0}, m_eff, m_del_begin{0}, m_del, m_npos, m_ga;
-    std::vector<u8> m_uncond;
+    std::vector<u8> m_uncond, m_can_fire;
     std::vector<u32> m_pre_of_begin, m_pre_of, m_zero_ops;
     // ground actions
     std::vector<u32> m_ga_schema;

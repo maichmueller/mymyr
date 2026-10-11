@@ -39,9 +39,10 @@ public:
     }
 
 private:
-    [[nodiscard]] bool positive_fluent(u32 prop) const
+    /// A "true" proposition of a fluent atom (or of a derived atom, with include_derived_atoms).
+    [[nodiscard]] bool positive_atom(u32 prop) const
     {
-        return !R.negative(prop) && R.prop_atom(prop) < L.fluent_count;
+        return !R.negative(prop) && (R.prop_atom(prop) < L.fluent_count || (O.include_derived_atoms && R.prop_atom(prop) < L.total));
     }
 
     /// Step 1: h_max-style Dijkstra with unit firing costs, first achievers per proposition.
@@ -50,7 +51,9 @@ private:
         const u32 P = R.num_props(), NO = R.num_ops();
         m_cost.assign(P, k_inf);
         m_first.assign(P, {});
-        std::vector<u32> cnt(NO), acc(NO, 0);
+        std::vector<u32>& cnt = m_cnt0;
+        cnt.resize(NO);
+        std::vector<u32> acc(NO, 0);
         for (u32 o = 0; o < NO; ++o)
             cnt[o] = R.npos(o);
         for (u32 p = 0; p < P; ++p)
@@ -81,6 +84,7 @@ private:
             {
                 m_cost[pp] = 0;
                 push(0, pp);
+                m_init_props.push_back(pp);
             }
             if (np != RelaxedTask::k_none && m_cost[np] == 0)
             {
@@ -89,6 +93,10 @@ private:
                     ++cnt[o];
             }
         }
+        for (u32 p = 0; p < P; ++p)
+            if (R.negative(p) && m_cost[p] == 0)
+                m_init_neg_props.push_back(p);
+        std::vector<u32> work = cnt;  // m_cnt0 keeps the counters of the initial state (possibly-before explorations)
         auto fire = [&](u32 o)
         {
             const u32 val = acc[o] + 1;
@@ -105,7 +113,7 @@ private:
             }
         };
         for (u32 o : R.zero_ops())
-            if (cnt[o] == 0)
+            if (work[o] == 0)
                 fire(o);
         for (u32 c = 0; c < buckets.size(); ++c)
             for (usize i = 0; i < buckets[c].size(); ++i)
@@ -116,13 +124,83 @@ private:
                 for (u32 o : R.pre_of(p))
                 {
                     acc[o] = std::max(acc[o], c);
-                    if (--cnt[o] == 0)
+                    if (--work[o] == 0)
                         fire(o);
                 }
             }
     }
 
-    /// Positive fluent preconditions of an operator: canonical ids, ascending, distinct.
+    /// FirstAchievers::PossiblyBefore: the operators adding proposition `pp` that are applicable in the delete
+    /// relaxation of the initial state without the operators adding it (empty when `pp` holds initially).
+    const std::vector<u32>& possibly_before(u32 pp)
+    {
+        if (m_pb_done.empty())
+        {
+            m_pb_done.assign(R.num_props(), 0);
+            m_pb.resize(R.num_props());
+            m_adders_begin.assign(R.num_props() + 1, 0);
+            for (u32 o = 0; o < R.num_ops(); ++o)
+                for (u32 q : R.eff(o))
+                    ++m_adders_begin[q + 1];
+            for (u32 q = 0; q < R.num_props(); ++q)
+                m_adders_begin[q + 1] += m_adders_begin[q];
+            m_adders.resize(m_adders_begin.back());
+            std::vector<u32> fill(m_adders_begin.begin(), m_adders_begin.end() - 1);
+            for (u32 o = 0; o < R.num_ops(); ++o)
+                for (u32 q : R.eff(o))
+                    m_adders[fill[q]++] = o;
+        }
+        std::vector<u32>& out = m_pb[pp];
+        if (m_pb_done[pp])
+            return out;
+        m_pb_done[pp] = 1;
+        if (m_cost[pp] == 0 || m_cost[pp] == k_inf)
+            return out;  // holds initially, or unreachable
+        std::vector<u32> cnt = m_cnt0;
+        std::vector<u8> reached(R.num_props(), 0);
+        std::vector<u32> stack;
+        auto fire = [&](u32 o)
+        {
+            const auto e = R.eff(o);
+            if (!R.static_condition_holds(o) || std::find(e.begin(), e.end(), pp) != e.end())
+                return;  // never fires, or an achiever of pp: excluded
+            for (u32 q : e)
+                if (!reached[q])
+                {
+                    reached[q] = 1;
+                    stack.push_back(q);
+                }
+        };
+        for (u32 p : m_init_props)
+            if (!reached[p])
+            {
+                reached[p] = 1;
+                stack.push_back(p);
+            }
+        for (u32 p : m_init_neg_props)
+            reached[p] = 1;  // m_cnt0 does not count them: an operator deleting the atom again changes nothing
+        for (u32 o : R.zero_ops())
+            if (cnt[o] == 0)
+                fire(o);
+        while (!stack.empty())
+        {
+            const u32 p = stack.back();
+            stack.pop_back();
+            for (u32 o : R.pre_of(p))
+                if (--cnt[o] == 0)
+                    fire(o);
+        }
+        for (u32 i = m_adders_begin[pp]; i < m_adders_begin[pp + 1]; ++i)
+        {
+            const u32 o = m_adders[i];
+            if (cnt[o] == 0 && R.static_condition_holds(o) && (out.empty() || out.back() != o))
+                out.push_back(o);
+        }
+        return out;
+    }
+
+    /// Positive fluent (and derived, with include_derived_atoms) preconditions of an operator: canonical ids,
+    /// ascending, distinct.
     const std::vector<CanonicalAtom>& pre_atoms(u32 o)
     {
         if (m_pre_done.empty())
@@ -135,18 +213,20 @@ private:
             return v;
         m_pre_done[o] = 1;
         for (u32 p : R.pre(o))
-            if (positive_fluent(p))
+            if (positive_atom(p))
                 v.push_back(R.prop_atom(p));
         std::sort(v.begin(), v.end());
         v.erase(std::unique(v.begin(), v.end()), v.end());
         return v;
     }
 
-    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c) const
+    [[nodiscard]] std::span<const u32> first_achievers(CanonicalAtom c)
     {
         const u32 pp = R.fluent_props(c).first;
         if (pp == RelaxedTask::k_none)
             return {};
+        if (O.first_achievers == FirstAchievers::PossiblyBefore)
+            return possibly_before(pp);
         return m_first[pp];
     }
 
@@ -168,13 +248,15 @@ private:
             std::vector<u32> args;
             for (const formalism::Literal& l : D.literals_of(D.goal))
             {
-                if (!l.positive || D.predicates[l.pred.v].kind != formalism::PredKind::Fluent || L.offset[l.pred.v] == CanonicalLayout::k_none)
+                const formalism::PredKind kind = D.predicates[l.pred.v].kind;
+                const bool wanted = kind == formalism::PredKind::Fluent || (O.include_derived_atoms && kind == formalism::PredKind::Derived);
+                if (!l.positive || !wanted || L.offset[l.pred.v] == CanonicalLayout::k_none)
                     continue;
                 args.clear();
                 for (formalism::Term t : D.terms_of(l))
                     args.push_back(formalism::term_object(t).v);
                 const CanonicalAtom c = L.encode(l.pred.v, args.data());
-                if (c < L.fluent_count)
+                if (c < (O.include_derived_atoms ? L.total : L.fluent_count))
                     add(c);
             }
         }
@@ -289,14 +371,15 @@ private:
             if (R.is_axiom(o))
                 continue;
             for (u32 q : R.eff(o))
-                if (positive_fluent(q))
+                if (positive_atom(q))
                     ach.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
         }
         std::sort(ach.begin(), ach.end());
         ach.erase(std::unique(ach.begin(), ach.end()), ach.end());
+        const bool pb = O.first_achievers == FirstAchievers::PossiblyBefore;
         for (u32 q = 0; q < R.num_props(); ++q)
-            if (positive_fluent(q))
-                for (u32 o : m_first[q])
+            if (positive_atom(q) && (!pb || (!m_pb_done.empty() && m_pb_done[q])))
+                for (u32 o : pb ? m_pb[q] : m_first[q])
                     if (!R.is_axiom(o))
                         first.emplace_back(R.prop_atom(q), pos[R.ground_action(o)]);
         std::sort(first.begin(), first.end());
@@ -361,6 +444,13 @@ private:
     std::vector<u32> m_args;
     std::vector<u32> m_cost;
     std::vector<std::vector<u32>> m_first;  // per proposition: operators of minimal firing cost
+    std::vector<u32> m_cnt0;                // per operator: unsatisfied preconditions in the initial state
+    std::vector<u32> m_init_props;          // the initial state's "true" propositions
+    std::vector<u32> m_init_neg_props;      // the "false" propositions of the atoms false in the initial state
+    // FirstAchievers::PossiblyBefore, per proposition on demand
+    std::vector<std::vector<u32>> m_pb;
+    std::vector<u8> m_pb_done;
+    std::vector<u32> m_adders_begin, m_adders;
     std::vector<std::vector<CanonicalAtom>> m_pre_cache;
     std::vector<u8> m_pre_done;
     std::vector<CanonicalAtom> m_landmarks;

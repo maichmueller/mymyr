@@ -483,6 +483,19 @@ nb::object make_ground_condition(const FormulaOwner& o, GroundCondition c)
     return nb::cast(PyGroundCondition{o, std::make_shared<const GroundCondition>(std::move(c))}, nb::rv_policy::move);
 }
 
+nb::typed<nb::tuple, PyGroundLiteral, nb::ellipsis> make_encoding_goal(const FormulaOwner& o)
+{
+    nb::list l;
+    for (const fm::Literal& literal : o.data->encoding_goal_literals())
+    {
+        GroundLiteral x{{literal.pred, {}}, literal.positive};
+        for (fm::Term t : o.data->terms_of(literal))
+            x.atom.objects.push_back(fm::term_object(t));
+        l.append(make_ground_literal(o, std::move(x)));
+    }
+    return nb::typed<nb::tuple, PyGroundLiteral, nb::ellipsis>(nb::tuple(l));
+}
+
 std::string literal_text(const TaskData& d, PredicateId predicate, bool positive, std::span<const fm::Term> terms, const Variables* vars)
 {
     std::string a = "(" + name_text(d, d.predicates[predicate.v].name);

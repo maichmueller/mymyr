@@ -594,6 +594,8 @@ struct Nodes
     std::vector<u8> flags;
     std::vector<u32> depth;  // only with a depth budget
     bool track_depth = false;
+    std::vector<u64> path_status;  // path-dependent heuristics: path_words words per node (Heuristic::progress)
+    u32 path_words = 0;
 
     void add(u32 p, u32 s, const ObjectId* b, u32 arity, f64 gv)
     {
@@ -606,6 +608,16 @@ struct Nodes
         flags.push_back(New);
         if (track_depth)
             depth.push_back(p == k_none ? 0 : depth[p] + 1);
+        if (path_words)
+            path_status.resize(path_status.size() + path_words, 0);
+    }
+    [[nodiscard]] std::span<u64> path_of(u32 id) noexcept
+    {
+        return {path_status.data() + static_cast<usize>(id) * path_words, path_words};
+    }
+    [[nodiscard]] std::span<const u64> path_of(u32 id) const noexcept
+    {
+        return {path_status.data() + static_cast<usize>(id) * path_words, path_words};
     }
     void relink(u32 id, u32 p, u32 s, const ObjectId* b, u32 arity, f64 gv)
     {
@@ -638,7 +650,7 @@ struct Nodes
     [[nodiscard]] u64 bytes() const noexcept
     {
         return parent.capacity() * 4 + schema.capacity() * 4 + offset.capacity() * 8 + binding.capacity() * 4 +
-               g.capacity() * 8 + h.capacity() * 8 + flags.capacity() + depth.capacity() * 4;
+               g.capacity() * 8 + h.capacity() * 8 + flags.capacity() + depth.capacity() * 4 + path_status.capacity() * 8;
     }
 };
 
@@ -703,6 +715,8 @@ public:
     bool witness = false, canonical = true;
     bool batched = false;         // the heuristic evaluates batches (Heuristic::batched)
     bool goal_view = false;       // a GoalSpec::AnyOf goal reads derived atoms: is_goal prepares the state
+    bool path_dependent = false;  // the heuristic keeps a status per node (Heuristic::path_dependent)
+    u32 status_words = 0;         // words of a node's status
     u32 nn = 0;                   // numeric words per state
     u64 max_states = ~u64{0};
 
@@ -710,6 +724,30 @@ public:
     /// effects applied to gp, or the metric of the successor's numeric values).
     [[nodiscard]] f64 g_next(f64 gp, const Delta& d) const { return costs->next(gp, d); }
     f64 evaluate(StateView s);
+    /// h of node id with state s: with its status for a path-dependent heuristic.
+    f64 evaluate(StateView s, const Nodes& nodes, u32 id);
+    /// Path-dependent heuristics: the status of the start node id with state s.
+    void start_status(Nodes& nodes, u32 id, StateView s)
+    {
+        if (path_dependent)
+            h->initial_status(s, nodes.path_of(id));
+    }
+    /// Path-dependent heuristics: the status of node `child` (state cs) through the transition from node `parent` (state
+    /// ps) by action (schema, b): its status when the child is new (`fresh`), else merged into the status it has.
+    void progress(Nodes& nodes, u32 parent, StateView ps, u32 schema, const ObjectId* b, u32 child, StateView cs, bool fresh)
+    {
+        if (!path_dependent)
+            return;
+        const ActionLabel a{SchemaId{schema}, std::span<const ObjectId>(b, succ.arity(schema))};
+        if (fresh)
+        {
+            h->progress(nodes.path_of(parent), ps, a, cs, nodes.path_of(child));
+            return;
+        }
+        m_status.resize(status_words);
+        h->progress(nodes.path_of(parent), ps, a, cs, m_status);
+        (void)h->merge(nodes.path_of(child), m_status);
+    }
     /// Batched evaluators: h of each state of `states` into `out`, in one call of the heuristic (one per state for
     /// GoalSpec::AnyOf).
     void evaluate(std::span<const StateView> states, std::span<f64> out);
@@ -773,6 +811,7 @@ private:
     u64 m_tick = 0;
     u32 m_transitions = 0;
     u64 m_next_progress = 0;
+    std::vector<u64> m_status;  // a status through another path, before the merge
     std::vector<StateView> m_batch;
     std::vector<u32> m_batch_index;
     std::vector<f64> m_batch_h;
@@ -780,10 +819,11 @@ private:
 
 /// Generates the transitions of state `id` (cur) into tr, in generation order: blocked successors are dropped
 /// (pruned, on_prune), the others are inserted into the store; a new state gets its search node (parent id, g through
-/// this transition). Words are kept for new states, and for all when the store needs them (Compact) or an observer is
-/// set. `preferred`: record whether each action is a preferred operator of the last evaluation. False (and r.status
-/// set) when the search stops inside the expansion: a new state filled the store (max_states: OutOfStates), or the
-/// time or the cancellation.
+/// this transition), and a path-dependent heuristic's status is progressed along every transition (merged into the
+/// status of a state reached before). Words are kept for new states, and for all when the store needs them (Compact),
+/// an observer is set or the heuristic is path-dependent. `preferred`: record whether each action is a preferred
+/// operator of the last evaluation. False (and r.status set) when the search stops inside the expansion: a new state
+/// filled the store (max_states: OutOfStates), or the time or the cancellation.
 template<class S>
 bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u64>& next, Transitions& tr, bool preferred)
 {
@@ -796,7 +836,7 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
     }
     c.succ.prepare(cur.view());
     const f64 gp = nodes.g[id];
-    const bool keep_all = S::k_needs_words || c.obs != nullptr;
+    const bool keep_all = S::k_needs_words || c.obs != nullptr || c.path_dependent;  // path-dependent: A* re-evaluates on reopening
     bool stop = false;
     c.generate(
         [&](u32 s, const ObjectId* b, const Delta& d) -> bool
@@ -820,6 +860,7 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
             const f64 g = c.g_next(gp, d);
             if (fresh)
                 nodes.add(id, s, b, arity, g);
+            c.progress(nodes, id, cur.view(), s, b, cid, {next.data(), nn, d.num, c.nn}, fresh);
             Transitions::T t{s, cid, tr.bind.size(), tr.words.size(), 0, g, fresh, false};
             tr.bind.insert(tr.bind.end(), b, b + arity);
             if (fresh || keep_all)
