@@ -233,6 +233,8 @@ class _Reader:
             header = json.loads(zf.read(HEADER).decode("utf-8"))
         except KeyError:
             raise ValueError(f"mymyr: {name} is not a mymyr dataset file (no {HEADER})") from None
+        except (ValueError, OSError, EOFError, zipfile.BadZipFile) as e:
+            raise ValueError(f"mymyr: corrupt dataset file {name} ({HEADER}: {e})") from None
         if not isinstance(header, dict) or header.get("format") != FORMAT:
             raise ValueError(f"mymyr: {name} is not a mymyr dataset file (format is not {FORMAT!r})")
         version = header.get("version")
@@ -249,7 +251,12 @@ class _Reader:
     def text(self, member: Any) -> str:
         if not isinstance(member, str):
             raise ValueError(f"mymyr: corrupt dataset file {self.name} (a member name is not a string)")
-        return self.zf.read(member).decode("utf-8")
+        try:
+            return self.zf.read(member).decode("utf-8")
+        except KeyError:
+            raise ValueError(f"mymyr: corrupt dataset file {self.name} (no member {member})") from None
+        except (ValueError, OSError, EOFError, zipfile.BadZipFile) as e:
+            raise ValueError(f"mymyr: corrupt dataset file {self.name} ({member}: {e})") from None
 
     def array(self, member: str) -> np.ndarray:
         try:
@@ -257,6 +264,8 @@ class _Reader:
                 a = np.lib.format.read_array(f, allow_pickle=False)
         except KeyError:
             raise ValueError(f"mymyr: corrupt dataset file {self.name} (no member {member})") from None
+        except (ValueError, OSError, EOFError, zipfile.BadZipFile) as e:  # not an .npy, or an object array
+            raise ValueError(f"mymyr: corrupt dataset file {self.name} ({member}: {e})") from None
         if not a.dtype.isnative:
             a = a.astype(a.dtype.newbyteorder("="))
         return a

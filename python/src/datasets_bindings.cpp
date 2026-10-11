@@ -337,7 +337,7 @@ nb::object mapping_item(nb::handle mapping, const char* key)
 /// TypeError unless `arrays` is a mapping whose keys are among `known`.
 void check_keys(nb::handle arrays, std::initializer_list<std::string_view> known, const char* what)
 {
-    if (!PyMapping_Check(arrays.ptr()) || nb::isinstance<nb::str>(arrays))
+    if (!nb::isinstance<nb::dict>(arrays) && (!PyMapping_Check(arrays.ptr()) || !nb::hasattr(arrays, "keys")))
         throw nb::type_error((std::string("mymyr: ") + what + " arrays must be a mapping of names to arrays (as arrays() gives them)").c_str());
     nb::object keys = nb::steal(PyMapping_Keys(arrays.ptr()));
     if (!keys.is_valid())
@@ -443,10 +443,7 @@ StateSpacePtr space_from_arrays(TaskPtr task, nb::handle arrays, nb::handle stat
     {
         nb::object obj = mapping_item(arrays, "state_words");
         if (obj.is_none())
-            throw nb::value_error(task->atoms().frozen()
-                                      ? "mymyr: the state space array 'state_words' is missing"
-                                      : "mymyr: a task with lazy atom slots takes no state rows (their numbering is the "
-                                        "task object's history): pickle the StateSpace or use datasets.save / load");
+            throw nb::value_error("mymyr: the state space array 'state_words' is missing");
         const nb::ndarray<nb::ro> w = host_array(obj, "the state space array 'state_words'");
         if (w.ndim() != 2)
             throw nb::type_error("mymyr: the state space array 'state_words' must be 2-d [num_states, words + numeric_words]");
@@ -962,6 +959,10 @@ void bind_datasets(nb::module_& parent)
             "from_arrays",
             [](TaskArg task, Arg<nb::typed<nb::mapping, std::string, ann::ArrayLike>> arrays) {
                 const Owner o = task_owner(task);
+                if (!o.core->task->atoms().frozen())
+                    throw nb::value_error("mymyr: a state space of a task with lazy atom slots is not rebuilt from arrays "
+                                          "(the slot numbering is the task object's history): pickle the StateSpace or "
+                                          "use datasets.save / load");
                 return PyStateSpace{space_from_arrays(o.core->task, arrays, nb::none()), o};
             },
             "task"_a, "arrays"_a,
@@ -970,7 +971,7 @@ void bind_datasets(nb::module_& parent)
             "arrays are validated: shapes and dtypes, unknown names, ranges, the reverse CSR against the forward one, "
             "flags against distances, and that the rows are states of the task (its row layout and atom slots, its "
             "initial state first, labels of its schemas and objects); ValueError or TypeError otherwise. A task with "
-            "lazy atom slots takes no rows (pickle the space or use datasets.save / load). The generation statistics "
+            "lazy atom slots is refused (pickle the space or use datasets.save / load). The generation statistics "
             "(threads, layers, seconds) of the result are 1, 0, 0, 0. Linear in the size of the arrays.")
         .def("__reduce__",
              [](const PyStateSpace& s) {
