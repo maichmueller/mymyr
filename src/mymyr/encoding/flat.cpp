@@ -53,12 +53,12 @@ bool atom_holds(const Task& task, const detail::Engine& engine, const GroundAtom
 }
 }
 
-FlatRelationEncoder::FlatRelationEncoder(TaskPtr task, FlatOptions options)
+FlatRelationEncoder::FlatRelationEncoder(TaskPtr task, FlatRelationEncoderOptions options)
     : FlatRelationEncoder(rl::TaskTable::single(std::move(task)), options)
 {
 }
 
-FlatRelationEncoder::FlatRelationEncoder(rl::TaskTablePtr table, FlatOptions options)
+FlatRelationEncoder::FlatRelationEncoder(rl::TaskTablePtr table, FlatRelationEncoderOptions options)
     : m_table(std::move(table)), m_options(options)
 {
     if (!m_table)
