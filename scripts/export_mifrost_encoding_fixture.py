@@ -15,11 +15,19 @@ One file per task, ``f<NN>_<slug>.json`` (``f01_blocks_smedium.json`` ...). Keys
 ``format``
     Format version (1).
 ``provenance``
-    ``producer`` (``"mifrost"``), ``mifrost_version``, ``mifrost_source_checkout`` (the mifrost commit the 0.6.0
-    wheel was cut from; the installed binary itself carries no commit), ``pymimir_version``, ``python``, ``seed``.
+    ``producer`` (``"mifrost"``), ``mifrost_version``, ``mifrost_tag_commit`` (the commit of the v0.6.0 tag; the
+    installed wheel records no build commit), ``pymimir_version``, ``python``, ``seed``.
 ``task``
     ``id``, ``slug``, ``covers`` (what the task exercises), ``domain`` and ``problem`` (paths relative to the
     repository root) and ``objects`` (names in mifrost's order: sorted by name, constants included).
+    ``helper_predicates`` maps each helper predicate ``axiom_<k>`` of the task to the parameter names of pymimir's
+    predicate, in pymimir's argument order (mymyr orders the arguments of the same predicate differently; match by
+    name). A task whose goal mifrost cannot encode as written (a ``forall`` or ``imply`` goal, which pymimir turns
+    into helper predicates that mifrost rejects) is a pair: ``problem`` is the problem as written, which mymyr loads
+    and replays, and ``mifrost_problem`` is the twin with the same objects and initial state and the goal written out
+    over the objects, which every recorded state and output comes from. ``mifrost_on_problem`` then records, per
+    encoder kind, the outcome of mifrost on the problem as written (``"ok"`` or its error message). Helper atoms
+    that exist only for the goal as written are absent from ``derived``.
 ``static_atoms``
     Sorted names of the task's static atoms, as ``"(on a b)"``.
 ``states``
@@ -100,8 +108,15 @@ delta/exclude, delta/encode_only with parent relation and actions, action/exclud
 with sibling and cousin relations); C8A and C8B the transition and transition-effects encoders; C9A to C9C HGraph
 (default, nullary predicates, actions). Horizon, transition and HGraph configs encode two states per task.
 
-Every option the configurations use exists in mifrost 0.6.0. Behaviours that shaped the selection of configurations
-are listed in ``FINDINGS`` and printed by ``--introspect``.
+A trailing ``N`` marks the same configuration with ``ignore_zero_arity_relations=False`` (nullary relations kept):
+C3N, C4_L1N, C4_L2N, C5AN, C5BN, C7AN, C7DN, C7EN, C7FN, C8AN, C8BN. C7B and C7C already keep them. C3D, C3S and C3H
+add goal derivations, subgoal layers and history to the predicate virtual nodes of C3 (nullary relations kept). C7G to
+C7K complete the nine modes x root policies (full/exclude, full/encode_only, delta/include, action/include,
+action/encode_only; nullary relations kept). C7S and C7T (horizon) and C8S (transition effects) take subgoal layers.
+
+The literals fed to subgoal layers and history steps are deduplicated and hold no atom together with its negation. A
+horizon or transition encoder takes no history. Every option the configurations use exists in mifrost 0.6.0.
+Behaviours that shaped the selection of configurations are listed in ``FINDINGS`` and printed by ``--introspect``.
 """
 
 from __future__ import annotations
@@ -123,7 +138,7 @@ FORMAT = 1
 SEED = 20261011
 MIFROST_VERSION = "0.6.0"
 PYMIMIR_VERSION = "0.16.3"
-MIFROST_SOURCE_CHECKOUT = "91b152c21819678a7818865b230774a3b6e800e3"
+MIFROST_TAG_COMMIT = "91b152c21819678a7818865b230774a3b6e800e3"
 WALK_LENGTHS = (2, 4, 6, 8)
 MAX_ACTIONS = 6
 MAX_CHILDREN = 3
@@ -141,15 +156,19 @@ ROLE_NAMES = (
 )
 
 # Behaviours of mifrost 0.6.0 that shape the selection of configurations; `--introspect` prints them.
-#  * Every option the configurations use exists.
-#  * HGraphEncoder(add_nullary_predicates=True) rejects a nullary goal literal ("Node feature dim mismatch"), so C9B
-#    only runs on tasks whose goals have no nullary literal.
-#  * Packing relation arguments relation-major only differs from graph-major for batches; single-graph fixtures
-#    record it as an option (C2) but cannot observe it.
 FINDINGS = {
     "missing options": "none",
     "HGraphEncoder nullary predicates": "C9B only on tasks without nullary goal literals",
     "relation-major packing": "recorded as an option of C2; not observable on one graph",
+    "forall and imply goals": "pymimir turns them into helper predicates and every mifrost encoder then rejects the "
+    "problem; the pairs F11 and F12 record the problem as written and mifrost's outputs on the expanded twin",
+    "disjunctive preconditions": "a schema that splits into two of the same name is rejected by the flat encoder "
+    "('Semantic flat encoder requires unique action names'); no task of that shape is recorded",
+    "plain satisfaction relations": "[+/-]p[sat], [sat+] and [sat-] without a goal or subgoal marker are in the "
+    "horizon and transition catalogs but stay empty for every input tried (goal override, subgoal layers at levels 1 "
+    "and 2, support_literals); only the [g], [sg] and [ssg] variants are filled",
+    "history on horizon and transition encoders": "rejected ('does not support history_subgoals payloads')",
+    "empty relations": "relations without tuples are absent from the outputs",
 }
 
 
@@ -164,12 +183,18 @@ def ipc(name, problem):
 
 
 FLAT = ("C1", "C2", "C3", "C4_L1", "C4_L2", "C5A", "C5B")
+FLAT_KEPT = ("C3N", "C4_L1N", "C4_L2N", "C5AN", "C5BN")
+VIRTUAL = ("C3D", "C3S", "C3H")
 HORIZON = ("C7A", "C7B", "C7C", "C7D", "C7E", "C7F", "C8A", "C8B")
+HORIZON_KEPT = ("C7AN", "C7DN", "C7EN", "C7FN", "C8AN", "C8BN")
+MODES = ("C7G", "C7H", "C7I", "C7J", "C7K")
+HORIZON_SUBGOALS = ("C7S", "C7T", "C8S")
 HGRAPH = ("C9A", "C9B", "C9C")
 
 TASKS = [
     dict(id="F1", slug="blocks_smedium", covers="blocks, three objects, nullary handempty",
-         files=pddl("blocks", "smedium"), configs=FLAT + HORIZON + HGRAPH),
+         files=pddl("blocks", "smedium"),
+         configs=FLAT + FLAT_KEPT + VIRTUAL + HORIZON + HORIZON_KEPT + MODES + HORIZON_SUBGOALS + HGRAPH),
     dict(id="F2", slug="blocks8", covers="blocks, eight objects", files=pddl("blocks", "probBLOCKS-8-0"),
          configs=("C1", "C2", "C3", "C4_L1", "C5A", "C5B", "C7B", "C8A", "C9A", "C9B", "C9C")),
     dict(id="F3", slug="logistics6", covers="typed domain, several action schemas",
@@ -177,17 +202,27 @@ TASKS = [
     dict(id="F4", slug="childsnack_p01_easy", covers="constants, many statics",
          files=ipc("childsnack", "p01-easy"), configs=("C1", "C2", "C3", "C4_L1")),
     dict(id="F5", slug="philosophers_p03", covers="derived predicates, =, auxiliary axioms",
-         files=pddl("philosophers", "p03-phil4"), configs=("C1", "C2", "C3", "C4_L1", "C7B", "C8B")),
+         files=pddl("philosophers", "p03-phil4"), configs=("C1", "C2", "C3", "C3D", "C4_L1", "C7B", "C8B")),
     dict(id="F6", slug="rovers_p01_easy", covers="many statics", files=ipc("rovers", "p01-easy"),
          configs=("C1", "C2", "C3")),
     dict(id="F7", slug="satellite_p01_easy", covers="typed domain", files=ipc("satellite", "p01-easy"),
          configs=("C1", "C2", "C3", "C4_L1", "C7D")),
     dict(id="F8", slug="features", covers="negative goals, derived predicate, nullary predicate and action",
-         files=pddl("features", "p01"), configs=FLAT + HORIZON + ("C9A", "C9C")),
+         files=pddl("features", "p01"),
+         configs=FLAT + FLAT_KEPT + VIRTUAL + HORIZON + HORIZON_KEPT + MODES + HORIZON_SUBGOALS + ("C9A", "C9C")),
     dict(id="F9", slug="relay", covers="existential preconditions", files=pddl("relay", "p01"),
          configs=FLAT + ("C7A", "C7C", "C8A", "C9A", "C9C")),
     dict(id="F10", slug="blocks_flags", covers="blocks with nullary fluents and goals",
-         files=pddl("blocks_flags", "p01"), configs=FLAT + ("C7C", "C8B", "C9A")),
+         files=pddl("blocks_flags", "p01"),
+         configs=FLAT + FLAT_KEPT + VIRTUAL + HORIZON_KEPT + ("C7C", "C8B", "C7S", "C9A")),
+    dict(id="F11", slug="features_forall", covers="forall goal over all objects (paired with the written-out goal)",
+         files=pddl("features", "p02"), twin=pddl("features", "p02_expanded")[1],
+         configs=("C1", "C2", "C3", "C4_L1", "C7A", "C8A", "C9A")),
+    dict(id="F12", slug="features_imply", covers="imply goals, static antecedents (paired with the goal written out)",
+         files=pddl("features", "p03"), twin=pddl("features", "p03_expanded")[1],
+         configs=("C1", "C2", "C3", "C4_L1", "C7A", "C8A", "C9A")),
+    dict(id="F13", slug="features_static_false", covers="negative nullary goal and a statically false goal literal",
+         files=pddl("features", "p04"), configs=("C1", "C2", "C3N", "C4_L1N", "C7AN", "C8AN", "C9A")),
 ]
 
 HGRAPH_STATES = ("s0", "s3")
@@ -195,35 +230,73 @@ HGRAPH_STATES = ("s0", "s3")
 GOAL_PLAIN_SAT_UNSAT = ["plain", "satisfied", "unsatisfied"]
 GOAL_ADDED = ["added_satisfied", "added_unsatisfied"]
 
-# config id -> (encoder class name, options, kind). `kind` selects the call shape in `encode_record`.
+
+def config(encoder, kind, feeds=(), **options):
+    """A configuration: the encoder class, its constructor options, the call shape (`kind`) and the optional inputs
+    the exporter feeds it (`feeds`)."""
+    return encoder, options, kind, tuple(feeds)
+
+
+def kept(base):
+    """The same configuration with nullary relations kept."""
+    encoder, options, kind, feeds = base
+    return encoder, {**options, "ignore_zero_arity_relations": False}, kind, feeds
+
+
 CONFIGS = {
-    "C1": ("FlatRelationEncoder", {}, "flat"),
-    "C2": ("FlatRelationEncoder", dict(goal_derivations=GOAL_PLAIN_SAT_UNSAT, ignore_zero_arity_relations=False,
-                                        pack_relation_args_relation_major=True), "flat"),
-    "C3": ("FlatRelationEncoder", dict(use_predicate_virtual_nodes=True, target_sources=["action", "goal"]), "flat"),
-    "C4_L1": ("FlatRelationEncoder", dict(max_goal_level=1, target_sources=["goal", "subgoal"],
-                                           goal_derivations=GOAL_PLAIN_SAT_UNSAT), "flat"),
-    "C4_L2": ("FlatRelationEncoder", dict(max_goal_level=2, target_sources=["goal", "subgoal"],
-                                           goal_derivations=GOAL_PLAIN_SAT_UNSAT), "flat"),
-    "C5A": ("FlatRelationEncoder", dict(target_sources=["history"]), "flat"),
-    "C5B": ("FlatRelationEncoder", {}, "flat"),
-    "C7A": ("FlatHorizonEncoder", dict(transition_mode="full", root_policy="include", ignore_actions=False),
-            "horizon"),
-    "C7B": ("FlatHorizonEncoder", dict(transition_mode="delta", root_policy="exclude", ignore_actions=True,
-                                        ignore_zero_arity_relations=False, goal_derivations=GOAL_ADDED), "horizon"),
-    "C7C": ("FlatHorizonEncoder", dict(transition_mode="delta", root_policy="encode_only", ignore_actions=False,
-                                        ignore_zero_arity_relations=False, enable_parent_relation=True,
-                                        goal_derivations=GOAL_ADDED), "horizon"),
-    "C7D": ("FlatHorizonEncoder", dict(transition_mode="action", root_policy="exclude", ignore_actions=False),
-            "horizon"),
-    "C7E": ("FlatRootedHorizonEncoder", {}, "horizon"),
-    "C7F": ("FlatRootedHorizonEncoder", dict(enable_sibling_relation=True, enable_cousin_relation=True), "horizon"),
-    "C8A": ("FlatTransitionEncoder", {}, "transition"),
-    "C8B": ("FlatTransitionEffectsEncoder", {}, "transition"),
-    "C9A": ("HGraphEncoder", {}, "hgraph"),
-    "C9B": ("HGraphEncoder", dict(add_nullary_predicates=True), "hgraph"),
-    "C9C": ("HGraphEncoder", dict(ignore_actions=False, target_sources=["action"]), "hgraph"),
+    "C1": config("FlatRelationEncoder", "flat"),
+    "C2": config("FlatRelationEncoder", "flat", goal_derivations=GOAL_PLAIN_SAT_UNSAT,
+                 ignore_zero_arity_relations=False, pack_relation_args_relation_major=True),
+    "C3": config("FlatRelationEncoder", "flat", ("actions", "goals_odd"), use_predicate_virtual_nodes=True,
+                 target_sources=["action", "goal"]),
+    "C3D": config("FlatRelationEncoder", "flat", ("actions", "goals_odd"), use_predicate_virtual_nodes=True,
+                  target_sources=["action", "goal"], goal_derivations=GOAL_PLAIN_SAT_UNSAT,
+                  ignore_zero_arity_relations=False),
+    "C3S": config("FlatRelationEncoder", "flat", ("actions", "goals_odd", "layers"), use_predicate_virtual_nodes=True,
+                  max_goal_level=2, target_sources=["action", "goal", "subgoal"], ignore_zero_arity_relations=False),
+    "C3H": config("FlatRelationEncoder", "flat", ("actions", "goals_odd", "history"), use_predicate_virtual_nodes=True,
+                  target_sources=["action", "goal", "history"], ignore_zero_arity_relations=False),
+    "C4_L1": config("FlatRelationEncoder", "flat", ("layers",), max_goal_level=1, target_sources=["goal", "subgoal"],
+                    goal_derivations=GOAL_PLAIN_SAT_UNSAT),
+    "C4_L2": config("FlatRelationEncoder", "flat", ("layers",), max_goal_level=2, target_sources=["goal", "subgoal"],
+                    goal_derivations=GOAL_PLAIN_SAT_UNSAT),
+    "C5A": config("FlatRelationEncoder", "flat", ("history",), target_sources=["history"]),
+    "C5B": config("FlatRelationEncoder", "flat", ("history_capped",)),
+    "C7A": config("FlatHorizonEncoder", "horizon", transition_mode="full", root_policy="include", ignore_actions=False),
+    "C7B": config("FlatHorizonEncoder", "horizon", transition_mode="delta", root_policy="exclude", ignore_actions=True,
+                  ignore_zero_arity_relations=False, goal_derivations=GOAL_ADDED),
+    "C7C": config("FlatHorizonEncoder", "horizon", transition_mode="delta", root_policy="encode_only",
+                  ignore_actions=False, ignore_zero_arity_relations=False, enable_parent_relation=True,
+                  goal_derivations=GOAL_ADDED),
+    "C7D": config("FlatHorizonEncoder", "horizon", transition_mode="action", root_policy="exclude",
+                  ignore_actions=False),
+    "C7E": config("FlatRootedHorizonEncoder", "horizon"),
+    "C7F": config("FlatRootedHorizonEncoder", "horizon", enable_sibling_relation=True, enable_cousin_relation=True),
+    "C7G": config("FlatHorizonEncoder", "horizon", transition_mode="full", root_policy="exclude",
+                  ignore_actions=False, ignore_zero_arity_relations=False),
+    "C7H": config("FlatHorizonEncoder", "horizon", transition_mode="full", root_policy="encode_only",
+                  ignore_actions=False, ignore_zero_arity_relations=False),
+    "C7I": config("FlatHorizonEncoder", "horizon", transition_mode="delta", root_policy="include",
+                  ignore_actions=True, ignore_zero_arity_relations=False, goal_derivations=GOAL_ADDED),
+    "C7J": config("FlatHorizonEncoder", "horizon", transition_mode="action", root_policy="include",
+                  ignore_actions=False, ignore_zero_arity_relations=False),
+    "C7K": config("FlatHorizonEncoder", "horizon", transition_mode="action", root_policy="encode_only",
+                  ignore_actions=False, ignore_zero_arity_relations=False),
+    "C7S": config("FlatHorizonEncoder", "horizon", ("layers",), transition_mode="delta", root_policy="exclude",
+                  ignore_actions=True, ignore_zero_arity_relations=False, goal_derivations=GOAL_ADDED,
+                  max_goal_level=2),
+    "C7T": config("FlatHorizonEncoder", "horizon", ("layers",), transition_mode="full", root_policy="include",
+                  ignore_actions=False, ignore_zero_arity_relations=False, max_goal_level=1),
+    "C8A": config("FlatTransitionEncoder", "transition"),
+    "C8B": config("FlatTransitionEffectsEncoder", "transition"),
+    "C8S": config("FlatTransitionEffectsEncoder", "transition", ("layers",), ignore_zero_arity_relations=False,
+                  max_goal_level=2),
+    "C9A": config("HGraphEncoder", "hgraph"),
+    "C9B": config("HGraphEncoder", "hgraph", add_nullary_predicates=True),
+    "C9C": config("HGraphEncoder", "hgraph", ("actions",), ignore_actions=False, target_sources=["action"]),
 }
+for _name in ("C3", "C4_L1", "C4_L2", "C5A", "C5B", "C7A", "C7D", "C7E", "C7F", "C8A", "C8B"):
+    CONFIGS[_name + "N"] = kept(CONFIGS[_name])
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -242,11 +315,16 @@ def literal_name(literal):
 
 
 class Task:
-    def __init__(self, entry):
+    """A pymimir task. By default the problem mifrost encodes: the twin of a paired task, else the problem itself;
+    `native=True` loads the problem as written."""
+
+    def __init__(self, entry, native=False):
         import pymimir
 
         self.entry = entry
         domain_path, problem_path = entry["files"]
+        if entry.get("twin") and not native:
+            problem_path = entry["twin"]
         self.domain = pymimir.Domain(str(ROOT / domain_path))
         self.problem = pymimir.Problem(self.domain, str(ROOT / problem_path), mode="lifted")
         self.initial = self.problem.get_initial_state()
@@ -255,6 +333,17 @@ class Task:
         self.universe = []
         self.predicates = {p.get_name(): p for p in self.domain.get_predicates()}
         self.goal = list(self.problem.get_goal_condition())
+
+    def helper_parameters(self):
+        """Parameter names of the helper predicates ``axiom_<k>`` in pymimir's argument order."""
+        predicates = list(self.domain.get_predicates())
+        predicates += list(self.problem.get_derived_goal_predicates())
+        predicates += list(self.problem.get_derived_problem_predicates())
+        return {
+            p.get_name(): [str(v).lstrip("?") for v in p.get_parameters()]
+            for p in sorted(predicates, key=lambda p: p.get_name())
+            if p.get_name().startswith("axiom_")
+        }
 
     def applicable(self, state):
         actions = list(state.generate_applicable_actions())
@@ -308,17 +397,33 @@ def build_states(task):
                 break
         chosen.add(state_key(state))
         states.append(dict(id=f"s{index}", path=path, obj=state))
-    task.universe = sorted({a for s in states for a in task.atoms(s["obj"], "fluent") if " " in a})
+    task.universe = sorted({a for s in states for a in task.atoms(s["obj"], "fluent")})
     return states
 
 
-def state_literals(task, state):
-    """Literals to draw subgoals and history from: the goal literals, the state's non-nullary fluent atoms and one
-    atom that holds in another recorded state but not in this one (as a negative literal)."""
+def clean(literals):
+    """The literals without repeats and without a literal whose negation is already present."""
+    kept_literals = []
+    for text in literals:
+        complement = text[5:-1] if text.startswith("(not ") else f"(not {text})"
+        if text not in kept_literals and complement not in kept_literals:
+            kept_literals.append(text)
+    return kept_literals
+
+
+def state_literals(task, state, nullary):
+    """Literals to draw subgoals and history from: the goal literals, the state's fluent atoms (nullary ones only if
+    they are kept), one atom that holds in another recorded state but not in this one (as a negative literal) and the
+    state's atoms as negative literals (unsatisfied in the state)."""
+
+    def usable(atom):
+        return nullary or " " in atom
+
     goal = [literal_name(l) for l in task.goal]
-    fluent = [a for a in task.atoms(state, "fluent") if " " in a]
-    absent = next((f"(not {a})" for a in task.universe if a not in set(task.atoms(state, "fluent"))), None)
-    return goal, fluent, absent
+    present = task.atoms(state, "fluent")
+    fluent = [a for a in present if usable(a)]
+    absent = next((f"(not {a})" for a in task.universe if usable(a) and a not in set(present)), None)
+    return goal, fluent, absent, [f"(not {a})" for a in fluent]
 
 
 def pick(items, count, rng):
@@ -333,40 +438,40 @@ def sampled_actions(task, state, rng):
     return [actions[i] for i in sorted(rng.sample(range(len(actions)), min(MAX_ACTIONS, len(actions))))]
 
 
-def payloads(task, state_record, config_id, kind):
+def payloads(task, state_record, config_id, config):
     """The optional inputs for (config, state): both the literal strings and the pymimir objects."""
+    _, options, _, feeds = config
+    nullary = options.get("ignore_zero_arity_relations", True) is False
     state = state_record["obj"]
     rng = random.Random(f"{SEED}/{task.entry['id']}/{config_id}/{state_record['id']}")
-    goal, fluent, absent = state_literals(task, state)
+    goal, fluent, absent, negated = state_literals(task, state, nullary)
+    absent = [absent] if absent else []
     texts, objs = {}, {}
-    if config_id == "C3":
+    if "actions" in feeds:
         actions = sampled_actions(task, state, rng)
         texts["actions"] = [action_name(a) for a in actions]
         objs["actions"] = actions
-        if int(state_record["id"][1:]) % 2 == 1:
-            texts["goals"] = pick(fluent, 3, rng) + ([absent] if absent else [])
-    elif config_id in ("C4_L1", "C4_L2"):
-        first = pick(goal, 1, rng) + pick([f for f in fluent if f not in goal], 1, rng)
+    if "goals_odd" in feeds and int(state_record["id"][1:]) % 2 == 1:
+        texts["goals"] = clean(pick(fluent, 3, rng) + absent)
+    if "layers" in feeds:
+        first = pick(goal, 1, rng) + pick([f for f in fluent if f not in goal], 1, rng) + pick(negated, 1, rng)
+        first = clean(first)
         layers = [first]
-        if config_id == "C4_L2":
-            second = pick([g for g in goal if g not in first], 1, rng) + ([absent] if absent else [])
+        if options["max_goal_level"] >= 2:
+            second = clean(pick([g for g in goal if g not in first], 1, rng) + absent + pick(negated, 1, rng))
             layers.append(second)
         texts["subgoal_layers"] = layers
-    elif config_id in ("C5A", "C5B"):
+    if feeds and feeds[-1] in ("history", "history_capped"):
         steps = [
-            [-3, pick(fluent, 2, rng)],
-            [-2, pick(goal, 1, rng) + pick(fluent, 1, rng)],
-            [-1, ([absent] if absent else []) + pick(fluent, 2, rng)],
+            [-3, clean(pick(fluent, 2, rng))],
+            [-2, clean(pick(goal, 1, rng) + pick(fluent, 1, rng))],
+            [-1, clean(absent + pick(fluent, 2, rng))],
         ]
-        if config_id == "C5A":
+        if feeds[-1] == "history":
             steps = steps[1:]
         else:
             texts["history_max_steps"] = 2
         texts["history_subgoals"] = steps
-    elif kind == "hgraph" and config_id == "C9C":
-        actions = sampled_actions(task, state, rng)
-        texts["actions"] = [action_name(a) for a in actions]
-        objs["actions"] = actions
     return texts, objs
 
 
@@ -438,7 +543,7 @@ def resolve_options(mifrost, options):
 
 
 def make_encoder(mifrost, domain, config_id):
-    name, options, _ = CONFIGS[config_id]
+    name, options, _, _ = CONFIGS[config_id]
     return getattr(mifrost, name)(domain, **resolve_options(mifrost, options))
 
 
@@ -590,7 +695,8 @@ def decode_hgraph(encoder, encoding, pool):
         targets = target_block(tensors, graph_attrs, entity_names)
     if targets is not None:
         out["targets"] = targets
-    out["_schema"] = dict(node_types=list(data["schema"]["node_types"]), edge_types=jsonable(data["schema"]["edge_types"]))
+    out["_schema"] = dict(node_types=list(data["schema"]["node_types"]),
+                          edge_types=jsonable(data["schema"]["edge_types"]))
     return out
 
 
@@ -625,6 +731,68 @@ def encode_record(task, encoder, kind, state_record, texts, objs, extra, pool):
     return decode_flat(encoder, encoding, pool)
 
 
+def run_record(task, encoder, config_id, state_record, pool, raise_errors=None):
+    """Encode one state with one configuration: (inputs, outputs, schema), or None if the state has no successor to
+    encode as a transition. `outputs` is ``{"error": message}`` if mifrost rejects the inputs."""
+    _, _, kind, _ = CONFIGS[config_id]
+    texts, objs = payloads(task, state_record, config_id, CONFIGS[config_id])
+    inputs = dict(texts)
+    extra = None
+    rng = random.Random(f"{SEED}/{task.entry['id']}/{config_id}/{state_record['id']}/dag")
+    if kind in ("horizon", "transition"):
+        nodes, edges = horizon_dag(task, state_record, rng)
+        if kind == "horizon":
+            extra = dict(nodes=nodes, edges=edges)
+            inputs["dag"] = dict(nodes=[n["path"] for n in nodes], edges=[[p, c, action_name(a)] for p, c, a in edges])
+        else:
+            if not edges:
+                return None
+            _, child, action = edges[0]
+            extra = dict(successor=nodes[child]["obj"])
+            inputs["successor"] = dict(path=nodes[child]["path"], action=action_name(action))
+    schema = None
+    try:
+        outputs = encode_record(task, encoder, kind, state_record, texts, objs, extra, pool)
+        schema = outputs.pop("_schema", None)
+    except Exception as error:  # noqa: BLE001 - recorded in the record's outputs as `error`
+        if RAISE if raise_errors is None else raise_errors:
+            raise
+        outputs = dict(error=f"{type(error).__name__}: {error}")
+    return inputs, outputs, schema
+
+
+def states_for(task, states, kind):
+    if kind in ("horizon", "transition"):
+        return horizon_states(task, states)
+    if kind == "hgraph":
+        return [s for s in states if s["id"] in HGRAPH_STATES]
+    return states
+
+
+def mifrost_on_native_problem(mifrost, entry):
+    """What mifrost does with the problem as written (a paired task): per config kind, ``"ok"`` or its error."""
+    task = Task(entry, native=True)
+    state_record = dict(id="s0", path=[], obj=task.initial)
+    outcome = {}
+    for config_id in ("C1", "C7A", "C8A", "C9A"):
+        if config_id not in entry["configs"]:
+            continue
+        encoder = make_encoder(mifrost, task.domain, config_id)
+        result = run_record(task, encoder, config_id, state_record, Pool(), raise_errors=False)
+        outputs = result[1]
+        outcome[config_id] = outputs.get("error", "ok")
+    return outcome
+
+
+def task_record(mifrost, entry, task):
+    record = dict(id=entry["id"], slug=entry["slug"], covers=entry["covers"], domain=entry["files"][0],
+                  problem=entry["files"][1], objects=sorted(task.objects), helper_predicates=task.helper_parameters())
+    if entry.get("twin"):
+        record["mifrost_problem"] = entry["twin"]
+        record["mifrost_on_problem"] = mifrost_on_native_problem(mifrost, entry)
+    return record
+
+
 def export_task(mifrost, entry):
     task = Task(entry)
     states = build_states(task)
@@ -633,45 +801,18 @@ def export_task(mifrost, entry):
     catalogs = Pool()
     encodings = []
     for config_id in entry["configs"]:
-        name, options, kind = CONFIGS[config_id]
+        name, options, kind, _ = CONFIGS[config_id]
         encoder = make_encoder(mifrost, task.domain, config_id)
         record = dict(encoder=name, options=jsonable(options))
-        if kind == "hgraph":
-            record["catalog"] = None
-        else:
-            record["catalog"] = catalogs.add(catalog_of(encoder, kind))
+        record["catalog"] = None if kind == "hgraph" else catalogs.add(catalog_of(encoder, kind))
         configs[config_id] = record
-        selected = states
-        if kind in ("horizon", "transition"):
-            selected = horizon_states(task, states)
-        if kind == "hgraph":
-            selected = [s for s in states if s["id"] in HGRAPH_STATES]
-        for state_record in selected:
-            texts, objs = payloads(task, state_record, config_id, kind)
-            inputs = dict(texts)
-            extra = None
-            rng = random.Random(f"{SEED}/{entry['id']}/{config_id}/{state_record['id']}/dag")
-            if kind == "horizon":
-                nodes, edges = horizon_dag(task, state_record, rng)
-                extra = dict(nodes=nodes, edges=edges)
-                inputs["dag"] = dict(nodes=[n["path"] for n in nodes],
-                                     edges=[[p, c, action_name(a)] for p, c, a in edges])
-            elif kind == "transition":
-                nodes, edges = horizon_dag(task, state_record, rng)
-                if not edges:
-                    continue
-                parent, child, action = edges[0]
-                extra = dict(successor=nodes[child]["obj"])
-                inputs["successor"] = dict(path=nodes[child]["path"], action=action_name(action))
-            try:
-                outputs = encode_record(task, encoder, kind, state_record, texts, objs, extra, pool)
-                schema = outputs.pop("_schema", None)
-                if schema is not None and configs[config_id]["catalog"] is None:
-                    configs[config_id]["catalog"] = catalogs.add(schema)
-            except Exception as error:  # noqa: BLE001 - recorded in the record's outputs as `error`
-                if RAISE:
-                    raise
-                outputs = dict(error=f"{type(error).__name__}: {error}")
+        for state_record in states_for(task, states, kind):
+            result = run_record(task, encoder, config_id, state_record, pool)
+            if result is None:
+                continue
+            inputs, outputs, schema = result
+            if schema is not None and record["catalog"] is None:
+                record["catalog"] = catalogs.add(schema)
             encodings.append(dict(config=config_id, state=state_record["id"], inputs=inputs, outputs=outputs))
     state_records = [
         dict(id=s["id"], path=s["path"], fluent=task.atoms(s["obj"], "fluent"), derived=task.atoms(s["obj"], "derived"))
@@ -682,13 +823,12 @@ def export_task(mifrost, entry):
         provenance=dict(
             producer="mifrost",
             mifrost_version=importlib.metadata.version("mifrost"),
-            mifrost_source_checkout=MIFROST_SOURCE_CHECKOUT,
+            mifrost_tag_commit=MIFROST_TAG_COMMIT,
             pymimir_version=importlib.metadata.version("pymimir"),
             python=platform.python_version(),
             seed=SEED,
         ),
-        task=dict(id=entry["id"], slug=entry["slug"], covers=entry["covers"], domain=entry["files"][0],
-                  problem=entry["files"][1], objects=sorted(task.objects)),
+        task=task_record(mifrost, entry, task),
         static_atoms=task.atoms(task.initial, "static"),
         states=state_records,
         catalogs=catalogs.items,
