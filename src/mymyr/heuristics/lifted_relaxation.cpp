@@ -12,6 +12,7 @@
 #include <map>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 namespace mymyr::heuristics::detail
 {
@@ -347,6 +348,8 @@ struct LiftedRelaxation::Impl
     std::vector<u32> rec_op, rec_begin, rec_bind;
     // slot cache: task fluent slot -> canonical id
     std::vector<u64> slot_canon;
+    // lazy slots: the state's slots sorted by canonical id
+    std::vector<std::pair<u64, u64>> slot_order;
 };
 
 void LiftedRelaxation::Impl::build()
@@ -778,24 +781,38 @@ Value LiftedRelaxation::Impl::evaluate(StateView s, const std::vector<std::vecto
     rec_bind.clear();
     bucket = 0;
 
-    // the state's atoms: cost 0
+    // the state's atoms: cost 0, queued in ascending canonical id (fixed slots ascend with it; lazy ones follow the
+    // order in which searches met the atoms), so that the ties of the exploration do not depend on the slot numbering
     const AtomIndex& TA = T.atoms();
-    bits::for_each(s.w, s.nw,
-                   [&](u64 slot)
-                   {
-                       if (slot >= slot_canon.size())
-                           slot_canon.resize(slot + 1, ~u64{0});
-                       u64& c = slot_canon[slot];
-                       if (c == ~u64{0})
-                           c = TA.canonical(AtomKind::Fluent, static_cast<u32>(slot));
-                       if (c >= total)
-                           return;
-                       in_s[c >> 6] |= u64{1} << (c & 63);
-                       state_keys.push_back(c);
-                       const u32 x = touch(c);
-                       cost[x] = 0;
-                       queue.push(0, x);
-                   });
+    const auto canon = [&](u64 slot)
+    {
+        if (slot >= slot_canon.size())
+            slot_canon.resize(slot + 1, ~u64{0});
+        u64& c = slot_canon[slot];
+        if (c == ~u64{0})
+            c = TA.canonical(AtomKind::Fluent, static_cast<u32>(slot));
+        return c;
+    };
+    const auto start = [&](u64 c)
+    {
+        if (c >= total)
+            return;
+        in_s[c >> 6] |= u64{1} << (c & 63);
+        state_keys.push_back(c);
+        const u32 x = touch(c);
+        cost[x] = 0;
+        queue.push(0, x);
+    };
+    if (TA.frozen())
+        bits::for_each(s.w, s.nw, [&](u64 slot) { start(canon(slot)); });
+    else
+    {
+        slot_order.clear();
+        bits::for_each(s.w, s.nw, [&](u64 slot) { slot_order.push_back({canon(slot), slot}); });
+        std::sort(slot_order.begin(), slot_order.end());
+        for (const auto& [c, slot] : slot_order)
+            start(c);
+    }
 
     // goal literals: positive atoms and the deletion propositions of negated atoms true in s
     std::vector<u32> targets;

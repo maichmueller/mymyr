@@ -1098,7 +1098,7 @@ AtomList derived_atoms(const Owner& o, StateView s)
         Successors& succ = lease->successors();
         succ.prepare(s);
         const detail::Engine& e = succ.engine();
-        bits::for_each(e.derived(), e.derived_words(), [&](u64 b) { slots.push_back(static_cast<u32>(b)); });
+        slots = t.atoms().slots_in_canonical_order(AtomKind::Derived, e.derived(), e.derived_words());
     }
     const CanonicalLayout& L = t.compiled().layout;
     for (u32 slot : slots)
@@ -2340,16 +2340,18 @@ void bind_task(nb::module_& m)
              [](const PyState& s) {
                  const Owner o{s.core, s.owner};
                  AtomList out{nb::list()};
-                 bits::for_each(s.s.data(), s.s.size_words(),
-                                [&](u64 b) {
-                                    const SlotId slot{static_cast<u32>(b)};
-                                    const auto args = s.core->task->atoms().arguments(slot);
-                                    out.append(make_ground_atom(task_owner(o), GroundAtom{s.core->task->atoms().predicate(slot),
-                                                                                          std::vector<ObjectId>(args.begin(), args.end())}));
-                                });
+                 const AtomIndex& A = s.core->task->atoms();
+                 for (const u32 b : A.slots_in_canonical_order(AtomKind::Fluent, s.s.data(), s.s.size_words()))
+                 {
+                     const SlotId slot{b};
+                     const auto args = A.arguments(slot);
+                     out.append(make_ground_atom(task_owner(o), GroundAtom{A.predicate(slot),
+                                                                           std::vector<ObjectId>(args.begin(), args.end())}));
+                 }
                  return out;
              },
-             "The true fluent atoms (slot order).")
+             "The true fluent atoms, by predicate and then by arguments in the task's canonical atom order (the same "
+             "order under every atom mode).")
         .def("holds",
              [](const PyState& s, HoldsArg formula) { return holds_arg(s, formula); }, "formula"_a,
              "Truth of a ground atom (a GroundAtom, '(on a b)', ('on', 'a', 'b') or a slot), a GroundLiteral or "

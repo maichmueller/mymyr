@@ -1,5 +1,7 @@
 #include "mymyr/task/atom_index.hpp"
 
+#include "mymyr/core/bitset.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <stdexcept>
@@ -167,5 +169,14 @@ u64 AtomIndex::bytes() const noexcept
     for (usize k = 0; k < 2; ++k)
         b += m_records[k].bytes() + m_ops[k].bytes() + m_cid[k].bytes();
     return b;
+}
+
+std::vector<u32> AtomIndex::slots_in_canonical_order(AtomKind k, const u64* w, u32 nw) const
+{
+    std::vector<u32> slots;
+    bits::for_each(w, nw, [&](u64 b) { slots.push_back(static_cast<u32>(b)); });
+    if (!frozen())
+        std::ranges::sort(slots, {}, [&](u32 slot) { return canonical(k, slot); });
+    return slots;
 }
 }  // namespace mymyr

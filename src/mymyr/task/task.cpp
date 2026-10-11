@@ -372,7 +372,8 @@ std::string Task::format(SlotId fluent_slot) const
 std::vector<std::string> Task::format_atoms(StateView s) const
 {
     std::vector<std::string> out;
-    bits::for_each(s.w, s.nw, [&](u64 slot) { out.push_back(format(SlotId{static_cast<u32>(slot)})); });
+    for (const u32 slot : m_atoms.slots_in_canonical_order(AtomKind::Fluent, s.w, s.nw))
+        out.push_back(format(SlotId{slot}));
     return out;
 }
 

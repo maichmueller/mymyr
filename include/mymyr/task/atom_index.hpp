@@ -174,6 +174,10 @@ public:
     [[nodiscard]] const u32* record(AtomKind k, u32 slot) const noexcept { return m_records[idx(k)].get(slot); }
     [[nodiscard]] const ViewOp& view_op(AtomKind k, u32 slot) const noexcept { return *m_ops[idx(k)].get(slot); }
     [[nodiscard]] CanonicalAtom canonical(AtomKind k, u32 slot) const noexcept { return *m_cid[idx(k)].get(slot); }
+    /// The slots set in the slot bitset w[0, nw) of kind k, in ascending canonical id of their atoms: the slot order
+    /// under frozen slots, sorted under lazy ones (numbered in the order searches met the atoms), so that a listing of a
+    /// state's atoms does not depend on that history.
+    [[nodiscard]] std::vector<u32> slots_in_canonical_order(AtomKind k, const u64* w, u32 nw) const;
 
     [[nodiscard]] PredicateId predicate(SlotId s) const noexcept { return PredicateId{record(AtomKind::Fluent, s.v)[0]}; }
     [[nodiscard]] std::span<const u32> arguments(SlotId s) const noexcept
