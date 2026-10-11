@@ -1,6 +1,7 @@
 """The mifrost parity fixtures replay in mymyr: tasks load, action paths reproduce the recorded states, and the names
-that the fixtures record exist in the task. Uses only mymyr and the JSON files (see
-scripts/export_mifrost_encoding_fixture.py for the format)."""
+and arities that the fixtures record exist in the task. Uses only mymyr and the JSON files (see
+scripts/export_mifrost_encoding_fixture.py for the format). The structural checks need only the JSON files; the others
+need the PDDL front end and skip without it."""
 
 import json
 import re
@@ -14,13 +15,18 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = sorted((ROOT / "tests/data/encoding/mifrost").glob("f*.json"))
 HELPER = re.compile(r"axiom_\d+$")
 DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
-GOAL_SOURCES = ("goal", "goal_derivation", "history")
+FLAT_ENCODERS = ("FlatRelationEncoder", "FlatHorizonEncoder", "FlatRootedHorizonEncoder", "FlatTransitionEncoder",
+                 "FlatTransitionEffectsEncoder")
+
+
+def read(path):
+    return json.loads(path.read_text())
 
 
 def load(path):
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
-    fixture = json.loads(path.read_text())
+    fixture = read(path)
     task = mymyr.Task.from_pddl(ROOT / fixture["task"]["domain"], ROOT / fixture["task"]["problem"])
     return fixture, task
 
@@ -36,32 +42,72 @@ def atoms(values):
     return sorted(str(a) for a in values)
 
 
-def comparable_derived(names):
-    """Derived atoms by name; the argument order of the normalizer's helper predicates (``axiom_<k>``) differs between
-    mimir and mymyr, so those compare as multisets of sorted arguments."""
+def state_path(fixture, state_id):
+    return next(s["path"] for s in fixture["states"] if s["id"] == state_id)
+
+
+def helper_arguments_in_fixture_order(task, fixture, atom):
+    """The atom ``(axiom_<k> ...)`` with its arguments in the argument order of the fixture's (pymimir's) predicate.
+
+    mymyr orders the parameters of a helper predicate by name, pymimir by its own traversal; the parameters carry the
+    same names, so the arguments are mapped by name. ``None`` if the predicate is a helper of the problem as written
+    that the fixture's (pymimir) task does not have."""
+    predicate, *arguments = atom.strip("()").split()
+    recorded = fixture["task"]["helper_predicates"].get(predicate)
+    if recorded is None:
+        return None
+    own = next(p for p in task.formalism.predicates if p.name == predicate)
+    names = [parameter.name for parameter in own.parameters]
+    assert sorted(names) == sorted(recorded), predicate
+    return "(" + " ".join([predicate] + [arguments[names.index(name)] for name in recorded]) + ")"
+
+
+def derived_in_fixture_order(task, fixture, state):
     output = []
-    for name in names:
-        predicate, *arguments = name.strip("()").split()
-        output.append((predicate, tuple(sorted(arguments)) if HELPER.match(predicate) else tuple(arguments)))
+    for atom in atoms(state.derived_atoms()):
+        if HELPER.match(atom.strip("()").split()[0]):
+            atom = helper_arguments_in_fixture_order(task, fixture, atom)
+            if atom is None:
+                continue
+        output.append(atom)
     return sorted(output)
 
 
 def base_predicate(relation):
-    """The predicate or schema a catalog relation is named after (decoration such as ``[+]`` and ``[g][sat]`` removed)."""
+    """The predicate or schema a catalog relation is named after (decorations like ``[+]`` and ``[g]`` removed)."""
     return DECORATION.match(relation).group(1)
+
+
+def flat_catalogs(fixture):
+    for config in fixture["configs"].values():
+        if config["encoder"] in FLAT_ENCODERS:
+            yield config, fixture["catalogs"][config["catalog"]]
+
+
+def hgraph_catalogs(fixture):
+    for config in fixture["configs"].values():
+        if config["encoder"] == "HGraphEncoder":
+            yield config, fixture["catalogs"][config["catalog"]]
+
+
+@pytest.fixture(params=FIXTURES, ids=[p.stem[:3] for p in FIXTURES])
+def recorded(request):
+    """The fixture alone."""
+    return read(request.param)
 
 
 @pytest.fixture(params=FIXTURES, ids=[p.stem[:3] for p in FIXTURES])
 def case(request):
+    """The fixture and the task it names, loaded in mymyr."""
     return load(request.param)
 
 
 def test_fixtures_are_present():
-    assert [p.stem[:3] for p in FIXTURES] == [f"f{i:02d}" for i in range(1, 11)]
+    assert [p.stem[:3] for p in FIXTURES] == [f"f{i:02d}" for i in range(1, 14)]
 
 
-def test_provenance_and_structure(case):
-    fixture, _ = case
+def test_provenance_and_structure(recorded):
+    fixture = recorded
     assert fixture["format"] == 1
     assert fixture["provenance"]["mifrost_version"] == "0.6.0"
     assert fixture["provenance"]["pymimir_version"] == "0.16.3"
@@ -85,16 +131,63 @@ def test_provenance_and_structure(case):
         assert config["catalog"] in fixture["catalogs"]
 
 
-def test_flat_catalogs_are_sorted_bytewise(case):
-    fixture, _ = case
-    for config in fixture["configs"].values():
-        catalog = fixture["catalogs"][config["catalog"]]
-        if "names" in catalog and config["encoder"] == "FlatRelationEncoder":
-            names = catalog["names"]
-            assert names == sorted(names, key=lambda n: n.encode())
-            assert len(set(names)) == len(names)
-            assert len(catalog["arities"]) == len(catalog["sources"]) == len(catalog["slots"]) == len(names)
-            assert all(len(slots) == arity for slots, arity in zip(catalog["slots"], catalog["arities"]))
+def test_paired_tasks_record_mifrost_on_the_problem_as_written(recorded):
+    task = recorded["task"]
+    if "mifrost_problem" not in task:
+        assert "mifrost_on_problem" not in task
+        return
+    assert task["mifrost_problem"] != task["problem"]
+    assert task["mifrost_on_problem"]
+    assert all(outcome != "ok" for outcome in task["mifrost_on_problem"].values())
+
+
+def test_flat_catalogs_are_sorted_bytewise(recorded):
+    for config, catalog in flat_catalogs(recorded):
+        if config["encoder"] != "FlatRelationEncoder":
+            continue
+        names = catalog["names"]
+        assert names == sorted(names, key=lambda n: n.encode())
+        assert len(set(names)) == len(names)
+        assert len(catalog["arities"]) == len(catalog["sources"]) == len(catalog["slots"]) == len(names)
+        assert all(len(slots) == arity for slots, arity in zip(catalog["slots"], catalog["arities"]))
+
+
+def test_hgraph_catalogs_are_well_formed(recorded):
+    for _, catalog in hgraph_catalogs(recorded):
+        node_types = catalog["node_types"]
+        assert node_types == sorted(node_types, key=lambda n: n.encode()) and len(set(node_types)) == len(node_types)
+        assert "_symbol_" in node_types
+        for edge in catalog["edge_types"]:
+            assert edge["rel"].isdigit()
+            assert {edge["src"], edge["dst"]} <= set(node_types)
+            assert "_symbol_" in (edge["src"], edge["dst"]) and edge["src"] != edge["dst"]
+
+
+def test_dag_and_successor_paths_agree_with_the_state(recorded):
+    for record in recorded["encodings"]:
+        path = state_path(recorded, record["state"])
+        inputs = record["inputs"]
+        if "dag" in inputs:
+            dag = inputs["dag"]
+            assert dag["nodes"][0] == path
+            for parent, child, action in dag["edges"]:
+                assert dag["nodes"][child] == dag["nodes"][parent] + [action]
+        if "successor" in inputs:
+            successor = inputs["successor"]
+            assert successor["path"][:-1] == path
+            assert successor["path"][-1] == successor["action"]
+
+
+def test_input_literals_are_clean(recorded):
+    for record in recorded["encodings"]:
+        inputs = record["inputs"]
+        groups = list(inputs.get("subgoal_layers", [])) + [step for _, step in inputs.get("history_subgoals", [])]
+        groups += [inputs["goals"]] if "goals" in inputs else []
+        for literals in groups:
+            assert len(set(literals)) == len(literals), (record["config"], record["state"])
+            positive = {l for l in literals if not l.startswith("(not ")}
+            negative = {l[5:-1] for l in literals if l.startswith("(not ")}
+            assert not positive & negative, (record["config"], record["state"])
 
 
 def test_states_replay_by_action_name(case):
@@ -102,7 +195,17 @@ def test_states_replay_by_action_name(case):
     for record in fixture["states"]:
         state = replay(task, record["path"])
         assert atoms(state.atoms()) == record["fluent"], record["id"]
-        assert comparable_derived(atoms(state.derived_atoms())) == comparable_derived(record["derived"]), record["id"]
+        assert derived_in_fixture_order(task, fixture, state) == record["derived"], record["id"]
+
+
+def test_helper_atoms_exist_only_where_the_fixture_has_them(case):
+    fixture, task = case
+    for record in fixture["states"]:
+        state = replay(task, record["path"])
+        extra = [a for a in atoms(state.derived_atoms())
+                 if HELPER.match(a.strip("()").split()[0]) and a.strip("()").split()[0]
+                 not in fixture["task"]["helper_predicates"]]
+        assert not extra or "mifrost_problem" in fixture["task"], extra
 
 
 def test_objects_and_static_atoms(case):
@@ -115,9 +218,8 @@ def test_catalog_names_exist_in_the_task(case):
     fixture, task = case
     predicates = {p.name for p in task.formalism.predicates}
     schemas = {s.name for s in task.formalism.schemas}
-    for config in fixture["configs"].values():
-        catalog = fixture["catalogs"][config["catalog"]]
-        for name, source in zip(catalog.get("names", []), catalog.get("sources", [])):
+    for _, catalog in flat_catalogs(fixture):
+        for name, source in zip(catalog["names"], catalog["sources"]):
             if name.startswith("_"):
                 continue
             base = base_predicate(name)
@@ -127,11 +229,54 @@ def test_catalog_names_exist_in_the_task(case):
                 assert base in predicates, name
 
 
+def test_logical_arities_match_the_task(case):
+    fixture, task = case
+    predicates = {p.name: p.arity for p in task.formalism.predicates}
+    schemas = {s.name: s.arity for s in task.formalism.schemas}
+    for _, catalog in flat_catalogs(fixture):
+        for name, source, arity in zip(catalog["names"], catalog["sources"], catalog["logical_arities"]):
+            if name.startswith("_"):
+                continue
+            base = base_predicate(name)
+            expected = schemas[base] if source == "action" else predicates[base]
+            assert arity == expected, name
+
+
+def test_action_arity_counts_existential_witnesses():
+    path = ROOT / "tests/data/encoding/mifrost/f09_relay.json"
+    fixture, task = load(path)
+    schema = next(s for s in task.formalism.schemas if s.name == "step")
+    assert schema.original_arity == 2 and schema.arity == 3
+    for _, catalog in flat_catalogs(fixture):
+        if "step" in catalog["names"]:
+            assert catalog["logical_arities"][catalog["names"].index("step")] == 3
+    names = [name for record in fixture["encodings"] for name in record["inputs"].get("actions", [])]
+    assert any(name.startswith("(step ") and len(name.strip("()").split()) == 4 for name in names)
+
+
+def test_hgraph_catalogs_match_the_task(case):
+    """Edge positions of a predicate node are its argument positions; an action node has the target entity at
+    position 0 and the action's objects (witnesses included) after it."""
+    fixture, task = case
+    positions = {p.name: max(p.arity, 1) for p in task.formalism.predicates}
+    for schema in task.formalism.schemas:
+        positions[schema.name] = max(positions.get(schema.name, 0), schema.arity + 1)
+    for _, catalog in hgraph_catalogs(fixture):
+        for node_type in catalog["node_types"]:
+            if node_type != "_symbol_":
+                assert base_predicate(node_type) in positions, node_type
+        for edge in catalog["edge_types"]:
+            node_type = edge["dst"] if edge["src"] == "_symbol_" else edge["src"]
+            if node_type != "_symbol_":
+                assert int(edge["rel"]) < positions[base_predicate(node_type)], edge
+
+
 def test_input_literals_and_actions_exist(case):
     fixture, task = case
     for record in fixture["encodings"]:
         inputs = record["inputs"]
-        state = replay(task, next(s for s in fixture["states"] if s["id"] == record["state"])["path"])
+        path = state_path(fixture, record["state"])
+        state = replay(task, path)
         literals = list(inputs.get("goals", []))
         for layer in inputs.get("subgoal_layers", []):
             literals += layer
@@ -143,12 +288,7 @@ def test_input_literals_and_actions_exist(case):
             applicable = {str(a) for a in state.applicable_actions()}
             assert set(inputs["actions"]) <= applicable
         if "dag" in inputs:
-            dag = inputs["dag"]
-            for parent, child, action in dag["edges"]:
-                assert dag["nodes"][child] == dag["nodes"][parent] + [action]
-            for path in dag["nodes"]:
-                replay(task, path)
+            for node in inputs["dag"]["nodes"]:
+                replay(task, node)
         if "successor" in inputs:
-            successor = inputs["successor"]
-            replay(task, successor["path"])
-            assert successor["path"][-1] == successor["action"]
+            replay(task, inputs["successor"]["path"])
