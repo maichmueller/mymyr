@@ -1,7 +1,7 @@
 // Conditions of the ADL fragment (quantifiers, implication, disjunction, negation over compounds, nesting) in goals,
-// preconditions, conditional effects under forall effects and derived predicate bodies: on small tasks, in every state
-// the base actions reach, the goal test, the applicable actions and the successors agree with the formula as written,
-// evaluated here; search finds plans for guarded forall goals that satisfy the formula.
+// preconditions, conditional effects (under forall effects, nested in each other) and derived predicate bodies: on small
+// tasks, in every state the base actions reach, the goal test, the applicable actions and the successors agree with the
+// formula as written, evaluated here; search finds plans for guarded forall goals that satisfy the formula.
 
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -26,13 +26,14 @@ using namespace mymyr;
 namespace
 {
 const std::string kDomain = R"((define (domain adl) (:requirements :adl :derived-predicates)
- (:predicates (s ?x) (p ?x) (q ?x) (r ?x ?y) (m ?x) (n ?x) (ok ?x))
+ (:predicates (s ?x) (p ?x) (q ?x) (r ?x ?y) (m ?x) (n ?x) (k ?x) (ok ?x))
  (:derived (ok ?x) (forall (?y) (imply (r ?x ?y) (p ?y))))
  (:action set-p :parameters (?x) :precondition (not (p ?x)) :effect (p ?x))
  (:action del-p :parameters (?x) :precondition (p ?x) :effect (not (p ?x)))
  (:action set-q :parameters (?x) :precondition (not (q ?x)) :effect (q ?x))
  (:action act :parameters (?x) :precondition (or (q ?x) (forall (?y) (imply (s ?y) (p ?y))))
-  :effect (and (n ?x) (forall (?w) (when (forall (?y) (imply (r ?w ?y) (q ?y))) (m ?w)))))
+  :effect (and (n ?x) (forall (?w) (when (forall (?y) (imply (r ?w ?y) (q ?y))) (m ?w)))
+   (when (exists (?z) (and (q ?z) (not (p ?z)))) (forall (?w) (when (not (exists (?y) (and (r ?w ?y) (not (p ?y))))) (k ?w))))))
  (:action check :parameters (?x) :precondition (and (ok ?x) (not (exists (?y) (and (r ?y ?x) (not (q ?y))))))
   :effect (n ?x))))";
 
@@ -153,13 +154,14 @@ TEST(AdlConditions, PreconditionsEffectConditionsAndDerivedBodiesMatchTheFormula
     const std::vector<State> states = base_states(*t);
     ASSERT_EQ(states.size(), 64u);
     const WorkspaceLease ws = t->workspace();
-    u32 acts = 0, checks = 0, marks = 0;
+    u32 acts = 0, checks = 0, marks = 0, nested_marks = 0;
     for (const State& s : states)
     {
         const Atoms at = atoms_of(*t, s.view());
         const bool guarded = Atoms::all([&](auto& y) { return !at("s", y) || at("p", y); });
         auto ok = [&](const std::string& x) { return Atoms::all([&](auto& y) { return !at("r", x, y) || at("p", y); }); };
         auto mark = [&](const std::string& w) { return Atoms::all([&](auto& y) { return !at("r", w, y) || at("q", y); }); };
+        const bool nested = Atoms::any([&](auto& z) { return at("q", z) && !at("p", z); });
         std::set<std::string> want, got;
         for (const std::string& x : kObjects)
         {
@@ -180,7 +182,8 @@ TEST(AdlConditions, PreconditionsEffectConditionsAndDerivedBodiesMatchTheFormula
                 continue;
             }
             ++acts;
-            // the successor adds (n x), and (m w) for every w whose condition holds in s
+            // the successor adds (n x), (m w) for every w whose condition holds in s, and (k w) for every w with ok(w)
+            // if some z has q but not p
             std::vector<std::string> expected = t->format_atoms(s.view());
             expected.push_back("(n " + name.substr(5, name.size() - 6) + ")");
             for (const std::string& w : kObjects)
@@ -188,6 +191,12 @@ TEST(AdlConditions, PreconditionsEffectConditionsAndDerivedBodiesMatchTheFormula
                 {
                     expected.push_back("(m " + w + ")");
                     ++marks;
+                }
+            for (const std::string& w : kObjects)
+                if (nested && ok(w))
+                {
+                    expected.push_back("(k " + w + ")");
+                    ++nested_marks;
                 }
             const State n = ws->successors().apply(s.view(), a.label());
             std::vector<std::string> succ = t->format_atoms(n.view());
@@ -200,6 +209,7 @@ TEST(AdlConditions, PreconditionsEffectConditionsAndDerivedBodiesMatchTheFormula
     EXPECT_GT(acts, 0u);
     EXPECT_GT(checks, 0u);
     EXPECT_GT(marks, 0u);
+    EXPECT_GT(nested_marks, 0u);
 }
 
 TEST(AdlConditions, SearchFindsPlansForGuardedForallGoals)

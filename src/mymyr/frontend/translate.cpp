@@ -321,6 +321,29 @@ void conjuncts(const loki::Condition& c, loki::ConditionList& out)
         throw std::logic_error("Expected conjunctive condition.");
 }
 
+/// The conjuncts of the condition of a conditional effect (conjuncts), where existential quantifiers may occur too:
+/// loki merges the conditions of nested conditional effects (`c1 > (c2 > e)` is `(c1 and c2) > e`) after it moved the
+/// existential quantifiers out of conditions, so an existential condition met by another one arrives as a part of a
+/// conjunction. Its variables are appended to `params`, the parameters of the conditional effect, and its body joins
+/// the conjuncts, as loki compiles an existential condition on its own (`exists(vs, c) > e` is `forall(vs, c > e)`).
+void effect_conjuncts(const loki::Condition& c, loki::ConditionList& out, loki::ParameterList& params)
+{
+    if (const auto* a = std::get_if<loki::ConditionAnd>(&c->get_condition()))
+    {
+        for (const auto& part : (*a)->get_conditions())
+            effect_conjuncts(part, out, params);
+    }
+    else if (const auto* x = std::get_if<loki::ConditionExists>(&c->get_condition()))
+    {
+        params.insert(params.end(), (*x)->get_parameters().begin(), (*x)->get_parameters().end());
+        effect_conjuncts((*x)->get_condition(), out, params);
+    }
+    else if (is_atomic(c))
+        out.push_back(c);
+    else
+        throw std::logic_error("Expected literal in conjunctive condition.");
+}
+
 /// mimir: which predicates are fluent / derived and which functions appear in effects (ToMimirStructures::prepare).
 struct Classifier
 {
@@ -341,7 +364,9 @@ struct Classifier
                 e = (*f)->get_effect();
             if (const auto* w = std::get_if<loki::EffectCompositeWhen>(&e->get_effect()))
             {
-                condition((*w)->get_condition());
+                loki::ConditionList parts;
+                loki::ParameterList params;
+                effect_conjuncts((*w)->get_condition(), parts, params);
                 e = (*w)->get_effect();
             }
             if (const auto* l = std::get_if<loki::EffectLiteral>(&e->get_effect()))
@@ -655,9 +680,14 @@ public:
     /// mimir: ToMimirStructures::translate_lifted(Condition, parameters)
     u32 cond(loki::Condition c, const std::vector<u32>& ps)
     {
-        std::vector<u32> lits[3], ncs;
         loki::ConditionList parts;
         conjuncts(c, parts);
+        return cond(std::move(parts), ps);
+    }
+    /// The condition of the conjuncts `parts`.
+    u32 cond(loki::ConditionList parts, const std::vector<u32>& ps)
+    {
+        std::vector<u32> lits[3], ncs;
         canonicalize_type_runs(parts);
         for (const auto& part : parts)
         {
@@ -700,7 +730,12 @@ public:
             std::optional<u32> c;
             if (const auto* w = std::get_if<loki::EffectCompositeWhen>(&e->get_effect()))
             {
-                c = cond((*w)->get_condition(), forall_params);
+                loki::ConditionList parts;
+                loki::ParameterList exists_params;
+                effect_conjuncts((*w)->get_condition(), parts, exists_params);
+                for (u32 p : params(exists_params))
+                    forall_params.push_back(p);
+                c = cond(std::move(parts), forall_params);
                 e = (*w)->get_effect();
             }
             if (!c)

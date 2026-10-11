@@ -15,6 +15,7 @@ undefined side both are false, and a universal quantifier holds when no binding 
 import math
 import re
 
+import numpy as np
 import pytest
 
 import mymyr
@@ -77,7 +78,8 @@ SHAPES = {
     "numeric-not": "(not (and (p X) (<= (f X) 1)))",
 }
 
-CONTEXTS = ["goal", "goal-and", "pre", "when", "forall-when", "derived", "derived-goal"]
+CONTEXTS = ["goal", "goal-and", "pre", "when", "forall-when", "nested-when", "derived", "derived-goal"]
+NESTED_GUARD = "(exists (?z - a) (and (p ?z) (not (= ?z ?x))))"
 
 
 def fill(shape, x):
@@ -96,6 +98,9 @@ def build(shape, context):
         parts["eff"] = "(when " + fill(shape, "?x") + " (m ?x))"
     elif context == "forall-when":
         parts["eff"] = "(forall (?w - a) (when (and (not (= ?w ?x)) " + fill(shape, "?w") + ") (m ?w)))"
+    elif context == "nested-when":
+        # an existential condition around a forall effect with a condition of its own
+        parts["eff"] = "(when " + NESTED_GUARD + " (forall (?w - a) (when " + fill(shape, "?w") + " (m ?w))))"
     else:
         parts["derived"] = "(:derived (d ?x - a) " + fill(shape, "?x") + ")"
         if context == "derived-goal":
@@ -266,6 +271,8 @@ def check(shape, context):
                 want.add(("m", (o,)))
             if context == "forall-when":
                 want |= {("m", (w,)) for w in a_objects if w != o and ref.holds(parse(fill(shape, w)), {})}
+            if context == "nested-when" and ref.holds(parse(NESTED_GUARD), {"?x": o}):
+                want |= {("m", (w,)) for w in a_objects if ref.holds(parse(fill(shape, w)), {})}
             assert {atom_key(x) for x in task.apply(s, a).atoms()} == want, (shape, context, str(a), sorted(fluents))
 
 
@@ -326,26 +333,123 @@ DEVICE_CASES = [
     ("nested-negations", "goal-and"),
     ("or-quantifiers", "pre"),
     ("forall-free", "forall-when"),
+    ("forall-free", "nested-when"),
     ("nested-exists-forall", "derived-goal"),
-    ("numeric-forall", "goal"),
 ]
+
+
+def cuda_module():
+    mc = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend", exc_type=ImportError)
+    if not mc.available():
+        pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
+    return mc
+
+
+def task_of(shape, context):
+    domain, problem, _ = build(SHAPES[shape], context)
+    return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
 
 
 @pytest.mark.parametrize("shape,context", DEVICE_CASES)
 def test_device_paths_agree_with_the_cpu(shape, context):
-    mc = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend", exc_type=ImportError)
-    if not mc.available():
-        pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
-    import mymyr.datasets
-
-    domain, problem, _ = build(SHAPES[shape], context)
-    task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+    mc = cuda_module()
+    task = task_of(shape, context)
     ctx = mc.Context(0, max_bytes=1 << 30)
     cpu = search.brfs(task, fingerprint=True, stop_at_goal=False)
     gpu = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
     assert (gpu.states, gpu.generated, gpu.goal_states, gpu.fingerprint) == (cpu.states, cpu.generated, cpu.goal_states, cpu.fingerprint)
+    assert_state_spaces_agree(task, ctx)
+    ctx.synchronize()
+
+
+def assert_state_spaces_agree(task, ctx):
+    import mymyr.datasets
+
     space = mymyr.datasets.state_space(task, remove_if_unsolvable=False)
     device_space = mymyr.datasets.state_space(task, device=ctx, remove_if_unsolvable=False)
-    assert device_space.num_states == space.num_states
-    assert sum(device_space.is_goal(i) for i in range(device_space.num_states)) == sum(space.is_goal(i) for i in range(space.num_states))
+    fields = ("num_states", "num_transitions", "num_goal_states", "num_unsolvable_states", "max_goal_distance")
+    assert [getattr(device_space, f) for f in fields] == [getattr(space, f) for f in fields]
+    assert space.num_goal_states > 0
+
+
+@pytest.mark.parametrize("shape,context", [("forall-guarded", "goal"), ("nested-negations", "goal-and"), ("nested-exists-forall", "derived-goal")])
+def test_device_ground_goals_agree_with_the_cpu(shape, context):
+    mc = cuda_module()
+    task = task_of(shape, context)
+    goal = task.goal_condition
+    options = {"max_arity": 2, "max_states": 3000}
+    starts = [task.initial_state, task.apply(task.initial_state, task.applicable_actions(task.initial_state)[0])]
+    ctx = mc.Context(0, max_bytes=1 << 30)
+    batch = mc.multi_iw(task, starts, goals=[goal, goal], ctx=ctx, **options)
+    for i, start in enumerate(starts):
+        expected = search.iw(task, start=start, goal=goal, **options)
+        assert expected.solved
+        assert batch.status[i] == expected.status
+        assert [str(a) for a in batch.plan(i)] == [str(a) for a in expected.plan]
+        assert batch.goal_state(i) == expected.goal_state
     ctx.synchronize()
+
+
+LEVEL_DOMAIN = """(define (domain level) (:requirements :typing :adl :numeric-fluents)
+ (:types a)
+ (:predicates (p ?x - a))
+ (:functions (f ?x - a))
+ (:action set-p :parameters (?x - a) :precondition (not (p ?x)) :effect (p ?x))
+ (:action inc :parameters (?x - a) :precondition (< (f ?x) 3) :effect (increase (f ?x) 1)))"""
+LEVEL_PROBLEM = """(define (problem level-1) (:domain level) (:objects o1 o2 - a)
+ (:init (= (f o1) 0) (= (f o2) 1)) (:goal (forall (?y - a) (imply (p ?y) (>= (f ?y) 2)))))"""
+
+
+def test_device_paths_evaluate_numeric_helper_rules_on_the_cpu():
+    """A universal quantifier over a numeric comparison compiles into a derived predicate whose rule has a numeric
+    constraint: the device paths evaluate such rules on the CPU and agree with the CPU search."""
+    mc = cuda_module()
+    task = mymyr.Task(mymyr.Domain.from_string(LEVEL_DOMAIN).instantiate_string(LEVEL_PROBLEM))
+    assert task.has_axioms
+    ctx = mc.Context(0, max_bytes=1 << 30)
+    cpu = search.brfs(task, fingerprint=True, stop_at_goal=False)
+    gpu = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
+    assert (gpu.states, gpu.generated, gpu.goal_states, gpu.fingerprint) == (cpu.states, cpu.generated, cpu.goal_states, cpu.fingerprint)
+    assert gpu.stats["device_axioms"] == 0 and gpu.stats["host_axiom_ms"] > 0.0
+    options = {"max_arity": 1, "max_states": 1000}
+    expected = search.iw(task, goal=task.goal_condition, **options)
+    batch = mc.multi_iw(task, [task.initial_state], goals=[task.goal_condition], ctx=ctx, **options)
+    assert batch.status[0] == expected.status and [str(a) for a in batch.plan(0)] == [str(a) for a in expected.plan]
+    assert_state_spaces_agree(task, ctx)
+    ctx.synchronize()
+
+
+def test_goal_masks_refuse_compiled_goals():
+    """A goal that is not a conjunction of literals is a derived literal: a mask test cannot decide it."""
+    task = task_of("forall-guarded", "goal")
+    with pytest.raises(ValueError, match="derived"):
+        task.goal_masks()
+
+
+ENV_CASES = [("forall-guarded", "goal"), ("or-quantifiers", "pre"), ("forall-free", "nested-when"), ("nested-exists-forall", "derived-goal"), ("level", "goal")]
+
+
+@pytest.mark.parametrize("shape,context", ENV_CASES)
+def test_device_environment_agrees_with_the_host(shape, context):
+    from test_rl_table import gpu_device, step_arrays
+
+    dev = gpu_device()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    from mymyr import rl
+
+    if shape == "level":
+        task = mymyr.Task(mymyr.Domain.from_string(LEVEL_DOMAIN).instantiate_string(LEVEL_PROBLEM))
+    else:
+        task = task_of(shape, context)
+    table = rl.TaskTable([task])
+    config = dict(max_steps=8, step_reward=-1.0, goal_reward=5.0, seed=3)
+    host, env = rt.BatchedEnv(table, 64, **config), rt.BatchedEnv(table, 64, device=dev, **config)
+    solved = 0
+    for step in range(16):
+        want, got = step_arrays(host.step(final=True)), step_arrays(env.step(final=True))
+        assert want.keys() == got.keys()
+        for field, value in want.items():
+            assert np.array_equal(got[field], value), (shape, context, step, field)
+        solved += int(want["terminated"].sum())
+    env.check_errors()
+    assert solved > 0
