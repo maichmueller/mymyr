@@ -318,8 +318,6 @@ def host_rollout(t, ids, steps, goals=False, next_ids=None, seed=5, **cfg):
         r = step_arrays(env.step(next_task_ids=nxt, final=True))
         a = env_arrays(env)
         a.update(r)
-        if goals:
-            a["goal_pos"] = env.goal_pos.numpy().view(np.uint64).copy()
         out.append(a)
     return out
 
@@ -354,10 +352,7 @@ def test_device_env_equals_host_env(sets, name):
                 r = step_arrays(env.step(next_task_ids=torch.from_numpy(ROT(n, len(tasks))(s)).to(dev), final=True))
                 a = env_arrays(env)
                 for f, v in ref[s + 1].items():
-                    got = r.get(f, a.get(f))
-                    if f == "goal_pos":
-                        got = env.goal_pos.cpu().numpy().view(np.uint64)
-                    assert np.array_equal(got, v), (path, launch, s, f)
+                    assert np.array_equal(r.get(f, a.get(f)), v), (path, launch, s, f)
             env.check_errors()
     # a batch split (two envs, first_env = the second half's first env id) on a side stream
     h = n // 3

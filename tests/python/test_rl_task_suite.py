@@ -333,8 +333,7 @@ def test_device_suite_env_equals_host(sets, key):
                 r = step_arrays(env.step(next_task_ids=torch.from_numpy(rot(k)).to(dev), final=True))
                 a = env_arrays(env)
                 for f, v in ref[k + 1].items():
-                    got = env.goal_pos.cpu().numpy().view(np.uint64) if f == "goal_pos" else r.get(f, a.get(f))
-                    assert np.array_equal(got, v), (order, path, k, f)
+                    assert np.array_equal(r.get(f, a.get(f)), v), (order, path, k, f)
             env.check_errors()
             # a refresh after writing states and task ids: the counts of the rows' instances
             env.task_ids.copy_(torch.from_numpy(np.roll(ids, 3)).to(dev))
