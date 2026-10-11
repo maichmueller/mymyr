@@ -1,5 +1,5 @@
 (define (domain features)
- (:requirements :strips :negative-preconditions :derived-predicates)
+ (:requirements :strips :negative-preconditions :derived-predicates :universal-preconditions :disjunctive-preconditions)
  (:predicates (fixed ?x) (flag ?x) (available ?x) (ready))
  (:derived (available ?x) (flag ?x))
  (:action enable :parameters (?x) :precondition (not (flag ?x)) :effect (flag ?x))
