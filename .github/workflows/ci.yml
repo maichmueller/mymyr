@@ -312,7 +312,7 @@ jobs:
           cd build/cpu
           ctest -j "$(sysctl -n hw.ncpu)" --timeout 900 --output-on-failure --no-tests=error 2>&1 | tee ctest.log
       - name: Check the ctest counts
-        run: python3 ci/check_ctest_log.py build/cpu/ctest.log
+        run: python3 ci/check_ctest_log.py --platform macos build/cpu/ctest.log
       - name: C++ consumer of the installed build tree
         run: |
           cmake --install build/cpu --prefix build/prefix
