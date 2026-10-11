@@ -75,6 +75,12 @@ void check_out(const TaskSuite& table, const Expansion& out)
         throw std::invalid_argument("mymyr: expand: goal flags need the successor rows");
     if (out.succ)
         check_numeric(table, out.numeric_words, "the successor rows");
+    if (out.derived && !out.succ)
+        throw std::invalid_argument("mymyr: expand: derived words need the successor rows");
+    if (out.derived && out.derived_words < table.derived_words())
+        throw std::invalid_argument("mymyr: expand: derived rows of " + std::to_string(out.derived_words) +
+                                    " words; the " + table.noun() + " has instances of " +
+                                    std::to_string(table.derived_words()));
 }
 
 /// Successor generators of a suite's instances for one thread, leased on first use per instance and returned with the
@@ -272,6 +278,28 @@ inline u8 goal_of(const Task& task, const u64* s, u32 W, u32 NN)
     const u32 nn = task.numeric_words();
     return static_cast<u8>(task.is_goal(StateView{s, std::min(W, task.words()), NN ? s + W : nullptr, nn}));
 }
+
+/// The goal flag and/or derived words of a successor row: one axiom evaluation serves both. `derived` (dw words, zero
+/// past the instance's own) is null when not wanted; `goal` likewise.
+inline void row_info(const Task& task, const u64* s, u32 W, u32 NN, u8* goal, u64* derived, u32 dw)
+{
+    if (!derived)
+    {
+        if (goal)
+            *goal = goal_of(task, s, W, NN);
+        return;
+    }
+    const u32 own = bits::words_for(task.atoms().derived_slots());
+    std::fill_n(derived, dw, u64{0});
+    const StateView view{s, std::min(W, task.words()), NN ? s + W : nullptr, task.numeric_words()};
+    const WorkspaceLease ws = task.workspace();
+    Successors& succ = ws->successors();
+    succ.prepare(view);
+    if (own)
+        std::copy_n(ws->engine().derived(), own, derived);
+    if (goal)
+        *goal = static_cast<u8>(succ.goal_holds());
+}
 }  // namespace
 
 struct ExpandScratch::Impl
@@ -286,6 +314,7 @@ struct ExpandScratch::Impl
         LineVector<u64> succ;
         LineVector<i32> parent, schema, binding;
         LineVector<u8> goal;
+        LineVector<u64> derived;
         LineVector<u64> tmp;
         LineVector<Chunk> chunks;
         u32 words_needed = 0;
@@ -328,9 +357,10 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
         const u32 nw = bits::trimmed_size(row, std::min(in.words, task.words()));
         DirectSink sink{out, row, nw, static_cast<i32>(i), next, L, tmp};
         expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
-        if (out.goal)
+        if (out.goal || out.derived)
             for (u64 j = next; j < sink.next && j < out.capacity; ++j)
-                out.goal[j] = goal_of(task, out.succ + j * RW, out.words, NN);
+                row_info(task, out.succ + j * RW, out.words, NN, out.goal ? out.goal + j : nullptr,
+                         out.derived ? out.derived + j * out.derived_words : nullptr, out.derived_words);
         next = sink.next;
         if (out.offsets)
             write_offsets(out.offsets, i + 1, next);
@@ -360,7 +390,8 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
     const u64 nchunks = (in.rows + chunk - 1) / chunk;
     S.next_chunk.store(0, std::memory_order_relaxed);
     const u32 W = out.words, L = out.label_width, NN = in.numeric_words, RW = W + out.numeric_words;
-    const bool want_goal = out.goal != nullptr;
+    const bool want_goal = out.goal != nullptr, want_derived = out.derived != nullptr;
+    const u32 DW = out.derived_words;
 
     pool.run(
         [&](u32 t)
@@ -371,6 +402,7 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
             m.schema.clear();
             m.binding.clear();
             m.goal.clear();
+            m.derived.clear();
             m.chunks.clear();
             m.words_needed = 0;
             Generators gens(table);
@@ -397,9 +429,20 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
                     expand_state(gens.of(inst), row, nw, nn ? row + in.words : nullptr, nn, opt, sink);
                     S.counts[i] = sink.rows;
                     rows_before += sink.rows;
-                    if (want_goal)
+                    if (want_goal || want_derived)
                         for (u64 j = before; j < rows_before; ++j)
-                            m.goal.push_back(goal_of(task, m.succ.data() + (rec.first_row + j) * RW, W, NN));
+                        {
+                            u8 g = 0;
+                            u64* d = nullptr;
+                            if (want_derived)
+                            {
+                                m.derived.resize(m.derived.size() + DW);
+                                d = m.derived.data() + m.derived.size() - DW;
+                            }
+                            row_info(task, m.succ.data() + (rec.first_row + j) * RW, W, NN, want_goal ? &g : nullptr, d, DW);
+                            if (want_goal)
+                                m.goal.push_back(g);
+                        }
                 }
                 rec.rows = rows_before;
                 m.chunks.push_back(rec);
@@ -443,6 +486,8 @@ void expand(const TaskSuite& table, StateBatchView in, const i32* ids, Expansion
                     std::memcpy(out.binding + dst * L, m.binding.data() + c.first_row * L, n * L * sizeof(i32));
                 if (out.goal)
                     std::memcpy(out.goal + dst, m.goal.data() + c.first_row, n * sizeof(u8));
+                if (out.derived)
+                    std::memcpy(out.derived + dst * DW, m.derived.data() + c.first_row * DW, n * DW * sizeof(u64));
             }
         });
 }
@@ -459,6 +504,8 @@ void pad(const Expansion& flat, u64 rows, PaddedExpansion& out)
         throw std::invalid_argument("mymyr: pad: padded and flat rows carry different numeric words");
     if (out.binding && flat.binding && L < flat.label_width)
         throw std::invalid_argument("mymyr: pad: padded label width below the flat label width");
+    if (out.derived && flat.derived && out.derived_words < flat.derived_words)
+        throw std::invalid_argument("mymyr: pad: padded derived rows narrower than the flat rows");
     out.overflow = false;
     for (u64 i = 0; i < rows; ++i)
     {
@@ -506,6 +553,13 @@ void pad(const Expansion& flat, u64 rows, PaddedExpansion& out)
             }
             if (out.goal)
                 out.goal[at] = valid && flat.goal ? flat.goal[j] : 0;
+            if (out.derived)
+            {
+                u64* dst = out.derived + at * out.derived_words;
+                const u64* src = valid && flat.derived ? flat.derived + j * flat.derived_words : nullptr;
+                for (u32 w = 0; w < out.derived_words; ++w)
+                    dst[w] = src && w < flat.derived_words ? src[w] : 0;
+            }
         }
     }
 }
