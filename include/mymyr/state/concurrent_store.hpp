@@ -12,7 +12,8 @@
 //     resulting ids do not depend on thread scheduling.
 // Numeric tasks: a record is [len, bits..., numeric words...]; the numeric words (a fixed count per task) follow
 // the trimmed bits, the hash is hash::state and equality compares them bitwise.
-// Every thread t in [0, threads) may call insert(t, ...) concurrently with the others; nothing else is concurrent.
+// Every thread t in [0, threads) may call insert(t, ...) or insert_bounded(t, ...) concurrently with the others;
+// nothing else is concurrent.
 
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/hash.hpp"
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -61,6 +63,23 @@ public:
     /// records of the current layer lowers the stored key to `key` if smaller. Returns (handle, inserted).
     std::pair<Handle, bool> insert(u32 t, const u64* w, u32 n, u64 key, const u64* num = nullptr)
     {
+        return *insert_impl<false>(t, w, n, key, num, nullptr, 0);
+    }
+
+    /// insert() into a store of at most `limit` states: `count` is the number of states stored, shared by every
+    /// thread (all inserts go through insert_bounded with the same counter). A state that is new when `count` has
+    /// reached `limit` is not stored: nullopt. Duplicates are found whatever the count.
+    std::optional<std::pair<Handle, bool>> insert_bounded(u32 t, const u64* w, u32 n, u64 key, const u64* num,
+                                                          std::atomic<u64>& count, u64 limit)
+    {
+        return insert_impl<true>(t, w, n, key, num, &count, limit);
+    }
+
+private:
+    template<bool Bounded>
+    std::optional<std::pair<Handle, bool>> insert_impl(u32 t, const u64* w, u32 n, u64 key, const u64* num,
+                                                       std::atomic<u64>* count, u64 limit)
+    {
         n = bits::trimmed_size(w, n);
         const u64 h = hash::state(w, n, num, m_nn);
         const u32 tag = static_cast<u32>(h >> 32) | 1u;
@@ -69,11 +88,26 @@ public:
         std::atomic<u64>* S = m_tab;
         const u64 mask = m_cap - 1;
         u64 probes = 0;
+        [[maybe_unused]] bool reserved = false;  // Bounded: one unit of `count` taken for this state
         for (u64 j = h & mask;; j = (j + 1) & mask)
         {
             u64 v = S[j].load(std::memory_order_acquire);
             if (v == 0)
             {
+                if constexpr (Bounded)
+                {
+                    // the state is new so far: take a unit of the count before publishing it
+                    if (!reserved)
+                    {
+                        u64 c = count->load(std::memory_order_relaxed);
+                        do
+                        {
+                            if (c >= limit)
+                                return std::nullopt;
+                        } while (!count->compare_exchange_weak(c, c + 1, std::memory_order_relaxed));
+                        reserved = true;
+                    }
+                }
                 if (!written)
                 {
                     A.write(w, n, num, m_nn, key);
@@ -89,18 +123,23 @@ public:
                         m_approx.fetch_add(64, std::memory_order_relaxed);
                         A.local_new = 0;
                     }
-                    return {nh, true};
+                    return std::pair<Handle, bool>{nh, true};
                 }
             }
             if (static_cast<u32>(v >> 32) == tag && equal(static_cast<Handle>(v), w, n, num))
             {
+                if constexpr (Bounded)
+                    if (reserved)  // another thread published the same state first
+                        count->fetch_sub(1, std::memory_order_relaxed);
                 on_duplicate(static_cast<Handle>(v), key);
-                return {static_cast<Handle>(v), false};
+                return std::pair<Handle, bool>{static_cast<Handle>(v), false};
             }
             if (++probes > mask)
                 throw std::length_error("ConcurrentStateStore: table full");
         }
     }
+
+public:
 
     /// The record of a handle (trimmed words, then the numeric words).
     [[nodiscard]] StateView record(Handle h) const noexcept

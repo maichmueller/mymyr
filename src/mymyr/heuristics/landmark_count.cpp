@@ -384,7 +384,8 @@ private:
         scan.derived.clear();
         if (!m_derived.empty())
         {
-            Successors& succ = m_task.evaluation_workspace().successors();
+            const WorkspaceLease lease = m_task.workspace();
+            Successors& succ = lease->successors();
             succ.prepare(s);
             const mymyr::detail::Engine& e = succ.engine();
             for (const auto& [p, c] : m_derived)

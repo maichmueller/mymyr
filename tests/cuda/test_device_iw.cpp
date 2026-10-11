@@ -682,7 +682,8 @@ TEST(CudaMultiIw, RelaxedNoveltyReturnsValidPlans)
             o.exact = false;
             o.budget.max_states = 5000;
             const std::vector<search::IwResult> d = cuda::multi_iw(context(), task, starts, o);
-            Successors& succ = task->workspace().successors();
+            const WorkspaceLease lease = task->workspace();
+            Successors& succ = lease->successors();
             for (usize i = 0; i < starts.size(); ++i)
             {
                 if (d[i].status != search::SearchStatus::Solved)

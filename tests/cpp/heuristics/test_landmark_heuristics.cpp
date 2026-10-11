@@ -194,7 +194,8 @@ namespace
 /// Replays `plan` from the initial state: every action applicable, the last state a goal state.
 bool replays(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = task.initial_state();
     for (const Action& a : plan)
     {

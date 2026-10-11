@@ -55,13 +55,18 @@ struct ExpandOptions
 {
     bool canonical_order = true;
     bool witness_pruning = false;  // on: one witness per effect-relevant binding (fewer, unlabelled-equivalent rows)
-    bool validate = true;          // reject rows with bits beyond their instance's assigned atom slots
+    // reject rows with bits beyond their instance's assigned atom slots (rows narrower than a frozen instance's
+    // width are rejected either way)
+    bool validate = true;
 };
+
+/// States of one batch, and successor rows (capacity, total) of one expansion, at most: parents and offsets are i32.
+inline constexpr u64 k_max_rows = (u64{1} << 31) - 1;
 
 /// Destination buffers and results of a flat expansion. A null array is not written.
 struct Expansion
 {
-    u64 capacity = 0;        // rows of succ / parent / schema / binding / goal
+    u64 capacity = 0;        // rows of succ / parent / schema / binding / goal (at most k_max_rows)
     u32 words = 0;           // atom words per successor row
     u32 label_width = 0;     // columns of `binding` (at least the table's label_width() when binding is set)
     u64* succ = nullptr;     // [capacity, words + numeric_words]
@@ -137,7 +142,8 @@ struct PaddedExpansion
 void pad(const Expansion& flat, u64 rows, PaddedExpansion& out);
 
 /// Goal flags of a batch (evaluates axioms when the goal mentions derived predicates): out[i] = the goal test of
-/// instance task_ids[i] (null: a table of one instance) on row i.
+/// instance task_ids[i] (null: a table of one instance) on row i. Throws std::invalid_argument for malformed buffers,
+/// states or task ids (as expand with validate on).
 void is_goal(const TaskSuite& suite, StateBatchView in, const i32* task_ids, u8* out);
 inline void is_goal(const TaskTable& table, StateBatchView in, const i32* task_ids, u8* out)
 {

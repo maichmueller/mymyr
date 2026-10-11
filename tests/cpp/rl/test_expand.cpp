@@ -43,7 +43,8 @@ TaskPtr load(const std::string& name, TaskOptions::Atoms atoms)
 std::vector<State> walk_states(const Task& task, u32 walks, u32 steps, u64 seed)
 {
     std::mt19937_64 rng(seed);
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     std::vector<State> out;
     for (u32 w = 0; w < walks; ++w)
     {
@@ -114,7 +115,8 @@ struct Reference
 Reference reference(const Task& task, const std::vector<State>& states)
 {
     Reference r;
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     for (usize i = 0; i < states.size(); ++i)
     {
         std::vector<Action> acts;
@@ -503,7 +505,8 @@ TEST(RlConcurrency, SixtyFourThreadsShareOneTask)
                                 ++failures[t];
                         }
                         // apply and is_goal through the per-thread workspace
-                        Successors& succ = task->workspace().successors();
+                        const WorkspaceLease lease = task->workspace();
+                        Successors& succ = lease->successors();
                         for (usize j = t % 7; j < ref.actions.size(); j += 7)
                         {
                             const State s = succ.apply(states[static_cast<usize>(ref.parent[j])], ref.actions[j].label());

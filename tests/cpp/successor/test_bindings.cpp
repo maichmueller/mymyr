@@ -105,7 +105,8 @@ std::string golden_format(const Task& task, const ActionLabel& a, const test::js
 /// The states of the golden walks, replayed by the names of the actions taken.
 std::vector<State> walk_states(const Task& task, const test::json::Value& doc)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const auto& names = doc["names"];
     std::vector<State> out;
     for (const auto& w : doc["walks"]["walks"].arr)
@@ -140,7 +141,8 @@ std::vector<State> walk_states(const Task& task, const test::json::Value& doc)
 
 std::vector<Action> applicable(const Task& task, StateView s)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     succ.set_witness_pruning(false);
     succ.set_canonical_order(true);
     return succ.applicable_actions(s);
@@ -199,7 +201,8 @@ TEST_P(BindingsWalk, SchemaBindingsAreTheApplicableActionsThatAgree)
         GTEST_SKIP() << "no text export of " << name;
     const auto doc = test::json::parse_file((data_dir() / "expected" / (name + ".json")).string());
     const auto task = Task::from_text_file(txt->string());
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     std::vector<State> states = walk_states(*task, doc);
     if (k_sanitized && states.size() > 12)
         states.resize(12);
@@ -632,7 +635,8 @@ std::vector<State> random_states(const Task& task, u32 walks, u32 steps, u64 see
             const std::vector<Action> acts = applicable(task, s.view());
             if (acts.empty())
                 break;
-            s = task.workspace().successors().apply(s, acts[rng() % acts.size()].label());
+            const WorkspaceLease lease = task.workspace();
+            s = lease->successors().apply(s, acts[rng() % acts.size()].label());
         }
     }
     return out;
@@ -657,7 +661,8 @@ class BindingsRandom : public ::testing::TestWithParam<std::string>
 TEST_P(BindingsRandom, ConditionsMatchBruteForce)
 {
     const auto task = Task::from_text_file((data_dir() / (GetParam() + ".txt")).string());
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     Oracle oracle(task->data());
     BruteForce brute(*task, oracle);
     const u32 n = task->num_objects();
@@ -764,7 +769,8 @@ TEST(Bindings, ConstantsNegationEqualityAndStaticPredicates)
 {
     // gripper: (at ?b rooma) (not (= ?b ball1)), (ball ?b) static, (free ?g) fluent negated
     const auto task = suite_task("gripper__prob05");
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     const State s0 = task->initial_state();
     ConjunctiveCondition c;
     c.variables = {{"b", {}}};
@@ -810,7 +816,8 @@ TEST(Bindings, DeclaredTypes)
     for (u32 o = 0; o < data.num_objects(); ++o)
         data.objects[o].types = formalism::TaskData::append(data.type_ids, std::span<const TypeId>(types[o]));
     const auto task = Task::create(std::move(data));
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     const State init = task->initial_state();
     const StateView s = init.view();
     ConjunctiveCondition c;
@@ -832,7 +839,8 @@ TEST(Bindings, DerivedPredicates)
 {
     const auto task = suite_task("philosophers__p03-phil4");
     ASSERT_TRUE(task->has_axioms());
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     Oracle oracle(task->data());
     BruteForce brute(*task, oracle);
     u64 derived_literals = 0, nonempty = 0;
@@ -869,7 +877,8 @@ TEST(Bindings, NumericConstraints)
 {
     // counters: (<= (+ (value ?c) 1) (max_int)) and value comparisons between counters
     const auto task = Task::from_text_file((data_dir() / "numeric_tasks" / "cs-counters.txt").string());
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     const auto& T = task->data();
     u32 value = ~u32{0}, max_int = ~u32{0};
     for (u32 f = 0; f < T.functions.size(); ++f)
@@ -930,7 +939,8 @@ TEST(Bindings, NumericSchemasFollowTheApplicableActions)
         if (e.path().extension() != ".txt")
             continue;
         const auto task = Task::from_text_file(e.path().string());
-        Workspace& ws = task->workspace();
+        const WorkspaceLease ws_lease = task->workspace();
+        Workspace& ws = *ws_lease;
         for (const State& s : random_states(*task, 1, k_sanitized ? 4 : 10, 2))
         {
             const std::vector<Action> acts = applicable(*task, s.view());
@@ -950,7 +960,8 @@ TEST(Bindings, NumericSchemasFollowTheApplicableActions)
 TEST(Bindings, InvalidInputThrows)
 {
     const auto task = suite_task("gripper__prob05");
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     const State s = task->initial_state();
     ConjunctiveCondition c;
     c.variables = {{"x", {}}};
@@ -1018,8 +1029,9 @@ TEST(Bindings, PreconditionAndGoalConditions)
     EXPECT_EQ(g.literals.size(), T.goal.literals.count);
     EXPECT_FALSE(g == ConjunctiveCondition::precondition(*task, SchemaId{0}));
     // the goal does not hold initially: no binding; an empty condition has the one empty binding
-    EXPECT_EQ(count_bindings(*task, task->workspace(), g, task->initial_state().view()), 0u);
-    EXPECT_EQ(count_bindings(*task, task->workspace(), ConjunctiveCondition{}, task->initial_state().view()), 1u);
+    const WorkspaceLease lease = task->workspace();
+    EXPECT_EQ(count_bindings(*task, *lease, g, task->initial_state().view()), 0u);
+    EXPECT_EQ(count_bindings(*task, *lease, ConjunctiveCondition{}, task->initial_state().view()), 1u);
 }
 
 TEST(Bindings, ConcurrentEnumerationOverOneTask)
@@ -1049,7 +1061,10 @@ TEST(Bindings, ConcurrentEnumerationOverOneTask)
     std::vector<std::vector<std::vector<Tuple>>> got(8);
     std::vector<std::thread> threads;
     for (u32 t = 0; t < 8; ++t)
-        threads.emplace_back([&, t] { got[t] = run(task->workspace()); });
+        threads.emplace_back([&, t] {
+            const WorkspaceLease lease = task->workspace();
+            got[t] = run(*lease);
+        });
     for (auto& th : threads)
         th.join();
     for (u32 t = 0; t < 8; ++t)
@@ -1104,7 +1119,8 @@ TEST_P(BindingsRandom, GroundConditionsHoldAsTheBruteForce)
     // each of its literals agrees with the brute-force oracle (static facts, the state's atoms, the axiom closure,
     // numeric values), and lifting gives a condition that grounds back to it
     const auto task = Task::from_text_file((data_dir() / (GetParam() + ".txt")).string());
-    Workspace& ws = task->workspace();
+    const WorkspaceLease ws_lease = task->workspace();
+    Workspace& ws = *ws_lease;
     Oracle oracle(task->data());
     BruteForce brute(*task, oracle);
     const u32 n = task->num_objects();
@@ -1177,7 +1193,8 @@ TEST_P(BindingsWalk, TheGoalAsAGroundConditionHoldsInTheGoalStates)
     const auto task = Task::from_text_file(txt->string());
     const GroundCondition goal = GroundCondition::goal(*task);
     const auto spec = search::any_of(*task, std::span(&goal, 1));
-    Successors& succ = task->workspace().successors();
+    const WorkspaceLease lease = task->workspace();
+    Successors& succ = lease->successors();
     for (const State& s : walk_states(*task, doc))
     {
         EXPECT_EQ(holds(*task, s.view(), goal), task->is_goal(s.view())) << name;
@@ -1303,14 +1320,15 @@ TEST(Conditions, DerivedLiteralsFollowTheAxioms)
                 EXPECT_EQ(holds(*task, s.view(), a), want);
                 if (i % 5 != 0)
                     continue;
-                // inside a successor enumeration on this thread's workspace: holds runs in the evaluation workspace
+                // inside a successor enumeration: holds leases a workspace of its own
                 bool inside = !want;
-                task->workspace().successors().for_each_applicable(s.view(), [&](const ActionLabel&, const Delta&) -> bool
-                                                                   {
-                                                                       inside = holds(*task, s.view(), a);
-                                                                       return false;
-                                                                   });
-                if (task->workspace().successors().any_applicable(s.view()))
+                const WorkspaceLease lease = task->workspace();
+                lease->successors().for_each_applicable(s.view(), [&](const ActionLabel&, const Delta&) -> bool
+                                                        {
+                                                            inside = holds(*task, s.view(), a);
+                                                            return false;
+                                                        });
+                if (lease->successors().any_applicable(s.view()))
                 {
                     EXPECT_EQ(inside, want);
                 }

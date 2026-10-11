@@ -196,6 +196,11 @@ def test_errors(ctx):
         mc.rollouts(task, [1], ctx=ctx, max_next_layer_states=0)
     with pytest.raises(TypeError):
         mc.rollouts(task, [1], ctx=ctx, start=5)
+    other = text_task("gripper__prob05").initial_state
+    with pytest.raises(ValueError, match=r"^mymyr: start belongs to another task$"):
+        mc.rollouts(task, [1], ctx=ctx, start=other)
+    with pytest.raises(ValueError, match=r"^mymyr: state 1 belongs to another task$"):
+        mc.multi_iw(task, [s, other], ctx=ctx)
     assert len(mc.multi_iw(task, [], ctx=ctx)) == 0
 
 

@@ -114,8 +114,8 @@ def test_device_numeric_expand_and_search(counters):
     ctx = mc.Context(0, max_bytes=1 << 28)
     uploaded = mc.DeviceTask(counters, ctx)
     assert uploaded.validate() == (0, 0)
-    cpu_brfs = search.brfs(counters)
-    gpu_brfs = mc.brfs(counters, ctx=ctx)
+    cpu_brfs = search.brfs(counters, stop_at_goal=False)
+    gpu_brfs = mc.brfs(counters, ctx=ctx, stop_at_goal=False)
     assert gpu_brfs.states == cpu_brfs.states
     stored = torch.from_dlpack(gpu_brfs.state_words()).cpu().numpy()
     decoded = counters.decode(stored)

@@ -144,7 +144,8 @@ BrfsResult run_brfs(const Task& task, const LayerOrdering& lo, u32 threads, u64 
 /// Whether `plan` leads from the initial state to a goal state.
 bool valid_plan(const Task& task, const std::vector<Action>& plan)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     State s = task.initial_state();
     for (const Action& a : plan)
     {
@@ -367,7 +368,8 @@ struct RelaxedRef
 /// `width` entered; then the SurvivorsOnly replay.
 RelaxedRef ref_relaxed(const Task& task, const RelaxedSpec& sp)
 {
-    Successors& succ = task.workspace().successors();
+    const WorkspaceLease lease = task.workspace();
+    Successors& succ = lease->successors();
     const bool w0 = succ.witness_pruning(), c0 = succ.canonical_order();
     succ.set_witness_pruning(false);
     succ.set_canonical_order(true);
@@ -690,6 +692,7 @@ TEST(BeamParallel, Refusals)
     EXPECT_EQ(r.status, SearchStatus::Failed);
     EXPECT_NE(r.message.find("RelaxedSurvivorsOnly requires Kind::GoalCount"), std::string::npos) << r.message;
     BrfsOptions b;
+    b.stop_at_goal = false;
     b.layers = lo;
     EXPECT_THROW((void)brfs(*task, b), std::invalid_argument);
     o.layers = beam(4, Novelty::RelaxedSurvivorsOnly);

@@ -1,8 +1,8 @@
 #pragma once
-// Workspace: one thread's mutable scratch for one task: the matching engine (per-state view, binding array, resolved
-// matchers), the axiom evaluator, the successor generator and, made on first use, the scratch of the binding
-// generators (successor/bindings.hpp). A task creates one per thread on first use (Task::workspace()) and frees them
-// with itself; users never construct one.
+// Workspace: mutable scratch for one task: the matching engine (per-state view, binding array, resolved matchers), the
+// axiom evaluator, the successor generator and, made on first use, the scratch of the binding generators
+// (successor/bindings.hpp). A task lends them out (Task::workspace(): one per live lease) and frees them with itself;
+// users never construct one.
 
 #include "mymyr/axioms/evaluator.hpp"
 #include "mymyr/core/memory.hpp"
@@ -10,6 +10,7 @@
 #include "mymyr/successor/successors.hpp"
 
 #include <memory>
+#include <vector>
 
 namespace mymyr
 {
@@ -39,4 +40,13 @@ private:
     Successors m_successors;
     std::unique_ptr<detail::BindingScratch> m_bindings;
 };
+
+namespace detail
+{
+/// One thread's released workspaces of one task, for its next leases (Task::workspace()).
+struct WorkspacePool
+{
+    std::vector<std::unique_ptr<Workspace>> idle;
+};
+}  // namespace detail
 }  // namespace mymyr

@@ -2,6 +2,8 @@
 
 #include "mymyr/cuda/arena.hpp"
 
+#include "mymyr/core/checked.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -15,9 +17,10 @@ DeviceArena::DeviceArena(ContextPtr ctx, u32 record_bytes, u64 capacity, bool ho
         throw std::invalid_argument("mymyr: DeviceArena: null context or zero record size");
     DeviceGuard g(m_ctx->device());
     m_capacity = std::max<u64>(capacity, 1);
-    m_gen = std::make_shared<DeviceBuffer>(m_ctx, m_capacity * m_rb, m_ctx->stream());
+    const u64 bytes = checked_mul({m_capacity, m_rb}, "DeviceArena (capacity x record bytes)");
+    m_gen = std::make_shared<DeviceBuffer>(m_ctx, bytes, m_ctx->stream());
     if (host_mirror)
-        m_mirror = std::make_shared<PinnedBuffer>(m_capacity * m_rb);
+        m_mirror = std::make_shared<PinnedBuffer>(bytes);
 }
 
 DeviceArena::~DeviceArena()
@@ -42,19 +45,22 @@ Event DeviceArena::take_event()
 
 void DeviceArena::reserve(u64 more)
 {
-    if (m_device_size + more <= m_capacity)
+    const u64 need = checked_add(m_device_size, more, "DeviceArena (records)");
+    if (need <= m_capacity)
         return;
+    // the new generation's size is checked before anything changes: an impossible size leaves the arena as it is
+    const u64 cap = std::max(need, m_capacity <= ~u64{0} / 2 ? 2 * m_capacity : need);
+    const u64 bytes = checked_mul({cap, m_rb}, "DeviceArena (capacity x record bytes)");
     DeviceGuard g(m_ctx->device());
     wait();  // pending copies read the old generation and write the old mirror
-    const u64 cap = std::max(m_device_size + more, 2 * m_capacity);
-    auto gen = std::make_shared<DeviceBuffer>(m_ctx, cap * m_rb, m_ctx->stream());
+    auto gen = std::make_shared<DeviceBuffer>(m_ctx, bytes, m_ctx->stream());
     if (m_device_size)
         check(cudaMemcpyAsync(gen->data(), m_gen->data(), m_device_size * m_rb, cudaMemcpyDeviceToDevice, m_ctx->stream()),
               "cudaMemcpyAsync (arena growth)");
     m_gen = std::move(gen);  // the old generation is freed after the copy (its stream), unless an export holds it
     if (m_mirror)
     {
-        auto mirror = std::make_shared<PinnedBuffer>(cap * m_rb);
+        auto mirror = std::make_shared<PinnedBuffer>(bytes);
         if (m_host_size)
             std::memcpy(mirror->data(), m_mirror->data(), m_host_size * m_rb);
         m_mirror = std::move(mirror);
@@ -70,7 +76,7 @@ std::byte* DeviceArena::tail(u64 n)
 
 void DeviceArena::commit(u64 n)
 {
-    if (m_device_size + n > m_capacity)
+    if (n > m_capacity - m_device_size)
         throw std::out_of_range("mymyr: DeviceArena::commit beyond the reserved tail");
     m_device_size += n;
 }

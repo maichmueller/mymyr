@@ -44,7 +44,8 @@ f64 h(const Task& t, H::Kind k, StateView s, H::Costs costs = H::Costs::Auto) { 
 
 Action find(const Task& t, StateView s, const std::string& action)
 {
-    for (const Action& a : t.workspace().successors().applicable_actions(s))
+    const WorkspaceLease lease = t.workspace();
+    for (const Action& a : lease->successors().applicable_actions(s))
         if (t.format(a.label()) == action)
             return a;
     ADD_FAILURE() << action << " is not applicable";
@@ -68,7 +69,8 @@ Path walk(const Task& t, H::Heuristic& hc, const std::vector<std::string>& actio
     {
         const StateView s = p.states.back().view();
         const Action a = find(t, s, name);
-        State next = t.workspace().successors().apply(s, a.label());
+        const WorkspaceLease lease = t.workspace();
+        State next = lease->successors().apply(s, a.label());
         std::vector<u64> st(hc.status_words());
         hc.progress(p.status.back(), s, a.label(), next.view(), st);
         p.states.push_back(std::move(next));

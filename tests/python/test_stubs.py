@@ -153,7 +153,7 @@ def test_stubs_parse_and_are_typed():
     if "def from_pddl(" in rl:
         assert ("def from_pddl(domain: mymyr._core.Domain | str | os.PathLike, problems: str | os.PathLike | "
                 "Sequence[str | os.PathLike], *, atoms: str = 'auto',") in rl
-        assert "pilot_expansions: int = 1024, threads: int = 0) -> TaskTable:" in rl
+        assert "pilot_expansions: int = 1024, threads: int | None = None) -> TaskTable:" in rl
     # knowledge bases and tuple graphs
     ds = (d / "_datasets.pyi").read_text()
     assert ("def tuple_graphs(space: StateSpace, *, width: int = 0, dominance_pruning: bool = True, threads: int = 0) -> "

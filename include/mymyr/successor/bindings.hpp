@@ -5,7 +5,8 @@
 //   const ConjunctiveCondition c = ConjunctiveCondition::precondition(*task, SchemaId{2});
 //   std::vector<std::optional<ObjectId>> partial(c.arity());
 //   partial[1] = ObjectId{4};                                   // fix the second parameter
-//   for_each_binding(*task, task->workspace(), c, state, partial,
+//   const WorkspaceLease ws = task->workspace();
+//   for_each_binding(*task, *ws, c, state, partial,
 //                    [&](std::span<const ObjectId> binding) { ...; return true; });  // false stops
 //
 // Targets:
@@ -24,9 +25,10 @@
 // variables), and the bindings come in lexicographic order over the free variables in that order, by object index.
 // The order does not depend on the state, the thread, the workspace or earlier calls, so a later call can continue an
 // enumeration after a binding it returned (BindingOptions::resume_after).
-// Workspaces: the enumeration uses scratch of `ws` (a workspace of the task, one per thread: Task::workspace()). The
-// callback may use the workspace's successor generator, but must not start another binding enumeration on the same
-// workspace (std::logic_error). Compiled targets are cached per workspace, keyed by (target, set of fixed variables).
+// Workspaces: the enumeration uses scratch of `ws` (a workspace leased from the task: Task::workspace()). The callback
+// may use the workspace's successor generator, or lease another workspace for anything else, but must not start another
+// binding enumeration on `ws` itself (std::logic_error). Compiled targets are cached per workspace, keyed by (target,
+// set of fixed variables).
 //
 // Complexity: compiling a target costs about one pass over the static atoms of its predicates; each call then
 // prepares the state (as Successors::prepare: its true atoms and the axioms) and searches the bindings with the
