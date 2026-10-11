@@ -105,7 +105,7 @@ is not a JAX-jitted, CUDA or CUDA-graph-capturable operation; GPU inputs are not
 Numeric functions/constraints, including tasks declaring action-cost functions, are explicitly unsupported. Their
 values must not disappear into an apparently complete Boolean observation. TaskSuite/cross-domain batches, history,
 subgoal layers, lookahead DAGs, custom graph projections, automatic PyG/jraph conversion and WL features are not in
-this version. See [the integration assessment](native-encoding-design.md) for the staged extensions and source strategy.
+this version.
 
 The C++ API is in `mymyr/encoding/flat.hpp`, linked with `mymyr::encoding`. It accepts caller-owned StateBatchView,
 TaskTable instance IDs, ActionBatchView label columns and optional per-row GroundConditions. Output storage uses
