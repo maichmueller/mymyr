@@ -77,7 +77,7 @@ AUXILIARY_SLOT = 8
 
 def native_catalog(schema):
     """(name, arity, slot roles) per relation, with the auxiliary slot of the nullary relations taken away: mifrost
-    encodes a nullary atom as a tuple of its other slots only (D7)."""
+    encodes a nullary atom as a tuple of its other slots only."""
     rows = []
     for name, arity, roles in zip(schema.relation_names, schema.relation_arities, schema.slot_roles):
         if roles and roles[-1] == AUXILIARY_SLOT:
@@ -100,8 +100,8 @@ SOURCE_OF_LANE = {
 }
 
 # Entries compared with an explicitly listed difference.
-SUPPORT_LITERALS = "flat_literals_relmo"  # A7: mifrost's support_literals option is not ported
-NO_STATIC = "flat_no_static"  # I1: include_static=False drops the static relations from the catalog
+SUPPORT_LITERALS = "flat_literals_relmo"  # mifrost's support_literals option is not ported
+NO_STATIC = "flat_no_static"  # include_static=False drops the static relations from the catalog
 
 
 @needs_pddl
@@ -125,7 +125,7 @@ def test_catalog_equals_mifrost(tasks, name):
 def test_support_literals_are_the_only_difference_to_the_relmo_catalog(tasks):
     entry = CATALOGS[SUPPORT_LITERALS]
     schema = EncodingSchema(tasks["blocks"], **native_options(entry))
-    # A7: support_literals adds `[+]p`, `[+]p[sat]` and `[+]p[unsat]` (and the `-` forms) to the goal lanes.
+    # support_literals adds `[+]p`, `[+]p[sat]` and `[+]p[unsat]` (and the `-` forms) to the goal lanes.
     literal = re.compile(r"^\[[+-]\][^\[]+(\[(sat|unsat)\])?$")
     dropped = [row for row in mifrost_catalog(entry) if literal.match(row[0])]
     assert len(dropped) == 2 * 3 * 5  # two signs, three names, five predicates (the types have no goal relations)
@@ -135,7 +135,7 @@ def test_support_literals_are_the_only_difference_to_the_relmo_catalog(tasks):
 
 @needs_pddl
 def test_include_static_false_drops_the_static_relations(tasks):
-    # I1: mifrost keeps the (empty) static relations in the catalog; the native catalog leaves them out.
+    # mifrost keeps the (empty) static relations in the catalog; the native catalog leaves them out.
     entry = CATALOGS[NO_STATIC]
     schema = EncodingSchema(tasks["blocks"], **native_options(entry))
     expected = [row for row in mifrost_catalog(entry) if row[0] not in ("number", "object")]
@@ -145,7 +145,7 @@ def test_include_static_false_drops_the_static_relations(tasks):
 
 @needs_pddl
 def test_delta_horizon_has_no_relations_for_static_predicates(tasks):
-    # H2: mifrost lists delta relations for static predicates too; they could never hold a tuple.
+    # mifrost lists delta relations for static predicates too; they could never hold a tuple.
     schema = EncodingSchema(
         tasks["childsnack"], horizon_mode="delta", root_policy="exclude",
         goal_derivations=["added_satisfied", "added_unsatisfied"],
