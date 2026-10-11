@@ -73,14 +73,14 @@ def records(task):
     lazy = search.gbfs(task, heuristic="ff", lazy=True, max_expanded=BUDGET)
     beam = search.beam(task, width=32, max_expanded=BUDGET)
     ss = datasets.generate(task, threads=2, max_states=DATASETS_BUDGET, remove_if_unsolvable=False)
-    # every array but the state words (their slot layout depends on the task's atom mode and interning history)
     space = [] if ss.space is None else [
-        [arr(v) for k, v in sorted(ss.space.arrays().items()) if k != "state_words"],
+        [arr(v) for k, v in sorted(ss.space.arrays().items())],
         arr(datasets.StateSpaceSampler(ss.space, seed=3).sample_states(64)),
     ]
     return {
         "task.fingerprint": task.fingerprint,
         "task.num_atoms": task.num_atoms,
+        "task.encoding_fingerprint": [task.atom_mode, task.words, task.encoding_fingerprint],
         "task.atoms": [str(a) for a in s0.atoms()],
         "task.encoding": arr(task.encode([s0])),
         "applicable": [str(a) for a in task.applicable_actions(s0)],
