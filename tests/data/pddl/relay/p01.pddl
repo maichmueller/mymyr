@@ -1,0 +1,5 @@
+(define (problem relay-p01) (:domain relay)
+ (:objects n0 n1 n2 n3 - node)
+ (:init (at n0) (lit n0) (lit n3)
+        (link n0 n1) (link n1 n2) (link n2 n3) (link n1 n3) (link n3 n0) (link n0 n2))
+ (:goal (and (visited n3) (lit n2) (at n3))))
