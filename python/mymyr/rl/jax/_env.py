@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from mymyr._core import _rl_jax
+from mymyr.rl._sampling import _instance_sampler
 
 from . import _ffi
 
@@ -22,7 +23,8 @@ class EnvState(NamedTuple):
     environment's RNG stream, ``count`` the successors of the current state, ``goal_pos`` / ``goal_neg`` the per-env
     goal masks (uint32 [N, 2 words] with goals=True, else [N, 0]). ``counts`` / ``views`` are the device fast path's
     cache of the current state (uint32 [N, C] and [N, 2V]; [N, 0] on the CPU and on the general path): opaque, kept
-    current by reset, step and refresh."""
+    current by reset, step and refresh. ``reset_counts`` [N] uint32 and ``sampling_seed`` [N, 2] uint32 hold the
+    independent instance sampler's per-environment counters and keys."""
 
     states: Any
     task_id: Any
@@ -34,6 +36,8 @@ class EnvState(NamedTuple):
     views: Any
     goal_pos: Any
     goal_neg: Any
+    reset_counts: Any
+    sampling_seed: Any
 
 
 class Observation(NamedTuple):
@@ -159,9 +163,10 @@ class Env:
         *,
         device: Any = None,
         goals: bool = False,
+        sampler: Any = "uniform",
         max_steps: int = 0,
-        step_reward: float = -1.0,
-        goal_reward: float = 0.0,
+        step_reward: float = 0.0,
+        goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
@@ -198,6 +203,8 @@ class Env:
         self.table = table
         self.handle: int = self.native.handle
         self.num_instances: int = self.native.num_instances
+        self.sampler = _instance_sampler(sampler, self.num_instances)
+        self.autoreset = bool(autoreset)
         self.words: int = self.native.words
         self.row_words: int = self.native.row_words
         self.label_width: int = self.native.label_width
@@ -253,13 +260,17 @@ class Env:
         goal_pos: Optional[Any] = None,
         goal_neg: Optional[Any] = None,
     ) -> tuple[EnvState, Observation]:
-        """Environments at the initial states of their instances, with env ids ``first_env + i`` and zero draw
-        counters. ``task_ids``: int32 [N] instances, or an int N (N environments of instance 0). ``goal_pos`` /
-        ``goal_neg`` [N, 2 words] (goals=True) set the goals (default: the instances'). ``key`` is not used (an instance
-        has one initial state); it is there for the gymnax / Jumanji signature."""
-        del key
+        """Environments at initial states, with env ids ``first_env + i`` and zero action draw counters. ``task_ids``:
+        int32 [N] explicit instances, or an int N (sample N instances with ``key``; None means seed 0). ``sampler=None``
+        disables sampling and an int N then starts instance 0. ``goal_pos`` / ``goal_neg`` [N, 2 words] (goals=True)
+        set the goals (default: the instances'). The key and counters are retained in the functional state."""
         if isinstance(task_ids, (int, np.integer)):
-            ids = jnp.zeros((int(task_ids),), jnp.int32)
+            n = int(task_ids)
+            env_id = jnp.arange(first_env, first_env + n, dtype=jnp.uint32)
+            seed = jnp.broadcast_to(key_seed(0 if key is None else key), (n, 2))
+            ids = jnp.zeros((n,), jnp.int32) if self.sampler is None else self.sampler.sample(
+                seed, env_id, jnp.zeros(n, jnp.uint32)
+            )
         else:
             ids = self._ids(task_ids)
         n = ids.shape[0]
@@ -270,12 +281,14 @@ class Env:
             )
             draws = jnp.zeros((n, 2), jnp.uint32)
             env_id = jnp.arange(first_env, first_env + n, dtype=jnp.uint32)
+            sampling_seed = jnp.broadcast_to(key_seed(0 if key is None else key), (n, 2))
+            reset_counts = jnp.ones(n, jnp.uint32)
         if goal_pos is not None or goal_neg is not None:
             if not self.goals or goal_pos is None or goal_neg is None:
                 raise ValueError("mymyr: per-env goals need goals=True and both goal_pos and goal_neg")
             gpos = jnp.asarray(goal_pos, jnp.uint32).reshape(gpos.shape)
             gneg = jnp.asarray(goal_neg, jnp.uint32).reshape(gneg.shape)
-        state = EnvState(states, ids, steps, draws, env_id, count, counts, views, gpos, gneg)
+        state = EnvState(states, ids, steps, draws, env_id, count, counts, views, gpos, gneg, reset_counts, sampling_seed)
         if not isinstance(states, jax.core.Tracer):
             # committed to the environment's device: jitted steps of this state run there, whatever the default device
             state = jax.device_put(state, self.device)
@@ -287,14 +300,19 @@ class Env:
         mask: Any,
         task_ids: Optional[Any] = None,
         *,
+        key: Any = None,
         goal_pos: Optional[Any] = None,
         goal_neg: Optional[Any] = None,
     ) -> tuple[EnvState, Observation]:
-        """Resets the environments with ``mask[i]`` (bool [N]) to the initial states of their instances (steps 0;
-        draw counters and env ids kept): the reset of ``autoreset=False`` environments. ``task_ids`` [N] moves the
-        reset rows to those instances (curriculum); ``goal_pos`` / ``goal_neg`` [N, 2 words] set their goals (default:
-        their instances')."""
+        """Resets the environments with ``mask[i]`` (bool [N]) to sampled instances (steps 0; action draw counters
+        and env ids kept). ``task_ids`` [N] overrides sampling; sampler=None keeps the instances. ``key`` reseeds only
+        reset rows, restarting their sampling counters. Otherwise the retained sampling keys are used, independent
+        of action keys. ``goal_pos`` / ``goal_neg`` [N, 2 words] set their goals (default: their instances')."""
         m = jnp.asarray(mask, jnp.bool_)
+        sampling_seed = state.sampling_seed if key is None else jnp.broadcast_to(key_seed(key), state.sampling_seed.shape)
+        reset_counts = state.reset_counts if key is None else jnp.where(m, jnp.uint32(0), state.reset_counts)
+        if task_ids is None and self.sampler is not None:
+            task_ids = self.sampler.sample(sampling_seed, state.env_id, reset_counts)
         ids = state.task_id if task_ids is None else jnp.where(m, jnp.asarray(task_ids, jnp.int32), state.task_id)
         keep = goal_pos is not None or goal_neg is not None
         gpos, gneg = state.goal_pos, state.goal_neg
@@ -308,7 +326,9 @@ class Env:
                 self.handle, state.states, ids, state.steps, state.count, state.counts, state.views, gpos, gneg, m, keep
             )
         s = state._replace(
-            states=states, task_id=ids, steps=steps, count=count, counts=counts, views=views, goal_pos=gpos, goal_neg=gneg
+            states=states, task_id=ids, steps=steps, count=count, counts=counts, views=views, goal_pos=gpos, goal_neg=gneg,
+            reset_counts=reset_counts + m.astype(jnp.uint32),
+            sampling_seed=jnp.where(m[:, None], sampling_seed, state.sampling_seed),
         )
         return s, self.observation(s)
 
@@ -325,7 +345,7 @@ class Env:
         """One step of every environment: ``(state, obs, reward, terminated, truncated, info)``.
 
         ``action``: int32 [N] indices into the canonical successor order (None: the random policy of ``key``).
-        ``next_task_ids``: int32 [N], the instances autoresetting environments restart in (None: their own).
+        ``next_task_ids``: int32 [N], overrides sampled autoreset instances (None: sample, or keep with sampler=None).
         ``info``: ``final_state`` (the reached state before the autoreset; with final_state=True), ``goal`` (the
         reached state is a goal), ``invalid`` (the action was outside [0, count)), ``schema`` [N] and ``binding``
         [N, L] (the action's label, objects of the env's instance before the autoreset; -1 for no move; binding with
@@ -334,6 +354,8 @@ class Env:
         with self._dev():
             seed = jnp.broadcast_to(key_seed(key), (*n, 2))
             act = jnp.zeros((0,), jnp.int32) if action is None else jnp.asarray(action).astype(jnp.int32)
+            if next_task_ids is None and self.sampler is not None and self.autoreset:
+                next_task_ids = self.sampler.sample(state.sampling_seed, state.env_id, state.reset_counts)
             nxt = jnp.zeros((0,), jnp.int32) if next_task_ids is None else jnp.asarray(next_task_ids).astype(jnp.int32)
             outs = _ffi.env_step(
                 self.handle,
@@ -355,12 +377,20 @@ class Env:
             )
         (states, task_id, steps, draws, count, counts, views, gpos, gneg, reward, terminated, truncated, goal, invalid,
          schema, binding, final) = outs  # fmt: skip
-        s = EnvState(states, task_id, steps, draws, state.env_id, count, counts, views, gpos, gneg)
+        reset_counts = state.reset_counts
+        if self.autoreset:
+            reset_counts = reset_counts + (terminated | truncated).astype(jnp.uint32)
+        s = state._replace(
+            states=states, task_id=task_id, steps=steps, draws=draws, count=count, counts=counts, views=views,
+            goal_pos=gpos, goal_neg=gneg, reset_counts=reset_counts,
+        )
         info: dict[str, Any] = {"goal": goal, "invalid": invalid, "schema": schema}
         if self.labels:
             info["binding"] = binding
         if self.final_state:
             info["final_state"] = final
+        if not self.native.autoreset:
+            info["no_autoreset"] = ()
         return s, self.observation(s), reward, terminated, truncated, info
 
     def random_actions(self, key: Any, state: EnvState, max_actions: int = 0) -> Any:

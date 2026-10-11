@@ -164,8 +164,8 @@ def her_relabel(
     goal_atoms: Optional[Any] = None,
     env_ids: Optional[Any] = None,
     first_env: int = 0,
-    step_reward: float = -1.0,
-    goal_reward: float = 0.0,
+    step_reward: float = 0.0,
+    goal_reward: float = 1.0,
 ) -> HerBatch:
     """Hindsight relabels with atom-set goals (Andrychowicz et al. 2017) of a trajectory window:
     ``states`` [T, N, RW] the states the steps reached (``final_states`` / ``info["final_state"]``: before an autoreset),

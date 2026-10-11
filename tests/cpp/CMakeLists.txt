@@ -55,6 +55,10 @@ target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURC
 include(GoogleTest)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 
+add_executable(mymyr_encoding_tests encoding/test_flat.cpp)
+target_link_libraries(mymyr_encoding_tests PRIVATE mymyr::encoding mymyr_warnings GTest::gtest_main)
+gtest_discover_tests(mymyr_encoding_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+
 # Thread counts and thread creation; interposes pthread_create to simulate refused threads, so in an executable of
 # its own.
 add_executable(mymyr_thread_tests core/test_threads.cpp)

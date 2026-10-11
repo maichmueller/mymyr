@@ -1,7 +1,7 @@
 """JAX planning environments over mymyr tasks. Needs JAX (jaxlib's XLA FFI headers at build time).
 
 - :class:`Env`: N environments over a :class:`~mymyr.rl.TaskTable`, a :class:`~mymyr.rl.TaskSuite` (several domains,
-  global task ids) or a Task (its table of one) as pure functions over a pytree state (:class:`EnvState`): ``reset(key, task_ids)`` (or ``reset(key, N)``: N environments of instance 0),
+  global task ids) or a Task (its table of one) as pure functions over a pytree state (:class:`EnvState`): ``reset(key, task_ids)`` (or ``reset(key, N)``: N sampled instances),
   ``step(key, state, action, next_task_ids=None)`` with SAME_STEP autoreset (into ``next_task_ids`` where given) and
   ``info["final_state"]``, ``reset_where``, ``refresh``,
   ``expand`` (padded) and ``expand_flat``. They are XLA FFI calls (CPU: ``rl::HostEnv``, CUDA: ``cuda::DeviceEnv`` on

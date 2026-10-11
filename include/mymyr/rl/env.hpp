@@ -27,8 +27,9 @@
 //      masks follow the new instance. final_states keeps s' (the
 //      bootstrap state), count is the initial state's. Without autoreset the caller resets finished environments with
 //      reset(mask) (TorchRL's convention).
-// Special cases: an action outside [0, count) does not move (s' = s, reward step_reward, not a goal, not a dead end;
-// flagged in `invalid`); a stuck environment does not move either.
+// Special cases: goals and terminal dead ends are absorbing until reset: no move, reward zero and no step-counter
+// advance; draw counters still advance. An action outside [0, count) in a nonterminal state does not move (s' = s,
+// reward step_reward, not a goal, not a dead end; flagged in `invalid`); a stuck environment does not move either.
 //
 // Rows are `words` atom words wide (at least the suite's words(), so a reset into any instance fits), plus the suite's
 // numeric words ([bits | slots]; the numeric encoding follows each instance's storage mode). A step reads and writes
@@ -59,8 +60,8 @@ struct EnvConfig
 {
     u64 seed = 0;              // key of the successor draws (rl/rng.hpp)
     u32 max_steps = 0;         // truncation after this many steps of an episode (0: never)
-    f32 step_reward = -1.0f;   // every step (unit cost)
-    f32 goal_reward = 0.0f;    // added when the step reaches a goal state
+    f32 step_reward = 0.0f;
+    f32 goal_reward = 1.0f;
     f32 dead_end_reward = 0.0f;  // added when the step reaches (or is stuck in) a dead end
     DeadEnd dead_end = DeadEnd::NoSuccessors;
     bool dead_end_terminal = true;  // a dead end terminates the episode
@@ -150,8 +151,9 @@ public:
     /// Resets the rows with mask[i] != 0 (every row if mask is null) to the initial states of their instances
     /// (task_ids, which the caller sets first): steps 0, goal masks (if the batch has them and keep_goals is false)
     /// the instances' goals, count (if set) the initial states' successors. Draw counters are kept (set_seed and the
-    /// caller decide when streams restart).
-    void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false) const;
+    /// caller decide when streams restart). goal, if set, reports the reset states' actual goal tests.
+    void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false,
+               u8* goal = nullptr) const;
     /// One step of every row (see the file comment); `action` [rows] indexes the canonical successor order (none: the
     /// random policy); `next_task_ids` [rows] (optional) names the instance an autoresetting row restarts in.
     void step(EnvBatch& b, const StepOutputs& out, Actions action = {}, const i32* next_task_ids = nullptr,
@@ -159,6 +161,7 @@ public:
 
     /// Successors of rows (count[i] for i < b.rows).
     void count(const EnvBatch& b, i32* count, ThreadPool* pool = nullptr);
+    void goal(const EnvBatch& b, u8* goal) const;
 
     /// Scratch of one thread's row steps (grown as needed).
     struct Scratch
@@ -173,10 +176,12 @@ public:
     void step_row(EnvBatch& b, u64 row, const StepOutputs& out, u64 out_row, i64 action, bool random,
                   i32 next_instance, Scratch& scratch) const;
     /// Resets row `row` into instance `instance` (steps 0, goal masks unless keep_goals, the task id); returns the
-    /// initial state's successor count.
-    u32 reset_row(EnvBatch& b, u64 row, u32 instance, bool keep_goals) const;
+    /// initial state's successor count. `dirty`: how many of the row's atom words (and goal mask words) may be nonzero,
+    /// the words of the instance it held (the rest is zero padding); the reset writes max(dirty, the instance's words).
+    u32 reset_row(EnvBatch& b, u64 row, u32 instance, bool keep_goals, u32 dirty) const;
     /// Successors of one row.
     [[nodiscard]] u32 count_row(const EnvBatch& b, u64 row) const;
+    [[nodiscard]] bool goal_row(const EnvBatch& b, u64 row) const;
 
 private:
     void check_step(const EnvBatch& b, const StepOutputs& out, Actions action, const i32* next_task_ids) const;

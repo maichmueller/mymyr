@@ -134,7 +134,7 @@ def check_her(states, done, h, strategy, k, subset, atoms=None):
                 assert size == (pc if subset is None else min(subset, pc))
                 ok = bool(np.all(states[t, i] & g == g))
                 assert bool(h.achieved[t, i, j]) == ok
-                assert float(h.reward[t, i, j]) == (-1.0 + 3.0 if ok else -1.0)
+                assert float(h.reward[t, i, j]) == (3.0 if ok else 0.0)
 
 
 @pytest.mark.parametrize("strategy", ["future", "final", "episode"])

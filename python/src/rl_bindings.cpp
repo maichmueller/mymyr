@@ -1677,6 +1677,12 @@ void bind_rl(nb::module_& parent)
                      "Action schemas of the table, the most of any domain of a suite (the columns of rl.schema_masks).")
         .def_prop_ro("table", [](const PyExpansion& e) { return SuiteArg(e.ref.obj); },
                      "The suite, table or Task the expansion was made over.")
+        .def_prop_ro("task_ids", [](const PyExpansion& expansion) {
+            std::vector<i32> ids(expansion.flat.rows);
+            for (u64 row = 0; row < expansion.flat.rows; ++row)
+                ids[row] = static_cast<i32>(expansion.instance_of_state(row));
+            return ids;
+        }, "Owned source instance IDs, one per expanded state, including rows without actions.")
         .def_prop_ro("overflow", [](const PyExpansion& e) {
             return e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words;
         })
@@ -1819,8 +1825,9 @@ void bind_rl(nb::module_& parent)
     };
     nb::class_<PyPoolBatch>(m, "PoolBatch",
                             "The results of a CpuEnvPool call: arrays of B rows in the order of their env ids "
-                            "(zero-copy, read-only views in the pool's framework). The step results are None after a "
-                            "reset. Once the batch and every array taken from it are dropped, its memory goes back to "
+                            "(zero-copy, read-only views in the pool's framework). Reward, truncation, invalid and "
+                            "action labels are None after a reset; goal and termination describe its initial states. "
+                            "Once the batch and every array taken from it are dropped, its memory goes back to "
                             "the pool for later results (CpuEnvPool::recycle).")
         .def_prop_ro("rows", [](const PyPoolBatch& p) { return p.b->rows; })
         .def_prop_ro("words", [](const PyPoolBatch& p) { return p.b->words; },
@@ -1855,18 +1862,18 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("reward", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->reward, rl::DType::F32, {p.rows()}); });
         }, "[B] float32 (None after a reset)")
-        .def_prop_ro("terminated", [opt](const PyPoolBatch& p) {
-            return opt(p.stepped(), [&] { return p.array(p.b->terminated, rl::DType::Bool, {p.rows()}); });
-        }, "[B] bool (None after a reset)")
+        .def_prop_ro("terminated", [](const PyPoolBatch& p) {
+            return ArrayOut(p.array(p.b->terminated, rl::DType::Bool, {p.rows()}));
+        }, "[B] bool: terminal reached states (initial states after a reset)")
         .def_prop_ro("truncated", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->truncated, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool (None after a reset)")
         .def_prop_ro("invalid", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->invalid, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool: the given action was outside [0, count) (None after a reset)")
-        .def_prop_ro("goal", [opt](const PyPoolBatch& p) {
-            return opt(p.stepped(), [&] { return p.array(p.b->goal, rl::DType::Bool, {p.rows()}); });
-        }, "[B] bool: the reached state is a goal state (None after a reset)")
+        .def_prop_ro("goal", [](const PyPoolBatch& p) {
+            return ArrayOut(p.array(p.b->goal, rl::DType::Bool, {p.rows()}));
+        }, "[B] bool: the reached state is a goal state (initial state after a reset)")
         .def_prop_ro("final_states", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] {
                 return p.array(p.b->final_states, rl::DType::U64, {p.rows(), static_cast<i64>(p.b->row_words())}, true);
@@ -1922,7 +1929,7 @@ void bind_rl(nb::module_& parent)
                 new (self) PyCpuPool(suite_of(table), c, num_envs, o, fw);
             },
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 0, "goals"_a = false, "seed"_a = 0, "max_steps"_a = 0,
-            "step_reward"_a = -1.0f, "goal_reward"_a = 0.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
+            "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
             "framework"_a = nb::none(), "words"_a = nb::none(),
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "

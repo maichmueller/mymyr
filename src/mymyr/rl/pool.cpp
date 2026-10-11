@@ -67,10 +67,10 @@ void size_batch(PoolBatch& b, u64 n, u32 W, u32 NN, u32 L, bool goals, bool step
     b.goal_pos.resize(goals ? n * W : 0);
     b.goal_neg.resize(goals ? n * W : 0);
     b.reward.resize(step ? n : 0);
-    b.terminated.resize(step ? n : 0);
+    b.terminated.resize(n);
     b.truncated.resize(step ? n : 0);
     b.invalid.resize(step ? n : 0);
-    b.goal.resize(step ? n : 0);
+    b.goal.resize(n);
     b.final_states.resize(step ? n * (W + NN) : 0);
     b.schema.resize(step ? n : 0);
     b.binding.resize(step ? n * L : 0);
@@ -495,18 +495,22 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
     {
         const u32 e = ids[p];
         const u32 inst = task_ids ? static_cast<u32>(task_ids[p]) : static_cast<u32>(I.task_ids[e]);
-        out.count[p] = static_cast<i32>(I.env.reset_row(I.batch, e, inst, goal_pos != nullptr));
+        const u32 held = I.instance_words(I.task_ids[e]);  // the env's words that may be nonzero
+        out.count[p] = static_cast<i32>(I.env.reset_row(I.batch, e, inst, goal_pos != nullptr, held));
         if (goal_pos)
         {
             // the instance's words of the given masks; the rest of the env's masks is zero
-            const u32 w = I.instance_words(static_cast<i32>(inst));
+            const u32 w = I.instance_words(static_cast<i32>(inst)), z = std::max(w, held);
             u64* gp = I.gpos.data() + u64{e} * I.W;
             u64* gn = I.gneg.data() + u64{e} * I.W;
             std::copy_n(goal_pos + p * goal_words, w, gp);
-            std::fill(gp + w, gp + I.W, u64{0});
+            std::fill(gp + w, gp + z, u64{0});
             std::copy_n(goal_neg + p * goal_words, w, gn);
-            std::fill(gn + w, gn + I.W, u64{0});
+            std::fill(gn + w, gn + z, u64{0});
         }
+        out.goal[p] = I.env.goal_row(I.batch, e) ? 1 : 0;
+        out.terminated[p] = out.goal[p] || (out.count[p] == 0 && I.env.config().dead_end == DeadEnd::NoSuccessors &&
+                                          I.env.config().dead_end_terminal) ? 1 : 0;
         I.observe(e, out, p);
     }
     return out;

@@ -126,14 +126,15 @@ u32 TaskSuite::batch_words(const i32* task_ids, u64 n) const noexcept
 
 std::string TaskSuite::domain_name(u32 domain) const { return table(domain)->task(0)->data().domain_name; }
 
-void TaskSuite::initial_row(u32 g, u64* row, u32 words, u32 numeric_words) const
+void TaskSuite::initial_row(u32 g, u64* row, u32 words, u32 numeric_words, u32 dirty) const
 {
     const Ref r = ref(g);
     const TaskTable& t = *m_tables[r.domain];
     const TaskTable::Instance& in = t.instance(r.local);  // init: [t.words() | t.numeric_words()]
-    std::fill_n(row, u64{words} + numeric_words, u64{0});
     std::copy_n(in.init.begin(), in.words, row);
+    std::fill(row + in.words, row + std::min(words, std::max(in.words, dirty)), u64{0});
     std::copy_n(in.init.begin() + t.words(), t.numeric_words(), row + words);
+    std::fill(row + words + t.numeric_words(), row + words + numeric_words, u64{0});
 }
 
 u64 TaskSuite::fingerprint() const

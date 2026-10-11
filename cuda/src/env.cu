@@ -56,7 +56,9 @@ __global__ void k_select(Select p)
         const u32 c = row_count(p.counts, p.num_schemas, p.count_stride, p.offsets, i);
         u64 a = 0;
         u8 st = k_ok;
-        if (c == 0)
+        if (p.goal && p.goal[i])
+            st = k_goal;
+        else if (c == 0)
             st = k_stuck;
         else if (p.action || p.action32)
         {
@@ -155,6 +157,45 @@ __global__ void k_move(Move p)
 /// The instance of row i (inst null: 0).
 __device__ __forceinline__ u32 instance_of(const Instances& in, u64 i) { return in.inst ? static_cast<u32>(in.inst[i]) : 0u; }
 
+__device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p, u64 row_id, u32 instance)
+{
+    const u64* row = p.states + row_id * p.row_words;
+    if (p.goal_pos)
+    {
+        for (u32 word = 0; word < p.words; ++word)
+            if ((row[word] & p.goal_pos[row_id * p.words + word]) != p.goal_pos[row_id * p.words + word] ||
+                (row[word] & p.goal_neg[row_id * p.words + word]) != 0)
+                return false;
+        return true;
+    }
+    if (p.goal_flag)
+        return p.goal_flag[row_id] != 0;
+    if (p.in.goal_off)
+    {
+        if (p.in.goal_never[instance])
+            return false;
+        for (u32 goal_id = p.in.goal_off[instance]; goal_id < p.in.goal_off[instance + 1]; ++goal_id)
+        {
+            const u64 word = row[p.in.goal_word[goal_id]];
+            if ((word & p.in.goal_wpos[goal_id]) != p.in.goal_wpos[goal_id] || (word & p.in.goal_wneg[goal_id]) != 0)
+                return false;
+        }
+        return true;
+    }
+    return rl::dev::goal_holds(p.in.views ? p.in.views[instance] : task, row, p.words, nullptr, 0);
+}
+
+__global__ void k_goal_rows(rl::dev::TaskView task, Finish p, u8* goal)
+{
+    for (u64 row = u64{blockIdx.x} * blockDim.x + threadIdx.x; row < p.rows; row += u64{gridDim.x} * blockDim.x)
+    {
+        const u32 instance = instance_of(p.in, row);
+        if (instance >= p.in.count && p.error)
+            atomicOr(p.error, 4u);
+        goal[row] = instance < p.in.count && goal_row(task, p, row, instance) ? 1 : 0;
+    }
+}
+
 /// Row i := the initial state of instance k (and, on the fast path, its cache: the instance's cache words, of rows
 /// `stride` apart, and view words), its goal masks unless keep_goals; returns the initial state's successor count.
 __device__ __forceinline__ u32 reset_row(const Instances& in, u32 k, u64 i, u64* states, u32 words, u32 row_words,
@@ -210,7 +251,6 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
             *p.order_bad = 0;  // Select of the next step sets it again if the order is stale
         const u8 st = p.status[i];
         const i32 c2 = static_cast<i32>(row_count(p.counts, p.num_schemas, p.count_stride, p.offsets, i));
-        u64* row = p.states + i * p.row_words;
         u32 k = instance_of(p.in, i);
         if (k >= p.in.count)
         {
@@ -219,39 +259,16 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 atomicOr(p.error, 4u);
             k = 0;
         }
-        bool g = false;
+        bool g = st == k_goal;
         if (st == k_ok)
-        {
-            if (p.goal_pos)
-            {
-                g = true;
-                for (u32 w = 0; w < p.words && g; ++w)
-                {
-                    const u64 gp = p.goal_pos[i * p.words + w], gn = p.goal_neg[i * p.words + w];
-                    g = (row[w] & gp) == gp && (row[w] & gn) == 0;
-                }
-            }
-            else if (p.goal_flag)
-                g = p.goal_flag[i] != 0;
-            else if (p.in.goal_off)
-            {
-                // the instance's goal masks, over their words that are not zero
-                g = p.in.goal_never[k] == 0;
-                for (u32 j = p.in.goal_off[k]; j < p.in.goal_off[k + 1] && g; ++j)
-                {
-                    const u64 x = row[p.in.goal_word[j]];
-                    g = (x & p.in.goal_wpos[j]) == p.in.goal_wpos[j] && (x & p.in.goal_wneg[j]) == 0;
-                }
-            }
-            else
-                g = rl::dev::goal_holds(p.in.views ? p.in.views[k] : t, row, p.words, nullptr, 0);
-        }
-        const bool dead = p.dead_end && ((st == k_ok && !g && c2 == 0) || st == k_stuck);
+            g = goal_row(t, p, i, k);
+        const bool dead = p.dead_end && !g && ((st == k_ok && c2 == 0) || st == k_stuck);
         const bool term = g || (dead && p.dead_end_terminal);
-        const i32 t2 = p.steps ? p.steps[i] + 1 : 0;
+        const bool absorbed = st == k_goal || (st == k_stuck && dead && p.dead_end_terminal);
+        const i32 t2 = p.steps ? p.steps[i] + (absorbed ? 0 : 1) : 0;
         const bool trunc = !term && p.max_steps && t2 >= static_cast<i32>(p.max_steps);
         if (p.reward)
-            p.reward[i] = p.step_reward + (g ? p.goal_reward : 0.0f) + (dead ? p.dead_end_reward : 0.0f);
+            p.reward[i] = absorbed ? 0.0f : p.step_reward + (g ? p.goal_reward : 0.0f) + (dead ? p.dead_end_reward : 0.0f);
         if (p.terminated)
             p.terminated[i] = term ? 1 : 0;
         if (p.truncated)
@@ -391,6 +408,13 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
         (p.views && !p.in.init_view))
         return cudaErrorInvalidValue;
     k_finish<<<grid_for(p.rows), k_block, 0, s>>>(t, p);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_goal(const rl::dev::TaskView& task, const Finish& p, u8* goal, cudaStream_t stream)
+{
+    if (p.rows)
+        k_goal_rows<<<grid_for(p.rows), k_block, 0, stream>>>(task, p, goal);
     return cudaGetLastError();
 }
 

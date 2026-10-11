@@ -260,7 +260,8 @@ def env_arrays(env):
 
 def step_arrays(r):
     out = {f: getattr(r, f).cpu().numpy().copy() for f in r._fields}
-    out["final_states"] = out["final_states"].view(np.uint64)
+    for field in ("final_states", "states", "goal_pos", "goal_neg"):
+        out[field] = out[field].view(np.uint64)
     return out
 
 
@@ -317,8 +318,6 @@ def host_rollout(t, ids, steps, goals=False, next_ids=None, seed=5, **cfg):
         r = step_arrays(env.step(next_task_ids=nxt, final=True))
         a = env_arrays(env)
         a.update(r)
-        if goals:
-            a["goal_pos"] = env.goal_pos.numpy().view(np.uint64).copy()
         out.append(a)
     return out
 
@@ -353,10 +352,7 @@ def test_device_env_equals_host_env(sets, name):
                 r = step_arrays(env.step(next_task_ids=torch.from_numpy(ROT(n, len(tasks))(s)).to(dev), final=True))
                 a = env_arrays(env)
                 for f, v in ref[s + 1].items():
-                    got = r.get(f, a.get(f))
-                    if f == "goal_pos":
-                        got = env.goal_pos.cpu().numpy().view(np.uint64)
-                    assert np.array_equal(got, v), (path, launch, s, f)
+                    assert np.array_equal(r.get(f, a.get(f)), v), (path, launch, s, f)
             env.check_errors()
     # a batch split (two envs, first_env = the second half's first env id) on a side stream
     h = n // 3
@@ -588,7 +584,7 @@ def last_successor(td):
 
 
 def test_torchrl_over_tables(sets):
-    """TorchRL over a mixed table: the specs, resets that carry task_id (curriculum), SerialEnv == ParallelEnv (the
+    """TorchRL over a mixed table: the specs, resets that carry next_task_id (curriculum), SerialEnv == ParallelEnv (the
     table pickled into spawned workers), a collector, and rollouts equal to a BatchedEnv with the same actions."""
     pytest.importorskip("torchrl")
     import functools
@@ -609,10 +605,9 @@ def test_torchrl_over_tables(sets):
     check_env_specs(env, seed=3)
     td = env.reset()
     assert torch.equal(td["task_id"], ids.to(torch.int64)) and torch.equal(td["state"], init[ids.long()])
-    # a partial reset with task_id moves the reset rows to other instances; the others keep theirs
     mask = torch.arange(n) % 3 == 0
     new = (ids + 1) % I
-    td = env.reset(TensorDict({"_reset": mask.unsqueeze(-1), "task_id": new.to(torch.int64)}, batch_size=[n]))
+    td = env.reset(TensorDict({"_reset": mask.unsqueeze(-1), "next_task_id": new.to(torch.int64)}, batch_size=[n]))
     want = torch.where(mask, new, ids).to(torch.int64)
     # (TorchRL fills the rows not reset from the input tensordict: the env's own task ids are the truth)
     assert torch.equal(env.batched.task_ids.long(), want)
@@ -620,7 +615,7 @@ def test_torchrl_over_tables(sets):
 
     # a rollout with a deterministic policy == BatchedEnv with the same actions (resets of finished rows keep the
     # rows' instances; the rollout's first reset keeps the current ones)
-    env.reset(TensorDict({"task_id": ids.to(torch.int64)}, batch_size=[n]))
+    env.reset(TensorDict({"next_task_id": ids.to(torch.int64)}, batch_size=[n]))
     env.set_seed(4)
     roll = env.rollout(8, last_successor, break_when_any_done=False)
     twin = rt.BatchedEnv(t, n, task_ids=ids, seed=4, max_steps=5, goal_reward=1.0, autoreset=True)

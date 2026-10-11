@@ -145,6 +145,7 @@ public:
     /// Recomputes the cache (fast path: counts, views, launch order) and the successor counts of the current states,
     /// after the caller wrote states or task ids.
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
+    void goal(const rl::EnvBatch& b, u8* goal);
     /// rl::HostEnv::step on device arrays; action [rows] (device, none: the random policy); next_task_ids [rows]
     /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it
     /// keeps the row's instance and is reported by check_errors()).

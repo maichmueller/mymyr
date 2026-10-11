@@ -27,7 +27,7 @@ from test_rl_table import MASK_SETS, ROT, SETS, env_arrays, gpu_device, host_rol
 torch = pytest.importorskip("torch")
 rt = pytest.importorskip("mymyr.rl.torch")
 
-FIELDS = ("reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "final_states", "count")
+FIELDS = rt.StepResult._fields
 CFG = dict(max_steps=6, goal_reward=1.0, dead_end="no_successors", dead_end_reward=-2.0)
 
 
@@ -392,10 +392,11 @@ def test_jax_scan_with_command_buffers_equals_without(name, path, tmp_path):
     if name in SETS and not all(p.is_file() for p in SETS[name][1]):
         pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
     runs = run_xla_modes(tmp_path, SCAN, "roll", name, path)
+    rj = pytest.importorskip("mymyr.rl.jax")
     for mode, a in runs.items():
         assert bool(a["gpu_fast"]) == (path == "auto"), mode
     keys = sorted(k[4:] for k in runs["off"] if k.startswith("cpu_") and k != "cpu_fast")
-    assert len(keys) == 10 + 2 * 14
+    assert len(keys) == len(rj.EnvState._fields) + 2 * 14  # the final state's leaves, then two scans of 14 outputs
     for mode, a in runs.items():
         for k in keys:
             if k not in ("06", "07"):  # counts, views: the device cache ([N, 0] on the CPU)

@@ -122,7 +122,10 @@ public:
     [[nodiscard]] std::string domain_name(u32 domain) const;
     /// Instance g's initial state as a row of `words` atom words (>= the instance's words), then `numeric_words` numeric
     /// words (>= its table's numeric_words()): the instance's atom words, zeros, its numeric words, zeros.
-    void initial_row(u32 g, u64* row, u32 words, u32 numeric_words) const;
+    void initial_row(u32 g, u64* row, u32 words, u32 numeric_words) const { initial_row(g, row, words, numeric_words, words); }
+    /// The same into a row whose atom words past the first `dirty` are zero already: it writes the instance's words and
+    /// zeroes the rest up to `dirty`, so it costs max(the instance's words, dirty) atom words, not `words`.
+    void initial_row(u32 g, u64* row, u32 words, u32 numeric_words, u32 dirty) const;
 
     /// The table's fingerprint for one domain, else a hash of the domains' fingerprints and the id mapping.
     [[nodiscard]] u64 fingerprint() const;

@@ -42,7 +42,7 @@ from mymyr._core._formalism import (
     Literal,
     Variable,
 )
-from mymyr import datasets, rl, search
+from mymyr import datasets, encoding, rl, search
 
 __all__ = [
     "Action",
@@ -64,6 +64,7 @@ __all__ = [
     "__version__",
     "build_info",
     "datasets",
+    "encoding",
     "formalism",
     "free_threaded_build",
     "get_cmake_dir",
@@ -95,8 +96,8 @@ def get_include() -> str:
 
 def get_cmake_dir() -> str:
     """The directory of ``mymyrConfig.cmake``: pass it as ``-Dmymyr_DIR=...`` to CMake and use
-    ``find_package(mymyr CONFIG REQUIRED COMPONENTS core frontend)`` for the targets ``mymyr::core`` and
-    ``mymyr::frontend`` (and ``mymyr::cuda`` in a CUDA wheel). The libraries are static and carry their
+    ``find_package(mymyr CONFIG REQUIRED COMPONENTS core encoding frontend)`` for the targets ``mymyr::core``,
+    ``mymyr::encoding`` and ``mymyr::frontend`` (and ``mymyr::cuda`` in a CUDA wheel). The libraries are static and carry their
     dependencies, so nothing else needs to be installed.
 
     Like :func:`get_include`, this is a source-level interface that needs C++26; it exists in an installed wheel only.
