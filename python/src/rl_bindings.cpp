@@ -1778,18 +1778,18 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("reward", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->reward, rl::DType::F32, {p.rows()}); });
         }, "[B] float32 (None after a reset)")
-        .def_prop_ro("terminated", [opt](const PyPoolBatch& p) {
-            return opt(p.stepped(), [&] { return p.array(p.b->terminated, rl::DType::Bool, {p.rows()}); });
-        }, "[B] bool (None after a reset)")
+        .def_prop_ro("terminated", [](const PyPoolBatch& p) {
+            return p.array(p.b->terminated, rl::DType::Bool, {p.rows()});
+        }, "[B] bool: terminal reached states (initial states after a reset)")
         .def_prop_ro("truncated", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->truncated, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool (None after a reset)")
         .def_prop_ro("invalid", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] { return p.array(p.b->invalid, rl::DType::Bool, {p.rows()}); });
         }, "[B] bool: the given action was outside [0, count) (None after a reset)")
-        .def_prop_ro("goal", [opt](const PyPoolBatch& p) {
-            return opt(p.stepped(), [&] { return p.array(p.b->goal, rl::DType::Bool, {p.rows()}); });
-        }, "[B] bool: the reached state is a goal state (None after a reset)")
+        .def_prop_ro("goal", [](const PyPoolBatch& p) {
+            return p.array(p.b->goal, rl::DType::Bool, {p.rows()});
+        }, "[B] bool: the reached state is a goal state (initial state after a reset)")
         .def_prop_ro("final_states", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] {
                 return p.array(p.b->final_states, rl::DType::U64, {p.rows(), static_cast<i64>(p.b->row_words())}, true);

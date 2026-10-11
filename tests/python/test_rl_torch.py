@@ -51,9 +51,13 @@ def check_step(task, env, before, action, r):
     L = binding.shape[1]
     count = off[1:] - off[:-1]
     after = env.states.cpu()
+    previous_goals = rl.is_goal(task, before.cpu()).tolist()
     for i in range(before.shape[0]):
         a, c = int(action[i]), int(count[i])
-        if c == 0:  # stuck: no move, terminated
+        if previous_goals[i]:
+            assert torch.equal(after[i], before[i]) and bool(r.goal[i]) and bool(r.terminated[i])
+            assert int(r.schema[i]) == -1 and not bool(r.invalid[i]) and float(r.reward[i]) == 0
+        elif c == 0:  # stuck: no move, terminated
             assert torch.equal(after[i], before[i]) and bool(r.terminated[i]) and not bool(r.invalid[i])
             assert int(r.schema[i]) == -1
         elif a < 0 or a >= c:  # invalid: no move
@@ -120,9 +124,11 @@ def test_dead_ends_and_stuck_states():
     env = rt.BatchedEnv(task, n, autoreset=False, step_reward=-1.0, dead_end_reward=-10.0)
     seen = 0
     for _ in range(40):
+        stuck = env.count == 0
         r = env.step()
         dead = r.terminated & ~r.goal
-        assert torch.all(r.reward[dead] == -11.0)
+        assert torch.all(r.reward[dead & ~stuck] == -11.0)
+        assert torch.all(r.reward[dead & stuck] == 0)
         assert torch.all(env.count[dead] == 0)
         seen += int(dead.sum())
     assert seen > 0
