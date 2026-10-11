@@ -4,7 +4,8 @@
 //     states of the whole state space, with unit and real costs;
 //   - every best-first search with landmark count (path-dependent) and with LM-cut solves suite tasks with plans that
 //     replay; A* with LM-cut finds the optimal cost;
-//   - one heuristic per thread over one shared task and grounding gives the single-threaded values (TSan build).
+//   - one heuristic per thread over one shared task and grounding gives the single-threaded values, and searches on
+//     several threads over a shared grounding give the single-threaded results (TSan build).
 
 #include "../support/suite.hpp"
 #include "h2_reference.hpp"
@@ -187,6 +188,53 @@ TEST(LandmarkHeuristics, OneHeuristicPerThreadOverASharedTask)
         for (usize k = 0; k < std::size(kinds); ++k)
             for (usize i = 0; i < ids.size(); ++i)
                 EXPECT_EQ(got[t][k][i], expected[k][(i + t * 7) % ids.size()]) << t << " " << k << " " << i;
+}
+
+TEST(LandmarkHeuristics, SearchesOnSeveralThreadsShareTheGrounding)
+{
+    const auto task = load("openstacks-opt08-adl__p03");  // derived landmark atoms: evaluated in leased workspaces
+    search::BestFirstOptions o;
+    o.heuristic.relaxed = H::ground(*task);
+    using Search = search::BestFirstResult (*)(const Task&, const search::BestFirstOptions&);
+    const std::pair<H::Kind, Search> runs[] = {{H::Kind::LmCount, &search::gbfs_lazy},
+                                               {H::Kind::LmCount, &search::astar_eager},
+                                               {H::Kind::LmCut, &search::astar_eager}};
+    auto run = [&](usize i)
+    {
+        search::BestFirstOptions oi = o;
+        oi.heuristic.kind = runs[i].first;
+        return runs[i].second(*task, oi);
+    };
+    std::vector<search::BestFirstResult> expected;
+    for (usize i = 0; i < std::size(runs); ++i)
+    {
+        expected.push_back(run(i));
+        ASSERT_EQ(expected.back().status, search::SearchStatus::Solved) << i << " " << expected.back().message;
+    }
+    constexpr u32 k_threads = 4;
+    std::vector<std::vector<search::BestFirstResult>> got(k_threads);
+    {
+        std::vector<std::jthread> pool;
+        for (u32 t = 0; t < k_threads; ++t)
+            pool.emplace_back(
+                [&, t]
+                {
+                    for (usize i = 0; i < std::size(runs); ++i)
+                        got[t].push_back(run((i + t) % std::size(runs)));
+                });
+    }
+    for (u32 t = 0; t < k_threads; ++t)
+        for (usize i = 0; i < std::size(runs); ++i)
+        {
+            const search::BestFirstResult& e = expected[(i + t) % std::size(runs)];
+            const search::BestFirstResult& g = got[t][i];
+            ASSERT_EQ(g.status, search::SearchStatus::Solved) << t << " " << i << " " << g.message;
+            EXPECT_EQ(g.cost, e.cost) << t << " " << i;
+            EXPECT_EQ(g.stats.expanded, e.stats.expanded) << t << " " << i;
+            ASSERT_EQ(g.plan.size(), e.plan.size()) << t << " " << i;
+            for (usize k = 0; k < e.plan.size(); ++k)
+                EXPECT_TRUE(g.plan[k].schema == e.plan[k].schema && g.plan[k].binding == e.plan[k].binding) << t << " " << i;
+        }
 }
 
 namespace

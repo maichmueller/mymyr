@@ -1,6 +1,7 @@
 """LM-cut and the landmark count through mymyr.search: kind names, admissibility of LM-cut, the path-dependent status
 of the landmark count (initial_status, progress, merge, h(state, status), preferred actions), every best-first search
-with both, refusals, and one heuristic per thread over a shared task."""
+with both, refusals, one heuristic per thread over a shared task, and searches on several threads sharing one
+landmark count object."""
 
 import math
 import threading
@@ -156,6 +157,31 @@ def test_one_heuristic_per_thread_over_a_shared_task(depot):
         t.join()
     assert not errors
 
+
+
+def test_searches_on_other_threads_share_a_landmark_count_object():
+    task = text_task("philosophers__p03-phil4")  # derived landmark atoms: evaluated by the axioms
+    h = search.Heuristic(task, "lmcount")
+    status = h.initial_status(task.initial_state)
+    ref = [str(a) for a in search.gbfs(task, heuristic=h, lazy=True).plan]
+    results, errors = [], []
+
+    def work():
+        try:
+            for _ in range(3):
+                r = search.gbfs(task, heuristic=h, lazy=True)
+                results.append([str(a) for a in r.plan])
+                assert h.initial_status(task.initial_state) == status
+                h(task.initial_state, status)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors and ref and results == [ref] * 12
 
 SHORTCUT_DOMAIN = """(define (domain d) (:requirements :strips)
  (:predicates (x) (y1) (y) (g))
