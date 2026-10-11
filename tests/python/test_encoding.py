@@ -249,7 +249,7 @@ def test_rows_of_other_frameworks_and_their_outputs(framework):
     if framework == "torch":
         source = module.from_numpy(rows.view(np.int64).copy())
     else:
-        source = module.numpy.asarray(rows.view(np.uint32))
+        source = module.device_put(rows.view(np.uint32), module.devices("cpu")[0])
     batch = encoder.encode(source)
     exported = batch.as_dict()
     for key, value in expected.as_dict().items():
