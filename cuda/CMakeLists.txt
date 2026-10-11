@@ -43,6 +43,8 @@ target_sources(mymyr_cuda PRIVATE src/device_table.cpp src/table_launch.cpp src/
 target_sources(mymyr_cuda PRIVATE src/state_space.cu src/state_space.cpp)
 # IW over task tables (cuda/multi_iw.hpp: the searches grouped by instance)
 target_sources(mymyr_cuda PRIVATE src/multi_iw_table.cpp)
+# the per-graph functions of the relational encoding (encoding/detail/lanes.hpp) compiled as device code
+target_sources(mymyr_cuda PRIVATE src/encoding_lanes.cu)
 # task suites (several domains) on the device: the suite expand and the domain split of a batch
 target_sources(mymyr_cuda PRIVATE src/suite.cu src/suite_expand.cpp)
 # device action costs (cuda/cost_program.hpp: programs over static functions, the state spaces and A*)

@@ -180,6 +180,18 @@ MYMYR_HD bool any_bit_from(const u64* words, u32 count, u32 first)
     return false;
 }
 
+/// Whether a state row sets a bit the instance does not have: at or beyond its fluent slots (within its words).
+MYMYR_HD bool has_foreign_atom_bits(const InstanceView& v, const u64* atoms)
+{
+    return any_bit_from(atoms, v.words, v.fluent_slots);
+}
+
+/// The same for the derived words of a row (at or beyond the instance's derived slots).
+MYMYR_HD bool has_foreign_derived_bits(const InstanceView& v, const u64* derived)
+{
+    return any_bit_from(derived, v.derived_words, v.derived_slots);
+}
+
 /// The tuples of one cell in this graph.
 MYMYR_HD u32 cell_count(const InstanceView& v, const Cell& c, const RowInput& in)
 {
@@ -211,8 +223,7 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32*
             t.flags |= k_graph_auxiliary;
     }
     t.entities = v.num_objects + ((t.flags & k_graph_auxiliary) ? 1u : 0u);
-    if (any_bit_from(in.atoms, v.words, v.fluent_slots) ||
-        (in.derived && any_bit_from(in.derived, v.derived_words, v.derived_slots)))
+    if (has_foreign_atom_bits(v, in.atoms) || (in.derived && has_foreign_derived_bits(v, in.derived)))
         t.flags |= k_graph_bad_row;
     return t;
 }

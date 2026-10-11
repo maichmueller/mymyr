@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -144,7 +143,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
             if (!context.needs_derived(instance))
                 continue;
             const detail::InstanceView v = detail::instance_view(view, instance);
-            if (detail::any_bit_from(states.row(g), v.words, v.fluent_slots))
+            if (detail::has_foreign_atom_bits(v, states.row(g)))
                 throw std::invalid_argument("mymyr: encoding: row " + std::to_string(g) +
                                             " sets an atom bit its instance does not have");
             const Task& task = *table.instance(instance).task;
