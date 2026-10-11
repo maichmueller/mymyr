@@ -1,0 +1,5 @@
+(define (problem wiring-2)
+  (:domain wiring)
+  (:objects r1 r2 - room s1 s2 - switch)
+  (:init (wired s1 r1) (wired s2 r2))
+  (:goal (forall (?r - room) (lit ?r))))

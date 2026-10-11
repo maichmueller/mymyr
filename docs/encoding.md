@@ -114,3 +114,35 @@ this version.
 The C++ API is in `mymyr/encoding/flat.hpp`, linked with `mymyr::encoding`. It accepts caller-owned StateBatchView,
 TaskTable instance IDs, ActionBatchView label columns and optional per-row GroundConditions. Output storage uses
 the existing immutable ArrayBundle. No planning-backend ABI/type registry is imported.
+
+## Encoding schema
+
+`mymyr.encoding.EncodingSchema(table_or_task, **options)` (C++: `mymyr/encoding/schema.hpp`) is the relation catalog of
+an encoding: which relations a batch holds, with their arities, lanes and slot roles. It is a function of the domain
+and the options, never of the instances of a table, so tables over one domain give the same relation ids to the same
+relations.
+
+- **Names and order.** Relations are named `[+]on[g][sat]`: a sign for goal and history relations, the predicate or
+  action schema name, `[hist]`, a goal level (`[g]`, `[sg]`, `[ssg]`, `[sssg]`) and a derivation (`[sat]`, `[unsat]`,
+  `[sat+]`, `[sat-]`). State relations carry the plain name. The catalog is sorted by name, bytewise; a relation's id
+  is its position. `relation_lanes`, `relation_signs`, `relation_levels`, `relation_derivations`,
+  `relation_predicates` and `relation_schemas` describe each relation, `slot_roles` each position of its tuples.
+- **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
+  (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
+  predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`;
+  the state relations of the static predicates (the types included) and of the derived predicates can be dropped
+  (`include_static`, `include_derived`); their goal and history relations stay. Nullary predicates (`nullary=True`,
+  the default) have relations of arity 1: their atoms are tuples over one auxiliary entity per graph (slot role
+  `auxiliary_slot`, entity role `auxiliary`); with `nullary=False` they have no relations. `slot_role_names` and
+  `entity_role_names` always list all nine roles.
+  An action relation holds the schema's full parameter list (the written parameters and the ones normalization adds
+  for existential variables). Schemas of one name and arity (a disjunctive precondition splits an action) share one
+  relation; a name with several arities has one relation `name#arity` per arity.
+- **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
+  `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
+  derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
+  targets together with a horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
+  `root_policy` other than `include` without a horizon mode.
+- **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
+  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
+  depend on declaration order, on predicate ids, on the process or on the build.
