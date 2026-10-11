@@ -997,5 +997,13 @@ TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
             EXPECT_NE(std::string(e.what()).find(c.what), std::string::npos) << e.what();
         }
     }
+    // ArraysCheck::Structure checks sizes and ranges only: contents of another task pass, broken ranges do not
+    StateSpaceArrays a = S->to_arrays();
+    a.task = other;
+    a.goal_flags[0] = 1;
+    EXPECT_EQ(StateSpace::create(std::move(a), ArraysCheck::Structure)->num_goal_states(), S->num_goal_states() + 1);
+    StateSpaceArrays b = S->to_arrays();
+    b.forward_targets[0] = N;
+    EXPECT_THROW((void)StateSpace::create(std::move(b), ArraysCheck::Structure), std::invalid_argument);
 }
 }  // namespace

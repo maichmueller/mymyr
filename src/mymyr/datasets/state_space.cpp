@@ -444,7 +444,7 @@ bool reverse_matches(const StateSpaceArrays& a)
 }
 }  // namespace
 
-std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
+std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a, ArraysCheck check)
 {
     auto need = [](bool ok, const char* what)
     {
@@ -452,7 +452,6 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
             throw std::invalid_argument(std::string("mymyr: invalid state space arrays: ") + what);
     };
     need(a.task != nullptr, "no task");
-    const Task& T = *a.task;
     const u64 N = a.num_states, E = a.forward_targets.size(), RW = u64{a.words} + a.numeric_words;
     need(N > 0, "no states (a state space has at least its initial state)");
     need(a.state_words.size() == N * RW, "state_words is not [num_states, words + numeric_words]");
@@ -480,6 +479,15 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
     need(below(a.forward_targets, N), "a transition target is not a state");
     need(below(a.backward_sources, N), "a transition source is not a state");
     need(below(a.backward_edges, E), "a backward edge is not a transition");
+    if (check == ArraysCheck::Full)
+        check_contents(a, need);
+    return assemble(std::move(a));
+}
+
+void StateSpace::check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need)
+{
+    const Task& T = *a.task;
+    const u64 N = a.num_states, E = a.forward_targets.size(), RW = u64{a.words} + a.numeric_words;
     need(reverse_matches(a), "the backward CSR does not list the forward transitions by target");
 
     // the rows are states of this task: its row layout, no atom slot it lacks, and its initial state first
@@ -527,7 +535,11 @@ std::shared_ptr<const StateSpace> StateSpace::create(StateSpaceArrays&& a)
              "the cost goal distances do not match the unsolvable flags");
         need(al == (!g && !u), "the alive flags are not the states neither goal nor unsolvable");
     }
+}
 
+std::shared_ptr<const StateSpace> StateSpace::assemble(StateSpaceArrays&& a)
+{
+    const u64 N = a.num_states;
     auto space = std::make_shared<StateSpace>();
     StateSpace& S = *space;
     StateSpaceBuilder::set_basic(S, std::move(a.task), a.num_states, a.words, a.numeric_words, a.labels,

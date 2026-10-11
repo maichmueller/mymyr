@@ -21,7 +21,7 @@ from mymyr import datasets, search
 from mymyr.datasets import _files
 from mymyr.rl import TaskTable
 
-from conftest import ROOT, TASKS, text_task
+from conftest import ROOT, text_task
 
 PDDL = ROOT / "tests/data/pddl"
 needs_frontend = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
@@ -343,6 +343,20 @@ def test_lazy_atom_slots_round_trip_exactly(tmp_path):
     assert prefix.num_atoms == task.num_atoms
     with pytest.raises(ValueError, match="saved under lazy atom slots; the task has frozen ones"):
         datasets.load(tmp_path / "lazy.mymyr", task=mymyr.Task.from_pddl(g / "domain.pddl", g / "p02.pddl"))
+
+
+@needs_frontend
+def test_device_state_spaces_pass_the_full_check():
+    """to_host() of a device space builds it checking sizes and ranges only; its contents pass the full check."""
+    cuda = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend", exc_type=ImportError)
+    if not cuda.available():
+        pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
+    for d, p, options in SPACES:
+        task = pddl_task(d, p)
+        host = datasets.state_space(task, device=0, **options).to_host()
+        same_arrays(datasets.StateSpace.from_arrays(task, host.arrays()).arrays(), host.arrays())
+        same_arrays(host.arrays(), datasets.state_space(task, **options).arrays())
+        same_space(host, pickle.loads(pickle.dumps(host)))
 
 
 @needs_frontend

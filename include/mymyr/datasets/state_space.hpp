@@ -80,6 +80,14 @@ enum class StateSpaceStatus : u8
 /// Unit goal distance of a state that cannot reach a goal (mimir uses INT32_MAX).
 inline constexpr i32 k_unsolvable_distance = -1;
 
+/// What StateSpace::create checks of its arrays.
+enum class ArraysCheck : u8
+{
+    Full,       // all of create's checks: arrays from outside (files, pickles, user arrays)
+    Structure,  // sizes and index ranges only, what indexing the arrays relies on: arrays a mymyr generator made (the
+                // device state spaces), whose contents need no second check
+};
+
 /// The arrays of a state space: generated elsewhere (the device state spaces, cuda/state_space.hpp) or saved
 /// (StateSpace::to_arrays), for StateSpace::create; each has the size and meaning of the StateSpace accessor of the
 /// same name.
@@ -107,7 +115,8 @@ class StateSpace
 {
 public:
     /// A state space from its arrays (moved in). The goal and unsolvable counts and the largest goal distance are
-    /// computed from them. Throws std::invalid_argument unless the arrays are a state space of their task:
+    /// computed from them. Throws std::invalid_argument unless the arrays are a state space of their task (the first
+    /// two points only with ArraysCheck::Structure):
     ///   - sizes: every array has its accessor's size, and the offset arrays are CSRs over num_states (> 0) states;
     ///   - ranges: targets and sources are states, backward edges are transitions, and the backward CSR lists every
     ///     forward transition once, in the row of its target, ascending, with its source;
@@ -118,7 +127,8 @@ public:
     ///     exactly those at k_unsolvable_distance (cost distance +inf; finite and nonnegative otherwise), alive ones
     ///     those neither goal nor unsolvable, and no cost is NaN.
     /// Linear in the size of the arrays. The goal distances themselves are taken as given.
-    [[nodiscard]] static std::shared_ptr<const StateSpace> create(StateSpaceArrays&& arrays);
+    [[nodiscard]] static std::shared_ptr<const StateSpace> create(StateSpaceArrays&& arrays,
+                                                                  ArraysCheck check = ArraysCheck::Full);
     /// A copy of the arrays: create(to_arrays()) is an equal state space.
     [[nodiscard]] StateSpaceArrays to_arrays() const;
 
@@ -200,6 +210,8 @@ public:
 
 private:
     friend class StateSpaceBuilder;
+    static void check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need);
+    static std::shared_ptr<const StateSpace> assemble(StateSpaceArrays&& a);
 
     TaskPtr m_task;
     u32 m_n = 0;
