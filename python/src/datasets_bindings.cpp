@@ -28,6 +28,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -258,7 +259,8 @@ ArrayDict space_arrays(const PyStateSpace& P, Framework fw)
     const std::shared_ptr<const void> own = P.space;
     ArrayDict d{nb::dict()};
     const i64 N = S.num_states(), E = static_cast<i64>(S.num_transitions());
-    d["state_words"] = view<u64>(own, S.state_words(), fw, {N, static_cast<i64>(S.row_words())}, true);
+    if (S.task()->atoms().frozen())  // lazy slots: the rows' layout is the generation's history
+        d["state_words"] = view<u64>(own, S.state_words(), fw, {N, static_cast<i64>(S.row_words())}, true);
     d["forward_offsets"] = view<u64>(own, S.forward_offsets(), fw);
     d["forward_targets"] = view<u32>(own, S.forward_targets(), fw);
     if (S.has_labels())
@@ -370,7 +372,7 @@ const char* k_space_doc =
 const char* k_options_doc =
     "Options: threads (0: all cores; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
     "or more, as in mimir), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
-    "labels (keep (schema, binding) per transition). State words are independent of the thread count when the task has frozen atoms (atoms='frozen').";
+    "labels (keep (schema, binding) per transition). State words are the same for every thread count (a task with lazy atom slots has none).";
 
 #define MYMYR_SS_ARGS                                                                                                      \
     nb::kw_only(), "threads"_a = 1, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \
@@ -414,7 +416,8 @@ void bind_datasets(nb::module_& parent)
         .def(
             "arrays", [](const PyStateSpace& s, FrameworkArg framework) { return space_arrays(s, parse_framework(framework)); },
             "framework"_a = nb::none(),
-            "Zero-copy read-only views: state_words [N, W + NN] (the task's word encoding), forward_offsets [N + 1], "
+            "Zero-copy read-only views: state_words [N, W + NN] (the task's word encoding; absent for a task with lazy "
+            "atom slots, whose numbering depends on the generation's order), forward_offsets [N + 1], "
             "forward_targets [E], label_schemas [E] and label_bindings [E, label_width] (unused positions 2^32 - 1; "
             "with labels), backward_offsets [N + 1], backward_sources and backward_edges [E] (per target, ascending "
             "forward edge indices), unit_goal_distances [N] (int32, -1: unsolvable), cost_goal_distances [N] (float64, "
@@ -813,7 +816,10 @@ void bind_datasets(nb::module_& parent)
                 const Owner& o = g.space.owner;
                 const Task& task = *o.core->task;
                 nb::typed<nb::list, PyGroundAtom> out{nb::list()};
-                for (const u32 s : g.graph->tuple(tuple_vertex(*g.graph, v)))
+                std::vector<u32> slots = to_vector(g.graph->tuple(tuple_vertex(*g.graph, v)));
+                if (!task.atoms().frozen())
+                    std::ranges::sort(slots, {}, [&](u32 s) { return task.atoms().canonical(mymyr::AtomKind::Fluent, s); });
+                for (const u32 s : slots)
                 {
                     const SlotId slot{s};
                     const auto args = task.atoms().arguments(slot);
@@ -822,7 +828,7 @@ void bind_datasets(nb::module_& parent)
                 }
                 return out;
             },
-            "vertex"_a, "The vertex's tuple as GroundAtoms (slot order).")
+            "vertex"_a, "The vertex's tuple as GroundAtoms, in the task's canonical atom order (the same under every atom mode).")
         .def("problem_vertices",
              [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->problem_vertices(tuple_vertex(*g.graph, v))); }, "vertex"_a,
              "The states at the vertex's distance in which its tuple is novel (state ids, ascending).")

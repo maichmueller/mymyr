@@ -202,7 +202,7 @@ def test_numeric_cuda_labels_heuristics_and_table_starts(name):
     torch = pytest.importorskip("torch")
     from mymyr import search
 
-    task = numeric_task(name, atoms="frozen")
+    task = numeric_task(name, atoms="dense")
     states = [task.initial_state]
     for i in range(8):
         actions = task.applicable_actions(states[-1])

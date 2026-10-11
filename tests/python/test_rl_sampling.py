@@ -20,7 +20,7 @@ def table():
     """)
     tasks = [mymyr.Task(domain.instantiate_string(f"""
         (define (problem instance{index}) (:domain toggles) (:init {initial}) (:goal (q)))
-    """), atoms="frozen") for index, initial in enumerate(["", "(p)"])]
+    """)) for index, initial in enumerate(["", "(p)"])]
     return rl.TaskTable(tasks)
 
 

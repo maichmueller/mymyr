@@ -1,4 +1,5 @@
-"""Packed relational observations against independent semantic reconstruction."""
+"""Packed relational observations against independent semantic reconstruction, under every fixed atom slot layout
+(the encoder reads state rows, so tasks with lazy atom slots are refused)."""
 
 import gc
 import importlib.util
@@ -13,6 +14,8 @@ import pytest
 import mymyr
 from mymyr import encoding, rl
 from conftest import SMALL_TASKS, text_task, walk
+
+MODES = ["auto", "reachable", "dense"]
 
 
 def unpack(batch, graph):
@@ -63,7 +66,7 @@ DOMAIN = """(define (domain features)
  (:action switch :parameters () :precondition (and) :effect (ready)))"""
 
 
-def feature_task(objects="a b", atoms="frozen"):
+def feature_task(objects="a b", atoms="auto"):
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
     domain = mymyr.Domain.from_string(DOMAIN)
@@ -74,7 +77,7 @@ def feature_task(objects="a b", atoms="frozen"):
     return mymyr.Task(domain.instantiate_string(problem), atoms=atoms)
 
 
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", MODES)
 @pytest.mark.parametrize("include_static,include_derived", [(True, True), (False, False)])
 def test_semantics_and_default_signed_derived_goals(atoms, include_static, include_derived):
     task = feature_task(atoms=atoms)
@@ -93,8 +96,9 @@ def test_semantics_and_default_signed_derived_goals(atoms, include_static, inclu
     assert batch.version == 1 and batch.num_graphs == 2
 
 
-def test_explicit_static_negative_and_empty_goals():
-    task = feature_task()
+@pytest.mark.parametrize("atoms", MODES)
+def test_explicit_static_negative_and_empty_goals(atoms):
+    task = feature_task(atoms=atoms)
     state = task.initial_state
     goal = task.ground_condition(["(fixed a)", "(not (fixed b))", "(fixed b)", "(not (fixed a))",
                                   "(flag a)", "(not (flag a))", "(available a)", "(not (available a))"])
@@ -107,9 +111,10 @@ def test_explicit_static_negative_and_empty_goals():
             assert empty.relation_counts[0, relation] == 0
 
 
-def test_mifrost_neutral_engine_semantic_fixture():
+@pytest.mark.parametrize("atoms", MODES)
+def test_mifrost_neutral_engine_semantic_fixture(atoms):
     fixture = json.loads((Path(__file__).parents[1] / "data/encoding/mifrost_flat_goals.json").read_text())
-    task = feature_task()
+    task = feature_task(atoms=atoms)
     goal = task.ground_condition(fixture["goals"])
     batch = encoding.FlatRelationEncoder(task).encode(task.initial_state, goals=goal)
     got = unpack(batch, 0)
@@ -118,8 +123,9 @@ def test_mifrost_neutral_engine_semantic_fixture():
     assert not got["[+]flag[g][sat]"] and not got["[-]flag[g][sat]"]
 
 
-def test_batch_global_objects_and_expansion_action_readouts():
-    first, second = feature_task(), feature_task("a b c d")
+@pytest.mark.parametrize("atoms", MODES)
+def test_batch_global_objects_and_expansion_action_readouts(atoms):
+    first, second = feature_task(atoms=atoms), feature_task("a b c d", atoms=atoms)
     table = rl.TaskTable([first, second])
     states = [second.initial_state, first.initial_state, second.state(["(flag b)"])]
     ids = np.array([1, 0, 1], dtype=np.int32)
@@ -150,9 +156,10 @@ def test_batch_global_objects_and_expansion_action_readouts():
         assert got == reference([first, second][task_id], state)
 
 
+@pytest.mark.parametrize("atoms", MODES)
 @pytest.mark.parametrize("name", SMALL_TASKS)
-def test_walk_fluent_and_goal_reference(name):
-    task = text_task(name, atoms="lazy")
+def test_walk_fluent_and_goal_reference(name, atoms):
+    task = text_task(name, atoms=atoms)
     states = walk(task, steps=3, walks=1)
     encoder = encoding.FlatRelationEncoder(task, include_static=False, include_derived=False)
     batch = encoder.encode(states)
@@ -168,29 +175,38 @@ def test_walk_fluent_and_goal_reference(name):
         assert {name: values for name, values in unpack(batch, graph).items() if values} == expected
 
 
-def test_lazy_growth_and_slot_order_do_not_change_semantic_encoding():
-    first, second = feature_task(atoms="lazy"), feature_task(atoms="lazy")
-    enc_first, enc_second = encoding.FlatRelationEncoder(first), encoding.FlatRelationEncoder(second)
-    first.state(["(flag b)"])
-    second.state(["(ready)"])
-    first_state, second_state = first.state(["(flag b)", "(ready)"]), second.state(["(flag b)", "(ready)"])
-    first_batch, second_batch = enc_first.encode(first_state), enc_second.encode(second_state)
-    assert first_batch.schema == second_batch.schema
-    assert first_batch.object_names == second_batch.object_names
-    assert first_batch.task_fingerprints == second_batch.task_fingerprints
-    assert unpack(first_batch, 0) == unpack(second_batch, 0)
-    for name in ["relation_args", "relation_counts", "relation_offsets", "relation_tuple_offsets"]:
-        assert np.array_equal(getattr(first_batch, name), getattr(second_batch, name))
+@pytest.mark.parametrize("name", SMALL_TASKS)
+def test_slot_layout_does_not_change_semantic_encoding(name):
+    batches = []
+    for atoms in MODES:
+        task = text_task(name, atoms=atoms)
+        batches.append(encoding.FlatRelationEncoder(task).encode(walk(task, steps=6, seed=3)))
+    first = batches[0]
+    for other in batches[1:]:
+        assert other.schema == first.schema and other.object_names == first.object_names
+        for graph in range(first.num_graphs):
+            assert unpack(other, graph) == unpack(first, graph)
+        for array in ["relation_args", "relation_counts", "relation_offsets", "relation_tuple_offsets"]:
+            assert np.array_equal(getattr(other, array), getattr(first, array))
 
 
-def test_problem_local_goal_predicates_stay_instance_scoped():
+def test_lazy_atom_slots_are_refused():
+    lazy = feature_task(atoms="lazy")
+    with pytest.raises(ValueError, match="lazy atom slots"):
+        encoding.FlatRelationEncoder(lazy)
+    with pytest.raises(ValueError, match="lazy atom slots"):
+        encoding.FlatRelationEncoder(rl.TaskTable([lazy]))
+
+
+@pytest.mark.parametrize("atoms", MODES)
+def test_problem_local_goal_predicates_stay_instance_scoped(atoms):
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
     domain = mymyr.Domain.from_string("""(define (domain local-goal)
       (:requirements :strips :disjunctive-preconditions) (:predicates (flag ?x))
       (:action enable :parameters (?x) :precondition (and) :effect (flag ?x)))""")
     tasks = [mymyr.Task(domain.instantiate_string(f"""(define (problem p) (:domain local-goal)
-      (:objects a b c) (:init (flag a)) (:goal {goal}))"""), atoms="lazy")
+      (:objects a b c) (:init (flag a)) (:goal {goal}))"""), atoms=atoms)
              for goal in ["(or (flag a) (flag b))", "(or (flag b) (flag c))"]]
     table = rl.TaskTable(tasks)
     encoder = encoding.FlatRelationEncoder(table)
@@ -210,7 +226,8 @@ def test_problem_local_goal_predicates_stay_instance_scoped():
     assert encoder.relation_names[:domain_relations] == other.relation_names[:domain_relations]
 
 
-def test_normalization_introduced_action_parameters_are_not_projected_away():
+@pytest.mark.parametrize("atoms", MODES)
+def test_normalization_introduced_action_parameters_are_not_projected_away(atoms):
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the PDDL front end")
     domain = mymyr.Domain.from_string("""(define (domain witnesses) (:requirements :adl)
@@ -218,7 +235,7 @@ def test_normalization_introduced_action_parameters_are_not_projected_away():
       (:action choose :parameters (?x) :precondition (exists (?witness) (flag ?witness))
          :effect (chosen ?x)))""")
     task = mymyr.Task(domain.instantiate_string("""(define (problem p) (:domain witnesses)
-      (:objects a b) (:init (flag a)) (:goal (chosen b)))"""), atoms="lazy")
+      (:objects a b) (:init (flag a)) (:goal (chosen b)))"""), atoms=atoms)
     expansion = rl.expand(task, [task.initial_state])
     batch = encoding.FlatRelationEncoder(task).encode(task.initial_state, actions=expansion)
     assert batch.action_binding.shape == (2, 2)
@@ -228,8 +245,9 @@ def test_normalization_introduced_action_parameters_are_not_projected_away():
     assert batch.relation_counts[0, relation] == 2
 
 
-def test_empty_states_batches_and_no_actions():
-    task = feature_task(atoms="lazy")
+@pytest.mark.parametrize("atoms", MODES)
+def test_empty_states_batches_and_no_actions(atoms):
+    task = feature_task(atoms=atoms)
     encoder = encoding.FlatRelationEncoder(task)
     empty_state = task.state([])
     assert unpack(encoder.encode(empty_state), 0) == unpack(encoder.encode([empty_state]), 0)
@@ -241,9 +259,10 @@ def test_empty_states_batches_and_no_actions():
     assert no_labels.action_offsets.tolist() == [0, 0]
 
 
+@pytest.mark.parametrize("atoms", MODES)
 @pytest.mark.parametrize("with_actions", [False, True])
-def test_action_readouts_reject_source_instance_mismatch(with_actions):
-    first, second = feature_task(), feature_task("a b c")
+def test_action_readouts_reject_source_instance_mismatch(with_actions, atoms):
+    first, second = feature_task(atoms=atoms), feature_task("a b c", atoms=atoms)
     table = rl.TaskTable([first, second])
     first_state = first.initial_state
     if not with_actions:
@@ -251,7 +270,7 @@ def test_action_readouts_reject_source_instance_mismatch(with_actions):
             (:predicates (ready) (done))
             (:action finish :parameters () :precondition (ready) :effect (done)))""")
         tasks = [mymyr.Task(domain.instantiate_string(f"""(define (problem p{index}) (:domain stuck)
-            (:init) (:goal (done)))"""), atoms="frozen") for index in range(2)]
+            (:init) (:goal (done)))"""), atoms=atoms) for index in range(2)]
         first, second = tasks
         table = rl.TaskTable(tasks)
         first_state = first.initial_state
@@ -264,8 +283,9 @@ def test_action_readouts_reject_source_instance_mismatch(with_actions):
         )
 
 
-def test_owned_results_and_readonly_numpy():
-    task = feature_task()
+@pytest.mark.parametrize("atoms", MODES)
+def test_owned_results_and_readonly_numpy(atoms):
+    task = feature_task(atoms=atoms)
     encoder = encoding.FlatRelationEncoder(task)
     states = task.encode([task.initial_state])
     batch = encoder.encode(states)
@@ -282,8 +302,9 @@ def test_owned_results_and_readonly_numpy():
         retained[0] = 1
 
 
-def test_concurrent_encoding_is_reentrant():
-    task = feature_task(atoms="lazy")
+@pytest.mark.parametrize("atoms", MODES)
+def test_concurrent_encoding_is_reentrant(atoms):
+    task = feature_task(atoms=atoms)
     encoder = encoding.FlatRelationEncoder(task)
     state = task.initial_state
     expected = encoder.encode(state).relation_args.copy()
@@ -319,8 +340,9 @@ def test_rejects_numeric_tasks():
         encoding.FlatRelationEncoder(task)
 
 
-def test_rejects_bad_identity_ids_expansion_and_inputs():
-    first, second = feature_task(), feature_task("a b c")
+@pytest.mark.parametrize("atoms", MODES)
+def test_rejects_bad_identity_ids_expansion_and_inputs(atoms):
+    first, second = feature_task(atoms=atoms), feature_task("a b c", atoms=atoms)
     encoder = encoding.FlatRelationEncoder(first)
     with pytest.raises(ValueError, match="another task"):
         encoder.encode(second.initial_state)
@@ -335,9 +357,12 @@ def test_rejects_bad_identity_ids_expansion_and_inputs():
     with pytest.raises(TypeError, match="Expansion"):
         encoder.encode(first.initial_state, actions=object())
     bad = first.encode([first.initial_state])
-    bad[0, -1] |= np.uint64(1 << 63)
+    assert first.num_atoms < 63
+    bad[0, -1] |= np.uint64(1 << 63)  # a slot past the task's atoms within its word
     with pytest.raises(ValueError, match="unassigned"):
         encoder.encode(bad)
+    padded = np.concatenate([first.encode([first.initial_state]), np.ones((1, 1), np.uint64)], 1)
+    assert unpack(encoder.encode(padded), 0) == unpack(encoder.encode(first.initial_state), 0)  # padding: not read
     with pytest.raises(TypeError, match="GroundCondition"):
         encoder.encode(first.initial_state, goals="(flag a)")
     with pytest.raises(ValueError, match="numeric"):

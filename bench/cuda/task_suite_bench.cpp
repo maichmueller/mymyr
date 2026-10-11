@@ -141,7 +141,7 @@ rl::TaskSuitePtr load_suite(const std::vector<std::string>& names)
         const auto it = std::find_if(all.begin(), all.end(), [&](const InstanceSet& s) { return s.name == n; });
         if (it == all.end())
             throw std::runtime_error("unknown set " + n);
-        std::vector<TaskPtr> tasks = load_set(*it, TaskOptions::Atoms::Frozen);
+        std::vector<TaskPtr> tasks = load_set(*it, TaskOptions::Atoms::Dense);
         if (tasks.empty())
             throw std::runtime_error("missing PDDL of set " + n);
         tables.push_back(rl::TaskTable::create(tasks));

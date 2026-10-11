@@ -25,7 +25,7 @@ using namespace mymyr::test;
 
 namespace
 {
-TaskPtr load(const std::string& name, TaskOptions::Atoms atoms = TaskOptions::Atoms::Frozen)
+TaskPtr load(const std::string& name, TaskOptions::Atoms atoms = TaskOptions::Atoms::Dense)
 {
     TaskOptions o;
     o.atoms = atoms;
@@ -427,7 +427,7 @@ TEST(HostEnv, DeadEndModes)
 
 TEST(HostEnv, PoolAndBatchCompositionDoNotChangeTrajectories)
 {
-    for (const auto atoms : {TaskOptions::Atoms::Frozen, TaskOptions::Atoms::Lazy})
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
     {
         const auto task = load("logistics00__probLOGISTICS-6-1", atoms);
         rl::EnvConfig cfg;

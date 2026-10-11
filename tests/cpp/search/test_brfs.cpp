@@ -40,17 +40,17 @@ struct Config
 
 const Config k_configs[] = {
     {"fixed_lazy", TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Flat, 1, true, true, true},
-    {"fixed_frozen", TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Frozen, BrfsOptions::Store::Flat, 1, true, false, true},
+    {"fixed_frozen", TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Dense, BrfsOptions::Store::Flat, 1, true, false, true},
     {"fc_lazy", TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Flat, 1, true, false, true},
-    {"fc_frozen", TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Frozen, BrfsOptions::Store::Flat, 1, true, true, true},
+    {"fc_frozen", TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Dense, BrfsOptions::Store::Flat, 1, true, true, true},
     {"fixed_lazy_nowitness", TaskOptions::Matching::FixedOrder, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Flat, 1, false, true, true},
-    {"fc_frozen_nowitness", TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Frozen, BrfsOptions::Store::Flat, 1, false, false, true},
+    {"fc_frozen_nowitness", TaskOptions::Matching::ForwardChecking, TaskOptions::Atoms::Dense, BrfsOptions::Store::Flat, 1, false, false, true},
     {"auto_chunked", TaskOptions::Matching::Auto, TaskOptions::Atoms::Auto, BrfsOptions::Store::Chunked, 1, true, true, true},
     {"auto_chunked_lazy", TaskOptions::Matching::Auto, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Chunked, 1, true, true, true},
     {"auto_compact", TaskOptions::Matching::Auto, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Compact, 1, true, true, true},
     {"concurrent_t1", TaskOptions::Matching::Auto, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Concurrent, 1, true, true, true},
     {"concurrent_t4", TaskOptions::Matching::Auto, TaskOptions::Atoms::Lazy, BrfsOptions::Store::Concurrent, 4, true, true, true},
-    {"concurrent_t4_ranges", TaskOptions::Matching::Auto, TaskOptions::Atoms::Frozen, BrfsOptions::Store::Concurrent, 4, false, false, false},
+    {"concurrent_t4_ranges", TaskOptions::Matching::Auto, TaskOptions::Atoms::Dense, BrfsOptions::Store::Concurrent, 4, false, false, false},
 };
 
 struct Param
@@ -116,7 +116,7 @@ TEST(Brfs, DeterministicIdsIndependentOfThreadCount)
     {
         if (t.states > std::min<u64>(suite_state_limit(), 200000))
             continue;
-        for (auto atoms : {TaskOptions::Atoms::Lazy, TaskOptions::Atoms::Frozen})
+        for (auto atoms : {TaskOptions::Atoms::Lazy, TaskOptions::Atoms::Dense})
         {
             TaskOptions to;
             to.atoms = atoms;

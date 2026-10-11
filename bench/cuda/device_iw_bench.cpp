@@ -1,7 +1,7 @@
 // mymyr_device_iw_bench: device rollouts and exact batched IW(1) against the CPU, printing one JSON line.
 //
 //   mymyr_device_iw_bench task.txt [--mode rollouts|iw1] [--n N] [--next K] [--arity A] [--sample S] [--threads T]
-//                  [--reps R] [--atoms auto|lazy|frozen] [--chunk N] [--max-bytes B] [--walk-steps S] [--max-states N]
+//                  [--reps R] [--atoms auto|reachable|dense|lazy] [--chunk N] [--max-bytes B] [--walk-steps S] [--max-states N]
 //                  [--graphs 0|1] [--dedup 0|1]
 //
 // rollouts: N device rollouts (seeds 1 + i * golden) from the initial state (cuda::rollouts_batch; max_arity A,
@@ -89,7 +89,7 @@ u64 batch_fp(const cuda::MultiIwBatch& b)
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_iw_bench task.txt [--mode rollouts|iw1] [--n N] [--next K] [--arity A] [--sample S]\n"
-                 "       [--threads T] [--reps R] [--atoms auto|lazy|frozen] [--chunk N] [--max-bytes B] [--walk-steps S]\n",
+                 "       [--threads T] [--reps R] [--atoms auto|reachable|dense|lazy] [--chunk N] [--max-bytes B] [--walk-steps S]\n",
                  msg);
     std::exit(2);
 }
@@ -202,7 +202,7 @@ int main(int argc, char** argv)
         else if (a == "--atoms")
         {
             const std::string v = value();
-            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Auto;
+            to.atoms = v == "lazy" ? TaskOptions::Atoms::Lazy : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Auto;
         }
         else
             usage(("unknown option " + a).c_str());

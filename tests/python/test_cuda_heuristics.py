@@ -169,6 +169,13 @@ def test_errors(ctx):
     other = text_task("gripper__prob05")
     with pytest.raises(ValueError):
         mc.Heuristic(task, "goal_count", ctx=ctx)
+    for kind in ("lmcut", "lmcount"):
+        with pytest.raises(ValueError, match=f"'{kind}'"):
+            mc.Heuristic(task, kind, ctx=ctx)
+        with pytest.raises(ValueError, match=f"'{kind}'"):
+            mc.astar(task, heuristic=kind, ctx=ctx)
+        with pytest.raises(ValueError, match=f"'{kind}'"):
+            mc.gbfs(task, heuristic=kind, ctx=ctx)
     with pytest.raises(ValueError, match="heuristic"):
         mc.astar(task, heuristic="nope", ctx=ctx)
     with pytest.raises(ValueError, match="costs"):

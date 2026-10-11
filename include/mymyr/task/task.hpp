@@ -7,7 +7,8 @@
 //
 // A task holds the normalized TaskData, the static relations (unary bitsets, binary row tables, k-ary sets and
 // projections), the two-level atom index, the compiled schemas, axioms and goal, and the initial state. The only
-// mutation after construction is the CAS-guarded append of lazily assigned slots (atom_index.hpp).
+// mutation after construction is the CAS-guarded append of lazily assigned slots (atom_index.hpp; TaskOptions::Atoms::
+// Lazy only).
 //
 // Mutable scratch (the matching engine, the axiom evaluator, the successor generator) lives in Workspaces, which the
 // task lends out: every search, enumeration or evaluation holds a WorkspaceLease while it runs, and every live lease
@@ -78,13 +79,26 @@ private:
     std::unique_ptr<Workspace> m_ws;
 };
 
+/// Construction options. Together with the normalized task they determine everything a task computes, its state
+/// encoding included: the same task data and options give the same atom slots, state words and rows in every run,
+/// thread and process (except under Atoms::Lazy).
 struct TaskOptions
 {
+    /// How fluent and derived atoms get their slots (bit positions in a state; task/atom_index.hpp).
     enum class Atoms : u8
     {
-        Auto,    // frozen when W_dense <= frozen_max_words or W_dense <= 2 * W_lazy (pilot estimate)
-        Lazy,    // slots assigned on first touch
-        Frozen,  // slot = canonical id (GPU, datasets)
+        /// Reachable slots, or dense ones where the state is not wider that way (W_dense <= W_reachable, fluent and
+        /// derived); dense when the reachability analysis passes reachability_budget.
+        Auto,
+        /// One slot per relaxed-reachable atom, in canonical order. Throws std::length_error when the analysis passes
+        /// reachability_budget.
+        Reachable,
+        /// slot = canonical id: one slot per atom of the typed-dense space. No analysis at construction.
+        Dense,
+        /// Slots assigned on first touch: the numbering depends on the order in which searches meet the atoms (threads,
+        /// earlier searches), so rows of such a task mean nothing outside the task object. For searches over tasks
+        /// whose reachable space is far larger than what they explore.
+        Lazy,
     };
     enum class Matching : u8
     {
@@ -100,6 +114,10 @@ struct TaskOptions
         I32,
     };
 
+    /// The default bound of the reachability analysis, in steps (reachability::reachable_atoms): a few seconds and
+    /// about a gigabyte at most, several times what the largest IPC 2023 learning-track test tasks need.
+    static constexpr u64 k_reachability_budget = u64{1} << 25;
+
     Atoms atoms = Atoms::Auto;
     Matching matching = Matching::Auto;
     NumericStorageMode numeric_storage = NumericStorageMode::Auto;
@@ -109,19 +127,21 @@ struct TaskOptions
     /// comparisons use a 1e-9 tolerance. Changes the state space (hydropower: 7.6x fewer states at depth 45).
     bool numeric_tolerant = false;
     u32 fc_auto_free_params = 4;
-    u32 frozen_max_words = 8;
-    /// Expansions of the bounded lazy BrFS that estimates W_lazy for the Auto rule (only run when W_dense exceeds
-    /// frozen_max_words). 0 skips the pilot and chooses lazy slots.
-    u32 pilot_expansions = 1024;
+    /// Work bound of the relaxed-reachability analysis behind Atoms::Auto and Atoms::Reachable, in steps of its joins:
+    /// a count, not a time, so whether it suffices is a property of the task. 0: unbounded.
+    u64 reachability_budget = k_reachability_budget;
 };
 
 /// Construction facts, for diagnostics and reports.
 struct TaskInfo
 {
-    AtomMode atom_mode = AtomMode::Lazy;
-    u64 dense_fluent = 0;   // F_fluent of the typed-dense space
-    u64 dense_derived = 0;  // F_derived
-    u32 pilot_words = 0;    // W_lazy estimate (0 if no pilot ran)
+    AtomMode atom_mode = AtomMode::Dense;
+    u64 dense_fluent = 0;        // F_fluent of the typed-dense space
+    u64 dense_derived = 0;       // F_derived
+    u64 reachable_fluent = 0;    // relaxed-reachable fluent atoms (0 when the analysis did not run or did not finish)
+    u64 reachable_derived = 0;   // relaxed-reachable derived atoms
+    u64 reachability_steps = 0;  // work of the analysis (0 when it did not run)
+    bool reachability_complete = false;  // the analysis ran and finished within the budget
     double build_s = 0;
 };
 
@@ -161,10 +181,16 @@ public:
     [[nodiscard]] u32 num_objects() const noexcept { return m_compiled.num_objects; }
     [[nodiscard]] u32 num_schemas() const noexcept { return static_cast<u32>(m_compiled.schemas.size()); }
     [[nodiscard]] bool has_axioms() const noexcept { return !m_compiled.strata.empty(); }
-    /// Current fluent width W: words_for(assigned fluent slots). Grows only under lazy slots.
+    /// Fluent width W in u64 words: words_for(fluent slots). Fixed at construction for frozen slots; grows under lazy
+    /// slots as atoms get theirs.
     [[nodiscard]] u32 words() const noexcept { return bits::words_for(m_atoms.fluent_slots()); }
-    /// Largest width any state of this task can have.
+    /// Largest width any state of this task can have (words() for frozen slots).
     [[nodiscard]] u32 max_words() const noexcept { return bits::words_for(m_atoms.max_fluent_slots()); }
+    /// Hash of the state encoding: the atom mode, the fluent and derived slots' canonical ids in slot order, and the
+    /// numeric storage. Equal encodings give equal values in every process; rows of a task decode correctly with
+    /// another task exactly when both have the same fingerprint() and encoding_fingerprint(). Lazy slots: the hash of
+    /// the slots assigned so far.
+    [[nodiscard]] u64 encoding_fingerprint() const;
 
     // numerics (task/numeric.hpp)
     /// Numeric slots (ground fluent functions with an initial value); 0 for classical tasks.
@@ -190,6 +216,15 @@ public:
     [[nodiscard]] State make_state(std::span<const AtomArgs> atoms, std::span<const f64> values = {}) const;
     /// Goal test. Evaluates the axioms (in a workspace of its own) when the goal mentions derived predicates.
     [[nodiscard]] bool is_goal(StateView s) const;
+    /// The goal as written, expanded into signed ground literals (TaskData::encoding_goal), for encodings; sorted by
+    /// (positive first, predicate id, objects) without duplicates. The planner's goal test is unaffected.
+    [[nodiscard]] std::span<const formalism::Literal> encoding_goal() const noexcept { return m_data.encoding_goal_literals(); }
+    /// Whether encoding_goal() is the whole goal: false when a conjunct could not be expanded (`or`, `exists`, `imply`
+    /// over fluents, `not and`, numeric constraints, too many quantifier bindings), or when the task came from a text without the goal as written and its
+    /// planner goal mentions predicates that goal normalization introduced.
+    [[nodiscard]] bool encoding_goal_complete() const noexcept { return m_data.encoding_goal_complete; }
+    /// Whether a literal of encoding_goal() over a static predicate fails in the initial atoms: no state is a goal.
+    [[nodiscard]] bool encoding_goal_unsatisfiable() const noexcept { return m_data.encoding_goal_unsatisfiable; }
     /// Order-independent hash of a state over the canonical ids of its atoms: equal for equal states under any slot
     /// numbering (lazy slots depend on the order of first touch), so it identifies states across runs and threads.
     /// Numeric tasks: it also covers the numeric values, as canonical doubles (the same under I32 and F64 slots).
@@ -208,13 +243,14 @@ public:
     [[nodiscard]] std::string format(SlotId fluent_slot) const;
     /// The true fluent atoms of s, formatted, in slot order.
     [[nodiscard]] std::vector<std::string> format_atoms(StateView s) const;
-    /// Slot of the fluent atom pred(args) if it has one (lazy mode: if it was ever produced).
+    /// Slot of the fluent atom pred(args) if it has one (reachable mode: if it is relaxed-reachable; lazy mode: if it was
+    /// ever produced).
     [[nodiscard]] SlotId find_atom(PredicateId pred, std::span<const ObjectId> args) const;
 
 private:
     void choose_atom_mode();
-    u32 pilot_words();
     void build_initial_state();
+    [[nodiscard]] u64 compute_encoding_fingerprint() const;
 
     formalism::TaskData m_data;
     TaskOptions m_options;
@@ -233,6 +269,8 @@ private:
     mutable std::atomic<usize> m_workspaces_made{0};
     mutable Once m_fingerprint_once;
     mutable u64 m_fingerprint = 0;
+    mutable Once m_encoding_once;
+    mutable u64 m_encoding = 0;
 };
 
 using TaskPtr = std::shared_ptr<const Task>;

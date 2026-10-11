@@ -37,6 +37,10 @@ u64 fingerprint(const TaskData& t)
         h = hash::combine(h, hash_bytes(t.str(ty.name), 5));
     for (const Schema& s : t.schemas)
         h = hash::combine(h, s.original_arity);
+    // the encoding goal counts when it is not the one the planner's goal gives (a task with a conjunctive goal hashes
+    // as its text alone)
+    if (!has_default_encoding_goal(t))
+        h = hash::combine(h, hash_bytes(write_task_text(t, true), 6));
     return h;
 }
 }  // namespace mymyr::formalism

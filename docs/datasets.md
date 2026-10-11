@@ -20,6 +20,10 @@ print(space.num_states, space.num_transitions, arrays["goal"].sum())
 
 Use `max_states=` and `max_seconds=` to bound generation. `threads=` controls CPU generation workers.
 
+`arrays()["state_words"]` holds the states as rows in the task's encoding, the same for every thread count and run
+([State encodings](parsing-and-tasks.md#state-encodings)). A task with lazy atom slots has no such rows, so its arrays
+leave `state_words` out.
+
 `datasets.generate(task)` returns a `GenerationResult` with status and counts when you need to distinguish a completed
 generation from a limit. `generate_many(tasks)` processes a task collection. `StateSpaceSampler(space, seed=...)`
 samples states and goal-distance layers deterministically for a seed.
@@ -55,7 +59,7 @@ arguments; unpickling builds it again.
 from mymyr import datasets
 from mymyr.rl import TaskTable
 
-tasks = TaskTable.from_pddl("tests/data/pddl/gripper/domain.pddl", "tests/data/pddl/gripper/p*.pddl", atoms="frozen")
+tasks = TaskTable.from_pddl("tests/data/pddl/gripper/domain.pddl", "tests/data/pddl/gripper/p*.pddl", atoms="dense")
 kb = datasets.KnowledgeBase(tasks, generalized=True, width=1)
 print([s.num_states for s in kb.state_spaces], kb.task_indices)   # [8, 28] [0, 1]
 gss = kb.generalized_state_space

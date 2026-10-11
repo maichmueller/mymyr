@@ -269,7 +269,7 @@ protected:
     TaskPtr load() const
     {
         TaskOptions o;
-        o.atoms = std::get<1>(GetParam()) ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+        o.atoms = std::get<1>(GetParam()) ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
         return Task::from_text_file(task_path(std::get<0>(GetParam())), o);
     }
 };

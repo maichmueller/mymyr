@@ -9,7 +9,7 @@
 //   without  goal_reachable_without({a}) for every reachable fluent atom a (the complete landmark test), and the
 //            restricted tables of the first --queries of them: count of landmarks, milliseconds (best of --reps)
 //   approx   the approximate (grounded) generator: fact and disjunctive landmarks, orderings, achievers
-//            [--disj-size K] [--disj-depth D]
+//            [--disj-size K] [--disj-depth D] [--first-achievers hmax|possibly_before] [--derived]
 //   lifted   the lifted generator [--disambiguation off|per_literal|joint] [--complete off|members|all]
 //            [--no-first-achievers] [--no-filter-members] [--no-verify] [--no-static-filter] [--max-combinations N]
 //            [--max-members N]
@@ -73,6 +73,7 @@ double peak_rss_mb()
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_landmarks (task.txt | --domain D --problem P) --mode rr|without|approx|lifted|order\n"
                  "       [--reps N] [--dump FILE] [--queries N] [--disj-size K] [--disj-depth D] [--max-layers L] [--order-from F]\n"
+                 "       [--first-achievers hmax|possibly_before] [--derived]\n"
                  "       [--disambiguation off|per_literal|joint] [--complete off|members|all] [--no-first-achievers]\n"
                  "       [--no-filter-members] [--no-verify] [--no-static-filter] [--max-combinations N] [--max-members N]\n",
                  msg.c_str());
@@ -143,6 +144,8 @@ struct Args
     int reps = 1;
     u32 queries = 0;
     usize disj_size = 0, disj_depth = 0;
+    landmarks::FirstAchievers first_achievers = landmarks::FirstAchievers::HMax;
+    bool derived = false;
     landmarks::LiftedFactLandmarkOptions lifted;
     u32 max_layers = 1000;
     std::string order_from;
@@ -284,6 +287,8 @@ void mode_approx(const Args& a, const Task& task)
     landmarks::ApproximateFactLandmarkOptions o;
     o.max_disjunctive_landmark_size = a.disj_size;
     o.max_disjunctive_landmark_depth = a.disj_depth;
+    o.first_achievers = a.first_achievers;
+    o.include_derived_atoms = a.derived;
     double best = 1e300;
     landmarks::FactLandmarkGraph g;
     for (int r = 0; r < a.reps; ++r)
@@ -653,6 +658,11 @@ int main(int argc, char** argv)
             a.disj_size = std::stoul(value());
         else if (s == "--disj-depth")
             a.disj_depth = std::stoul(value());
+        else if (s == "--first-achievers")
+            a.first_achievers = value() == "possibly_before" ? landmarks::FirstAchievers::PossiblyBefore
+                                                              : landmarks::FirstAchievers::HMax;
+        else if (s == "--derived")
+            a.derived = true;
         else if (s == "--disambiguation")
         {
             const std::string v = value();
@@ -686,7 +696,7 @@ int main(int argc, char** argv)
         else if (s == "--atoms")
         {
             const std::string v = value();
-            a.to.atoms = v == "auto" ? TaskOptions::Atoms::Auto : v == "frozen" ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+            a.to.atoms = v == "auto" ? TaskOptions::Atoms::Auto : v == "dense" ? TaskOptions::Atoms::Dense : v == "reachable" ? TaskOptions::Atoms::Reachable : TaskOptions::Atoms::Lazy;
         }
         else if (!s.empty() && s[0] != '-' && a.task_file.empty())
             a.task_file = s;

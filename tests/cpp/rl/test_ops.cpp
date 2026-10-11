@@ -30,7 +30,7 @@ namespace
 TaskPtr load(const std::string& name)
 {
     TaskOptions o;
-    o.atoms = TaskOptions::Atoms::Frozen;
+    o.atoms = TaskOptions::Atoms::Dense;
     return Task::from_text_file(task_path(name), o);
 }
 

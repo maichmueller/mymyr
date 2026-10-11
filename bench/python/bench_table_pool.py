@@ -60,7 +60,7 @@ if getattr(sys, "_is_gil_enabled", lambda: True)():
     print("warning: the GIL is enabled (run the free-threaded interpreter with PYTHON_GIL=0)", file=sys.stderr)
 
 dom, probs = SETS[args.set]
-tasks = [mymyr.Task.from_pddl(dom, p, atoms="frozen") for p in probs]
+tasks = [mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]
 table = rl.TaskTable(tasks)
 N = args.envs
 ids = (np.arange(N) % len(tasks)).astype(np.int32)

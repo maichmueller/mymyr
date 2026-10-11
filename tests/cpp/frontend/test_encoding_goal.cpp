@@ -1,0 +1,409 @@
+// The encoding goal (TaskData::encoding_goal): the goal as written, expanded into signed ground literals. Problems in
+// tests/data/pddl/goals differ only in their goal; each test lists the literals that goal expands to.
+
+#include "mymyr/formalism/fingerprint.hpp"
+#include "mymyr/formalism/text_format.hpp"
+#include "mymyr/frontend/domain.hpp"
+#include "mymyr/task/task.hpp"
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace mymyr;
+using namespace mymyr::formalism;
+namespace fs = std::filesystem;
+
+namespace
+{
+const fs::path k_pddl = fs::path(MYMYR_SOURCE_DIR) / "tests/data/pddl";
+
+/// "(pred o1 o2)", "(not (pred o1))": objects by name, or by index where a text round trip has renamed them.
+std::string text(const TaskData& t, const Literal& l, bool by_index = false)
+{
+    std::string s = "(" + std::string(t.str(t.predicate(l.pred).name));
+    for (Term x : t.terms_of(l))
+        s += " " + (by_index ? std::to_string(term_object(x).v) : std::string(t.str(t.objects[term_object(x).v].name)));
+    s += ")";
+    return l.positive ? s : "(not " + s + ")";
+}
+
+std::vector<std::string> goal_text(const TaskData& t, bool by_index = false)
+{
+    std::vector<std::string> out;
+    for (const Literal& l : t.encoding_goal_literals())
+        out.push_back(text(t, l, by_index));
+    return out;
+}
+
+std::set<std::string> literal_set(const TaskData& t, bool by_index = false)
+{
+    const auto v = goal_text(t, by_index);
+    return {v.begin(), v.end()};
+}
+
+std::set<std::string> planner_goal(const TaskData& t)
+{
+    std::set<std::string> out;
+    for (const Literal& l : t.literals_of(t.goal))
+        out.insert(text(t, l));
+    return out;
+}
+
+frontend::TaskPtr load(const std::string& domain, const std::string& problem)
+{
+    return frontend::Domain::from_file(k_pddl / domain / "domain.pddl")->instantiate_file(k_pddl / domain / problem);
+}
+
+struct Case
+{
+    const char* problem;
+    std::set<std::string> literals;
+    bool complete;
+    bool unsatisfiable;
+};
+
+const std::vector<Case>& cases()
+{
+    static const std::vector<Case> v = {
+        {"conjunctive", {"(lit a)", "(not (ok t1))", "(at t2 b)", "(done)"}, true, false},
+        // objects in order: constants, then the problem's
+        {"forall", {"(lit home)", "(lit a)", "(lit b)"}, true, false},
+        {"forall_nested", {"(at b1 home)", "(at b1 a)", "(at b1 b)"}, true, false},
+        // the constant k0 and the objects of the subtype big belong to thing
+        {"forall_subtypes_constants", {"(ok k0)", "(ok t1)", "(ok t2)", "(ok b1)"}, true, false},
+        // a variable of type (either big place) ranges over the objects of either type
+        {"forall_either", {"(seen home)", "(seen a)", "(seen b)", "(seen b1)"}, true, false},
+        {"forall_empty_type", {"(lit a)"}, true, false},
+        {"forall_negative", {"(not (ok b1))"}, true, false},
+        {"forall_conjunctive_body", {"(ok b1)", "(not (at b1 a))"}, true, false},
+        {"imply_true", {"(ok t1)", "(at b1 home)", "(at b1 a)", "(at b1 b)"}, true, false},
+        // an antecedent that fails statically makes the implication hold: nothing to require
+        {"imply_false", {"(lit a)"}, true, false},
+        {"imply_equality", {"(lit a)"}, true, false},
+        // the antecedents (exists, forall over thing / big) are decided by static atoms: true, true, false
+        {"imply_quantified_antecedent", {"(flag)", "(ok t2)"}, true, false},
+        {"imply_fluent", {"(lit a)"}, false, false},
+        {"or", {"(lit a)"}, false, false},
+        {"exists", {"(lit a)"}, false, false},
+        {"forall_exists", {"(lit a)"}, false, false},
+        {"negated_forall", {"(lit a)"}, false, false},
+        // negation is pushed inward: not-or, not-exists, not-imply with a static antecedent that holds, not-not
+        {"not_or", {"(lit a)", "(not (lit b))", "(not (ok t1))"}, true, false},
+        {"not_exists", {"(lit a)", "(not (ok k0))", "(not (ok t1))", "(not (ok t2))", "(not (ok b1))"}, true, false},
+        {"not_imply", {"(lit a)", "(not (ok t2))"}, true, false},
+        {"not_imply_false", {"(lit a)"}, false, false},
+        {"not_not", {"(lit a)", "(not (ok t1))"}, true, false},
+        {"not_and", {"(lit a)"}, false, false},
+        // a literal both positive and negative: both are kept
+        {"contradiction", {"(lit a)", "(not (lit a))", "(ok t1)"}, true, false},
+        {"static_false", {"(heavy t2)", "(lit a)"}, true, true},
+        // equality is a static predicate: (not (= a a)) fails
+        {"forall_equality", {"(not (= home a))", "(not (= a a))", "(not (= b a))"}, true, true},
+        {"static_true", {"(heavy t1)", "(not (heavy t2))", "(lit a)"}, true, false},
+        {"duplicate", {"(lit home)", "(lit a)", "(lit b)", "(not (ok t1))"}, true, false},
+    };
+    return v;
+}
+}  // namespace
+
+TEST(EncodingGoal, ExpandsEveryGoalShape)
+{
+    for (const Case& c : cases())
+    {
+        SCOPED_TRACE(c.problem);
+        const auto t = load("goals", std::string(c.problem) + ".pddl");
+        const auto got = goal_text(*t);
+        EXPECT_EQ(std::set<std::string>(got.begin(), got.end()), c.literals);
+        EXPECT_EQ(got.size(), c.literals.size()) << "duplicates";
+        EXPECT_EQ(t->encoding_goal_complete, c.complete);
+        EXPECT_EQ(t->encoding_goal_unsatisfiable, c.unsatisfiable);
+    }
+}
+
+TEST(EncodingGoal, LiteralsAreSortedBySignPredicateAndObjects)
+{
+    for (const Case& c : cases())
+    {
+        SCOPED_TRACE(c.problem);
+        const auto t = load("goals", std::string(c.problem) + ".pddl");
+        const auto lits = t->encoding_goal_literals();
+        auto key = [&](const Literal& l)
+        {
+            std::vector<u32> k{l.positive ? 0u : 1u, l.pred.v};
+            for (Term x : t->terms_of(l))
+                k.push_back(term_object(x).v);
+            return k;
+        };
+        for (size_t i = 1; i < lits.size(); ++i)
+            EXPECT_LT(key(lits[i - 1]), key(lits[i]));
+    }
+}
+
+TEST(EncodingGoal, ConjunctiveGoalsEqualTheNormalizedGoal)
+{
+    const std::vector<std::pair<const char*, const char*>> tasks = {
+        {"blocks", "probBLOCKS-8-0.pddl"},   {"gripper", "p01.pddl"},        {"gripper", "p02.pddl"},
+        {"logistics00", "probLOGISTICS-6-1.pddl"}, {"visitall", "test_problem.pddl"}, {"delivery", "test_problem.pddl"},
+        {"philosophers", "p03-phil4.pddl"},  {"counters", "p01.pddl"},
+    };
+    for (const auto& [domain, problem] : tasks)
+    {
+        SCOPED_TRACE(std::string(domain) + "/" + problem);
+        const auto t = load(domain, problem);
+        const auto got = goal_text(*t);
+        EXPECT_EQ(std::set<std::string>(got.begin(), got.end()), planner_goal(*t));
+        EXPECT_TRUE(t->encoding_goal_complete);
+        EXPECT_FALSE(t->encoding_goal_unsatisfiable);
+        EXPECT_TRUE(has_default_encoding_goal(*t));
+    }
+    const auto t = load("goals", "conjunctive.pddl");
+    EXPECT_EQ(literal_set(*t), planner_goal(*t));
+}
+
+TEST(EncodingGoal, ThePlannersGoalIsUnchanged)
+{
+    // forall: the planner keeps the derived predicate of the normalized goal
+    const auto t = load("goals", "forall.pddl");
+    ASSERT_EQ(t->goal.literals.count, 1u);
+    EXPECT_EQ(t->predicate(t->literals[t->goal.literals.begin].pred).kind, PredKind::Derived);
+    EXPECT_FALSE(has_default_encoding_goal(*t));
+    EXPECT_EQ(t->encoding_goal.count, 3u);
+}
+
+TEST(EncodingGoal, TaskAccessors)
+{
+    const auto data = load("goals", "static_false.pddl");
+    const auto task = Task::create(*data);
+    EXPECT_EQ(task->encoding_goal().size(), 2u);
+    EXPECT_TRUE(task->encoding_goal_complete());
+    EXPECT_TRUE(task->encoding_goal_unsatisfiable());
+    EXPECT_TRUE(task->is_goal(task->initial_state()) == false);
+}
+
+TEST(EncodingGoal, NumericConstraintsAreNotExpandable)
+{
+    const auto d = frontend::Domain::from_string(R"((define (domain n) (:requirements :strips :numeric-fluents)
+ (:predicates (p)) (:functions (f))
+ (:action inc :parameters () :precondition (and) :effect (and (p) (increase (f) 1)))))");
+    const auto t = d->instantiate_string(R"((define (problem q) (:domain n) (:init (= (f) 0))
+ (:goal (and (p) (>= (f) 2)))))");
+    EXPECT_EQ(goal_text(*t), std::vector<std::string>{"(p)"});
+    EXPECT_FALSE(t->encoding_goal_complete);
+}
+
+TEST(EncodingGoal, UntypedQuantifierRangesOverEveryObject)
+{
+    const auto d = frontend::Domain::from_string(R"((define (domain u) (:requirements :strips :universal-preconditions)
+ (:constants c)
+ (:predicates (p ?x) (q ?x ?y))
+ (:action act :parameters (?x ?y) :precondition (and) :effect (and (p ?x) (q ?x ?y)))))");
+    const auto t = d->instantiate_string(R"((define (problem u1) (:domain u) (:objects a b)
+ (:goal (and (forall (?x) (p ?x)) (forall (?x) (forall (?y) (q ?x ?y)))))))");
+    const auto got = literal_set(*t);
+    EXPECT_EQ(got.size(), 3u + 9u);
+    EXPECT_TRUE(got.contains("(p c)"));
+    EXPECT_TRUE(got.contains("(q b c)"));
+    EXPECT_TRUE(t->encoding_goal_complete);
+}
+
+TEST(EncodingGoal, TextWithTheGoalRoundTrips)
+{
+    for (const Case& c : cases())
+    {
+        SCOPED_TRACE(c.problem);
+        const auto t = load("goals", std::string(c.problem) + ".pddl");
+        std::istringstream in(write_task_text(*t, true));
+        const TaskData back = read_task_text(in);
+        EXPECT_EQ(goal_text(back, true), goal_text(*t, true));
+        EXPECT_EQ(back.encoding_goal_complete, t->encoding_goal_complete);
+        EXPECT_EQ(back.encoding_goal_unsatisfiable, t->encoding_goal_unsatisfiable);
+        // a text round trip keeps the fingerprint (it renames objects, so compare two of them)
+        std::istringstream again(write_task_text(back, true));
+        EXPECT_EQ(fingerprint(read_task_text(again)), fingerprint(back));
+    }
+}
+
+TEST(EncodingGoal, TextWithoutTheGoalAsWrittenKeepsTheConjunctivePart)
+{
+    // the text format has no goal as written: literals over predicates that normalization introduced are left out
+    for (const char* problem : {"conjunctive", "forall", "or", "imply_true", "imply_fluent", "static_false", "negated_forall"})
+    {
+        SCOPED_TRACE(problem);
+        const auto t = load("goals", std::string(problem) + ".pddl");
+        std::set<std::string> kept;
+        bool complete = true;
+        for (const Literal& l : t->literals_of(t->goal))
+        {
+            if (t->str(t->predicate(l.pred).name).starts_with("axiom_"))
+                complete = false;
+            else
+                kept.insert(text(*t, l, true));
+        }
+        std::istringstream in(write_task_text(*t));
+        const TaskData back = read_task_text(in);
+        EXPECT_EQ(literal_set(back, true), kept);
+        EXPECT_EQ(back.encoding_goal_complete, complete);
+        EXPECT_TRUE(has_default_encoding_goal(back));
+    }
+}
+
+TEST(EncodingGoal, FingerprintCoversTheEncodingGoalOnlyWhenItIsNotTheDefault)
+{
+    const auto conjunctive = load("goals", "conjunctive.pddl");
+    EXPECT_TRUE(has_default_encoding_goal(*conjunctive));
+    // the fingerprint of a task with the default encoding goal is that of its text and names alone
+    TaskData same = *conjunctive;
+    set_encoding_goal_from_normalized(same);
+    EXPECT_EQ(fingerprint(same), fingerprint(*conjunctive));
+
+    const auto forall = load("goals", "forall.pddl");
+    TaskData stripped = *forall;
+    set_encoding_goal_from_normalized(stripped);
+    EXPECT_NE(fingerprint(stripped), fingerprint(*forall));
+}
+
+TEST(EncodingGoal, IsIndependentOfTheInitPath)
+{
+    const auto d = frontend::Domain::from_file(k_pddl / "goals/domain.pddl");
+    for (const Case& c : cases())
+    {
+        SCOPED_TRACE(c.problem);
+        frontend::InstantiateOptions fast, full;
+        fast.fast_init = true;
+        full.fast_init = false;
+        const auto path = k_pddl / "goals" / (std::string(c.problem) + ".pddl");
+        EXPECT_EQ(goal_text(*d->instantiate_file(path, fast)), goal_text(*d->instantiate_file(path, full)));
+    }
+}
+
+namespace
+{
+/// A task with `n` untyped objects and the goal `(and (p o1) <goal>)`.
+frontend::TaskPtr many_objects(int n, const std::string& goal)
+{
+    const auto d = frontend::Domain::from_string(R"((define (domain m) (:requirements :strips :universal-preconditions :disjunctive-preconditions :negative-preconditions :equality)
+ (:predicates (p ?x) (q ?x ?y) (r ?x ?y ?z))
+ (:action act :parameters (?x) :precondition (and) :effect (p ?x))))");
+    std::string objects;
+    for (int i = 1; i <= n; ++i)
+        objects += " o" + std::to_string(i);
+    return d->instantiate_string("(define (problem m1) (:domain m) (:objects" + objects + ") (:goal (and (p o1) " + goal + ")))");
+}
+}  // namespace
+
+TEST(EncodingGoal, AQuantifierBeyondTheBindingBudgetIsLeftOutWhole)
+{
+    // 300^3 bindings exceed the budget: nothing of the forall is kept, and the goal is incomplete
+    const auto t = many_objects(300, "(forall (?x ?y ?z) (r ?x ?y ?z))");
+    EXPECT_EQ(goal_text(*t), std::vector<std::string>{"(p o1)"});
+    EXPECT_FALSE(t->encoding_goal_complete);
+}
+
+TEST(EncodingGoal, TheBindingBudgetIsSharedByTheConjuncts)
+{
+    // the antecedent of each imply is a forall over 250^3 bindings (false at the first one, but charged in full): the
+    // first imply fits, the second does not and is left out whole, and the forall of 250 bindings fits in what remains
+    const std::string antecedent = "(forall (?x ?y ?z) (not (= ?x ?y)))";
+    const auto t = many_objects(250, "(imply " + antecedent + " (p o2)) (imply " + antecedent + " (p o3)) (forall (?x) (q ?x ?x))");
+    const auto got = literal_set(*t);
+    EXPECT_EQ(got.size(), 1u + 250u);
+    EXPECT_TRUE(got.contains("(q o250 o250)"));
+    EXPECT_FALSE(t->encoding_goal_complete);
+}
+
+TEST(EncodingGoal, AnImplyWhoseAntecedentExceedsTheBudgetIsLeftOut)
+{
+    const auto t = many_objects(300, "(imply (forall (?x ?y ?z) (not (r ?x ?y ?z))) (p o2))");
+    EXPECT_EQ(goal_text(*t), std::vector<std::string>{"(p o1)"});
+    EXPECT_FALSE(t->encoding_goal_complete);
+}
+
+TEST(EncodingGoal, AnUnrecordedEncodingGoalIsDerivedByTheTask)
+{
+    const auto planner = load("goals", "conjunctive.pddl");
+    TaskData data = *planner;
+    data.encoding_goal = {};
+    data.encoding_goal_recorded = false;
+    data.encoding_goal_complete = false;  // not meaningful while unrecorded
+    const auto task = Task::create(data);
+    EXPECT_TRUE(task->data().encoding_goal_recorded);
+    EXPECT_EQ(literal_set(task->data()), planner_goal(task->data()));
+    EXPECT_TRUE(task->encoding_goal_complete());
+
+    // a normalized goal: the literals of the derived predicates that goal normalization introduced are left out
+    TaskData forall = *load("goals", "forall.pddl");
+    forall.encoding_goal = {};
+    forall.encoding_goal_recorded = false;
+    const auto derived = Task::create(forall);
+    EXPECT_TRUE(derived->encoding_goal().empty());
+    EXPECT_FALSE(derived->encoding_goal_complete());
+}
+
+TEST(EncodingGoal, ValidateChecksTheEncodingGoal)
+{
+    TaskData data = *load("goals", "static_false.pddl");
+    ASSERT_TRUE(data.encoding_goal_unsatisfiable);
+    validate(data);
+    TaskData wrong = data;
+    wrong.encoding_goal_unsatisfiable = false;
+    EXPECT_THROW(validate(wrong), std::exception);
+
+    TaskData unsorted = *load("goals", "conjunctive.pddl");
+    ASSERT_GE(unsorted.encoding_goal.count, 2u);
+    std::swap(unsorted.literals[unsorted.encoding_goal.begin], unsorted.literals[unsorted.encoding_goal.begin + 1]);
+    EXPECT_THROW(validate(unsorted), std::exception);
+
+    TaskData duplicate = *load("goals", "conjunctive.pddl");
+    duplicate.literals[duplicate.encoding_goal.begin + 1] = duplicate.literals[duplicate.encoding_goal.begin];
+    EXPECT_THROW(validate(duplicate), std::exception);
+}
+
+TEST(EncodingGoal, PddlAndTextAgreeOnANegatedDisjunction)
+{
+    for (const char* problem : {"not_or", "not_not"})
+    {
+        SCOPED_TRACE(problem);
+        const auto t = load("goals", std::string(problem) + ".pddl");
+        std::istringstream in(write_task_text(*t));
+        const TaskData back = read_task_text(in);
+        EXPECT_EQ(literal_set(back, true), literal_set(*t, true));
+        EXPECT_TRUE(back.encoding_goal_complete);
+    }
+}
+
+TEST(EncodingGoal, TextWithNumericConstraintsIsIncomplete)
+{
+    const auto d = frontend::Domain::from_string(R"((define (domain n) (:requirements :strips :numeric-fluents)
+ (:predicates (p)) (:functions (f))
+ (:action inc :parameters () :precondition (and) :effect (and (p) (increase (f) 1)))))");
+    const auto t = d->instantiate_string(R"((define (problem q) (:domain n) (:init (= (f) 0))
+ (:goal (and (p) (>= (f) 2)))))");
+    std::istringstream in(write_task_text(*t));
+    const TaskData back = read_task_text(in);
+    EXPECT_EQ(goal_text(back, true), (std::vector<std::string>{"(p)"}));
+    EXPECT_FALSE(back.encoding_goal_complete);
+}
+
+TEST(EncodingGoal, ExpandedGoalsEqualTheirWrittenOutTwins)
+{
+    // the encoding goal of a problem with forall / imply equals the goal literals of the problem written out
+    for (const char* stem : {"p02", "p03"})
+    {
+        SCOPED_TRACE(stem);
+        const auto written = load("features", std::string(stem) + ".pddl");
+        const auto twin = load("features", std::string(stem) + "_expanded.pddl");
+        EXPECT_EQ(literal_set(*written), planner_goal(*twin));
+        EXPECT_TRUE(written->encoding_goal_complete);
+        EXPECT_FALSE(written->encoding_goal_unsatisfiable);
+    }
+    // a false static literal is kept and marks the problem unsatisfiable
+    const auto p04 = load("features", "p04.pddl");
+    EXPECT_TRUE(literal_set(*p04).contains("(fixed b)"));
+    EXPECT_TRUE(p04->encoding_goal_unsatisfiable);
+}

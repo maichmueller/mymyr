@@ -1,6 +1,6 @@
 // rl::device_arrays version 2: a strict superset of version 1, deterministic, structurally valid, and read on the
 // host through rl/task_arrays_view.hpp it answers is_applicable / apply / is_goal exactly as the CPU engine does, on
-// every task of the lifted suite, with frozen and lazy slots. The CUDA smoke test (tests/cuda) runs the same functions
+// every task of the lifted suite, with dense and reachable slots. The CUDA smoke test (tests/cuda) runs the same functions
 // on the device against the same reference.
 
 #include "../support/device_ref.hpp"
@@ -31,7 +31,7 @@ protected:
     TaskPtr load() const
     {
         TaskOptions o;
-        o.atoms = std::get<1>(GetParam()) ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+        o.atoms = std::get<1>(GetParam()) ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable;
         return Task::from_text_file(task_path(std::get<0>(GetParam())), o);
     }
 };
@@ -48,7 +48,7 @@ bool same_bytes(const rl::ArrayBundle& a, const rl::ArrayInfo& x, const rl::Arra
 TEST_P(TaskArraysV2, IsASupersetOfVersionOneAndDeterministic)
 {
     const auto task = load();
-    (void)device_ref_walks(*task, 2, 10, 5);  // assign some lazy slots first
+    (void)device_ref_walks(*task, 2, 10, 5);
     const rl::ArrayBundle v1 = rl::device_arrays(*task, 1);
     const rl::ArrayBundle v2 = rl::device_arrays(*task, 2);
     const rl::ArrayBundle again = rl::device_arrays(*task);
@@ -183,8 +183,7 @@ TEST_P(TaskArraysV2, HostViewAgreesWithTheEngine)
 
 TEST_P(TaskArraysV2, DeviceMatcherFlagsFollowTheSearchCosts)
 {
-    // the device's matcher per plan matcher comes from device_search_costs (deterministic, and under lazy slots
-    // it interns no atom); the export's k_mc_device_fc follows it, k_mc_witnesses the plan's witness-only parameters.
+    // the device's matcher per plan matcher comes from device_search_costs (deterministic); the export's k_mc_device_fc follows it, k_mc_witnesses the plan's witness-only parameters.
     // a matcher deeper than k_max_matcher_depth (the deep kernels) keeps the plan's choice (k_mc_use_fc)
     const auto task = load();
     const u32 fluent = task->atoms().fluent_slots(), derived = task->atoms().derived_slots();
@@ -196,7 +195,7 @@ TEST_P(TaskArraysV2, DeviceMatcherFlagsFollowTheSearchCosts)
     ASSERT_EQ(costs.schemas.size(), C.schemas.size());
     ASSERT_EQ(again.schemas.size(), C.schemas.size());
     EXPECT_GE(costs.states, 1u);
-    EXPECT_LE(costs.states, task->atoms().mode() == AtomMode::Frozen ? rl::k_probe_states : 1u);
+    EXPECT_LE(costs.states, task->atoms().frozen() ? rl::k_probe_states : 1u);
     const rl::ArrayBundle b = rl::device_arrays(*task, 2);
     const rl::dev::TaskView v = rl::task_view(b);
     auto expect_flags = [&](u32 flags, const plan::Matcher& m, rl::SearchCost c, bool schema, const std::string& what)
@@ -254,7 +253,7 @@ TEST_P(TaskArraysV2, DeviceMatcherFlagsFollowTheSearchCosts)
 INSTANTIATE_TEST_SUITE_P(Suite, TaskArraysV2, ::testing::ValuesIn(params()),
                          [](const auto& info)
                          {
-                             std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_frozen" : "_lazy");
+                             std::string n = std::get<0>(info.param) + (std::get<1>(info.param) ? "_dense" : "_reachable");
                              std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
                              return n;
                          });

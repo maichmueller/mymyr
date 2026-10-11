@@ -9,7 +9,7 @@ import numpy as np
 import mymyr
 from mymyr import encoding, rl
 
-task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt", atoms="lazy")
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
 states = [task.initial_state]
 expansion = rl.expand(task, states)
 encoder = encoding.FlatRelationEncoder(task)
@@ -50,9 +50,9 @@ For N graphs and R relations, all indices/counts are int32:
 
 Cell `graph * R + relation` has `relation_counts[graph,relation]` tuples of that relation's arity, encoded in
 `relation_args[relation_offsets[cell]:relation_offsets[cell+1]]`. Tuples are sorted lexicographically by object
-binding within each cell, so lazy slot allocation order never becomes model input. Zero-arity predicates are not
-dropped: they carry a count even though their argument segment is empty. Counts/offsets beyond int32 capacity fail
-explicitly rather than wrapping or truncating.
+binding within each cell, so the atom slot layout (`atoms='auto'`, `'reachable'` or `'dense'`) never becomes model
+input. Zero-arity predicates are not dropped: they carry a count even though their argument segment is empty.
+Counts/offsets beyond int32 capacity fail explicitly rather than wrapping or truncating.
 Repeated initial facts have set semantics, while repeated caller action labels remain distinct readout rows.
 
 `batch.object_names` and `batch.task_fingerprints` retain portable name/content metadata. Batch-global object IDs
@@ -64,7 +64,9 @@ The result owns its schema, metadata and packed arrays and remains valid after t
 Construct an encoder from one `Task`/`TaskHandle`, or a one-domain `rl.TaskTable`. A multi-instance table requires an
 aligned `task_ids` vector. Native State and GroundCondition values are checked against their row's task ownership;
 raw word-array callers remain responsible for supplying the matching task/slot encoding. Invalid or unassigned bits
-are rejected. The encoder reads the task's current atom index directly rather than retaining stale lazy metadata.
+are rejected. A row's words past its instance's own are padding and are not read; a row narrower than its instance's
+states raises `ValueError`. Tasks with lazy atom slots are refused, since their rows have no fixed layout
+([State encodings](parsing-and-tasks.md#state-encodings)).
 
 Default state facts include static and axiom-derived atoms; `include_static=False` or `include_derived=False` chooses
 an explicit projection. Derived goal satisfaction is evaluated correctly even when derived state facts are omitted.
@@ -112,3 +114,35 @@ this version.
 The C++ API is in `mymyr/encoding/flat.hpp`, linked with `mymyr::encoding`. It accepts caller-owned StateBatchView,
 TaskTable instance IDs, ActionBatchView label columns and optional per-row GroundConditions. Output storage uses
 the existing immutable ArrayBundle. No planning-backend ABI/type registry is imported.
+
+## Encoding schema
+
+`mymyr.encoding.EncodingSchema(table_or_task, **options)` (C++: `mymyr/encoding/schema.hpp`) is the relation catalog of
+an encoding: which relations a batch holds, with their arities, lanes and slot roles. It is a function of the domain
+and the options, never of the instances of a table, so tables over one domain give the same relation ids to the same
+relations.
+
+- **Names and order.** Relations are named `[+]on[g][sat]`: a sign for goal and history relations, the predicate or
+  action schema name, `[hist]`, a goal level (`[g]`, `[sg]`, `[ssg]`, `[sssg]`) and a derivation (`[sat]`, `[unsat]`,
+  `[sat+]`, `[sat-]`). State relations carry the plain name. The catalog is sorted by name, bytewise; a relation's id
+  is its position. `relation_lanes`, `relation_signs`, `relation_levels`, `relation_derivations`,
+  `relation_predicates` and `relation_schemas` describe each relation, `slot_roles` each position of its tuples.
+- **What is listed.** Every domain predicate and action schema, the helper predicates of quantified conditions
+  (`axiom_<k>`) included; the predicates only a problem's axioms define are not. Goal relations exist for every
+  predicate except the types `object` and `number`. The equality predicate `=` is left out unless `equality=True`;
+  the state relations of the static predicates (the types included) and of the derived predicates can be dropped
+  (`include_static`, `include_derived`); their goal and history relations stay. Nullary predicates (`nullary=True`,
+  the default) have relations of arity 1: their atoms are tuples over one auxiliary entity per graph (slot role
+  `auxiliary_slot`, entity role `auxiliary`); with `nullary=False` they have no relations. `slot_role_names` and
+  `entity_role_names` always list all nine roles.
+  An action relation holds the schema's full parameter list (the written parameters and the ones normalization adds
+  for existential variables). Schemas of one name and arity (a disjunctive precondition splits an action) share one
+  relation; a name with several arities has one relation `name#arity` per arity.
+- **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
+  `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
+  derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
+  targets together with a horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
+  `root_policy` other than `include` without a horizon mode.
+- **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
+  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
+  depend on declaration order, on predicate ids, on the process or on the build.

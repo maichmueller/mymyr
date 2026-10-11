@@ -65,7 +65,7 @@ cuda::ContextPtr context()
 TaskPtr load(const std::string& name, bool frozen)
 {
     TaskOptions o;
-    o.atoms = frozen ? TaskOptions::Atoms::Frozen : TaskOptions::Atoms::Lazy;
+    o.atoms = frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Lazy;
     return Task::from_text_file(task_path(name), o);
 }
 
@@ -436,7 +436,8 @@ TEST(CudaHeuristic, IgnoresNumericValuesAndRefusesOtherKindsAndLargeGroundings)
     const std::vector<State> starts{numeric->initial_state()};
     EXPECT_EQ(nh.evaluate(starts)[0], nh.reference(starts[0].view()));
     const TaskPtr task = load("depot__p02", true);
-    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount, heuristics::Kind::Perfect})
+    for (heuristics::Kind k : {heuristics::Kind::Blind, heuristics::Kind::GoalCount, heuristics::Kind::Perfect,
+                               heuristics::Kind::LmCut, heuristics::Kind::LmCount})
     {
         cuda::DeviceHeuristicOptions o;
         o.kind = k;
@@ -751,6 +752,12 @@ TEST(CudaBestFirst, BudgetsStartsAndRefusals)
               search::gbfs_eager(*numeric, numeric_options.search).status);
     cuda::DeviceBestFirstOptions o = device_search(heuristics::Kind::GoalCount, 10);
     EXPECT_THROW((void)cuda::astar(ctx, task, o), std::invalid_argument);
+    for (heuristics::Kind k : {heuristics::Kind::LmCut, heuristics::Kind::LmCount})
+    {
+        o = device_search(k, 10);
+        EXPECT_THROW((void)cuda::astar(ctx, task, o), std::invalid_argument) << heuristics::to_string(k);
+        EXPECT_THROW((void)cuda::gbfs(ctx, task, o), std::invalid_argument) << heuristics::to_string(k);
+    }
     o = device_search(heuristics::Kind::Max, 0);
     EXPECT_THROW((void)cuda::astar(ctx, task, o), std::invalid_argument);
     o = device_search(heuristics::Kind::Max, 10);

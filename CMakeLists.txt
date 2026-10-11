@@ -119,6 +119,8 @@ add_library(mymyr_core STATIC
     src/mymyr/heuristics/relaxed_task.cpp
     src/mymyr/heuristics/heuristics.cpp
     src/mymyr/heuristics/h2.cpp
+    src/mymyr/heuristics/lm_cut.cpp
+    src/mymyr/heuristics/landmark_count.cpp
     src/mymyr/heuristics/lifted_relaxation.cpp
     src/mymyr/search/best_first.cpp
     src/mymyr/search/astar_iw.cpp
@@ -167,7 +169,7 @@ target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/knowledge_base.cpp
 )
 
-add_library(mymyr_encoding STATIC src/mymyr/encoding/flat.cpp)
+add_library(mymyr_encoding STATIC src/mymyr/encoding/flat.cpp src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)
 set_target_properties(mymyr_encoding PROPERTIES EXPORT_NAME encoding)
 target_link_libraries(mymyr_encoding PUBLIC mymyr::core PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
@@ -189,6 +191,7 @@ if(MYMYR_FRONTEND)
     add_library(mymyr_frontend STATIC
         src/mymyr/frontend/diagnose.cpp
         src/mymyr/frontend/domain.cpp
+        src/mymyr/frontend/encoding_goal.cpp
         src/mymyr/frontend/init_reader.cpp
         src/mymyr/frontend/translate.cpp
     )

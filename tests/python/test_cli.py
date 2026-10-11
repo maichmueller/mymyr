@@ -98,7 +98,7 @@ def test_every_search_on_a_numeric_task(search_name):
         assert cost == search.astar(task, heuristic="blind", costs="real").cost == 6
 
 
-@pytest.mark.parametrize("heuristic", ["max", "blind", "h2"])
+@pytest.mark.parametrize("heuristic", ["max", "blind", "h2", "lmcut"])
 @pytest.mark.parametrize("name", sorted(GOLDEN))
 def test_astar_finds_the_optimal_cost_of_the_goldens(name, heuristic):
     golden = json.loads((EXPECTED / f"{name}.json").read_text())["astar"]
@@ -162,6 +162,17 @@ def test_exit_codes(tmp_path):
     assert r.returncode == 2 and "Traceback" in r.stderr and "PddlError" in r.stderr
     # 0
     assert run("plan", d, p, "--search", "gbfs").returncode == 0
+
+
+@pytest.mark.parametrize("search_name", ["astar", "gbfs", "brfs", "siw"])
+def test_plans_do_not_depend_on_the_atom_slots(search_name):
+    d, p = GOLDEN["logistics00__probLOGISTICS-6-1"]
+    outs = [run("plan", d, p, "--search", search_name, "--atoms", atoms, "-v", *width_args(search_name))
+            for atoms in ("lazy", "auto", "reachable", "dense")]
+    assert all(r.returncode == 0 for r in outs), [r.stderr for r in outs]
+    assert len({r.stdout for r in outs}) == 1
+    counts = {re.sub(r"[0-9.]+ ?s\b|time[^,\n]*", "", r.stderr) for r in outs}
+    assert len(counts) == 1, counts
 
 
 def test_brfs_threads():

@@ -28,7 +28,7 @@ rl::TaskTablePtr fork_table(const std::string& dir, std::initializer_list<const 
         if (!std::filesystem::exists(root / p))
             return nullptr;
         TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Frozen;
+        to.atoms = TaskOptions::Atoms::Dense;
         tasks.push_back(Task::create(*domain->instantiate_file(root / p), to));
     }
     return rl::TaskTable::create(std::move(tasks));

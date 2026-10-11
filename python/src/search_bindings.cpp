@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1059,12 +1060,37 @@ using OrderingsArg =
 using RolloutsArg = Arg<std::variant<PyParallelRollouts, nb::typed<nb::sequence, PyRolloutResult>>>;
 using AtomList = nb::typed<nb::list, PyGroundAtom>;
 
-double py_evaluate(PyHeuristic& self, StateArg state)
+/// The words of a status of a path-dependent heuristic, from its bytes (Heuristic.initial_status / progress).
+std::vector<u64> status_of(const PyHeuristic& self, nb::handle status, const char* what)
+{
+    if (!nb::isinstance<nb::bytes>(status))
+        throw nb::type_error((std::string("mymyr: ") + what + " must be bytes (a status from initial_status or progress)").c_str());
+    const auto b = nb::borrow<nb::bytes>(status);
+    const usize n = self.h->status_words();
+    if (b.size() != n * sizeof(u64))
+        throw nb::value_error((std::string("mymyr: ") + what + " has " + std::to_string(b.size()) +
+                               " bytes; the statuses of this heuristic have " + std::to_string(n * sizeof(u64)))
+                                  .c_str());
+    std::vector<u64> w(n);
+    if (n)
+        std::memcpy(w.data(), b.c_str(), n * sizeof(u64));
+    return w;
+}
+
+nb::bytes status_bytes(const std::vector<u64>& w)
+{
+    return nb::bytes(reinterpret_cast<const char*>(w.data()), w.size() * sizeof(u64));
+}
+
+double py_evaluate(PyHeuristic& self, StateArg state, Arg<nb::bytes> status)
 {
     const State s = state_for(self.o, state, "state");
+    std::optional<std::vector<u64>> w;
+    if (!status.is_none())
+        w = status_of(self, status, "status");
     nb::gil_scoped_release release;
     std::lock_guard lock(self.m);
-    return self.h->evaluate(s.view());
+    return w ? self.h->evaluate(s.view(), *w) : self.h->evaluate(s.view());
 }
 
 /// heuristic='perfect': h* from the task's state space, generated within the search's state and time budgets.
@@ -1471,6 +1497,9 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("evaluations", [](const PyBestFirstResult& x) { return x.r.evaluations; })
         .def_prop_ro("dead_ends", [](const PyBestFirstResult& x) { return x.r.dead_ends; })
         .def_prop_ro("reopened", [](const PyBestFirstResult& x) { return x.r.reopened; })
+        .def_prop_ro("expanded_until_last_jump", [](const PyBestFirstResult& x) { return x.r.expanded_until_last_jump; },
+                     "A*: the expansions before the f-value of the last node popped was first reached (those below "
+                     "the final f-layer; Fast Downward's statistic). 0 for the other searches.")
         .def_prop_ro("layers", [](const PyBestFirstResult& x) { return x.r.layers; })
         .def_prop_ro("initial_h", [](const PyBestFirstResult& x) { return x.r.initial_h; })
         .def_prop_ro("heuristic", [](const PyBestFirstResult& x) { return x.r.heuristic; })
@@ -1719,19 +1748,27 @@ void bind_search(nb::module_& parent)
     nb::class_<PyHeuristic>(m, "Heuristic",
                             "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count' "
                             "('gc'), 'max' ('hmax'), 'add' ('hadd'), 'ff' ('hff'), 'set_additive' ('hsa', 'setadd'), "
-                            "'h2' (heuristics/heuristic.hpp has their definitions); the perfect heuristic h* comes from "
+                            "'h2', 'lmcut' ('lm_cut': LM-cut, admissible), 'lmcount' ('lm_count', 'landmark_count': "
+                            "LAMA's landmark count, path-dependent) (heuristics/heuristic.hpp and docs/search.md have "
+                            "their definitions); the perfect heuristic h* comes from "
                             "a state space: Heuristic.perfect(space). costs: 'auto' (the default: the task's objective, i.e. 'unit' "
                             "for a task without action costs and metric, else 'real'), 'unit' (every action 1) or "
                             "'real' (the task's action costs: zero and fractional costs exact up to 6 decimal places, "
                             "rounded down beyond, 0 for a cost that depends on the state; set-additive then sums the "
                             "costs of its achiever set, one per supported proposition). Unit costs on a task whose "
                             "actions cost less than 1 overestimate; "
-                            "evaluation: 'auto', 'grounded', 'lifted' (set_additive and h2 are grounded only). "
-                            "share=another Heuristic of the task reuses its grounding. Calls on one object are "
-                            "serialized; use one object per thread for parallel evaluation. A search given the object "
-                            "evaluates with an evaluator of its own that shares the grounding, so the object stays "
-                            "callable while the search runs (from its observer, from other threads); stats counts the "
-                            "calls on the object, the search's evaluations are in its result.")
+                            "evaluation: 'auto', 'grounded', 'lifted' (set_additive, h2, lmcut and lmcount are "
+                            "grounded only: a state outside the grounding raises RuntimeError). "
+                            "share=another Heuristic of the task reuses its grounding. Path-dependent heuristics "
+                            "(path_dependent: lmcount) value a state by the path to it, through a status (bytes): "
+                            "initial_status(start), progress(status, state, action, successor) along a transition, "
+                            "merge(status, other) for a state reached on two paths, and h(state, status); h(state) "
+                            "takes the state as the start of the path. The searches keep the statuses themselves. "
+                            "Calls on one object are serialized; use one object per thread for parallel evaluation. "
+                            "A search given the object evaluates with an evaluator of its own that shares the "
+                            "grounding, so the object stays callable while the search runs (from its observer, from "
+                            "other threads); stats counts the calls on the object, the search's evaluations are in its "
+                            "result.")
         .def(
             "__init__",
             [](PyHeuristic* self, TaskArg task, StrArg kind, StrArg costs, StrArg evaluation,
@@ -1782,8 +1819,61 @@ void bind_search(nb::module_& parent)
             "remove_if_unsolvable=False)): the goal distance of a state, +inf where no goal is reachable. costs: 'auto' (the default: 'real' for a task with action costs or a metric, else 'unit'), "
             "'unit' (the number of actions) or 'real' (the transition costs). A state outside "
             "the space raises ValueError, as does a search goal other than the task's.")
-        .def("__call__", &py_evaluate, "state"_a, "h(state): the heuristic value (+inf for a dead end).")
-        .def("evaluate", &py_evaluate, "state"_a)
+        .def("__call__", &py_evaluate, "state"_a, "status"_a = nb::none(),
+             "h(state): the heuristic value (+inf for a dead end). status: a status of the path to the state "
+             "(path-dependent heuristics); None takes the state as the start of the path.")
+        .def("evaluate", &py_evaluate, "state"_a, "status"_a = nb::none(), "As h(state, status).")
+        .def_prop_ro("path_dependent", [](const PyHeuristic& self) { return self.h->path_dependent(); },
+                     "Whether the value of a state depends on the path to it (lmcount: the landmarks reached on it).")
+        .def(
+            "initial_status",
+            [](PyHeuristic& self, StateArg state) {
+                const State s = state_for(self.o, state, "state");
+                std::vector<u64> w(self.h->status_words());
+                {
+                    nb::gil_scoped_release release;
+                    std::lock_guard lock(self.m);
+                    self.h->initial_status(s.view(), w);
+                }
+                return status_bytes(w);
+            },
+            "state"_a,
+            "The status of a path that starts in `state` (bytes; empty for a heuristic that is not path-dependent). "
+            "lmcount: the landmarks true in the initial state; for another state, inferred from it (those true in it "
+            "or initially, and those ordered greedy-necessarily before one true in it but not initially).")
+        .def(
+            "progress",
+            [](PyHeuristic& self, Arg<nb::bytes> status, StateArg state, Arg<PyAction> action, StateArg successor) {
+                const std::vector<u64> parent = status_of(self, status, "status");
+                const State s = state_for(self.o, state, "state");
+                const State t = state_for(self.o, successor, "successor");
+                if (!nb::isinstance<PyAction>(action))
+                    throw nb::type_error("mymyr: action must be a mymyr.Action");
+                const PyAction& a = *nb::inst_ptr<PyAction>(action);
+                if (a.core != self.o.core)
+                    throw nb::value_error("mymyr: action belongs to another task");
+                std::vector<u64> w(parent.size());
+                {
+                    nb::gil_scoped_release release;
+                    std::lock_guard lock(self.m);
+                    self.h->progress(parent, s.view(), a.label(), t.view(), w);
+                }
+                return status_bytes(w);
+            },
+            "status"_a, "state"_a, "action"_a, "successor"_a,
+            "The status of `successor`, reached from `state` (whose status is `status`) by `action`. lmcount: the "
+            "landmarks of `status` and those true in `successor`.")
+        .def(
+            "merge",
+            [](PyHeuristic& self, Arg<nb::bytes> status, Arg<nb::bytes> other) {
+                std::vector<u64> w = status_of(self, status, "status");
+                const std::vector<u64> x = status_of(self, other, "other");
+                self.h->merge(w, x);
+                return status_bytes(w);
+            },
+            "status"_a, "other"_a,
+            "The status of a state reached on two paths with statuses `status` and `other`. lmcount: the landmarks "
+            "both reached (Fast Downward's), inferred if either status is.")
         .def(
             "relaxed_plan",
             [](PyHeuristic& self, StateArg state) {
@@ -1802,8 +1892,11 @@ void bind_search(nb::module_& parent)
             "achiever set); empty for the other kinds.")
         .def(
             "preferred_actions",
-            [](PyHeuristic& self, StateArg state) {
+            [](PyHeuristic& self, StateArg state, Arg<nb::bytes> status) {
                 const State s = state_for(self.o, state, "state");
+                std::optional<std::vector<u64>> w;
+                if (!status.is_none())
+                    w = status_of(self, status, "status");
                 nb::list applicable = nb::borrow<nb::list>(task_object(self.o.obj).attr("applicable_actions")(state));
                 std::vector<Action> labels;
                 for (nb::handle a : applicable)
@@ -1812,7 +1905,10 @@ void bind_search(nb::module_& parent)
                 {
                     nb::gil_scoped_release release;  // never block on the mutex while attached
                     std::lock_guard lock(self.m);
-                    self.h->evaluate(s.view());
+                    if (w)
+                        self.h->evaluate(s.view(), *w);
+                    else
+                        self.h->evaluate(s.view());
                     if (self.h->provides_preferred())
                         for (usize i = 0; i < labels.size(); ++i)
                             keep[i] = self.h->preferred(labels[i].label()) ? 1 : 0;
@@ -1823,9 +1919,10 @@ void bind_search(nb::module_& parent)
                         out.append(applicable[i]);
                 return out;
             },
-            "state"_a,
-            "FF and set-additive: the applicable actions of `state` that are in its relaxed plan (mimir's preferred "
-            "actions).")
+            "state"_a, "status"_a = nb::none(),
+            "The preferred operators of `state` (status: as for h(state, status)). FF and set-additive: the "
+            "applicable actions in its relaxed plan (mimir's preferred actions); lmcount: the applicable actions with "
+            "an effect that fires in `state` and adds a needed landmark false there; empty for the other kinds.")
         .def_prop_ro("kind", [](const PyHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); })
         .def_prop_ro("stats", [](PyHeuristic& self) {
             heuristics::HeuristicStats st;
@@ -2028,11 +2125,15 @@ void bind_search(nb::module_& parent)
         "max_seconds"_a = nb::none(), "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(),
         "observer"_a = nb::none(), "progress_interval"_a = nb::none(),
         (std::string("A* (search/best_first.hpp), eager or lazy. heuristic: a kind ('blind', 'goal_count', 'max', "
-                     "'add', 'ff', 'set_additive', 'h2', as for Heuristic), 'perfect' (h* from the task's state space, "
+                     "'add', 'ff', 'set_additive', 'h2', 'lmcut', 'lmcount', as for Heuristic), 'perfect' (h* from the "
+                     "task's state space, "
                      "generated first within max_states and max_seconds; ValueError when they stop it), a Heuristic "
                      "of the task, or a heuristic written in Python; costs: 'auto' (the default), 'unit' or 'real', as for "
-                     "Heuristic. With costs='auto' and an admissible heuristic ('blind', 'max', 'h2', 'perfect'), "
-                     "the plan is optimal for the task's objective (its total-cost or metric). ") +
+                     "Heuristic. With costs='auto' and an admissible heuristic ('blind', 'max', 'h2', 'lmcut', "
+                     "'perfect'), the plan is optimal for the task's objective (its total-cost or metric). A "
+                     "path-dependent heuristic ('lmcount') gets each node's status: a state reached on several paths "
+                     "keeps the merge of their statuses, and eager A* evaluates a state again when a cheaper path "
+                     "reaches it; it cannot evaluate in batches, nor estimate a goal of several alternatives. ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
 

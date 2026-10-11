@@ -30,7 +30,7 @@ def fork_task(d, p):
     dom, prob = FORK_DATA / d / "domain.pddl", FORK_DATA / d / p
     if not prob.exists():
         pytest.skip(f"fork data missing: {prob}")
-    return mymyr.Task.from_pddl(dom, prob, atoms="frozen")
+    return mymyr.Task.from_pddl(dom, prob, atoms="dense")
 
 
 def space_of(task, **options):
@@ -176,7 +176,7 @@ def test_independent_of_the_thread_count():
 # ------------------------------------------------------------------------------------------------ knowledge bases
 def gripper_table():
     return TaskTable.from_pddl(FORK_DATA / "gripper" / "domain.pddl",
-                               [FORK_DATA / "gripper" / p for p in ("p-1-0.pddl", "p-2-0.pddl")], atoms="frozen")
+                               [FORK_DATA / "gripper" / p for p in ("p-1-0.pddl", "p-2-0.pddl")], atoms="dense")
 
 
 def test_knowledge_base_as_the_fork():
@@ -208,7 +208,7 @@ def test_knowledge_base_tuple_graphs(width, tg_vertices, tg_edges):
 def test_knowledge_base_order_pickling_and_threads():
     fork_task("gripper", "p-2-0.pddl")
     files = [FORK_DATA / "gripper" / p for p in ("test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl")]
-    table = TaskTable.from_pddl(FORK_DATA / "gripper" / "domain.pddl", files, atoms="frozen")
+    table = TaskTable.from_pddl(FORK_DATA / "gripper" / "domain.pddl", files, atoms="dense")
     kb = datasets.KnowledgeBase(table, width=1, threads=1)
     assert kb.task_indices == [2, 1, 0] and kb.generalized_state_space is None
     sizes = [s.num_states for s in kb.state_spaces]

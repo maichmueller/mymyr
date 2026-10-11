@@ -30,7 +30,7 @@ def chain_tasks(sizes):
         edges = " ".join(f"(next cell{position} cell{position + 1})" for position in range(size - 1))
         problem = f"""(define (problem chain-{size}) (:domain chain) (:objects {objects})
           (:init (at cell0) {edges}) (:goal (at cell{size - 1})))"""
-        tasks.append(mymyr.Task(domain.instantiate_string(problem), atoms="frozen"))
+        tasks.append(mymyr.Task(domain.instantiate_string(problem)))
     return tasks
 
 

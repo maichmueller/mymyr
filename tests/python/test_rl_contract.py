@@ -18,7 +18,7 @@ def toggle_task(*, init="", goal="(q)"):
      (:action finish :parameters () :precondition (p) :effect (q)))
     """)
     problem = f"(define (problem tiny) (:domain toggles) (:init {init}) (:goal {goal}))"
-    return mymyr.Task(domain.instantiate_string(problem), atoms="frozen")
+    return mymyr.Task(domain.instantiate_string(problem))
 
 
 def jax_rl():
@@ -111,7 +111,7 @@ def failure_choice_task():
      (:action finish :parameters () :precondition (halfway) :effect (and (not (halfway)) (complete))))
     """)
     problem = "(define (problem tiny) (:domain failure-choice) (:init (alive)) (:goal (complete)))"
-    return mymyr.Task(domain.instantiate_string(problem), atoms="frozen")
+    return mymyr.Task(domain.instantiate_string(problem))
 
 
 @needs_frontend

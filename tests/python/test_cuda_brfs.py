@@ -101,7 +101,7 @@ def assert_same_padded(dev, cpu):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable", "lazy"])
 def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     task = text_task(name, atoms=atoms)
     r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
@@ -122,8 +122,8 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     small = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, chunk_states=97, stop_at_goal=False)
     assert (small.states, small.fingerprint) == (r.states, r.fingerprint)
     assert small.stats["chunks"] > r.stats["chunks"]
-    # small layers run in device loops (frozen slots); timings=True drives every chunk from the host: the same ids
-    if atoms == "frozen":
+    # small layers run in device loops (fixed slots); timings=True drives every chunk from the host: the same ids
+    if atoms != "lazy":
         assert r.stats["loops"] > 0 and r.stats["captures"] > 0
     timed = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, timings=True, stop_at_goal=False)
     assert (timed.states, timed.layers, timed.fingerprint) == (r.states, r.layers, r.fingerprint)
@@ -132,7 +132,7 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
 
 def test_device_brfs_state_space_and_plans(ctx):
     torch = torch_cuda()
-    task = text_task("gripper__prob05", atoms="frozen")
+    task = text_task("gripper__prob05", atoms="dense")
     r = mc.brfs(task, ctx=ctx)
     words = r.state_words("torch")
     nodes = r.nodes("torch")
@@ -165,7 +165,7 @@ def test_device_brfs_state_space_and_plans(ctx):
 
 
 @pytest.mark.parametrize("name", SMALL_TASKS)
-@pytest.mark.parametrize("atoms", ["frozen", "lazy"])
+@pytest.mark.parametrize("atoms", ["dense", "reachable"])
 def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
     torch = torch_cuda()
     task = text_task(name, atoms=atoms)
@@ -181,7 +181,7 @@ def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
         dict(capacity=17, goal=True),
         dict(words=1),
     ):
-        dev = rl.expand(task, t, ctx=ctx, **kw)  # first: under lazy slots the device interns the new atoms
+        dev = rl.expand(task, t, ctx=ctx, **kw)
         cpu = rl.expand(task, x, **kw)
         if "capacity" in kw:
             assert dev.capacity == cpu.capacity == kw["capacity"]
@@ -241,19 +241,26 @@ def test_expand_into_torch_destinations(ctx):
 
 def test_expand_validates_like_the_cpu(ctx):
     torch = torch_cuda()
-    task = text_task("gripper__prob05", atoms="frozen")
+    task = text_task("gripper__prob05", atoms="dense")
+    assert task.num_atoms % 64
     x = words_of([task.initial_state] * 2, task.words + 1)
-    x[1, -1] = 1  # an unassigned slot
+    x[1, task.num_atoms // 64] |= np.uint64(1) << np.uint64(task.num_atoms % 64)  # an unassigned slot
     with pytest.raises(ValueError, match="state row 1"):
         rl.expand(task, x)
     with pytest.raises(ValueError, match="state row 1"):
         rl.expand(task, torch.from_numpy(x.view(np.int64)).cuda(), ctx=ctx)
     assert rl.expand(task, torch.from_numpy(x.view(np.int64)).cuda(), ctx=ctx, validate=False).total > 0
+    # padding: the CPU does not read it, the device rejects a row whose padding is not zero
+    y = words_of([task.initial_state] * 2, task.words + 1)
+    y[1, -1] = 1
+    assert rl.expand(task, y).total == rl.expand(task, y[:, :-1]).total
+    with pytest.raises(ValueError, match="state row 1"):
+        rl.expand(task, torch.from_numpy(y.view(np.int64)).cuda(), ctx=ctx)
 
 
 def test_expand_stream_semantics(ctx):
     torch = torch_cuda()
-    task = text_task("blocks__probBLOCKS-8-0", atoms="frozen")
+    task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
     states = walk(task, steps=30, seed=1, walks=4)
     x = words_of(states, task.words)
     cpu = rl.expand(task, x)
@@ -300,7 +307,7 @@ def test_expand_stream_semantics(ctx):
 
 
 def test_expand_dlarray_and_jax_inputs(ctx):
-    task = text_task("logistics00__probLOGISTICS-6-1", atoms="frozen")
+    task = text_task("logistics00__probLOGISTICS-6-1", atoms="dense")
     states = walk(task, steps=15, seed=2)
     x = words_of(states, task.words)
     cpu = rl.expand(task, x, K=0)
@@ -326,7 +333,7 @@ def test_expand_dlarray_and_jax_inputs(ctx):
 
 def test_expand_from_many_threads(ctx):
     torch = torch_cuda()
-    task = text_task("gripper__prob05", atoms="lazy")
+    task = text_task("gripper__prob05", atoms="reachable")
     states = walk(task, steps=20, seed=9, walks=3)
     x = words_of(states, task.words)
     t = torch.from_numpy(x.view(np.int64)).cuda()

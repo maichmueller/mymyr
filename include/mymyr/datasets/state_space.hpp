@@ -31,11 +31,11 @@
 //     thread count;
 //   - generate_state_spaces: an instance pool, one task per worker thread (many small instances).
 //
-// State words: row i of state_words() holds state i in the task's slot layout (the fluent/derived words, then
-// numeric_words() words for numeric tasks), zero-padded to row_words(). With frozen atoms
-// (TaskOptions::Atoms::Frozen, the default for datasets) the layout is fixed; with lazy slots it is the task's
-// current one, which depends on the order in which atoms were first reached and hence on the thread count. Every
-// other array is independent of the thread count.
+// State words: row i of state_words() holds state i in the task's slot layout (the fluent words, then
+// numeric_words() words for numeric tasks), zero-padded to row_words(). The layout of a task with frozen atom slots
+// (every TaskOptions::Atoms but Lazy) is a function of the task; with lazy slots it is the task's current one, which
+// depends on the order in which atoms were first reached and hence on the thread count. Every other array is
+// independent of the thread count.
 //
 // Options that mirror mimir's `StateSpaceOptions`: max_states (mimir's max_num_states: the generation fails when
 // the space has max_states states or more), remove_if_unsolvable (no state space when the initial state cannot

@@ -27,13 +27,13 @@ def fork_task(d, p, **options):
         pytest.skip(f"fork data missing: {prob}")
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
-    options.setdefault("atoms", "frozen")
+    options.setdefault("atoms", "dense")
     return mymyr.Task.from_pddl(dom, prob, **options)
 
 
 @pytest.fixture(scope="module")
 def depot():
-    return text_task("depot__p02", atoms="frozen")  # 40320 states
+    return text_task("depot__p02", atoms="dense")  # 40320 states
 
 
 @pytest.fixture(scope="module")
@@ -185,7 +185,7 @@ def test_options(tmp_path, depot):
 
 # ------------------------------------------------------------------------------------------------ pool
 def test_pool_equals_single_generations():
-    tasks = [text_task(n, atoms="frozen") for n in ("depot__p02", "philosophers__p03-phil4")] * 3
+    tasks = [text_task(n, atoms="dense") for n in ("depot__p02", "philosophers__p03-phil4")] * 3
     rs = datasets.generate_many(tasks, threads=4, remove_if_unsolvable=False)
     assert [r.status for r in rs] == [datasets.Status.OK] * 6
     for t, r in zip(tasks, rs):
@@ -197,7 +197,7 @@ def test_pool_equals_single_generations():
 
 
 def test_many_python_threads():
-    task = text_task("philosophers__p03-phil4", atoms="frozen")
+    task = text_task("philosophers__p03-phil4", atoms="dense")
     out = [None] * 8
 
     def work(i):

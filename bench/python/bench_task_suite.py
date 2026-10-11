@@ -250,7 +250,7 @@ def main():
         tables = []
         for name in key.split("+"):
             dom, probs = SETS[name]
-            tables.append(rl.TaskTable([mymyr.Task.from_pddl(dom, p, atoms="frozen") for p in probs]))
+            tables.append(rl.TaskTable([mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]))
         suite = rl.TaskSuite(tables)
         for n in map(int, a.envs.split(",")):
             for layout in a.layouts.split(","):

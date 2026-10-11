@@ -7,7 +7,9 @@
 //   - Atoms are positive fluent ground atoms named by their canonical id (task/atom_index.hpp): portable across
 //     processes and threads, independent of the order in which lazy slots were assigned. slots() resolves them to
 //     state bit positions of a task (interning a slot on first touch, which is thread-safe).
-//   - Fact landmarks: every plan makes each of them true at some point. Kept in discovery order, without duplicates.
+//   - Fact landmarks: atoms every plan makes true at some point (for a sound generator: approximate_fact_landmarks with
+//     FirstAchievers::PossiblyBefore; mimir's first achievers are not sound in general). Kept in discovery order,
+//     without duplicates.
 //   - Disjunctive landmarks: sets of which every plan makes at least one member true. Each set is ascending and
 //     duplicate-free, no set contains a fact landmark (the fact subsumes it), no two sets are equal, and the list is
 //     sorted. Deliberately separate from the fact landmarks: a member is not individually mandatory.
@@ -235,15 +237,18 @@ public:
     [[nodiscard]] const std::vector<LiftedLandmark>& lifted() const noexcept { return m_lifted; }
 
     // ------------------------------------------------------------------------------------ against a task's states
-    /// Slots of `atoms` in `task` (assigned on first touch; thread-safe). An atom outside the task's canonical space
-    /// maps to SlotId::invalid().
+    /// Slots of `atoms` in `task` (assigned on first touch under lazy slots; thread-safe). An atom outside the task's
+    /// canonical space, or without a slot (no state holds it), maps to SlotId::invalid().
     [[nodiscard]] static std::vector<SlotId> slots(const Task& task, std::span<const CanonicalAtom> atoms)
     {
         std::vector<SlotId> out;
         out.reserve(atoms.size());
         const AtomIndex& ix = task.atoms();
         for (CanonicalAtom c : atoms)
-            out.push_back(c < ix.layout().fluent_count ? SlotId{ix.intern(c)} : SlotId::invalid());
+        {
+            const u32 s = c < ix.layout().fluent_count ? ix.slot_if_any(c) : AtomIndex::k_empty;
+            out.push_back(s == AtomIndex::k_empty ? SlotId::invalid() : SlotId{s});
+        }
         return out;
     }
     /// Fact landmarks true in s (discovery order).

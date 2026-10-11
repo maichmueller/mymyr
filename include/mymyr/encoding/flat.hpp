@@ -13,7 +13,7 @@ namespace mymyr::encoding
 {
 inline constexpr u32 k_flat_version = 1;
 
-struct FlatOptions
+struct FlatRelationEncoderOptions
 {
     bool include_static = true;
     bool include_derived = true;
@@ -48,19 +48,19 @@ struct FlatBatch
 class FlatRelationEncoder
 {
 public:
-    explicit FlatRelationEncoder(rl::TaskTablePtr table, FlatOptions options = {});
-    explicit FlatRelationEncoder(TaskPtr task, FlatOptions options = {});
+    explicit FlatRelationEncoder(rl::TaskTablePtr table, FlatRelationEncoderOptions options = {});
+    explicit FlatRelationEncoder(TaskPtr task, FlatRelationEncoderOptions options = {});
 
     [[nodiscard]] const rl::TaskTable& table() const noexcept { return *m_table; }
     [[nodiscard]] const std::shared_ptr<const FlatSchema>& schema() const noexcept { return m_schema; }
-    [[nodiscard]] FlatOptions options() const noexcept { return m_options; }
+    [[nodiscard]] FlatRelationEncoderOptions options() const noexcept { return m_options; }
     [[nodiscard]] FlatBatch encode(rl::StateBatchView states, const i32* task_ids = nullptr,
                                   ActionBatchView actions = {},
                                   std::span<const GroundCondition* const> goals = {}) const;
 
 private:
     rl::TaskTablePtr m_table;
-    FlatOptions m_options;
+    FlatRelationEncoderOptions m_options;
     std::shared_ptr<const FlatSchema> m_schema;
     std::vector<GroundCondition> m_goals;
 };

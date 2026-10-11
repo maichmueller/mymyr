@@ -205,7 +205,6 @@ public:
         {
             TaskOptions eo;
             eo.atoms = TaskOptions::Atoms::Lazy;
-            eo.pilot_expansions = 0;
             eo.matching = m_task.options().matching;
             eo.fc_auto_free_params = m_task.options().fc_auto_free_params;
             explore = Task::create(make_explore_data(T), eo);
@@ -472,7 +471,7 @@ private:
         return m_proj.emplace(key, std::move(v)).first->second;
     }
 
-    void push_op(u32 ga, const std::vector<u32>& pre, const std::vector<u32>& eff, bool unconditional)
+    void push_op(u32 ga, const std::vector<u32>& pre, const std::vector<u32>& eff, bool unconditional, bool can_fire)
     {
         u32 npos = 0;
         for (u32 e : pre)
@@ -484,6 +483,7 @@ private:
         m_raw_npos.push_back(npos);
         m_raw_ga.push_back(ga);
         m_raw_uncond.push_back(unconditional ? 1 : 0);
+        m_raw_can_fire.push_back(can_fire ? 1 : 0);
     }
 
     void ground_action(u32 s, const ObjectId* b)
@@ -560,6 +560,8 @@ private:
 
     void ce_instance(u32 ga, const ConditionalEffect& ce, const ObjectId* b)
     {
+        m_check.clear();
+        const bool can_fire = condition_entries(T.literals_of(ce.condition), b, m_check, true);
         m_pre = m_apre;
         condition_entries(T.literals_of(ce.condition), b, m_pre, false);  // static ce literals ignored, as in mimir's RPG
         m_eff.clear();
@@ -568,7 +570,7 @@ private:
             const u32 a = atom_of(l, b);
             m_eff.push_back(l.positive ? a : (a | k_neg_bit));
         }
-        push_op(ga, m_pre, m_eff, T.literals_of(ce.condition).empty());
+        push_op(ga, m_pre, m_eff, T.literals_of(ce.condition).empty(), can_fire);
     }
 
     void ground_axiom(u32 x, const ObjectId* b)
@@ -578,7 +580,7 @@ private:
         if (!condition_entries(T.literals_of(ax.body), b, m_pre, true))
             return;
         m_eff.assign(1, atom_of(ax.head, b));
-        push_op(RelaxedTask::k_none, m_pre, m_eff, true);
+        push_op(RelaxedTask::k_none, m_pre, m_eff, true, true);
         ++m_out.m_stats.ground_axioms;
     }
 
@@ -656,6 +658,7 @@ private:
             }
             R.m_del_begin.push_back(static_cast<u32>(R.m_del.size()));
             R.m_uncond.push_back(m_raw_uncond[o]);
+            R.m_can_fire.push_back(m_raw_can_fire[o]);
             u32 npos = 0;
             for (usize i = pb; i < pe; ++i)
             {
@@ -787,10 +790,10 @@ private:
     std::map<u64, std::vector<u8>> m_proj;
     // raw operators
     std::vector<u32> m_raw_pre_begin{0}, m_raw_pre, m_raw_eff_begin{0}, m_raw_eff, m_raw_npos, m_raw_ga;
-    std::vector<u8> m_raw_uncond;
+    std::vector<u8> m_raw_uncond, m_raw_can_fire;
     std::vector<u32> m_goal_raw;
     // scratch
-    std::vector<u32> m_apre, m_pre, m_eff, m_negd;
+    std::vector<u32> m_apre, m_pre, m_eff, m_negd, m_check;
     std::vector<ObjectId> m_full;
     RelaxedTaskOptions m_options;
 };

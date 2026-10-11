@@ -891,7 +891,7 @@ private:
         else
         {
             const Task& t = *m_tasks[first];
-            w.W = t.atoms().mode() == AtomMode::Frozen ? std::max<u32>(1, t.words()) + t.numeric_slots()
+            w.W = t.atoms().frozen() ? std::max<u32>(1, t.words()) + t.numeric_slots()
                                                       : bucket(t.words() + t.numeric_slots());
             m_gen = std::make_unique<ChunkGenerator>(m_ctx, m_tasks[first], m_s);
         }

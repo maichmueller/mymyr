@@ -116,7 +116,10 @@ GoalPrograms::GoalPrograms(const ContextPtr& ctx, const Task& task, std::span<co
             {
                 if (id < layout.fluent_count || id >= layout.total)
                     throw std::invalid_argument("mymyr: device goal: a canonical id is not a derived atom of the task");
-                derived_words = std::max(derived_words, bits::word_of(atoms.intern(id)) + 1);
+                const u32 slot = atoms.slot_if_any(id);
+                if (slot == AtomIndex::k_empty)
+                    throw std::invalid_argument("mymyr: device goal: a derived atom without a slot (no state holds it)");
+                derived_words = std::max(derived_words, bits::word_of(slot) + 1);
             }
         };
         derived(g.derived_positive); derived(g.derived_negative);

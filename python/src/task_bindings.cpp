@@ -173,23 +173,28 @@ void check_task_rows(const StateBatch& b, const Task& task)
             throw nb::value_error(("mymyr: " + row_name(b, i) + " belongs to another task").c_str());
     if (!b.owners.empty())
         return;  // States of this task: their rows are its rows
+    if (!b.view.rows)
+        return;
+    if (!task.atoms().frozen())
+        throw nb::value_error("mymyr: state rows for a task with lazy atom slots: its slots are numbered in the order "
+                              "searches meet its atoms, so a row cannot be checked against them (pass States, or build "
+                              "the task with atoms 'auto', 'reachable' or 'dense')");
     const u32 W = b.view.words;
-    if (task.atoms().mode() == AtomMode::Frozen && W < task.words() && b.view.rows)
+    if (W < task.words())
         throw nb::value_error(("mymyr: rows of " + std::to_string(W) + " atom words; this task's states have " +
-                               std::to_string(task.words()) + " (frozen atom slots)")
+                               std::to_string(task.words()))
                                   .c_str());
+    // words past the task's own are padding (a wider batch's): never read
     const u32 limit = task.atoms().fluent_slots();
-    if (static_cast<u64>(W) * 64 <= limit)
+    if (static_cast<u64>(task.words()) * 64 <= limit)
         return;
     for (u64 i = 0; i < b.view.rows; ++i)
     {
         const u64* w = b.view.row(i);
-        u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
-        for (u32 k = (limit >> 6) + 1; k < W && !bad; ++k)
-            bad = w[k];
+        const u64 bad = w[limit >> 6] & ~((u64{1} << (limit & 63)) - 1);
         if (bad)
             throw nb::value_error(("mymyr: " + row_name(b, i) +
-                                   " sets atom slots this task has not assigned (a state of another task?)")
+                                   " sets atom slots this task does not have (a state of another task?)")
                                       .c_str());
     }
 }
@@ -244,18 +249,21 @@ StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
     return b;
 }
 
-TaskOptions make_options(std::string_view atoms, std::string_view matching, u32 fc_free_params, u32 frozen_max_words,
-                         u32 pilot_expansions)
+TaskOptions make_options(std::string_view atoms, std::string_view matching, IntArg fc_free_params,
+                         std::string_view numeric_storage, FloatArg numeric_quantum, bool numeric_tolerant,
+                         IntArg reachability_budget)
 {
     TaskOptions o;
     if (atoms == "auto")
         o.atoms = TaskOptions::Atoms::Auto;
+    else if (atoms == "reachable")
+        o.atoms = TaskOptions::Atoms::Reachable;
+    else if (atoms == "dense")
+        o.atoms = TaskOptions::Atoms::Dense;
     else if (atoms == "lazy")
         o.atoms = TaskOptions::Atoms::Lazy;
-    else if (atoms == "frozen")
-        o.atoms = TaskOptions::Atoms::Frozen;
     else
-        throw nb::value_error("atoms must be 'auto', 'lazy' or 'frozen'");
+        throw nb::value_error("mymyr: atoms must be 'auto', 'reachable', 'dense' or 'lazy'");
     if (matching == "auto")
         o.matching = TaskOptions::Matching::Auto;
     else if (matching == "fixed")
@@ -263,10 +271,19 @@ TaskOptions make_options(std::string_view atoms, std::string_view matching, u32 
     else if (matching == "fc" || matching == "forward_checking")
         o.matching = TaskOptions::Matching::ForwardChecking;
     else
-        throw nb::value_error("matching must be 'auto', 'fixed' or 'fc'");
-    o.fc_auto_free_params = fc_free_params;
-    o.frozen_max_words = frozen_max_words;
-    o.pilot_expansions = pilot_expansions;
+        throw nb::value_error("mymyr: matching must be 'auto', 'fixed' or 'fc'");
+    if (numeric_storage == "auto")
+        o.numeric_storage = TaskOptions::NumericStorageMode::Auto;
+    else if (numeric_storage == "f64")
+        o.numeric_storage = TaskOptions::NumericStorageMode::F64;
+    else if (numeric_storage == "i32")
+        o.numeric_storage = TaskOptions::NumericStorageMode::I32;
+    else
+        throw nb::value_error("mymyr: numeric_storage must be 'auto', 'f64' or 'i32'");
+    o.fc_auto_free_params = int_arg<u32>(fc_free_params, "fc_free_params");
+    o.numeric_quantum = float_arg(numeric_quantum, "numeric_quantum", 0.0, std::numeric_limits<double>::max());
+    o.numeric_tolerant = numeric_tolerant;
+    o.reachability_budget = int_arg<u64>(reachability_budget, "reachability_budget", 0);
     return o;
 }
 
@@ -276,15 +293,41 @@ namespace
 
 std::string name_of(const formalism::TaskData& D, formalism::Str s) { return std::string(D.str(s)); }
 
-const char* atoms_name(AtomMode m) { return m == AtomMode::Frozen ? "frozen" : "lazy"; }
+const char* atoms_option_name(TaskOptions::Atoms a)
+{
+    switch (a)
+    {
+        case TaskOptions::Atoms::Auto: return "auto";
+        case TaskOptions::Atoms::Reachable: return "reachable";
+        case TaskOptions::Atoms::Dense: return "dense";
+        case TaskOptions::Atoms::Lazy: return "lazy";
+    }
+    return "auto";
+}
 
+const char* storage_option_name(TaskOptions::NumericStorageMode m)
+{
+    return m == TaskOptions::NumericStorageMode::F64 ? "f64" : m == TaskOptions::NumericStorageMode::I32 ? "i32" : "auto";
+}
+
+/// The options as a tuple in make_options' argument order (pickles).
 nb::tuple options_tuple(const TaskOptions& o)
 {
-    const char* atoms = o.atoms == TaskOptions::Atoms::Auto ? "auto" : o.atoms == TaskOptions::Atoms::Lazy ? "lazy" : "frozen";
     const char* matching = o.matching == TaskOptions::Matching::Auto        ? "auto"
                            : o.matching == TaskOptions::Matching::FixedOrder ? "fixed"
                                                                              : "fc";
-    return nb::make_tuple(atoms, matching, o.fc_auto_free_params, o.frozen_max_words, o.pilot_expansions);
+    return nb::make_tuple(atoms_option_name(o.atoms), matching, o.fc_auto_free_params, storage_option_name(o.numeric_storage),
+                          o.numeric_quantum, o.numeric_tolerant, o.reachability_budget);
+}
+
+TaskOptions options_of_tuple(nb::handle t)
+{
+    const nb::tuple o = nb::cast<nb::tuple>(t);
+    if (o.size() != 7)
+        throw nb::value_error("mymyr: corrupt task pickle (options)");
+    return make_options(nb::cast<std::string_view>(o[0]), nb::cast<std::string_view>(o[1]), nb::borrow<IntArg>(o[2]),
+                        nb::cast<std::string_view>(o[3]), nb::borrow<FloatArg>(o[4]), nb::cast<bool>(o[5]),
+                        nb::borrow<IntArg>(o[6]));
 }
 
 CorePtr build_core(std::shared_ptr<const formalism::TaskData> data, std::shared_ptr<const TaskSource> source,
@@ -292,15 +335,20 @@ CorePtr build_core(std::shared_ptr<const formalism::TaskData> data, std::shared_
 {
     TaskPtr task;
     {
-        nb::gil_scoped_release release;  // compiling (and the Auto rule's pilot search) can take a while
+        nb::gil_scoped_release release;  // compiling (and the reachability analysis) can take a while
         task = Task::create(formalism::TaskData(*data), options);
     }
     return std::make_shared<PyTaskCore>(std::move(task), std::move(data), std::move(source));
 }
 
 constexpr const char* k_options_doc =
-    "Options: atoms ('auto': frozen slots when the dense state width is small, else lazy; 'lazy'; 'frozen'), "
-    "matching ('auto', 'fixed', 'fc'), fc_free_params, frozen_max_words, pilot_expansions.";
+    "Options: atoms ('auto': one slot per relaxed-reachable atom, or the "
+    "typed-dense layout where that is no wider, and dense when the analysis passes reachability_budget; 'reachable'; "
+    "'dense'; 'lazy': slots on first touch, for searches only), matching ('auto', 'fixed', 'fc'), fc_free_params, "
+    "numeric_storage ('auto': 'i32' for statically integral tasks without a quantum, else 'f64'; 'f64'; 'i32'), "
+    "numeric_quantum (> 0: stored values snap to multiples of it), numeric_tolerant (mimir-C# numeric semantics), "
+    "reachability_budget (the analysis' work bound in join steps; 0: unbounded). The same task and options give the "
+    "same encoding in every run and process (atoms='lazy' aside).";
 
 /// A state argument: a State of this task, or state words (one row).
 struct StateArg
@@ -326,7 +374,7 @@ StateArg state_arg(PyTaskCore& core, nb::handle h)
     const u64* w = a.batch.view.data;
     const u32 nw = a.batch.view.words;
     const u32 NN = a.batch.view.numeric_words;
-    a.view = StateView{w, nw, NN ? w + nw : nullptr, NN};
+    a.view = StateView{w, std::min(nw, core.task->words()), NN ? w + nw : nullptr, NN};
     return a;
 }
 
@@ -1050,7 +1098,7 @@ AtomList derived_atoms(const Owner& o, StateView s)
         Successors& succ = lease->successors();
         succ.prepare(s);
         const detail::Engine& e = succ.engine();
-        bits::for_each(e.derived(), e.derived_words(), [&](u64 b) { slots.push_back(static_cast<u32>(b)); });
+        slots = t.atoms().slots_in_canonical_order(AtomKind::Derived, e.derived(), e.derived_words());
     }
     const CanonicalLayout& L = t.compiled().layout;
     for (u32 slot : slots)
@@ -1578,6 +1626,22 @@ void bind_task_api(nb::class_<C>& cls)
                 return Arg<PyGroundCondition>(make_ground_condition(task_owner(owner(self)), GroundCondition::goal(*self.p->core->task)));
             },
             "The goal as a GroundCondition (each literal once, then the numeric constraints).")
+        .def_prop_ro(
+            "encoding_goal",
+            [owner](Self self) { return make_encoding_goal(task_owner(owner(self))); },
+            "The goal as written, expanded into signed ground literals for encodings: conjunctions flattened, `forall` "
+            "expanded over the objects of the quantified types (constants included, in object order), `imply` with a "
+            "static antecedent expanded, negation pushed inward. A tuple of GroundLiterals, positive ones first, then by predicate and objects, "
+            "without duplicates. A literal over a static predicate that fails in the initial atoms is kept "
+            "(encoding_goal_unsatisfiable). A conjunct that cannot be expanded is left out and clears "
+            "encoding_goal_complete. The planner's goal (goal_condition) is unaffected.")
+        .def_prop_ro("encoding_goal_complete", [](Self self) { return self.p->core->task->encoding_goal_complete(); },
+                     "Whether encoding_goal is the whole goal: False when it has a conjunct that is not expandable "
+                     "(`or`, `exists`, `imply` over fluents, `not and`, a numeric constraint, too many quantifier bindings). A task built from a text "
+                     "(Task.from_text) has no goal as written: its encoding goal is the goal without the predicates "
+                     "that goal normalization introduced, complete iff none were left out.")
+        .def_prop_ro("encoding_goal_unsatisfiable", [](Self self) { return self.p->core->task->encoding_goal_unsatisfiable(); },
+                     "Whether a static literal of encoding_goal fails in the initial atoms, so that no state is a goal.")
         .def(
             "iter_applicable_actions",
             [owner](Self self, StateLike state) {
@@ -1753,20 +1817,44 @@ void bind_task_api(nb::class_<C>& cls)
             [owner](Self self, WordsArg words) {
                 PyTaskCore& core = *self.p->core;
                 StateBatch b = import_task_states(words, *core.task);
-                const u32 NN = b.view.numeric_words;
+                const u32 NN = b.view.numeric_words, nw = std::min(b.view.words, core.task->words());
                 StateList out{nb::list()};
                 for (u64 i = 0; i < b.view.rows; ++i)
                 {
                     const u64* w = b.view.row(i);
-                    out.append(make_state(owner(self), State(w, b.view.words, NN ? w + b.view.words : nullptr, NN)));
+                    out.append(make_state(owner(self), State(w, nw, NN ? w + b.view.words : nullptr, NN)));
                 }
                 return out;
             },
-            "words"_a, "States from a word array [N, W] (any framework); numeric tasks: [N, W + NN] rows.");
+            "words"_a,
+            "States from a word array [N, W] (any framework, W >= words; the words past the task's own are padding and "
+            "are not read); numeric tasks: [N, W + NN] rows. Raises ValueError for rows narrower than words, rows that "
+            "set atom slots the task does not have, and any rows of a task with lazy atom slots (their numbering is "
+            "the task object's own history: pass States instead).");
 }
 
 nb::object restore_task(std::string_view kind, std::string a, std::string b, std::string apath, std::string bpath,
-                        nb::tuple opts, u64 fingerprint);
+                        nb::tuple opts, u64 fingerprint, nb::tuple encoding);
+
+/// The encoding part of a task pickle: (encoding_fingerprint, lazy slots). Lazy slots: the canonical ids of the
+/// assigned fluent slots, then of the derived ones, in slot order, with their counts (u64 [2 + F + D] as bytes), so
+/// the restored task numbers its atoms as the pickled one did when it was pickled; empty for frozen slots.
+nb::tuple encoding_state(const Task& T)
+{
+    std::vector<u64> lazy;
+    if (!T.atoms().frozen())
+    {
+        const u32 nf = T.atoms().fluent_slots(), nd = T.atoms().derived_slots();
+        lazy.push_back(nf);
+        lazy.push_back(nd);
+        for (u32 s = 0; s < nf; ++s)
+            lazy.push_back(T.atoms().canonical(AtomKind::Fluent, s));
+        for (u32 s = 0; s < nd; ++s)
+            lazy.push_back(T.atoms().canonical(AtomKind::Derived, s));
+    }
+    return nb::make_tuple(T.encoding_fingerprint(),
+                          nb::bytes(reinterpret_cast<const char*>(lazy.data()), lazy.size() * sizeof(u64)));
+}
 
 nb::object task_reduce(nb::handle self)
 {
@@ -1774,17 +1862,46 @@ nb::object task_reduce(nb::handle self)
     nb::object restore = nb::module_::import_("mymyr._pickle").attr("_restore_task");
     const nb::tuple opts = options_tuple(core.task->options());
     const u64 fp = core.task->fingerprint();
+    const nb::tuple enc = encoding_state(*core.task);
     if (core.source && core.source->kind == TaskSource::Kind::Pddl)
         return nb::make_tuple(restore, nb::make_tuple("pddl", core.source->domain, core.source->problem, core.source->domain_path,
-                                                      core.source->problem_path, opts, fp));
-    return nb::make_tuple(restore, nb::make_tuple("text", formalism::write_task_text(*core.data), "", "", "", opts, fp));
+                                                      core.source->problem_path, opts, fp, enc));
+    return nb::make_tuple(restore, nb::make_tuple("text", formalism::write_task_text(*core.data, true), "", "", "", opts, fp, enc));
+}
+
+/// Gives the lazy slots of `T` the pickled numbering (encoding_state), then checks the encoding fingerprint.
+void restore_encoding(const Task& T, nb::tuple encoding)
+{
+    if (encoding.size() != 2)
+        throw nb::value_error("mymyr: corrupt task pickle (encoding)");
+    const nb::bytes lazy_bytes = nb::cast<nb::bytes>(encoding[1]);
+    const usize n = lazy_bytes.size() / sizeof(u64);
+    if (n)
+    {
+        std::vector<u64> lazy(n);
+        std::memcpy(lazy.data(), lazy_bytes.c_str(), n * sizeof(u64));
+        const CanonicalLayout& L = T.compiled().layout;
+        if (T.atoms().frozen() || n < 2 || n != 2 + lazy[0] + lazy[1])
+            throw nb::value_error("mymyr: corrupt task pickle (lazy atom slots)");
+        for (usize i = 0; i < n - 2; ++i)
+        {
+            const u64 c = lazy[2 + i];
+            const bool fluent = i < lazy[0];
+            const u64 slot = fluent ? i : i - lazy[0];
+            if (c >= L.total || (c < L.fluent_count) != fluent || T.atoms().intern(c) != slot)
+                throw nb::value_error("mymyr: the unpickled task cannot number its lazy atom slots as the pickled one "
+                                      "did (its atoms got slots in another order)");
+        }
+    }
+    if (T.encoding_fingerprint() != nb::cast<u64>(encoding[0]))
+        throw nb::value_error("mymyr: the unpickled task encodes states differently from the pickled one (encoding "
+                              "fingerprint mismatch): its atom slots or numeric storage changed with mymyr's version");
 }
 
 nb::object restore_task(std::string_view kind, std::string a, std::string b, std::string apath, std::string bpath,
-                        nb::tuple opts, u64 fingerprint)
+                        nb::tuple opts, u64 fingerprint, nb::tuple encoding)
 {
-    const TaskOptions options = make_options(nb::cast<std::string_view>(opts[0]), nb::cast<std::string_view>(opts[1]),
-                                             nb::cast<u32>(opts[2]), nb::cast<u32>(opts[3]), nb::cast<u32>(opts[4]));
+    const TaskOptions options = options_of_tuple(opts);
     std::shared_ptr<const formalism::TaskData> data;
     auto source = std::make_shared<TaskSource>();
     if (kind == "pddl")
@@ -1814,6 +1931,7 @@ nb::object restore_task(std::string_view kind, std::string a, std::string b, std
     if (core->task->fingerprint() != fingerprint)
         throw nb::value_error("mymyr: the unpickled task differs from the pickled one (content fingerprint mismatch): "
                               "the PDDL or mymyr's normalization changed");
+    restore_encoding(*core->task, encoding);
     return nb::cast(PyTask{std::move(core)}, nb::rv_policy::move);
 }
 
@@ -1826,7 +1944,7 @@ nb::object state_reduce(const PyState& s)
     nb::object task = task_object(s.owner);
     std::vector<u64> payload;
     std::string kind;
-    if (T.atoms().mode() == AtomMode::Frozen)
+    if (T.atoms().frozen())
     {
         kind = "w";
         payload.assign(s.s.data(), s.s.data() + s.s.size_words());
@@ -1860,6 +1978,7 @@ nb::object restore_state(nb::handle task, u64 fingerprint, std::string_view kind
     std::vector<u64> raw(n);
     std::memcpy(raw.data(), payload.c_str(), n * sizeof(u64));
     const u64 F = T.compiled().layout.fluent_count;
+    const u32 slots = T.atoms().fluent_slots();
     std::vector<u64> num;
     if (kind == "wn" || kind == "cn")
     {
@@ -1872,27 +1991,26 @@ nb::object restore_state(nb::handle task, u64 fingerprint, std::string_view kind
     }
     else if (T.numeric_words())
         throw nb::value_error("mymyr: corrupt state pickle (no numeric words for a numeric task)");
-    if (kind == "w" && T.atoms().mode() == AtomMode::Frozen)
+    if (kind == "w")
     {
-        bool ok = true;  // frozen: slot = canonical id, every bit below F
-        bits::for_each(raw.data(), static_cast<u32>(n), [&](u64 b) { ok = ok && b < F; });
+        // the words of frozen slots: the task restored with the state has the same encoding (restore_task checks it)
+        if (!T.atoms().frozen())
+            throw nb::value_error("mymyr: corrupt state pickle (state words for a task with lazy atom slots)");
+        bool ok = true;
+        bits::for_each(raw.data(), static_cast<u32>(n), [&](u64 b) { ok = ok && b < slots; });
         if (!ok)
-            throw nb::value_error("mymyr: corrupt state pickle (atom id out of range)");
+            throw nb::value_error("mymyr: corrupt state pickle (atom slot out of range)");
         return make_state(o, State(raw.data(), static_cast<u32>(n), num.data(), static_cast<u32>(num.size())));
     }
-    std::vector<u64> cids;
-    if (kind == "w")
-        bits::for_each(raw.data(), static_cast<u32>(n), [&](u64 b) { cids.push_back(b); });  // frozen: slot = cid
-    else if (kind == "c")
-        cids = std::move(raw);
-    else
+    if (kind != "c")
         throw nb::value_error("mymyr: unknown state pickle kind");
     StateBuilder b;
-    for (u64 c : cids)
+    for (u64 c : raw)
     {
-        if (c >= F)
-            throw nb::value_error("mymyr: corrupt state pickle (atom id out of range)");
-        b.set(SlotId{T.atoms().intern(c)});
+        const u32 slot = c < F ? T.atoms().slot_if_any(c) : AtomIndex::k_empty;
+        if (slot == AtomIndex::k_empty)
+            throw nb::value_error("mymyr: corrupt state pickle (an atom this task has no slot for)");
+        b.set(SlotId{slot});
     }
     b.numeric() = std::move(num);
     return make_state(o, b.build());
@@ -1965,22 +2083,15 @@ void bind_task(nb::module_& m)
                             "loops.");
     task.def(
             "__init__",
-            [](PyTask* self, const FormalismTask& normalized, std::string_view atoms, std::string_view matching,
-               IntArg fc_free_params_in, IntArg frozen_max_words_in, IntArg pilot_expansions_in) {
-                const u32 fc_free_params = int_arg<u32>(fc_free_params_in, "fc_free_params");
-                const u32 frozen_max_words = int_arg<u32>(frozen_max_words_in, "frozen_max_words");
-                const u32 pilot_expansions = int_arg<u32>(pilot_expansions_in, "pilot_expansions");
-                const TaskOptions o = make_options(atoms, matching, fc_free_params, frozen_max_words, pilot_expansions);
+            [](PyTask* self, const FormalismTask& normalized, MYMYR_TASK_OPTION_PARAMS) {
+                const TaskOptions o = make_options(MYMYR_TASK_OPTION_VALUES);
                 new (self) PyTask{build_core(normalized.t, normalized.source, o)};
             },
             "normalized"_a, MYMYR_TASK_OPTION_ARGS, k_options_doc)
         .def_static(
             "from_text",
-            [](const std::filesystem::path& path, std::string_view atoms, std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in) {
-                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
-                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
-                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
-                const TaskOptions o = make_options(atoms, matching, fc, fmw, pilot);
+            [](const std::filesystem::path& path, MYMYR_TASK_OPTION_PARAMS) {
+                const TaskOptions o = make_options(MYMYR_TASK_OPTION_VALUES);
                 std::shared_ptr<const formalism::TaskData> data;
                 {
                     nb::gil_scoped_release release;
@@ -1994,11 +2105,8 @@ void bind_task(nb::module_& m)
         .def_static(
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain, const std::filesystem::path& problem,
-               std::string_view atoms, std::string_view matching, IntArg fc_in, IntArg fmw_in, IntArg pilot_in) {
-                const u32 fc = int_arg<u32>(fc_in, "fc_free_params");
-                const u32 fmw = int_arg<u32>(fmw_in, "frozen_max_words");
-                const u32 pilot = int_arg<u32>(pilot_in, "pilot_expansions");
-                const TaskOptions o = make_options(atoms, matching, fc, fmw, pilot);
+               MYMYR_TASK_OPTION_PARAMS) {
+                const TaskOptions o = make_options(MYMYR_TASK_OPTION_VALUES);
                 PyDomain dom;
                 if (nb::isinstance<PyDomain>(domain))
                     dom = *nb::inst_ptr<PyDomain>(domain);
@@ -2056,11 +2164,21 @@ void bind_task(nb::module_& m)
             return v;
         }, "Predicate names by index.")
         .def_prop_ro("words", [](const PyTask& t) { return t.core->task->words(); },
-                     "Current state width W in u64 words (grows only under lazy slots).")
-        .def_prop_ro("max_words", [](const PyTask& t) { return t.core->task->max_words(); })
+                     "Atom words W of a state row: ceil(num_atoms / 64). Fixed, except under lazy slots (it grows as "
+                     "slots are assigned, up to max_words).")
+        .def_prop_ro("max_words", [](const PyTask& t) { return t.core->task->max_words(); },
+                     "The widest a state of this task can be: words, except under lazy slots (the typed-dense width).")
         .def_prop_ro("num_atoms", [](const PyTask& t) { return t.core->task->atoms().fluent_slots(); },
-                     "Assigned fluent atom slots.")
-        .def_prop_ro("atom_mode", [](const PyTask& t) { return atoms_name(t.core->task->atoms().mode()); })
+                     "Fluent atom slots, the bits of a row that can be set: the relaxed-reachable fluent atoms "
+                     "('reachable'), every atom of the typed-dense space ('dense'), or the slots assigned so far "
+                     "('lazy').")
+        .def_prop_ro("atom_mode", [](const PyTask& t) { return atom_mode_name(t.core->task->atoms().mode()); },
+                     "How atoms get slots: 'reachable', 'dense' (what atoms='auto' chose, or what was asked for) or "
+                     "'lazy'.")
+        .def_prop_ro("encoding_fingerprint", [](const PyTask& t) { return t.core->task->encoding_fingerprint(); },
+                     "A hash of the state encoding: the slot of every fluent and derived atom, the numeric slots and "
+                     "their storage. Two tasks with equal encoding fingerprints read and write rows alike. A function "
+                     "of the task and its options, except under lazy slots (it then changes as slots are assigned).")
         .def_prop_ro("label_width", [](const PyTask& t) { return t.core->label_width; }, "Largest schema arity.")
         .def_prop_ro("numeric_slots", [](const PyTask& t) { return t.core->task->numeric_slots(); },
                      "Numeric fluent slots (ground fluent functions with a value; 0 for classical tasks).")
@@ -2084,20 +2202,27 @@ void bind_task(nb::module_& m)
             d["atoms"] = o[0];
             d["matching"] = o[1];
             d["fc_free_params"] = o[2];
-            d["frozen_max_words"] = o[3];
-            d["pilot_expansions"] = o[4];
+            d["numeric_storage"] = o[3];
+            d["numeric_quantum"] = o[4];
+            d["numeric_tolerant"] = o[5];
+            d["reachability_budget"] = o[6];
             return d;
-        })
+        }, "The construction options, as keyword arguments of Task.from_pddl.")
         .def_prop_ro("info", [](const PyTask& t) {
             const TaskInfo& i = t.core->task->info();
             nb::typed<nb::dict, std::string, ann::Any> d{nb::dict()};
-            d["atom_mode"] = atoms_name(i.atom_mode);
+            d["atom_mode"] = atom_mode_name(i.atom_mode);
             d["dense_fluent"] = i.dense_fluent;
             d["dense_derived"] = i.dense_derived;
-            d["pilot_words"] = i.pilot_words;
+            d["reachable_fluent"] = i.reachable_fluent;
+            d["reachable_derived"] = i.reachable_derived;
+            d["reachability_steps"] = i.reachability_steps;
+            d["reachability_complete"] = i.reachability_complete;
             d["build_seconds"] = i.build_s;
             return d;
-        })
+        }, "Construction facts: atom_mode, the typed-dense and relaxed-reachable atom counts (dense_fluent, "
+           "dense_derived, reachable_fluent, reachable_derived; the latter 0 when the analysis did not run or did not "
+           "finish), reachability_steps, reachability_complete, build_seconds.")
         .def(
             "atom_metadata",
             [](const PyTask& t, FrameworkArg framework) {
@@ -2112,8 +2237,12 @@ void bind_task(nb::module_& m)
             "framework"_a = nb::none(),
             "Atom metadata for encoders (mifrost), zero-copy views of a cached snapshot: atom_pred, atom_args (CSR with "
             "atom_args_offsets), atom_args_padded, atom_cid, pred_slots / pred_slot_offsets, pred_arity, pred_kind, "
-            "derived_* and static_* atoms, and scalars (num_atoms, num_objects, ...). Under lazy slots the snapshot "
-            "covers the slots assigned so far.")
+            "derived_* (with derived_pred_slots / derived_pred_slot_offsets) and static_* atoms, and scalars "
+            "(num_atoms, num_objects, atom_mode: 0 lazy, 1 dense, 2 reachable, ...). Under fixed slots (every mode but "
+            "lazy) the slots of a predicate are one range, ascending in the lexicographic order of their object "
+            "tuples: predicate p's fluent slots are pred_slot_offsets[p] .. pred_slot_offsets[p + 1] - 1 (pred_slots "
+            "is the identity; derived ones likewise). Under lazy slots the snapshot covers the slots assigned so far, "
+            "and pred_slots lists each predicate's slots.")
         .def(
             "device_arrays",
             [](const PyTask& t, IntArg version_in, FrameworkArg framework) {
@@ -2152,7 +2281,7 @@ void bind_task(nb::module_& m)
         .def("__repr__", [](const PyTask& t) {
             return "Task(" + t.core->data->domain_name + "/" + t.core->data->problem_name + ", " +
                    std::to_string(t.core->task->num_objects()) + " objects, " + std::to_string(t.core->task->num_schemas()) +
-                   " schemas, " + atoms_name(t.core->task->atoms().mode()) + " slots)";
+                   " schemas, " + atom_mode_name(t.core->task->atoms().mode()) + " slots)";
         });
     bind_task_api(task);
 
@@ -2231,16 +2360,18 @@ void bind_task(nb::module_& m)
              [](const PyState& s) {
                  const Owner o{s.core, s.owner};
                  AtomList out{nb::list()};
-                 bits::for_each(s.s.data(), s.s.size_words(),
-                                [&](u64 b) {
-                                    const SlotId slot{static_cast<u32>(b)};
-                                    const auto args = s.core->task->atoms().arguments(slot);
-                                    out.append(make_ground_atom(task_owner(o), GroundAtom{s.core->task->atoms().predicate(slot),
-                                                                                          std::vector<ObjectId>(args.begin(), args.end())}));
-                                });
+                 const AtomIndex& A = s.core->task->atoms();
+                 for (const u32 b : A.slots_in_canonical_order(AtomKind::Fluent, s.s.data(), s.s.size_words()))
+                 {
+                     const SlotId slot{b};
+                     const auto args = A.arguments(slot);
+                     out.append(make_ground_atom(task_owner(o), GroundAtom{A.predicate(slot),
+                                                                           std::vector<ObjectId>(args.begin(), args.end())}));
+                 }
                  return out;
              },
-             "The true fluent atoms (slot order).")
+             "The true fluent atoms, by predicate and then by arguments in the task's canonical atom order (the same "
+             "order under every atom mode).")
         .def("holds",
              [](const PyState& s, HoldsArg formula) { return holds_arg(s, formula); }, "formula"_a,
              "Truth of a ground atom (a GroundAtom, '(on a b)', ('on', 'a', 'b') or a slot), a GroundLiteral or "
