@@ -32,13 +32,13 @@ def solved_task(request):
             """(define (problem solved) (:domain solved) (:init (= (level) 1))
             (:goal (>= (level) 1)))""",
         )
-    derived = "(:derived (done) (p))" if request.param == "derived" else ""
+    derived = "(:derived (done) (p object))" if request.param == "derived" else ""
     requirements = ":strips :derived-predicates" if derived else ":strips"
-    goal = "done" if derived else "p"
+    goal = "done" if derived else "p object"
     return task_from_strings(
-        f"""(define (domain solved) (:requirements {requirements}) (:predicates (p) (done)) {derived}
-        (:action leave :parameters () :precondition (p) :effect (not (p))))""",
-        f"""(define (problem solved) (:domain solved) (:init (p)) (:goal ({goal})))""",
+        f"""(define (domain solved) (:requirements {requirements}) (:constants object) (:predicates (p ?object) (done)) {derived}
+        (:action leave :parameters (?object) :precondition (p ?object) :effect (not (p ?object))))""",
+        f"""(define (problem solved) (:domain solved) (:init (p object)) (:goal ({goal})))""",
     )
 
 
