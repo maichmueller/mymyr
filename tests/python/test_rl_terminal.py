@@ -205,7 +205,8 @@ CORRIDOR = """(define (domain corridor) (:requirements :strips)
  (:predicates (at ?x) (link ?x ?y) (alive))
  (:action move :parameters (?x ?y) :precondition (and (alive) (at ?x) (link ?x ?y)) :effect (and (not (at ?x)) (at ?y)))
  (:action die :parameters (?x) :precondition (and (alive) (at ?x)) :effect (not (alive))))"""
-# solved initially (with successors), the goal two moves away, an initial dead end, a longer corridor; dying is a dead end
+# solved initially (with successors), the goal two moves away, an initial dead end, a longer corridor; dying is a
+# dead end
 CORRIDOR_PROBLEMS = [
     "(:objects a c) (:init (alive) (at c) (link c a)) (:goal (at c))",
     "(:objects a b c) (:init (alive) (at a) (link a b) (link b a) (link b c)) (:goal (at c))",
@@ -218,6 +219,27 @@ TOGGLES = """(define (domain toggles) (:requirements :strips :negative-precondit
  (:action down :parameters () :precondition (p) :effect (not (p)))
  (:action finish :parameters () :precondition (p) :effect (q)))"""
 TOGGLES_PROBLEMS = ["(:init) (:goal (q))", "(:init (q)) (:goal (q))", "(:init (p)) (:goal (and (q) (not (p))))"]
+# a derived goal and numeric goals: the general path only, without goal masks
+RELAY = """(define (domain relay) (:requirements :strips :derived-predicates)
+ (:predicates (at ?x) (link ?x ?y) (exit ?x) (out ?x) (alive))
+ (:derived (out ?x) (and (at ?x) (exit ?x)))
+ (:action move :parameters (?x ?y) :precondition (and (alive) (at ?x) (link ?x ?y)) :effect (and (not (at ?x)) (at ?y)))
+ (:action die :parameters (?x) :precondition (and (alive) (at ?x)) :effect (not (alive))))"""
+RELAY_PROBLEMS = [
+    "(:objects a c) (:init (alive) (at c) (exit c) (link c a)) (:goal (out c))",
+    "(:objects a b c) (:init (alive) (at a) (exit c) (link a b) (link b a) (link b c)) (:goal (out c))",
+    "(:objects a b) (:init (at a) (exit b) (link a b)) (:goal (out b))",
+]
+LEVEL = """(define (domain level) (:requirements :strips :numeric-fluents) (:predicates (alive)) (:functions (level))
+ (:action up :parameters () :precondition (and (alive) (<= (level) 3)) :effect (increase (level) 1))
+ (:action down :parameters () :precondition (and (alive) (>= (level) 1)) :effect (decrease (level) 1))
+ (:action die :parameters () :precondition (alive) :effect (not (alive))))"""
+LEVEL_PROBLEMS = [
+    "(:init (alive) (= (level) 3)) (:goal (>= (level) 3))",
+    "(:init (alive) (= (level) 0)) (:goal (>= (level) 2))",
+    "(:init (= (level) 1)) (:goal (>= (level) 3))",
+]
+FAST_KINDS = ("corridor", "toggles", "suite")
 CONFIG = dict(max_steps=5, step_reward=-1.0, goal_reward=5.0, dead_end_reward=-2.0)
 DEAD_ENDS = [("no_successors", True), ("no_successors", False), ("none", True)]
 
@@ -234,7 +256,8 @@ def table_of(domain, problems):
 @pytest.fixture(scope="module")
 def absorbing_tables():
     corridor, toggles = table_of(CORRIDOR, CORRIDOR_PROBLEMS), table_of(TOGGLES, TOGGLES_PROBLEMS)
-    return {"corridor": corridor, "toggles": toggles, "suite": rl.TaskSuite([corridor, toggles])}
+    return {"corridor": corridor, "toggles": toggles, "suite": rl.TaskSuite([corridor, toggles]),
+            "derived": table_of(RELAY, RELAY_PROBLEMS), "numeric": table_of(LEVEL, LEVEL_PROBLEMS)}
 
 
 def weights_of(instances):
@@ -267,24 +290,26 @@ def absorbing_rollout(env, steps, autoreset):
 @pytest.mark.parametrize("autoreset", [False, True])
 def test_device_absorbing_rollout_equals_host(absorbing_tables, dead_end, terminal, autoreset):
     """Solved and dead-end rows on the device, general and fast path (both bucket launches), tables and a suite, with
-    and without per-env goals: absorbing steps, solved resets, sampled partial resets and autoresets, and the goal query
-    equal the host environment's."""
+    and without per-env goals, derived and numeric goals on the general path: absorbing steps, solved resets, sampled
+    partial resets and autoresets, and the goal query equal the host environment's."""
     from test_rl_table import gpu_device
 
     dev = gpu_device()
     rt = pytest.importorskip("mymyr.rl.torch")
     n, steps = 48, 12
     for kind, table in absorbing_tables.items():
-        assert rt.fast_unsupported(table) == ""
+        fast = kind in FAST_KINDS
+        assert (rt.fast_unsupported(table) == "") == fast
         instances = len(table)
         sampler = rl.InstanceSampler(instances, weights_of(instances)) if autoreset else "uniform"
-        for goals in (False, True):
+        for goals in (False, True) if fast else (False,):
             cfg = dict(CONFIG, dead_end=dead_end, dead_end_terminal=terminal, autoreset=autoreset, goals=goals, seed=7,
                        task_ids=(np.arange(n) % instances).astype(np.int32), sampler=sampler)  # fmt: skip
             ref = absorbing_rollout(rt.BatchedEnv(table, n, **cfg), steps, autoreset)
             absorbed = [r["step_terminated"] & (r["step_schema"] < 0) & (r["step_reward"] == 0) for r in ref]
             assert any(a.any() for a in absorbed), kind
-            for path, launch in (("general", "widest"), ("auto", "widest"), ("auto", "per_bucket")):
+            launches = [("general", "widest")] + ([("auto", "widest"), ("auto", "per_bucket")] if fast else [])
+            for path, launch in launches:
                 env = rt.BatchedEnv(table, n, device=dev, path=path, **cfg)
                 env.set_launch(launch)
                 assert env.core.fast == (path == "auto")
@@ -303,9 +328,10 @@ def test_captured_sampled_rollout_equals_host(absorbing_tables):
     dev = gpu_device()
     rt = pytest.importorskip("mymyr.rl.torch")
     n, K, R = 40, 4, 3
-    for kind, table in absorbing_tables.items():
-        instances = len(table)
-        cfg = dict(CONFIG, sampler=rl.InstanceSampler(instances, weights_of(instances)), seed=11, goals=kind != "toggles")
+    for kind in FAST_KINDS:
+        table, instances = absorbing_tables[kind], len(absorbing_tables[kind])
+        sampler = rl.InstanceSampler(instances, weights_of(instances))
+        cfg = dict(CONFIG, sampler=sampler, seed=11, goals=kind != "toggles")
         host = rt.BatchedEnv(table, n, **cfg)
         ref = [step_arrays(host.step(final=True)) for _ in range(K * R)]
         env = rt.BatchedEnv(table, n, device=dev, **cfg)
@@ -328,7 +354,7 @@ def test_captured_sampled_rollout_equals_host(absorbing_tables):
 @pytest.mark.parametrize("autoreset", [False, True])
 def test_jax_device_absorbing_scan_equals_cpu(absorbing_tables, dead_end, terminal, autoreset):
     """A jitted scan over solved and dead-end rows (given and random actions, sampled resets) on the GPU, general and
-    fast path, equals the same scan on the CPU."""
+    fast path (derived and numeric goals: the general path), equals the same scan on the CPU."""
     jax = pytest.importorskip("jax")
     import jax.numpy as jnp
 
@@ -342,8 +368,10 @@ def test_jax_device_absorbing_scan_equals_cpu(absorbing_tables, dead_end, termin
         instances = len(table)
         sampler = rl.InstanceSampler(instances, weights_of(instances))
         runs = {}
-        for device, path in ((jax.devices("cpu")[0], "auto"), (gpu, "general"), (gpu, "auto")):
-            env = rj.Env(table, device=device, path=path, goals=kind != "toggles", autoreset=autoreset, sampler=sampler,
+        fast = kind in FAST_KINDS
+        for device, path in ((jax.devices("cpu")[0], "auto"), (gpu, "general")) + (((gpu, "auto"),) if fast else ()):
+            env = rj.Env(table, device=device, path=path, goals=kind in ("corridor", "suite"), autoreset=autoreset,
+                         sampler=sampler,
                          dead_end=dead_end, dead_end_terminal=terminal, **CONFIG)  # fmt: skip
             if device == gpu:
                 assert env.fast == (path == "auto")
