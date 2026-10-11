@@ -188,6 +188,21 @@ TEST(EncodingGoal, NumericConstraintsAreNotExpandable)
     EXPECT_FALSE(t->encoding_goal_complete);
 }
 
+TEST(EncodingGoal, UntypedQuantifierRangesOverEveryObject)
+{
+    const auto d = frontend::Domain::from_string(R"((define (domain u) (:requirements :strips :universal-preconditions)
+ (:constants c)
+ (:predicates (p ?x) (q ?x ?y))
+ (:action act :parameters (?x ?y) :precondition (and) :effect (and (p ?x) (q ?x ?y)))))");
+    const auto t = d->instantiate_string(R"((define (problem u1) (:domain u) (:objects a b)
+ (:goal (and (forall (?x) (p ?x)) (forall (?x) (forall (?y) (q ?x ?y)))))))");
+    const auto got = literal_set(*t);
+    EXPECT_EQ(got.size(), 3u + 9u);
+    EXPECT_TRUE(got.contains("(p c)"));
+    EXPECT_TRUE(got.contains("(q b c)"));
+    EXPECT_TRUE(t->encoding_goal_complete);
+}
+
 TEST(EncodingGoal, TextWithTheGoalRoundTrips)
 {
     for (const Case& c : cases())
