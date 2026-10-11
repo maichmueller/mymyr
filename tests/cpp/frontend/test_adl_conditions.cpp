@@ -108,9 +108,37 @@ std::vector<State> base_states(const Task& t)
 
 using Formula = std::function<bool(const Atoms&)>;
 
-void expect_goal(const std::string& goal, const Formula& f)
+/// "(p a)" or "(not (p a))".
+std::string literal_text(const formalism::TaskData& d, const formalism::Literal& l)
+{
+    std::string s = "(" + std::string(d.str(d.predicate(l.pred).name));
+    for (formalism::Term x : d.terms_of(l))
+        s += " " + std::string(d.str(d.objects[formalism::term_object(x).v].name));
+    s += ")";
+    return l.positive ? s : "(not " + s + ")";
+}
+
+bool literal_holds(const formalism::TaskData& d, const formalism::Literal& l, const Atoms& at)
+{
+    const auto terms = d.terms_of(l);
+    const bool value = d.str(d.predicate(l.pred).name) == "="
+                           ? formalism::term_object(terms[0]).v == formalism::term_object(terms[1]).v
+                           : at.set.contains(literal_text(d, {l.pred, true, l.terms}));
+    return value == l.positive;
+}
+
+/// The goal test agrees with `f` in every base state. The encoding goal (the goal as written, expanded) is `encoding`
+/// and `complete`: its literals hold in every goal state, and when it is complete they hold in the goal states only.
+void expect_goal(const std::string& goal, const Formula& f, const std::set<std::string>& encoding, bool complete)
 {
     const auto t = make(goal);
+    const formalism::TaskData& d = t->data();
+    std::set<std::string> got;
+    for (const formalism::Literal& l : t->encoding_goal())
+        got.insert(literal_text(d, l));
+    EXPECT_EQ(got, encoding) << goal;
+    EXPECT_EQ(t->encoding_goal_complete(), complete) << goal;
+    EXPECT_FALSE(t->encoding_goal_unsatisfiable()) << goal;
     const std::vector<State> states = base_states(*t);
     ASSERT_EQ(states.size(), 64u);
     u32 holds = 0;
@@ -119,6 +147,12 @@ void expect_goal(const std::string& goal, const Formula& f)
         const Atoms at = atoms_of(*t, s.view());
         EXPECT_EQ(t->is_goal(s.view()), f(at)) << goal;
         holds += f(at) ? 1 : 0;
+        const bool expanded = std::ranges::all_of(t->encoding_goal(), [&](const formalism::Literal& l) { return literal_holds(d, l, at); });
+        EXPECT_TRUE(expanded || !f(at)) << goal;
+        if (complete)
+        {
+            EXPECT_EQ(expanded, f(at)) << goal;
+        }
     }
     EXPECT_GT(holds, 0u) << goal;
     EXPECT_LT(holds, states.size()) << goal;
@@ -128,24 +162,38 @@ void expect_goal(const std::string& goal, const Formula& f)
 TEST(AdlConditions, GoalsMatchTheFormula)
 {
     using A = Atoms;
-    expect_goal("(forall (?x) (imply (s ?x) (p ?x)))", [](const A& at) { return A::all([&](auto& x) { return !at("s", x) || at("p", x); }); });
+    // a static guard (s, r) is decided per binding in the encoding goal; a fluent guard, a disjunction or an
+    // existential is not, and leaves the encoding goal incomplete
+    expect_goal("(forall (?x) (imply (s ?x) (p ?x)))", [](const A& at) { return A::all([&](auto& x) { return !at("s", x) || at("p", x); }); },
+                {"(p a)", "(p c)"}, true);
     expect_goal("(and (q a) (forall (?x) (imply (s ?x) (p ?x))))",
-                [](const A& at) { return at("q", "a") && A::all([&](auto& x) { return !at("s", x) || at("p", x); }); });
-    expect_goal("(exists (?x) (and (p ?x) (not (q ?x))))", [](const A& at) { return A::any([&](auto& x) { return at("p", x) && !at("q", x); }); });
+                [](const A& at) { return at("q", "a") && A::all([&](auto& x) { return !at("s", x) || at("p", x); }); },
+                {"(q a)", "(p a)", "(p c)"}, true);
+    expect_goal("(forall (?x) (imply (s ?x) (forall (?y) (imply (r ?x ?y) (q ?y)))))",
+                [](const A& at)
+                { return A::all([&](auto& x) { return !at("s", x) || A::all([&](auto& y) { return !at("r", x, y) || at("q", y); }); }); },
+                {"(q b)", "(q c)"}, true);
+    expect_goal("(forall (?x) (or (p ?x) (q ?x)))", [](const A& at) { return A::all([&](auto& x) { return at("p", x) || at("q", x); }); }, {},
+                false);
+    expect_goal("(exists (?x) (and (p ?x) (not (q ?x))))", [](const A& at) { return A::any([&](auto& x) { return at("p", x) && !at("q", x); }); },
+                {}, false);
     expect_goal("(or (and (p a) (q b)) (not (exists (?x) (q ?x))))",
-                [](const A& at) { return (at("p", "a") && at("q", "b")) || !A::any([&](auto& x) { return at("q", x); }); });
+                [](const A& at) { return (at("p", "a") && at("q", "b")) || !A::any([&](auto& x) { return at("q", x); }); }, {}, false);
     expect_goal("(forall (?x) (imply (p ?x) (exists (?y) (and (r ?x ?y) (q ?y)))))",
                 [](const A& at)
-                { return A::all([&](auto& x) { return !at("p", x) || A::any([&](auto& y) { return at("r", x, y) && at("q", y); }); }); });
+                { return A::all([&](auto& x) { return !at("p", x) || A::any([&](auto& y) { return at("r", x, y) && at("q", y); }); }); },
+                {}, false);
     expect_goal("(not (forall (?x) (or (p ?x) (exists (?y) (and (r ?y ?x) (q ?y))))))",
                 [](const A& at)
-                { return !A::all([&](auto& x) { return at("p", x) || A::any([&](auto& y) { return at("r", y, x) && at("q", y); }); }); });
+                { return !A::all([&](auto& x) { return at("p", x) || A::any([&](auto& y) { return at("r", y, x) && at("q", y); }); }); },
+                {}, false);
     expect_goal("(forall (?x ?y) (imply (and (r ?x ?y) (p ?x)) (or (p ?y) (= ?x ?y))))",
                 [](const A& at)
                 {
                     return A::all([&](auto& x)
                                   { return A::all([&](auto& y) { return !(at("r", x, y) && at("p", x)) || at("p", y) || x == y; }); });
-                });
+                },
+                {}, false);
 }
 
 TEST(AdlConditions, PreconditionsEffectConditionsAndDerivedBodiesMatchTheFormula)

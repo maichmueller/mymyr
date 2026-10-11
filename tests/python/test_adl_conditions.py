@@ -76,6 +76,8 @@ SHAPES = {
     "numeric-exists": "(exists (?y - a) (and (p ?y) (< (f ?y) 2)))",
     "numeric-or": "(or (g) (> (f X) 2))",
     "numeric-not": "(not (and (p X) (<= (f X) 1)))",
+    "static-nested-forall": "(forall (?y - a) (imply (s ?y) (forall (?z - a) (imply (r ?y ?z) (q ?z)))))",
+    "static-guard-false-body": "(forall (?y - a) (imply (s ?y) (r ?y ?y)))",
 }
 
 CONTEXTS = ["goal", "goal-and", "pre", "when", "forall-when", "nested-when", "derived", "derived-goal"]
@@ -280,6 +282,70 @@ def check(shape, context):
 @pytest.mark.parametrize("shape", list(SHAPES))
 def test_conditions_against_the_formula(shape, context):
     check(SHAPES[shape], context)
+
+
+# ------------------------------------------------------------------------------------------------ encoding goal
+
+
+def literal_holds(literal, fluents):
+    name, args = literal.predicate.name, tuple(o.name for o in literal.objects)
+    value = args[0] == args[1] if name == "=" else (name, args) in fluents or (name, args) in STATIC
+    return value == literal.positive
+
+
+@pytest.mark.parametrize("context", ["goal", "goal-and"])
+@pytest.mark.parametrize("shape", list(SHAPES))
+def test_encoding_goal_follows_the_formula(shape, context):
+    """The goal as written, expanded (task.encoding_goal), against the formula in every state: each literal holds in
+    every goal state; a complete expansion holds exactly in the goal states; it is unsatisfiable exactly when one of its
+    static literals fails, and then no state is a goal."""
+    domain, problem, parts = build(SHAPES[shape], context)
+    task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+    goal = parse(parts["goal"])
+    literals = task.encoding_goal
+    static = [x for x in literals if x.predicate.name in ("s", "r", "=")]
+    assert task.encoding_goal_unsatisfiable == (not all(literal_holds(x, set()) for x in static))
+    goals = 0
+    for state in base_states(task):
+        fluents = {atom_key(a) for a in state.atoms()}
+        holds = Reference(fluents, None).holds(goal, {})
+        assert task.is_goal(state) == holds
+        expanded = all(literal_holds(x, fluents) for x in literals)
+        assert expanded or not holds, (shape, context, sorted(fluents))
+        if task.encoding_goal_complete:
+            assert expanded == holds, (shape, context, sorted(fluents))
+        goals += holds
+    if task.encoding_goal_unsatisfiable:
+        assert goals == 0
+
+
+# shape in the goal (X = o1): (literals, complete, unsatisfiable)
+ENCODING_GOALS = {
+    "forall-guarded": ({"(p o1)", "(p k)"}, True, False),
+    "forall-free": ({"(p o2)"}, True, False),
+    "static-nested-forall": ({"(q o2)", "(q k)"}, True, False),
+    "static-guard-false-body": ({"(r o1 o1)", "(r k k)"}, True, True),
+    "forall-either": ({"(q o2)", "(q k)", "(q c1)"}, True, False),
+    "forall-two": (set(), False, False),  # a fluent guard
+    "nested-forall-forall": (set(), False, False),  # a fluent guard
+    "forall-or": (set(), False, False),
+    "forall-equality": (set(), False, False),  # a disjunction, though its first part is static
+    "exists-and": (set(), False, False),
+    "not-exists": (set(), False, False),  # a forall of a negated conjunction
+    "numeric-forall": (set(), False, False),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(ENCODING_GOALS))
+def test_encoding_goal_of_guarded_quantifiers(shape):
+    literals, complete, unsatisfiable = ENCODING_GOALS[shape]
+    domain, problem, _ = build(SHAPES[shape], "goal")
+    task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+    assert {str(x) for x in task.encoding_goal} == literals
+    assert task.encoding_goal_complete is complete
+    assert task.encoding_goal_unsatisfiable is unsatisfiable
+    # the planner keeps the derived predicate of the compiled goal
+    assert all(x.predicate.name.startswith("axiom_") for x in task.goal_condition.literals)
 
 
 def test_fast_init_and_loki_init_agree():

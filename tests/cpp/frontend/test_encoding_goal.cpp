@@ -107,6 +107,18 @@ const std::vector<Case>& cases()
         {"forall_equality", {"(not (= home a))", "(not (= a a))", "(not (= b a))"}, true, true},
         {"static_true", {"(heavy t1)", "(not (heavy t2))", "(lit a)"}, true, false},
         {"duplicate", {"(lit home)", "(lit a)", "(lit b)", "(not (ok t1))"}, true, false},
+        // guarded quantifiers, which the planner compiles into derived predicates: a static guard (an atom, equality, a
+        // nested quantifier's) is decided per binding, a fluent guard, a disjunction or an existential is not
+        {"forall_static_guard", {"(ok t1)", "(ok b1)"}, true, false},
+        {"forall_forall_static_guard", {"(lit a)", "(lit b)"}, true, false},
+        {"forall_guard_equality", {"(lit home)", "(lit b)"}, true, false},
+        {"forall_static_guard_unsatisfiable", {"(road b b)"}, true, true},
+        {"forall_fluent_guard", {"(lit a)"}, false, false},
+        {"forall_or", {"(lit a)"}, false, false},
+        {"forall_partly_expandable", {"(ok b1)"}, false, false},
+        {"exists_conjunctive_body", {"(lit a)"}, false, false},
+        {"exists_forall", {"(lit a)"}, false, false},
+        {"or_conjunctions", {"(lit b)"}, false, false},
     };
     return v;
 }

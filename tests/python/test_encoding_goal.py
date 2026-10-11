@@ -45,6 +45,17 @@ CASES = {
     "static_false": ({"(heavy t2)", "(lit a)"}, True, True),
     "static_true": ({"(heavy t1)", "(not (heavy t2))", "(lit a)"}, True, False),
     "duplicate": ({"(lit home)", "(lit a)", "(lit b)", "(not (ok t1))"}, True, False),
+    # guarded quantifiers: a static guard is decided per binding, a fluent guard, a disjunction or an existential is not
+    "forall_static_guard": ({"(ok t1)", "(ok b1)"}, True, False),
+    "forall_forall_static_guard": ({"(lit a)", "(lit b)"}, True, False),
+    "forall_guard_equality": ({"(lit home)", "(lit b)"}, True, False),
+    "forall_static_guard_unsatisfiable": ({"(road b b)"}, True, True),
+    "forall_fluent_guard": ({"(lit a)"}, False, False),
+    "forall_or": ({"(lit a)"}, False, False),
+    "forall_partly_expandable": ({"(ok b1)"}, False, False),
+    "exists_conjunctive_body": ({"(lit a)"}, False, False),
+    "exists_forall": ({"(lit a)"}, False, False),
+    "or_conjunctions": ({"(lit b)"}, False, False),
 }
 
 

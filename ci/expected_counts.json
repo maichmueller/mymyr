@@ -4,5 +4,5 @@
   "ctest_max_skipped": 214,
   "ctest_sanitized_min_total": 1622,
   "ctest_sanitized_max_skipped": 223,
-  "pytest_min_passed": 1908
+  "pytest_min_passed": 2028
 }
