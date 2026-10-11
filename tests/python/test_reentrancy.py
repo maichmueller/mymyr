@@ -183,7 +183,7 @@ def _call(fn):
         return e
 
 
-@pytest.mark.parametrize("kind", ["max", "ff", "goal_count", "perfect"])
+@pytest.mark.parametrize("kind", ["max", "ff", "goal_count", "lmcut", "lmcount", "perfect"])
 def test_a_searchs_heuristic_object_is_callable_from_its_observer(two_puts, kind):
     if kind == "perfect":
         h = search.Heuristic.perfect(mymyr.datasets.state_space(two_puts, remove_if_unsolvable=False))

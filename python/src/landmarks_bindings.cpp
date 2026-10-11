@@ -265,6 +265,16 @@ rr::ConjunctiveQuery make_query(const Owner& o, u32 num_variables, nb::handle li
 void bind_landmarks(nb::module_& m)
 {
     // enums ----------------------------------------------------------------------------------------------------------
+    nb::enum_<lm::FirstAchievers>(m, "FirstAchievers",
+                                  "The first achievers of approximate_fact_landmarks: HMAX (mimir's) takes the "
+                                  "operators reaching an atom at its h_max-style cost, which is not sound in general (an "
+                                  "atom every cheapest achiever needs is a landmark although a costlier achiever does "
+                                  "without it); POSSIBLY_BEFORE takes the operators applicable in the delete relaxation "
+                                  "before the atom can first hold (Zhu and Givan; Richter, Helmert and Westphal), which "
+                                  "makes the landmarks and orderings sound.")
+        .value("HMAX", lm::FirstAchievers::HMax)
+        .value("POSSIBLY_BEFORE", lm::FirstAchievers::PossiblyBefore);
+
     nb::enum_<lm::ReachabilityDisambiguation>(m, "ReachabilityDisambiguation",
                                               "How lifted_fact_landmarks narrows a lifted landmark's free parameters "
                                               "against relaxed reachability, beyond the static filter: OFF does not; "
@@ -512,14 +522,19 @@ void bind_landmarks(nb::module_& m)
     m.def(
         "approximate_fact_landmarks",
         [](TaskArg task, bool include_positive_goal_facts, bool compute_greedy_necessary_orderings,
-           IntArg max_disjunctive_landmark_size_in, IntArg max_disjunctive_landmark_depth_in, IntArg max_operators_in, IntArg max_bindings_in,
-           double max_seconds) {
+           IntArg max_disjunctive_landmark_size_in, IntArg max_disjunctive_landmark_depth_in,
+           Arg<std::variant<lm::FirstAchievers, std::string>> first_achievers, bool include_derived_atoms,
+           IntArg max_operators_in, IntArg max_bindings_in, double max_seconds) {
             const u64 max_disjunctive_landmark_size = int_arg<u64>(max_disjunctive_landmark_size_in, "max_disjunctive_landmark_size");
             const u64 max_disjunctive_landmark_depth = int_arg<u64>(max_disjunctive_landmark_depth_in, "max_disjunctive_landmark_depth");
             const u64 max_operators = int_arg<u64>(max_operators_in, "max_operators");
             const u64 max_bindings = int_arg<u64>(max_bindings_in, "max_bindings");
             const Owner o = owner_of(task);
             lm::ApproximateFactLandmarkOptions opts;
+            opts.first_achievers = enum_arg<lm::FirstAchievers>(
+                first_achievers, {{"hmax", lm::FirstAchievers::HMax}, {"possibly_before", lm::FirstAchievers::PossiblyBefore}},
+                "first_achievers");
+            opts.include_derived_atoms = include_derived_atoms;
             opts.include_positive_goal_facts = include_positive_goal_facts;
             opts.compute_greedy_necessary_orderings = compute_greedy_necessary_orderings;
             opts.max_disjunctive_landmark_size = max_disjunctive_landmark_size;
@@ -536,12 +551,16 @@ void bind_landmarks(nb::module_& m)
             return make_graph(o, std::move(*g));
         },
         "task"_a, nb::kw_only(), "include_positive_goal_facts"_a = true, "compute_greedy_necessary_orderings"_a = true,
-        "max_disjunctive_landmark_size"_a = 0, "max_disjunctive_landmark_depth"_a = 0, "max_operators"_a = 5'000'000,
+        "max_disjunctive_landmark_size"_a = 0, "max_disjunctive_landmark_depth"_a = 0,
+        "first_achievers"_a = lm::FirstAchievers::HMax, "include_derived_atoms"_a = false, "max_operators"_a = 5'000'000,
         "max_bindings"_a = 100'000'000, "max_seconds"_a = 60.0,
         "Fact landmarks over the grounded delete relaxation (landmarks/approximate.hpp; as in mimir's "
         "ApproximateFactLandmarkGenerator), with the achiever index. Grounds the task: max_operators, max_bindings and "
         "max_seconds bound the grounding (RuntimeError beyond). max_disjunctive_landmark_size 0: no disjunctive "
-        "landmarks; max_disjunctive_landmark_depth 0: unbounded.");
+        "landmarks; max_disjunctive_landmark_depth 0: unbounded. first_achievers: a FirstAchievers or 'hmax' / "
+        "'possibly_before' (sound; the landmark count's). include_derived_atoms: derived goal atoms and derived "
+        "preconditions are landmarks too, achieved by the axioms (the graph's achieved / unachieved see fluent atoms "
+        "only).");
 
     m.def(
         "lifted_fact_landmarks",

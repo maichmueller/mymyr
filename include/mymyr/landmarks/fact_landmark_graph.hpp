@@ -7,7 +7,9 @@
 //   - Atoms are positive fluent ground atoms named by their canonical id (task/atom_index.hpp): portable across
 //     processes and threads, independent of the order in which lazy slots were assigned. slots() resolves them to
 //     state bit positions of a task (interning a slot on first touch, which is thread-safe).
-//   - Fact landmarks: every plan makes each of them true at some point. Kept in discovery order, without duplicates.
+//   - Fact landmarks: atoms every plan makes true at some point (for a sound generator: approximate_fact_landmarks with
+//     FirstAchievers::PossiblyBefore; mimir's first achievers are not sound in general). Kept in discovery order,
+//     without duplicates.
 //   - Disjunctive landmarks: sets of which every plan makes at least one member true. Each set is ascending and
 //     duplicate-free, no set contains a fact landmark (the fact subsumes it), no two sets are equal, and the list is
 //     sorted. Deliberately separate from the fact landmarks: a member is not individually mandatory.

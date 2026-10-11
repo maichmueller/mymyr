@@ -248,7 +248,7 @@ def lazy_after_a_search(name):
 
 def test_heuristics_and_atom_listings_do_not_depend_on_lazy_slots():
     fixed, lazy = text_task("depot__p02"), lazy_after_a_search("depot__p02")
-    kinds = ("ff", "add", "max", "set_additive", "h2", "goal_count")
+    kinds = ("ff", "add", "max", "set_additive", "h2", "goal_count", "lmcut", "lmcount")
     hf = {k: search.Heuristic(fixed, k) for k in kinds}
     hl = {k: search.Heuristic(lazy, k) for k in kinds}
     a, b = fixed.initial_state, lazy.initial_state

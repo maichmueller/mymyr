@@ -26,6 +26,7 @@ struct AStarEager
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
+        nodes.path_words = c.status_words;
         Q open, goals;  // goal states wait in their own list: popped first among equal f (mimir's (f, GOAL) key)
         Transitions tr;
         Cur cur;
@@ -35,6 +36,7 @@ struct AStarEager
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
         nodes.add(k_none, k_none, nullptr, 0, c.g0);
+        c.start_status(nodes, root, s0);
         if (c.unsolvable())
         {
             c.begin_search();
@@ -47,7 +49,7 @@ struct AStarEager
             c.solved(nodes, root, s0, false);
             return finish();
         }
-        const f64 h0 = c.evaluate(s0);
+        const f64 h0 = c.evaluate(s0, nodes, root);
         r.initial_h = h0;
         c.begin_search();
         if (h0 == k_inf)
@@ -69,6 +71,15 @@ struct AStarEager
             else
                 open.push(f, Q::key(nodes.h[id]), store.make_ref(id, v));
         };
+        f64 last_f = -k_inf;
+        auto layer = [&](u32 id)
+        {
+            if (const f64 f = fval(nodes, id, c.g0); f > last_f)
+            {
+                last_f = f;
+                r.expanded_until_last_jump = r.stats.expanded;
+            }
+        };
         const u32 max_depth = c.o.control.budget.max_depth;
         for (;;)
         {
@@ -84,6 +95,7 @@ struct AStarEager
                 }
                 store.load(ref, cur);
                 store.release(ref);
+                layer(id);
                 c.solved(nodes, id, cur.view(), false);
                 break;
             }
@@ -105,6 +117,7 @@ struct AStarEager
             store.load(ref, cur);
             store.release(ref);
             nodes.set_status(id, Nodes::Closed);
+            layer(id);
             if (nodes.track_depth && nodes.depth[id] >= max_depth)
             {
                 ++r.stats.pruned;
@@ -127,7 +140,7 @@ struct AStarEager
                     const StateView v = tr.view(t);
                     if (c.batched ? c.fresh_goal[tr.index(t)] != 0 : c.is_goal(v))
                         nodes.set(cid, Nodes::Goal);
-                    const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v);
+                    const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v, nodes, cid);
                     if (hv == k_inf)
                     {
                         nodes.set_status(cid, Nodes::DeadEnd);
@@ -147,6 +160,18 @@ struct AStarEager
                 {
                     r.reopened += st == Nodes::Closed;
                     nodes.relink(cid, id, t.schema, tr.binding(t), c.succ.arity(t.schema), gc);
+                    if (c.path_dependent)  // the status has merged another path since h was computed
+                    {
+                        const f64 hv = c.evaluate(tr.view(t), nodes, cid);
+                        if (hv == k_inf)
+                        {
+                            nodes.set_status(cid, Nodes::DeadEnd);
+                            ++r.dead_ends;
+                            ++r.stats.pruned;
+                            continue;
+                        }
+                        nodes.h[cid] = hv;
+                    }
                     nodes.set_status(cid, Nodes::Open);
                     push(cid, tr.view(t));
                 }
@@ -168,6 +193,7 @@ struct AStarLazy
         S store(c.task);
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
+        nodes.path_words = c.status_words;
         Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 1, c.o.standard_weight);
         Q goals;  // requeue: evaluated goal states, accepted once no open entry has a smaller key
         Transitions tr;
@@ -178,6 +204,7 @@ struct AStarLazy
         const StateView s0 = c.start.view();
         const u32 root = store.insert(s0).first;
         nodes.add(k_none, k_none, nullptr, 0, c.g0);
+        c.start_status(nodes, root, s0);
         if (c.unsolvable())
         {
             c.begin_search();
@@ -190,7 +217,7 @@ struct AStarLazy
             c.solved(nodes, root, s0, false);
             return finish();
         }
-        const f64 h0 = c.evaluate(s0);
+        const f64 h0 = c.evaluate(s0, nodes, root);
         r.initial_h = h0;
         c.begin_search();
         if (h0 == k_inf)
@@ -207,6 +234,15 @@ struct AStarLazy
         const bool use_preferred = c.o.preferred_operators && c.h->provides_preferred();
         const u32 max_depth = c.o.control.budget.max_depth;
         u32 last_evaluated = root;
+        f64 last_f = -k_inf;
+        auto layer = [&](u32 id)
+        {
+            if (const f64 f = fval(nodes, id, c.g0); f > last_f)
+            {
+                last_f = f;
+                r.expanded_until_last_jump = r.stats.expanded;
+            }
+        };
         for (;;)
         {
             if (!goals.empty() && (open.empty() || goals.top_key() <= open.min_key()))
@@ -221,6 +257,7 @@ struct AStarLazy
                 }
                 store.load(ref, cur);
                 store.release(ref);
+                layer(id);
                 c.solved(nodes, id, cur.view(), false);
                 break;
             }
@@ -245,7 +282,7 @@ struct AStarLazy
             const StateView sv = cur.view();
             if (!nodes.has(id, Nodes::Evaluated))
             {
-                const f64 hv = c.evaluate(sv);
+                const f64 hv = c.evaluate(sv, nodes, id);
                 last_evaluated = id;
                 nodes.h[id] = hv;
                 nodes.set(id, Nodes::Evaluated);
@@ -274,6 +311,7 @@ struct AStarLazy
                 }
             }
             store.release(ref);
+            layer(id);
             if (!requeue && nodes.has(id, Nodes::Goal))
             {
                 c.solved(nodes, id, sv, false);
@@ -292,7 +330,7 @@ struct AStarLazy
             // h was cached (a re-queued state)
             if (use_preferred && last_evaluated != id)
             {
-                (void)c.evaluate(sv);
+                (void)c.evaluate(sv, nodes, id);
                 last_evaluated = id;
             }
             const bool pref = use_preferred;
