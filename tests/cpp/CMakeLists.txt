@@ -33,6 +33,7 @@ add_executable(mymyr_tests
     search/test_astar_iw_fork.cpp
     search/test_best_first.cpp
     heuristics/test_heuristics.cpp
+    heuristics/test_landmark_heuristics.cpp
     search/test_plan_file.cpp
     search/test_layer_orders_fork.cpp
     search/test_beam.cpp
@@ -78,7 +79,7 @@ if(TARGET mymyr_frontend)
     target_compile_definitions(mymyr_export_task PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}" MYMYR_WORK_DIR="${MYMYR_WORK_DIR}" MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
 
-    add_executable(mymyr_frontend_tests frontend/golden.cpp frontend/test_frontend.cpp)
+    add_executable(mymyr_frontend_tests frontend/golden.cpp frontend/test_frontend.cpp frontend/test_encoding_goal.cpp)
     target_link_libraries(mymyr_frontend_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_frontend_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
@@ -253,6 +254,10 @@ if(TARGET mymyr_frontend)
         MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}"
         $<$<BOOL:${MYMYR_SANITIZE}>:MYMYR_SANITIZED>)
     gtest_discover_tests(mymyr_numeric_pddl_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
+    # LM-cut and landmark count on hand-evaluated PDDL tasks
+    add_executable(mymyr_landmark_heuristics_tests heuristics/test_landmark_heuristics_pddl.cpp)
+    target_link_libraries(mymyr_landmark_heuristics_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
+    gtest_discover_tests(mymyr_landmark_heuristics_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 endif()
 
 # ------------------------------------------------------------------------------------------------ relaxed reachability and landmarks

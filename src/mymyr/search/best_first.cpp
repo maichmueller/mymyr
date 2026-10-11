@@ -54,6 +54,14 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     }
     h->set_interrupt([this] { return (m_timed && Clock::now() >= m_deadline) || o.control.cancel.requested(); });
     batched = h->batched();
+    path_dependent = h->path_dependent();
+    status_words = path_dependent ? h->status_words() : 0;
+    if (path_dependent && batched)
+        throw std::invalid_argument("mymyr best-first search: a path-dependent heuristic cannot evaluate in batches");
+    if (path_dependent && o.control.goal.kind == GoalSpec::Kind::AnyOf)
+        throw std::invalid_argument(std::string("mymyr best-first search: the path-dependent heuristic '") +
+                                    heuristics::to_string(h->kind()) +
+                                    "' estimates the task's goal; GoalSpec::AnyOf is not supported");
     for (const State& s : o.control.blocked_states)
     {
         if (s.numeric_words() != nn)
@@ -75,6 +83,14 @@ f64 Context::evaluate(StateView s)
     if (o.control.goal.kind == GoalSpec::Kind::AnyOf)
         return h->evaluate(s, o.control.goal.goals);
     return h->evaluate(s);
+}
+
+f64 Context::evaluate(StateView s, const Nodes& nodes, u32 id)
+{
+    if (!path_dependent)
+        return evaluate(s);
+    ++r.evaluations;
+    return h->evaluate(s, nodes.path_of(id));
 }
 
 void Context::evaluate(std::span<const StateView> states, std::span<f64> out)

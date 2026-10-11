@@ -238,6 +238,23 @@ struct TaskData
     Condition goal;                        // ground: every term is an object
     std::optional<Metric> metric;
 
+    // The goal as an encoding sees it: signed ground literals (into `literals`; every term is an object), sorted by
+    // (sign: positive first, predicate id, objects) and free of duplicates. It is the goal as written, with
+    // conjunctions flattened, `forall` expanded over the objects of the quantified types (constants included, in
+    // object order) and `imply` with a static antecedent that holds expanded (one that fails contributes nothing).
+    // Negation is pushed inward (`not or`, `not exists`, `not imply` with a static antecedent that holds, `not not`).
+    // Literals over static predicates are evaluated: a true one is kept, a false one is kept too and sets
+    // `encoding_goal_unsatisfiable`. A conjunct that cannot be expanded (`or`, `exists`, `not and`, `not forall`,
+    // `imply` with a fluent antecedent, a numeric constraint) is left out and clears `encoding_goal_complete`; so is
+    // one whose quantifiers would take the goal past the budget of quantifier bindings. The planner's goal (`goal`)
+    // is not affected.
+    // `encoding_goal_recorded` is false for a TaskData whose front end did not record it (`encoding_goal` is then
+    // empty); a Task derives it with set_encoding_goal_from_normalized.
+    Range encoding_goal;
+    bool encoding_goal_recorded = false;
+    bool encoding_goal_complete = true;
+    bool encoding_goal_unsatisfiable = false;
+
     // ------------------------------------------------------------------ accessors
     [[nodiscard]] std::string_view str(Str s) const { return std::string_view(chars).substr(s.begin, s.size); }
     template<class T>
@@ -255,6 +272,7 @@ struct TaskData
     {
         return slice(conditional_effects, s.effects);
     }
+    [[nodiscard]] std::span<const Literal> encoding_goal_literals() const { return slice(literals, encoding_goal); }
     [[nodiscard]] std::span<const ObjectId> objects_of(const GroundAtom& a) const { return slice(object_ids, a.objects); }
     [[nodiscard]] const Predicate& predicate(PredicateId p) const { return predicates[p.v]; }
     [[nodiscard]] u32 num_objects() const { return static_cast<u32>(objects.size()); }
@@ -275,6 +293,28 @@ struct TaskData
         return r;
     }
 };
+
+/// A signed ground literal, as the front ends hand it to set_encoding_goal.
+struct GroundLiteralData
+{
+    PredicateId pred;
+    bool positive = true;
+    std::vector<ObjectId> objects;
+};
+
+/// Records the encoding goal (see TaskData::encoding_goal): sorts and deduplicates `literals`, stores them, and sets
+/// `encoding_goal_unsatisfiable` from the literals over static predicates (against `static_init`).
+void set_encoding_goal(TaskData& t, std::vector<GroundLiteralData> literals, bool complete);
+
+/// The encoding goal of a task whose goal as written is not available: the literals of `goal` except those over the
+/// derived predicates that goal normalization introduced (loki names them "axiom_<k>"), complete iff nothing was left
+/// out and the goal has no numeric constraints. For a conjunctive goal this is the goal itself. The derived
+/// predicates are recognized by their name, so a user predicate called "axiom_<k>" in the goal is left out too.
+void set_encoding_goal_from_normalized(TaskData& t);
+
+/// Whether the encoding goal of `t` is the one set_encoding_goal_from_normalized would give (true if none is
+/// recorded).
+[[nodiscard]] bool has_default_encoding_goal(const TaskData& t);
 
 /// Structural validation (ranges in bounds, arities consistent, derived heads, ground goal). Throws on violation.
 void validate(const TaskData& t);

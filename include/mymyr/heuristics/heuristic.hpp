@@ -34,6 +34,24 @@
 //              conditions, never reaches a negative literal the state does not satisfy, and its delete check excludes
 //              the negation of a deleted atom instead of the atom. Grounded only: memory and time grow with the
 //              square of the number of propositions (make_heuristic refuses more than 8191).
+//   LmCut      LM-cut (Helmert and Domshlak 2009) over the same grounding: h_max with supporters, then repeatedly a
+//              cut of the justification graph between the state and the goal zone, whose cheapest operator cost is
+//              added to h and subtracted from the cut's actions, until h_max of the goal is 0. Admissible: an action's
+//              cost is shared by all of its effects (a cut lowers each of its actions once, however many of their
+//              conditional effects it holds), and axioms are free operators, which no cut contains. With conditional
+//              effects, lowering an action lowers its other effects too and the cuts can sum to less than h_max: h is
+//              then h_max. h_max <= LM-cut <= h*. Ties: an operator's h_max supporter is the last of its most
+//              expensive preconditions in the grounding's order; while the goal zone is marked, a zero-cost
+//              achiever's supporter moves to an equally expensive precondition without zero-cost achievers, else to
+//              one already in the goal zone (Fast Downward's border and goal-zone detection).
+//   LmCount    the landmark count heuristic of LAMA (Richter and Westphal 2010) over approximate fact landmarks
+//              (landmarks/approximate.hpp, possibly-before first achievers): the landmarks the path to a state has not
+//              reached, plus the reached ones that must become true again (false goals, and landmarks greedy-necessarily
+//              ordered before an unreached one). Unit costs count them, real costs sum the cheapest achiever of each.
+//              The landmarks are those of the task's initial state, where paths start; the status of another start
+//              state s holds what every path from the initial state to s reaches as far as s shows it (marked as
+//              inferred: a landmark needed again only for an ordering and without an achiever is then left out).
+//              Path-dependent (below); not admissible. Preferred operators: applicable actions that add a needed one.
 //   Perfect    h* from a state space (heuristics/perfect.hpp: heuristics::perfect); make_heuristic refuses it.
 //   Custom     a Heuristic subclass of the caller (BestFirstOptions::evaluator), e.g. a learned value function.
 // Numeric tasks. As mimir's delete relaxation (DeleteRelaxTranslator), the relaxation heuristics ignore numeric conditions
@@ -52,6 +70,18 @@
 // std::runtime_error for a state outside the grounding (which only a state not reachable from the initial state is)
 // and for a goal of evaluate(s, goals) with a negative literal over an atom that holds in s and that no operator or goal
 // of the task uses negatively (the grounding has no proposition for its negation).
+//
+// LM-cut and landmark count are grounded only, like set-additive and h².
+//
+// Path-dependent heuristics (path_dependent(): landmark count). The value of a state depends on the path that reached
+// it, through a status a search keeps per node (status_words() words):
+//   - the start state s:                    initial_status(s, out)
+//   - a transition s --a--> t:               progress(status(s), s, a, t, out) is t's status through this transition
+//   - t reached again through another path:  merge(status(t), other) combines the two (landmark count: a landmark is
+//                                            reached only if every known path reached it, as in Fast Downward)
+//   - h of t:                                 evaluate(t, status(t))
+// evaluate(s) without a status takes s as the start of the path (evaluate(s, initial_status(s))). The best-first searches
+// (search/best_first.hpp, search/astar_iw.hpp) keep the statuses; heuristics that are not path-dependent ignore them.
 //
 // A Heuristic holds per-thread scratch: create one per search thread. Heuristics made from the same Options share the
 // grounding when Options::relaxed is set (use ground() to build it once).
@@ -92,6 +122,8 @@ enum class Kind : u8
     SetAdditive,
     H2,
     Perfect,  // h* from a state space: heuristics::perfect (heuristics/perfect.hpp); make_heuristic refuses it
+    LmCut,
+    LmCount,
 };
 
 enum class Costs : u8
@@ -114,7 +146,8 @@ enum class Evaluation : u8
 
 [[nodiscard]] const char* to_string(Kind k) noexcept;
 /// "blind", "goal_count" (or "gc"), "max" (or "hmax"), "add" (or "hadd"), "ff" (or "hff"), "set_additive" (or "hsa",
-/// "setadd"), "h2". Throws std::invalid_argument for other names, including "perfect" (made by heuristics::perfect).
+/// "setadd"), "h2", "lmcut" (or "lm_cut"), "lmcount" (or "lm_count", "landmark_count"). Throws std::invalid_argument
+/// for other names, including "perfect" (made by heuristics::perfect).
 [[nodiscard]] Kind parse_kind(std::string_view name);
 
 struct Options
@@ -174,6 +207,34 @@ public:
     [[nodiscard]] virtual bool preferred(const ActionLabel& /*action*/) const { return false; }
     [[nodiscard]] virtual std::vector<Action> relaxed_plan() const { return {}; }
 
+    // ------------------------------------------------------------------------------------ path-dependent heuristics
+    /// Whether the value of a state depends on the path to it (see above).
+    [[nodiscard]] virtual bool path_dependent() const noexcept { return false; }
+    /// Words of a node's status (0 for heuristics that are not path-dependent).
+    [[nodiscard]] virtual u32 status_words() const noexcept { return 0; }
+    /// The status of the start state s of a path into `out` (status_words() words).
+    virtual void initial_status(StateView /*s*/, std::span<u64> /*out*/) {}
+    /// The status of `child` reached from `parent` (whose status is `parent_status`) by `action`, into `out`.
+    virtual void progress(std::span<const u64> /*parent_status*/, StateView /*parent*/, const ActionLabel& /*action*/,
+                          StateView /*child*/, std::span<u64> /*out*/)
+    {
+    }
+    /// Combines the status `into` of a state with the status `other` of the same state through another path; returns
+    /// whether `into` changed. The default keeps what both have (bitwise and).
+    virtual bool merge(std::span<u64> into, std::span<const u64> other) const
+    {
+        bool changed = false;
+        for (usize i = 0; i < into.size(); ++i)
+        {
+            const u64 x = into[i] & other[i];
+            changed |= x != into[i];
+            into[i] = x;
+        }
+        return changed;
+    }
+    /// h of s reached on a path with the given status (heuristics that are not path-dependent: evaluate(s)).
+    virtual Value evaluate(StateView s, std::span<const u64> /*status*/) { return evaluate(s); }
+
     [[nodiscard]] const HeuristicStats& stats() const noexcept { return m_stats; }
     /// Long evaluations (the lifted fallback's enumeration) poll `stop` and throw Interrupted once it returns true.
     /// Searches set it to their deadline and cancellation token. Empty: never interrupted.
@@ -186,7 +247,8 @@ protected:
     std::function<bool()> m_interrupt;
 };
 
-/// Throws std::invalid_argument for unsupported combinations (real costs of 2^31 units or more, h² or set-additive
-/// without a grounding) and for Kind::Custom and Kind::Perfect.
+/// Throws std::invalid_argument for unsupported combinations (real costs of 2^31 units or more, Evaluation::Lifted for
+/// set-additive, h², LM-cut and landmark count) and for Kind::Custom and Kind::Perfect, std::runtime_error when the
+/// grounding of a grounded-only kind exceeds the budget.
 [[nodiscard]] std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& options = {});
 }  // namespace mymyr::heuristics

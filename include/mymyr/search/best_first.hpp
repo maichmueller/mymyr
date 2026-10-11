@@ -115,6 +115,8 @@ struct BestFirstResult
     u64 evaluations = 0;                 // heuristic evaluations by the search
     u64 dead_ends = 0;                   // states with h = +inf
     u64 reopened = 0;                    // A*: states whose g decreased after they were opened
+    u64 expanded_until_last_jump = 0;    // A*: expansions before the f-value of the last node popped was first reached
+                                         // (the expansions below the final f-layer; Fast Downward's statistic)
     u64 layers = 0;                      // beam: layers expanded
     double initial_h = 0;                // h of the start state
     heuristics::HeuristicStats heuristic;  // the evaluator's statistics at the end

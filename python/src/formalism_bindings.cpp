@@ -409,6 +409,10 @@ void bind_formalism(nb::module_& parent)
             .field("auxiliary_initial", [](const FormalismTask& v) { return v.t->auxiliary_initial; })
             .field("goal", [](const FormalismTask& v) { return Arg<PyGroundCondition>(make_ground_condition(bare_owner(v.t), GroundCondition::goal(*v.t))); },
                    "a GroundCondition")
+            .field("encoding_goal", [](const FormalismTask& v) { return make_encoding_goal(bare_owner(v.t)); },
+                   "tuple of GroundLiteral: the goal as written, expanded (Task.encoding_goal)")
+            .field("encoding_goal_complete", [](const FormalismTask& v) { return v.t->encoding_goal_complete; })
+            .field("encoding_goal_unsatisfiable", [](const FormalismTask& v) { return v.t->encoding_goal_unsatisfiable; })
             .field("metric", [](const FormalismTask& v) -> nb::object {
                 if (!v.t->metric)
                     return nb::none();
@@ -416,8 +420,11 @@ void bind_formalism(nb::module_& parent)
                                      PyExpression{task_pool(bare_owner(v.t), nullptr), v.t->metric->expr});
             }, "('minimize'|'maximize', Expression) or None")
             .finish();
-        c.def("to_text", [](const FormalismTask& v) { return formalism::write_task_text(*v.t); },
-              "mymyr's normalized text format (formalism::write_task_text writes it).");
+        c.def("to_text", [](const FormalismTask& v, bool encoding_goal) { return formalism::write_task_text(*v.t, encoding_goal); },
+              "encoding_goal"_a = false,
+              "mymyr's normalized text format (formalism::write_task_text writes it). With encoding_goal, a final section "
+              "keeps the encoding goal, which Task.from_text then reads; without it, from_text derives the encoding goal "
+              "from the planner's goal.");
         c.def("__repr__", [](const FormalismTask& v) {
             return "NormalizedTask(" + std::to_string(v.t->objects.size()) + " objects, " + std::to_string(v.t->predicates.size()) +
                    " predicates, " + std::to_string(v.t->schemas.size()) + " schemas, " + std::to_string(v.t->axioms.size()) + " axioms)";

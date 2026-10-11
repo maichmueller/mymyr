@@ -119,6 +119,8 @@ add_library(mymyr_core STATIC
     src/mymyr/heuristics/relaxed_task.cpp
     src/mymyr/heuristics/heuristics.cpp
     src/mymyr/heuristics/h2.cpp
+    src/mymyr/heuristics/lm_cut.cpp
+    src/mymyr/heuristics/landmark_count.cpp
     src/mymyr/heuristics/lifted_relaxation.cpp
     src/mymyr/search/best_first.cpp
     src/mymyr/search/astar_iw.cpp
@@ -189,6 +191,7 @@ if(MYMYR_FRONTEND)
     add_library(mymyr_frontend STATIC
         src/mymyr/frontend/diagnose.cpp
         src/mymyr/frontend/domain.cpp
+        src/mymyr/frontend/encoding_goal.cpp
         src/mymyr/frontend/init_reader.cpp
         src/mymyr/frontend/normalize.cpp
         src/mymyr/frontend/translate.cpp

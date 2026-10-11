@@ -11,7 +11,7 @@ task = mymyr.Task.from_pddl(DATA / "domain.pddl", DATA / "p01.pddl")
 state = task.initial_state
 space = datasets.state_space(task, remove_if_unsolvable=False)
 
-for kind in ("max", "add", "ff", "h2", "set_additive"):
+for kind in ("max", "add", "ff", "h2", "set_additive", "lmcut", "lmcount"):
     print(kind, search.Heuristic(task, kind)(state))
 
 perfect = search.Heuristic.perfect(space)

@@ -1,11 +1,12 @@
 // Heuristic evaluators: blind, goal count, and h_max / h_add / h_FF / set-additive over mimir's delete relaxation,
 // grounded (relaxed_task.hpp: GroundedEval extended with negative propositions, axiom rules and relaxed-plan
 // extraction) or lifted (lifted_relaxation.hpp: a cost-bucketed semi-naive fixpoint over the relaxed reachability
-// matchers; not for set-additive). h² is in h2.cpp.
+// matchers; not for set-additive). h² is in h2.cpp, LM-cut in lm_cut.cpp, landmark count in landmark_count.cpp.
 
 #include "mymyr/heuristics/heuristic.hpp"
 
 #include "h2.hpp"
+#include "landmark_heuristics.hpp"
 #include "lifted_relaxation.hpp"
 #include "relaxation_detail.hpp"
 
@@ -40,6 +41,8 @@ const char* to_string(Kind k) noexcept
         case Kind::SetAdditive: return "set_additive";
         case Kind::H2: return "h2";
         case Kind::Perfect: return "perfect";
+        case Kind::LmCut: return "lmcut";
+        case Kind::LmCount: return "lmcount";
     }
     return "?";
 }
@@ -60,6 +63,10 @@ Kind parse_kind(std::string_view n)
         return Kind::SetAdditive;
     if (n == "h2")
         return Kind::H2;
+    if (n == "lmcut" || n == "lm_cut")
+        return Kind::LmCut;
+    if (n == "lmcount" || n == "lm_count" || n == "landmark_count")
+        return Kind::LmCount;
     if (n == "perfect")
         throw std::invalid_argument("mymyr: the perfect heuristic needs a state space: build it with heuristics::perfect "
                                     "(Python: Heuristic.perfect(state_space), or heuristic='perfect' on a search)");
@@ -562,6 +569,8 @@ std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& optio
         case Kind::Perfect:
             throw std::invalid_argument("mymyr: Kind::Perfect needs a state space: build it with heuristics::perfect (heuristics/perfect.hpp)");
         case Kind::H2: return detail::make_h2(task, options);
+        case Kind::LmCut: return detail::make_lm_cut(task, options);
+        case Kind::LmCount: return detail::make_landmark_count(task, options);
         default: return std::make_unique<RelaxationHeuristic>(task, options);
     }
 }

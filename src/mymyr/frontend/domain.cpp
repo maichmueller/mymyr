@@ -118,9 +118,11 @@ struct Domain::Impl
         detail::PredicateOrigin problem_origin = origin;
         for (const auto& pred : parsed->get_predicates())
             problem_origin.declared.insert(pred->get_name());
-        auto out = std::make_shared<const formalism::TaskData>(detail::translate_problem(*state, translated, init, objects, problem_origin));
+        formalism::TaskData data = detail::translate_problem(*state, translated, init, objects, problem_origin);
         lap("translate");
-        return out;
+        detail::record_encoding_goal(*state, parsed, data);
+        lap("encoding goal");
+        return std::make_shared<const formalism::TaskData>(std::move(data));
     }
 };
 

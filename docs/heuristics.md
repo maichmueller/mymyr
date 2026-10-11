@@ -1,8 +1,10 @@
 # Heuristics
 
 Create a heuristic with `mymyr.search.Heuristic(task, kind)`. Built-in kinds are `"blind"`, `"goal_count"`, `"max"`,
-`"add"`, `"ff"`, `"h2"` and `"set_additive"`; set-additive also accepts `"hsa"` and `"setadd"`. Call the object on
-a state for its value. Positive infinity means the heuristic proves the state is a dead end.
+`"add"`, `"ff"`, `"h2"`, `"set_additive"`, `"lmcut"` and `"lmcount"`; set-additive also accepts `"hsa"` and
+`"setadd"`. Call the object on a state for its value. Positive infinity means the heuristic proves the state is a dead
+end. LM-cut and the landmark count, whose value depends on the path to a state, have their own section in the
+[search guide](search.md#lm-cut-and-the-landmark-count).
 
 ```python
 from pathlib import Path
@@ -32,7 +34,7 @@ metric, and its action cost otherwise. `costs="unit"` and `costs="real"` overrid
 and fractional costs with up to 6 decimal places (the relaxation counts them in units of 10^-k) and rounded down
 beyond; an action whose cost depends on the state, and every action under a metric over numeric fluents, costs 0 in
 the relaxation, and an action whose cost is undefined is never applicable and left out. So `max` and `h2` never
-overestimate the cost of reaching a goal, and A* with them finds an optimal plan. With `costs="unit"` on a task whose
+overestimate the cost of reaching a goal (nor does `lmcut`), and A* with them finds an optimal plan. With `costs="unit"` on a task whose
 actions cost less than 1 they can overestimate, and A* need not find an optimal plan. The h² and set-additive
 implementations use grounded evaluation; they do not support `evaluation="lifted"`.
 

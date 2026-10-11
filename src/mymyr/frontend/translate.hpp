@@ -143,6 +143,12 @@ GroundInit read_loki_init(const DomainState& ds, const loki::Problem& problem, c
 formalism::TaskData translate_problem(const DomainState& ds, const loki::Problem& problem, const GroundInit& init,
                                       const ObjectMap& object_of, const PredicateOrigin& origin);
 
+/// Records `t.encoding_goal` (and its flags) from the goal of the parsed problem, the one that `translate_problem`'s
+/// loki::translate has not yet normalized, so that quantified goals are still visible: conjunctions are flattened,
+/// `forall` is expanded over the objects of its types (constants included, in object order), and `imply` is expanded
+/// when its antecedent is decided by static atoms and equality alone. See TaskData::encoding_goal.
+void record_encoding_goal(const DomainState& ds, const loki::Problem& parsed, formalism::TaskData& t);
+
 /// Union types. loki gives a variable of type (either t1 ... tk) (a parameter of an action or axiom, a quantified
 /// variable of a precondition, effect or goal) the conjunction of the type literals of every ti and their supertypes,
 /// i.e. the intersection of the types. This replaces that conjunction by one literal over a static predicate that
