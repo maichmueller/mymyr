@@ -487,7 +487,6 @@ TEST(EncoderRefusals, OptionsThatAreNotEncodedYet)
     refused([](FlatOptions& o) { o.targets = {TargetSource::Action}; });
     refused([](FlatOptions& o) { o.predicate_virtual_nodes = true; });
     refused([](FlatOptions& o) { o.horizon.mode = HorizonMode::Full; });
-    refused([](FlatOptions& o) { o.layout = Layout::Relation; });
     // the options an encoder accepts: actions (zero tuples), both index types, nullary and equality either way
     for (const bool actions : {true, false})
         for (const bool nullary : {true, false})

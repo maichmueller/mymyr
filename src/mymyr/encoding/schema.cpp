@@ -419,11 +419,15 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
             schema->m_schema_relation.push_back(static_cast<i32>(*schema->find(action_relation_name(action, split))));
         }
     const FlatOptions& o = schema->m_options;
+    schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() && !o.predicate_virtual_nodes &&
+                                  !o.include_actions && o.horizon.mode == HorizonMode::None;
     Hasher hasher;
     hasher.text("mymyr.encoding.schema");
     hasher.integer(k_schema_version);
     hasher.integer(static_cast<u64>(o.layout));
     hasher.integer(static_cast<u64>(o.index));
+    hasher.integer(o.emit_counts ? 1 : 0);
+    hasher.integer(schema->m_implicit_entities ? 1 : 0);
     hasher.integer(o.targets.bits());
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));

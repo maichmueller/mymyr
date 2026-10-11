@@ -40,8 +40,8 @@ std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 
 using R = SlotRole;
 
-constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0x31e6ae6fd252e8a1,
-                PIN_FULL = 0x8f230d9913e98bf7;
+constexpr u64 PIN_DEFAULT = 0x9cae243aca84741f, PIN_DELTA = 0xf0bf48ac76f3d206, PIN_TARGETS = 0x86f4e1f1a3be9f96,
+                PIN_FULL = 0xa3d6a87bdc752437;
 
 TEST(EncodingSchema, DefaultCatalogIsSortedBytewiseAndNamedLikeMifrost)
 {
@@ -386,4 +386,32 @@ TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndFullActionArities)
     for (u32 s = 0; s < table->num_schemas(); ++s)
         EXPECT_EQ(domain.schemas[s].arity, table->schema_arities()[s]);
 }
+}
+
+TEST(EncodingSchema, TheStoredArraysAreOptionsOfTheFingerprint)
+{
+    const DomainSignature d = blocks();
+    FlatOptions options;
+    options.include_actions = false;
+    const u64 reference = EncodingSchema::create(d, options)->fingerprint();
+    EXPECT_TRUE(EncodingSchema::create(d, options)->emits_counts());
+    EXPECT_FALSE(EncodingSchema::create(d, options)->implicit_entity_arrays());
+    FlatOptions no_counts = options;
+    no_counts.emit_counts = false;
+    EXPECT_FALSE(EncodingSchema::create(d, no_counts)->emits_counts());
+    EXPECT_NE(EncodingSchema::create(d, no_counts)->fingerprint(), reference);
+    FlatOptions automatic = options;
+    automatic.entity_arrays = EntityArrays::Auto;
+    EXPECT_TRUE(EncodingSchema::create(d, automatic)->implicit_entity_arrays());
+    EXPECT_NE(EncodingSchema::create(d, automatic)->fingerprint(), reference);
+    // Auto that cannot be implicit is the same encoding as Always: same arrays, same fingerprint
+    FlatOptions with_actions;
+    FlatOptions with_actions_auto;
+    with_actions_auto.entity_arrays = EntityArrays::Auto;
+    EXPECT_FALSE(EncodingSchema::create(d, with_actions_auto)->implicit_entity_arrays());
+    EXPECT_EQ(EncodingSchema::create(d, with_actions_auto)->fingerprint(), EncodingSchema::create(d, with_actions)->fingerprint());
+    EXPECT_EQ(parse_entity_arrays("auto"), EntityArrays::Auto);
+    EXPECT_EQ(parse_entity_arrays("always"), EntityArrays::Always);
+    EXPECT_FALSE(parse_entity_arrays("never"));
+    EXPECT_EQ(to_string(EntityArrays::Auto), "auto");
 }

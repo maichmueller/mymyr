@@ -24,6 +24,12 @@
 // fill_entities and fill_cell (contents). count_graph and fill_graph are loops over them, and a kernel that spreads a
 // graph over several threads calls the same functions. A cell's count is per cell: an instance's cells are sorted by
 // relation id, at most one per relation, and per-cell counts are indexed by the cell, not by the relation.
+//
+// Layouts. The cell (g, r) of G graphs and R relations is segment g * R + r in the graph-major layout and r * G + g in the
+// relation-major one (cell_segment). Graph-major positions are a prefix over the graph's own cells and need nothing but
+// the graph's base (fill_graph). Relation-major positions come from an exclusive scan over all G * R segments in
+// segment order (the cells' counts, as count_graph reports them), written to relation_offsets and
+// relation_arg_offsets before the fill; fill_graph_relation_major reads its cells' positions from the two arrays.
 
 #include "mymyr/core/types.hpp"
 
@@ -253,28 +259,38 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32*
     return t;
 }
 
-/// Where graphs write (graph-major layout): pointers to the batch arrays.
+/// Where graphs write: pointers to the batch arrays.
 template<class I>
 struct GraphOut
 {
+    u64 graphs;                // G
     I* num_objects;            // [G]
-    I* relation_counts;        // [G * R]
-    I* relation_offsets;       // [G * R + 1]
-    I* relation_arg_offsets;   // [G * R + 1]
+    I* relation_counts;        // [G, R] indexed (g, r) in both layouts; null: not stored
+    I* relation_offsets;       // [G * R + 1] in segment order
+    I* relation_arg_offsets;   // [G * R + 1] in segment order
     I* relation_args;
-    u8* entity_role;           // [E]
+    u8* entity_role;           // [E]; null: not stored (together with entity_ref)
     I* entity_ref;             // [E]
 };
 
-/// Writes num_objects[g] and the entities of graph `g` from `entity_base` on: the objects, then the auxiliary entity
-/// if `auxiliary` (totals.flags & k_graph_auxiliary).
+/// The segment of cell (g, r) among the G * R cells of a batch with R relations: g * R + r graph-major, r * G + g
+/// relation-major.
+MYMYR_HD u64 cell_segment(bool relation_major, u64 g, u32 r, u64 G, u32 R)
+{
+    return relation_major ? static_cast<u64>(r) * G + g : g * R + r;
+}
+
+/// Writes num_objects[g] and, unless the entity arrays are not stored, the entities of graph `g` from `entity_base` on:
+/// the objects, then the auxiliary entity if `auxiliary` (totals.flags & k_graph_auxiliary).
 template<class I>
 MYMYR_HD void fill_entities(const InstanceView& v, bool auxiliary, u64 g, u64 entity_base, const GraphOut<I>& out)
 {
     const u32 num_objects = v.num_objects;
+    out.num_objects[g] = static_cast<I>(num_objects);
+    if (!out.entity_role)
+        return;
     u8* role = out.entity_role + entity_base;
     I* ref = out.entity_ref + entity_base;
-    out.num_objects[g] = static_cast<I>(num_objects);
     for (u32 o = 0; o < num_objects; ++o)
     {
         role[o] = k_role_object;
@@ -358,11 +374,12 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
     return n;
 }
 
-/// Writes graph `g`: num_objects[g]; its entities from `entity_base` on (the objects, then the auxiliary entity if
-/// totals say the graph has one); and, for its segments g*R .. g*R+R-1, the counts and the offsets, which start at
-/// `tuple_base` and `arg_base`, and the tuples' arguments. `totals` is count_graph's result for the same graph. The end
-/// entries of the offset arrays are the caller's. A loop over fill_entities and fill_cell: the cells of an instance
-/// are sorted by relation, and the relations between them are empty.
+/// Writes graph `g` of a graph-major batch: num_objects[g]; its entities from `entity_base` on (the objects, then the
+/// auxiliary entity if totals say the graph has one); and, for its segments g*R .. g*R+R-1, the counts (unless
+/// out.relation_counts is null) and the offsets, which start at `tuple_base` and `arg_base`, and the tuples' arguments.
+/// `totals` is count_graph's result for the same graph. The end entries of the offset arrays are the caller's. A loop
+/// over fill_entities and fill_cell: the cells of an instance are sorted by relation, and the relations between them are
+/// empty.
 template<class I>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& in, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out)
@@ -372,7 +389,7 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& in, u64 g, u64 t
     const u32 R = v.num_relations;
     const u32 num_cells = v.num_cells;
     const Cell* cells = v.cells;
-    I* counts = out.relation_counts + g * R;
+    I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
     I* offsets = out.relation_offsets + g * R;
     I* arg_offsets = out.relation_arg_offsets + g * R;
     I* args_out = out.relation_args;
@@ -386,12 +403,14 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& in, u64 g, u64 t
         {
             offsets[r] = static_cast<I>(tuples);
             arg_offsets[r] = static_cast<I>(args);
-            counts[r] = static_cast<I>(0);
+            if (counts)
+                counts[r] = static_cast<I>(0);
         }
         offsets[r] = static_cast<I>(tuples);
         arg_offsets[r] = static_cast<I>(args);
         const u32 n = fill_cell<I>(v, c, in, entity_base, auxiliary, args_out + args);
-        counts[r] = static_cast<I>(n);
+        if (counts)
+            counts[r] = static_cast<I>(n);
         tuples += n;
         args += static_cast<u64>(n) * c.arity;
         ++r;
@@ -400,7 +419,41 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& in, u64 g, u64 t
     {
         offsets[r] = static_cast<I>(tuples);
         arg_offsets[r] = static_cast<I>(args);
-        counts[r] = static_cast<I>(0);
+        if (counts)
+            counts[r] = static_cast<I>(0);
     }
+}
+
+/// Writes graph `g` of a relation-major batch: like fill_graph, except that a cell's position is read from the scanned
+/// segment arrays (out.relation_offsets and out.relation_arg_offsets at the cell's segment, scanned
+/// beforehand) and not computed from a local prefix. The counts, if stored, are [G, R] indexed (g, r).
+template<class I>
+MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& in, u64 g, u64 entity_base,
+                                        const GraphTotals& totals, const GraphOut<I>& out)
+{
+    fill_entities<I>(v, (totals.flags & k_graph_auxiliary) != 0, g, entity_base, out);
+    const u64 auxiliary = entity_base + v.num_objects;
+    const u32 R = v.num_relations;
+    const u32 num_cells = v.num_cells;
+    const Cell* cells = v.cells;
+    I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
+    u32 r = 0;
+    for (u32 i = 0; i < num_cells; ++i)
+    {
+        const Cell c = cells[i];
+        if (counts)
+            for (; r < c.relation; ++r)
+                counts[r] = static_cast<I>(0);
+        const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
+        const u32 n = fill_cell<I>(v, c, in, entity_base, auxiliary, out.relation_args + out.relation_arg_offsets[segment]);
+        if (counts)
+        {
+            counts[c.relation] = static_cast<I>(n);
+            r = c.relation + 1;
+        }
+    }
+    if (counts)
+        for (; r < R; ++r)
+            counts[r] = static_cast<I>(0);
 }
 }  // namespace mymyr::encoding::detail

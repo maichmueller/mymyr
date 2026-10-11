@@ -76,8 +76,9 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     const u64 R = schema.num_relations();
     if (batch.scalar("num_relations") != static_cast<i64>(R))
         fail("num_relations does not match the schema");
-    if (batch.scalar("layout") != 0)
-        fail("the layout is not graph-major");
+    const bool relation_major = schema.options().layout == Layout::Relation;
+    if (batch.scalar("layout") != (relation_major ? 1 : 0))
+        fail(std::string("the layout is not ") + (relation_major ? "relation-major" : "graph-major"));
     const i64 index_dtype = batch.scalar("index_dtype");
     if (index_dtype != 0 && index_dtype != 1)
         fail("index_dtype is neither 0 nor 1");
@@ -99,10 +100,23 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     if (entity_offsets[0] != 0)
         fail("entity_offsets does not start at 0");
     const u64 E = static_cast<u64>(entity_offsets[G]);
-    const Ints entity_ref = ints(*array(batch, "entity_ref", itype, {static_cast<i64>(E)}));
-    const rl::ArrayInfo& role_info = *array(batch, "entity_role", rl::DType::U8, {static_cast<i64>(E)});
-    const u8* entity_role = static_cast<const u8*>(batch.data(role_info));
-    const Ints counts = ints(*array(batch, "relation_counts", itype, {g_i64, r_i64}));
+    const bool implicit_entities = schema.implicit_entity_arrays();
+    if (implicit_entities != (batch.find("entity_role") == nullptr) || implicit_entities != (batch.find("entity_ref") == nullptr))
+        fail(implicit_entities ? "entity_role and entity_ref must be omitted: the schema's entity arrays are implicit"
+                               : "entity_role and entity_ref are missing");
+    Ints entity_ref;
+    const u8* entity_role = nullptr;
+    if (!implicit_entities)
+    {
+        entity_ref = ints(*array(batch, "entity_ref", itype, {static_cast<i64>(E)}));
+        entity_role = static_cast<const u8*>(batch.data(*array(batch, "entity_role", rl::DType::U8, {static_cast<i64>(E)})));
+    }
+    const bool stored_counts = schema.emits_counts();
+    if (stored_counts != (batch.find("relation_counts") != nullptr))
+        fail(stored_counts ? "relation_counts is missing" : "relation_counts must be omitted: the schema does not store counts");
+    Ints counts;
+    if (stored_counts)
+        counts = ints(*array(batch, "relation_counts", itype, {g_i64, r_i64}));
     const Ints tuple_offsets = ints(*array(batch, "relation_offsets", itype, {g_i64 * r_i64 + 1}));
     const Ints arg_offsets = ints(*array(batch, "relation_arg_offsets", itype, {g_i64 * r_i64 + 1}));
     const u64 total_args = static_cast<u64>(arg_offsets[G * R]);
@@ -120,7 +134,11 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         const i64 objects = num_objects[g];
         if (objects < 0 || first + objects > last)
             fail("graph " + std::to_string(g) + " has more objects than entities");
-        for (i64 e = first; e < last; ++e)
+        // The role of an entity: stored, or implied (an object below num_objects, else the auxiliary entity).
+        auto role_of = [&](i64 e) { return entity_role ? entity_role[e] : (e < first + objects ? k_object : k_auxiliary); };
+        if (implicit_entities && last - first - objects > 1)
+            fail("graph " + std::to_string(g) + " has more than one entity past its objects");
+        for (i64 e = first; e < last && !implicit_entities; ++e)
         {
             const bool is_object = e < first + objects;
             if (is_object && (entity_role[e] != k_object || entity_ref[e] != e - first))
@@ -133,12 +151,12 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         bool auxiliary_used = false;
         for (u64 r = 0; r < R; ++r)
         {
-            const u64 cell = g * R + r;
-            const u64 n = static_cast<u64>(counts[cell]);
+            const u64 cell = relation_major ? r * G + g : g * R + r;
+            const u64 n = static_cast<u64>(tuple_offsets[cell + 1] - tuple_offsets[cell]);
             const u32 arity = schema.relation(static_cast<u32>(r)).arity;
             const auto roles = schema.slot_roles(static_cast<u32>(r));
             const std::string where = "cell (" + std::to_string(g) + ", " + schema.relation(static_cast<u32>(r)).name + ")";
-            if (counts[cell] < 0 || static_cast<u64>(tuple_offsets[cell + 1] - tuple_offsets[cell]) != n)
+            if (stored_counts && counts[g * R + r] != tuple_offsets[cell + 1] - tuple_offsets[cell])
                 fail("relation_offsets and relation_counts disagree in " + where);
             if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
@@ -150,7 +168,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                     const i64 id = args[at + k];
                     if (id < first || id >= last)
                         fail("a tuple of " + where + " has an entity outside its graph");
-                    if (entity_role[id] != static_cast<u8>(entity_role_of(roles[k])))
+                    if (role_of(id) != static_cast<u8>(entity_role_of(roles[k])))
                         fail("a tuple of " + where + " has an entity of the wrong role at position " + std::to_string(k));
                     if (roles[k] == SlotRole::Auxiliary)
                         auxiliary_used = true;
@@ -169,7 +187,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         }
         u32 auxiliaries = 0;
         for (i64 e = first; e < last; ++e)
-            auxiliaries += entity_role[e] == k_auxiliary;
+            auxiliaries += role_of(e) == k_auxiliary;
         if (auxiliaries > 1)
             fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
         if ((auxiliaries == 1) != auxiliary_used)
