@@ -16,12 +16,16 @@ def ctest_log(total: int, skipped: int) -> str:
     return f"100% tests passed, 0 tests failed out of {total}\n\n{skipped_lines}"
 
 
-def check_log(tmp_path: Path, text: str, *, sanitized: bool = False) -> subprocess.CompletedProcess:
+def check_log(
+    tmp_path: Path, text: str, *, sanitized: bool = False, platform: str | None = None
+) -> subprocess.CompletedProcess:
     log = tmp_path / "ctest.log"
     log.write_text(text)
     command = [sys.executable, str(CHECKER)]
     if sanitized:
         command.append("--sanitized")
+    if platform is not None:
+        command += ["--platform", platform]
     command.append(str(log))
     return subprocess.run(command, capture_output=True, text=True, check=False)
 
@@ -30,6 +34,7 @@ def test_ctest_log_passes_with_cpu_counts(tmp_path: Path) -> None:
     result = check_log(
         tmp_path,
         ctest_log(COUNTS["ctest_min_total"], COUNTS["ctest_max_skipped"]),
+        platform="linux",
     )
 
     assert result.returncode == 0
@@ -42,11 +47,35 @@ def test_ctest_log_passes_with_cpu_counts(tmp_path: Path) -> None:
 def test_ctest_log_fails_below_cpu_counts(tmp_path: Path) -> None:
     min_total = COUNTS["ctest_min_total"]
     max_skipped = COUNTS["ctest_max_skipped"]
-    result = check_log(tmp_path, ctest_log(min_total - 1, max_skipped + 1))
+    result = check_log(tmp_path, ctest_log(min_total - 1, max_skipped + 1), platform="linux")
 
     assert result.returncode == 1
     assert f"only {min_total - 1} tests were registered (expected at least {min_total})" in result.stderr
     assert f"{max_skipped + 1} tests skipped (expected at most {max_skipped})" in result.stderr
+
+
+def test_ctest_log_passes_with_macos_counts(tmp_path: Path) -> None:
+    total = COUNTS["ctest_min_total"] - COUNTS["ctest_linux_only_tests"]
+    result = check_log(tmp_path, ctest_log(total, COUNTS["ctest_max_skipped"]), platform="macos")
+
+    assert result.returncode == 0
+    assert f"{total} tests, 0 failed" in result.stdout
+
+
+def test_ctest_log_fails_below_macos_counts(tmp_path: Path) -> None:
+    total = COUNTS["ctest_min_total"] - COUNTS["ctest_linux_only_tests"]
+    result = check_log(tmp_path, ctest_log(total - 1, 0), platform="macos")
+
+    assert result.returncode == 1
+    assert f"only {total - 1} tests were registered (expected at least {total})" in result.stderr
+
+
+def test_macos_log_fails_the_linux_check(tmp_path: Path) -> None:
+    total = COUNTS["ctest_min_total"] - COUNTS["ctest_linux_only_tests"]
+    result = check_log(tmp_path, ctest_log(total, 0), platform="linux")
+
+    assert result.returncode == 1
+    assert f"expected at least {COUNTS['ctest_min_total']}" in result.stderr
 
 
 def test_ctest_log_passes_with_sanitized_counts(tmp_path: Path) -> None:
