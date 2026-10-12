@@ -2,11 +2,10 @@
 
 Run with the interpreter that has mifrost 0.6.0 and pymimir 0.16.3 installed, isolated and from the repository root:
 
-    python -I scripts/export_mifrost_encoding_fixture.py [--out DIR] [--only F1,F5] [--introspect] [--small-goals]
+    python -I scripts/export_mifrost_encoding_fixture.py [--out DIR] [--only F1,F5] [--introspect]
 
 This is the only place that imports mifrost; the tests read the JSON files and need neither mifrost nor pymimir. The
-output is deterministic: running the script twice gives byte-identical files. ``--small-goals`` instead prints the
-small semantic fixture ``tests/data/encoding/mifrost_flat_goals.json`` (mifrost's neutral engine, no planner).
+output is deterministic: running the script twice gives byte-identical files.
 
 Fixtures
 --------
@@ -887,55 +886,11 @@ def introspect(mifrost):
     print("findings:", json.dumps(FINDINGS, indent=1))
 
 
-def print_small_goals_fixture():
-    """Print the signed-goal fixture of mifrost's neutral engine (no planning backend)."""
-    from mifrost import _neutral_core as core
-
-    category = core.SemanticPredicateCategory
-    predicates = [
-        core.SemanticPredicateSpec(category.fluent, "flag", 1),
-        core.SemanticPredicateSpec(getattr(category, "static"), "fixed", 1),
-        core.SemanticPredicateSpec(category.derived, "available", 1),
-        core.SemanticPredicateSpec(category.fluent, "ready", 0),
-    ]
-    config = core.FlatRelationEncoderConfig(
-        support_literals=True,
-        ignore_zero_arity_relations=False,
-        goal_derivations={core.GoalDerivation.satisfied, core.GoalDerivation.unsatisfied},
-    )
-    engine = core.SemanticFlatRelationEncoderEngine(predicates, [], config)
-    value = core.SemanticFlatRelationInput()
-    value.objects = ["a", "b"]
-    value.state_facts = [core.SemanticAtom(predicate, [0]) for predicate in range(3)]
-    value.goals = [
-        core.SemanticLiteral(core.SemanticAtom(predicate, objects), positive)
-        for predicate, objects, positive in [(0, [1], True), (0, [0], False), (1, [0], True),
-                                              (1, [1], False), (2, [1], True), (2, [0], False), (3, [], True)]
-    ]
-    batch = engine.encode(value)
-    tensors = {
-        key: to_numpy(payload)
-        for key, payload in batch.as_dict()["tensors"].items()
-        if key in {"__graph__/relation_args", "__graph__/relation_counts"}
-    }
-    counts = tensors["__graph__/relation_counts"][0]
-    packed = tensors["__graph__/relation_args"]
-    output = {}
-    offset = 0
-    for name, arity, count in zip(engine.relation_names, batch.graph_attrs["relation_arities"], counts):
-        count, arity = int(count), int(arity)
-        if count:
-            output[name] = packed[offset : offset + count * arity].reshape(count, arity).tolist()
-        offset += count * arity
-    print(json.dumps(output, indent=2, sort_keys=True))
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--only", help="comma-separated task ids, e.g. F1,F5")
     parser.add_argument("--raise-errors", action="store_true", help="stop at the first mifrost error")
-    parser.add_argument("--small-goals", action="store_true", help="print the small signed-goal fixture and exit")
     parser.add_argument("--introspect", action="store_true", help="print the encoder options of the installed mifrost")
     arguments = parser.parse_args()
     global RAISE
@@ -946,9 +901,6 @@ def main():
         sys.exit(f"mifrost {MIFROST_VERSION} is required, found {importlib.metadata.version('mifrost')}")
     if importlib.metadata.version("pymimir") != PYMIMIR_VERSION:
         sys.exit(f"pymimir {PYMIMIR_VERSION} is required, found {importlib.metadata.version('pymimir')}")
-    if arguments.small_goals:
-        print_small_goals_fixture()
-        return
     if arguments.introspect:
         introspect(mifrost)
         return
