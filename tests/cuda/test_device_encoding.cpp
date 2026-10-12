@@ -405,6 +405,7 @@ TEST(DeviceEncoder, OutputLayoutPinsTheBytesOfEveryArray)
 
 TEST(DeviceEncoder, ScratchBytesAreTheFourTermsRoundedUp)
 {
+    SKIP_WITHOUT_GPU();  // the scan term asks CUB, which needs a device
     // 24 G + 24 G + 4 G C + the scan of G + 1 values, each rounded up to 64
     for (const u64 graphs : {u64{1}, u64{10}, u64{1000}, u64{16384}})
         for (const u64 cells : {u64{0}, u64{6}, u64{170}})
