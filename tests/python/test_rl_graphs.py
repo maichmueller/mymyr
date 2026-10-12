@@ -393,7 +393,7 @@ def test_jax_scan_with_command_buffers_equals_without(name, path, tmp_path):
     the CPU and on the GPU without command buffers, by default, with the scan's body as a CUDA graph and with the whole
     loop as one; the fast path's step is inside the command buffers, the general path's (it synchronizes) outside."""
     if name in SETS and not all(p.is_file() for p in SETS[name][1]):
-        pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
+        pytest.skip(f"the table instances of {name} are missing")
     runs = run_xla_modes(tmp_path, SCAN, "roll", name, path)
     rj = pytest.importorskip("mymyr.rl.jax")
     for mode, a in runs.items():

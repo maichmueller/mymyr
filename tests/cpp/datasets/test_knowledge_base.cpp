@@ -1,7 +1,6 @@
-// Knowledge bases: the fork's knowledge base tests (tests/unit/datasets/knowledge_base.cpp: spanner and gripper, tuple
-// graphs of width 0, 1 and 2), the order of the state spaces and the options.
+// Knowledge bases: spanner and gripper, tuple graphs of width 0, 1 and 2, the order of the state spaces and the options.
 
-#include "../frontend/golden.hpp"
+#include "../support/benchmarks.hpp"
 #include "mymyr/datasets/knowledge_base.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/task_table.hpp"
@@ -19,9 +18,9 @@ using namespace mymyr::datasets;
 
 namespace
 {
-rl::TaskTablePtr fork_table(const std::string& dir, std::initializer_list<const char*> problems)
+rl::TaskTablePtr small_table(const std::string& dir, std::initializer_list<const char*> problems)
 {
-    const auto root = test::fork_data_dir() / dir;
+    const auto root = test::small_dir() / dir;
     std::vector<TaskPtr> tasks;
     const auto domain = frontend::Domain::from_file(root / "domain.pddl");
     for (const char* p : problems)
@@ -59,9 +58,7 @@ KnowledgeBaseOptions options(u32 width)
 // The spanner at location 1 in one problem and at location 2 in the other.
 TEST(KnowledgeBase, Spanner)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "spanner/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("spanner", {"p-1-1-2-1.pddl", "p-1-1-2-1(2).pddl"});
+    const auto table = small_table("spanner", {"p-1-1-2-1.pddl", "p-1-1-2-1(2).pddl"});
     ASSERT_TRUE(table);
     const auto kb = KnowledgeBase::create(table, options(2));
     const auto& G = *kb->generalized_state_space();
@@ -83,9 +80,7 @@ TEST(KnowledgeBase, Spanner)
 // One and two balls.
 TEST(KnowledgeBase, Gripper)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("gripper", {"p-1-0.pddl", "p-2-0.pddl"});
+    const auto table = small_table("gripper", {"p-1-0.pddl", "p-2-0.pddl"});
     ASSERT_TRUE(table);
     struct Expect
     {
@@ -114,9 +109,7 @@ TEST(KnowledgeBase, Gripper)
 
 TEST(KnowledgeBase, PartsAndOrder)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
+    const auto table = small_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
     ASSERT_TRUE(table);
     // the defaults: state spaces only, ascending by size
     const auto kb = KnowledgeBase::create(table);
@@ -164,9 +157,7 @@ TEST(KnowledgeBase, PartsAndOrder)
 
 TEST(KnowledgeBase, FromParts)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
+    const auto table = small_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
     ASSERT_TRUE(table);
     const auto kb = KnowledgeBase::create(table, options(1));
     auto parts = [&] {

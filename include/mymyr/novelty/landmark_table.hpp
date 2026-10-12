@@ -1,5 +1,5 @@
 #pragma once
-// Landmark-restricted novelty for LIW(k), matching mimir 0.16.3's LandmarkCoordinates and LandmarkNoveltyTable.
+// Landmark-restricted novelty for LIW(k).
 //
 // A feature is a pair (l, t): l a landmark coordinate of the state, t a free atom tuple of size <= k.
 //   - Coordinates (LandmarkCoordinates): landmark atoms are grouped into ranks; a state's coordinates are the ranks of
@@ -8,7 +8,7 @@
 //     several ranks). For a transition s -> t, the ranks of t split into flipped (not a rank of s) and kept (a rank of
 //     s); BOT flips on when s held a landmark and t holds none;
 //   - state tuples: every subset of the state's atoms of size 0..k (the empty tuple included), none at all when the
-//     state has fewer than k - 1 atoms (mimir's StateTupleIndexGenerator needs k entries among atoms + placeholder);
+//     state has fewer than k - 1 atoms;
 //   - transition tuples: every subset of the successor's atoms of size 1..k that contains an atom the transition added,
 //     none when the successor has fewer than k - 1 atoms;
 //   - the start state marks coordinates x state tuples; a transition marks flipped x state tuples of t and
@@ -17,8 +17,8 @@
 //
 // Layout: tuples are numbered by the combinadic rank of the padded tuple (placeholders 0 .. k-j-1, atom a as a + k),
 // which does not depend on the atom count, so growing the table only appends. Dense: tuple-major rows of
-// words_for(num_ranks) words (mimir's TupleMajorBitTable), while rows x row bytes fit LandmarkTableOptions;
-// sparse (one way, like mimir): an open-addressing set of (tuple, rank) keys. For k <= 2, while it fits the same
+// words_for(num_ranks) words, while rows x row bytes fit LandmarkTableOptions;
+// sparse (one way): an open-addressing set of (tuple, rank) keys. For k <= 2, while it fits the same
 // budget, the dense table is rank-major instead, so the tests become word operations over the state: k = 1 keeps per
 // rank the set of marked atoms next to the tuple-major rows (a flipped rank tests the successor's atoms against its
 // set, a kept rank tests the added atoms' rows); k = 2 keeps per rank and atom a the set of atoms b with {a, b}
@@ -40,7 +40,7 @@ namespace mymyr::novelty
 {
 struct LandmarkTableOptions
 {
-    /// Largest dense table in bytes (mimir's default 256 MiB); above it the table is sparse. 0 forces sparse.
+    /// Largest dense table in bytes; above it the table is sparse. 0 forces sparse.
     u64 max_dense_bytes = u64{256} << 20;
 };
 
@@ -53,8 +53,7 @@ public:
     /// never hold).
     explicit LandmarkCoordinates(std::vector<std::vector<u32>> groups);
 
-    /// mimir's grouping (LandmarkNoveltyPruningStrategyImpl::make_grouping and the LandmarkCoordinates
-    /// constructors), over slots:
+    /// The grouping, over slots:
     ///   - without `disjunctive` (or without disjunctive sets): one rank per fact landmark;
     ///   - `all_private`: one rank per atom of fact landmarks and disjunctive members (unshared must be empty);
     ///   - otherwise one shared rank per disjunctive set (members minus `unshared`, in the given order) and one rank

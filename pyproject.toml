@@ -29,7 +29,8 @@ MYMYR_PYTHON = "ON"
 MYMYR_TESTS = "OFF"
 
 [tool.pytest.ini_options]
-testpaths = ["tests/python"]
+testpaths = ["tests/python", "tests/parity/python"]
+markers = ["parity: compares mymyr with recorded reference results (skips without the reference data)"]
 
 [tool.cibuildwheel]
 # free-threaded CPython only; Linux wheels are x86_64 manylinux, macOS wheels are arm64
@@ -37,18 +38,16 @@ build = ["cp314t-*", "cp315t-*"]
 skip = ["*musllinux*"]
 build-verbosity = 1
 test-requires = ["pytest>=8", "nanobind>=3.1,<4", "cmake>=3.25", "ninja"]
-# The CPU test suite against the installed wheel, with the benchmark data fetched next to it.
-before-test = "bash {project}/ci/fetch_test_data.sh /tmp/mymyr-test-data"
+# The CPU test suite against the installed wheel, with the reference data of the parity tests fetched next to it.
+before-test = "bash {project}/tests/parity/fetch_data.sh /tmp/mymyr-test-data"
 test-command = [
     "python -c \"import importlib.metadata as m, mymyr; assert mymyr.__version__ == m.version('mymyr'), (mymyr.__version__, m.version('mymyr'))\"",
-    "python {project}/ci/run_pytest.py --runtimes none -W error -q -rs -p no:cacheprovider {project}/tests/python",
+    "python {project}/ci/run_pytest.py --runtimes none -W error -q -rs -p no:cacheprovider {project}/tests/python {project}/tests/parity/python",
     "bash {project}/ci/check_cmake_consumer.sh \"$(python -c 'import mymyr; print(mymyr.get_cmake_dir())')\" /tmp/mymyr-consumer",
 ]
 
 [tool.cibuildwheel.test-environment]
-MYMYR_FORK_DATA = "/tmp/mymyr-test-data/mimir-fork/data"
-MYMYR_IPC = "/tmp/mymyr-test-data/mimir-fork/data/ipc"
-MYMYR_WORK = "/tmp/mymyr-test-data/work"
+MYMYR_PARITY_DATA = "/tmp/mymyr-test-data"
 CUDA_VISIBLE_DEVICES = ""
 JAX_PLATFORMS = "cpu"
 

@@ -12,7 +12,7 @@
 // fits": groups of searches are sized to MultiIwOptions::table_bytes and run one after the other).
 //
 // Semantics: per search, exactly search::iw(task, {start, max_arity, optimize_iw1, width_zero, witness_pruning,
-// canonical_order, budgets}) (mimir's conventions, search/iw.hpp): the width-0 pass, optimized IW(1), goal test on
+// canonical_order, budgets}): the width-0 pass, optimized IW(1), goal test on
 // pop, expanded / generated / generated_in_tree / skipped per pass, the plan and the goal state. The candidates of a
 // chunk come in canonical order (search, pop position, schema, binding; the lifted kernels, with their per-schema
 // CPU fallback and CPU axioms), and exact batch novelty (the default) resolves every unseen tuple's

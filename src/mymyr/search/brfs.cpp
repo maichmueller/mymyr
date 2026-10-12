@@ -347,7 +347,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
             break;  // max_states, the time or the token, inside the expansion
         if constexpr (Ordered)
             if (truncated || pos + 1 - layer_begin == order.size())
-                pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
+                pos = layer_end - 1;  // a full next layer drops the rest of this one; the beam's last entry ends it
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);
@@ -491,7 +491,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
             break;  // max_states, the time or the token, inside the expansion
         if constexpr (Ordered)
             if (truncated || pos + 1 - layer_begin == order.size())
-                pos = layer_end - 1;  // a full next layer drops the rest of this one (mimir); the beam's last entry ends it
+                pos = layer_end - 1;  // a full next layer drops the rest of this one; the beam's last entry ends it
     }
     log.close(r.expanded, r.generated, store.size());
     r.search_s = seconds_since(t0);

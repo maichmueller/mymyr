@@ -1,6 +1,6 @@
 #pragma once
 // Test support: h² by its definition (heuristics/heuristic.hpp), a plain Bellman-Ford over the full pair table of a
-// grounding, to check the Dijkstra of src/mymyr/heuristics/h2.cpp and to reproduce mimir's H2Heuristic.
+// grounding, to check the Dijkstra of src/mymyr/heuristics/h2.cpp.
 
 #include "mymyr/heuristics/heuristic.hpp"
 #include "mymyr/heuristics/relaxed_task.hpp"
@@ -46,10 +46,10 @@ inline std::vector<u32> true_props(const Task& task, const heuristics::RelaxedTa
 class ReferenceH2
 {
 public:
-    /// mimir_deletes: mimir's H2Heuristic instead, which checks the deletes of an action against the negations of
-    /// atoms (every atom persists); the two agree with mimir only on tasks without negative literals, conditional
-    /// effects and axioms (its other differences).
-    explicit ReferenceH2(const heuristics::RelaxedTask& R, bool mimir_deletes = false) : R(R), P(R.num_props()), O(R.num_ops())
+    /// negation_deletes: the deletes of an action are checked against the negations of atoms instead (every atom
+    /// persists); the two agree only on tasks without negative literals, conditional effects and axioms.
+    explicit ReferenceH2(const heuristics::RelaxedTask& R, bool negation_deletes = false)
+        : R(R), P(R.num_props()), O(R.num_ops())
     {
         comp.assign(P, h2_detail::k_none);
         for (u32 p = 0; p < P; ++p)
@@ -78,7 +78,7 @@ public:
         for (u32 o = 0; o < O; ++o)
         {
             std::set<u32> ex;
-            if (!mimir_deletes)
+            if (!negation_deletes)
             {
                 ex.insert(add[o].begin(), add[o].end());
                 falsified(o, ex);
@@ -88,7 +88,7 @@ public:
                 if (o2 != o && !R.is_axiom(o) && !R.is_axiom(o2) && R.ground_action(o2) == R.ground_action(o))
                 {
                     sib.push_back(o2);
-                    if (R.unconditional(o2) && !mimir_deletes)
+                    if (R.unconditional(o2) && !negation_deletes)
                         falsified(o2, ex);
                 }
             excl.push_back(std::move(ex));

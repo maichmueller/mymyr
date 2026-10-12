@@ -1,6 +1,5 @@
-// IW(k) passes and the IW ladder (search/iw.hpp), with mimir's pass semantics (mimir 0.16.3 brfs::find_solution with
-// the ArityZero / ArityK novelty pruning strategies, src/search/algorithms/brfs.cpp and iw/pruning_strategy.cpp):
-// goal test on pop, blocked states before the novelty test, the width-0 and optimized-IW(1) root rules.
+// IW(k) passes and the IW ladder (search/iw.hpp), (breadth-first passes with the arity-zero and
+// arity-k novelty pruning strategies): goal test on pop, blocked states before the novelty test, the width-0 and optimized-IW(1) root rules.
 
 #include "iw_detail.hpp"
 #include "beam_detail.hpp"
@@ -19,21 +18,6 @@
 
 namespace mymyr::search
 {
-const char* mimir_status_name(SearchStatus s) noexcept
-{
-    switch (s)
-    {
-        case SearchStatus::Solved: return "solved";
-        case SearchStatus::Exhausted: return "failed";  // mimir's IW/SIW: every pass exhausted
-        case SearchStatus::OutOfStates: return "out_of_states";
-        case SearchStatus::OutOfTime: return "out_of_time";
-        case SearchStatus::Cancelled: return "canceled";
-        case SearchStatus::Failed: return "error";
-        case SearchStatus::Unsolvable: return "unsolvable";
-    }
-    return "?";
-}
-
 namespace detail
 {
 // ------------------------------------------------------------------------------------------------- GoalTest
@@ -70,7 +54,7 @@ GoalTest GoalTest::counter(const Task& task, u32 threshold)
     const plan::Goal& goal = task.compiled().goal;
     g.m_static_false = goal.unsatisfiable;
     g.m_view = goal.uses_derived;
-    // each distinct literal once (mimir counts the atoms of its goal condition, a set per kind and polarity)
+    // each distinct literal once
     for (const plan::Check& c : goal.lits)
     {
         const bool dup = std::any_of(g.m_lits.begin(), g.m_lits.end(),
@@ -290,7 +274,7 @@ private:
 struct PassSpec
 {
     u32 arity = 0;
-    bool root_continuation = false;  // mimir's optimized IW(1): admit every distinct root successor
+    bool root_continuation = false;  // the optimized IW(1): admit every distinct root successor
 };
 
 struct PassOut
@@ -303,7 +287,7 @@ struct PassOut
 };
 
 /// Distinct states of the tree, by content: the successors of the root (width 0 and the optimized IW(1) root rule
-/// deduplicate them) and, in a beam with BeamNovelty::SurvivorsOnly, every candidate (mimir's "is new" test: a
+/// deduplicate them) and, in a beam with BeamNovelty::SurvivorsOnly, every candidate (the "is new" test: a
 /// candidate the beam dropped has marked nothing, so it could pass the read-only novelty test again).
 class SeenStates
 {
@@ -368,13 +352,13 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     u64 progress_next = interval;
 
     // Ordered layers (IwOptions::layers): `layer` holds the entries of the current layer in expansion order, `next`
-    // those of the next one in generation order (width-0 duplicates are entries of their first node, as in mimir,
+    // those of the next one in generation order (width-0 duplicates are entries of their first node,
     // and are skipped once their node is closed). Otherwise the tree itself is the queue.
     LayerOrderer* const lo = c.layers.get();
     const bool limit_layer = lo && lo->limited();
     // A beam (LayerOrdering::beam_width): candidates enter the tree and the next layer as they are generated; at the
     // boundary the layer is ordered and cut, generated_in_tree then counts only the kept entries. SurvivorsOnly:
-    // the novelty test only reads the table during generation (`seen` stands in for mimir's "is new" test) and the
+    // the novelty test only reads the table during generation (`seen` stands in for the "is new" test) and the
     // kept entries are replayed through the marking test (replay below).
     const bool beam = lo && lo->beam();
     const bool survivors = lo && lo->survivors_only();
@@ -515,7 +499,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     };
 
     // SurvivorsOnly: the kept entries in rank order, each tested and marked against the table plus the tuples of the
-    // better ranked ones (mimir's finalize_beam_layer and on_end_beam_replay: marking as it goes is the same as its
+    // better ranked ones (marking as it goes is the same as a
     // delta set committed at the end). One that adds no tuple leaves the layer; a root successor of the optimized
     // IW(1) pass stays and is only marked as not to be expanded.
     std::vector<u64> rparent, rchild;
@@ -960,7 +944,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
 
         if (id == 0 && (k == 0 || ps.root_continuation))
         {
-            // the root of a width-0 pass (mimir's ArityZero root rule) or of an optimized IW(1) pass
+            // the root of a width-0 pass or of an optimized IW(1) pass
             drive(cv,
                 [&](u32 s, const ObjectId* b, const Delta& d) -> bool
                 {
@@ -990,10 +974,10 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
                     if (k == 0)
                     {
                         if (dup != k_none && survivors)
-                            return reject();  // mimir's ArityZero beam selection: not new
+                            return reject();  // the arity-zero beam selection: not new
                         if (dup != k_none)
                         {
-                            // mimir admits it again (counted in the tree) but pops it as closed: no second node
+                            // it is admitted again (counted in the tree) but popped as closed: no second node
                             ++st.generated_in_tree;
                             if constexpr (Slow)
                                 if (obs)
@@ -1124,7 +1108,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
         if (stop)
             break;
         if (truncated)
-            lpos = layer.size();  // mimir drops the rest of the layer once the next one is full
+            lpos = layer.size();  // the rest of the layer is dropped once the next one is full
     }
     if (!status_set)
         st.status = SearchStatus::Exhausted;
@@ -1171,7 +1155,7 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_ar
     }
     if (goal.statically_false())
     {
-        // mimir's first pass returns UNSOLVABLE before expanding anything
+        // a statically false goal ends the first pass as UNSOLVABLE before anything is expanded
         IwPassStatistics p;
         p.arity = first;
         p.status = SearchStatus::Unsolvable;

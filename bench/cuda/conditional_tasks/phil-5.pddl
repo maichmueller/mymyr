@@ -1,5 +1,5 @@
 ;; Philosophers with 5 philosophers (712,192 states), from gen_phil.py 5;
-;; domain: the fork's data/philosophers/domain.pddl
+;; domain: tests/data/benchmarks/small/philosophers/domain.pddl
 (define (problem phil-5)
 (:domain protocol)
 (:objects

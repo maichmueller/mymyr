@@ -1,0 +1,1 @@
+Sample of the IPC 2023 learning-track domains (blocksworld, childsnack, ferry, floortile, miconic, rovers, satellite, sokoban, transport): domain.pddl and a few train and test problems per domain. Files are unchanged.

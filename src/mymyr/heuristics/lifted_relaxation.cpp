@@ -363,7 +363,7 @@ void LiftedRelaxation::Impl::build()
         const auto t = D.terms_of(l);
         return k.pred == l.pred.v && std::equal(k.terms.begin(), k.terms.end(), t.begin(), t.end());
     };
-    // one condition's literals as a set (loki repeats nullary literals; mimir keeps them once)
+    // one condition's literals as a set (loki repeats nullary literals; a set keeps them once)
     auto add_unique = [&](std::vector<KeyPat>& v, usize first, const Literal& l)
     {
         for (usize i = first; i < v.size(); ++i)
@@ -449,9 +449,9 @@ void LiftedRelaxation::Impl::build()
             op.arity = sc.arity();
             op.num_vars = sc.arity() + ce.extra_params.count;
             relaxed_pre(D.literals_of(sc.precondition), true, op);
-            relaxed_pre(D.literals_of(ce.condition), false, op);  // static effect-condition literals ignored, as in mimir
+            relaxed_pre(D.literals_of(ce.condition), false, op);  // static effect-condition literals ignored
             std::vector<std::vector<u64>> masks(op.num_vars);
-            // quantified parameters: mimir's single-parameter static consistency candidates
+            // quantified parameters: single-parameter static consistency candidates
             for (u32 j = 0; j < ce.extra_params.count; ++j)
             {
                 const u32 param = sc.arity() + j;

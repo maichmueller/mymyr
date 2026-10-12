@@ -1,5 +1,5 @@
 #pragma once
-// Task-level arrays for encoders (mifrost), environments and device kernels.
+// Task-level arrays for encoders, environments and device kernels.
 //
 //   - atom_metadata(task): what an observation encoder needs, and nothing more (mymyr ships no encoders):
 //       atom_pred [F], atom_args (CSR: atom_args_offsets [F+1] + atom_args), atom_args_padded [F, A] (-1 padding),

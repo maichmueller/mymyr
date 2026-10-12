@@ -556,7 +556,7 @@ struct PlanOut
 };
 cudaError_t launch_plans(Nodes nodes, Searches s, PlanOut p, cudaStream_t st);
 /// The non-goal states of the same plans (the ancestors of the goal nodes, the root first) as gathered rows at
-/// plan_offset[i] with their search ids (g.rows, g.search; g.words wide): mimir's plan extraction enumerates their
+/// plan_offset[i] with their search ids (g.rows, g.search; g.words wide): the plan extraction enumerates their
 /// successors, which the rollouts' reached atoms include (cuda/rollouts.hpp).
 cudaError_t launch_plan_states(Nodes nodes, Searches s, PlanOut p, Gathered g, cudaStream_t st);
 }  // namespace mymyr::cuda::miw

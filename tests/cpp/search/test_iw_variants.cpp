@@ -2,8 +2,7 @@
 // their shared BrFS engine (src/mymyr/search/novelty_brfs.hpp):
 //   - the engine's classic IW ladder equals search::iw() pass for pass on the suite, on the fast path, on the slow
 //     (tracked) path and with in-order layers;
-//   - further sections test each variant (fork parity of the counts is in test_iw_variants_golden.cpp, against
-//     tests/data/iw_variants/fork_golden.json).
+//   - further sections test each variant (parity of the counts is in tests/parity).
 
 #include "../../../src/mymyr/search/novelty_brfs.hpp"
 #include "../support/suite.hpp"
@@ -152,8 +151,8 @@ TEST_P(EngineOnSuite, LayerOrderingsOfIwEqualTheClassicLadders)
 INSTANTIATE_TEST_SUITE_P(Suite, EngineOnSuite, ::testing::ValuesIn(suite()), [](const auto& i) { return param_name(i.param.name); });
 
 // ================================================================================================ oracle
-// A literal re-implementation of the documented pass semantics (the fork's brfs.cpp with its pruning strategies):
-// every successor materialized with Successors::apply, a duplicate check on admitted states (the fork's "is new"),
+// A literal re-implementation of the documented pass semantics (BrFS with its pruning strategies):
+// every successor materialized with Successors::apply, a duplicate check on admitted states ("is new"),
 // novelty over std::set features computed from scratch. Shares no code with the engine or the pruners.
 using Atoms = std::vector<u32>;  // ascending slots
 
@@ -379,7 +378,7 @@ Atoms slots_of(const Task& task, std::span<const CanonicalAtom> atoms)
     return out;
 }
 
-/// The oracle's grouping, written from the fork's rules independently of LandmarkCoordinates::make.
+/// The oracle's grouping, written from the rules independently of LandmarkCoordinates::make.
 OracleRanks oracle_ranks(const Task& task, const LandmarkNovelty& ln)
 {
     OracleRanks r;
@@ -542,7 +541,7 @@ TEST(Liw, AllPrivateWithUnsharedFails)
 // ================================================================================================ abstracted IW
 namespace
 {
-/// The abstracted features and tuples, written from the fork's compute_features_for_atom / generate_tuples.
+/// The abstracted features and tuples, written from the definition of the features and tuples.
 struct AiwOracle : OracleNovelty
 {
     const Task* task = nullptr;

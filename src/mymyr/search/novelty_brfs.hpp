@@ -1,14 +1,13 @@
 #pragma once
-// The breadth-first engine of the IW family variants: one BrFS pass with a pluggable novelty pruner, mimir's
-// root rules, optional ordered (and randomized, truncated) layers, search coordination and state tracking. A port of
-// mimir 0.16.3 brfs::find_solution (src/search/algorithms/brfs.cpp, the queued path, and brfs/ordered_layer.cpp) with
+// The breadth-first engine of the IW family variants: one BrFS pass with a pluggable novelty pruner, the
+// root rules, optional ordered (and randomized, truncated) layers, search coordination and state tracking, with
 // the conventions of the IW pass (search/iw.cpp, run_pass): goal test on pop, blocked states before the novelty
 // test, expanded = popped non-goal states, generated = every transition of an expanded state, generated_in_tree =
 // admitted successors.
 //
 // A pruner decides novelty. Its interface (duck-typed):
-//   bool init(const u64* w, u32 n);                        marks the start state; false: it is pruned (mimir's
-//                                                          test_prune_initial_state; the pass then ends at once)
+//   bool init(const u64* w, u32 n);                        marks the start state; false: it is pruned
+//                                                          (the pass then ends at once)
 //   void begin(const u64* w, u32 n);                       once per expanded state, before its transitions
 //   bool test(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, const Delta& d);
 //                                                          novelty of parent -> child, marking what is new
@@ -21,21 +20,21 @@
 //                                                          BeamNovelty::SurvivorsOnly needs it)
 // `add` holds the atoms the transition adds (true in the child, false in the parent), each once, in effect order.
 //
-// Root rules (mimir's pruning strategies): Normal (the novelty test applies at the root too); ArityZero (the
+// Root rules: Normal (the novelty test applies at the root too); ArityZero (the
 // width-0 pass: every successor of the start state other than itself enters, duplicates once per action as queue
 // entries, and every successor below the root is pruned); Continuation (optimized IW(1) and abstracted IW: every
 // distinct root successor enters; one that is not novel is goal-tested and counted as expanded but not expanded,
 // unless keep_depth_one is set).
 //
 // Every state admitted to the tree is never novel again for the pruners of this family (all of its features are
-// marked when it enters), so, as in the IW pass, no duplicate-detection table is needed: mimir's "is new" test is
+// marked when it enters), so, as in the IW pass, no duplicate-detection table is needed: the "is new" test is
 // implied. Width-0 duplicates are queue entries that point to the node of their first occurrence; popping a closed
-// node is skipped, as mimir skips CLOSED search nodes.
+// node is skipped.
 //
 // Beam (LayerOrdering::beam_width): candidates enter the tree and the next layer as they are generated; at the
 // boundary the layer is ordered and cut, and generated_in_tree counts only the kept entries. With
 // BeamNovelty::SurvivorsOnly the candidates are tested with peek() (nothing is marked, so a set of the candidates
-// stands in for mimir's "is new" test) and the kept ones are replayed in rank order through test(): one that adds
+// stands in for the "is new" test) and the kept ones are replayed in rank order through test(): one that adds
 // nothing beyond the better ranked ones leaves the layer (a Continuation root successor stays, marked as not to be
 // expanded unless keep_depth_one). Observers see the transitions as they are generated: a successor reported as
 // Opened can be dropped by the beam or the replay and is then never expanded.
@@ -65,8 +64,8 @@ inline constexpr u32 k_no_node = ~u32{0};
 
 using SuccessorOrder = std::function<void(StateView, std::span<const Action>, std::vector<u32>&)>;
 
-/// Records every distinct state a search creates: mimir's state repository with first-achiever and
-/// co-occurrence tracking (state_repository.cpp record_first_achievers / record_co_occurrence). Indexed by fluent
+/// Records every distinct state a search creates, with first-achiever and
+/// co-occurrence tracking. Indexed by fluent
 /// slots; convert with the task's atom index before comparing across tasks or runs.
 class StateTracker
 {
@@ -158,8 +157,8 @@ public:
         return true;
     }
 
-    /// Evaluates the derived atoms of the states recorded since the last call (mimir evaluates the axioms of every
-    /// new state). Must not run inside a successor enumeration of `succ`.
+    /// Evaluates the derived atoms of the states recorded since the last call (the axioms of every
+    /// new state are evaluated). Must not run inside a successor enumeration of `succ`.
     void flush_derived(Successors& succ)
     {
         for (u32 id : m_pending)
@@ -229,7 +228,7 @@ struct Env
     SearchObserver* root = nullptr;  // lifecycle events (pass, solution, end); null inside parallel workers
     SearchCoordination* coord = nullptr;
     StateTracker* tracker = nullptr;
-    LayerOrderer* layers = nullptr;  // ordered layers (mimir's layer_ordering_strategy); null: the queued BrFS
+    LayerOrderer* layers = nullptr;  // ordered layers; null: the queued BrFS
     BeamTeam* team = nullptr;        // the beam's layer step (threads > 1 or a relaxed beam; fast path only)
 
     Env(const Task& t, Successors& s, const GoalTest& g, const BlockedSet& b, const SearchControl& c)
@@ -475,7 +474,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         env.tracker->record(root.w, rn);
         env.tracker->flush_derived(succ);
     }
-    const bool root_enters = pruner.init(root.w, rn);  // false: mimir's brfs returns FAILED (the ladder goes on)
+    const bool root_enters = pruner.init(root.w, rn);  // false: the pass is FAILED (the ladder goes on)
     SeenStates seen;
     Driver driver;
 
@@ -498,8 +497,8 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
 
     auto action_of = [&](u32 s, const ObjectId* b) { return Action(SchemaId{s}, std::vector<ObjectId>(b, b + succ.arity(s))); };
 
-    // SurvivorsOnly: the kept entries of `next` in rank order through the marking test (mimir's finalize_beam_layer and
-    // on_end_beam_replay: marking as it goes is the same as its delta set committed at the end).
+    // SurvivorsOnly: the kept entries of `next` in rank order through the marking test (marking as it goes is the same as a
+    // delta set committed at the end).
     std::vector<u64> rparent, rchild;
     std::vector<u32> radd;
     std::vector<SlotId> rslots;
@@ -1038,10 +1037,10 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             {
                 const u32 dup = seen.find(tree, w, nn);
                 if (dup != k_no_node && survivors)
-                    return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // mimir's ArityZero beam selection: not new
+                    return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // the arity-zero beam selection: not new
                 if (dup != k_no_node)
                 {
-                    // mimir admits it again (a queue entry) and skips it when popped: it is closed by then
+                    // it is admitted again (a queue entry) and skipped when popped: it is closed by then
                     ++st.generated_in_tree;
                     report(s, b, w, nn, dup, TransitionOutcome::Duplicate);
                     target->push_back(dup);
@@ -1070,7 +1069,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             if (survivors)
             {
                 if (seen.find(tree, w, nn) != k_no_node)
-                    return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // a candidate before (mimir: not new)
+                    return reject(s, b, w, nn, TransitionOutcome::Duplicate);  // a candidate before
                 seen.insert(w, nn, tree.size());
             }
             report(s, b, w, nn, tree.size(), TransitionOutcome::Opened);
@@ -1094,7 +1093,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
         if (env.tracker && env.tracker->pending())
             env.tracker->flush_derived(succ);
         if (truncated)
-            pos = cur.size();  // mimir drops the rest of the layer once the next one is full
+            pos = cur.size();  // the rest of the layer is dropped once the next one is full
     }
     if (!status_set)
     {

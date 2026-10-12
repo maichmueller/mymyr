@@ -39,7 +39,7 @@ every count equal the single-threaded search's, ties and seeds included; an obse
 step on the calling thread. `threads > 1` without a beam is refused, except by the plain `brfs`, which has its own
 parallel layers.
 
-`beam_novelty="relaxed_survivors_only"` (with `layer_order="goal_count"`; not supported by LIW) is mimir's relaxed
+`beam_novelty="relaxed_survivors_only"` (with `layer_order="goal_count"`; not supported by LIW) is the relaxed
 survivors-only beam: a layer's transitions, in generation order, are split into `min(threads, ceil(n / beam_chunk))`
 contiguous parts (`beam_chunk=1024` by default). Each part keeps its best `beam_width` successors by the read-only
 novelty test; the kept ones of all parts enter in rank order, skipping states seen before, until `beam_width` entered;
@@ -162,7 +162,7 @@ translator produces; mymyr works on the PDDL atoms. This accounts for most of th
 - Language: Fast Downward's LM-cut refuses conditional effects and axioms that its translator does not simplify away.
   mymyr's LM-cut supports both: conditional effects through action-level cost sharing (each cut lowers an action
   once), derived predicates as free operators. Effects whose static condition fails never fire and are left out, as
-  the translator does; the other relaxation heuristics (`max`, `add`, `ff`) keep them, as mimir does.
+  the translator does; the other relaxation heuristics (`max`, `add`, `ff`) keep them.
 - LM-cut ties: Fast Downward takes the first of an operator's most expensive preconditions in the order of its SAS+
   variables, mymyr the last in the order of the grounding. On ties the cuts can differ, and so can the value (both are
   admissible) and the number of states A* expands before its last f-layer, in either direction.

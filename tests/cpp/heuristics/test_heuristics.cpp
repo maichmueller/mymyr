@@ -1,5 +1,4 @@
-// h², set-additive and the perfect heuristic on small suite tasks (the comparison with the fork is
-// mymyr_heuristics_golden_tests):
+// h², set-additive and the perfect heuristic on small suite tasks :
 //   - h² equals a plain Bellman-Ford evaluation of its definition (written here independently), and
 //     h_max <= h² <= h* on states of the whole state space (h* from the perfect heuristic), so h² is infinite only on
 //     dead ends;
@@ -287,8 +286,8 @@ TEST(Heuristics, AStarWithThePerfectHeuristicExpandsOnePlan)
         const auto r = search::astar_eager(*task, o);
         ASSERT_EQ(r.status, search::SearchStatus::Solved);
         EXPECT_EQ(static_cast<i32>(r.plan.size()), sp->unit_goal_distances()[0]);
-        // the states of the plan but the goal, which is returned when popped without being expanded (mimir's A*
-        // counts the goal as expanded and does not break ties among equal f by h, so it expands more states)
+        // the states of the plan but the goal, which is returned when popped without being expanded (an A* that
+        // counts the goal as expanded expands one more state)
         EXPECT_EQ(r.stats.expanded, r.plan.size());
     }
 }

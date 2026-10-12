@@ -1976,7 +1976,7 @@ const char* k_landmark_doc =
     "(with disjunctive: members given their own rank), max_dense_bytes (dense table budget, default 256 MiB). ";
 
 const char* k_layer_doc =
-    "layer_order (search/layer_ordering.hpp; mimir's layer ordering strategies): 'queue' (plain BrFS, the default) or "
+    "layer_order (search/layer_ordering.hpp): 'queue' (plain BrFS, the default) or "
     "layer by layer, each next layer reordered before it is expanded: 'in_order' (as generated), 'reverse', "
     "'randomized' (seed: the SplitMix64 seed) or 'goal_count' (stable, by the number of satisfied goal literals, most "
     "first; prefer_more_satisfied_goals=False: fewest first). max_next_layer_states (ordered kinds only): once the "
@@ -2012,8 +2012,7 @@ void bind_search(nb::module_& parent)
         .def("__str__", [](SearchStatus s) { return std::string(search::to_string(s)); });
 
     nb::enum_<search::ActionOrdering>(m, "ActionOrdering",
-                                      "Rollout IW's action ordering (search/rollout_iw.hpp; mimir's "
-                                      "RolloutIWActionOrderingKind): guidance, never pruning.")
+                                      "Rollout IW's action ordering (search/rollout_iw.hpp): guidance, never pruning.")
         .value("IN_ORDER", search::ActionOrdering::InOrder)
         .value("RANDOMIZED", search::ActionOrdering::Randomized)
         .value("DIRECT_GOAL_ACHIEVER_FIRST", search::ActionOrdering::DirectGoalAchieverFirst)
@@ -2051,7 +2050,7 @@ void bind_search(nb::module_& parent)
         .def_ro("seconds", &search::SearchStatistics::seconds)
         .def("__repr__", [](const search::SearchStatistics& s) { return "Statistics(" + stats_repr(s) + ")"; });
 
-    auto iw_pass = nb::class_<search::IwPassStatistics>(m, "IwPass", "Statistics of one IW(k) pass (mimir's per-pass counts).");
+    auto iw_pass = nb::class_<search::IwPassStatistics>(m, "IwPass", "Statistics of one IW(k) pass (its per-pass counts).");
     bind_stats_pickle(iw_pass, [](const search::IwPassStatistics& x) { return enc(x); }, dec_pass);
     iw_pass.def_ro("arity", &search::IwPassStatistics::arity)
         .def_ro("status", &search::IwPassStatistics::status)
@@ -2196,7 +2195,7 @@ void bind_search(nb::module_& parent)
 
     // parallel rollouts and portfolio: results ----------------------------------------------------------------------
     using RS = search::RolloutIwStatistics;
-    auto rollout_stats = nb::class_<RS>(m, "RolloutIwStatistics", "Counters of a Rollout IW run (mimir's rollout_iw::Statistics).");
+    auto rollout_stats = nb::class_<RS>(m, "RolloutIwStatistics", "Counters of a Rollout IW run .");
     bind_stats_pickle(rollout_stats, [](const RS& x) { return enc(x); }, dec_rollout_stats);
     rollout_stats.def_ro("rollouts", &RS::rollouts)
         .def_ro("generated", &RS::generated, "New tree nodes.")
@@ -2243,8 +2242,7 @@ void bind_search(nb::module_& parent)
         });
 
     nb::class_<PyLandingState>(m, "LandingState",
-                               "A state a rollout created that first made some fluent atom true (mimir's "
-                               "IWLandingState).")
+                               "A state a rollout created that first made some fluent atom true.")
         .def_prop_ro("state", [](const PyLandingState& x) { return make_state(x.o, State(x.l.state)); })
         .def_prop_ro("atoms", [](const PyLandingState& x) { return atom_list(x.o, x.l.atoms); },
                      "Its fluent atoms (ascending by canonical id).")
@@ -2259,7 +2257,7 @@ void bind_search(nb::module_& parent)
 
     nb::class_<PyRolloutResult>(m, "RolloutResult",
                                 "One rollout of find_rollouts_parallel: its IW ladder and what its private state "
-                                "repository recorded (mimir's IWRolloutResult). Atoms are GroundAtoms, equal "
+                                "repository recorded. Atoms are GroundAtoms, equal "
                                 "across rollouts and thread counts.")
         .def_prop_ro("seed", [](const PyRolloutResult& x) { return x.seed; })
         .def_prop_ro("search", [](const PyRolloutResult& x) { return PyIwResult{x.get().search, x.o}; },
@@ -2361,7 +2359,7 @@ void bind_search(nb::module_& parent)
         });
 
     nb::class_<PyPortfolioResult>(m, "PortfolioResult",
-                                  "The atomic-goal portfolio's result (mimir's AtomicGoalIWPortfolioResult).")
+                                  "The atomic-goal portfolio's result.")
         .def_prop_ro("status", [](const PyPortfolioResult& x) { return x.r.status; })
         .def_prop_ro("solved", [](const PyPortfolioResult& x) { return x.r.status == SearchStatus::Solved; })
         .def_prop_ro("plan", [](const PyPortfolioResult& x) { return plan_list(x.o, x.r.plan); })
@@ -2605,7 +2603,7 @@ void bind_search(nb::module_& parent)
             },
             "state"_a, "status"_a = nb::none(),
             "The preferred operators of `state` (status: as for h(state, status)). FF and set-additive: the "
-            "applicable actions in its relaxed plan (mimir's preferred actions); lmcount: the applicable actions with "
+            "applicable actions in its relaxed plan; lmcount: the applicable actions with "
             "an effect that fires in `state` and adds a needed landmark false there; empty for the other kinds.")
         .def_prop_ro("kind", [](const PyHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); })
         .def(
@@ -2688,10 +2686,10 @@ void bind_search(nb::module_& parent)
             return PyIwResult{std::move(r), o};
         },
         MYMYR_IW_ARGS,
-        (std::string("The IW(k) ladder, arities 0..max_arity, with mimir's conventions (search/iw.hpp; optimized "
-                     "IW(1) when max_arity == 1). width_zero: 'expand_depth_one' (mimir) or 'root_only' (C#). "
+        (std::string("The IW(k) ladder, arities 0..max_arity, (search/iw.hpp; optimized "
+                     "IW(1) when max_arity == 1). width_zero: 'expand_depth_one' (the depth-1 states enter the tree and are expanded) or 'root_only' (they are goal-tested but not expanded). "
                      "transition_ordering: a LandmarkTransitionOrdering that orders each layer of the width-1 pass "
-                     "(mimir's find_solution_iw with a transition ordering strategy). ") +
+                     "(a transition ordering strategy). ") +
          k_layer_doc + " " + k_control_doc)
             .c_str());
 
@@ -2932,7 +2930,7 @@ void bind_search(nb::module_& parent)
         "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), "observer"_a = nb::none(),
         "progress_interval"_a = nb::none(),
         (std::string("Greedy best-first search (search/best_first.hpp), eager or lazy (preferred and standard lists "
-                     "alternating, mimir's 64:1 by default). heuristic: as for astar. ") +
+                     "alternating, 64:1 by default). heuristic: as for astar. ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
 
@@ -2980,7 +2978,7 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, "plan"_a, nb::kw_only(), "start"_a = nb::none(),
         "The plan as IPC plan text (search/plan_file.hpp): one '(name o1 ... ok)' line per action with the PDDL action's "
-        "own parameters (mimir's plan format), then '; cost = N (unit cost)' or '; cost = N (general cost)'. N is the "
+        "own parameters , then '; cost = N (unit cost)' or '; cost = N (general cost)'. N is the "
         "metric value of the state the plan reaches from `start` (default: the initial state), as a result's cost. "
         "Raises ValueError when an action is not applicable in its state.");
 
@@ -3038,10 +3036,9 @@ void bind_search(nb::module_& parent)
         "task"_a, nb::kw_only(), "max_arity"_a = 2, MYMYR_LANDMARK_ARGS, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "width_zero"_a = "expand_depth_one", "witness_pruning"_a = false, "canonical_order"_a = true,
         "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
-        (std::string("LIW(k) (search/liw.hpp; mimir's iw with landmark_novelty_graph): the width-0 pass, then "
+        (std::string("LIW(k) (search/liw.hpp): the width-0 pass, then "
                      "LIW(1..max_arity) over (landmark coordinate, tuple of size <= k) novelty, each pass from the start "
-                     "with a fresh table, until one solves the task (an exhausted ladder is EXHAUSTED, mimir's "
-                     "FAILED). No optimized IW(1). The result is an IwResult with the per-pass statistics.") +
+                     "with a fresh table, until one solves the task (an exhausted ladder is EXHAUSTED). No optimized IW(1). The result is an IwResult with the per-pass statistics.") +
          k_landmark_doc + k_layer_doc + " " + k_control_doc + k_iw_family_doc)
             .c_str());
 
@@ -3075,7 +3072,7 @@ void bind_search(nb::module_& parent)
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(),
         MYMYR_CONTROL_ARGS,
-        (std::string("Abstracted IW(width) (search/aiw.hpp; mimir's abstracted_iw): one breadth-first pass whose "
+        (std::string("Abstracted IW(width) (search/aiw.hpp): one breadth-first pass whose "
                      "novelty features are abstracted atoms, one per object position with the other objects' type "
                      "signature (base_abstracted: BAIW, no signatures); preserve_goal_atoms keeps positive goal atoms "
                      "whole; keep_depth_one_novel expands the non-novel successors of the start. width 1..3. With "
@@ -3114,7 +3111,7 @@ void bind_search(nb::module_& parent)
         "keep_depth_one_novel"_a = false, MYMYR_LANDMARK_ARGS, "preserve_landmark_atoms"_a = true, MYMYR_LAYER_ARGS, MYMYR_THREADS_ARG,
         "witness_pruning"_a = false, "canonical_order"_a = true, "start"_a = nb::none(),
         MYMYR_CONTROL_ARGS,
-        (std::string("Mimir's projective_iw alias: abstracted IW(1) with base_abstracted = not typed_projection "
+        (std::string("The projective_iw alias: abstracted IW(1) with base_abstracted = not typed_projection "
                      "and preserve_goal_atoms = keep_goal_nonunary_atoms. See abstracted_iw.") +
          k_landmark_doc + k_layer_doc + " " + k_control_doc + k_iw_family_doc)
             .c_str());
@@ -3151,7 +3148,7 @@ void bind_search(nb::module_& parent)
         "max_seconds"_a = nb::none(),
         "cancel"_a = nb::none(), "goal"_a = nb::none(), "blocked_states"_a = nb::none(), "observer"_a = nb::none(),
         "progress_interval"_a = nb::none(),
-        (std::string("Rollout IW(1) (search/rollout_iw.hpp; Bandres et al. 2018, mimir's find_solution_rollout_iw): "
+        (std::string("Rollout IW(1) (search/rollout_iw.hpp; Bandres et al. 2018): "
                      "rollouts from the root over a tree of action sequences, pruned by the minimum depth of each "
                      "fluent atom, until a goal is found (the goal is tested on generation), the root is solved "
                      "(EXHAUSTED; root_solved) or a budget stops it. ordering: an ActionOrdering or its name "
@@ -3193,8 +3190,7 @@ void bind_search(nb::module_& parent)
         "max_next_layer_states"_a = nb::none(), "report_landing_states"_a = false, "report_co_occurrence"_a = false,
         "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,
         "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
-        (std::string("Parallel IW rollouts (search/parallel_rollouts.hpp; mimir's find_rollouts_iw_parallel / "
-                     "iw_parallel): one IW(max_arity) ladder per seed with a randomized layer order seeded by it, on "
+        (std::string("Parallel IW rollouts (search/parallel_rollouts.hpp): one IW(max_arity) ladder per seed with a randomized layer order seeded by it, on "
                      "num_threads threads (0: all cores, capped at len(seeds)) over the one task. For a seed a "
                      "rollout's result is the same at every thread count. Per rollout: the ladder, the reached atoms, "
                      "the number of distinct states created and, when reported, the landing states (per fluent atom "
@@ -3219,7 +3215,7 @@ void bind_search(nb::module_& parent)
             return co_occurrence_dict(o, rows);
         },
         "results"_a,
-        "Mimir's intersect_co_occurrence: per atom of the first rollout, the intersection of its co-occurrence rows "
+        "Per atom of the first rollout, the intersection of its co-occurrence rows "
         "over all rollouts (run with report_co_occurrence).");
 
     m.def(
@@ -3267,15 +3263,14 @@ void bind_search(nb::module_& parent)
         },
         "task"_a, nb::kw_only(), "num_rollout_workers"_a = 4, "num_threads"_a = 0, "base_seed"_a = 0,
         "rollout_orderings"_a = nb::none(), "canonical_order"_a = true, "start"_a = nb::none(), MYMYR_CONTROL_ARGS,
-        (std::string("The atomic-goal portfolio (search/portfolio.hpp; mimir's "
-                     "find_solution_atomic_goal_iw_portfolio): one IW(1) certifier (worker 0) and num_rollout_workers "
+        (std::string("The atomic-goal portfolio (search/portfolio.hpp): one IW(1) certifier (worker 0) and num_rollout_workers "
                      "goal-guided Rollout IW workers (1..K) under one coordination: the best plan's length prunes the "
                      "rollouts, and the certifier's completed depths certify a plan as shortest in the width-1 space. "
                      "rollout_orderings: cycled over the workers, each an ordering or (ordering, seed); None: "
-                     "mimir's cycle DIRECT_GOAL_ACHIEVER_FIRST, MIXED_REGRESSION_RANDOM, RANDOMIZED, "
+                     "the cycle DIRECT_GOAL_ACHIEVER_FIRST, MIXED_REGRESSION_RANDOM, RANDOMIZED, "
                      "GOAL_REGRESSION_RELEVANCE with seeds base_seed + k - 1. num_threads 1 runs the workers one after "
                      "the other on the calling thread (reproducible); more threads (0: all cores) run them side by side "
-                     "(the result then depends on timing, as in mimir). goal: the atomic goal (e.g. "
+                     "(the result then depends on timing). goal: the atomic goal (e.g. "
                      "goal=[['(on a b)']]); max_expanded caps the expansions of all workers together, max_states "
                      "applies per worker, max_seconds to the call.") +
          " " + k_control_doc + k_iw_family_doc + k_parallel_doc + " A worker is 0 (the certifier) or 1..K.")

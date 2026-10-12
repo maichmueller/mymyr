@@ -4,9 +4,9 @@
 #   cmake -S dependencies -B dependencies/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 #   cmake --build dependencies/build
 #
-# The pins are the mimir fork's (its dependencies/ directory), with one deliberate difference: loki is
-# built WITHOUT the fork's IndexedHashSet multi-level-chaining patch. mymyr chains at most one level
-# (domain -> problem), where the patched and stock loki behave identically (same lookup result, indices
+# Every dependency is pinned to a fixed revision. loki is built with its stock IndexedHashSet, without a
+# multi-level-chaining patch: mymyr chains at most one level
+# (domain -> problem), where a patched and the stock loki behave identically (same lookup result, indices
 # continue the parent's space).
 #
 # A package that is already installed in the prefix is skipped, so re-running is cheap.
@@ -29,7 +29,7 @@ endif()
 set(MYMYR_DEPS_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/installs" CACHE PATH "Install prefix of the dependencies")
 set(CMAKE_INSTALL_PREFIX "${MYMYR_DEPS_PREFIX}" CACHE PATH "" FORCE)
 
-# Archives of the pinned commits/tags (equivalent to the fork's git checkouts, but faster to fetch).
+# Archives of the pinned commits/tags (faster to fetch than git checkouts).
 set(MYMYR_LOKI_COMMIT 02880ea1d4ce4ca11deca188050ea6cc83f88dbb)      # https://github.com/drexlerd/Loki.git
 set(MYMYR_ABSEIL_COMMIT 5913446e0c0f8c1976627654956c3553e1519d2c)    # https://github.com/abseil/abseil-cpp.git
 set(MYMYR_FMT_TAG 11.2.0)                                            # https://github.com/fmtlib/fmt

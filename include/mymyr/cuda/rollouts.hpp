@@ -13,7 +13,7 @@
 // the CPU's order: one Fisher-Yates shuffle per completed non-empty layer, across the passes), truncated layers
 // (max_next_layer_states: the admission that fills the next layer stops the layer), status, plan, per-pass counts and
 // the reached fluent atoms (every state the rollout created: the start state, every generated successor, and the
-// successors mimir's plan extraction creates along a solved rollout's plan). The streams are counter-based, so a
+// successors the plan extraction creates along a solved rollout's plan). The streams are counter-based, so a
 // rollout never depends on the launch configuration (group size, chunk size) or on the other rollouts.
 //
 // Differences from search::find_rollouts_parallel (documented, tested in tests/cuda/test_device_iw.cpp):

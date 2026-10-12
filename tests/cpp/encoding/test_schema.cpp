@@ -43,7 +43,7 @@ using R = SlotRole;
 constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0x31e6ae6fd252e8a1,
                 PIN_FULL = 0x8f230d9913e98bf7;
 
-TEST(EncodingSchema, DefaultCatalogIsSortedBytewiseAndNamedLikeMifrost)
+TEST(EncodingSchema, DefaultCatalogIsSortedBytewise)
 {
     const auto schema = EncodingSchema::create(blocks());
     const auto all = names(*schema);

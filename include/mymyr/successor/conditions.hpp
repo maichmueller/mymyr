@@ -15,7 +15,7 @@
 //                    [&](std::span<const ObjectId> b) { const GroundCondition back = c.ground(b); ... });
 //
 // Truth in a state (holds): a static literal by the task's static facts, a fluent literal by the state's atoms, a
-// derived literal by the state's closure under the axioms, a numeric constraint by mimir's semantics (task/numeric.hpp:
+// derived literal by the state's closure under the axioms, a numeric constraint by the numeric semantics (task/numeric.hpp:
 // an undefined function value or a division by zero makes the comparison false). A ground atom need not be one of the
 // task's atoms: one outside the reachable domains of its predicate never holds, and so does a fluent or derived atom
 // that no state has produced yet.
@@ -146,8 +146,7 @@ struct GroundCondition
     void add_constraint(const Task& task, std::string_view pddl);
 
     /// The lifted condition with every object replaced by a variable: variable i (named "x<i>", untyped) stands for
-    /// the i-th distinct object in order of first appearance over the literals, then the constraints (as mimir's
-    /// GroundConjunctiveCondition.lift). With add_inequalities, every pair of variables gets a disequality, so that
+    /// the i-th distinct object in order of first appearance over the literals, then the constraints. With add_inequalities, every pair of variables gets a disequality, so that
     /// the bindings map distinct variables to distinct objects. Grounding the result under the binding that maps each
     /// variable back to its object gives this condition back.
     [[nodiscard]] ConjunctiveCondition lift(bool add_inequalities = false) const;

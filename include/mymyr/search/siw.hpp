@@ -1,5 +1,5 @@
 #pragma once
-// Serialized iterated width, matching mimir's siw::find_solution.
+// Serialized iterated width.
 //
 //   mymyr::search::SiwOptions o;
 //   o.max_arity = 2;
@@ -7,15 +7,15 @@
 //
 // SIW runs the IW ladder (search/iw.hpp, with all of its conventions and options) repeatedly: each subproblem starts
 // at the state the previous one reached and ends at the first state in which fewer of the task's goal literals are
-// unsatisfied than at its start (mimir's ProblemGoalStrategyImplCounter: fluent and derived, positive and
+// unsatisfied than at its start (fluent and derived, positive and
 // negative goal literals, each counted once; goals achieved earlier may be undone). It stops when the search goal
 // (SearchControl::goal, the task goal by default) holds, or when a subproblem's ladder exhausts every pass
-// (status Exhausted, mimir's FAILED) or stops on a budget. A solved SIW's plan is the concatenation of the subplans;
+// (status Exhausted) or stops on a budget. A solved SIW's plan is the concatenation of the subplans;
 // an unsolved one has an empty plan, and partial_plan holds the subplans of the subproblems solved before the one
 // that failed (the path to the state where that one started).
 //
 // Budgets: max_seconds spans the whole SIW; max_states, max_expanded and max_depth apply per IW pass, as in iw().
-// blocked_states and the observer are forwarded to every pass of every subproblem (mimir's SIW has neither).
+// blocked_states and the observer are forwarded to every pass of every subproblem.
 // Observer: on_start and on_end once, on_pass per IW pass, on_solution once with the whole plan.
 
 #include "mymyr/search/iw.hpp"
@@ -39,7 +39,7 @@ struct SiwResult
     SearchStatus status = SearchStatus::Exhausted;
     std::vector<Action> plan;          // empty unless solved
     std::vector<Action> partial_plan;  // unless solved: the subplans of the solved subproblems (empty when solved)
-    double cost = 0;  // the sum of the subplans' costs (search/iw.hpp), each from its start state (mimir's cost); 0 unless solved
+    double cost = 0;  // the sum of the subplans' costs (search/iw.hpp), each from its start state; 0 unless solved
     bool cost_exact = true;  // as in IwResult
     std::optional<State> goal_state;
     std::vector<SiwSubproblem> subproblems;  // including a last one that failed
