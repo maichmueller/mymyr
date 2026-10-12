@@ -139,10 +139,10 @@ struct PaddedExpansion
     u32 label_width = 0;     // columns of `binding`
     i32* binding = nullptr;  // [rows, K, label_width], -1 padding
     u8* goal = nullptr;      // [rows, K], 0 padding
-    u32 derived_words = 0;   // words per row of `derived`
-    u64* derived = nullptr;  // [rows, K, derived_words], zero padding
     bool overflow = false;   // some count > K, or some successor was beyond the flat capacity
     u32 numeric_words = 0;   // numeric tasks: must equal the flat expansion's
+    u32 derived_words = 0;   // words per row of `derived`
+    u64* derived = nullptr;  // [rows, K, derived_words], zero padding
 };
 
 /// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null, or
