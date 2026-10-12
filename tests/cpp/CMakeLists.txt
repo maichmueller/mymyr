@@ -56,7 +56,7 @@ target_compile_definitions(mymyr_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURC
 include(GoogleTest)
 gtest_discover_tests(mymyr_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800)
 
-add_executable(mymyr_encoding_tests encoding/test_flat.cpp encoding/test_schema.cpp encoding/test_lanes.cpp
+add_executable(mymyr_encoding_tests encoding/test_schema.cpp encoding/test_lanes.cpp
     encoding/test_validate.cpp)
 target_link_libraries(mymyr_encoding_tests PRIVATE mymyr::encoding mymyr_warnings GTest::gtest_main)
 gtest_discover_tests(mymyr_encoding_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600 LABELS encoding)
@@ -252,8 +252,10 @@ endif()
 target_sources(mymyr_tests PRIVATE task/test_numeric.cpp search/test_best_first_numeric.cpp)
 if(TARGET mymyr_frontend)
     # numeric applicability rules, metric kinds and plan costs of tasks with numeric functions, from PDDL; the PDDL
-    # semantics of union types, numeric expressions, undefined values, metrics and heuristic costs
-    add_executable(mymyr_numeric_pddl_tests frontend/test_numeric_pddl.cpp frontend/test_pddl_semantics.cpp frontend/golden.cpp)
+    # semantics of union types, numeric expressions, undefined values, metrics and heuristic costs; ADL conditions
+    # (quantifiers, implication, disjunction, nesting) in every position
+    add_executable(mymyr_numeric_pddl_tests frontend/test_numeric_pddl.cpp frontend/test_pddl_semantics.cpp frontend/test_adl_conditions.cpp
+        frontend/golden.cpp)
     target_link_libraries(mymyr_numeric_pddl_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_numeric_pddl_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"

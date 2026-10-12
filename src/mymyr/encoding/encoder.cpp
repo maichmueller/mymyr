@@ -36,7 +36,7 @@ void check_index_range(u64 value, IndexType index, const char* what)
     if (value <= index_limit(index))
         return;
     throw std::overflow_error("mymyr: encoding: the batch needs " + std::to_string(value) + " " + what + ", more than " +
-                              (wide ? "int64" : "int32") + " indices hold" + (wide ? "" : "; use index='int64'"));
+                              (wide ? "int64" : "int32") + " indices hold" + (wide ? "" : "; use index_dtype='int64'"));
 }
 }  // namespace detail
 
@@ -299,9 +299,9 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(rl::TaskTablePtr table, c
 {
     if (!table)
         invalid("an encoder needs a task table");
-    refuse_unsupported(options);
     auto encoder = std::shared_ptr<FlatEncoder>(new FlatEncoder());
     encoder->m_schema = EncodingSchema::create(*table, options);
+    refuse_unsupported(options);
     encoder->m_context = EncodingContext::create(std::move(table), encoder->m_schema);
     return encoder;
 }

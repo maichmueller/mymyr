@@ -583,6 +583,7 @@ def last_successor(td):
     return td.set("action", (td["count"].clamp(max=k) - 1).clamp(min=0))
 
 
+@pytest.mark.needs_gil
 def test_torchrl_over_tables(sets):
     """TorchRL over a mixed table: the specs, resets that carry next_task_id (curriculum), SerialEnv == ParallelEnv (the
     table pickled into spawned workers), a collector, and rollouts equal to a BatchedEnv with the same actions."""

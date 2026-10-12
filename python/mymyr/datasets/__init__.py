@@ -18,6 +18,9 @@ core), on the CPU or a CUDA device, for classical and numeric tasks.
     kb.state_spaces, kb.generalized_state_space, kb.tuple_graph(0, v)
     graphs = mymyr.datasets.tuple_graphs(space, width=1)         # the tuple graph of every vertex (CPU)
 
+    mymyr.datasets.save(kb, "kb.npz"); kb = mymyr.datasets.load("kb.npz")   # files: arrays + JSON, no pickle
+    pickle.dumps(space)                                          # pickles: the arrays, nothing generated again
+
 On the device (CUDA builds; mymyr.cuda): ``device=`` a device ordinal or a mymyr.cuda.Context.
 
     space = mymyr.datasets.state_space(task, device=0)           # a mymyr.cuda.DeviceStateSpace
@@ -56,6 +59,7 @@ from mymyr._core._datasets import (
 )
 from mymyr._core._datasets import state_space as _cpu_state_space
 from mymyr._core._rl import TaskSuite, TaskTable
+from mymyr.datasets._files import load, save
 
 if TYPE_CHECKING:
     from mymyr.cuda import Context, DeviceStateSpace
@@ -281,6 +285,8 @@ __all__ = [
     "generalized_state_space",
     "generate",
     "generate_many",
+    "load",
+    "save",
     "sorted_by_size",
     "state_space",
     "state_spaces",

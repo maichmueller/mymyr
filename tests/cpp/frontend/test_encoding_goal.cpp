@@ -107,6 +107,31 @@ const std::vector<Case>& cases()
         {"forall_equality", {"(not (= home a))", "(not (= a a))", "(not (= b a))"}, true, true},
         {"static_true", {"(heavy t1)", "(not (heavy t2))", "(lit a)"}, true, false},
         {"duplicate", {"(lit home)", "(lit a)", "(lit b)", "(not (ok t1))"}, true, false},
+        // guarded quantifiers, which the planner compiles into derived predicates: a static guard (an atom, equality, a
+        // nested quantifier's) is decided per binding; a fluent guard, or a disjunction with two or more disjuncts that
+        // static atoms do not decide, is not expandable
+        {"forall_static_guard", {"(ok t1)", "(ok b1)"}, true, false},
+        {"forall_forall_static_guard", {"(lit a)", "(lit b)"}, true, false},
+        {"forall_guard_equality", {"(lit home)", "(lit b)"}, true, false},
+        {"forall_static_guard_unsatisfiable", {"(road b b)"}, true, true},
+        {"forall_fluent_guard", {"(lit a)"}, false, false},
+        {"forall_or", {"(lit a)"}, false, false},
+        {"forall_partly_expandable", {"(ok b1)"}, false, false},
+        {"exists_conjunctive_body", {"(lit a)"}, false, false},
+        {"exists_forall", {"(lit a)"}, false, false},
+        {"or_conjunctions", {"(lit b)"}, false, false},
+        // disjunctions that static atoms and equality decide: a disjunct that holds leaves nothing to require, the one
+        // disjunct they leave open is expanded (static literals of its conjunctions kept), and when all fail the last
+        // one is (with its failing static literal)
+        {"forall_or_equality", {"(not (ok k0))", "(not (ok t2))", "(not (ok b1))"}, true, false},
+        {"forall_or_equality_static", {"(not (heavy b1))"}, true, true},
+        {"not_exists_static_part", {"(not (ok t1))", "(not (ok b1))"}, true, false},
+        {"negated_forall_single_witness", {"(heavy b1)", "(not (= b1 t1))", "(not (ok b1))"}, true, false},
+        {"exists_single_witness", {"(road b a)", "(lit b)"}, true, false},
+        {"or_static_true", {"(lit a)"}, true, false},
+        {"or_static_false", {"(lit a)", "(ok t2)"}, true, false},
+        {"or_all_static_false", {"(lit a)", "(= a b)"}, true, true},
+        {"imply_static_false_consequent", {"(lit a)", "(not (lit b))"}, true, false},
     };
     return v;
 }
@@ -287,7 +312,7 @@ namespace
 /// A task with `n` untyped objects and the goal `(and (p o1) <goal>)`.
 frontend::TaskPtr many_objects(int n, const std::string& goal)
 {
-    const auto d = frontend::Domain::from_string(R"((define (domain m) (:requirements :strips :universal-preconditions :disjunctive-preconditions :negative-preconditions :equality)
+    const auto d = frontend::Domain::from_string(R"((define (domain m) (:requirements :strips :universal-preconditions :existential-preconditions :disjunctive-preconditions :negative-preconditions :equality)
  (:predicates (p ?x) (q ?x ?y) (r ?x ?y ?z))
  (:action act :parameters (?x) :precondition (and) :effect (p ?x))))");
     std::string objects;
@@ -315,6 +340,22 @@ TEST(EncodingGoal, TheBindingBudgetIsSharedByTheConjuncts)
     EXPECT_EQ(got.size(), 1u + 250u);
     EXPECT_TRUE(got.contains("(q o250 o250)"));
     EXPECT_FALSE(t->encoding_goal_complete);
+}
+
+TEST(EncodingGoal, ADisjunctionIsChargedAgainstTheBindingBudget)
+{
+    // an exists over 300^3 bindings, and an or with a part that is: left out whole, incomplete
+    for (const char* goal : {"(exists (?x ?y ?z) (r ?x ?y ?z))", "(or (forall (?x ?y ?z) (r ?x ?y ?z)) (p o2))"})
+    {
+        SCOPED_TRACE(goal);
+        const auto t = many_objects(300, goal);
+        EXPECT_EQ(goal_text(*t), std::vector<std::string>{"(p o1)"});
+        EXPECT_FALSE(t->encoding_goal_complete);
+    }
+    // within the budget, an exists that equality decides but for one binding is expanded for that one
+    const auto t = many_objects(300, "(exists (?x) (and (= ?x o7) (p ?x)))");
+    EXPECT_EQ(literal_set(*t), (std::set<std::string>{"(p o1)", "(p o7)", "(= o7 o7)"}));
+    EXPECT_TRUE(t->encoding_goal_complete);
 }
 
 TEST(EncodingGoal, AnImplyWhoseAntecedentExceedsTheBudgetIsLeftOut)

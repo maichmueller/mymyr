@@ -1,10 +1,12 @@
-"""Packed relational observations against independent semantic reconstruction, under every fixed atom slot layout
-(the encoder reads state rows, so tasks with lazy atom slots are refused)."""
+"""The Python API of the relational encoder: FlatRelationEncoder and FlatBatch. The graphs are checked against an
+independent reconstruction from the state's atoms, against the C++ encoder's bytes, against mifrost's recorded
+encodings (tests/data/encoding/mifrost), and for the input and output interop (State lists, u32 rows, zero-copy
+exports) and the error mapping."""
 
 import gc
 import importlib.util
 import itertools
-import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -13,47 +15,60 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from conftest import SMALL_TASKS, text_task, walk
+from conftest import ROOT, SMALL_TASKS, text_task, walk
+from test_encoding_fixtures import FIXTURES, HELPER, load, read, replay
 
 MODES = ["auto", "reachable", "dense"]
+AUXILIARY = 8
+
+
+def encoder_of(task, **options):
+    return encoding.FlatRelationEncoder(task, **{"goal_derivations": (), **options})
+
+
+def lane_relations(encoder, lanes=("fluent", "static", "derived")):
+    return [i for i, lane in enumerate(encoder.relation_lanes) if lane in lanes]
 
 
 def unpack(batch, graph):
+    """{relation name: tuples of instance-local entity ids} of one graph, for the relations that have tuples."""
     output = {}
-    relations = len(batch.relation_names)
-    for relation, name in enumerate(batch.relation_names):
-        arity = int(batch.relation_arities[relation])
-        cell = graph * relations + relation
-        begin, end = batch.relation_offsets[cell : cell + 2]
-        arguments = batch.relation_args[begin:end] - batch.object_offsets[graph]
+    relations = batch.num_relations
+    names = batch.schema.relation_names
+    arities = batch.schema.relation_arities
+    base = int(batch.entity_offsets[graph])
+    for relation, name in enumerate(names):
         count = int(batch.relation_counts[graph, relation])
-        assert end - begin == count * arity
-        assert batch.relation_tuple_offsets[cell + 1] - batch.relation_tuple_offsets[cell] == count
-        output[name] = [tuple(row) for row in arguments.reshape(count, arity)]
+        if not count:
+            continue
+        cell = graph * relations + relation
+        begin, end = (int(x) for x in batch.relation_arg_offsets[cell : cell + 2])
+        assert end - begin == count * arities[relation]
+        assert batch.relation_offsets[cell + 1] - batch.relation_offsets[cell] == count
+        arguments = batch.relation_args[begin:end] - base
+        output[name] = [tuple(int(x) for x in row) for row in arguments.reshape(count, arities[relation])]
     return output
 
 
-def atom_key(atom):
-    return atom.predicate.name, tuple(obj.index for obj in atom.objects)
-
-
-def reference(task, state, include_static=True, include_derived=True, goal=None):
+def reference(task, state, include_static=True, include_derived=True, nullary=True):
+    """The tuples of a state by relation name, from its atoms; a nullary atom is the tuple over the auxiliary entity."""
+    atoms = list(state.atoms())
+    if include_derived:
+        atoms += list(state.derived_atoms())
+    if include_static:
+        atoms += list(task.formalism.static_init)
+    auxiliary = len(task.objects)
     output = {}
-    for predicate in task.formalism.predicates:
-        if predicate.kind == "static" and not include_static:
+    for atom in atoms:
+        name = atom.predicate.name
+        if name == "=":
             continue
-        if predicate.kind == "derived" and not include_derived:
-            continue
-        for objects in itertools.product(range(len(task.objects)), repeat=predicate.arity):
-            atom = task.atom((predicate.name, list(objects)))
-            if state.holds(atom):
-                name, args = atom_key(atom)
-                output.setdefault(name, []).append(args)
-    for literal in (task.goal_condition if goal is None else goal).literals:
-        name, args = atom_key(literal.atom)
-        polarity = "+" if literal.positive else "-"
-        status = "sat" if literal.holds(state) else "unsat"
-        output.setdefault(f"[{polarity}]{name}[g][{status}]", []).append(args)
+        arguments = tuple(obj.index for obj in atom.objects)
+        if not arguments:
+            if not nullary:
+                continue
+            arguments = (auxiliary,)
+        output.setdefault(name, set()).add(arguments)
     return {name: sorted(values) for name, values in output.items()}
 
 
@@ -77,319 +92,579 @@ def feature_task(objects="a b", atoms="auto"):
     return mymyr.Task(domain.instantiate_string(problem), atoms=atoms)
 
 
-@pytest.mark.parametrize("atoms", MODES)
-@pytest.mark.parametrize("include_static,include_derived", [(True, True), (False, False)])
-def test_semantics_and_default_signed_derived_goals(atoms, include_static, include_derived):
-    task = feature_task(atoms=atoms)
-    states = [task.initial_state]
-    state = task.apply(states[0], "(enable b)")
+def feature_states(task):
+    state = task.apply(task.initial_state, "(enable b)")
     state = task.apply(state, "(disable a)")
-    states.append(task.apply(state, "(switch)"))
-    encoder = encoding.FlatRelationEncoder(task, include_static=include_static, include_derived=include_derived)
+    return [task.initial_state, state, task.apply(state, "(switch)")]
+
+
+def derived_words(task, states):
+    """The derived atom words of each state: bit i is set iff the i-th derived slot's atom holds."""
+    metadata = rl.as_table(task).atom_metadata()
+    predicates = task.formalism.predicates
+    slots = [
+        (predicates[int(p)].name, [int(a) for a in args if a >= 0])
+        for p, args in zip(metadata["derived_pred"], metadata["derived_args"])
+    ]
+    words = np.zeros((len(states), max(1, (len(slots) + 63) // 64)), np.uint64)
+    for row, state in enumerate(states):
+        for slot, (name, args) in enumerate(slots):
+            if state.holds(task.atom((name, args))):
+                words[row, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+    return words
+
+
+# ------------------------------------------------------------------------------------------------ semantics
+@pytest.mark.parametrize("atoms", MODES)
+@pytest.mark.parametrize(
+    "options", [{}, {"include_static": False}, {"include_derived": False}, {"nullary": False, "include_static": False}]
+)
+def test_graphs_equal_the_reconstruction_from_the_atoms(atoms, options):
+    task = feature_task(atoms=atoms)
+    states = feature_states(task)
+    encoder = encoder_of(task, **options)
+    batch = encoder.encode(states)
+    assert batch.num_graphs == 3 and batch.num_relations == encoder.num_relations
+    for graph, state in enumerate(states):
+        assert unpack(batch, graph) == reference(
+            task, state, options.get("include_static", True), options.get("include_derived", True),
+            options.get("nullary", True))
+    ready = encoder.relation_id("ready") if options.get("nullary", True) else None
+    if ready is not None:
+        assert encoder.relation_arities[ready] == 1
+        assert batch.relation_counts[:, ready].tolist() == [0, 0, 1]
+
+
+@pytest.mark.parametrize("atoms", MODES)
+def test_entities_objects_first_then_the_auxiliary_entity_when_a_nullary_tuple_exists(atoms):
+    task = feature_task(atoms=atoms)
+    states = feature_states(task)
+    batch = encoder_of(task).encode(states)
+    objects = len(task.objects)
+    assert batch.num_objects.tolist() == [objects] * 3
+    # the initial state has a static nullary atom or none: the graphs with a nullary tuple have the auxiliary entity
+    for graph in range(3):
+        begin, end = (int(x) for x in batch.entity_offsets[graph : graph + 2])
+        roles = batch.entity_role[begin:end].tolist()
+        refs = batch.entity_ref[begin:end].tolist()
+        has_nullary = any(
+            tuple(t) == (objects,) for tuples in unpack(batch, graph).values() for t in tuples
+        )
+        assert roles == [0] * objects + ([AUXILIARY] if has_nullary else [])
+        assert refs == list(range(objects)) + ([-1] if has_nullary else [])
+    assert batch.schema.entity_role_names[AUXILIARY] == "auxiliary"
+
+
+@pytest.mark.parametrize("atoms", MODES)
+@pytest.mark.parametrize("name", SMALL_TASKS)
+def test_walks_equal_the_reconstruction_from_the_atoms(name, atoms):
+    task = text_task(name, atoms=atoms)
+    states = walk(task, steps=3, walks=1)
+    encoder = encoder_of(task)
     batch = encoder.encode(states)
     for graph, state in enumerate(states):
-        got = {name: tuples for name, tuples in unpack(batch, graph).items() if tuples}
-        assert got == reference(task, state, include_static, include_derived)
-    ready = encoder.relation_names.index("ready")
-    assert batch.relation_arities[ready] == 0
-    assert batch.relation_counts[:, ready].tolist() == [0, 1]
-    assert batch.version == 1 and batch.num_graphs == 2
+        assert unpack(batch, graph) == reference(task, state)
+
+
+@pytest.mark.parametrize("name", SMALL_TASKS)
+def test_slot_layout_does_not_change_the_encoding(name):
+    batches = []
+    for atoms in MODES:
+        task = text_task(name, atoms=atoms)
+        batches.append(encoder_of(task).encode(walk(task, steps=6, seed=3)))
+    first = batches[0].as_dict()
+    for other in batches[1:]:
+        for key, value in other.as_dict().items():
+            assert np.array_equal(value, first[key]), key
 
 
 @pytest.mark.parametrize("atoms", MODES)
-def test_explicit_static_negative_and_empty_goals(atoms):
-    task = feature_task(atoms=atoms)
-    state = task.initial_state
-    goal = task.ground_condition(["(fixed a)", "(not (fixed b))", "(fixed b)", "(not (fixed a))",
-                                  "(flag a)", "(not (flag a))", "(available a)", "(not (available a))"])
-    encoder = encoding.FlatRelationEncoder(task)
-    batch = encoder.encode(state, goals=goal)
-    assert {name: values for name, values in unpack(batch, 0).items() if values} == reference(task, state, goal=goal)
-    empty = encoder.encode(state, goals=task.ground_condition([]))
-    for relation, source in enumerate(encoder.relation_sources):
-        if source.startswith("goal"):
-            assert empty.relation_counts[0, relation] == 0
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_mifrost_neutral_engine_semantic_fixture(atoms):
-    fixture = json.loads((Path(__file__).parents[1] / "data/encoding/mifrost_flat_goals.json").read_text())
-    task = feature_task(atoms=atoms)
-    goal = task.ground_condition(fixture["goals"])
-    batch = encoding.FlatRelationEncoder(task).encode(task.initial_state, goals=goal)
-    got = unpack(batch, 0)
-    for name, expected in fixture["relations"].items():
-        assert [list(values) for values in got[name]] == expected
-    assert not got["[+]flag[g][sat]"] and not got["[-]flag[g][sat]"]
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_batch_global_objects_and_expansion_action_readouts(atoms):
+def test_a_table_of_several_instances_numbers_entities_across_the_batch(atoms):
     first, second = feature_task(atoms=atoms), feature_task("a b c d", atoms=atoms)
     table = rl.TaskTable([first, second])
     states = [second.initial_state, first.initial_state, second.state(["(flag b)"])]
     ids = np.array([1, 0, 1], dtype=np.int32)
-    expansion = rl.expand(table, states, task_ids=ids)
-    encoder = encoding.FlatRelationEncoder(table)
-    batch = encoder.encode(states, task_ids=ids, actions=expansion)
-    assert batch.object_offsets.tolist() == [0, 4, 6, 10]
-    assert batch.task_ids.tolist() == ids.tolist()
-    assert np.array_equal(batch.action_offsets, expansion.offsets)
-    assert np.array_equal(batch.action_schema, expansion.schema)
-    assert np.array_equal(batch.action_binding, expansion.binding)
-    assert np.array_equal(batch.action_parent, expansion.parent)
-    assert len(np.unique(batch.action_tuple)) == expansion.total
-    relations = len(encoder.relation_names)
-    for action, tuple_id in enumerate(batch.action_tuple):
-        cell = np.searchsorted(batch.relation_tuple_offsets, tuple_id, side="right") - 1
-        graph, relation = divmod(cell, relations)
-        assert graph == expansion.parent[action]
-        assert batch.relation_schemas[relation] == expansion.schema[action]
-        local = tuple_id - batch.relation_tuple_offsets[cell]
-        arity = batch.relation_arities[relation]
-        start = batch.relation_offsets[cell] + local * arity
-        objects = batch.relation_args[start : start + arity] - batch.object_offsets[graph]
-        assert objects.tolist() == expansion.binding[action, :arity].tolist()
+    encoder = encoder_of(table)
+    batch = encoder.encode(states, task_ids=ids)
+    assert batch.task_ids.tolist() == [1, 0, 1]
+    assert batch.num_objects.tolist() == [4, 2, 4]
     for graph, (task_id, state) in enumerate(zip(ids, states)):
-        got = {name: values for name, values in unpack(batch, graph).items()
-               if values and not name.endswith("[action]")}
-        assert got == reference([first, second][task_id], state)
+        assert unpack(batch, graph) == reference([first, second][task_id], state)
+    # the graph of a row does not depend on the other rows
+    for graph in range(3):
+        single = encoder.encode([states[graph]], task_ids=ids[graph : graph + 1])
+        assert unpack(single, 0) == unpack(batch, graph)
 
 
-@pytest.mark.parametrize("atoms", MODES)
-@pytest.mark.parametrize("name", SMALL_TASKS)
-def test_walk_fluent_and_goal_reference(name, atoms):
-    task = text_task(name, atoms=atoms)
-    states = walk(task, steps=3, walks=1)
-    encoder = encoding.FlatRelationEncoder(task, include_static=False, include_derived=False)
+def test_empty_batches_and_states():
+    task = text_task("gripper__prob05")
+    encoder = encoder_of(task)
+    empty = encoder.encode([])
+    assert empty.num_graphs == 0 and empty.relation_counts.shape == (0, encoder.num_relations)
+    assert empty.entity_offsets.tolist() == [0] and empty.relation_offsets.tolist() == [0]
+    assert empty.relation_args.shape == (0,)
+    none = encoder.encode(np.zeros((0, task.words), np.uint64))
+    assert none.num_graphs == 0
+    state = task.state([])
+    one = encoder.encode(state)
+    assert unpack(one, 0) == reference(task, state)
+
+
+# ------------------------------------------------------------------------------------------------ interop
+def test_state_lists_equal_rows():
+    task = text_task("philosophers__p03-phil4")
+    encoder = encoder_of(task)
+    states = walk(task, steps=4, walks=2)
+    rows = task.encode(states)
+    from_states = encoder.encode(states)
+    from_rows = encoder.encode(rows)
+    assert from_states.schema.schema_fingerprint == from_rows.schema.schema_fingerprint
+    for key, value in from_states.as_dict().items():
+        assert np.array_equal(value, from_rows.as_dict()[key]), key
+    single = encoder.encode(states[0])
+    assert unpack(single, 0) == unpack(from_rows, 0)
+    assert np.array_equal(encoder.encode(tuple(states)).relation_args, from_rows.relation_args)
+
+
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_u32_rows_equal_u64_rows(index):
+    task = text_task("philosophers__p03-phil4")
+    encoder = encoder_of(task, index_dtype=index)
+    rows = np.ascontiguousarray(task.encode(walk(task, steps=4, walks=2)))
+    halves = rows.view(np.uint32)
+    assert halves.shape == (len(rows), 2 * rows.shape[1])
+    wide, narrow = encoder.encode(rows), encoder.encode(halves)
+    for key, value in wide.as_dict().items():
+        assert np.array_equal(value, narrow.as_dict()[key]), key
+    assert wide.relation_args.dtype == (np.int32 if index == "int32" else np.int64)
+
+
+@pytest.mark.parametrize("framework", ["torch", "jax"])
+def test_rows_of_other_frameworks_and_their_outputs(framework):
+    module = pytest.importorskip(framework)
+    task = text_task("gripper__prob05")
+    encoder = encoder_of(task)
+    rows = np.ascontiguousarray(task.encode(walk(task, steps=4, walks=1)))
+    expected = encoder.encode(rows)
+    if framework == "torch":
+        source = module.from_numpy(rows.view(np.int64).copy())
+    else:
+        source = module.device_put(rows.view(np.uint32), module.devices("cpu")[0])
+    batch = encoder.encode(source)
+    exported = batch.as_dict()
+    for key, value in expected.as_dict().items():
+        assert np.array_equal(np.asarray(exported[key]), value), key
+    assert type(batch.relation_args).__module__.split(".")[0] in {"torch", "jaxlib", "jax"}
+    forced = encoder.encode(rows, framework=framework)
+    assert type(forced.relation_args).__module__.split(".")[0] in {"torch", "jaxlib", "jax"}
+
+
+def pointer(array):
+    if hasattr(array, "data_ptr"):
+        return array.data_ptr()
+    if hasattr(array, "unsafe_buffer_pointer"):
+        return array.unsafe_buffer_pointer()
+    return array.__array_interface__["data"][0]
+
+
+ARRAYS = ["task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref", "relation_counts",
+          "relation_offsets", "relation_arg_offsets", "relation_args"]
+
+
+def test_numpy_exports_share_the_memory_of_the_batch():
+    task = text_task("gripper__prob05")
+    batch = encoder_of(task).encode(walk(task, steps=3, walks=1))
+    exported = batch.as_dict("numpy")
+    for name in ARRAYS:
+        array = getattr(batch, name)
+        assert pointer(array) == pointer(exported[name]) == pointer(batch.as_dict()[name]), name
+        assert not array.flags.writeable
+    with pytest.raises(ValueError):
+        batch.relation_args[0] = 1
+    assert exported["num_graphs"] == batch.num_graphs and exported["version"] == 1
+    assert exported["schema_fingerprint"] % 2**64 == batch.schema.schema_fingerprint
+
+
+@pytest.mark.parametrize("framework", ["torch", "jax", "dlpack"])
+def test_framework_exports_share_the_memory_of_the_batch(framework):
+    if framework != "dlpack":
+        pytest.importorskip(framework)
+    task = text_task("gripper__prob05")
+    batch = encoder_of(task).encode(walk(task, steps=3, walks=1))
+    exported = batch.as_dict(framework)
+    for name in ARRAYS:
+        value = exported[name]
+        if framework == "dlpack":
+            assert pointer(np.from_dlpack(value)) == pointer(getattr(batch, name)), name
+        else:
+            assert pointer(value) == pointer(getattr(batch, name)), name
+            assert np.array_equal(np.asarray(value), getattr(batch, name)), name
+
+
+def test_results_are_owned_and_independent_of_the_inputs():
+    task = text_task("gripper__prob05")
+    encoder = encoder_of(task)
+    states = task.encode(walk(task, steps=3, walks=1))
     batch = encoder.encode(states)
-    for graph, state in enumerate(states):
-        expected = {}
-        for atom in state.atoms():
-            name, args = atom_key(atom)
-            expected.setdefault(name, []).append(args)
-        for literal in task.goal_condition.literals:
-            name, args = atom_key(literal.atom)
-            expected.setdefault(f"[{'+' if literal.positive else '-'}]{name}[g][{'sat' if literal.holds(state) else 'unsat'}]", []).append(args)
-        expected = {name: sorted(values) for name, values in expected.items()}
-        assert {name: values for name, values in unpack(batch, graph).items() if values} == expected
-
-
-@pytest.mark.parametrize("name", SMALL_TASKS)
-def test_slot_layout_does_not_change_semantic_encoding(name):
-    batches = []
-    for atoms in MODES:
-        task = text_task(name, atoms=atoms)
-        batches.append(encoding.FlatRelationEncoder(task).encode(walk(task, steps=6, seed=3)))
-    first = batches[0]
-    for other in batches[1:]:
-        assert other.schema == first.schema and other.object_names == first.object_names
-        for graph in range(first.num_graphs):
-            assert unpack(other, graph) == unpack(first, graph)
-        for array in ["relation_args", "relation_counts", "relation_offsets", "relation_tuple_offsets"]:
-            assert np.array_equal(getattr(other, array), getattr(first, array))
-
-
-def test_lazy_atom_slots_are_refused():
-    lazy = feature_task(atoms="lazy")
-    with pytest.raises(ValueError, match="lazy atom slots"):
-        encoding.FlatRelationEncoder(lazy)
-    with pytest.raises(ValueError, match="lazy atom slots"):
-        encoding.FlatRelationEncoder(rl.TaskTable([lazy]))
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_problem_local_goal_predicates_stay_instance_scoped(atoms):
-    if not hasattr(mymyr, "Domain"):
-        pytest.skip("built without the PDDL front end")
-    domain = mymyr.Domain.from_string("""(define (domain local-goal)
-      (:requirements :strips :disjunctive-preconditions) (:predicates (flag ?x))
-      (:action enable :parameters (?x) :precondition (and) :effect (flag ?x)))""")
-    tasks = [mymyr.Task(domain.instantiate_string(f"""(define (problem p) (:domain local-goal)
-      (:objects a b c) (:init (flag a)) (:goal {goal}))"""), atoms=atoms)
-             for goal in ["(or (flag a) (flag b))", "(or (flag b) (flag c))"]]
-    table = rl.TaskTable(tasks)
-    encoder = encoding.FlatRelationEncoder(table)
-    batch = encoder.encode([task.initial_state for task in tasks], task_ids=[0, 1])
-    locals_by_instance = {instance: [relation for relation, owner in enumerate(batch.relation_instances)
-                                  if owner == instance and batch.relation_sources[relation] == "state"]
-                          for instance in range(2)}
-    assert all(locals_by_instance.values())
-    for instance, relations in locals_by_instance.items():
-        for relation in relations:
-            assert f"[@instance:{instance}]" in batch.relation_names[relation]
-            assert batch.relation_counts[1 - instance, relation] == 0
-    assert batch.relation_counts[0, locals_by_instance[0]].sum() == 1
-    assert batch.relation_counts[1, locals_by_instance[1]].sum() == 0
-    other = encoding.FlatRelationEncoder(rl.TaskTable(list(reversed(tasks))))
-    domain_relations = table.num_domain_predicates * 5
-    assert encoder.relation_names[:domain_relations] == other.relation_names[:domain_relations]
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_normalization_introduced_action_parameters_are_not_projected_away(atoms):
-    if not hasattr(mymyr, "Domain"):
-        pytest.skip("built without the PDDL front end")
-    domain = mymyr.Domain.from_string("""(define (domain witnesses) (:requirements :adl)
-      (:predicates (flag ?x) (chosen ?x))
-      (:action choose :parameters (?x) :precondition (exists (?witness) (flag ?witness))
-         :effect (chosen ?x)))""")
-    task = mymyr.Task(domain.instantiate_string("""(define (problem p) (:domain witnesses)
-      (:objects a b) (:init (flag a)) (:goal (chosen b)))"""), atoms=atoms)
-    expansion = rl.expand(task, [task.initial_state])
-    batch = encoding.FlatRelationEncoder(task).encode(task.initial_state, actions=expansion)
-    assert batch.action_binding.shape == (2, 2)
-    assert np.array_equal(batch.action_binding, expansion.binding)
-    relation = batch.relation_names.index("choose[action]")
-    assert batch.relation_arities[relation] == 2
-    assert batch.relation_counts[0, relation] == 2
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_empty_states_batches_and_no_actions(atoms):
-    task = feature_task(atoms=atoms)
-    encoder = encoding.FlatRelationEncoder(task)
-    empty_state = task.state([])
-    assert unpack(encoder.encode(empty_state), 0) == unpack(encoder.encode([empty_state]), 0)
-    batch = encoder.encode([])
-    assert batch.num_graphs == 0 and batch.relation_counts.shape == (0, len(encoder.relation_names))
-    assert batch.object_offsets.tolist() == [0] and batch.relation_offsets.tolist() == [0]
-    assert batch.action_binding.shape == (0, task.label_width)
-    no_labels = encoder.encode(task.initial_state)
-    assert no_labels.action_offsets.tolist() == [0, 0]
-
-
-@pytest.mark.parametrize("atoms", MODES)
-@pytest.mark.parametrize("with_actions", [False, True])
-def test_action_readouts_reject_source_instance_mismatch(with_actions, atoms):
-    first, second = feature_task(atoms=atoms), feature_task("a b c", atoms=atoms)
-    table = rl.TaskTable([first, second])
-    first_state = first.initial_state
-    if not with_actions:
-        domain = mymyr.Domain.from_string("""(define (domain stuck) (:requirements :strips)
-            (:predicates (ready) (done))
-            (:action finish :parameters () :precondition (ready) :effect (done)))""")
-        tasks = [mymyr.Task(domain.instantiate_string(f"""(define (problem p{index}) (:domain stuck)
-            (:init) (:goal (done)))"""), atoms=atoms) for index in range(2)]
-        first, second = tasks
-        table = rl.TaskTable(tasks)
-        first_state = first.initial_state
-    expansion = rl.expand(table, [first_state], task_ids=np.array([0], np.int32))
-    assert bool(expansion.total) == with_actions
-    assert expansion.task_ids == [0]
-    with pytest.raises(ValueError, match="source task ids"):
-        encoding.FlatRelationEncoder(table).encode(
-            [second.initial_state], task_ids=np.array([1], np.int32), actions=expansion
-        )
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_owned_results_and_readonly_numpy(atoms):
-    task = feature_task(atoms=atoms)
-    encoder = encoding.FlatRelationEncoder(task)
-    states = task.encode([task.initial_state])
-    batch = encoder.encode(states)
-    retained = batch.relation_args
-    expected = retained.copy()
+    retained, expected = batch.relation_args, batch.relation_args.copy()
+    schema = batch.schema
     states[:] = 0
     encoder.encode(states)
-    schema = batch.schema
-    del task, encoder, batch, states
+    del encoder, batch, states, task
     gc.collect()
-    assert np.array_equal(retained, expected) and schema["version"] == 1
-    assert not retained.flags.writeable
-    with pytest.raises(ValueError):
-        retained[0] = 1
+    assert np.array_equal(retained, expected) and schema.num_relations > 0
 
 
-@pytest.mark.parametrize("atoms", MODES)
-def test_concurrent_encoding_is_reentrant(atoms):
-    task = feature_task(atoms=atoms)
-    encoder = encoding.FlatRelationEncoder(task)
-    state = task.initial_state
-    expected = encoder.encode(state).relation_args.copy()
+def test_encoding_is_reentrant():
+    task = text_task("philosophers__p03-phil4")
+    encoder = encoder_of(task)
+    states = walk(task, steps=5, walks=1)
+    expected = encoder.encode(states).relation_args.copy()
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda _: encoder.encode(state).relation_args.copy(), range(64)))
+        results = list(pool.map(lambda _: encoder.encode(states).relation_args.copy(), range(64)))
     assert all(np.array_equal(value, expected) for value in results)
 
 
-@pytest.mark.parametrize("framework", ["numpy", "dlpack", "torch", "jax"])
-def test_framework_exports(framework):
-    if framework in {"torch", "jax"}:
-        pytest.importorskip(framework)
-    task = feature_task()
-    batch = encoding.FlatRelationEncoder(task).encode(task.initial_state)
-    values = batch.as_dict(framework=framework)
-    if framework == "dlpack":
-        got = np.from_dlpack(values["relation_counts"])
-    else:
-        got = np.asarray(values["relation_counts"])
-    assert np.array_equal(got, batch.relation_counts)
-    assert values["schema"] == batch.schema
+# ------------------------------------------------------------------------------------------------ derived words
+def test_given_derived_words_equal_the_evaluated_ones():
+    task = text_task("philosophers__p03-phil4")
+    encoder = encoder_of(task)
+    states = walk(task, steps=5, walks=2)
+    rows = task.encode(states)
+    expected = encoder.encode(rows)
+    words = derived_words(task, states)
+    given = encoder.encode(rows, derived=words)
+    for key, value in expected.as_dict().items():
+        assert np.array_equal(value, given.as_dict()[key]), key
+    padded = np.concatenate([words, np.ones((len(states), 3), np.uint64)], axis=1)
+    assert np.array_equal(encoder.encode(rows, derived=padded).relation_args, expected.relation_args)
+    assert np.array_equal(encoder.encode(rows, derived=words.view(np.uint32)).relation_args, expected.relation_args)
+    # the words are used: without derived atoms there are no derived tuples
+    blank = encoder.encode(rows, derived=np.zeros_like(words))
+    derived = [name for name, lane in zip(encoder.relation_names, encoder.relation_lanes) if lane == "derived"]
+    assert any(unpack(expected, g).get(name) for g in range(len(states)) for name in derived)
+    assert not any(unpack(blank, g).get(name) for g in range(len(states)) for name in derived)
 
 
-def test_rejects_numeric_tasks():
-    if not hasattr(mymyr, "Domain"):
-        pytest.skip("built without the PDDL front end")
-    domain = mymyr.Domain.from_string("""(define (domain numeric) (:requirements :strips :numeric-fluents)
-       (:predicates (ready)) (:functions (fuel))
-       (:action consume :parameters () :precondition (ready) :effect (decrease (fuel) 1)))""")
-    task = mymyr.Task(domain.instantiate_string("""(define (problem n) (:domain numeric)
-       (:init (ready) (= (fuel) 2)) (:goal (<= (fuel) 0)))"""))
-    with pytest.raises(ValueError, match="numeric"):
+# ------------------------------------------------------------------------------------------------ schema and API
+def test_the_encoder_describes_its_schema():
+    task = text_task("philosophers__p03-phil4")
+    options = {"goal_derivations": (), "nullary": False, "include_static": False}
+    encoder = encoding.FlatRelationEncoder(task, **options)
+    schema = encoding.EncodingSchema(task, **options)
+    for name in ("options", "num_relations", "relation_names", "relation_arities", "relation_logical_arities",
+                 "relation_lanes", "relation_signs", "relation_levels", "relation_derivations", "relation_predicates",
+                 "relation_schemas", "relation_slot_roles", "schema_relations", "slot_role_names", "entity_role_names",
+                 "target_group_names", "schema_fingerprint"):
+        assert getattr(encoder, name) == getattr(schema, name), name
+    assert encoder.schema.schema_fingerprint == schema.schema_fingerprint
+    assert encoder.relation_id(encoder.relation_names[3]) == 3
+    with pytest.raises(KeyError):
+        encoder.relation_id("no-such-relation")
+    batch = encoder.encode(task.initial_state)
+    assert batch.schema.relation_names == schema.relation_names
+    assert encoder.table is not None
+    assert encoding.FlatRelationEncoder(task, **options).schema_fingerprint == schema.schema_fingerprint
+
+
+def test_the_default_goal_derivations_are_refused():
+    task = text_task("gripper__prob05")
+    with pytest.raises(ValueError, match="^mymyr: encoding: goal_derivations is not supported"):
         encoding.FlatRelationEncoder(task)
+    encoding.EncodingSchema(task)  # the catalog itself lists them
+
+
+# ------------------------------------------------------------------------------------------------ errors
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"goal_derivations": ("plain",)}, "goal_derivations is not supported"),
+        ({"max_goal_level": 1}, "max_goal_level is not supported"),
+        ({"target_sources": ("action",)}, "targets is not supported"),
+        ({"predicate_virtual_nodes": True}, "predicate_virtual_nodes is not supported"),
+        ({"horizon_mode": "full"}, "horizon is not supported"),
+        ({"layout": "relation"}, "layout='relation' is not supported"),
+    ],
+)
+def test_options_the_encoder_does_not_encode_raise_value_error(options, match):
+    with pytest.raises(ValueError, match=f"^mymyr: encoding: .*{match}"):
+        encoding.FlatRelationEncoder(text_task("gripper__prob05"), **{"goal_derivations": (), **options})
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"target_sources": ("subgoal",)}, "subgoal targets need max_goal_level"),
+        ({"target_sources": ("action",), "include_actions": False}, "action targets need"),
+        ({"max_goal_level": 1, "target_sources": ("goal", "subgoal"), "goal_derivations": ("satisfied",)},
+         "plain goal derivation"),
+        ({"horizon_mode": "full", "target_sources": ("action",)}, "horizon"),
+    ],
+)
+def test_invalid_combinations_give_the_error_of_the_schema(options, match):
+    task = text_task("gripper__prob05")
+    with pytest.raises(ValueError, match=match) as encoder_error:
+        encoder_of(task, **options)
+    with pytest.raises(ValueError, match=match) as schema_error:
+        encoding.EncodingSchema(task, **{"goal_derivations": (), **options})
+    assert str(encoder_error.value) == str(schema_error.value)
+    assert "not supported" not in str(encoder_error.value)
+
+
+def test_horizon_mode_none_is_spelled_none_not_as_a_string():
+    task = text_task("gripper__prob05")
+    for cls in (encoding.EncodingSchema, encoding.FlatRelationEncoder):
+        with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
+            cls(task, goal_derivations=(), horizon_mode="none")
+
+
+@pytest.mark.parametrize(
+    "options, error, match",
+    [
+        ({"max_goal_level": 4}, ValueError, "^mymyr: encoding: max_goal_level must be in"),
+        ({"goal_derivations": ["plane"]}, ValueError, "goal_derivations"),
+        ({"goal_derivations": "plain"}, TypeError, "collection"),
+        ({"index_dtype": "int16"}, ValueError, "index_dtype"),
+        ({"no_such_option": 1}, TypeError, "no_such_option"),
+    ],
+)
+def test_invalid_options_raise_like_the_schema(options, error, match):
+    task = text_task("gripper__prob05")
+    with pytest.raises(error, match=match):
+        encoder_of(task, **options)
+    with pytest.raises(error, match=match):
+        encoding.EncodingSchema(task, **{"goal_derivations": (), **options})
+
+
+def test_numeric_tasks_and_bad_tables_are_refused():
+    numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    with pytest.raises(ValueError, match="^mymyr: encoding: numeric"):
+        encoder_of(numeric)
+    with pytest.raises(TypeError):
+        encoder_of("gripper")
+    task = text_task("gripper__prob05")
+    with pytest.raises(TypeError, match="TaskTable"):
+        encoder_of(rl.TaskSuite([rl.TaskTable([task])]))
+
+
+def test_lazy_atom_slots_are_refused():
+    task = text_task("gripper__prob05", atoms="lazy")
+    with pytest.raises(ValueError, match="lazy atom slots"):
+        encoder_of(task)
+    with pytest.raises(ValueError, match="lazy atom slots"):
+        encoder_of(rl.TaskTable([task]))
 
 
 @pytest.mark.parametrize("atoms", MODES)
-def test_rejects_bad_identity_ids_expansion_and_inputs(atoms):
+def test_invalid_inputs_raise(atoms):
     first, second = feature_task(atoms=atoms), feature_task("a b c", atoms=atoms)
-    encoder = encoding.FlatRelationEncoder(first)
-    with pytest.raises(ValueError, match="another task"):
+    encoder = encoder_of(first)
+    with pytest.raises(ValueError, match="^mymyr: encoding: state 0 is not a state of instance 0 of the table"):
         encoder.encode(second.initial_state)
-    with pytest.raises(ValueError, match="another task"):
-        encoder.encode(first.initial_state, goals=second.goal_condition)
-    with pytest.raises(ValueError, match="another task"):
-        encoder.encode(first.initial_state, actions=rl.expand(second, [second.initial_state]))
-    with pytest.raises(ValueError, match="different row counts"):
-        encoder.encode([first.initial_state] * 2, actions=rl.expand(first, [first.initial_state]))
-    with pytest.raises(ValueError, match="overflow"):
-        encoder.encode(first.initial_state, actions=rl.expand(first, [first.initial_state], capacity=1))
-    with pytest.raises(TypeError, match="Expansion"):
-        encoder.encode(first.initial_state, actions=object())
     bad = first.encode([first.initial_state])
     assert first.num_atoms < 63
-    bad[0, -1] |= np.uint64(1 << 63)  # a slot past the task's atoms within its word
-    with pytest.raises(ValueError, match="unassigned"):
+    bad[0, -1] |= np.uint64(1 << 63)
+    with pytest.raises(ValueError, match="^mymyr: encoding: .*atom bit"):
         encoder.encode(bad)
+    narrow = np.zeros((1, 0), np.uint64)
+    with pytest.raises(ValueError):
+        encoder.encode(narrow)
     padded = np.concatenate([first.encode([first.initial_state]), np.ones((1, 1), np.uint64)], 1)
-    assert unpack(encoder.encode(padded), 0) == unpack(encoder.encode(first.initial_state), 0)  # padding: not read
-    with pytest.raises(TypeError, match="GroundCondition"):
-        encoder.encode(first.initial_state, goals="(flag a)")
-    with pytest.raises(ValueError, match="numeric"):
-        encoder.encode(first.initial_state, goals=first.ground_condition([], constraints=["(> 2 1)"]))
-    with pytest.raises(ValueError, match="per state row"):
-        encoder.encode([first.initial_state] * 2, goals=[first.goal_condition])
-    table_encoder = encoding.FlatRelationEncoder(rl.TaskTable([first, second]))
-    with pytest.raises(ValueError, match="task_ids"):
+    assert unpack(encoder.encode(padded), 0) == unpack(encoder.encode(first.initial_state), 0)  # padding is not read
+    with pytest.raises(TypeError):
+        encoder.encode("states")
+    with pytest.raises(ValueError):
+        encoder.encode(first.initial_state, framework="tensorflow")
+    table_encoder = encoder_of(rl.TaskTable([first, second]))
+    with pytest.raises(ValueError, match="^mymyr: encoding: task_ids are required"):
         table_encoder.encode([first.initial_state])
     with pytest.raises(ValueError, match="task id"):
         table_encoder.encode([first.initial_state], task_ids=[2])
-    with pytest.raises(ValueError, match="another task"):
+    with pytest.raises(ValueError, match="state 0 is not a state of instance 1 of the table"):
         table_encoder.encode([first.initial_state], task_ids=[1])
-    with pytest.raises(TypeError, match="TaskTable"):
-        encoding.FlatRelationEncoder(rl.TaskSuite([rl.TaskTable([first])]))
+    with pytest.raises(ValueError, match="state 1 is not a state of instance 0 of the table"):
+        table_encoder.encode([first.initial_state, second.initial_state], task_ids=[0, 0])
+    rows = first.encode([first.initial_state] * 2)
+    with pytest.raises(ValueError):
+        encoder.encode(rows, derived=np.zeros((3, 1), np.uint64))
+    with pytest.raises(TypeError):
+        encoder.encode(rows, derived=np.zeros((2, 1), np.float32))
 
 
+def test_states_of_an_equal_task_are_accepted():
+    task, twin = text_task("gripper__prob05"), text_task("gripper__prob05")
+    assert task.fingerprint == twin.fingerprint and task.encoding_fingerprint == twin.encoding_fingerprint
+    encoder = encoder_of(task)
+    states = walk(twin, steps=3, walks=1)
+    from_twin = encoder.encode(states)
+    from_task = encoder.encode(twin.encode(states))
+    for key, value in from_twin.as_dict().items():
+        assert np.array_equal(value, from_task.as_dict()[key]), key
+    assert unpack(encoder.encode(twin.initial_state), 0) == unpack(encoder.encode(task.initial_state), 0)
+    table = encoder_of(rl.TaskTable([task, twin]))
+    batch = table.encode([task.initial_state, twin.initial_state], task_ids=[1, 0])
+    assert unpack(batch, 0) == unpack(batch, 1) and batch.task_ids.tolist() == [1, 0]
+
+
+def test_states_of_a_task_with_another_atom_encoding_are_refused():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    directory = ROOT / "tests/data/pddl/logistics00"
+    task, other = (mymyr.Task.from_pddl(directory / "domain.pddl", directory / "probLOGISTICS-6-1.pddl", atoms=atoms)
+                   for atoms in ("auto", "reachable"))
+    assert task.fingerprint == other.fingerprint and task.encoding_fingerprint != other.encoding_fingerprint
+    with pytest.raises(ValueError, match="state 1 is not a state of instance 0 of the table"):
+        encoder_of(task).encode([task.initial_state, other.initial_state])
+
+
+def test_a_derived_array_narrower_than_the_instance_needs_is_refused():
+    task = text_task("philosophers__p03-phil4")
+    encoder = encoder_of(task)
+    rows = task.encode([task.initial_state])
+    needed = derived_words(task, [task.initial_state]).shape[1]
+    assert needed >= 1
+    with pytest.raises(ValueError, match="^mymyr: encoding: the derived row stride"):
+        encoder.encode(rows, derived=np.zeros((1, needed - 1), np.uint64))
+
+
+# ------------------------------------------------------------------------------------------------ C++ bytes
+# FNV-1a 64 over the scalars (name, value as 8 bytes), then each array's name, extents (8 bytes each) and bytes: the
+# digest of the encoder's rl::ArrayBundle. tests/cpp/encoding/test_encoder.cpp asserts the same constants for the same
+# encodings, so the arrays that Python exports are the bytes that the C++ encoder wrote.
+GOLDEN_DIGESTS = {
+    "gripper__prob05": 14883951552709315966,
+    "philosophers__p03-phil4": 12253892925669182561,
+}
+
+
+def digest(batch):
+    h = 0xCBF29CE484222325
+
+    def feed(data):
+        nonlocal h
+        for byte in data:
+            h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+
+    for name, value in batch.as_dict("numpy").items():
+        feed(name.encode())
+        if isinstance(value, int):
+            feed(int(value).to_bytes(8, "little", signed=True))
+        else:
+            for extent in value.shape:
+                feed(int(extent).to_bytes(8, "little"))
+            feed(np.ascontiguousarray(value).tobytes())
+    return h
+
+
+def first_successor_chain(task, length):
+    rows = task.encode([task.initial_state])
+    for _ in range(length - 1):
+        expansion = rl.expand(task, rows[-1:])
+        assert expansion.total > 0
+        rows = np.concatenate([rows, np.asarray(expansion.succ)[:1]])
+    return rows
+
+
+@pytest.mark.parametrize("name", sorted(GOLDEN_DIGESTS))
+def test_python_arrays_are_the_bytes_of_the_cpp_encoder(name):
+    task = text_task(name)
+    batch = encoder_of(task).encode(first_successor_chain(task, 6))
+    assert digest(batch) == GOLDEN_DIGESTS[name]
+
+
+# ------------------------------------------------------------------------------------------------ mifrost
+def mifrost_tuples(fixture, relations, name, helper):
+    entry = relations.get(name)
+    if entry is None:
+        return []
+    tuples = [tuple(t) for t in fixture["tuples"][entry["emit"]]]
+    return sorted(tuple(sorted(t)) if helper else t for t in tuples)
+
+
+@pytest.fixture(params=FIXTURES, ids=[p.stem[:3] for p in FIXTURES])
+def parity_case(request):
+    return load(request.param)
+
+
+def test_c1_state_static_and_derived_lanes_equal_mifrost(parity_case):
+    """mifrost's default flat encoding (config C1) against the state, static and derived lanes of the native one.
+
+    Catalogs are compared as ordered lists and tuples as name multisets. The differences are the allowed ones: tuple
+    order (the multisets are compared), object ids (names are compared), nullary relations (mifrost drops them, mymyr
+    has one auxiliary entity), the equality predicate (absent) and the argument order of the helper predicates
+    `axiom_<k>` (compared sorted)."""
+    fixture, task = parity_case
+    config = fixture["configs"]["C1"]
+    assert config["encoder"] == "FlatRelationEncoder" and not config["options"]
+    catalog = fixture["catalogs"][config["catalog"]]
+    source_of = dict(zip(catalog["names"], catalog["sources"]))
+    mifrost = [
+        (name, arity)
+        for name, arity, source in zip(catalog["names"], catalog["arities"], catalog["sources"])
+        if source == "state" and name != "="  # the equality predicate is absent
+    ]
+    encoder = encoder_of(task, include_actions=False)
+    state_ids = lane_relations(encoder)
+    native = [(encoder.relation_names[i], encoder.relation_logical_arities[i]) for i in state_ids]
+    nullary = {name for name, arity in native if arity == 0}
+    # mifrost lists a nullary predicate with arity 0 or not at all
+    assert [(n, a) for n, a in mifrost if a != 0] == [(n, a) for n, a in native if a != 0]
+    assert {n for n, a in mifrost if a == 0} <= nullary
+
+    records = [r for r in fixture["encodings"] if r["config"] == "C1"]
+    paths = {s["id"]: s for s in fixture["states"]}
+    states = [replay(task, paths[r["state"]]["path"]) for r in records]
+    batch = encoder.encode(states)
+    names = task.objects
+    static_nullary = {a.strip("()") for a in fixture["static_atoms"] if " " not in a.strip("()")}
+    for graph, (record, state) in enumerate(zip(records, states)):
+        outputs = record["outputs"]
+        got = unpack(batch, graph)
+        objects = len(names)
+        for name, arity in native:
+            if arity == 0:
+                continue
+            helper = bool(HELPER.match(name))
+            tuples = sorted(
+                tuple(sorted(names[i] for i in t)) if helper else tuple(names[i] for i in t) for t in got.get(name, [])
+            )
+            assert tuples == mifrost_tuples(fixture, outputs["relations"], name, helper), (record["state"], name)
+        recorded = {n for n in outputs["relations"] if source_of[n] == "state"}
+        assert recorded <= {n for n, _ in mifrost} | {"="}, recorded
+        assert sorted(outputs["entities"]["by_role"]["object"]) == sorted(names)
+        # the nullary relations hold the auxiliary entity exactly for the nullary atoms that hold
+        fixture_state = paths[record["state"]]
+        holding = {a.strip("()") for a in fixture_state["fluent"] + fixture_state["derived"]
+                   if " " not in a.strip("()")} | static_nullary
+        for name in nullary:
+            expected = [(objects,)] if name in holding else []
+            assert got.get(name, []) == expected, (record["state"], name)
+        has_auxiliary = bool(holding & nullary)
+        begin, end = (int(x) for x in batch.entity_offsets[graph : graph + 2])
+        assert end - begin == objects + has_auxiliary
+
+
+def test_c1_fixture_states_are_distinct_graphs(parity_case):
+    fixture, task = parity_case
+    encoder = encoder_of(task, include_actions=False)
+    states = [replay(task, s["path"]) for s in fixture["states"]]
+    batch = encoder.encode(states)
+    assert batch.num_graphs == len(states)
+    rendered = {repr(sorted(unpack(batch, g).items())) for g in range(batch.num_graphs)}
+    assert len(rendered) >= 3
+
+
+# ------------------------------------------------------------------------------------------------ stubs
 def test_generated_native_encoding_stubs_are_typed():
     directory = Path(importlib.util.find_spec("mymyr._core").origin).parent / "_core"
     path = directory / "_encoding.pyi"
     if not path.is_file():
         pytest.skip("no encoding stubs installed")
     source = path.read_text()
+    assert "class FlatRelationEncoder" in source and "class FlatBatch" in source
     assert "states: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack" in source
     assert "table: mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle" in source
-    assert "actions: mymyr._core._rl.Expansion | None = None" in source
-    assert "goals: mymyr._core._formalism.GroundCondition | Sequence[mymyr._core._formalism.GroundCondition | None]" in source
+    assert "derived: mymyr._typing.SupportsDLPack" in source
     assert "def relation_counts(self) -> Any" in source
-    assert "-> dict[str, Any]" in source
+    assert "def as_dict(self, framework:" in source and "-> dict[str, Any]" in source
     assert ": object" not in source and "-> object" not in source

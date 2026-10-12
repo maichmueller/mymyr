@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <compare>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -55,6 +56,111 @@ bool operator==(const TupleGraph& a, const TupleGraph& b) noexcept
            a.m_problem_offsets == b.m_problem_offsets && a.m_problem_vertices == b.m_problem_vertices && a.m_succ_offsets == b.m_succ_offsets &&
            a.m_succ == b.m_succ && a.m_pred_offsets == b.m_pred_offsets && a.m_pred == b.m_pred && a.m_layer_offsets == b.m_layer_offsets &&
            a.m_layer_vertices == b.m_layer_vertices;
+}
+
+TupleGraph TupleGraph::create(TupleGraphArrays&& a)
+{
+    auto need = [](bool ok, const char* what)
+    {
+        if (!ok)
+            throw std::invalid_argument(std::string("mymyr: invalid tuple graph arrays: ") + what);
+    };
+    need(a.space != nullptr, "no state space");
+    const StateSpace& S = *a.space;
+    const u64 N = S.num_states();
+    need(a.width <= novelty::k_max_arity, "width above the largest tuple size");
+    need(a.root < N, "the root is not a state of the space");
+    // a CSR with `rows` rows over `values`
+    auto csr = [](const std::vector<u32>& off, u64 rows, u64 values)
+    { return off.size() == rows + 1 && off.front() == 0 && off.back() == values && std::is_sorted(off.begin(), off.end()); };
+    // each row strictly ascending, every value below n
+    auto rows_ascending = [](const std::vector<u32>& off, const std::vector<u32>& v, u64 n)
+    {
+        for (usize r = 0; r + 1 < off.size(); ++r)
+            for (u32 k = off[r]; k < off[r + 1]; ++k)
+                if (v[k] >= n || (k > off[r] && v[k - 1] >= v[k]))
+                    return false;
+        return true;
+    };
+    const auto& D = a.distance_offsets;
+    need(D.size() >= 2 && D.front() == 0 && std::adjacent_find(D.begin(), D.end(), std::greater_equal<>()) == D.end(),
+         "distance_offsets is not ascending from 0 with a vertex at every distance");
+    const u64 V = D.back(), ND = D.size() - 1;
+    need(csr(a.tuple_offsets, V, a.tuple_atoms.size()), "tuple_offsets is not a CSR over the vertices");
+    need(csr(a.problem_offsets, V, a.problem_vertex_ids.size()), "problem_offsets is not a CSR over the vertices");
+    need(csr(a.successor_offsets, V, a.successor_ids.size()), "successor_offsets is not a CSR over the vertices");
+    need(csr(a.predecessor_offsets, V, a.predecessor_ids.size()), "predecessor_offsets is not a CSR over the vertices");
+    need(csr(a.layer_offsets, ND, a.layer_vertex_ids.size()), "layer_offsets is not a CSR over the distances");
+    need(rows_ascending(a.tuple_offsets, a.tuple_atoms, S.task()->atoms().fluent_slots()),
+         "a tuple is not ascending atom slots of the task");
+    need(rows_ascending(a.problem_offsets, a.problem_vertex_ids, N), "problem vertices are not ascending states");
+    need(rows_ascending(a.layer_offsets, a.layer_vertex_ids, N), "a layer is not ascending states");
+    need(a.layer_offsets[1] == 1 && a.layer_vertex_ids[0] == a.root, "layer 0 is not the root");
+    for (u64 d = 0; d < ND; ++d)
+    {
+        const auto lb = a.layer_vertex_ids.begin() + a.layer_offsets[d], le = a.layer_vertex_ids.begin() + a.layer_offsets[d + 1];
+        for (u32 v = D[d]; v < D[d + 1]; ++v)
+        {
+            need(a.tuple_offsets[v + 1] - a.tuple_offsets[v] <= a.width, "a tuple has more atoms than width");
+            need(a.problem_offsets[v + 1] > a.problem_offsets[v], "a vertex has no problem vertices");
+            for (u32 k = a.problem_offsets[v]; k < a.problem_offsets[v + 1]; ++k)
+                need(std::binary_search(lb, le, a.problem_vertex_ids[k]), "a problem vertex is not in its vertex's layer");
+            for (u32 k = a.successor_offsets[v]; k < a.successor_offsets[v + 1]; ++k)
+            {
+                const u32 t = a.successor_ids[k];
+                need(d + 1 < ND && t >= D[d + 1] && t < D[d + 2] && (k == a.successor_offsets[v] || a.successor_ids[k - 1] < t),
+                     "successors are not ascending vertices at the next distance");
+            }
+        }
+    }
+    // the predecessors are the reversed successor edges: filling them in source order gives ascending rows
+    need(a.predecessor_ids.size() == a.successor_ids.size(), "predecessors are not the reversed successor edges");
+    std::vector<u32> cursor(a.predecessor_offsets.begin(), a.predecessor_offsets.end() - 1);
+    for (u32 u = 0; u < V; ++u)
+        for (u32 k = a.successor_offsets[u]; k < a.successor_offsets[u + 1]; ++k)
+        {
+            const u32 t = a.successor_ids[k];
+            need(cursor[t] < a.predecessor_offsets[t + 1] && a.predecessor_ids[cursor[t]] == u,
+                 "predecessors are not the reversed successor edges");
+            ++cursor[t];
+        }
+
+    TupleGraph g;
+    g.m_space = std::move(a.space);
+    g.m_root = a.root;
+    g.m_width = a.width;
+    g.m_pruning = a.dominance_pruning;
+    g.m_distance_offsets = std::move(a.distance_offsets);
+    g.m_tuple_offsets = std::move(a.tuple_offsets);
+    g.m_tuple_atoms = std::move(a.tuple_atoms);
+    g.m_problem_offsets = std::move(a.problem_offsets);
+    g.m_problem_vertices = std::move(a.problem_vertex_ids);
+    g.m_succ_offsets = std::move(a.successor_offsets);
+    g.m_succ = std::move(a.successor_ids);
+    g.m_pred_offsets = std::move(a.predecessor_offsets);
+    g.m_pred = std::move(a.predecessor_ids);
+    g.m_layer_offsets = std::move(a.layer_offsets);
+    g.m_layer_vertices = std::move(a.layer_vertex_ids);
+    return g;
+}
+
+TupleGraphArrays TupleGraph::to_arrays() const
+{
+    return TupleGraphArrays{.space = m_space,
+                            .root = m_root,
+                            .width = m_width,
+                            .dominance_pruning = m_pruning,
+                            .distance_offsets = m_distance_offsets,
+                            .tuple_offsets = m_tuple_offsets,
+                            .tuple_atoms = m_tuple_atoms,
+                            .problem_offsets = m_problem_offsets,
+                            .problem_vertex_ids = m_problem_vertices,
+                            .successor_offsets = m_succ_offsets,
+                            .successor_ids = m_succ,
+                            .predecessor_offsets = m_pred_offsets,
+                            .predecessor_ids = m_pred,
+                            .layer_offsets = m_layer_offsets,
+                            .layer_vertex_ids = m_layer_vertices};
 }
 
 // ----------------------------------------------------------------------------------------------------- construction

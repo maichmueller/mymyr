@@ -1,8 +1,12 @@
 """Shared test setup. JAX and torch (when installed) stay on the CPU unless the caller sets CUDA_VISIBLE_DEVICES (and
 JAX_PLATFORMS) explicitly: only test_cuda.py uses a GPU, and it skips otherwise."""
 
+import json
 import os
 import pathlib
+import subprocess
+import sys
+import tempfile
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -56,3 +60,89 @@ def walk(task, steps=20, seed=0, walks=2):
             s = rng.choice(succ)
             out.append(s)
     return out
+
+
+# Tests that load an extension module which cannot run without the GIL (torchrl and tensordict import
+# torch._dynamo, which loads triton; so do torch.compile and torch._dynamo themselves) are marked
+# ``needs_gil``. Loading such a module enables the GIL for the rest of the process, and the free-threading
+# tests assert that it stays disabled, so a marked test runs in a child pytest process: the tests of one
+# module that were selected for this run share one child, and each reports the child's outcome.
+# Every other test fails if it leaves the GIL enabled, so that a missing mark is found at the test that
+# causes it rather than at a free-threading test later in the session.
+
+ISOLATED_REPORT = "MYMYR_TEST_ISOLATED_REPORT"
+_isolated_outcomes: dict[str, dict] = {}
+_isolated_groups: dict[str, list[str]] = {}
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "needs_gil: loads a module that enables the GIL; runs in a child process (tests/python/conftest.py)"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if ISOLATED_REPORT in os.environ:
+        return
+    for item in items:
+        if item.get_closest_marker("needs_gil"):
+            _isolated_groups.setdefault(str(item.path), []).append(item.nodeid)
+
+
+def pytest_runtest_logreport(report):
+    path = os.environ.get(ISOLATED_REPORT)
+    if path is None:
+        return
+    entry = {"nodeid": report.nodeid, "when": report.when, "outcome": report.outcome}
+    if report.skipped:
+        entry["skip"] = str(report.longrepr[2]) if isinstance(report.longrepr, tuple) else str(report.longrepr)
+    elif report.failed:
+        entry["text"] = report.longreprtext
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _run_isolated(config, path):
+    fd, report = tempfile.mkstemp(suffix=".jsonl")
+    os.close(fd)
+    args = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", str(config.rootpath)]
+    for w in config.getoption("pythonwarnings") or []:
+        args += ["-W", w]
+    # the child exists to load such modules
+    args += ["-W", "ignore:The global interpreter lock (GIL) has been enabled:RuntimeWarning"]
+    proc = subprocess.run(args + _isolated_groups[path], env={**os.environ, ISOLATED_REPORT: report},
+                          capture_output=True, text=True)
+    try:
+        for line in pathlib.Path(report).read_text().splitlines():
+            entry = json.loads(line)
+            old = _isolated_outcomes.get(entry["nodeid"])
+            if old is None or old["outcome"] == "passed":
+                _isolated_outcomes[entry["nodeid"]] = entry
+    finally:
+        os.unlink(report)
+    for nodeid in _isolated_groups[path]:
+        _isolated_outcomes.setdefault(nodeid, {"outcome": "failed", "text": proc.stdout[-4000:] + proc.stderr[-4000:]})
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pyfunc_call(pyfuncitem):
+    if ISOLATED_REPORT in os.environ or not pyfuncitem.get_closest_marker("needs_gil"):
+        return None
+    if pyfuncitem.nodeid not in _isolated_outcomes:
+        _run_isolated(pyfuncitem.config, str(pyfuncitem.path))
+    entry = _isolated_outcomes[pyfuncitem.nodeid]
+    if entry["outcome"] == "failed":
+        pytest.fail(f"in the child process:\n{entry['text']}", pytrace=False)
+    if entry["outcome"] == "skipped":
+        pytest.skip(entry["skip"])
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _gil_stays_disabled():
+    if ISOLATED_REPORT in os.environ or not hasattr(sys, "_is_gil_enabled") or sys._is_gil_enabled():
+        yield
+        return
+    yield
+    if sys._is_gil_enabled():
+        pytest.fail("this test enabled the GIL (it loaded a module that needs it); mark it @pytest.mark.needs_gil")

@@ -42,6 +42,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
@@ -131,6 +132,16 @@ heuristics::Costs parse_costs(nb::handle h)
     if (s == "real")
         return heuristics::Costs::Real;
     throw nb::value_error("mymyr: costs must be 'auto', 'unit' or 'real'");
+}
+
+const char* costs_name(heuristics::Costs c)
+{
+    return c == heuristics::Costs::Unit ? "unit" : c == heuristics::Costs::Real ? "real" : "auto";
+}
+
+const char* evaluation_name(heuristics::Evaluation e)
+{
+    return e == heuristics::Evaluation::Grounded ? "grounded" : e == heuristics::Evaluation::Lifted ? "lifted" : "auto";
 }
 
 heuristics::Evaluation parse_evaluation(nb::handle h)
@@ -659,6 +670,483 @@ private:
 using CoOccurrence = std::vector<std::pair<CanonicalAtom, std::vector<CanonicalAtom>>>;
 using CoOccurrenceDict = nb::typed<nb::dict, PyGroundAtom, nb::typed<nb::list, PyGroundAtom>>;
 
+// ------------------------------------------------------------------------------------------------ pickling results
+// A result pickles as (kind, its Task, the task's fingerprint, its fields as a tuple): plans as (schema, objects)
+// labels, states as States (which pickle with their task), statistics as tuples, statuses and atoms as ints.
+// Unpickling checks the fingerprint, the labels (schemas, arities and objects of the task), the canonical atom ids
+// and the statuses.
+
+/// Reads the fields of a pickled tuple in order; ValueError ("corrupt ... pickle") for a missing or mistyped field.
+class Fields
+{
+public:
+    Fields(nb::handle t, const char* what) : m_what(what)
+    {
+        if (!nb::isinstance<nb::tuple>(t))
+            corrupt();
+        m_t = nb::borrow<nb::tuple>(t);
+    }
+    nb::handle next()
+    {
+        if (m_i >= m_t.size())
+            corrupt();
+        return m_t[m_i++];
+    }
+    template<class T>
+    T get()
+    {
+        nb::handle h = next();
+        T v{};
+        if (!nb::try_cast(h, v))
+            corrupt();
+        return v;
+    }
+    SearchStatus status()
+    {
+        const int v = get<int>();
+        if (v < 0 || v > static_cast<int>(SearchStatus::Unsolvable))
+            corrupt();
+        return static_cast<SearchStatus>(v);
+    }
+    void done() const
+    {
+        if (m_i != m_t.size())
+            corrupt();
+    }
+    [[noreturn]] void corrupt() const { throw nb::value_error((std::string("mymyr: corrupt ") + m_what + " pickle").c_str()); }
+
+private:
+    nb::tuple m_t;
+    usize m_i = 0;
+    const char* m_what;
+};
+
+int status_int(SearchStatus s) { return static_cast<int>(s); }
+
+nb::list enc_plan(const std::vector<Action>& plan)
+{
+    nb::list out;
+    for (const Action& a : plan)
+    {
+        nb::list b;
+        for (const ObjectId o : a.binding)
+            b.append(o.v);
+        out.append(nb::make_tuple(a.schema.v, nb::tuple(b)));
+    }
+    return out;
+}
+
+/// A plan of labels of `task`: schemas of the task, bindings of their arity over its objects.
+std::vector<Action> dec_plan(const Task& task, nb::handle h, const char* what)
+{
+    if (!nb::isinstance<nb::list>(h))
+        Fields(nb::none(), what).corrupt();
+    std::vector<Action> plan;
+    for (nb::handle step : nb::borrow<nb::list>(h))
+    {
+        Fields f(step, what);
+        const u32 schema = f.get<u32>();
+        nb::handle binding = f.next();
+        f.done();
+        if (schema >= task.num_schemas() || !nb::isinstance<nb::tuple>(binding) ||
+            nb::len(binding) != task.data().schemas[schema].arity())
+            throw nb::value_error(
+                (std::string("mymyr: corrupt ") + what + " pickle (an action is not one of the task's)").c_str());
+        std::vector<ObjectId> objects;
+        for (nb::handle o : nb::borrow<nb::tuple>(binding))
+        {
+            u32 v = 0;
+            if (!nb::try_cast(o, v) || v >= task.num_objects())
+                throw nb::value_error(
+                (std::string("mymyr: corrupt ") + what + " pickle (an action is not one of the task's)").c_str());
+            objects.push_back(ObjectId{v});
+        }
+        plan.emplace_back(SchemaId{schema}, std::move(objects));
+    }
+    return plan;
+}
+
+std::optional<State> dec_state(const Owner& o, nb::handle h)
+{
+    if (h.is_none())
+        return std::nullopt;
+    return state_for(o, h, "a pickled result's state");
+}
+
+nb::list enc_atoms(std::span<const CanonicalAtom> atoms)
+{
+    nb::list out;
+    for (const CanonicalAtom c : atoms)
+        out.append(c);
+    return out;
+}
+
+std::vector<CanonicalAtom> dec_atoms(const Task& task, nb::handle h, const char* what)
+{
+    std::vector<CanonicalAtom> out;
+    if (!nb::isinstance<nb::list>(h))
+        Fields(nb::none(), what).corrupt();
+    for (nb::handle x : nb::borrow<nb::list>(h))
+    {
+        u64 c = 0;
+        if (!nb::try_cast(x, c) || c >= task.compiled().layout.total)
+            throw nb::value_error((std::string("mymyr: corrupt ") + what + " pickle (an atom is not one of the task's)").c_str());
+        out.push_back(c);
+    }
+    return out;
+}
+
+template<class T, class F>
+nb::list enc_list(const std::vector<T>& v, F&& f)
+{
+    nb::list out;
+    for (const T& x : v)
+        out.append(f(x));
+    return out;
+}
+
+template<class T, class F>
+std::vector<T> dec_list(nb::handle h, const char* what, F&& f)
+{
+    if (!nb::isinstance<nb::list>(h))
+        Fields(nb::none(), what).corrupt();
+    std::vector<T> out;
+    for (nb::handle x : nb::borrow<nb::list>(h))
+        out.push_back(f(x));
+    return out;
+}
+
+// statistics (no task)
+nb::tuple enc(const search::SearchStatistics& s)
+{
+    return nb::make_tuple(s.expanded, s.generated, s.states, s.pruned, s.seconds);
+}
+search::SearchStatistics dec_stats(nb::handle h)
+{
+    Fields f(h, "statistics");
+    search::SearchStatistics s;
+    s.expanded = f.get<u64>();
+    s.generated = f.get<u64>();
+    s.states = f.get<u64>();
+    s.pruned = f.get<u64>();
+    s.seconds = f.get<double>();
+    f.done();
+    return s;
+}
+
+nb::tuple enc(const search::IwPassStatistics& p)
+{
+    return nb::make_tuple(p.arity, status_int(p.status), p.expanded, p.generated, p.generated_in_tree, p.skipped, p.blocked,
+                          p.seconds, p.placeholder);
+}
+search::IwPassStatistics dec_pass(nb::handle h)
+{
+    Fields f(h, "IW pass statistics");
+    search::IwPassStatistics p;
+    p.arity = f.get<u32>();
+    p.status = f.status();
+    p.expanded = f.get<u64>();
+    p.generated = f.get<u64>();
+    p.generated_in_tree = f.get<u64>();
+    p.skipped = f.get<u64>();
+    p.blocked = f.get<u64>();
+    p.seconds = f.get<double>();
+    p.placeholder = f.get<bool>();
+    f.done();
+    return p;
+}
+
+nb::tuple enc(const search::SiwSubproblem& p)
+{
+    return nb::make_tuple(status_int(p.status), p.unsatisfied_at_start, p.plan_length, p.effective_width,
+                          enc_list(p.passes, [](const auto& x) { return enc(x); }));
+}
+search::SiwSubproblem dec_subproblem(nb::handle h)
+{
+    Fields f(h, "SIW subproblem");
+    search::SiwSubproblem p;
+    p.status = f.status();
+    p.unsatisfied_at_start = f.get<u32>();
+    p.plan_length = f.get<u32>();
+    p.effective_width = f.get<u32>();
+    p.passes = dec_list<search::IwPassStatistics>(f.next(), "SIW subproblem", dec_pass);
+    f.done();
+    return p;
+}
+
+nb::tuple enc(const heuristics::HeuristicStats& s)
+{
+    return nb::make_tuple(s.evaluations, s.grounded, s.lifted, s.dead_ends, s.grounding_seconds);
+}
+heuristics::HeuristicStats dec_heuristic_stats(nb::handle h)
+{
+    Fields f(h, "heuristic statistics");
+    heuristics::HeuristicStats s;
+    s.evaluations = f.get<u64>();
+    s.grounded = f.get<u64>();
+    s.lifted = f.get<u64>();
+    s.dead_ends = f.get<u64>();
+    s.grounding_seconds = f.get<double>();
+    f.done();
+    return s;
+}
+
+nb::tuple enc(const search::AStarIwNoveltyStatistics& s)
+{
+    return nb::make_tuple(s.rejected, s.stale, s.stale_g, s.probes, s.updates, s.pop_tests, s.table_bytes);
+}
+search::AStarIwNoveltyStatistics dec_novelty(nb::handle h)
+{
+    Fields f(h, "A*-IW novelty statistics");
+    search::AStarIwNoveltyStatistics s;
+    s.rejected = f.get<u64>();
+    s.stale = f.get<u64>();
+    s.stale_g = f.get<u64>();
+    s.probes = f.get<u64>();
+    s.updates = f.get<u64>();
+    s.pop_tests = f.get<u64>();
+    s.table_bytes = f.get<u64>();
+    f.done();
+    return s;
+}
+
+nb::tuple enc(const search::RolloutIwStatistics& s)
+{
+    return nb::make_tuple(s.rollouts, s.generated, s.expanded, s.feature_depth_improvements, s.case1, s.case2, s.case3, s.case4,
+                          s.solved_propagations, s.dead_ends, s.depth_bound_prunings, s.incumbent_bound_prunings, s.blocked,
+                          s.max_rollout_depth, s.tree_nodes, s.seconds);
+}
+search::RolloutIwStatistics dec_rollout_stats(nb::handle h)
+{
+    Fields f(h, "Rollout IW statistics");
+    search::RolloutIwStatistics s;
+    for (u64* x : {&s.rollouts, &s.generated, &s.expanded, &s.feature_depth_improvements, &s.case1, &s.case2, &s.case3, &s.case4,
+                   &s.solved_propagations, &s.dead_ends, &s.depth_bound_prunings, &s.incumbent_bound_prunings, &s.blocked})
+        *x = f.get<u64>();
+    s.max_rollout_depth = f.get<u32>();
+    s.tree_nodes = f.get<u64>();
+    s.seconds = f.get<double>();
+    f.done();
+    return s;
+}
+
+// results (of a task)
+nb::tuple enc(const Owner& o, const search::IwResult& r)
+{
+    return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, r.cost_exact, state_or_none(o, r.goal_state),
+                          enc_list(r.passes, [](const auto& x) { return enc(x); }), enc(r.total), r.effective_width, r.message,
+                          r.fluent_slots, r.peak_table_bytes, r.peak_node_bytes);
+}
+search::IwResult dec_iw(const Owner& o, nb::handle h)
+{
+    const char* what = "IW result";
+    Fields f(h, what);
+    search::IwResult r;
+    r.status = f.status();
+    r.plan = dec_plan(*o.core->task, f.next(), what);
+    r.cost = f.get<double>();
+    r.cost_exact = f.get<bool>();
+    r.goal_state = dec_state(o, f.next());
+    r.passes = dec_list<search::IwPassStatistics>(f.next(), what, dec_pass);
+    r.total = dec_stats(f.next());
+    r.effective_width = f.get<u32>();
+    r.message = f.get<std::string>();
+    r.fluent_slots = f.get<u32>();
+    r.peak_table_bytes = f.get<u64>();
+    r.peak_node_bytes = f.get<u64>();
+    f.done();
+    return r;
+}
+
+nb::tuple enc(const Owner& o, const search::SiwResult& r)
+{
+    return nb::make_tuple(status_int(r.status), enc_plan(r.plan), enc_plan(r.partial_plan), r.cost, r.cost_exact,
+                          state_or_none(o, r.goal_state), enc_list(r.subproblems, [](const auto& x) { return enc(x); }),
+                          enc(r.total), r.max_effective_width, r.message, r.fluent_slots, r.peak_table_bytes, r.peak_node_bytes);
+}
+search::SiwResult dec_siw(const Owner& o, nb::handle h)
+{
+    const char* what = "SIW result";
+    Fields f(h, what);
+    search::SiwResult r;
+    r.status = f.status();
+    r.plan = dec_plan(*o.core->task, f.next(), what);
+    r.partial_plan = dec_plan(*o.core->task, f.next(), what);
+    r.cost = f.get<double>();
+    r.cost_exact = f.get<bool>();
+    r.goal_state = dec_state(o, f.next());
+    r.subproblems = dec_list<search::SiwSubproblem>(f.next(), what, dec_subproblem);
+    r.total = dec_stats(f.next());
+    r.max_effective_width = f.get<u32>();
+    r.message = f.get<std::string>();
+    r.fluent_slots = f.get<u32>();
+    r.peak_table_bytes = f.get<u64>();
+    r.peak_node_bytes = f.get<u64>();
+    f.done();
+    return r;
+}
+
+nb::tuple enc(const Owner& o, const search::BestFirstResult& r)
+{
+    return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, state_or_none(o, r.goal_state), enc(r.stats),
+                          r.evaluations, r.dead_ends, r.reopened, r.expanded_until_last_jump, r.layers, r.initial_h,
+                          enc(r.heuristic), r.setup_seconds, r.algorithm, r.store, r.queue, r.message, r.store_bytes,
+                          r.fluent_slots);
+}
+void dec_best_first(const Owner& o, Fields& f, search::BestFirstResult& r, const char* what)
+{
+    r.status = f.status();
+    r.plan = dec_plan(*o.core->task, f.next(), what);
+    r.cost = f.get<double>();
+    r.goal_state = dec_state(o, f.next());
+    r.stats = dec_stats(f.next());
+    r.evaluations = f.get<u64>();
+    r.dead_ends = f.get<u64>();
+    r.reopened = f.get<u64>();
+    r.expanded_until_last_jump = f.get<u64>();
+    r.layers = f.get<u64>();
+    r.initial_h = f.get<double>();
+    r.heuristic = dec_heuristic_stats(f.next());
+    r.setup_seconds = f.get<double>();
+    r.algorithm = f.get<std::string>();
+    r.store = f.get<std::string>();
+    r.queue = f.get<std::string>();
+    r.message = f.get<std::string>();
+    r.store_bytes = f.get<u64>();
+    r.fluent_slots = f.get<u32>();
+}
+
+nb::tuple enc(const Owner& o, const BrfsResult& r)
+{
+    nb::list layers;
+    for (const auto& l : r.layer_counts)
+        layers.append(nb::make_tuple(l[0], l[1], l[2]));
+    return nb::make_tuple(status_int(r.status), r.states, r.expanded, r.generated, r.goal_states, r.layers, layers, r.exhausted,
+                          r.solved, enc_plan(r.plan), r.search_s, r.words, r.fluent_slots, r.store_bytes, r.fingerprint, r.threads,
+                          r.store);
+}
+BrfsResult dec_brfs(const Owner& o, nb::handle h)
+{
+    const char* what = "BrFS result";
+    Fields f(h, what);
+    BrfsResult r;
+    r.status = f.status();
+    r.states = f.get<u64>();
+    r.expanded = f.get<u64>();
+    r.generated = f.get<u64>();
+    r.goal_states = f.get<u64>();
+    r.layers = f.get<u32>();
+    r.layer_counts = dec_list<std::array<u64, 3>>(f.next(), what, [&](nb::handle x) {
+        Fields l(x, what);
+        std::array<u64, 3> c{l.get<u64>(), l.get<u64>(), l.get<u64>()};
+        l.done();
+        return c;
+    });
+    r.exhausted = f.get<bool>();
+    r.solved = f.get<bool>();
+    r.plan = dec_plan(*o.core->task, f.next(), what);
+    r.search_s = f.get<double>();
+    r.words = f.get<u32>();
+    r.fluent_slots = f.get<u32>();
+    r.store_bytes = f.get<u64>();
+    r.fingerprint = f.get<u64>();
+    r.threads = f.get<u32>();
+    r.store = f.get<std::string>();
+    f.done();
+    return r;
+}
+
+nb::tuple enc(const Owner& o, const search::RolloutIwResult& r)
+{
+    return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, r.cost_exact, state_or_none(o, r.goal_state),
+                          enc(r.statistics), r.root_solved, r.message, r.fluent_slots);
+}
+search::RolloutIwResult dec_rollout_iw(const Owner& o, nb::handle h)
+{
+    const char* what = "Rollout IW result";
+    Fields f(h, what);
+    search::RolloutIwResult r;
+    r.status = f.status();
+    r.plan = dec_plan(*o.core->task, f.next(), what);
+    r.cost = f.get<double>();
+    r.cost_exact = f.get<bool>();
+    r.goal_state = dec_state(o, f.next());
+    r.statistics = dec_rollout_stats(f.next());
+    r.root_solved = f.get<bool>();
+    r.message = f.get<std::string>();
+    r.fluent_slots = f.get<u32>();
+    f.done();
+    return r;
+}
+
+nb::tuple enc(const Owner& o, const search::LandingState& l)
+{
+    return nb::make_tuple(make_state(o, State(l.state)), enc_atoms(l.atoms), l.direct_dead_end);
+}
+search::LandingState dec_landing(const Owner& o, nb::handle h)
+{
+    const char* what = "landing state";
+    Fields f(h, what);
+    search::LandingState l;
+    const std::optional<State> s = dec_state(o, f.next());
+    if (!s)
+        f.corrupt();
+    l.state = *s;
+    l.atoms = dec_atoms(*o.core->task, f.next(), what);
+    l.direct_dead_end = f.get<bool>();
+    f.done();
+    return l;
+}
+
+nb::tuple enc(const Owner& o, const search::RolloutResult& r)
+{
+    nb::list by_atom, rows;
+    for (const auto& [c, i] : r.landing_state_by_atom)
+        by_atom.append(nb::make_tuple(c, i));
+    for (const auto& [c, row] : r.co_occurrence)
+        rows.append(nb::make_tuple(c, enc_atoms(row)));
+    return nb::make_tuple(enc(o, r.search), enc_atoms(r.reached_fluent_atoms), enc_atoms(r.reached_derived_atoms), r.num_states,
+                          enc_list(r.landing_states, [&](const auto& x) { return enc(o, x); }), by_atom, rows);
+}
+search::RolloutResult dec_rollout(const Owner& o, nb::handle h)
+{
+    const char* what = "rollout result";
+    const Task& T = *o.core->task;
+    Fields f(h, what);
+    search::RolloutResult r;
+    r.search = dec_iw(o, f.next());
+    r.reached_fluent_atoms = dec_atoms(T, f.next(), what);
+    r.reached_derived_atoms = dec_atoms(T, f.next(), what);
+    r.num_states = f.get<u64>();
+    r.landing_states = dec_list<search::LandingState>(f.next(), what, [&](nb::handle x) { return dec_landing(o, x); });
+    auto atom = [&](Fields& p)
+    {
+        const u64 c = p.get<u64>();
+        if (c >= T.compiled().layout.total)
+            p.corrupt();
+        return CanonicalAtom{c};
+    };
+    r.landing_state_by_atom = dec_list<std::pair<CanonicalAtom, u32>>(f.next(), what, [&](nb::handle x) {
+        Fields p(x, what);
+        const CanonicalAtom c = atom(p);
+        const u32 i = p.get<u32>();
+        p.done();
+        if (i >= r.landing_states.size())
+            p.corrupt();
+        return std::pair<CanonicalAtom, u32>{c, i};
+    });
+    r.co_occurrence = dec_list<std::pair<CanonicalAtom, std::vector<CanonicalAtom>>>(f.next(), what, [&](nb::handle x) {
+        Fields p(x, what);
+        const CanonicalAtom c = atom(p);
+        std::vector<CanonicalAtom> row = dec_atoms(T, p.next(), what);
+        p.done();
+        return std::pair<CanonicalAtom, std::vector<CanonicalAtom>>{c, std::move(row)};
+    });
+    f.done();
+    return r;
+}
+
+
 CoOccurrenceDict co_occurrence_dict(const Owner& o, const CoOccurrence& rows)
 {
     AtomCache atoms(o);
@@ -669,6 +1157,164 @@ CoOccurrenceDict co_occurrence_dict(const Owner& o, const CoOccurrence& rows)
 }
 
 std::string status_or_none(bool valid, SearchStatus s) { return valid ? std::string(search::to_string(s)) : "None"; }
+
+nb::tuple enc(const Owner& o, const search::PortfolioResult& r)
+{
+    nb::list statuses;
+    for (const SearchStatus x : r.rollout_statuses)
+        statuses.append(status_int(x));
+    return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, r.cost_exact, r.plan_length, r.certified_optimal,
+                          r.iw_lower_bound, r.iw_completed_depth, r.winning_worker, r.message, r.certifier_ran,
+                          status_int(r.certifier_status), enc(o, r.certifier),
+                          enc_list(r.rollout_statistics, [](const auto& x) { return enc(x); }), statuses,
+                          enc_list(r.rollout_rounds, [](u32 x) { return nb::int_(x); }), r.total_expansions, r.threads_used,
+                          r.fluent_slots);
+}
+search::PortfolioResult dec_portfolio(const Owner& o, nb::handle h)
+{
+    const char* what = "portfolio result";
+    Fields f(h, what);
+    search::PortfolioResult r;
+    r.status = f.status();
+    r.plan = dec_plan(*o.core->task, f.next(), what);
+    r.cost = f.get<double>();
+    r.cost_exact = f.get<bool>();
+    r.plan_length = f.get<u32>();
+    r.certified_optimal = f.get<bool>();
+    r.iw_lower_bound = f.get<u32>();
+    r.iw_completed_depth = f.get<u32>();
+    r.winning_worker = f.get<u32>();
+    r.message = f.get<std::string>();
+    r.certifier_ran = f.get<bool>();
+    r.certifier_status = f.status();
+    r.certifier = dec_iw(o, f.next());
+    r.rollout_statistics = dec_list<search::RolloutIwStatistics>(f.next(), what, dec_rollout_stats);
+    r.rollout_statuses = dec_list<SearchStatus>(f.next(), what, [&](nb::handle x) {
+        int v = -1;
+        if (!nb::try_cast(x, v) || v < 0 || v > static_cast<int>(SearchStatus::Unsolvable))
+            f.corrupt();
+        return static_cast<SearchStatus>(v);
+    });
+    r.rollout_rounds = dec_list<u32>(f.next(), what, [&](nb::handle x) {
+        u32 v = 0;
+        if (!nb::try_cast(x, v))
+            f.corrupt();
+        return v;
+    });
+    r.total_expansions = f.get<u64>();
+    r.threads_used = f.get<u32>();
+    r.fluent_slots = f.get<u32>();
+    f.done();
+    if (r.rollout_rounds.size() != r.rollout_statuses.size())
+        f.corrupt();
+    return r;
+}
+
+/// (restore, (kind, task, fingerprint, fields)): the pickle of a result of `o`'s task.
+nb::tuple result_reduce(const char* kind, const Owner& o, nb::object fields)
+{
+    return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_search_result"),
+                          nb::make_tuple(kind, task_object(o.obj), o.core->task->fingerprint(), fields));
+}
+
+/// The result a result_reduce pickle describes.
+nb::object restore_result(std::string_view kind, nb::handle task, u64 fingerprint, nb::handle fields)
+{
+    if (!nb::isinstance<PyTask>(task) && !nb::isinstance<PyHandle>(task))
+        throw nb::type_error("mymyr: a pickled search result's task must be a Task");
+    const Owner o = owner_of(task);
+    if (o.core->task->fingerprint() != fingerprint)
+        throw nb::value_error("mymyr: the search result was pickled from a different task (content fingerprint mismatch)");
+    if (kind == "iw")
+        return nb::cast(PyIwResult{dec_iw(o, fields), o});
+    if (kind == "siw")
+        return nb::cast(PySiwResult{dec_siw(o, fields), o});
+    if (kind == "best_first" || kind == "astar_iw")
+    {
+        const char* what = kind == "best_first" ? "best-first result" : "A*-IW result";
+        Fields f(fields, what);
+        search::BestFirstResult r;
+        dec_best_first(o, f, r, what);
+        if (kind == "best_first")
+        {
+            f.done();
+            return nb::cast(PyBestFirstResult{std::move(r), o});
+        }
+        PyAStarIwResult a;
+        a.r = std::move(r);
+        a.o = o;
+        a.novelty = dec_novelty(f.next());
+        f.done();
+        return nb::cast(std::move(a));
+    }
+    if (kind == "brfs")
+        return nb::cast(PyBrfsResult{dec_brfs(o, fields), o});
+    if (kind == "rollout_iw")
+        return nb::cast(PyRolloutIwResult{dec_rollout_iw(o, fields), o});
+    if (kind == "landing_state")
+        return nb::cast(PyLandingState{dec_landing(o, fields), o});
+    if (kind == "merged_landing_states")
+    {
+        const char* what = "merged landing states";
+        Fields f(fields, what);
+        search::MergedLandingStates m;
+        m.states = dec_list<State>(f.next(), what, [&](nb::handle x) {
+            const std::optional<State> st = dec_state(o, x);
+            if (!st)
+                f.corrupt();
+            return *st;
+        });
+        m.by_rollout = dec_list<std::vector<u32>>(f.next(), what, [&](nb::handle x) {
+            return dec_list<u32>(x, what, [&](nb::handle i) {
+                u32 v = 0;
+                if (!nb::try_cast(i, v) || v >= m.states.size())
+                    f.corrupt();
+                return v;
+            });
+        });
+        f.done();
+        return nb::cast(PyMergedLandingStates{std::move(m), o});
+    }
+    if (kind == "rollouts" || kind == "rollout")
+    {
+        // a batch, or one rollout (a batch of one)
+        const char* what = kind == "rollouts" ? "parallel rollouts" : "rollout result";
+        Fields f(fields, what);
+        auto batch = std::make_shared<search::ParallelRolloutsResult>();
+        std::vector<u64> seeds;
+        if (kind == "rollout")
+        {
+            seeds.push_back(f.get<u64>());
+            batch->rollouts.push_back(dec_rollout(o, f.next()));
+            f.done();
+            return nb::cast(PyRolloutResult{std::move(batch), 0, seeds[0], o});
+        }
+        batch->rollouts = dec_list<search::RolloutResult>(f.next(), what, [&](nb::handle x) { return dec_rollout(o, x); });
+        seeds = dec_list<u64>(f.next(), what, [&](nb::handle x) {
+            u64 v = 0;
+            if (!nb::try_cast(x, v))
+                f.corrupt();
+            return v;
+        });
+        batch->threads_used = f.get<u32>();
+        batch->message = f.get<std::string>();
+        f.done();
+        if (seeds.size() != batch->rollouts.size())
+            f.corrupt();
+        return nb::cast(PyParallelRollouts{std::move(batch), std::move(seeds), o});
+    }
+    if (kind == "portfolio")
+        return nb::cast(PyPortfolioResult{dec_portfolio(o, fields), o});
+    throw nb::value_error("mymyr: unknown search result pickle kind");
+}
+
+/// __getstate__ / __setstate__ of a statistics class (plain values, no task).
+template<class T, class Enc, class Dec>
+void bind_stats_pickle(nb::class_<T>& c, Enc enc_fn, Dec dec_fn)
+{
+    c.def("__getstate__", [enc_fn](const T& x) { return enc_fn(x); });
+    c.def("__setstate__", [dec_fn](T* self, nb::tuple t) { new (self) T(dec_fn(t)); });
+}
 
 // ------------------------------------------------------------------------------------------------ parallel rollouts and portfolio: options
 
@@ -824,6 +1470,7 @@ struct PyHeuristic
     heuristics::Options options;  // h's options, with h's grounding (options.relaxed)
     std::mutex m;
     datasets::StateSpacePtr space{};  // Heuristic.perfect: the state space
+    nb::object space_object{};        // Heuristic.perfect: the StateSpace it was given (its pickle)
 
     /// A new evaluator of h's values with scratch of its own, sharing h's grounding or state space.
     [[nodiscard]] std::unique_ptr<heuristics::Heuristic> make_evaluator() const
@@ -1395,16 +2042,18 @@ void bind_search(nb::module_& parent)
             return std::string("CancelToken(requested=") + (t.token.requested() ? "True" : "False") + ")";
         });
 
-    nb::class_<search::SearchStatistics>(m, "Statistics")
-        .def_ro("expanded", &search::SearchStatistics::expanded)
+    auto statistics = nb::class_<search::SearchStatistics>(m, "Statistics");
+    bind_stats_pickle(statistics, [](const search::SearchStatistics& x) { return enc(x); }, dec_stats);
+    statistics.def_ro("expanded", &search::SearchStatistics::expanded)
         .def_ro("generated", &search::SearchStatistics::generated)
         .def_ro("states", &search::SearchStatistics::states)
         .def_ro("pruned", &search::SearchStatistics::pruned)
         .def_ro("seconds", &search::SearchStatistics::seconds)
         .def("__repr__", [](const search::SearchStatistics& s) { return "Statistics(" + stats_repr(s) + ")"; });
 
-    nb::class_<search::IwPassStatistics>(m, "IwPass", "Statistics of one IW(k) pass (mimir's per-pass counts).")
-        .def_ro("arity", &search::IwPassStatistics::arity)
+    auto iw_pass = nb::class_<search::IwPassStatistics>(m, "IwPass", "Statistics of one IW(k) pass (mimir's per-pass counts).");
+    bind_stats_pickle(iw_pass, [](const search::IwPassStatistics& x) { return enc(x); }, dec_pass);
+    iw_pass.def_ro("arity", &search::IwPassStatistics::arity)
         .def_ro("status", &search::IwPassStatistics::status)
         .def_ro("expanded", &search::IwPassStatistics::expanded)
         .def_ro("generated", &search::IwPassStatistics::generated)
@@ -1419,15 +2068,17 @@ void bind_search(nb::module_& parent)
                    ", generated_in_tree=" + std::to_string(p.generated_in_tree) + ")";
         });
 
-    nb::class_<search::SiwSubproblem>(m, "SiwSubproblem")
-        .def_ro("status", &search::SiwSubproblem::status)
+    auto subproblem = nb::class_<search::SiwSubproblem>(m, "SiwSubproblem");
+    bind_stats_pickle(subproblem, [](const search::SiwSubproblem& x) { return enc(x); }, dec_subproblem);
+    subproblem.def_ro("status", &search::SiwSubproblem::status)
         .def_ro("unsatisfied_at_start", &search::SiwSubproblem::unsatisfied_at_start)
         .def_ro("plan_length", &search::SiwSubproblem::plan_length)
         .def_ro("effective_width", &search::SiwSubproblem::effective_width)
         .def_ro("passes", &search::SiwSubproblem::passes);
 
-    nb::class_<heuristics::HeuristicStats>(m, "HeuristicStatistics")
-        .def_ro("evaluations", &heuristics::HeuristicStats::evaluations)
+    auto heuristic_stats = nb::class_<heuristics::HeuristicStats>(m, "HeuristicStatistics");
+    bind_stats_pickle(heuristic_stats, [](const heuristics::HeuristicStats& x) { return enc(x); }, dec_heuristic_stats);
+    heuristic_stats.def_ro("evaluations", &heuristics::HeuristicStats::evaluations)
         .def_ro("grounded", &heuristics::HeuristicStats::grounded)
         .def_ro("lifted", &heuristics::HeuristicStats::lifted)
         .def_ro("dead_ends", &heuristics::HeuristicStats::dead_ends)
@@ -1448,6 +2099,7 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("fluent_slots", [](const PyIwResult& x) { return x.r.fluent_slots; })
         .def_prop_ro("peak_table_bytes", [](const PyIwResult& x) { return x.r.peak_table_bytes; })
         .def_prop_ro("peak_node_bytes", [](const PyIwResult& x) { return x.r.peak_node_bytes; })
+        .def("__reduce__", [](const PyIwResult& x) { return result_reduce("iw", x.o, enc(x.o, x.r)); })
         .def("__repr__", [](const PyIwResult& x) {
             return std::string("IwResult(status=") + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
@@ -1469,6 +2121,7 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("total", [](const PySiwResult& x) { return x.r.total; })
         .def_prop_ro("max_effective_width", [](const PySiwResult& x) { return x.r.max_effective_width; })
         .def_prop_ro("message", [](const PySiwResult& x) { return x.r.message; })
+        .def("__reduce__", [](const PySiwResult& x) { return result_reduce("siw", x.o, enc(x.o, x.r)); })
         .def("__repr__", [](const PySiwResult& x) {
             return std::string("SiwResult(status=") + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) +
@@ -1478,8 +2131,9 @@ void bind_search(nb::module_& parent)
                    stats_repr(x.r.total) + ")";
         });
 
-    nb::class_<search::AStarIwNoveltyStatistics>(m, "AStarIwNoveltyStatistics")
-        .def_ro("rejected", &search::AStarIwNoveltyStatistics::rejected)
+    auto novelty_stats = nb::class_<search::AStarIwNoveltyStatistics>(m, "AStarIwNoveltyStatistics");
+    bind_stats_pickle(novelty_stats, [](const search::AStarIwNoveltyStatistics& x) { return enc(x); }, dec_novelty);
+    novelty_stats.def_ro("rejected", &search::AStarIwNoveltyStatistics::rejected)
         .def_ro("stale", &search::AStarIwNoveltyStatistics::stale)
         .def_ro("stale_g", &search::AStarIwNoveltyStatistics::stale_g)
         .def_ro("probes", &search::AStarIwNoveltyStatistics::probes)
@@ -1509,6 +2163,8 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("queue", [](const PyBestFirstResult& x) { return x.r.queue; })
         .def_prop_ro("message", [](const PyBestFirstResult& x) { return x.r.message; })
         .def_prop_ro("store_bytes", [](const PyBestFirstResult& x) { return x.r.store_bytes; })
+        .def("__reduce__",
+             [](const PyBestFirstResult& x) { return result_reduce("best_first", x.o, enc(x.o, x.r)); })
         .def("__repr__", [](const PyBestFirstResult& x) {
             return "BestFirstResult(algorithm=" + x.r.algorithm + ", status=" + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) + ", " +
@@ -1530,6 +2186,7 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("store_bytes", [](const PyBrfsResult& x) { return x.r.store_bytes; })
         .def_prop_ro("threads", [](const PyBrfsResult& x) { return x.r.threads; })
         .def_prop_ro("fingerprint", [](const PyBrfsResult& x) { return x.r.fingerprint; })
+        .def("__reduce__", [](const PyBrfsResult& x) { return result_reduce("brfs", x.o, enc(x.o, x.r)); })
         .def("__repr__", [](const PyBrfsResult& x) {
             return "BrfsResult(states=" + std::to_string(x.r.states) + ", expanded=" + std::to_string(x.r.expanded) +
                    ", generated=" + std::to_string(x.r.generated) + ", layers=" + std::to_string(x.r.layers) +
@@ -1539,8 +2196,9 @@ void bind_search(nb::module_& parent)
 
     // parallel rollouts and portfolio: results ----------------------------------------------------------------------
     using RS = search::RolloutIwStatistics;
-    nb::class_<RS>(m, "RolloutIwStatistics", "Counters of a Rollout IW run (mimir's rollout_iw::Statistics).")
-        .def_ro("rollouts", &RS::rollouts)
+    auto rollout_stats = nb::class_<RS>(m, "RolloutIwStatistics", "Counters of a Rollout IW run (mimir's rollout_iw::Statistics).");
+    bind_stats_pickle(rollout_stats, [](const RS& x) { return enc(x); }, dec_rollout_stats);
+    rollout_stats.def_ro("rollouts", &RS::rollouts)
         .def_ro("generated", &RS::generated, "New tree nodes.")
         .def_ro("expanded", &RS::expanded, "Nodes whose actions were materialized.")
         .def_ro("feature_depth_improvements", &RS::feature_depth_improvements)
@@ -1575,6 +2233,8 @@ void bind_search(nb::module_& parent)
                      "The reachable width-1 space was exhausted (relative to the depth and incumbent bounds).")
         .def_prop_ro("message", [](const PyRolloutIwResult& x) { return x.r.message; })
         .def_prop_ro("fluent_slots", [](const PyRolloutIwResult& x) { return x.r.fluent_slots; })
+        .def("__reduce__",
+             [](const PyRolloutIwResult& x) { return result_reduce("rollout_iw", x.o, enc(x.o, x.r)); })
         .def("__repr__", [](const PyRolloutIwResult& x) {
             return std::string("RolloutIwResult(status=") + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
@@ -1590,6 +2250,8 @@ void bind_search(nb::module_& parent)
                      "Its fluent atoms (ascending by canonical id).")
         .def_prop_ro("direct_dead_end", [](const PyLandingState& x) { return x.l.direct_dead_end; },
                      "No action is applicable in it.")
+        .def("__reduce__",
+             [](const PyLandingState& x) { return result_reduce("landing_state", x.o, enc(x.o, x.l)); })
         .def("__repr__", [](const PyLandingState& x) {
             return "LandingState(atoms=" + std::to_string(x.l.atoms.size()) + ", direct_dead_end=" +
                    (x.l.direct_dead_end ? "True" : "False") + ")";
@@ -1629,6 +2291,8 @@ void bind_search(nb::module_& parent)
                      "Per fluent atom the index of its landing state in landing_states.")
         .def_prop_ro("co_occurrence", [](const PyRolloutResult& x) { return co_occurrence_dict(x.o, x.get().co_occurrence); },
                      "With report_co_occurrence: per fluent atom the atoms of the created states holding it.")
+        .def("__reduce__",
+             [](const PyRolloutResult& x) { return result_reduce("rollout", x.o, nb::make_tuple(x.seed, enc(x.o, x.get()))); })
         .def("__repr__", [](const PyRolloutResult& x) {
             const search::RolloutResult& r = x.get();
             return "RolloutResult(seed=" + std::to_string(x.seed) + ", status=" + search::to_string(r.search.status) +
@@ -1662,6 +2326,13 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("threads_used", [](const PyParallelRollouts& x) { return x.r->threads_used; })
         .def_prop_ro("message", [](const PyParallelRollouts& x) { return x.r->message; },
                      "Why the batch could not run (every rollout then FAILED), or why it ran on one thread.")
+        .def("__reduce__",
+             [](const PyParallelRollouts& x) {
+                 return result_reduce("rollouts", x.o,
+                                      nb::make_tuple(enc_list(x.r->rollouts, [&](const auto& r) { return enc(x.o, r); }),
+                                                     enc_list(x.seeds, [](u64 v) { return nb::int_(v); }), x.r->threads_used,
+                                                     x.r->message));
+             })
         .def("__repr__", [](const PyParallelRollouts& x) {
             usize solved = 0;
             for (const search::RolloutResult& r : x.r->rollouts)
@@ -1679,7 +2350,15 @@ void bind_search(nb::module_& parent)
                          return out;
                      })
         .def_prop_ro("by_rollout", [](const PyMergedLandingStates& x) { return x.m.by_rollout; },
-                     "Per rollout the indices of its landing states in `states`.");
+                     "Per rollout the indices of its landing states in `states`.")
+        .def("__reduce__", [](const PyMergedLandingStates& x) {
+            nb::list states, by_rollout;
+            for (const State& st : x.m.states)
+                states.append(make_state(x.o, State(st)));
+            for (const auto& r : x.m.by_rollout)
+                by_rollout.append(enc_list(r, [](u32 v) { return nb::int_(v); }));
+            return result_reduce("merged_landing_states", x.o, nb::make_tuple(states, by_rollout));
+        });
 
     nb::class_<PyPortfolioResult>(m, "PortfolioResult",
                                   "The atomic-goal portfolio's result (mimir's AtomicGoalIWPortfolioResult).")
@@ -1736,6 +2415,8 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("total_expansions", [](const PyPortfolioResult& x) { return x.r.total_expansions; })
         .def_prop_ro("threads_used", [](const PyPortfolioResult& x) { return x.r.threads_used; })
         .def_prop_ro("fluent_slots", [](const PyPortfolioResult& x) { return x.r.fluent_slots; })
+        .def("__reduce__",
+             [](const PyPortfolioResult& x) { return result_reduce("portfolio", x.o, enc(x.o, x.r)); })
         .def("__repr__", [](const PyPortfolioResult& x) {
             return std::string("PortfolioResult(status=") + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", certified_optimal=" +
@@ -1799,7 +2480,10 @@ void bind_search(nb::module_& parent)
             "share"_a = nb::none())
         .def_static(
             "perfect",
-            [](const PyStateSpace& space, StrArg costs) {
+            [](Arg<PyStateSpace> space_obj, StrArg costs) {
+                if (!nb::isinstance<PyStateSpace>(space_obj))
+                    throw nb::type_error("mymyr: space must be a mymyr.datasets.StateSpace");
+                const PyStateSpace& space = *nb::inst_ptr<PyStateSpace>(space_obj);
                 heuristics::Options opts;
                 opts.kind = heuristics::Kind::Perfect;
                 opts.costs = parse_costs(costs);
@@ -1812,7 +2496,7 @@ void bind_search(nb::module_& parent)
                 {
                     throw nb::value_error(e.what());
                 }
-                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}, space.space});
+                return std::unique_ptr<PyHeuristic>(new PyHeuristic{std::move(h), space.owner, opts, {}, space.space, space_obj});
             },
             "space"_a, nb::kw_only(), "costs"_a = "auto",
             "The perfect heuristic h* of the task of a state space (mymyr.datasets.state_space(task, "
@@ -1924,6 +2608,20 @@ void bind_search(nb::module_& parent)
             "applicable actions in its relaxed plan (mimir's preferred actions); lmcount: the applicable actions with "
             "an effect that fires in `state` and adds a needed landmark false there; empty for the other kinds.")
         .def_prop_ro("kind", [](const PyHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); })
+        .def(
+            "__reduce__",
+            [](const PyHeuristic& self) {
+                // its specification: (task, kind, costs, evaluation), or a perfect heuristic's (space, costs)
+                const nb::module_ pk = nb::module_::import_("mymyr._pickle");
+                if (self.space)
+                    return nb::make_tuple(pk.attr("_restore_perfect_heuristic"),
+                                          nb::make_tuple(self.space_object, costs_name(self.options.costs)));
+                return nb::make_tuple(pk.attr("_restore_heuristic"),
+                                      nb::make_tuple(task_object(self.o.obj), heuristics::to_string(self.options.kind),
+                                                     costs_name(self.options.costs), evaluation_name(self.options.evaluation)));
+            },
+            "A heuristic pickles as its specification and is built again when unpickled (its grounding included); "
+            "a perfect heuristic as its state space. stats start from zero.")
         .def_prop_ro("stats", [](PyHeuristic& self) {
             heuristics::HeuristicStats st;
             {
@@ -1944,7 +2642,27 @@ void bind_search(nb::module_& parent)
         });
 
     nb::class_<PyAStarIwResult, PyBestFirstResult>(m, "AStarIwResult")
-        .def_prop_ro("novelty", [](const PyAStarIwResult& r) { return r.novelty; });
+        .def_prop_ro("novelty", [](const PyAStarIwResult& r) { return r.novelty; })
+        .def("__reduce__", [](const PyAStarIwResult& x) {
+            nb::tuple base = enc(x.o, x.r);
+            nb::list fields;
+            for (nb::handle h : base)
+                fields.append(h);
+            fields.append(enc(x.novelty));
+            return result_reduce("astar_iw", x.o, nb::tuple(fields));
+        });
+
+    using RestoredResult =
+        nb::typed<nb::object, std::variant<PyIwResult, PySiwResult, PyBestFirstResult, PyBrfsResult, PyRolloutIwResult,
+                                           PyLandingState, PyMergedLandingStates, PyParallelRollouts, PyRolloutResult,
+                                           PyPortfolioResult>>;
+    m.def(
+        "_restore_search_result",
+        [](std::string_view kind, TaskArg task, u64 fingerprint, nb::typed<nb::tuple, ann::Any, nb::ellipsis> fields) {
+            return RestoredResult(restore_result(kind, task, fingerprint, fields));
+        },
+        "kind"_a, "task"_a, "fingerprint"_a, "fields"_a,
+          "The search result of a result pickle (mymyr._pickle).");
 
     // searches --------------------------------------------------------------------------------------------------------
     m.def(

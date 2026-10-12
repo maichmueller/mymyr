@@ -52,8 +52,8 @@ A `KnowledgeBase` holds what is known about a task set, as mimir's knowledge bas
 task whose generation succeeded (failures are skipped; `max_states` and `max_seconds` bound each one), sorted by size
 unless `sort_by_size=False`; the generalized state space over them when `generalized=True`; and the tuple graph of
 every vertex of every space when `width=` is given. `task_indices[i]` is the task of state space `i`. Every step runs
-on `threads=` threads and gives the same result at every thread count. A pickled knowledge base stores its tasks and
-arguments; unpickling builds it again.
+on `threads=` threads and gives the same result at every thread count. A knowledge base pickles and saves with what
+it computed ([Saving and pickling](#saving-and-pickling)): loading generates nothing again.
 
 ```python
 from mymyr import datasets
@@ -90,3 +90,80 @@ assert graphs[5] == datasets.tuple_graph(space, 5, width=2)
 a = graphs[0].arrays()
 print(len(graphs), a["tuple_offsets"][:4], a["successors"][:4])
 ```
+
+## Saving and pickling
+
+State spaces, generalized state spaces, tuple graphs and knowledge bases pickle with what they computed, so they
+travel to worker processes (`multiprocessing`, `concurrent.futures.ProcessPoolExecutor`, also with the spawn start
+method) and come back equal: the same arrays bit for bit, states, labels, goal distances, sampler draws and tuple
+graphs. A pickle holds the task (as its PDDL or normalized text and options, like a pickled `Task`) and the arrays;
+unpickling validates the arrays and builds no state space, generalized state space or tuple graph again, apart from
+the generalized state space's joined arrays, which take one linear pass. Objects pickled together share their task
+and state space objects. Search results pickle as their task and fields: the plan as action labels, states as
+`State`s, statistics and statuses as numbers. A `search.Heuristic` pickles as its specification (task, kind, costs,
+evaluation; a perfect heuristic: its state space) and is built again when unpickled.
+
+`StateSpace.from_arrays(task, arrays)` rebuilds a state space from the dict `arrays()` gives (NumPy arrays or DLPack
+arrays on the CPU) and validates it: names, dtypes and shapes, the CSR ranges, the backward CSR against the forward
+one, the flags against the goal distances, and that the arrays belong to `task` (its row layout and atom slots, its
+initial state first, labels of its schemas and objects). `TupleGraph.from_arrays(space, root, arrays, width=...)`
+does the same for a tuple graph. Invalid arrays raise `ValueError` or `TypeError` with a `mymyr: ...` message.
+
+`datasets.save(obj, path)` writes a `StateSpace`, `GeneralizedStateSpace`, `KnowledgeBase`, `TupleGraph` or a list of
+tuple graphs of one state space to a file, and `datasets.load(path)` reads it back. `load` builds the tasks from the
+file; pass `task=` (or `tasks=`, one per task of the file in its order, or a `TaskTable`) to attach the dataset to tasks
+you already have. A given task must be the file's task: another task (content fingerprint) or another encoding of
+it (for example another `atoms=` or `numeric_storage=`, compared through the encoding fingerprint) raises
+`ValueError`.
+
+```python
+import pickle
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+from mymyr import datasets
+
+kb = datasets.KnowledgeBase(tasks, generalized=True, width=1)
+copy = pickle.loads(pickle.dumps(kb))
+assert copy.task_indices == kb.task_indices
+assert np.array_equal(copy.tuple_graph(1, 0).arrays()["successors"], kb.tuple_graph(1, 0).arrays()["successors"])
+
+space = kb.state_spaces[1]
+rebuilt = datasets.StateSpace.from_arrays(space.task, space.arrays())
+assert np.array_equal(rebuilt.arrays()["forward_targets"], space.arrays()["forward_targets"])
+
+with tempfile.TemporaryDirectory() as d:
+    datasets.save(kb, Path(d) / "gripper.mymyr")
+    loaded = datasets.load(Path(d) / "gripper.mymyr", tasks=tasks)
+    assert loaded.tasks[0] is tasks[0] and loaded.state_spaces[1].num_states == space.num_states
+```
+
+A task with lazy atom slots (`atoms="lazy"`) numbers its atoms in the order it first meets them, so its state rows
+mean something only together with that numbering. Its datasets round-trip exactly through pickles and files, which
+carry the slot table: unpickling and loading without `task=` give a task with the same numbering, and a given lazy
+task takes the saved numbering when the slots it has assigned so far agree with it (a task that numbered its atoms
+in another order is refused, and keeps its slots). `from_arrays` refuses such a task, as its `arrays()` hold no rows.
+
+### File format
+
+A dataset file is a zip archive, also readable with `numpy.load` (an `.npz` file); the file name is free. It holds:
+
+- `header.json`: the format name `"mymyr.datasets"`, the format `version` (1), the `mymyr` version that wrote it, the
+  `kind` (`state_space`, `generalized_state_space`, `knowledge_base`, `tuple_graph` or `tuple_graphs`), the tasks (their
+  source, PDDL paths, `Task` options, content and encoding fingerprints as 16 hex digits), the state spaces (their task
+  and generation statistics), the tuple graph groups, and the knowledge base's options and task indices.
+- the tasks' PDDL (one member per distinct domain text) or normalized text, and for a lazy task its slot table as
+  `tasks/<i>/atom_slots.npy`;
+- every array as an `.npy` member: `state_spaces/<i>/<name>.npy` with the names of `StateSpace.arrays()` (rows
+  always included), `tuple_graphs/<j>/<name>.npy` with each group of tuple graphs packed (`meta`, `sizes` and the
+  arrays of `TupleGraph.arrays()` concatenated).
+
+A reader loads every version up to its own, refuses a newer version or an unknown kind, and ignores sections and
+fields it does not know, so later versions can add objects (encoding schemas and encoders, for example) without
+breaking older files.
+
+Loading a file reads data only: JSON, text and arrays read with `allow_pickle=False`, then validated as `from_arrays`
+does, so a damaged or hostile file raises `ValueError` rather than running code. Pickles are the opposite: like every
+pickle, `pickle.loads` can run arbitrary code, so unpickle only data you trust and share datasets as files.

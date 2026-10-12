@@ -145,6 +145,9 @@ struct StateBatch
     /// States packed from State objects: the Task::uid() of each row's task (empty for arrays). The importer of a
     /// batch checks them against the task or instance a row belongs to.
     std::vector<u64> owners;
+    /// The task of each State row, parallel to `owners` where an importer fills it (import_states does): for callers that
+    /// accept the States of an equal task.
+    std::vector<TaskPtr> owner_tasks;
 };
 
 /// `task_words` is used to pack State sequences.

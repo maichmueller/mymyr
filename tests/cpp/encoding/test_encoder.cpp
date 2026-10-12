@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <cstring>
 #include <limits>
 
@@ -487,6 +488,18 @@ TEST(EncoderRefusals, OptionsThatAreNotEncodedYet)
     refused([](FlatOptions& o) { o.targets = {TargetSource::Action}; });
     refused([](FlatOptions& o) { o.predicate_virtual_nodes = true; });
     refused([](FlatOptions& o) { o.horizon.mode = HorizonMode::Full; });
+    // an invalid combination is reported as such, whether or not the encoder would encode its parts
+    try
+    {
+        FlatOptions options = test::encoder_options();
+        options.targets = {TargetSource::Subgoal};
+        (void)FlatEncoder::create(table, options);
+        ADD_FAILURE() << "the options were accepted";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("subgoal targets need max_goal_level"), std::string::npos) << error.what();
+    }
     // the options an encoder accepts: actions (zero tuples), both index types, nullary and equality either way
     for (const bool actions : {true, false})
         for (const bool nullary : {true, false})
@@ -547,7 +560,7 @@ TEST(EncoderOverflow, IndexRangeIsCheckedForBothTypes)
     {
         const std::string text = error.what();
         EXPECT_NE(text.find("mymyr: encoding: the batch needs 2147483648 tuple arguments"), std::string::npos) << text;
-        EXPECT_NE(text.find("index='int64'"), std::string::npos) << text;
+        EXPECT_NE(text.find("index_dtype='int64'"), std::string::npos) << text;
     }
     EXPECT_NO_THROW(encoding::detail::check_index_range(max32 + 1, IndexType::I64, "tuples"));
     EXPECT_NO_THROW(encoding::detail::check_index_range(static_cast<u64>(std::numeric_limits<i64>::max()), IndexType::I64, "tuples"));
@@ -586,5 +599,71 @@ TEST(EncoderBatches, ActionRelationsHaveNoTuplesAndAnEncoderOfATaskWorks)
     const auto decoded = decode(*encode_checked(*encoder, rows), encoder->schema());
     for (const Graph& graph : decoded)
         EXPECT_TRUE(graph[pick].empty());
+}
+
+// FNV-1a 64 over the scalars (name, then the value as 8 little-endian bytes), then each array's name, extents (8 bytes
+// each, little-endian) and bytes. tests/python/test_encoding.py computes the same digest of the arrays that Python exports and asserts
+// the same constants, so what Python exports is what this encoder wrote.
+static_assert(std::endian::native == std::endian::little, "the digests hash scalars, extents and arrays in little-endian byte order");
+
+u64 bundle_digest(const rl::ArrayBundle& bundle)
+{
+    u64 h = 0xCBF29CE484222325ull;
+    const auto feed = [&h](const void* data, u64 bytes)
+    {
+        const auto* p = static_cast<const unsigned char*>(data);
+        for (u64 i = 0; i < bytes; ++i)
+            h = (h ^ p[i]) * 0x100000001B3ull;
+    };
+    for (const auto& [name, value] : bundle.scalars())
+    {
+        feed(name.data(), name.size());
+        feed(&value, sizeof(value));
+    }
+    for (const rl::ArrayInfo& info : bundle.arrays())
+    {
+        feed(info.name.data(), info.name.size());
+        for (const i64 extent : info.shape)
+            feed(&extent, sizeof(extent));
+        feed(bundle.data(info), info.elements() * rl::dtype_bytes(info.dtype));
+    }
+    return h;
+}
+
+/// `length` rows: the initial state, then each row's first successor.
+test::Rows first_successor_chain(const rl::TaskTable& table, u64 length)
+{
+    test::Rows rows;
+    rows.words = table.words();
+    std::vector<u64> current(table.instance(0).init.begin(), table.instance(0).init.end());
+    const i32 id = 0;
+    for (u64 i = 0; i < length; ++i)
+    {
+        rows.data.insert(rows.data.end(), current.begin(), current.end());
+        rows.task_ids.push_back(id);
+        rl::Expansion out;
+        out.words = rows.words;
+        out.capacity = 4096;
+        std::vector<u64> succ(out.capacity * rows.words, 0);
+        out.succ = succ.data();
+        rl::expand(table, {current.data(), 1, rows.words, 0, 0}, &id, out);
+        EXPECT_FALSE(out.overflow());
+        EXPECT_GT(out.total, 0u);
+        current.assign(succ.begin(), succ.begin() + rows.words);
+    }
+    return rows;
+}
+
+TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
+{
+    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 14883951552709315966ull},
+                                                               {"philosophers__p03-phil4", 12253892925669182561ull}};
+    for (const auto& [name, digest] : expected)
+    {
+        const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/" + name + ".txt");
+        const auto encoder = FlatEncoder::create(task, test::encoder_options());
+        const test::Rows rows = first_successor_chain(encoder->table(), 6);
+        EXPECT_EQ(bundle_digest(*encode_checked(*encoder, rows)), digest) << name;
+    }
 }
 }  // namespace
