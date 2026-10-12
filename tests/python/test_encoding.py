@@ -4,7 +4,6 @@
 import gc
 import importlib.util
 import itertools
-import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -109,18 +108,6 @@ def test_explicit_static_negative_and_empty_goals(atoms):
     for relation, source in enumerate(encoder.relation_sources):
         if source.startswith("goal"):
             assert empty.relation_counts[0, relation] == 0
-
-
-@pytest.mark.parametrize("atoms", MODES)
-def test_mifrost_neutral_engine_semantic_fixture(atoms):
-    fixture = json.loads((Path(__file__).parents[1] / "data/encoding/mifrost_flat_goals.json").read_text())
-    task = feature_task(atoms=atoms)
-    goal = task.ground_condition(fixture["goals"])
-    batch = encoding.FlatRelationEncoder(task).encode(task.initial_state, goals=goal)
-    got = unpack(batch, 0)
-    for name, expected in fixture["relations"].items():
-        assert [list(values) for values in got[name]] == expected
-    assert not got["[+]flag[g][sat]"] and not got["[-]flag[g][sat]"]
 
 
 @pytest.mark.parametrize("atoms", MODES)

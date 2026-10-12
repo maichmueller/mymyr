@@ -1,10 +1,10 @@
 // The beam over the layers of BrFS and the IW family (LayerOrdering::beam_width, search/layer_ordering.hpp):
-//   - an oracle: a literal re-implementation of the fork's find_solution_with_beam (brfs/beam.cpp) with its
-//     DuplicatePruning, ArityZero and ArityK beam hooks (iw/pruning_strategy.cpp), over State objects and a set of
+//   - an oracle: a literal re-implementation of the beam search with its
+//     duplicate, width-0 and width-k beam hooks, over State objects and a set of
 //     tuples; search::iw_pass, search::iw (optimized IW(1)), search::brfs, the IW family engine, LIW without landmarks
 //     and abstracted IW on a task with unary fluents (its features are then the atoms) equal it pass for pass,
 //     expansion for expansion;
-//   - the fork's beam semantics tests on small hand-made tasks: AllTested marks the tuples of the successors the beam
+//   - the beam semantics on small hand-made tasks: AllTested marks the tuples of the successors the beam
 //     drops, SurvivorsOnly does not, and its replay can leave fewer than beam_width states;
 //   - random ties (deterministic per seed), a beam wider than every layer, every refusal, and concurrent beam
 //     searches over one task.
@@ -121,7 +121,7 @@ void for_each_subset(const std::vector<u32>& atoms, u32 size, F f)
 
 struct RefSpec
 {
-    int k = 1;  // the novelty arity; -1: BrFS (mimir's DuplicatePruningStrategy)
+    int k = 1;  // the novelty arity; -1: BrFS (duplicate pruning)
     u32 width = 1;
     Novelty mode = Novelty::AllTested;
     bool prefer_more = true;
@@ -137,7 +137,7 @@ struct RefPass
     std::vector<State> order;  // the expanded states (goal-tested and counted), in order
 };
 
-/// The fork's beam pass, literally: candidates are the successors its pruning strategy admits for beam selection
+/// The beam pass, literally: candidates are the successors the pruning strategy admits for beam selection
 /// (is_new over every generated state), ranked by (unsatisfied goal literals, generation order) and cut to the
 /// width; SurvivorsOnly replays the kept ones against the table and the layer's delta, then commits the delta.
 RefPass ref_beam(const Task& task, const RefSpec& sp)
@@ -636,7 +636,7 @@ TEST(BeamSemantics, SurvivorsOnlyReplayCanShrinkTheLayer)
 
 TEST(BeamSemantics, WidthZeroSurvivorsOnlyPrunesDuplicateEntries)
 {
-    // mimir's ArityZero beam selection: AllTested keeps a duplicate root successor as a second entry (it takes a beam
+    // Width-0 beam selection: AllTested keeps a duplicate root successor as a second entry (it takes a beam
     // slot), SurvivorsOnly prunes it as not new
     // move and twin to o1 and o2: 4 successors, 2 states
     const auto task = walk_task({{0, 1}, {0, 2}}, "G 1\n2 1 4\n", Second::Twin);
