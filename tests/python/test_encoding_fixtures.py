@@ -3,91 +3,12 @@ and arities that the fixtures record exist in the task. Uses only mymyr and the 
 scripts/export_mifrost_encoding_fixture.py for the format). The structural checks need only the JSON files; the others
 need the PDDL front end and skip without it."""
 
-import json
-import re
-from pathlib import Path
-
 import pytest
 
-import mymyr
-
-ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = sorted((ROOT / "tests/data/encoding/mifrost").glob("f*.json"))
-HELPER = re.compile(r"axiom_\d+$")
-DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
-FLAT_ENCODERS = ("FlatRelationEncoder", "FlatHorizonEncoder", "FlatRootedHorizonEncoder", "FlatTransitionEncoder",
-                 "FlatTransitionEffectsEncoder")
-
-
-def read(path):
-    return json.loads(path.read_text())
-
-
-def load(path):
-    if not hasattr(mymyr, "Domain"):
-        pytest.skip("built without the PDDL front end")
-    fixture = read(path)
-    task = mymyr.Task.from_pddl(ROOT / fixture["task"]["domain"], ROOT / fixture["task"]["problem"])
-    return fixture, task
-
-
-def replay(task, path):
-    state = task.initial_state
-    for name in path:
-        state = task.apply(state, name)
-    return state
-
-
-def atoms(values):
-    return sorted(str(a) for a in values)
-
-
-def state_path(fixture, state_id):
-    return next(s["path"] for s in fixture["states"] if s["id"] == state_id)
-
-
-def helper_arguments_in_fixture_order(task, fixture, atom):
-    """The atom ``(axiom_<k> ...)`` with its arguments in the argument order of the fixture's (pymimir's) predicate.
-
-    mymyr orders the parameters of a helper predicate by name, pymimir by its own traversal; the parameters carry the
-    same names, so the arguments are mapped by name. ``None`` if the predicate is a helper of the problem as written
-    that the fixture's (pymimir) task does not have."""
-    predicate, *arguments = atom.strip("()").split()
-    recorded = fixture["task"]["helper_predicates"].get(predicate)
-    if recorded is None:
-        return None
-    own = next(p for p in task.formalism.predicates if p.name == predicate)
-    names = [parameter.name for parameter in own.parameters]
-    assert sorted(names) == sorted(recorded), predicate
-    return "(" + " ".join([predicate] + [arguments[names.index(name)] for name in recorded]) + ")"
-
-
-def derived_in_fixture_order(task, fixture, state):
-    output = []
-    for atom in atoms(state.derived_atoms()):
-        if HELPER.match(atom.strip("()").split()[0]):
-            atom = helper_arguments_in_fixture_order(task, fixture, atom)
-            if atom is None:
-                continue
-        output.append(atom)
-    return sorted(output)
-
-
-def base_predicate(relation):
-    """The predicate or schema a catalog relation is named after (decorations like ``[+]`` and ``[g]`` removed)."""
-    return DECORATION.match(relation).group(1)
-
-
-def flat_catalogs(fixture):
-    for config in fixture["configs"].values():
-        if config["encoder"] in FLAT_ENCODERS:
-            yield config, fixture["catalogs"][config["catalog"]]
-
-
-def hgraph_catalogs(fixture):
-    for config in fixture["configs"].values():
-        if config["encoder"] == "HGraphEncoder":
-            yield config, fixture["catalogs"][config["catalog"]]
+from encoding_parity import (
+    FIXTURES, HELPER, ROOT, atoms, base_predicate, derived_in_fixture_order, flat_catalogs, hgraph_catalogs, load, read,
+    replay, state_path,
+)
 
 
 @pytest.fixture(params=FIXTURES, ids=[p.stem[:3] for p in FIXTURES])
