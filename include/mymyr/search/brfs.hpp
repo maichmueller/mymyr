@@ -76,7 +76,7 @@ struct BrfsOptions
     /// The order in which a layer is expanded (search/layer_ordering.hpp; default: the queued BrFS). An ordered kind
     /// needs the flat or chunked store and, without a beam, threads == 1; state ids then follow the expansion order.
     /// With a beam the states it drops stay stored (counted in BrfsResult::states, never expanded, never entered
-    /// again: mimir's duplicate pruning), and AllTested and SurvivorsOnly behave alike (there is no novelty table).
+    /// again), and AllTested and SurvivorsOnly behave alike (there is no novelty table).
     /// threads > 1 runs the beam's layer step on that many threads, with the single-threaded result (ids included).
     /// RelaxedSurvivorsOnly stores only the selected successors (search/layer_ordering.hpp).
     search::LayerOrdering layers{};
@@ -96,7 +96,7 @@ struct BrfsResult
     u64 generated = 0;  // successors generated (with duplicates)
     u64 goal_states = 0;
     u32 layers = 0;          // layers expanded (partly, if the search stopped inside one)
-    /// With layer_stats: per expanded layer {expanded, generated, new states} (mimir's "layers").
+    /// With layer_stats: per expanded layer {expanded, generated, new states}.
     std::vector<std::array<u64, 3>> layer_counts;
     bool exhausted = false;  // the whole reachable space was expanded
     bool solved = false;     // a goal state was expanded

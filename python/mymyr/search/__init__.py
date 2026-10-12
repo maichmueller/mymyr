@@ -1,7 +1,7 @@
 """The search family, heuristics and landmarks (search/*.hpp, landmarks/*.hpp and
 reachability/*.hpp in the C++ core).
 
-    r = mymyr.search.iw(task, max_arity=2)              # IW(k) ladder, mimir's conventions
+    r = mymyr.search.iw(task, max_arity=2)              # IW(k) ladder
     r = mymyr.search.siw(task, max_arity=2)             # serialized IW
     r = mymyr.search.astar_iw(task, heuristic="max", width=2, features="classical")
     r = mymyr.search.astar(task, heuristic="max")       # A* (eager; lazy=True for lazy)
@@ -35,9 +35,9 @@ has ``evaluate_batch(states)`` returning one float per state (a list or an array
 the new successors of an expansion in one call, beam search those of a layer) and ``preferred_actions()``, the
 preferred actions of the state of the last ``evaluate`` call (the lazy searches' preferred list). It is called on the
 searching thread like the other callbacks below. Numeric tasks run in A*, GBFS and beam search; h_max, h_add and
-h_FF ignore their numeric conditions and effects (mimir's delete relaxation), and g is mimir's metric value.
+h_FF ignore their numeric conditions and effects (the delete relaxation), and g is the metric value.
 
-IW, SIW, iw_pass, brfs and the IW family variants expand layer by layer in a chosen order (mimir's layer ordering
+IW, SIW, iw_pass, brfs and the IW family variants expand layer by layer in a chosen order (layer ordering
 strategies): ``layer_order`` is ``"queue"`` (plain breadth-first, the default), ``"in_order"``, ``"reverse"``,
 ``"randomized"`` (with ``seed``) or ``"goal_count"`` (most satisfied goal literals first;
 ``prefer_more_satisfied_goals=False``: fewest first), and ``max_next_layer_states`` stops expanding a layer once the
@@ -65,7 +65,7 @@ The IW family variants:
 
     r = mymyr.search.liw(task, max_arity=1, landmarks="lifted")       # LIW(k): landmark-restricted novelty
     r = mymyr.search.abstracted_iw(task, width=2)                     # AIW / BAIW (base_abstracted=True)
-    r = mymyr.search.projective_iw(task)                              # mimir's alias of abstracted IW(1)
+    r = mymyr.search.projective_iw(task)                              # alias of abstracted IW(1)
     r = mymyr.search.rollout_iw(task, ordering=ActionOrdering.DIRECT_GOAL_ACHIEVER_FIRST)
     b = mymyr.search.find_rollouts_parallel(task, seeds=range(64), max_arity=1, report_co_occurrence=True)
     rows = mymyr.search.intersect_co_occurrence(b)                   # {Atom: [Atom]} over the batch
@@ -77,7 +77,7 @@ LIW, abstracted IW and projective IW return an :class:`IwResult`; ``landmarks`` 
 SplitMix64: the same seed gives the same run on every platform, and a rollout's result does not depend on the thread
 count. Numeric tasks raise ValueError in the IW family variants (IW and SIW support them).
 
-Landmarks and relaxed reachability (as in mimir's pymimir.advanced.search):
+Landmarks and relaxed reachability:
 
     g = mymyr.search.approximate_fact_landmarks(task)       # grounded, with the achiever index
     g = mymyr.search.lifted_fact_landmarks(task)            # no grounding; g.lifted: lifted landmarks

@@ -34,7 +34,7 @@ print(action, next_state.numeric_values())
 
 ## Semantics
 
-mymyr implements the PDDL semantics of mimir, with the differences listed at the end of this section.
+The semantics of the supported PDDL fragment are as follows; the notes at the end of this section list the points where an implementation could reasonably differ.
 
 - **Types.** A parameter, a quantified variable or a `forall` effect variable of type `(either a b)` ranges over the
   objects of `a`, of `b` and of their subtypes. An object or constant declared `(either a b)` belongs to `a`, to `b`
@@ -96,20 +96,20 @@ refused = search.astar(mymyr.Task(fuel.instantiate_string(fuel_problem.format("m
 assert refused.status == search.Status.FAILED and "maximize" in refused.message
 ```
 
-Differences from mimir:
+Notes:
 
-- a variable of type `(either a b)` ranges over the objects of `a` and of `b` (mimir takes the objects of both);
+- a variable of type `(either a b)` ranges over the objects of `a` and of `b`;
 - goals with a quantifier or a disjunction over a conjunction (such as `(forall (?x - t) (imply (s ?x) (p ?x)))`),
   effect conditions with a universal quantifier over a `forall` effect's variable and conditional effects nested in a
-  conditional effect with an existential condition load (mimir refuses them);
+  conditional effect with an existential condition load;
 - a conditional effect that does not fire records no effect family, so it cannot make its action inapplicable;
-- in a numeric constraint without parameters, a unary minus over an expression with fluents is kept (mimir drops it);
+- in a numeric constraint without parameters, a unary minus over an expression with fluents is kept;
 - a division by zero is undefined also between constants, and a `scale-down` by zero makes its action inapplicable;
 - `maximize` metrics and metrics that combine `total-cost` with other terms are refused rather than minimized, and an
   undefined metric value is an error;
-- the transition costs of a state space are the exact sums of the actions' `total-cost` increases (mimir computes
-  `(d + c) - d` for the search depth `d`, which rounds fractional costs), so its goal distances equal plan costs;
-- heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), where mimir's count
+- the transition costs of a state space are the exact sums of the actions' `total-cost` increases (no cost is computed as
+  a difference of depths, which would round fractional costs), so its goal distances equal plan costs;
+- heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), whereas the unit-cost heuristics count
   every action 1.
 
 ## Errors
@@ -170,7 +170,7 @@ and `task.options` returns them:
 | `reachability_budget` | steps, default `2**25`; `0` is unbounded | work bound of the analysis behind `'auto'` and `'reachable'` |
 | `numeric_storage` | `'auto'` (default), `'i32'`, `'f64'` | the type of a numeric slot |
 | `numeric_quantum` | `0` (default) or `q > 0` | stored values snap to multiples of `q` |
-| `numeric_tolerant` | `False` (default) | mimir-C# numeric semantics |
+| `numeric_tolerant` | `False` (default) | tolerant numeric semantics: values below 1e6 snap to a 1e-9 grid, comparisons use a 1e-9 tolerance |
 | `matching`, `fc_free_params` | `'auto'`, `'fixed'`, `'fc'`; `4` | how bindings are matched (no effect on the encoding) |
 
 **Atom slots.** The *typed-dense* space of a task has one atom per predicate and object tuple whose objects can occur

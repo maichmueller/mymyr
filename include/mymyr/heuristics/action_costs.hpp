@@ -1,21 +1,21 @@
 #pragma once
 // Action costs and metric values: the objective every search, state space and heuristic shares. The kind follows the
 // problem's metric:
-//   - `minimize (total-cost)`, or no metric in a domain that declares the auxiliary function total-cost (as in mimir;
-//     Kind::TotalCost): the metric value of a state starts at the problem's initial total-cost (0 when the problem sets
+//   - `minimize (total-cost)`, or no metric in a domain that declares the auxiliary function total-cost
+//     (Kind::TotalCost): the metric value of a state starts at the problem's initial total-cost (0 when the problem sets
 //     none) and every transition applies, in order, the total-cost effects of the (conditional) effects that fire,
 //     whatever their operator (increase, decrease, assign, scale-up, scale-down) and expression (numbers, static and
-//     fluent functions of the parameters and objects) -- matching mimir's `apply_action_effects`;
+//     fluent functions of the parameters and objects);
 //   - `minimize <expression>` over the state's numeric fluents, static functions and numbers (Kind::StateMetric): the
-//     expression evaluated on the state's values (mimir's `compute_state_metric_value`); total-cost effects do not
+//     expression evaluated on the state's values; total-cost effects do not
 //     count, also when the domain declares total-cost;
 //   - no metric and no total-cost (Kind::Unit): every action costs 1 and g starts at 0.
 // The constructor throws std::invalid_argument, naming the metric, for `maximize` (every search minimizes; a
 // maximization is not turned into a minimization) and for a metric that combines total-cost with other terms. A
 // state whose metric value is undefined (an undefined fluent, a division by zero) makes initial() and next() throw
 // std::domain_error naming the metric: the objective has no value there.
-// The successor generator evaluates the total-cost effects of each applicable action on the parent state (mimir's
-// applicability rules apply to them: an undefined value or an effect-family conflict makes the action inapplicable)
+// The successor generator evaluates the total-cost effects of each applicable action on the parent state
+// (an undefined value or an effect-family conflict makes the action inapplicable)
 // and hands them over in Delta::aux; next(g, delta) turns them into the successor's metric value.
 //
 // State-independent costs: when every total-cost effect of a schema is an unconditional `increase` by an expression
@@ -76,9 +76,9 @@ public:
     [[nodiscard]] f64 max_constant() const noexcept { return m_max_constant; }
     /// g of the initial state (TotalCost, Unit); for StateMetric use initial(state).
     [[nodiscard]] f64 initial() const noexcept { return m_initial; }
-    /// mimir's metric value of the start state s. Throws std::domain_error naming the metric when it is undefined in s.
+    /// The metric value of the start state s. Throws std::domain_error naming the metric when it is undefined in s.
     [[nodiscard]] f64 initial(StateView s) const;
-    /// mimir's metric value of the successor under delta d of a state with metric value g. Throws std::domain_error
+    /// The metric value of the successor under delta d of a state with metric value g. Throws std::domain_error
     /// naming the metric when it is undefined in the successor.
     [[nodiscard]] f64 next(f64 g, const Delta& d) const
     {
@@ -183,7 +183,7 @@ private:
     std::unordered_map<u64, f64> m_values;
 };
 
-/// mimir's plan extraction (matching `extract_total_ordered_plan`): replays `plan` from `start`, whose metric
+/// Plan extraction: replays `plan` from `start`, whose metric
 /// value is g0. At each step, among the applicable actions whose successor equals the plan's next state, the one that
 /// gives the successor the lowest metric value is taken (the plan's own action unless another is strictly lower; the
 /// first such in canonical order). Rewrites the plan's actions accordingly and returns the final metric value, which

@@ -346,7 +346,7 @@ constexpr const char* k_options_doc =
     "typed-dense layout where that is no wider, and dense when the analysis passes reachability_budget; 'reachable'; "
     "'dense'; 'lazy': slots on first touch, for searches only), matching ('auto', 'fixed', 'fc'), fc_free_params, "
     "numeric_storage ('auto': 'i32' for statically integral tasks without a quantum, else 'f64'; 'f64'; 'i32'), "
-    "numeric_quantum (> 0: stored values snap to multiples of it), numeric_tolerant (mimir-C# numeric semantics), "
+    "numeric_quantum (> 0: stored values snap to multiples of it), numeric_tolerant (tolerant numeric semantics), "
     "reachability_budget (the analysis' work bound in join steps; 0: unbounded). The same task and options give the "
     "same encoding in every run and process (atoms='lazy' aside).";
 
@@ -2260,7 +2260,7 @@ void bind_task(nb::module_& m)
                 return nb::borrow<BundleDict>(export_bundle(b, fw, default_words(fw)));
             },
             "framework"_a = nb::none(),
-            "Atom metadata for encoders (mifrost), zero-copy views of a cached snapshot: atom_pred, atom_args (CSR with "
+            "Atom metadata for encoders, zero-copy views of a cached snapshot: atom_pred, atom_args (CSR with "
             "atom_args_offsets), atom_args_padded, atom_cid, pred_slots / pred_slot_offsets, pred_arity, pred_kind, "
             "derived_* (with derived_pred_slots / derived_pred_slot_offsets) and static_* atoms, and scalars "
             "(num_atoms, num_objects, atom_mode: 0 lazy, 1 dense, 2 reachable, ...). Under fixed slots (every mode but "

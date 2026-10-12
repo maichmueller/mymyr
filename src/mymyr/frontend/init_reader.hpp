@@ -2,8 +2,8 @@
 // The problem fast path: the `:init` section is read in one pass straight into a `GroundInit`, instead of going
 // through loki (whose ten problem translation passes rebuild every initial literal).
 //
-// What must be reproduced is loki's *order* of the translated problem's initial literals, because mimir orders the
-// initial atoms by creation index, i.e. by loki's order. That order follows from loki's repositories (every pass sorts
+// What must be reproduced is loki's *order* of the translated problem's initial literals, because the initial
+// atoms are ordered by creation index, i.e. by loki's order. That order follows from loki's repositories (every pass sorts
 // the literals by index; indices continue the parent repositories' index space):
 //
 //   1. literals that exist in the translated domain's literal repository (ground literals of the domain: the static

@@ -3,7 +3,7 @@
 // cancellation apply uniformly across the family. Each search's options embed a SearchControl and its result
 // carries a SearchStatus plus SearchStatistics. Extend by appending members; do not rename.
 //
-// mimir's convention: in an IW ladder max_seconds spans the whole ladder while max_states applies
+// In an IW ladder max_seconds spans the whole ladder while max_states applies
 // per pass; blocked_states, goal and the observer are forwarded to every pass.
 
 #include "mymyr/core/ids.hpp"
@@ -33,7 +33,7 @@ enum class SearchStatus : u8
     OutOfTime,    // Budget::max_seconds hit
     Cancelled,    // CancelToken requested, or an observer asked to stop
     Failed,       // the search cannot run on this task (e.g. an unsupported feature); see the result's message
-    Unsolvable,   // the goal can never hold: it contains a static literal that is false (mimir's UNSOLVABLE)
+    Unsolvable,   // the goal can never hold: it contains a static literal that is false
 };
 
 [[nodiscard]] constexpr const char* to_string(SearchStatus s) noexcept
@@ -58,7 +58,7 @@ inline constexpr u32 k_check_transitions = 1024;
 /// Limits. Unset members are unlimited.
 ///
 /// max_states bounds the states a search stores, the start state included (IW: the nodes of a pass's tree; rollout
-/// IW: the new nodes its rollouts register, mimir's generated states). The search stops with OutOfStates as soon as
+/// IW: the new nodes its rollouts register). The search stops with OutOfStates as soon as
 /// it holds max_states states: the count is checked as each new state is stored, inside the expansion that finds it,
 /// so a search never stores more than max(max_states, 1) states (the GPU searches check between chunks; see
 /// mymyr/cuda). max_expanded is checked before each expansion; max_seconds and the cancellation before each
@@ -84,13 +84,13 @@ private:
     std::shared_ptr<std::atomic<bool>> m_flag;
 };
 
-/// When a state counts as a goal. The default is the task's goal (mimir's ProblemGoalStrategy).
+/// When a state counts as a goal. The default is the task's goal.
 struct GoalSpec
 {
     enum class Kind : u8
     {
         Task,    // the task's goal condition
-        AnyOf,   // any of several goals (mimir's ProblemMultiGoalStrategy); `goals` holds them
+        AnyOf,   // any of several goals; `goals` holds them
         Custom,  // `test` decides
     };
     /// One goal of AnyOf: a ground conjunctive condition resolved against the task (search/goal.hpp makes one from a
@@ -140,7 +140,7 @@ enum class TransitionOutcome : u8
     Goal,       // a goal state, found by a search that tests the goal on generation (Rollout IW)
 };
 
-/// Event hooks: the public extension point (matching mimir's event handlers; `hierarchical` implements a native tree capture on
+/// Event hooks: the public extension point (`hierarchical` implements a native tree capture on
 /// them). Every method has an empty default; searches call them only when an observer is set. Ids are the search's
 /// own state ids. Returning false from on_progress stops the search with SearchStatus::Cancelled.
 class SearchObserver
@@ -175,7 +175,7 @@ struct SearchControl
     Budget budget;
     CancelToken cancel;
     GoalSpec goal;
-    std::vector<State> blocked_states;    // never entered (mimir's `blocked_states`); compared by content
+    std::vector<State> blocked_states;    // never entered; compared by content
     SearchObserver* observer = nullptr;   // not owned; must outlive the search
     u64 progress_interval = u64{1} << 16; // expansions between on_progress calls and budget checks
     /// Optional coordination with searches running side by side (SearchCoordination below; not owned). Honored by
@@ -185,8 +185,7 @@ struct SearchControl
     struct SearchCoordination* coordination = nullptr;
 };
 
-/// The shared state of searches that run side by side, matching mimir 0.16.3's SearchControl
-/// (search/algorithms/search_control.hpp): a stop flag, the best plan length found so far, the deepest layer a
+/// The shared state of searches that run side by side: a stop flag, the best plan length found so far, the deepest layer a
 /// breadth-first certifier has completely processed, and a shared expansion budget. Every field is relaxed-atomic;
 /// a reader that is one update stale merely does a little more work.
 ///

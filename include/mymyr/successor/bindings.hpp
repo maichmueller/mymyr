@@ -16,7 +16,7 @@
 //     literal, equality and constraint holds in the state (derived atoms are those of the state's axiom closure);
 //   - a schema (SchemaId): the bindings are exactly the parameter tuples of the schema's applicable ground actions in
 //     the state, every parameter enumerated (no witness pruning): the precondition, numeric constraints included, and
-//     for a schema with numeric or total-cost effects mimir's applicability rules on those effects
+//     for a schema with numeric or total-cost effects the applicability rules on those effects
 //     (task/numeric.hpp). Conditional effects do not restrict applicability otherwise.
 // Partial bindings: a span with one entry per variable (or empty: every variable free); a fixed entry restricts the
 // variable to that object. A fixed object that violates the variable's type, a static literal or any other part of
@@ -62,7 +62,7 @@ struct GroundLiteralView
 };
 
 /// A binding with the condition's literals grounded under it, split by predicate kind in the condition's literal order
-/// (as the fork's create_ground_conjunction_generator). Equalities and numeric constraints are not literals and do not
+/// Equalities and numeric constraints are not literals and do not
 /// appear. Valid during the callback that received it.
 struct GroundConjunction
 {

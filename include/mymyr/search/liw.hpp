@@ -1,6 +1,5 @@
 #pragma once
-// LIW(k): iterated width over landmark-restricted novelty, matching mimir 0.16.3's
-// iw::find_solution with Options::landmark_novelty_graph and LandmarkNoveltyPruningStrategyImpl.
+// LIW(k): iterated width over landmark-restricted novelty.
 //
 //   auto graph = std::make_shared<const mymyr::landmarks::FactLandmarkGraph>(
 //       mymyr::landmarks::FactLandmarkGraph::create({goal atoms...}));
@@ -11,7 +10,7 @@
 //
 // The ladder runs the width-0 pass (as in iw(), WidthZero) and then LIW(1), ..., LIW(max_arity), each from the start
 // state with a fresh table, until a pass solves the task or stops on a budget; an exhausted ladder is
-// SearchStatus::Exhausted (mimir's FAILED). There is no optimized IW(1) (mimir disables it with landmarks), so
+// SearchStatus::Exhausted. There is no optimized IW(1), so
 // IwOptions::optimize_iw1 and IwOptions::tables are ignored. LIW(k) tracks pairs (landmark coordinate, free tuple of
 // size <= k) (novelty/landmark_table.hpp): it prunes less than IW(k) and more than IW(k + 1), and still solves every
 // task of width <= k. Grouping: one rank per fact landmark; with LandmarkNovelty::disjunctive the graph's

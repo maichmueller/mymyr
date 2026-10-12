@@ -337,7 +337,7 @@ struct CompileSpec
     std::vector<u8> slot_mode; // per slot
     /// Declared types per variable (restricts a variable that no positive literal binds); may be empty.
     std::vector<std::vector<u32>> var_types;
-    bool equality_by_identity = true;  // PDDL "=" on object identity, as in mimir's relaxed reachability
+    bool equality_by_identity = true;  // PDDL "=" on object identity
 };
 
 /// Compiles `lits` (every Rel literal's slot < spec.slot_mode.size()).

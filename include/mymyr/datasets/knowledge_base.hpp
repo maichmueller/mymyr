@@ -1,5 +1,5 @@
 #pragma once
-// Knowledge bases, as mimir's KnowledgeBaseImpl: what is known about a set of tasks of one domain, for learning across
+// Knowledge bases: what is known about a set of tasks of one domain, for learning across
 // instances of different sizes. A knowledge base holds the tasks (a TaskTable), the state space of every task whose
 // generation succeeded, optionally the generalized state space over them, and optionally the tuple graphs of every
 // vertex of every space.
@@ -7,9 +7,9 @@
 //   auto kb = mymyr::datasets::KnowledgeBase::create(table, {.generalized = true, .tuple_graphs = TupleGraphOptions{.width = 2}});
 //   kb->state_spaces(); kb->generalized_state_space(); kb->tuple_graphs()[i][v];
 //
-// Construction (mimir's KnowledgeBaseImpl::create): the state spaces of the tasks (the instance pool, one task per
+// Construction: the state spaces of the tasks (the instance pool, one task per
 // thread), the failed generations skipped; sorted ascending by size if sort_by_size (stable: ties keep the task order;
-// mimir's sort_ascending_by_num_states, default on as in mimir); with `generalized`, the generalized state space over
+// default on); with `generalized`, the generalized state space over
 // them (problem p = state space p); with `tuple_graphs`, the tuple graphs of every vertex of every space.
 
 #include "mymyr/core/types.hpp"

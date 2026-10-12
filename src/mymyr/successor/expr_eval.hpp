@@ -11,7 +11,7 @@
 
 namespace mymyr::detail
 {
-/// Value of expression e (mimir's semantics, as plan::eval): an undefined function value and a division by zero are
+/// Value of expression e: an undefined function value and a division by zero are
 /// NaN; with tolerant semantics a non-finite intermediate is NaN. `bind` holds the object of each variable (nullptr
 /// for ground expressions); `num` the state's numeric words.
 [[nodiscard]] inline f64 eval_expr(const plan::Numeric& N, std::span<const formalism::Expr> exprs,

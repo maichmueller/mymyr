@@ -1,8 +1,7 @@
 # Native relational encoding
 
 `mymyr.encoding` produces classical planning observations as packed arrays. It runs in C++, consumes native state
-words directly, and needs neither mifrost nor a model framework. It is a first native flat contract informed by
-mifrost's relational semantics, not a replacement for every mifrost encoder family.
+words directly, and needs no model framework. It is a native flat contract with relational semantics.
 
 ```python
 import numpy as np
@@ -27,7 +26,7 @@ The immutable schema is exposed through `encoder.schema` and retained in `batch.
 `relation_names`, `relation_arities` and `relation_sources` describe a fixed vocabulary for that encoder's table.
 Every table predicate has five lanes: its positive state facts, positive satisfied/unsatisfied goals, and negative
 satisfied/unsatisfied goals. A signed goal emits exactly one status tuple, including negative, static and derived
-literals. State names use the predicate name; goal names use the mifrost convention, e.g. `[+]on[g][sat]` and
+literals. State names use the predicate name; goal names carry the sign and the status, e.g. `[+]on[g][sat]` and
 `[-]clear[g][unsat]`. Action relation names end in `[action]`.
 
 `relation_predicates`, `relation_schemas`, `relation_kinds`, `relation_instances` and `relation_polarities` retain the

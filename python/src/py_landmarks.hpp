@@ -1,6 +1,5 @@
 #pragma once
-// Python-side objects of the landmark and relaxed reachability API (landmarks_bindings.cpp, in mymyr.search as in
-// mimir's pymimir.advanced.search), shared with search_bindings.cpp, whose LIW and abstracted IW take a
+// Python-side objects of the landmark and relaxed reachability API (landmarks_bindings.cpp, in mymyr.search), shared with search_bindings.cpp, whose LIW and abstracted IW take a
 // FactLandmarkGraph and whose iw() takes a LandmarkTransitionOrdering. Also the conversions between Python atoms and
 // actions and the core's canonical atom ids and Action labels.
 //

@@ -54,8 +54,7 @@ struct Anchor
     u32 lit = 0;  // the anchor literal's index in Rule::body
     // Projection dedup: a variable of the anchor literal that no other literal and not the head mentions does not change
     // what the anchored plan derives, so a round runs the plan once per distinct tuple of the other anchor variables
-    // (key_vars; packed with `id` into one word when that fits, else no dedup). Mimir's join projects such
-    // variables away.
+    // (key_vars; packed with `id` into one word when that fits, else no dedup).
     bool dedup = false;
     u32 id = 0;
     std::vector<u32> key_vars;
