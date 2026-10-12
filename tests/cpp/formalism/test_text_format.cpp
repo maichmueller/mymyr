@@ -1,5 +1,5 @@
-// Round-trip of the fork-exported task text format: read -> TaskData -> write must reproduce the fork's export
-// token by token, for every exported task in the analysis probes (plain lifted format and numeric format).
+// Round-trip of the task text format: read -> TaskData -> write must reproduce the file token by token, for every
+// task of tests/data/tasks and tests/data/numeric_tasks (plain lifted format and numeric format).
 
 #include "mymyr/formalism/text_format.hpp"
 

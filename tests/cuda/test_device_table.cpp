@@ -1,5 +1,5 @@
 // Device task-table tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device), on the instance sets of
-// tests/cpp/rl/table_instance_sets.hpp (the fork's PDDL through the front end, plus tests/data/table_instances), dense and reachable slots:
+// tests/cpp/rl/table_instance_sets.hpp (PDDL through the front end, from tests/data), dense and reachable slots:
 //   - the device expand of a mixed batch over a table (cuda::DeviceExpander: one pass of the multi-instance kernels,
 //     or each instance's rows apart) equals rl::expand byte for byte, flat (with capacity clipping) and padded, for
 //     any chunk size and bucket launch (rl::expand's mixed batch equals the single-instance expansions:

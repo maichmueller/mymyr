@@ -22,7 +22,6 @@ t_suite / t_apart (gate: <= 1.3).
 
 import argparse
 import json
-import os
 import pathlib
 import statistics
 import time
@@ -35,15 +34,16 @@ from mymyr import rl
 import mymyr.rl.torch as rt
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-FORK = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
+SMALL = ROOT / "tests/data/benchmarks/small"
+IPC = ROOT / "tests/data/ipc"
 GEN = ROOT / "tests/data/table_instances"
-BW = FORK / "ipc/blocksworld-ipc/train"
-MI = FORK / "ipc/miconic-ipc/test"
-SO = FORK / "ipc/sokoban-ipc"
+BW = IPC / "blocksworld-ipc/train"
+MI = IPC / "miconic-ipc/test"
+SO = IPC / "sokoban-ipc"
 SETS = {  # as tests/cpp/rl/table_instance_sets.hpp and mymyr_task_suite_bench
     "blocks": (BW / "domain.pddl", [BW / f"p{k}.pddl" for k in (13, 25, 37, 49, 61)]),
-    "gripper": (FORK / "gripper/domain.pddl",
-                [FORK / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
+    "gripper": (SMALL / "gripper/domain.pddl",
+                [SMALL / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
     "miconic": (MI / "domain.pddl",
                 [MI / p for p in ("p01-easy.pddl", "p20-easy.pddl", "p01-medium.pddl", "p04-medium.pddl", "p16-medium.pddl")]),
     "sokoban": (SO / "train/domain.pddl",

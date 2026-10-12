@@ -12,7 +12,7 @@ The received batches are dropped at once; their arrays go back to the pool (CpuE
 last reference) and later sends reuse them.
 
 Prints one JSON line per (driver, threads) with env-steps/s, the speedup over 1 thread, and the 1-minute load average
-before and after. The table is an instance set of tests/cpp/rl/table_instance_sets.hpp (the fork's PDDL plus tests/data/table_instances).
+before and after. The table is an instance set of tests/cpp/rl/table_instance_sets.hpp (tests/data/benchmarks/small plus tests/data/table_instances).
 
 Usage: python bench/python/bench_table_pool.py [--set blocks] [--envs 16384] [--threads 1,8,32] [--steps 50]
 """
@@ -31,18 +31,19 @@ import mymyr
 from mymyr import rl
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-FORK = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
+SMALL = ROOT / "tests/data/benchmarks/small"
+IPC = ROOT / "tests/data/ipc"
 GEN = ROOT / "tests/data/table_instances"
-BW = FORK / "ipc/blocksworld-ipc/train"
-MI = FORK / "ipc/miconic-ipc/test"
+BW = IPC / "blocksworld-ipc/train"
+MI = IPC / "miconic-ipc/test"
 SETS = {
     "blocks": (BW / "domain.pddl", [BW / f"p{k}.pddl" for k in (13, 25, 37, 49, 61)]),
-    "gripper": (FORK / "gripper/domain.pddl",
-                [FORK / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
+    "gripper": (SMALL / "gripper/domain.pddl",
+                [SMALL / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
     "miconic": (MI / "domain.pddl",
                 [MI / p for p in ("p01-easy.pddl", "p20-easy.pddl", "p01-medium.pddl", "p04-medium.pddl", "p16-medium.pddl")]),
-    "logistics": (FORK / "logistics/domain.pddl",
-                  [FORK / "logistics/test_problem.pddl"]
+    "logistics": (SMALL / "logistics/domain.pddl",
+                  [SMALL / "logistics/test_problem.pddl"]
                   + [GEN / f"logistics/logistics-{k}.pddl" for k in ("c2-s3-p4-a1", "c3-s3-p8-a2", "c4-s4-p16-a3", "c6-s5-p30-a4")]),
 }
 

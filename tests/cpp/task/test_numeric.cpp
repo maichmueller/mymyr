@@ -1,4 +1,4 @@
-// Numeric fluents and action costs: bytecode values, [bits | slots] states, stores, BrFS counts against the fork,
+// Numeric fluents and action costs: bytecode values, [bits | slots] states, stores, BrFS counts,
 // plan costs.
 
 #include "mymyr/formalism/text_format.hpp"
@@ -47,7 +47,7 @@ struct Expected
     u64 states, generated, goal_states;
 };
 
-// Exhaustive BrFS with witness pruning, against the fork's state counts per layer.
+// Exhaustive BrFS with witness pruning: state counts.
 const std::vector<Expected>& small_tasks()
 {
     static const std::vector<Expected> t = {
@@ -127,7 +127,7 @@ TEST(Numeric, ComparisonsWithNaNAreFalse)
     EXPECT_TRUE(plan::compare(N, Comparator::Le, 1, 1));
     EXPECT_FALSE(plan::compare(N, Comparator::Eq, 0.1 + 0.2, 0.3));
     const plan::Numeric C = numeric_of(NumericStorage::F64, 0, true);
-    EXPECT_TRUE(plan::compare(C, Comparator::Eq, 0.1 + 0.2, 0.3));  // Mimir-C#: 1e-9 tolerance
+    EXPECT_TRUE(plan::compare(C, Comparator::Eq, 0.1 + 0.2, 0.3));  // 1e-9 tolerance
 }
 
 TEST(Numeric, EffectFamilies)
@@ -232,7 +232,7 @@ TEST(Numeric, StatesThatDifferOnlyInTheirValuesAreDistinct)
 
 // ------------------------------------------------------------------------------------------------ BrFS
 
-TEST(Numeric, BrfsCountsEqualTheForkOnEveryStore)
+TEST(Numeric, BrfsCountsAreTheSameOnEveryStore)
 {
     for (const Expected& x : small_tasks())
     {
@@ -338,7 +338,7 @@ TEST(Numeric, DepthCappedLayersEqualTheProbe)
 
 // ------------------------------------------------------------------------------------------------ costs
 
-TEST(ActionCosts, KindsFollowTheFork)
+TEST(ActionCosts, Kinds)
 {
     {
         const auto task = Task::from_text_file(lifted_task("gripper__prob05"));
@@ -361,11 +361,11 @@ TEST(ActionCosts, KindsFollowTheFork)
     }
 }
 
-TEST(ActionCosts, NumericPlansEqualTheFork)
+TEST(ActionCosts, NumericPlans)
 {
-    // IW and SIW on numeric tasks (novelty over atoms only): status, plan length and cost against the fork's;
+    // IW and SIW on numeric tasks (novelty over atoms only): status, plan length and cost;
     // the plan reaches a goal state, numeric goal constraints included, and its cost
-    // is at most the replayed metric value (the fork's extraction may pick cheaper actions between the same states).
+    // is at most the replayed metric value (the extraction may pick cheaper actions between the same states).
     struct Case
     {
         const char* name;
@@ -379,7 +379,7 @@ TEST(ActionCosts, NumericPlansEqualTheFork)
         {"m-woodworking", false, 1, true, 2, 40},  {"m-transport", false, 2, true, 5, 54},
         {"m-transport", true, 2, true, 7, 154},    {"cs-delivery", true, 2, true, 14, 79},
         {"cs-delivery-nometric", true, 2, true, 14, 14},
-        {"cs-counters", false, 2, false, 0, 0},  // the fork's IW(2) crashes here; every state has the same atoms
+        {"cs-counters", false, 2, false, 0, 0},  // every state has the same atoms
         {"m-zenotravel-numeric", true, 2, false, 0, 0},
     };
     for (const Case& c : cases)

@@ -1,9 +1,9 @@
-// Datasets: state spaces against the fork's StateSpace on the fork's own test instances (counts, V*, and the
-// content, transition and V* fingerprints of the fork's own state-space tool), ids and arrays independent of
+// Datasets: state spaces on small instances, ids and arrays independent of
 // the thread count, the array invariants, the options (max_states, remove_if_unsolvable, statically false goals,
 // timeouts), transition costs and numeric tasks, the instance pool, generalized state spaces and samplers.
 
-#include "../frontend/golden.hpp"
+#include "support.hpp"
+#include "../support/benchmarks.hpp"
 #include "../support/suite.hpp"
 #include "mymyr/datasets/generalized_state_space.hpp"
 #include "mymyr/datasets/sampler.hpp"
@@ -33,136 +33,12 @@ using namespace mymyr::datasets;
 
 namespace
 {
-// ----------------------------------------------------------------------------------------------- fingerprints
-// The fork_datasets definitions (FNV-1a 64 over bytes; u64 as 8 little-endian bytes).
-struct Fnv
-{
-    u64 h = 0xcbf29ce484222325ULL;
-    void bytes(const void* p, usize n)
-    {
-        const auto* b = static_cast<const unsigned char*>(p);
-        for (usize i = 0; i < n; ++i)
-        {
-            h ^= b[i];
-            h *= 0x100000001b3ULL;
-        }
-    }
-    void str(const std::string& s) { bytes(s.data(), s.size()); }
-    void u64le(u64 x)
-    {
-        unsigned char b[8];
-        for (int i = 0; i < 8; ++i)
-            b[i] = static_cast<unsigned char>(x >> (8 * i));
-        bytes(b, 8);
-    }
-    template<class T>
-    void span(std::span<const T> s)
-    {
-        u64le(s.size());
-        bytes(s.data(), s.size_bytes());
-    }
-};
-u64 fnv_str(const std::string& s)
-{
-    Fnv f;
-    f.str(s);
-    return f.h;
-}
-u64 fnv_list(std::vector<u64> v)
-{
-    std::sort(v.begin(), v.end());
-    Fnv f;
-    for (u64 x : v)
-        f.u64le(x);
-    return f.h;
-}
-
-u64 state_hash(const Task& task, StateView s)
-{
-    std::vector<std::string> atoms = task.format_atoms(s);
-    std::sort(atoms.begin(), atoms.end());
-    std::string key;
-    for (usize i = 0; i < atoms.size(); ++i)
-        key += (i ? "\n" : "") + atoms[i];
-    if (task.numeric_slots())
-        for (f64 v : task.numeric_values(s))
-        {
-            char b[64];
-            std::snprintf(b, sizeof b, "\n=%.17g", v);
-            key += b;
-        }
-    return fnv_str(key);
-}
-
-struct Fingerprints
-{
-    u64 content, transitions, vstar;
-};
-Fingerprints fingerprints(const StateSpace& S)
-{
-    const Task& task = *S.task();
-    std::vector<u64> hs(S.num_states());
-    for (u32 v = 0; v < S.num_states(); ++v)
-        hs[v] = state_hash(task, S.state(v));
-    std::vector<u64> trans, vst;
-    const auto off = S.forward_offsets();
-    const auto tgt = S.forward_targets();
-    for (u32 v = 0; v < S.num_states(); ++v)
-    {
-        for (u64 e = off[v]; e < off[v + 1]; ++e)
-        {
-            Fnv f;
-            f.u64le(hs[v]);
-            f.u64le(fnv_str(task.format(S.label(e).label())));
-            f.u64le(hs[tgt[e]]);
-            trans.push_back(f.h);
-        }
-        Fnv f;
-        f.u64le(hs[v]);
-        const i32 d = S.unit_goal_distances()[v];
-        f.u64le(static_cast<u64>(static_cast<i64>(d == k_unsolvable_distance ? std::numeric_limits<i32>::max() : d)));
-        vst.push_back(f.h);
-    }
-    return {fnv_list(hs), fnv_list(trans), fnv_list(vst)};
-}
-
-/// FNV over every array of a space (mymyr_datasets --hash).
-u64 arrays_hash(const StateSpace& S, bool with_states = true)
-{
-    Fnv f;
-    f.u64le(S.num_states());
-    if (with_states)
-    {
-        f.u64le(S.row_words());
-        f.span(S.state_words());
-    }
-    f.span(S.forward_offsets());
-    f.span(S.forward_targets());
-    f.span(S.label_schemas());
-    f.span(S.label_bindings());
-    f.span(S.costs());
-    f.span(S.backward_offsets());
-    f.span(S.backward_sources());
-    f.span(S.backward_edges());
-    f.span(S.unit_goal_distances());
-    f.span(S.cost_goal_distances());
-    f.span(S.goal_flags());
-    f.span(S.unsolvable_flags());
-    f.span(S.alive_flags());
-    return f.h;
-}
+using namespace mymyr::test::ss;
 
 // ----------------------------------------------------------------------------------------------- tasks
-std::filesystem::path data(const std::string& rel) { return test::fork_data_dir() / rel; }
-
-TaskPtr fork_task(const std::string& dir, const std::string& problem, TaskOptions to = {})
+TaskPtr small_task(const std::string& dir, const std::string& problem, TaskOptions to = {})
 {
-    const auto d = data(dir + "/domain.pddl"), p = data(dir + "/" + problem);
-    if (!std::filesystem::exists(d) || !std::filesystem::exists(p))
-        return nullptr;
-    if (to.atoms == TaskOptions::Atoms::Auto)
-        to.atoms = TaskOptions::Atoms::Dense;
-    return Task::create(*frontend::load_task(d, p), to);
+    return dense_task(test::small_dir(), dir, problem, to);
 }
 
 TaskPtr pddl_task(const char* domain, const char* problem)
@@ -170,251 +46,6 @@ TaskPtr pddl_task(const char* domain, const char* problem)
     TaskOptions to;
     to.atoms = TaskOptions::Atoms::Dense;
     return Task::create(*frontend::Domain::from_string(domain, "d.pddl")->instantiate_string(problem, "p.pddl"), to);
-}
-
-StateSpaceOptions fork_ss(u32 threads = 1)
-{
-    StateSpaceOptions o;
-    o.threads = threads;
-    o.remove_if_unsolvable = false;
-    return o;
-}
-
-StateSpacePtr space_of(TaskPtr task, const StateSpaceOptions& o)
-{
-    StateSpaceResult r = generate_state_space(std::move(task), o);
-    EXPECT_EQ(r.status, StateSpaceStatus::Ok);
-    return r.space;
-}
-
-// ----------------------------------------------------------------------------------------------- invariants
-/// Checks the arrays against each other and against an independent search over the task.
-void check_invariants(const StateSpace& S)
-{
-    const u32 N = S.num_states();
-    const u64 E = S.num_transitions();
-    const auto off = S.forward_offsets();
-    const auto tgt = S.forward_targets();
-    ASSERT_EQ(off.size(), N + 1u);
-    ASSERT_EQ(off[N], E);
-    // reverse CSR: exactly the forward edges, grouped by target, ascending edge indices
-    const auto boff = S.backward_offsets();
-    const auto bsrc = S.backward_sources();
-    const auto bedg = S.backward_edges();
-    ASSERT_EQ(boff.size(), N + 1u);
-    ASSERT_EQ(boff[N], E);
-    std::vector<u8> seen(E, 0);
-    for (u32 t = 0; t < N; ++t)
-        for (u64 r = boff[t]; r < boff[t + 1]; ++r)
-        {
-            const u32 e = bedg[r];
-            ASSERT_LT(e, E);
-            EXPECT_EQ(tgt[e], t);
-            EXPECT_EQ(S.source(e), bsrc[r]);
-            EXPECT_TRUE(e >= off[bsrc[r]] && e < off[bsrc[r] + 1]);
-            if (r > boff[t])
-            {
-                EXPECT_LT(bedg[r - 1], e);
-            }
-            EXPECT_FALSE(seen[e]);
-            seen[e] = 1;
-        }
-    // goal distances: an independent backward BFS
-    std::vector<i32> d(N, k_unsolvable_distance);
-    std::deque<u32> q;
-    for (u32 v = 0; v < N; ++v)
-        if (S.is_goal(v))
-        {
-            d[v] = 0;
-            q.push_back(v);
-        }
-    std::vector<std::vector<u32>> pred(N);
-    for (u32 v = 0; v < N; ++v)
-        for (u64 e = off[v]; e < off[v + 1]; ++e)
-            pred[tgt[e]].push_back(v);
-    while (!q.empty())
-    {
-        const u32 v = q.front();
-        q.pop_front();
-        for (u32 u : pred[v])
-            if (d[u] == k_unsolvable_distance)
-            {
-                d[u] = d[v] + 1;
-                q.push_back(u);
-            }
-    }
-    i32 max = -1;
-    u32 goals = 0, unsolvable = 0;
-    for (u32 v = 0; v < N; ++v)
-    {
-        EXPECT_EQ(S.unit_goal_distances()[v], d[v]) << v;
-        EXPECT_EQ(S.is_unsolvable(v), d[v] == k_unsolvable_distance);
-        EXPECT_EQ(S.is_alive(v), !S.is_goal(v) && !S.is_unsolvable(v));
-        goals += S.is_goal(v);
-        unsolvable += S.is_unsolvable(v);
-        if (d[v] != k_unsolvable_distance)
-            max = std::max(max, d[v]);
-        // cost distances satisfy the Bellman equations
-        const f64 c = S.cost_goal_distances()[v];
-        if (S.is_goal(v))
-        {
-            EXPECT_EQ(c, 0.0);
-        }
-        else
-        {
-            f64 best = std::numeric_limits<f64>::infinity();
-            for (u64 e = off[v]; e < off[v + 1]; ++e)
-                best = std::min(best, S.cost(e) + S.cost_goal_distances()[tgt[e]]);
-            EXPECT_DOUBLE_EQ(c, best) << v;
-        }
-    }
-    EXPECT_EQ(S.num_goal_states(), goals);
-    EXPECT_EQ(S.num_unsolvable_states(), unsolvable);
-    EXPECT_EQ(S.max_goal_distance(), max);
-    // states are distinct and find() maps them back
-    for (u32 v = 0; v < N; ++v)
-        EXPECT_EQ(S.find(S.state(v)), static_cast<i64>(v));
-    // each row is the task's canonical successor sequence of its state (labels and targets)
-    if (S.has_labels())
-    {
-        const Task& task = *S.task();
-        const WorkspaceLease lease = task.workspace();
-        Successors& succ = lease->successors();
-        LineVector<u64> next;
-        for (u32 v = 0; v < N; v += std::max<u32>(1, N / 200))
-        {
-            const State cur(S.state(v));
-            succ.prepare(cur.view());
-            EXPECT_EQ(succ.goal_holds(), S.is_goal(v));
-            u64 e = off[v];
-            succ.generate<false>(
-                [&](u32 schema, const ObjectId* b, const Delta& dl)
-                {
-                    EXPECT_LT(e, off[v + 1]);
-                    const Action a = S.label(e);
-                    EXPECT_EQ(a.schema.v, schema);
-                    for (usize i = 0; i < a.binding.size(); ++i)
-                        EXPECT_EQ(a.binding[i], b[i]);
-                    const u32 nn = apply_delta(cur.data(), cur.size_words(), dl, next);
-                    const State t(next.data(), nn, dl.num, task.numeric_words());
-                    EXPECT_EQ(S.find(t.view()), static_cast<i64>(tgt[e]));
-                    ++e;
-                    return true;
-                },
-                false, true);
-            EXPECT_EQ(e, off[v + 1]);
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------------------------- fork parity
-struct ForkCase
-{
-    const char* dir;
-    const char* problem;
-    u32 states;
-    u64 transitions;
-    u32 goal, unsolvable;
-    i32 max_goal_dist;
-    u64 fp_content, fp_transitions, fp_vstar;
-    f64 cost_sum;  // sum of the finite cost goal distances (the fork's action goal distances)
-};
-
-// fork_datasets ss lists/fork_data.txt --max-states 200000 (build/parity/fork_data.jsonl; the fork 0.16.3 configured
-// as fork_ss: remove_if_unsolvable = false)
-const ForkCase kForkCases[] = {
-#include "fork_cases.inc"
-};
-
-class ForkParity : public ::testing::TestWithParam<ForkCase>
-{
-};
-
-TEST_P(ForkParity, MatchesTheFork)
-{
-    const ForkCase& c = GetParam();
-    const TaskPtr task = fork_task(c.dir, c.problem);
-    if (!task)
-        GTEST_SKIP() << "fork data missing: " << data(c.dir);
-    const StateSpacePtr S = space_of(task, fork_ss());
-    ASSERT_TRUE(S);
-    EXPECT_EQ(S->num_states(), c.states);
-    EXPECT_EQ(S->num_transitions(), c.transitions);
-    EXPECT_EQ(S->num_goal_states(), c.goal);
-    EXPECT_EQ(S->num_unsolvable_states(), c.unsolvable);
-    EXPECT_EQ(S->max_goal_distance(), c.max_goal_dist);
-    const Fingerprints fp = fingerprints(*S);
-    EXPECT_EQ(fp.content, c.fp_content);
-    EXPECT_EQ(fp.transitions, c.fp_transitions);
-    EXPECT_EQ(fp.vstar, c.fp_vstar);
-    f64 cost_sum = 0;
-    for (f64 x : S->cost_goal_distances())
-        if (std::isfinite(x))
-            cost_sum += x;
-    EXPECT_DOUBLE_EQ(cost_sum, c.cost_sum);
-    check_invariants(*S);
-    // the layered generator on several threads: the same arrays
-    const StateSpacePtr P = space_of(task, fork_ss(3));
-    ASSERT_TRUE(P);
-    EXPECT_EQ(arrays_hash(*P), arrays_hash(*S));
-}
-
-std::string case_name(const ::testing::TestParamInfo<ForkCase>& info)
-{
-    std::string n = std::string(info.param.dir) + "_" + info.param.problem;
-    for (char& ch : n)
-        if (!std::isalnum(static_cast<unsigned char>(ch)))
-            ch = '_';
-    return n;
-}
-INSTANTIATE_TEST_SUITE_P(ForkData, ForkParity, ::testing::ValuesIn(kForkCases), case_name);
-
-// Numeric tasks (the fork's StateSpace generates them too): tests/data/pddl/counters, fork numbers from
-// fork_datasets ss lists/numeric.txt. The state hashes cover the numeric values ("\n=%.17g" per variable).
-TEST(StateSpace, NumericTasksMatchTheFork)
-{
-    struct Case
-    {
-        const char* problem;
-        u32 states;
-        u64 transitions;
-        u32 goal, unsolvable;
-        i32 max_goal_dist;
-        u64 fp_content, fp_transitions, fp_vstar;
-        f64 cost_sum;
-    };
-    const Case cases[] = {
-        {"p01.pddl", 38, 108, 10, 0, 4, 0x2da00399d901c099ULL, 0xf345107ab284777cULL, 0xb86c738b18e1a06dULL, 59.0},
-        {"p02.pddl", 129, 544, 0, 129, -1, 0x37338418a09264c5ULL, 0x0d275494cc07b57cULL, 0x3e585b03385b3749ULL, 0.0},
-    };
-    const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
-    for (const Case& c : cases)
-    {
-        TaskOptions to;
-        to.atoms = TaskOptions::Atoms::Dense;
-        const TaskPtr task = Task::create(*frontend::load_task(dir + "domain.pddl", dir + c.problem), to);
-        ASSERT_GT(task->numeric_slots(), 0u);
-        for (u32 T : {1u, 3u})
-        {
-            const StateSpacePtr S = space_of(task, fork_ss(T));
-            ASSERT_TRUE(S);
-            EXPECT_EQ(S->num_states(), c.states) << c.problem;
-            EXPECT_EQ(S->num_transitions(), c.transitions);
-            EXPECT_EQ(S->num_goal_states(), c.goal);
-            EXPECT_EQ(S->num_unsolvable_states(), c.unsolvable);
-            EXPECT_EQ(S->max_goal_distance(), c.max_goal_dist);
-            const Fingerprints fp = fingerprints(*S);
-            EXPECT_EQ(fp.content, c.fp_content) << c.problem;
-            EXPECT_EQ(fp.transitions, c.fp_transitions);
-            EXPECT_EQ(fp.vstar, c.fp_vstar);
-            f64 cost_sum = 0;
-            for (f64 x : S->cost_goal_distances())
-                if (std::isfinite(x))
-                    cost_sum += x;
-            EXPECT_DOUBLE_EQ(cost_sum, c.cost_sum);
-            check_invariants(*S);
-        }
-    }
 }
 
 // ----------------------------------------------------------------------------------------------- determinism
@@ -427,13 +58,13 @@ TEST(StateSpace, ArraysIndependentOfThreadCount)
             TaskOptions to;
             to.atoms = atoms;
             const auto task = Task::from_text_file(test::task_path(name), to);
-            const StateSpacePtr ref = space_of(task, fork_ss(1));
+            const StateSpacePtr ref = space_of(task, ss_options(1));
             ASSERT_TRUE(ref);
             const bool frozen = atoms == TaskOptions::Atoms::Dense;
             const u64 h = arrays_hash(*ref, frozen);  // lazy slots: the state words depend on the interning order
             for (u32 T : {2u, 3u, 8u})
             {
-                const StateSpacePtr s = space_of(task, fork_ss(T));
+                const StateSpacePtr s = space_of(task, ss_options(T));
                 ASSERT_TRUE(s);
                 EXPECT_EQ(arrays_hash(*s, frozen), h) << name << " T=" << T;
             }
@@ -450,7 +81,7 @@ TEST(StateSpace, CountsMatchTheBrfsSuite)
         if (t.states > 50000)
             continue;
         const auto task = Task::from_text_file(test::task_path(t.name));
-        const StateSpacePtr s = space_of(task, fork_ss(2));
+        const StateSpacePtr s = space_of(task, ss_options(2));
         ASSERT_TRUE(s);
         EXPECT_EQ(s->num_states(), t.states) << t.name;
         EXPECT_EQ(s->num_goal_states(), t.goal_states) << t.name;
@@ -460,12 +91,12 @@ TEST(StateSpace, CountsMatchTheBrfsSuite)
 // ----------------------------------------------------------------------------------------------- options
 TEST(StateSpace, MaxStatesFailsIffTheSpaceReachesIt)
 {
-    const TaskPtr task = fork_task("gripper", "test_problem4.pddl");  // 256 states
+    const TaskPtr task = small_task("gripper", "test_problem4.pddl");  // 256 states
     if (!task)
         GTEST_SKIP();
     for (u32 T : {1u, 4u})
     {
-        StateSpaceOptions o = fork_ss(T);
+        StateSpaceOptions o = ss_options(T);
         o.max_states = 256;
         EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates) << T;
         o.max_states = 257;
@@ -473,12 +104,12 @@ TEST(StateSpace, MaxStatesFailsIffTheSpaceReachesIt)
         o.max_states = 10;
         EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates) << T;
     }
-    // the fork: a single-state space fits every limit (it fails iff N >= max(max_states, 2))
-    const TaskPtr one = fork_task("deadend", "test_problem.pddl");
+    // a single-state space fits every limit (it fails iff N >= max(max_states, 2))
+    const TaskPtr one = small_task("deadend", "test_problem.pddl");
     ASSERT_TRUE(one);
     for (u32 T : {1u, 2u})
     {
-        StateSpaceOptions o = fork_ss(T);
+        StateSpaceOptions o = ss_options(T);
         o.max_states = 0;
         const StateSpaceResult r = generate_state_space(one, o);
         ASSERT_EQ(r.status, StateSpaceStatus::Ok);
@@ -488,7 +119,7 @@ TEST(StateSpace, MaxStatesFailsIffTheSpaceReachesIt)
 
 TEST(StateSpace, RemoveIfUnsolvableDropsTheWholeSpace)
 {
-    const TaskPtr task = fork_task("deadend", "test_problem.pddl");  // the initial state is a dead end
+    const TaskPtr task = small_task("deadend", "test_problem.pddl");  // the initial state is a dead end
     if (!task)
         GTEST_SKIP();
     for (u32 T : {1u, 2u})
@@ -504,7 +135,7 @@ TEST(StateSpace, RemoveIfUnsolvableDropsTheWholeSpace)
         EXPECT_TRUE(std::isinf(r.space->cost_goal_distances()[0]));
     }
     // a space whose initial state reaches a goal keeps its dead ends
-    const TaskPtr spanner = fork_task("spanner", "p15-easy.pddl");
+    const TaskPtr spanner = small_task("spanner", "p15-easy.pddl");
     ASSERT_TRUE(spanner);
     const StateSpaceResult r = generate_state_space(spanner, {});
     ASSERT_EQ(r.status, StateSpaceStatus::Ok);
@@ -556,7 +187,7 @@ TEST(StateSpace, TransitionCostsAndCostDistances)
 )");
     for (u32 T : {1u, 2u})
     {
-        const StateSpacePtr S = space_of(task, fork_ss(T));
+        const StateSpacePtr S = space_of(task, ss_options(T));
         ASSERT_TRUE(S);
         ASSERT_EQ(S->num_states(), 4u);
         EXPECT_EQ(S->num_transitions(), 8u);
@@ -570,7 +201,7 @@ TEST(StateSpace, TransitionCostsAndCostDistances)
         check_invariants(*S);
     }
     // without labels the arrays are the same except the labels
-    StateSpaceOptions o = fork_ss();
+    StateSpaceOptions o = ss_options();
     o.labels = false;
     const StateSpacePtr S = space_of(task, o);
     ASSERT_TRUE(S);
@@ -599,7 +230,7 @@ TEST(StateSpace, NumericTasks)
  (:metric minimize (fuel)))
 )");
     ASSERT_GT(task->numeric_slots(), 0u);
-    StateSpaceOptions o = fork_ss();
+    StateSpaceOptions o = ss_options();
     o.max_states = 1000;  // fuel is unbounded: the space is infinite
     EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates);
     o.threads = 3;
@@ -622,7 +253,7 @@ TEST(StateSpace, NumericTasks)
 )");
     for (u32 T : {1u, 2u})
     {
-        const StateSpacePtr S = space_of(bounded, fork_ss(T));
+        const StateSpacePtr S = space_of(bounded, ss_options(T));
         ASSERT_TRUE(S);
         EXPECT_EQ(S->num_states(), 8u);
         EXPECT_EQ(S->numeric_words(), bounded->numeric_words());
@@ -634,7 +265,7 @@ TEST(StateSpace, NumericTasks)
 
 TEST(StateSpace, MetricWithoutTotalCostTakesTheMetricDifference)
 {
-    // the metric (fuel) decreases along inc: negative transition costs, which Dijkstra rejects (as the fork's BGL)
+    // the metric (fuel) decreases along inc: negative transition costs, which Dijkstra rejects 
     const TaskPtr task = pddl_task(R"(
 (define (domain m)
  (:requirements :strips :numeric-fluents)
@@ -649,7 +280,7 @@ TEST(StateSpace, MetricWithoutTotalCostTakesTheMetricDifference)
  (:goal (b))
  (:metric minimize (fuel)))
 )");
-    const StateSpacePtr S = space_of(task, fork_ss());
+    const StateSpacePtr S = space_of(task, ss_options());
     ASSERT_TRUE(S);
     ASSERT_EQ(S->num_transitions(), 1u);
     EXPECT_DOUBLE_EQ(S->cost(0), 3.0);
@@ -668,7 +299,7 @@ TEST(StateSpace, MetricWithoutTotalCostTakesTheMetricDifference)
  (:goal (b))
  (:metric minimize (fuel)))
 )");
-    EXPECT_THROW((void)generate_state_space(negative, fork_ss()), std::domain_error);
+    EXPECT_THROW((void)generate_state_space(negative, ss_options()), std::domain_error);
 }
 
 TEST(StateSpace, TimeoutStops)
@@ -676,7 +307,7 @@ TEST(StateSpace, TimeoutStops)
     const auto task = Task::from_text_file(test::task_path("depot__p02"));
     for (u32 T : {1u, 2u})
     {
-        StateSpaceOptions o = fork_ss(T);
+        StateSpaceOptions o = ss_options(T);
         o.max_seconds = 0;
         EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::Timeout) << T;
     }
@@ -687,32 +318,32 @@ TEST(StateSpace, PoolEqualsSingleGenerations)
 {
     std::vector<TaskPtr> tasks;
     for (const char* dir : {"gripper", "spanner", "blocks_3", "miconic", "delivery", "visitall"})
-        if (TaskPtr t = fork_task(dir, "test_problem.pddl"))
+        if (TaskPtr t = small_task(dir, "test_problem.pddl"))
             tasks.push_back(t);
     if (tasks.size() < 6)
         GTEST_SKIP();
-    const std::vector<StateSpaceResult> rs = generate_state_spaces(tasks, fork_ss(), 3);
+    const std::vector<StateSpaceResult> rs = generate_state_spaces(tasks, ss_options(), 3);
     ASSERT_EQ(rs.size(), tasks.size());
     for (usize i = 0; i < tasks.size(); ++i)
     {
         ASSERT_TRUE(rs[i].space);
         EXPECT_EQ(rs[i].space->task(), tasks[i]);
-        EXPECT_EQ(arrays_hash(*rs[i].space), arrays_hash(*space_of(tasks[i], fork_ss())));
+        EXPECT_EQ(arrays_hash(*rs[i].space), arrays_hash(*space_of(tasks[i], ss_options())));
     }
     // exceptions stop the pool and reach the caller
     EXPECT_THROW(for_each_state_space(
                      8, [&](u64 i) -> TaskPtr { if (i == 5) throw std::runtime_error("boom"); return tasks[i % tasks.size()]; },
-                     [](u64, StateSpaceResult&&) {}, fork_ss(), 3),
+                     [](u64, StateSpaceResult&&) {}, ss_options(), 3),
                  std::runtime_error);
 }
 
 // ----------------------------------------------------------------------------------------------- samplers
 TEST(Sampler, DeterministicPerSeedAndCorrectSupports)
 {
-    const TaskPtr task = fork_task("spanner", "p15-easy.pddl");
+    const TaskPtr task = small_task("spanner", "p15-easy.pddl");
     if (!task)
         GTEST_SKIP();
-    const StateSpacePtr S = space_of(task, fork_ss());
+    const StateSpacePtr S = space_of(task, ss_options());
     ASSERT_TRUE(S);
     StateSpaceSampler a(S, 7), b(S, 7), c(S, 8);
     std::vector<u32> xa(500), xb(500), xc(500);
@@ -756,7 +387,7 @@ TEST(Sampler, DeterministicPerSeedAndCorrectSupports)
 
 TEST(Sampler, NoDeadEnds)
 {
-    const TaskPtr task = fork_task("gripper", "p-2-0.pddl");
+    const TaskPtr task = small_task("gripper", "p-2-0.pddl");
     if (!task)
         GTEST_SKIP();
     StateSpaceSampler s(space_of(task, {}), 1);
@@ -769,12 +400,12 @@ TEST(GeneralizedStateSpace, DisjointUnion)
 {
     std::vector<TaskPtr> tasks;
     for (const char* p : {"test_problem4.pddl", "p-2-0.pddl", "test_problem2.pddl", "p-1-0.pddl"})
-        if (TaskPtr t = fork_task("gripper", p))
+        if (TaskPtr t = small_task("gripper", p))
             tasks.push_back(t);
     if (tasks.size() < 4)
         GTEST_SKIP();
     // the disjoint union, spaces sorted by size (stable)
-    const auto results = generate_state_spaces(tasks, fork_ss(), 2);
+    const auto results = generate_state_spaces(tasks, ss_options(), 2);
     const auto spaces = ordered_spaces(results);
     ASSERT_EQ(spaces.size(), 4u);
     for (usize i = 1; i < spaces.size(); ++i)
@@ -831,9 +462,9 @@ TEST(GeneralizedStateSpace, DisjointUnion)
     EXPECT_EQ(empty->num_edges(), 0u);
     EXPECT_EQ(empty->forward_offsets().size(), 1u);
     // one domain only
-    const TaskPtr other = fork_task("blocks_3", "test_problem.pddl");
+    const TaskPtr other = small_task("blocks_3", "test_problem.pddl");
     ASSERT_TRUE(other);
-    EXPECT_THROW((void)GeneralizedStateSpace::create({spaces[0], space_of(other, fork_ss())}), std::invalid_argument);
+    EXPECT_THROW((void)GeneralizedStateSpace::create({spaces[0], space_of(other, ss_options())}), std::invalid_argument);
 }
 
 // ----------------------------------------------------------------------------------------------- from arrays
@@ -880,7 +511,7 @@ const char* kCostProblem = R"(
 
 TEST(StateSpace, CreateFromArraysRoundTrips)
 {
-    // costs, numeric words, a fork task, lazy atom slots
+    // costs, numeric words, a small-instance task, lazy atom slots
     std::vector<TaskPtr> tasks{pddl_task(kCountDomain, kCostProblem), pddl_task(R"(
 (define (domain counter2)
  (:requirements :strips :numeric-fluents :negative-preconditions)
@@ -896,16 +527,16 @@ TEST(StateSpace, CreateFromArraysRoundTrips)
  (:init (= (x) 0))
  (:goal (and (done) (= (x) 0))))
 )")};
-    if (TaskPtr t = fork_task("spanner", "p15-easy.pddl"))
+    if (TaskPtr t = small_task("spanner", "p15-easy.pddl"))
         tasks.push_back(t);
     TaskOptions lazy;
     lazy.atoms = TaskOptions::Atoms::Lazy;
-    if (TaskPtr t = fork_task("gripper", "p-2-0.pddl", lazy))
+    if (TaskPtr t = small_task("gripper", "p-2-0.pddl", lazy))
         tasks.push_back(t);
     for (const TaskPtr& task : tasks)
         for (bool labels : {true, false})
         {
-            StateSpaceOptions o = fork_ss();
+            StateSpaceOptions o = ss_options();
             o.labels = labels;
             const StateSpacePtr S = space_of(task, o);
             ASSERT_TRUE(S);
@@ -923,7 +554,7 @@ TEST(StateSpace, CreateFromArraysRoundTrips)
 TEST(StateSpace, CreateRejectsArraysThatAreNotASpaceOfTheTask)
 {
     const TaskPtr task = pddl_task(kCountDomain, kCostProblem);
-    const StateSpacePtr S = space_of(task, fork_ss());
+    const StateSpacePtr S = space_of(task, ss_options());
     ASSERT_TRUE(S);
     ASSERT_GE(S->num_transitions(), 2u);
     ASSERT_LT(task->atoms().fluent_slots(), 64u * S->words());
