@@ -33,6 +33,33 @@ States travel as rows of atom words followed by numeric words, in the encoding o
 storage for all instances. A batch's rows are as wide as their widest instance (`words=` fixes the width); each row
 costs its own instance's width, and the words past it are zero padding. `rl.numeric_values` decodes numeric words.
 
+## Derived words
+
+Derived atoms are never stored in states. `rl.expand(..., derived=True)` also returns, for every successor, the bitset of
+its derived atoms (`expansion.derived`, `[M, D]` words in the encoding of the states, bit `d` of the row for derived slot
+`d`), from one axiom evaluation of the successor row; the same evaluation yields the goal flag. `D` is
+`table.derived_words` (`suite.derived_words`: the widest domain; `task.derived_words` for one task), and 0 for tasks
+without derived atoms, whose arrays are zero-width. An instance with fewer derived words has zeros past its own. The
+words are exactly what the [relational encoder](encoding.md) evaluates itself, so they can replace its evaluation.
+Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
+output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(K)` /
+`K=` carry `padded.derived` `[N, K, D]` with zero padding, and device inputs fill the words on the device (every device
+expansion path, including tables of instances with axioms and suites). The torch ops `expand_derived` and
+`expand_flat_derived` return the words as a seventh result, and `Env.expand(..., derived=True)` /
+`Env.expand_flat(..., derived=True)` of `mymyr.rl.jax` fill the `derived` field (uint32 pairs).
+
+```python
+from pathlib import Path
+
+import mymyr
+from mymyr import rl
+
+data = Path("tests/data/pddl/features")
+task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01.pddl")
+expansion = rl.expand(task, [task.initial_state], derived=True)
+print(expansion.derived.shape)
+```
+
 ## JAX and PyTorch
 
 The optional `mymyr.rl.jax.Env` is a functional environment whose `reset` and `step` methods work under

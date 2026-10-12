@@ -2180,6 +2180,9 @@ void bind_task(nb::module_& m)
                      "their storage. Two tasks with equal encoding fingerprints read and write rows alike. A function "
                      "of the task and its options, except under lazy slots (it then changes as slots are assigned).")
         .def_prop_ro("label_width", [](const PyTask& t) { return t.core->label_width; }, "Largest schema arity.")
+        .def_prop_ro("derived_words", [](const PyTask& t) { return (t.core->task->atoms().derived_slots() + 63) / 64; },
+                     "u64 words of the derived-atom bitset of a state (rl.expand(..., derived=True)); 0 without derived "
+                     "atoms.")
         .def_prop_ro("numeric_slots", [](const PyTask& t) { return t.core->task->numeric_slots(); },
                      "Numeric fluent slots (ground fluent functions with a value; 0 for classical tasks).")
         .def_prop_ro("numeric_words", [](const PyTask& t) { return t.core->task->numeric_words(); },

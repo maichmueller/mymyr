@@ -26,6 +26,11 @@
 // (the batch is copied down first: ChunkGenerator's per-schema CPU fallback), and so do axioms whose body matchers are
 // beyond the kernels.
 //
+// Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
+// successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
+// words are zero; PerInstance parts are scattered at the caller's width. A mapped write leaves the larger batch's
+// derived rows to the caller to zero first.
+//
 // Destination-passing: every array of `out` is device memory the caller owns (null: not written); nothing of the
 // caller's is allocated. The work runs on one stream (set_stream; null: the context's stream) in stream order after
 // the work already enqueued there, which must have produced the input states and task ids. count() synchronizes once
