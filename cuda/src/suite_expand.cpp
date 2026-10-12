@@ -170,6 +170,8 @@ struct SuiteExpander::Impl
             e.schema = out.schema ? out.schema + p.base : nullptr;
             e.binding = out.binding ? out.binding + p.base * L : nullptr;
             e.goal = out.goal ? out.goal + p.base : nullptr;
+            e.derived_words = out.derived_words;
+            e.derived = out.derived ? out.derived + p.base * out.derived_words : nullptr;
             e.offsets = out.offsets ? out.offsets + p.first : nullptr;
             subs[p.domain]->write(e);
             need = std::max(need, e.words_needed);
@@ -204,7 +206,11 @@ struct SuiteExpander::Impl
         auto* go = out.offsets ? out.offsets : scratch_of<i32>(batch_offsets, ctx, n + 1, s);
         const u64 stb = lifted::scan_temp_bytes(n + 1);
         check(lifted::launch_scan(cnt, reinterpret_cast<u32*>(go), n + 1, scan.ensure(ctx, stb, s), stb, s), "launch_scan");
-        // each domain's rows straight at their batch positions, at the suite's widths
+        // each domain's rows straight at their batch positions, at the suite's widths; a part without axioms leaves its
+        // derived rows to this zero fill
+        if (out.derived && out.derived_words && std::min(total, out.capacity))
+            check(cudaMemsetAsync(out.derived, 0, std::min(total, out.capacity) * out.derived_words * sizeof(u64), s),
+                  "cudaMemsetAsync");
         u32 need = 0;
         for (usize k = 0; k < np; ++k)
         {
@@ -352,6 +358,11 @@ void SuiteExpander::write(rl::Expansion& out)
     if (out.succ && out.words > lifted::k_max_words)
         throw std::invalid_argument("mymyr: device expand: successor rows of " + std::to_string(out.words) +
                                     " words (the device kernels take at most " + std::to_string(lifted::k_max_words) + ")");
+    if (out.derived && !out.succ)
+        throw std::invalid_argument("mymyr: expand: derived words need the successor rows");
+    if (out.derived && out.derived_words < I.suite->derived_words())
+        throw std::invalid_argument("mymyr: expand: derived rows of " + std::to_string(out.derived_words) +
+                                    " words; the suite has instances of " + std::to_string(I.suite->derived_words()));
     if (out.numeric_words != I.suite->numeric_words())
         throw std::invalid_argument("mymyr: device expand: output numeric width differs from the suite");
     if (out.offsets && I.total > rl::k_max_rows)

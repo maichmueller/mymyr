@@ -262,6 +262,8 @@ struct Padded
     u32 label_width = 0;
     u8* goal = nullptr;
     u32* overflow = nullptr;  // set to 1 when some count > K or a successor is past the flat capacity
+    u64* derived = nullptr;   // [rows, K, derived_words], zero padding
+    u32 derived_words = 0;
 };
 struct Flat
 {
@@ -273,6 +275,8 @@ struct Flat
     const i32* binding = nullptr;
     u32 label_width = 0;
     const u8* goal = nullptr;
+    const u64* derived = nullptr;  // [capacity, derived_words]
+    u32 derived_words = 0;
 };
 cudaError_t launch_pad(Flat flat, u64 rows, Padded out, cudaStream_t s);
 
@@ -488,7 +492,10 @@ struct PartScatter
     const i32* binding = nullptr;
     u32 label_width = 0, out_label_width = 0;
     const u8* goal = nullptr;
+    const u64* derived = nullptr;  // [total, derived_words]
+    u32 derived_words = 0, out_derived_words = 0;
     u64 capacity = 0;
+    u64* out_derived = nullptr;
     u64* out_succ = nullptr;
     i32* out_schema = nullptr;
     i32* out_binding = nullptr;

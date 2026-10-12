@@ -226,6 +226,11 @@ public:
     /// literals evaluate the axioms of the rows on the device (views and axioms in chunks, in scratch of their own: the
     /// chunk's views stay). Needs device_axioms() or a goal without derived literals.
     void goal_flags(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out);
+    /// The derived words of n state rows (rows of `words` words, `stride` apart; numeric tails as in goal_flags) into
+    /// out [n, out_words] (device u64): each row's derived bitset from the axiom closure, zero past the task's own
+    /// derived words (all zero without axioms). out_words must be at least the task's derived words. Axioms the device
+    /// cannot run are evaluated on the CPU (the rows are copied down and the words up; this synchronizes).
+    void derived_rows(const u64* rows, u64 stride, u32 words, u64 n, u64* out, u32 out_words);
     /// Per-search conjunctions, selected by row_goals[order[i]] (row_goals[i] without order). Numeric programs read
     /// internal double tails; derived masks use the same axiom closure as task goals. Absent rows receive flag zero.
     void goal_flags(const u64* rows, u64 stride, u32 words, u64 row_count, const u32* order, u64 n, u8* out,

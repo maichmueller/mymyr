@@ -217,6 +217,11 @@ if(TARGET mymyr_cuda)
             MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
         gtest_discover_tests(mymyr_device_table_tests DISCOVERY_TIMEOUT 60
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+        # the derived words of the device expand against rl::expand
+        add_executable(mymyr_device_derived_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_derived.cpp)
+        target_link_libraries(mymyr_device_derived_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
+        gtest_discover_tests(mymyr_device_derived_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
         # the device env's calls captured into CUDA graphs and replayed, against eager calls and the host
         add_executable(mymyr_device_graphs_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_graphs.cpp frontend/golden.cpp)
         target_link_libraries(mymyr_device_graphs_tests PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings GTest::gtest_main)
