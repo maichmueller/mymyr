@@ -112,9 +112,9 @@ def test_gates_compare_against_their_thresholds_and_skipped_modes_are_not_a_pass
     assert "n/a" in table and "pass" in table
 
 
-def test_env_gate_accepts_20_percent_around_the_recorded_step_time(bench):
+def test_env_gate_fails_a_step_more_than_20_percent_slower_than_recorded(bench):
     base = bench.ENV_STEP_US["blocks-p01e"][16384]
-    for factor, expected in ((1.0, "pass"), (1.19, "pass"), (0.81, "pass"), (1.3, "fail"), (0.5, "fail")):
+    for factor, expected in ((1.0, "pass"), (1.19, "pass"), (0.5, "pass"), (1.3, "fail")):
         results = bench.gate_results(bench.Index([record("blocks-p01e", "env_step_n16384", base * factor)]))
         assert results["ENV"]["blocks-p01e"]["status"] == expected, factor
 

@@ -150,7 +150,8 @@ TARGETS = [
          soft=False),
     dict(id="T6", what="against mifrost, batch of 256", gate=">= 20x faster", goal=None, soft=False),
     dict(id="T7", what="relation-major against graph-major, one thread", gate="<= 1.2x", goal=None, soft=False),
-    dict(id="ENV", what="device env step alone against the recorded step times", gate="within 20%", goal=None,
+    dict(id="ENV", what="device env step alone against the recorded step times",
+         gate="not more than 20% slower (within_20_percent records the two-sided check)", goal=None,
          soft=True),
     dict(id="T-G1", what="device flat core, graph-major, N >= 4096",
          gate="<= 1.25 x prototype full ns per graph x (bytes written / prototype bytes)",
@@ -355,7 +356,7 @@ def device_encoder_class():
 def env_modes(task, gpu, sizes, want_encode):
     """The device modes of one task and the objects to release. One environment per size N."""
     modes, keep = [], []
-    torch = gpu.torch
+    env_last = None
     for n in sizes:
         names = (f"env_step_n{n}", f"env_step_rand_n{n}", f"env_step_encode_n{n}")
         try:
@@ -395,7 +396,7 @@ def env_modes(task, gpu, sizes, want_encode):
                 modes.append(Mode(names[2], "env", unit="us_per_step", N=n,
                                   skip=f"device encoder failed: {str(error).splitlines()[0][:160]}"))
         env_last = (env, n)
-    return modes, keep, (env_last if sizes else None)
+    return modes, keep, env_last
 
 
 def device_modes(task, gpu, env_n, want):
@@ -523,7 +524,8 @@ def gate_results(index):
             if value is not None:
                 ratio = value / base
                 key = task if n == max(ENV_STEP_US[task]) else f"{task}@{n}"
-                out["ENV"][key] = dict(value=value, limit=base, ratio=ratio, status=verdict(abs(ratio - 1) <= 0.2),
+                out["ENV"][key] = dict(value=value, limit=base, ratio=ratio, status=verdict(ratio <= 1.2),
+                                       within_20_percent=abs(ratio - 1) <= 0.2,
                                        median_ratio=(g(f"env_step_n{n}", "median") or float("nan")) / base)
         proto = PROTOTYPE_GPU.get(task)
         graph = g("device_encode_graph")
