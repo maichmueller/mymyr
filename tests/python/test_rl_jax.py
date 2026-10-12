@@ -46,6 +46,36 @@ def devices():
     return out
 
 
+def test_task_ids_outside_the_table_are_reported():
+    """Host ids are checked at the call; JAX ids by the native environment: on the CPU in the call, on a device by
+    check_errors() and by the general path's next step."""
+    table = rl.TaskTable([text_task("gripper__prob05"), text_task("gripper__prob05")])
+    for device in devices():
+        for path in ("auto", "general") if device == "cuda" else ("auto",):
+            env = rj.Env(table, device=device, path=path)
+            with pytest.raises(ValueError, match=r"^mymyr: task_ids: task id 99 of row 3 is outside the table's 2"):
+                env.reset(None, np.array([0, 1, 0, 99], np.int32))
+            state, _ = env.reset(None, np.array([0, 1, 0, 1], np.int32))
+            with pytest.raises(ValueError, match=r"^mymyr: next_task_ids: task id 5 of row 0 is outside"):
+                env.step(0, state, next_task_ids=[5, 0, 0, 0])
+            with pytest.raises(ValueError, match=r"^mymyr: task_ids: task id -1 of row 2"):
+                env.reset_where(state, np.array([False, False, True, False]), np.array([7, 7, -1, 0], np.int32))
+            env.reset_where(state, np.array([True, False, False, False]), np.array([1, 7, -1, 0], np.int32))
+            bad = jax.device_put(jnp.asarray([0, 1, 0, 99], jnp.int32), on(device))
+            if device == "cpu":
+                with pytest.raises(jax.errors.JaxRuntimeError, match="outside the table's 2 instances"):
+                    jax.block_until_ready(env.reset(None, bad)[0].states)
+                continue
+            state, _ = env.reset(None, bad)
+            if path == "general":  # the step's FFI call raises
+                with pytest.raises(jax.errors.JaxRuntimeError, match="a task id outside the table's 2 instances"):
+                    jax.block_until_ready(env.step(0, state)[0].states)
+            else:
+                with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+                    env.check_errors()
+            env.check_errors()
+
+
 def need_gpu():
     if "cuda" not in devices():
         pytest.skip("no visible CUDA device for JAX (set CUDA_VISIBLE_DEVICES and JAX_PLATFORMS)")

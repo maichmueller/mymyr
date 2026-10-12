@@ -262,6 +262,10 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 atomicOr(p.error, 4u);
             k = 0;
         }
+        // every row's next task id is checked, autoresetting or not (as the host checks them)
+        if (p.next_task_ids && p.error &&
+            (p.next_task_ids[i] < 0 || static_cast<u32>(p.next_task_ids[i]) >= p.in.count))
+            atomicOr(p.error, 4u);
         bool g = st == k_goal;
         if (st == k_ok)
             g = goal_row(t, p, i, k);
@@ -296,8 +300,6 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 const i32 x = p.next_task_ids[i];
                 if (x >= 0 && static_cast<u32>(x) < p.in.count)
                     next = static_cast<u32>(x);
-                else if (p.error)
-                    atomicOr(p.error, 4u);
             }
             const u32 n0 = reset_row(p.in, next, i, p.states, p.words, p.row_words, p.cache_counts,
                                      stride_of(p.count_stride, p.num_schemas), p.views, p.goal_pos, p.goal_neg, false);

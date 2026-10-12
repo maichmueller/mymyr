@@ -138,8 +138,8 @@ struct Finish
     u32 dead_end_terminal = 1;  // a dead end terminates
     Instances in;
     const i32* next_task_ids = nullptr;  // [rows]: the instance an autoresetting row restarts in (null: its own)
-    u32* error = nullptr;                // value 4: a task id outside the table (a next id: the row kept its
-                                         // instance; the row's own: tested as instance 0)
+    u32* error = nullptr;                // value 4: a task id outside the table (a next id of any row, used or not;
+                                         // an autoresetting row keeps its instance; the row's own: instance 0)
     u32* order_bad = nullptr;            // reset to 0 for the next step (Select sets it)
     // outputs (null: not written)
     f32* reward = nullptr;

@@ -152,8 +152,9 @@ public:
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
     void goal(const rl::EnvBatch& b, u8* goal);
     /// rl::HostEnv::step on device arrays; action [rows] (device, none: the random policy); next_task_ids [rows]
-    /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it
-    /// keeps the row's instance and is reported by check_errors()).
+    /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it,
+    /// in any row, is reported by check_errors() and by the general path's next step or refresh, and an autoresetting
+    /// row keeps its instance).
     void step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions action = {}, const i32* next_task_ids = nullptr);
     /// The random policy's next choices without a step (TorchRL's rand_action): out[i] = the successor index step()
     /// would draw now for row i (draws, count [rows] device; the env's key, env id first_env + i), limited to

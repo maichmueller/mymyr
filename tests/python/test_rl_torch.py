@@ -557,6 +557,27 @@ def test_device_task_ids_outside_the_table_raise():
         penv.reset(td)  # the reset waits for the device and raises its errors
     td["next_task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
     assert penv.reset(td)["task_id"].tolist() == [1, 1, 0, 0]
+    # a next task id outside the table is reported in any row, autoresetting or not (as the host checks them)
+    env.step(next_task_ids=torch.tensor([0, 0, 7, 0], dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.check_errors()
+
+
+@pytest.mark.needs_gil
+def test_general_path_raises_device_task_ids_at_its_next_step():
+    """The general path synchronizes in its steps and refreshes: they raise the ids an earlier call flagged."""
+    dev = gpu()
+    env = rt.BatchedEnv(gripper_table(), 4, device=dev, path="general")
+    env.reset(task_ids=torch.tensor([0, 1, 0, 99], dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.step()
+    env.step()  # reported once
+    env.reset(task_ids=torch.tensor(1, dtype=torch.int32, device=dev))  # one id for every row
+    assert env.task_ids.tolist() == [1, 1, 1, 1]
+    env.step(next_task_ids=torch.tensor([0, 0, 7, 0], dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.refresh()
+    env.check_errors()
 
 
 # ------------------------------------------------------------------------------------------------ rand_action, ParallelEnv, collectors

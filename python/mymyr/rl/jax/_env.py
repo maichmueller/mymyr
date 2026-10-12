@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from mymyr._core import _rl_jax
+from mymyr._core import _rl, _rl_jax
 from mymyr.rl._sampling import _instance_sampler
 
 from . import _ffi
@@ -249,7 +249,28 @@ class Env:
                     f"mymyr: a batch over a table of {self.num_instances} instances needs task ids"
                 )
             return jnp.zeros((n,), jnp.int32)
-        return jnp.asarray(task_ids).astype(jnp.int32)
+        return self._checked(task_ids, "task_ids")
+
+    def _checked(self, ids: Any, name: str, mask: Any = None) -> Any:
+        """``ids`` as int32. Host values (ints, sequences, NumPy arrays) are checked here: ValueError for an id outside
+        the table's (suite's) instances in a row the call uses (``mask``: the masked rows, when it is concrete). JAX
+        arrays are checked by the native environment: on the CPU in the call, on a device by :meth:`check_errors` and
+        the general path's next step or refresh (which synchronize)."""
+        if not isinstance(ids, jax.Array):
+            flat = np.asarray(ids, np.int64).reshape(-1)
+            bad = (flat < 0) | (flat >= self.num_instances)
+            if isinstance(mask, jax.core.Tracer):
+                bad[:] = False  # a traced mask: the native environment checks the rows it uses
+            elif mask is not None:
+                bad &= np.broadcast_to(np.asarray(mask, np.bool_).reshape(-1), bad.shape)
+            if bad.any():
+                r = int(np.flatnonzero(bad)[0])
+                multi = isinstance(self.table, _rl.TaskSuite) and self.table.num_domains > 1
+                raise ValueError(
+                    f"mymyr: {name}: task id {int(flat[r])} of row {r} is outside the "
+                    f"{'suite' if multi else 'table'}'s {self.num_instances} instances"
+                )
+        return jnp.asarray(ids).astype(jnp.int32)
 
     def observation(self, state: EnvState) -> Observation:
         """The observation of ``state``."""
@@ -322,7 +343,7 @@ class Env:
         reset_counts = state.reset_counts if key is None else jnp.where(m, jnp.uint32(0), state.reset_counts)
         if task_ids is None and self.sampler is not None:
             task_ids = self.sampler.sample(sampling_seed, state.env_id, reset_counts)
-        ids = state.task_id if task_ids is None else jnp.where(m, jnp.asarray(task_ids, jnp.int32), state.task_id)
+        ids = state.task_id if task_ids is None else jnp.where(m, self._checked(task_ids, "task_ids", mask), state.task_id)
         keep = goal_pos is not None or goal_neg is not None
         gpos, gneg = state.goal_pos, state.goal_neg
         if keep:
@@ -369,7 +390,9 @@ class Env:
             act = jnp.zeros((0,), jnp.int32) if action is None else jnp.asarray(action).astype(jnp.int32)
             if next_task_ids is None and self.sampler is not None and self.autoreset:
                 next_task_ids = self.sampler.sample(state.sampling_seed, state.env_id, state.reset_counts)
-            nxt = jnp.zeros((0,), jnp.int32) if next_task_ids is None else jnp.asarray(next_task_ids).astype(jnp.int32)
+            nxt = (
+                jnp.zeros((0,), jnp.int32) if next_task_ids is None else self._checked(next_task_ids, "next_task_ids")
+            )
             outs = _ffi.env_step(
                 self.handle,
                 state.states,
