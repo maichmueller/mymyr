@@ -1,6 +1,6 @@
 """The Python API of the relational encoder: FlatRelationEncoder and FlatBatch. The graphs are checked against an
 independent reconstruction from the state's atoms and against the C++ encoder's bytes, and the input and output interop
-(State lists, u32 rows, zero-copy exports) and the error mapping are tested. Parity with mifrost is in
+(State lists, u32 rows, zero-copy exports) and the error mapping are tested. Parity is in
 test_encoding_parity.py."""
 
 import gc
