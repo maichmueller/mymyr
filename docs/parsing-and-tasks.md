@@ -34,11 +34,26 @@ print(action, next_state.numeric_values())
 
 ## Semantics
 
-mymyr implements the PDDL semantics of mimir, with the differences listed at the end of this section.
+The semantics of the supported PDDL fragment are as follows; the notes at the end of this section list the points where an implementation could reasonably differ.
 
 - **Types.** A parameter, a quantified variable or a `forall` effect variable of type `(either a b)` ranges over the
   objects of `a`, of `b` and of their subtypes. An object or constant declared `(either a b)` belongs to `a`, to `b`
   and to their supertypes.
+- **Conditions.** Goals, preconditions, effect conditions (also inside `forall` effects and nested conditional
+  effects) and derived predicate bodies may use every condition of the ADL fragment: `and`, `or`, `not` over any
+  condition, `imply`, typed `exists` and `forall` in any nesting, equality `(= ?x ?y)`, constants and numeric
+  comparisons. They are compiled into conjunctions of literals and comparisons plus derived predicates, as in Fast
+  Downward's translator. Negations are pushed down to literals and comparisons; a negated comparison is the
+  complementary one. A universal quantifier becomes the negated literal of a derived predicate `axiom_<k>` that holds
+  when some binding satisfies the negated body. Disjunctions split an action or a derived predicate rule into one copy
+  per disjunct, and a conditional effect into one effect per disjunct. An existential precondition adds its variables
+  to the action's parameters, so the actions list one instance per witness. A goal part that is not a literal or a
+  comparison becomes a nullary derived predicate `axiom_<k>`. So does the condition of an effect inside a `forall`
+  effect that quantifies universally over the effect's variable, as a derived predicate over its free variables. The
+  helper predicates `axiom_<k>` appear in `task.formalism` and among a state's derived atoms like any other derived
+  predicate. Two consequences: a comparison with an undefined side does not falsify a universal quantifier (it is
+  false negated, too), and a derived predicate that depends on itself through a universal quantifier is refused as not
+  stratifiable (`ValueError`).
 - **Conditional effects.** The effects whose conditions hold in the state an action is applied to fire, and every
   effect reads the values of that state. A numeric effect that fires conflicts with an earlier one of the same action
   on the same ground function: an `assign` with any other effect, an additive effect (`increase`, `decrease`) with a
@@ -81,17 +96,20 @@ refused = search.astar(mymyr.Task(fuel.instantiate_string(fuel_problem.format("m
 assert refused.status == search.Status.FAILED and "maximize" in refused.message
 ```
 
-Differences from mimir:
+Notes:
 
-- a variable of type `(either a b)` ranges over the objects of `a` and of `b` (mimir takes the objects of both);
+- a variable of type `(either a b)` ranges over the objects of `a` and of `b`;
+- goals with a quantifier or a disjunction over a conjunction (such as `(forall (?x - t) (imply (s ?x) (p ?x)))`),
+  effect conditions with a universal quantifier over a `forall` effect's variable and conditional effects nested in a
+  conditional effect with an existential condition load;
 - a conditional effect that does not fire records no effect family, so it cannot make its action inapplicable;
-- in a numeric constraint without parameters, a unary minus over an expression with fluents is kept (mimir drops it);
+- in a numeric constraint without parameters, a unary minus over an expression with fluents is kept;
 - a division by zero is undefined also between constants, and a `scale-down` by zero makes its action inapplicable;
 - `maximize` metrics and metrics that combine `total-cost` with other terms are refused rather than minimized, and an
   undefined metric value is an error;
-- the transition costs of a state space are the exact sums of the actions' `total-cost` increases (mimir computes
-  `(d + c) - d` for the search depth `d`, which rounds fractional costs), so its goal distances equal plan costs;
-- heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), where mimir's count
+- the transition costs of a state space are the exact sums of the actions' `total-cost` increases (no cost is computed as
+  a difference of depths, which would round fractional costs), so its goal distances equal plan costs;
+- heuristics use the task's action costs by default (`costs="auto"`, see the heuristics guide), whereas the unit-cost heuristics count
   every action 1.
 
 ## Errors
@@ -152,7 +170,7 @@ and `task.options` returns them:
 | `reachability_budget` | steps, default `2**25`; `0` is unbounded | work bound of the analysis behind `'auto'` and `'reachable'` |
 | `numeric_storage` | `'auto'` (default), `'i32'`, `'f64'` | the type of a numeric slot |
 | `numeric_quantum` | `0` (default) or `q > 0` | stored values snap to multiples of `q` |
-| `numeric_tolerant` | `False` (default) | mimir-C# numeric semantics |
+| `numeric_tolerant` | `False` (default) | tolerant numeric semantics: values below 1e6 snap to a 1e-9 grid, comparisons use a 1e-9 tolerance |
 | `matching`, `fc_free_params` | `'auto'`, `'fixed'`, `'fc'`; `4` | how bindings are matched (no effect on the encoding) |
 
 **Atom slots.** The *typed-dense* space of a task has one atom per predicate and object tuple whose objects can occur
@@ -235,17 +253,25 @@ duplicates:
 - a literal over a static predicate (equality included) is kept, whether it holds in the initial atoms or not; when it
   fails, `task.encoding_goal_unsatisfiable` is true, because no state is a goal;
 - negation is pushed inward: `not or` is a conjunction of negations, `not exists` a `forall` of the negation,
-  `not imply ψ φ` with a static `ψ` that holds is `not φ`, and `not not φ` is `φ`.
+  `not imply ψ φ` with a static `ψ` that holds is `not φ`, and `not not φ` is `φ`;
+- a disjunction is decided by static atoms and equality where they can: `or`, `not and` (the disjunction of the
+  negated parts), `exists` and `not forall` (a disjunct per binding of the variables) and `imply ψ φ` whose `ψ` they
+  do not decide (`not ψ` or `φ`). When a disjunct holds, the disjunction contributes nothing; when all disjuncts but
+  one fail, that one is expanded like any conjunct (its static literals kept); when all fail, the last one is
+  expanded, and its failing static literals make the goal unsatisfiable. So
+  `(forall (?x - t) (or (not (s ?x)) (p ?x)))` with a static `s` is expanded like
+  `(forall (?x - t) (imply (s ?x) (p ?x)))`, and `(exists (?x - t) (and (s ?x) (p ?x)))` with a single object `o`
+  that has `s` is `(s o)` and `(p o)`.
 
-A conjunct that cannot be expanded (`or`, `exists`, `imply` over fluents, `not and`, `not forall`, a numeric constraint) is
-left out, and `task.encoding_goal_complete` is false. For a task whose goal is a conjunction of literals, the encoding
-goal is the goal itself and `encoding_goal_complete` is true. The planner's goal, `task.goal_condition` and the search
-are unaffected. `Task.from_text` has no goal as written: the encoding goal is the planner's goal without the `axiom_<k>`
-literals, complete if there were none, unless the text carries it (`NormalizedTask.to_text(encoding_goal=True)`).
-The bindings of the quantifiers of a goal are counted up front (the product of the sizes of their domains): a
-conjunct whose quantifiers would take the goal past 2^24 bindings in total is left out whole, and the goal is
-incomplete. A task built without a front end (a `TaskData` with no recorded encoding goal) gets the text derivation
-described above when the `Task` is created.
+A conjunct that cannot be expanded (a disjunction with two or more disjuncts that static atoms and equality do not
+decide, a numeric constraint) is left out, and `task.encoding_goal_complete` is false. For a task whose goal is a
+conjunction of literals, the encoding goal is the goal itself and `encoding_goal_complete` is true. The planner's
+goal, `task.goal_condition` and the search are unaffected. `Task.from_text` has no goal as written: the encoding goal
+is the planner's goal without the `axiom_<k>` literals, complete if there were none, unless the text carries it
+(`NormalizedTask.to_text(encoding_goal=True)`). The bindings of the quantifiers of a goal are counted up front (the
+product of the sizes of their domains): a conjunct whose quantifiers would take the goal past 2^24 bindings in total
+is left out whole, and the goal is incomplete. A task built without a front end (a `TaskData` with no recorded
+encoding goal) gets the text derivation described above when the `Task` is created.
 
 The text derivation recognizes the derived predicates that goal normalization introduced by their name (`axiom_<k>`),
 so a task read from text whose goal uses a user predicate of that name has it left out of the encoding goal (and the

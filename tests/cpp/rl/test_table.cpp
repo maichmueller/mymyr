@@ -11,7 +11,6 @@
 //     sends of several home ranges from several caller threads at once and recycled batches; with instance sampling
 //     its starts, resets and autoresets are the counter draws of each env (rl/sampling.hpp).
 
-#include "../frontend/golden.hpp"
 #include "table_instance_sets.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/rl/env.hpp"
@@ -93,7 +92,7 @@ std::vector<Set> sets(TaskOptions::Atoms atoms)
         std::vector<TaskPtr> tasks = load_set(s, atoms);
         if (tasks.empty())
         {
-            ADD_FAILURE() << "missing PDDL of set " << s.name << " (MYMYR_FORK_DATA_DIR)";
+            ADD_FAILURE() << "missing PDDL of set " << s.name << "";
             continue;
         }
         auto table = rl::TaskTable::create(tasks);

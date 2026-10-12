@@ -48,7 +48,7 @@ inline std::vector<Set> sets(TaskOptions::Atoms atoms)
         std::vector<TaskPtr> tasks = load_set(s, atoms);
         if (tasks.empty())
         {
-            ADD_FAILURE() << "missing PDDL of set " << s.name << " (MYMYR_FORK_DATA_DIR)";
+            ADD_FAILURE() << "missing PDDL of set " << s.name << "";
             continue;
         }
         auto table = rl::TaskTable::create(tasks);

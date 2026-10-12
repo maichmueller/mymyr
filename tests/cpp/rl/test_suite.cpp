@@ -9,7 +9,6 @@
 //     next_task_ids restart rows in instances of other domains; per-env goals; both dead-end modes;
 //   - rl::CpuEnvPool over a suite equals rl::HostEnv over it.
 
-#include "../frontend/golden.hpp"
 #include "table_instance_sets.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/rl/env.hpp"
@@ -48,7 +47,7 @@ std::map<std::string, Domain> domains(TaskOptions::Atoms atoms)
         std::vector<TaskPtr> tasks = load_set(s, atoms);
         if (tasks.empty())
         {
-            ADD_FAILURE() << "missing PDDL of set " << s.name << " (MYMYR_FORK_DATA_DIR)";
+            ADD_FAILURE() << "missing PDDL of set " << s.name << "";
             continue;
         }
         auto table = rl::TaskTable::create(tasks);

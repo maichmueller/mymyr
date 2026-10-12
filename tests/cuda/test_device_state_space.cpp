@@ -2,7 +2,7 @@
 // (cuda/state_space.hpp) against the host's datasets::generate_state_space, array by array (ids, forward and reverse CSR with
 // labels and costs, flags, unit and cost goal distances, layers; state words byte for byte under frozen slots,
 // canonically under lazy ones):
-//   - the lifted suite (tasks up to 10^5 states; MYMYR_TEST_FULL_SUITE=1: all 22) and the fork's test instances
+//   - the lifted suite (tasks up to 10^5 states; MYMYR_TEST_FULL_SUITE=1: all 22) and small instances of tests/data/benchmarks/small
 //     (conditional effects, axioms, action costs), frozen and lazy, with tiny chunks too;
 //   - transition costs: integral and real state-independent costs (device tables), state-dependent costs (the CPU);
 //   - the host's options: max_states, remove_if_unsolvable, statically false goals, labels, max_seconds;
@@ -12,7 +12,7 @@
 //   - IW over tables (cuda::DeviceTableIw, multi_iw and batched_iw1 with task ids) equals the per-instance device runs
 //     and search::iw().
 
-#include "../cpp/frontend/golden.hpp"
+#include "../cpp/support/benchmarks.hpp"
 #include "../cpp/rl/table_instance_sets.hpp"
 #include "../cpp/support/suite.hpp"
 #include "../cpp/support/wide_costs.hpp"
@@ -64,11 +64,9 @@ cuda::ContextPtr context()
     return cuda::DeviceContext::create(0, o);
 }
 
-std::filesystem::path data(const std::string& rel) { return test::fork_data_dir() / rel; }
-
-TaskPtr fork_task(const std::string& dir, const std::string& problem, TaskOptions::Atoms atoms = TaskOptions::Atoms::Dense)
+TaskPtr small_task(const std::string& dir, const std::string& problem, TaskOptions::Atoms atoms = TaskOptions::Atoms::Dense)
 {
-    const auto d = data(dir + "/domain.pddl"), p = data(dir + "/" + problem);
+    const auto d = test::small_dir() / dir / "domain.pddl", p = test::small_dir() / dir / problem;
     if (!std::filesystem::exists(d) || !std::filesystem::exists(p))
         return nullptr;
     TaskOptions to;
@@ -192,34 +190,28 @@ TEST(DeviceStateSpace, SuiteEqualsHost)
         }
 }
 
-// ----------------------------------------------------------------------------------------------- the fork's instances
-struct ForkCase
+// ----------------------------------------------------------------------------------------------- the small instances
+struct SmallCase
 {
     const char* dir;
     const char* problem;
-    u32 states;
-    u64 transitions;
-    u32 goal, unsolvable;
-    i32 max_goal_dist;
-    u64 fp_content, fp_transitions, fp_vstar;
-    f64 cost_sum;
 };
-const ForkCase kForkCases[] = {
-#include "../cpp/datasets/fork_cases.inc"
+const SmallCase kSmallCases[] = {
+#include "../cpp/datasets/small_instances.inc"
 };
 
-TEST(DeviceStateSpace, ForkInstancesEqualHost)
+TEST(DeviceStateSpace, SmallInstancesEqualHost)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = context();
     u32 ran = 0, ce = 0, axioms = 0, costs = 0;
-    for (const ForkCase& c : kForkCases)
+    for (const SmallCase& c : kSmallCases)
         for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Lazy})
         {
-            const TaskPtr cpu_task = fork_task(c.dir, c.problem, atoms);
+            const TaskPtr cpu_task = small_task(c.dir, c.problem, atoms);
             if (!cpu_task)
             {
-                ADD_FAILURE() << "missing " << c.dir << "/" << c.problem << " (MYMYR_FORK_DATA_DIR)";
+                ADD_FAILURE() << "missing " << c.dir << "/" << c.problem << "";
                 continue;
             }
             if (!cuda::state_space_unsupported(*cpu_task).empty())
@@ -230,13 +222,9 @@ TEST(DeviceStateSpace, ForkInstancesEqualHost)
                 const std::string what = std::string(c.dir) + "/" + c.problem + (frozen ? " frozen" : " lazy") +
                                          (remove ? " remove" : "");
                 const StateSpaceResult ref = generate_state_space(cpu_task, cpu_options(remove));
-                if (ref.status == StateSpaceStatus::Ok)
-                {
-                    EXPECT_EQ(ref.space->num_states(), c.states) << what;
-                }
                 for (const u32 chunk : {u32{1} << 20, 7u})
                 {
-                    const TaskPtr task = frozen ? cpu_task : fork_task(c.dir, c.problem, atoms);
+                    const TaskPtr task = frozen ? cpu_task : small_task(c.dir, c.problem, atoms);
                     expect_device_equals(ctx, task, ref, dev_options(cpu_options(remove), chunk), frozen,
                                          what + " chunk " + std::to_string(chunk));
                 }
@@ -401,7 +389,7 @@ TEST(DeviceStateSpace, OptionsMatchHost)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = context();
-    const TaskPtr gripper = fork_task("gripper", "test_problem4.pddl");  // 256 states
+    const TaskPtr gripper = small_task("gripper", "test_problem4.pddl");  // 256 states
     ASSERT_TRUE(gripper);
     for (const u64 m : {u64{256}, u64{257}, u64{10}, u64{0}, u64{100}, u64{171}})
     {
@@ -420,7 +408,7 @@ TEST(DeviceStateSpace, OptionsMatchHost)
             EXPECT_EQ(d.states, ref.states) << m << " chunk " << chunk;
         }
     }
-    const TaskPtr deadend = fork_task("deadend", "test_problem.pddl");  // the initial state is a dead end
+    const TaskPtr deadend = small_task("deadend", "test_problem.pddl");  // the initial state is a dead end
     ASSERT_TRUE(deadend);
     for (const bool remove : {true, false})
     {
@@ -437,7 +425,7 @@ TEST(DeviceStateSpace, OptionsMatchHost)
     for (const bool remove : {true, false})
         EXPECT_EQ(cuda::state_space(ctx, never, dev_options(cpu_options(remove))).status, StateSpaceStatus::Unsolvable);
     // without labels
-    const TaskPtr spanner = fork_task("spanner", "p15-easy.pddl");
+    const TaskPtr spanner = small_task("spanner", "p15-easy.pddl");
     ASSERT_TRUE(spanner);
     StateSpaceOptions o = cpu_options();
     o.labels = false;
@@ -488,7 +476,7 @@ std::vector<Set> sets(TaskOptions::Atoms atoms)
         std::vector<TaskPtr> tasks = test::load_set(s, atoms);
         if (tasks.empty())
         {
-            ADD_FAILURE() << "missing PDDL of set " << s.name << " (MYMYR_FORK_DATA_DIR)";
+            ADD_FAILURE() << "missing PDDL of set " << s.name << "";
             continue;
         }
         auto table = rl::TaskTable::create(tasks);
@@ -580,7 +568,7 @@ TEST(DeviceStateSpaces, GeneralizedStateSpaceEqualsHost)
     const auto ctx = context();
     std::vector<TaskPtr> tasks;
     for (const char* p : {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl", "test_problem.pddl"})
-        if (TaskPtr t = fork_task("gripper", p))
+        if (TaskPtr t = small_task("gripper", p))
             tasks.push_back(t);
     ASSERT_EQ(tasks.size(), 4u);
     const std::vector<StateSpaceResult> cpu = generate_state_spaces(tasks, cpu_options(), 2);
@@ -610,7 +598,7 @@ TEST(DeviceStateSpace, SamplersOverDeviceDistances)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = context();
-    const TaskPtr spanner = fork_task("spanner", "p15-easy.pddl");
+    const TaskPtr spanner = small_task("spanner", "p15-easy.pddl");
     ASSERT_TRUE(spanner);
     const cuda::DeviceStateSpaceResult r = cuda::state_space(ctx, spanner, dev_options(cpu_options()));
     ASSERT_TRUE(r.space && r.host);

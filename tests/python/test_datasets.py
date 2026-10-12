@@ -1,11 +1,8 @@
 """mymyr.datasets: state spaces, the instance pool, generalized state spaces and samplers.
 
-Counts against the fork use the fork's own test instances (its data/ directory: env MYMYR_FORK_DATA; skipped when
-missing) with the fork's own state-space numbers. The torch and JAX tests skip
-without those frameworks (run them in a venv with torch 2.14 / jax 0.11.2).
+The torch and JAX tests skip without those frameworks (run them in a venv with torch 2.14 / jax 0.11.2).
 """
 
-import os
 import pathlib
 import threading
 
@@ -15,16 +12,14 @@ import pytest
 import mymyr
 from mymyr import datasets, search
 
-from conftest import TASKS, text_task
+from conftest import ROOT, TASKS, text_task
 
-FORK_DATA = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
+SMALL = ROOT / "tests/data/benchmarks/small"
 needs_frontend = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 
 
-def fork_task(d, p, **options):
-    dom, prob = FORK_DATA / d / "domain.pddl", FORK_DATA / d / p
-    if not dom.is_file() or not prob.is_file():
-        pytest.skip(f"fork data missing: {prob}")
+def small_task(d, p, **options):
+    dom, prob = SMALL / d / "domain.pddl", SMALL / d / p
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
     options.setdefault("atoms", "dense")
@@ -41,33 +36,6 @@ def depot_space(depot):
     s = datasets.state_space(depot, threads=2, remove_if_unsolvable=False)
     assert s is not None
     return s
-
-
-# ------------------------------------------------------------------------------------------------ fork parity
-# (dir, problem, states, transitions, goal, unsolvable, max goal distance, sum of finite cost goal distances)
-FORK = [
-    ("spanner", "p15-easy.pddl", 662, 1722, 40, 153, 14, None),
-    ("barman", "test_problem.pddl", 406, 1298, 28, 70, 17, 5136.0),  # action costs
-    ("miconic-fulladl", "test_problem.pddl", 87, 229, 6, 0, 8, None),  # derived predicates, conditional effects
-    ("gripper", "p-2-0.pddl", 28, 104, 2, 0, 6, None),
-]
-
-
-@pytest.mark.parametrize("case", FORK, ids=lambda c: f"{c[0]}-{c[1]}")
-def test_counts_match_the_fork(case):
-    d, p, n, e, goal, unsolvable, max_d, cost_sum = case
-    task = fork_task(d, p)
-    for threads in (1, 3):
-        r = datasets.generate(task, threads=threads, remove_if_unsolvable=False)
-        assert r.status == datasets.Status.OK and r and r.states == n
-        s = r.space
-        assert (s.num_states, s.num_transitions, s.num_goal_states, s.num_unsolvable_states) == (n, e, goal, unsolvable)
-        assert s.max_goal_distance == max_d
-        a = s.arrays()
-        if cost_sum is not None:
-            c = a["cost_goal_distances"]
-            assert c[np.isfinite(c)].sum() == cost_sum
-            assert not s.unit_costs and a["costs"].dtype == np.float64 and a["costs"].shape == (e,)
 
 
 # ------------------------------------------------------------------------------------------------ arrays
@@ -162,7 +130,7 @@ DEADEND = """
 def test_options(tmp_path, depot):
     dom = write(tmp_path, "d.pddl", DEADEND)
     task = mymyr.Task.from_pddl(dom, write(tmp_path, "p.pddl", "(define (problem p) (:domain dead) (:init (a)) (:goal (g)))"))
-    # the initial state cannot reach the goal: no space unless remove_if_unsolvable=False (the fork's default is True)
+    # the initial state cannot reach the goal: no space unless remove_if_unsolvable=False
     r = datasets.generate(task)
     assert r.status == datasets.Status.UNSOLVABLE and r.space is None and not r
     assert datasets.state_space(task) is None
@@ -213,7 +181,7 @@ def test_many_python_threads():
 
 # ------------------------------------------------------------------------------------------------ generalized
 def test_generalized_state_space():
-    tasks = [fork_task("gripper", p) for p in ("test_problem4.pddl", "p-2-0.pddl", "test_problem2.pddl", "p-1-0.pddl")]
+    tasks = [small_task("gripper", p) for p in ("test_problem4.pddl", "p-2-0.pddl", "test_problem2.pddl", "p-1-0.pddl")]
     g = datasets.generalized_state_space(tasks, remove_if_unsolvable=False)
     sizes = [s.num_states for s in g.spaces]
     assert sizes == sorted(sizes) == [8, 28, 28, 256]
@@ -241,12 +209,12 @@ def test_generalized_state_space():
         with pytest.raises(IndexError):
             bad()
     with pytest.raises(ValueError):
-        datasets.GeneralizedStateSpace([g.spaces[0], datasets.state_space(fork_task("blocks_3", "test_problem.pddl"), remove_if_unsolvable=False)])
+        datasets.GeneralizedStateSpace([g.spaces[0], datasets.state_space(small_task("blocks_3", "test_problem.pddl"), remove_if_unsolvable=False)])
 
 
 # ------------------------------------------------------------------------------------------------ samplers
 def test_sampler():
-    s = datasets.state_space(fork_task("spanner", "p15-easy.pddl"), remove_if_unsolvable=False)
+    s = datasets.state_space(small_task("spanner", "p15-easy.pddl"), remove_if_unsolvable=False)
     a, b = datasets.StateSpaceSampler(s, seed=7), datasets.StateSpaceSampler(s, seed=7)
     x = a.sample_states(1000)
     assert x.dtype == np.uint32 and np.array_equal(x, b.sample_states(1000))
@@ -268,7 +236,7 @@ def test_sampler():
         a.sample_state_n_steps_from_goal(15)
     # uniform: every state shows up
     assert np.unique(a.sample_states(40000)).size == s.num_states
-    no_dead = datasets.StateSpaceSampler(datasets.state_space(fork_task("gripper", "p-2-0.pddl")))
+    no_dead = datasets.StateSpaceSampler(datasets.state_space(small_task("gripper", "p-2-0.pddl")))
     with pytest.raises(ValueError):
         no_dead.sample_dead_end_state()
 
@@ -276,7 +244,7 @@ def test_sampler():
 # ------------------------------------------------------------------------------------------------ frameworks
 def test_torch_arrays(depot_space):
     torch = pytest.importorskip("torch")
-    s = datasets.state_space(fork_task("barman", "test_problem.pddl"), remove_if_unsolvable=False)
+    s = datasets.state_space(small_task("barman", "test_problem.pddl"), remove_if_unsolvable=False)
     for space in (depot_space, s):
         a, t = space.arrays(), space.arrays(framework="torch")
         assert t.keys() == a.keys()

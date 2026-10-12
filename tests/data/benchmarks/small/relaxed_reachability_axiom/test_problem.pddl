@@ -1,0 +1,6 @@
+(define (problem relaxed-reachability-axiom-1)
+  (:domain relaxed-reachability-axiom)
+  (:objects b1 b2 b3 - block)
+  (:init (clear b2) (clear b3) (stackable b1 b2) (stackable b2 b3))
+  (:goal (above b1 b3))
+)

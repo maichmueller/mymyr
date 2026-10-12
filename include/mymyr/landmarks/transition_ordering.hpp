@@ -1,5 +1,5 @@
 #pragma once
-// The landmark transition ordering, matching mimir 0.16.3's LandmarkTransitionOrderingStrategy: a
+// The landmark transition ordering: a
 // search::TransitionOrdering for IW's width-1 pass.
 //
 //   auto graph = mymyr::landmarks::approximate_fact_landmarks(*task);

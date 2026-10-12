@@ -128,7 +128,7 @@ TEST(LandmarkHeuristicsPddl, LmCutChargesAnActionOnceForAllOfItsConditionalEffec
 
 TEST(LandmarkHeuristicsPddl, EffectsWhoseStaticConditionFailsNeverFire)
 {
-    // workat d maintains the planes at d, a static fact; mimir's relaxation (and h_max) ignores it and lets either
+    // workat d maintains the planes at d, a static fact; the relaxation (and h_max) ignores it and lets either
     // action maintain both planes
     const auto t = make(R"((define (domain d) (:requirements :adl :typing)
  (:types plane day)

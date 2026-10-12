@@ -38,6 +38,10 @@ host, expanded on the host's threads and the successors copied back, which synch
 those instances take the host and the others stay on the device, so the environments' general path serves every
 table and suite; the fast path and CUDA graph capture need every instance on the device. Unsupported schema/axiom
 plans use the documented CPU fallback.
+The derived predicates `axiom_<k>` compiled from quantified and disjunctive conditions (see
+[Parsing and tasks](parsing-and-tasks.md)) are axioms like any other: the device evaluates their rules, unless a rule
+has a numeric comparison or more parameters than the device kernels take; then the task's axioms run on the CPU
+(`stats["device_axioms"] == 0`) and the results are the same.
 The device evaluates numeric conditions and effects only in tasks with numeric state values: a task whose numeric
 conditions or effects read only static functions and functions that never get a value (no initial value, no `assign`
 effect) is refused with `ValueError`; run it on the CPU.

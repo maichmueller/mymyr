@@ -1,6 +1,6 @@
 #pragma once
 // Lifted fact landmarks: necessary subgoals over partially ground atoms, straight from the schemas (Wichlacz, Höller &
-// Hoffmann, "Landmark Heuristics for Lifted Classical Planning", IJCAI 2022, §3.1), with mimir 0.16.3's
+// Hoffmann, "Landmark Heuristics for Lifted Classical Planning", IJCAI 2022, §3.1), with
 // delete-relaxed reachability refinements.
 //
 //   auto g = mymyr::landmarks::lifted_fact_landmarks(*task);
@@ -9,7 +9,7 @@
 // Back-chaining from the positive fluent goal atoms: for a pattern P(u) (free positions allowed) the achievers are the
 // (schema, conditional effect, add literal) triples unifying with it; for every fluent predicate Q that every achiever's
 // positive fluent precondition mentions, the position-wise agreement of one chosen occurrence per achiever is a
-// landmark pattern, with the member atoms its achievers' completions can produce. The reading is mimir's:
+// landmark pattern, with the member atoms its achievers' completions can produce. The reading:
 //   - a landmark with a member true initially is recorded, never expanded;
 //   - achievers by unification (type-compatible objects, repeated variables agree);
 //   - static filter (use_static_filter): static literals narrow the candidate objects of free parameters to a

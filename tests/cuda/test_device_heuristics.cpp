@@ -29,7 +29,7 @@
 #include "mymyr/task/workspace.hpp"
 
 #if defined(MYMYR_DEVICE_HEURISTICS_FRONTEND)
-#include "../cpp/frontend/golden.hpp"
+#include "../cpp/support/benchmarks.hpp"
 #include "mymyr/frontend/domain.hpp"
 #endif
 
@@ -775,8 +775,7 @@ TEST(CudaBestFirst, BudgetsStartsAndRefusals)
 #if defined(MYMYR_DEVICE_HEURISTICS_FRONTEND)
 // ------------------------------------------------------------------------------------------------ PDDL tasks
 
-/// The A* rows compared with the fork (tests/cpp/search/test_best_first_golden.cpp):
-/// the heuristics on sampled states with unit and real costs, device A* at the gate's batch ("DEVICE_VS_CPU" lines).
+/// The heuristics on sampled states with unit and real costs, device A* at the gate's batch ("DEVICE_VS_CPU" lines).
 TEST(DeviceHeuristicsPddl, RealActionCosts)
 {
     SKIP_WITHOUT_GPU();
@@ -809,14 +808,10 @@ TEST(DeviceHeuristicsPddl, RealActionCosts)
         const std::string name = std::string(row.dir) + "/" + row.problem;
         if (sanitizer_size() && (name != "strips/zenotravel/p05" || row.kind != heuristics::Kind::Max))
             continue;  // 12,135 expansions
-        const std::filesystem::path base = std::string(row.dir) == "data/sokoban" ? work_dir() / "mimir" / "data" / "sokoban"
-                                                                                  : work_dir() / "mimir-cs" / "Benchmark" / row.dir;
+        const std::filesystem::path base = std::string(row.dir) == "data/sokoban" ? test::domains_dir() / "sokoban"
+                                                                                  : test::classic_dir() / row.dir;
         const std::filesystem::path dom = base / "domain.pddl", prob = base / (std::string(row.problem) + ".pddl");
-        if (!std::filesystem::exists(dom) || !std::filesystem::exists(prob))
-        {
-            std::printf("DEVICE_VS_CPU %s missing\n", name.c_str());
-            continue;
-        }
+        ASSERT_TRUE(std::filesystem::exists(dom) && std::filesystem::exists(prob)) << name;
         SCOPED_TRACE(name + " " + kind_name(row.kind));
         const TaskPtr task = Task::create(*frontend::load_task(dom, prob));
         const auto R = grounding(*task);
@@ -883,8 +878,7 @@ TEST(DeviceHeuristicsPddl, RealActionCosts)
             ++run;
         }
     }
-    if (run == 0)
-        GTEST_SKIP() << "no PDDL task found under " << work_dir();
+    EXPECT_GT(run, 0u);
 }
 
 /// Costs on the device from cost programs (five cost parameters, a static function of more than 2^24 keys):

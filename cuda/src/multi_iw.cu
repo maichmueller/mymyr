@@ -786,7 +786,7 @@ __global__ void k_search_update(Gathered g, Candidates c, Searches s, Limits lim
                     }
                 }
                 s.generated[id] += gen;
-                s.in_tree[id] += ent;  // width 0 counts duplicate entries too (as in mimir's generated_in_tree)
+                s.in_tree[id] += ent;  // width 0 counts duplicate entries too
                 s.tree[id] += static_cast<u32>(adm);
                 s.next[id] += static_cast<u32>(ent);
                 // expanded rows: a prefix of the search's live rows (to its cut's row); skipped: those of them that

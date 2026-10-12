@@ -27,7 +27,7 @@ struct SuiteTask
     u64 goal_states;
 };
 
-// Recorded from an exhaustive BrFS run against the fork.
+// Counts of an exhaustive BrFS run.
 inline const std::vector<SuiteTask>& suite()
 {
     static const std::vector<SuiteTask> s = {

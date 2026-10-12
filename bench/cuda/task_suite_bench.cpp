@@ -40,11 +40,9 @@
 
 namespace mymyr::test
 {
-std::filesystem::path fork_data_dir()
+std::filesystem::path data_dir()
 {
-    if (const char* d = std::getenv("MYMYR_FORK_DATA"); d && *d)
-        return d;
-    return std::filesystem::path(MYMYR_FORK_DATA_DIR);
+    return std::filesystem::path(MYMYR_TEST_DATA_DIR);
 }
 }  // namespace mymyr::test
 
@@ -113,7 +111,7 @@ std::vector<std::string> parse_names(const std::string& s)
 std::vector<InstanceSet> bench_sets()
 {
     std::vector<InstanceSet> out = table_instance_sets();
-    const fs::path d = fork_data_dir() / "ipc" / "sokoban-ipc";
+    const fs::path d = data_dir() / "ipc" / "sokoban-ipc";
     out.push_back({"sokoban",
                    d / "train" / "domain.pddl",
                    {d / "train" / "p01.pddl", d / "train" / "p36.pddl", d / "train" / "p56.pddl", d / "test" / "p22-easy.pddl",

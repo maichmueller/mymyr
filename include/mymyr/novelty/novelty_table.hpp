@@ -2,11 +2,11 @@
 // Novelty tables for IW(k).
 //
 // A table remembers which atom tuples of size <= k have been seen. Atoms are fluent atom slots (dense and monotone:
-// lazy slots are assigned in order of first touch), so no extra index is needed. Semantics are mimir's
-// `DynamicNoveltyTable` (fluent atoms only; tuples of size 1..k):
+// lazy slots are assigned in order of first touch), so no extra index is needed. Semantics (fluent atoms only;
+// tuples of size 1..k):
 //   - a state is novel iff one of its tuples is unseen; mark_state() marks all of them (the root of an IW pass);
 //   - a transition s -> t is novel iff a tuple of t containing at least one atom *added* by it (an atom of t that is
-//     not in s) is unseen; test_and_mark() marks all such tuples (mimir's StatePairTupleIndexGenerator).
+//     not in s) is unseen; test_and_mark() marks all such tuples.
 // Every state admitted to an IW tree has all of its tuples marked (the root by mark_state, a successor because its
 // other tuples lie in its parent), so a novel successor is never a duplicate: IW needs no duplicate-detection table.
 //
@@ -22,7 +22,7 @@
 //     of 128-bit packed tuples when C(max_atoms, j) does not fit in 64 bits (the idea is from tyr's novelty table).
 // A level is dense while its bit table fits in TableOptions::max_dense_bytes. Tables grow with the slot count (lazy
 // slots, 1.5x; level 2 copies its rows); a level whose dense table would exceed the budget switches to sparse, one
-// way (mimir's LIW table does the same with its 256 MiB default).
+// way.
 //
 // Not thread-safe: one table per search (per thread).
 
@@ -36,7 +36,7 @@
 
 namespace mymyr::novelty
 {
-/// Largest supported k: mimir's MAX_ARITY is 6, so its iw::find_solution accepts max_arity <= 5.
+/// Largest supported k.
 inline constexpr u32 k_max_arity = 5;
 
 struct TableOptions

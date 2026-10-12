@@ -1,11 +1,10 @@
 #pragma once
-// Approximate fact landmarks over the grounded delete relaxation, matching mimir 0.16.3's
-// ApproximateFactLandmarkGenerator.
+// Approximate fact landmarks over the grounded delete relaxation.
 //
 //   auto g = mymyr::landmarks::approximate_fact_landmarks(*task);            // grounds the task (budget: options)
 //   auto g = mymyr::landmarks::approximate_fact_landmarks(*relaxed_task);    // reuses a grounding
 //
-// The reading is mimir's:
+// The reading:
 //   1. An h_max-style Dijkstra from the initial state over the relaxed operators of heuristics::RelaxedTask (one per
 //      ground action and effect instance, plus one per ground axiom): an operator's cost is the maximum of its
 //      precondition costs, firing it costs one more (actions and axioms alike, unlike h_max, where axioms are free). A
@@ -13,7 +12,7 @@
 //      exit. The first achievers of an atom are the operators whose firing cost equals the atom's cost.
 //   2. Fact landmarks: the positive fluent goal atoms, then back-chaining: the positive fluent preconditions shared by
 //      every first achiever of a landmark are landmarks, each ordered greedy-necessarily before it. An atom true
-//      initially has no first achiever and ends a chain. The first achievers are mimir's (FirstAchievers::HMax): the
+//      initially has no first achiever and ends a chain. The first achievers (FirstAchievers::HMax): the
 //      operators that reach the atom at its cost in step 1. A plan may reach the atom through a more expensive operator
 //      instead, so these landmarks and orderings are not sound in general (an atom every cheapest achiever needs is
 //      a landmark although a costlier achiever does without it). FirstAchievers::PossiblyBefore makes them sound, as in
@@ -31,13 +30,13 @@
 //      the first achievers' ground actions (PossiblyBefore: for the atoms step 2 and 3 expanded only), and per ground
 //      action the landmarks it achieves, first-achieves and uniquely achieves (as the only achiever at all).
 //
-// Derived atoms (include_derived_atoms): mimir's landmarks are fluent atoms. With the option, positive derived goal
+// Derived atoms (include_derived_atoms): the landmarks are fluent atoms. With the option, positive derived goal
 // atoms and positive derived preconditions are landmarks too, back-chained through the axioms deriving them (their
 // achievers, which the achiever index does not list: it lists ground actions). An atom ordered before a derived atom
 // holds in the state in which the derived atom first does. The graph's state queries (achieved, unachieved, slots) see
 // fluent atoms only.
 //
-// The grounding keeps the operators that can never fire (RelaxedTaskOptions::keep_unreachable_operators): mimir's
+// The grounding keeps the operators that can never fire (RelaxedTaskOptions::keep_unreachable_operators): the
 // achiever index counts them. A RelaxedTask built without that option gives the same landmarks and orderings, but its
 // achiever index lacks those actions.
 
@@ -48,7 +47,7 @@ namespace mymyr::landmarks
 {
 enum class FirstAchievers : u8
 {
-    HMax,            // mimir's: the operators reaching the atom at its h_max-style cost (not sound in general)
+    HMax,            // the operators reaching the atom at its h_max-style cost (not sound in general)
     PossiblyBefore,  // the operators applicable before the atom can first hold (sound)
 };
 

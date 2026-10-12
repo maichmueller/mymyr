@@ -6,7 +6,7 @@
 //   (drop ball1 roomb left)
 //   ; cost = 3 (unit cost)
 //
-// One line per action with the PDDL action's own parameters (mimir's plan format: the parameters that normalization
+// One line per action with the PDDL action's own parameters (the parameters that normalization
 // added, Schema::original_arity onwards, are not written), then the cost line: "(unit cost)" for a task without
 // action costs, "(general cost)" otherwise.
 //
@@ -30,7 +30,7 @@ class Task;
 
 namespace mymyr::search
 {
-/// The plan as IPC plan text. The cost is mimir's metric value of the state the plan reaches from `start` (default:
+/// The plan as IPC plan text. The cost is the metric value of the state the plan reaches from `start` (default:
 /// the initial state; heuristics::ActionCosts), as BestFirstResult::cost. Throws std::invalid_argument when an
 /// action is not applicable in its state.
 [[nodiscard]] std::string format_plan(const Task& task, std::span<const Action> plan,

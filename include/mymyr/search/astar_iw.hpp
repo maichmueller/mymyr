@@ -48,7 +48,7 @@ struct AStarIwResult : BestFirstResult
     AStarIwNoveltyStatistics novelty;
 };
 
-/// Weighted A* with minimum-g novelty pruning, as in mimir. Priority is (g + weight*h, h, g, state id).
+/// Weighted A* with minimum-g novelty pruning. Priority is (g + weight*h, h, g, state id).
 /// Requires unit-cost actions and no numeric fluents. Generation lowers tuple labels; a popped state must still
 /// own a label at its g. Root successors are admitted without novelty when allow_non_novel_root_goal is set, but
 /// only goals bypass the pop test. The initial state is always exempt. Novelty pruning does not imply optimality.

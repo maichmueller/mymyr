@@ -627,7 +627,8 @@ public:
                                   { derive_flags(a, lo, hi, cost != 0); });
         parallel(jobs.size(), m_threads, [&](u64 i) { jobs[i](); });
         std::vector<datasets::StateSpacePtr> out(n);
-        parallel(n, m_threads, [&](u64 j) { out[j] = datasets::StateSpace::create(std::move(arrays[j])); });
+        parallel(n, m_threads, [&](u64 j)
+                 { out[j] = datasets::StateSpace::create(std::move(arrays[j]), datasets::ArraysCheck::Structure); });
         return out;
     }
 

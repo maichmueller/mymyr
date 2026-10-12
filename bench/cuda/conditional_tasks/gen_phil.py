@@ -1,5 +1,5 @@
-"""Philosophers problems (IPC 2004 promela, domain `protocol`) with N philosophers, in the layout of the fork's
-data/philosophers/test_problem.pddl (N = 2). Usage: python3 gen_phil.py N > phil-N.pddl"""
+"""Philosophers problems (IPC 2004 promela, domain `protocol`) with N philosophers, in the layout of
+tests/data/benchmarks/small/philosophers/test_problem.pddl (N = 2). Usage: python3 gen_phil.py N > phil-N.pddl"""
 import sys
 
 n = int(sys.argv[1])

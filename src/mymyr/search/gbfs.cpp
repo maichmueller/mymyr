@@ -1,4 +1,4 @@
-// Greedy best-first search, eager and lazy (best_first.hpp): ports of mimir 0.16.3 gbfs_eager / gbfs_lazy onto the
+// Greedy best-first search, eager and lazy (best_first.hpp): eager and lazy GBFS on the
 // SoA nodes, shared stores and bucket or heap open lists (best_first_detail.hpp).
 
 #include "best_first_detail.hpp"
@@ -156,7 +156,7 @@ struct GbfsLazy
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
         nodes.path_words = c.status_words;
-        // mimir's weights {.., 64, 1}: 64 pops from the preferred list per pop from the standard one
+        // default weights {64, 1}: 64 pops from the preferred list per pop from the standard one
         Alternating<Q> open(c.o.preferred_weight ? c.o.preferred_weight : 64, c.o.standard_weight);
         Transitions tr;
         Cur cur;

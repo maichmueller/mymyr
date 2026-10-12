@@ -244,10 +244,12 @@ struct TaskData
     // object order) and `imply` with a static antecedent that holds expanded (one that fails contributes nothing).
     // Negation is pushed inward (`not or`, `not exists`, `not imply` with a static antecedent that holds, `not not`).
     // Literals over static predicates are evaluated: a true one is kept, a false one is kept too and sets
-    // `encoding_goal_unsatisfiable`. A conjunct that cannot be expanded (`or`, `exists`, `not and`, `not forall`,
-    // `imply` with a fluent antecedent, a numeric constraint) is left out and clears `encoding_goal_complete`; so is
-    // one whose quantifiers would take the goal past the budget of quantifier bindings. The planner's goal (`goal`)
-    // is not affected.
+    // `encoding_goal_unsatisfiable`. A disjunction (`or`, `not and`, `exists` and `not forall` over their bindings,
+    // `imply` with an antecedent that static atoms do not decide) is decided by static atoms and equality where they
+    // can: a disjunct that holds makes it contribute nothing, and when all disjuncts but one fail, that one is
+    // expanded. A conjunct that cannot be expanded (a disjunction with two or more undecided disjuncts, a numeric
+    // constraint) is left out and clears `encoding_goal_complete`; so is one whose quantifiers would take the goal
+    // past the budget of quantifier bindings. The planner's goal (`goal`) is not affected.
     // `encoding_goal_recorded` is false for a TaskData whose front end did not record it (`encoding_goal` is then
     // empty); a Task derives it with set_encoding_goal_from_normalized.
     Range encoding_goal;

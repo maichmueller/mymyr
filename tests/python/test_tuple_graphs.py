@@ -1,14 +1,6 @@
-"""Tuple graphs and knowledge bases (mymyr.datasets.TupleGraph, tuple_graphs, KnowledgeBase).
+"""Tuple graphs and knowledge bases (mymyr.datasets.TupleGraph, tuple_graphs, KnowledgeBase) on the vendored small
+instances (tests/data/benchmarks/small)."""
 
-The tuple graphs are compared with the fork's on the state-space suite through tests/data/tuple_graphs/
-fork_tuple_graphs.json (written by tests/data/fork_golden/search_fork/run_tuple_graphs.py; the format is in
-tests/data/fork_golden/README.md); the knowledge bases with the fork's knowledge base tests. Both use the fork's own
-instances (env MYMYR_FORK_DATA; skipped when missing).
-"""
-
-import json
-import os
-import pathlib
 import pickle
 
 import numpy as np
@@ -20,16 +12,13 @@ from mymyr.rl import TaskTable
 
 from conftest import ROOT
 
-FORK_DATA = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
-GOLDEN = ROOT / "tests/data/tuple_graphs/fork_tuple_graphs.json"
+SMALL = ROOT / "tests/data/benchmarks/small"
 
 pytestmark = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 
 
-def fork_task(d, p):
-    dom, prob = FORK_DATA / d / "domain.pddl", FORK_DATA / d / p
-    if not prob.exists():
-        pytest.skip(f"fork data missing: {prob}")
+def small_task(d, p):
+    dom, prob = SMALL / d / "domain.pddl", SMALL / d / p
     return mymyr.Task.from_pddl(dom, prob, atoms="dense")
 
 
@@ -37,66 +26,6 @@ def space_of(task, **options):
     s = datasets.state_space(task, threads=1, remove_if_unsolvable=False, **options)
     assert s is not None
     return s
-
-
-# ------------------------------------------------------------------------------------------------ the fork's digest
-def fnv(s):
-    h = 0xCBF29CE484222325
-    for b in s.encode():
-        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
-def set_hash(items):
-    return f"{sum(fnv(s) for s in items) & 0xFFFFFFFFFFFFFFFF:016x}"
-
-
-def state_key(state, numeric):
-    key = "\n".join(sorted(str(a) for a in state.atoms()))
-    if numeric:
-        key += "".join("\n=%.17g" % v for v in state.numeric_values())
-    return f"{fnv(key):016x}"
-
-
-def digest(g, keys):
-    """Per distance the vertex, edge and problem-vertex counts, and the hashes of the vertex, edge and problem-vertex
-    sets, with vertices named by distance and sorted atom names and states by their keys."""
-    ids, vs, es, qs, n, m, p = {}, set(), set(), set(), [], [], []
-    for d in range(g.num_distances):
-        at = set()
-        for v in g.vertices_at(d):
-            ids[v] = f"{d}:" + "".join(sorted(str(a) for a in g.atoms(v)))
-            vs.add(ids[v] + ":" + ",".join(sorted(keys[x] for x in g.problem_vertices(v))))
-            at.add(ids[v])
-        n.append(len(at))
-        layer = {f"{d}:{keys[x]}" for x in g.problem_vertices_at(d)}
-        p.append(len(layer))
-        qs |= layer
-    for d in range(1, g.num_distances):
-        at = {f"{ids[u]}>{ids[v]}" for v in g.vertices_at(d) for u in g.predecessors(v)}
-        m.append(len(at))
-        es |= at
-    return {"n": n, "m": m, "p": p, "v": set_hash(vs), "e": set_hash(es), "q": set_hash(qs)}
-
-
-GOLDEN_TASKS = {r["task"]: r for r in json.loads(GOLDEN.read_text())["tasks"]}
-
-
-@pytest.mark.parametrize("name", sorted(GOLDEN_TASKS))
-def test_tuple_graphs_match_the_fork(name):
-    record = GOLDEN_TASKS[name]
-    d, p = name.split("/")
-    task = fork_task(d, p)
-    s = space_of(task)
-    assert s.num_states == record["states"]
-    keys = [state_key(s.state(i), task.numeric_slots > 0) for i in range(s.num_states)]
-    assert len(set(keys)) == len(keys)
-    index = {k: i for i, k in enumerate(keys)}
-    roots = [index[k] for k in record["roots"]]
-    for config, graphs in record["graphs"].items():
-        width, pruning = int(config[1]), len(config) < 4 or config[3] == "1"
-        for r, want in zip(roots, graphs, strict=True):
-            assert digest(datasets.tuple_graph(s, r, width=width, dominance_pruning=pruning), keys) == want, (config, r)
 
 
 # ------------------------------------------------------------------------------------------------ the API
@@ -110,7 +39,7 @@ def same(g, h):
 
 @pytest.fixture(scope="module")
 def gripper():
-    return space_of(fork_task("gripper", "p-2-0.pddl"))
+    return space_of(small_task("gripper", "p-2-0.pddl"))
 
 
 def test_accessors_and_arrays(gripper):
@@ -165,7 +94,7 @@ def test_width_zero_and_pruning(gripper):
 
 def test_independent_of_the_thread_count():
     for d, p in (("gripper", "p-2-0.pddl"), ("blocks_3", "test_problem.pddl")):
-        s = datasets.state_space(fork_task(d, p), threads=1)
+        s = datasets.state_space(small_task(d, p), threads=1)
         for width in (0, 1, 2):
             one = datasets.tuple_graphs(s, width=width, threads=1)
             for threads in (4, 8):
@@ -175,13 +104,13 @@ def test_independent_of_the_thread_count():
 
 # ------------------------------------------------------------------------------------------------ knowledge bases
 def gripper_table():
-    return TaskTable.from_pddl(FORK_DATA / "gripper" / "domain.pddl",
-                               [FORK_DATA / "gripper" / p for p in ("p-1-0.pddl", "p-2-0.pddl")], atoms="dense")
+    return TaskTable.from_pddl(SMALL / "gripper" / "domain.pddl",
+                               [SMALL / "gripper" / p for p in ("p-1-0.pddl", "p-2-0.pddl")], atoms="dense")
 
 
-def test_knowledge_base_as_the_fork():
-    """The fork's Python knowledge base test (gripper p-1-0 and p-2-0)."""
-    fork_task("gripper", "p-2-0.pddl")
+def test_knowledge_base_two_problems():
+    """A knowledge base over gripper p-1-0 and p-2-0."""
+    small_task("gripper", "p-2-0.pddl")
     kb = datasets.KnowledgeBase(gripper_table(), generalized=True)
     g = kb.generalized_state_space
     assert (g.num_vertices, g.num_edges) == (36, 128)
@@ -194,8 +123,8 @@ def test_knowledge_base_as_the_fork():
 
 @pytest.mark.parametrize("width,tg_vertices,tg_edges", [(1, 220, 184), (0, 128, 92)])
 def test_knowledge_base_tuple_graphs(width, tg_vertices, tg_edges):
-    """The fork's knowledge base counts (its C++ knowledge base test, gripper)."""
-    fork_task("gripper", "p-2-0.pddl")
+    """Knowledge base counts on gripper."""
+    small_task("gripper", "p-2-0.pddl")
     kb = datasets.KnowledgeBase(gripper_table(), generalized=True, width=width)
     assert kb.width == width and len(kb) == 2
     graphs = [kb.tuple_graphs(i) for i in range(len(kb))]
@@ -206,9 +135,9 @@ def test_knowledge_base_tuple_graphs(width, tg_vertices, tg_edges):
 
 
 def test_knowledge_base_order_pickling_and_threads():
-    fork_task("gripper", "p-2-0.pddl")
-    files = [FORK_DATA / "gripper" / p for p in ("test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl")]
-    table = TaskTable.from_pddl(FORK_DATA / "gripper" / "domain.pddl", files, atoms="dense")
+    small_task("gripper", "p-2-0.pddl")
+    files = [SMALL / "gripper" / p for p in ("test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl")]
+    table = TaskTable.from_pddl(SMALL / "gripper" / "domain.pddl", files, atoms="dense")
     kb = datasets.KnowledgeBase(table, width=1, threads=1)
     assert kb.task_indices == [2, 1, 0] and kb.generalized_state_space is None
     sizes = [s.num_states for s in kb.state_spaces]

@@ -154,7 +154,7 @@ struct NumGroup
     AuxEffect aux;
 };
 
-/// A schema's effects with numeric content, in the task's order of conditional effects (mimir's family order).
+/// A schema's effects with numeric content, in the task's order of conditional effects.
 struct NumRef
 {
     bool conditional = false;

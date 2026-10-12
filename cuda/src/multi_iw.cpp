@@ -480,8 +480,8 @@ struct DeviceMultiIw::Impl
     bool recover(const u32* ctl_h, u32 arity);
     /// Plans and goal rows of the searches solved in the last pass; returns their total steps.
     u64 extract_plans(const std::vector<u32>& solved, const u32* depth, u32 g0, Host& host);
-    /// Rollouts with truncated layers: the successors of the plans' non-goal states join the reached atoms (mimir's
-    /// plan extraction creates them; after extract_plans, whose offsets it reuses).
+    /// Rollouts with truncated layers: the successors of the plans' non-goal states join the reached atoms (the plan
+    /// extraction creates them; after extract_plans, whose offsets it reuses).
     void extract_reached(u32 solved, u64 total, u32 arity);
 
     DevArray<u32> roots_dev, plan_meta, plan_labels;
@@ -874,7 +874,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     const u32 first = optimize ? 1 : 0;
     if (!per_search_goals && task->compiled().goal.unsatisfiable)
     {
-        // mimir's first pass returns UNSOLVABLE before expanding anything
+        // a statically false goal ends the first pass as UNSOLVABLE before anything is expanded
         search::IwPassStatistics p;
         p.arity = first;
         p.status = search::SearchStatus::Unsolvable;
