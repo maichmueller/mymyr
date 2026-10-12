@@ -200,7 +200,7 @@ private:
     u64 m_count = 0;
 };
 
-/// As in mimir's AlternatingOpenList, over a preferred (0) and a standard (1) list: up to `weight` pops from the current
+/// An alternating open list over a preferred (0) and a standard (1) list: up to `weight` pops from the current
 /// list, then the next non-empty one.
 template<class Q>
 class Alternating
@@ -665,7 +665,7 @@ struct Transitions
         u64 boff;  // binding in `bind`
         u64 woff;  // words in `words` (when kept)
         u32 nw;
-        f64 g;  // g of the child through this transition (mimir's metric value of the successor)
+        f64 g;  // g of the child through this transition
         bool fresh;
         bool preferred;
     };
@@ -720,7 +720,7 @@ public:
     u32 nn = 0;                   // numeric words per state
     u64 max_states = ~u64{0};
 
-    /// g of the successor under delta d of a state whose g is gp: mimir's metric value of the successor (total-cost
+    /// g of the successor under delta d of a state whose g is gp: the metric value of the successor (total-cost
     /// effects applied to gp, or the metric of the successor's numeric values).
     [[nodiscard]] f64 g_next(f64 gp, const Delta& d) const { return costs->next(gp, d); }
     f64 evaluate(StateView s);
@@ -777,7 +777,7 @@ public:
     [[nodiscard]] bool unsolvable() const;
     void begin_search();
     /// Status Solved with the plan to `id` (nodes) and the goal state. `cheapest`: rewrite each step to the
-    /// cheapest action between its two states (as in mimir's plan extraction; GBFS and beam).
+    /// cheapest action between its two states.
     void solved(const Nodes& nodes, u32 id, StateView goal, bool cheapest);
     /// Final bookkeeping: statistics, heuristic statistics, observer on_end.
     void finish(u64 states, u64 bytes);

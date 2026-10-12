@@ -1,7 +1,6 @@
 #pragma once
-// Abstracted IW (AIW, BAIW) and abstracted LIW, matching mimir 0.16.3's
-// AbstractedNoveltyPruningStrategyImpl run by one brfs::find_solution, and the Python aliases abstracted_iw and
-// projective_iw in pymimir/wrapper_search_width.py.
+// Abstracted IW (AIW, BAIW) and abstracted LIW: one breadth-first pass with an abstracted novelty pruning
+// strategy, and the alias projective_iw.
 //
 //   mymyr::search::AbstractedIwOptions o;
 //   o.width = 1;
@@ -16,7 +15,7 @@
 //     is its declared types ([count, types...], or [1, none] without types); BAIW (base_abstracted) drops the
 //     signatures.
 // Width 1: a transition is novel iff an added atom has an unseen feature (all of them are marked). Width 2 and 3
-// (mimir's generate_tuples): the successor's atoms are groups of features; the tuples are the single features of added
+// (generated tuples): the successor's atoms are groups of features; the tuples are the single features of added
 // atoms, the pairs of distinct features from two distinct atoms at least one of which is added and, at width 3, the
 // triples likewise; a transition is novel iff one of them is unseen, and all are marked. The start state marks all of
 // its tuples. Root rule: every distinct successor of the start state other than itself enters the tree; one that is
@@ -24,7 +23,7 @@
 // With a landmark graph (abstracted LIW) there is one table per landmark rank, split as in LIW(k): flipped ranks take
 // every tuple of the successor, kept ranks the tuples containing an added atom (search/liw.hpp).
 //
-// Statistics: IwResult::passes holds the one pass (arity = width). mimir reports this search with brfs statuses
+// Statistics: IwResult::passes holds the one pass (arity = width). The statuses are the breadth-first ones
 // ("solved", "exhausted"). Budgets, blocked states, goal specs, observer events (with on_transition),
 // SearchControl::coordination and layer orders are those of the IW family engine (src/mymyr/search/novelty_brfs.hpp).
 
@@ -42,7 +41,7 @@ struct AbstractedIwOptions
     bool keep_depth_one_novel = false;  // expand the non-novel successors of the start state too
     /// Abstracted LIW: a landmark graph (and its grouping) splits the tables by landmark rank.
     LandmarkNovelty landmarks;
-    bool preserve_landmark_atoms = true;  // with a graph: landmark atoms keep their full identity (mimir's default)
+    bool preserve_landmark_atoms = true;  // with a graph: landmark atoms keep their full identity
     LayerOrdering layers;
     u32 threads = 1;  // as IwOptions::threads
     bool witness_pruning = false;
@@ -56,7 +55,7 @@ struct AbstractedIwOptions
 /// an invalid grouping.
 [[nodiscard]] IwResult abstracted_iw(const Task& task, const AbstractedIwOptions& options = {});
 
-/// mimir's projective_iw alias: abstracted IW(1) with base_abstracted = !typed_projection and
+/// The projective_iw alias: abstracted IW(1) with base_abstracted = !typed_projection and
 /// preserve_goal_atoms = keep_goal_nonunary_atoms (width, base_abstracted and preserve_goal_atoms of the base options
 /// are overridden).
 struct ProjectiveIwOptions : AbstractedIwOptions

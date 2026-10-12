@@ -16,7 +16,7 @@ using namespace mymyr::novelty;
 
 namespace
 {
-/// The fork's definition, literally: a set of sorted tuples of size 1..k.
+/// The definition, literally: a set of sorted tuples of size 1..k.
 struct Reference
 {
     u32 k;

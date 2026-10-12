@@ -68,7 +68,7 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# gitignored work dir (clones, venvs, builds) for the fork and other external dependencies
+# gitignored work dir (clones, venvs, builds) for external dependencies
 .work/
 __pycache__/
 

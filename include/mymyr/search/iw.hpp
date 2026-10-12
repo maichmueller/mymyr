@@ -6,34 +6,33 @@
 //   o.max_arity = 2;
 //   mymyr::search::IwResult r = mymyr::search::iw(*task, o);
 //
-// Follows mimir 0.16.3's `iw::find_solution` conventions, which runs BrFS with a novelty pruning strategy per arity:
+// The ladder runs BrFS with a novelty pruning strategy per arity:
 //   - the ladder runs one pass per arity 0, 1, ..., max_arity, each from the start state with fresh novelty tables,
-//     until a pass solves the task or stops on a budget; if every pass exhausts its tree, the status is Exhausted
-//     (mimir calls this FAILED);
+//     until a pass solves the task or stops on a budget; if every pass exhausts its tree, the status is Exhausted;
 //   - within a pass, states are expanded breadth first in the order they were admitted, successors in the successor
 //     generator's order (canonical order by default); the goal is tested when a state is popped, so a goal
 //     state is not counted as expanded;
 //   - a successor enters the tree iff it is novel (novelty/novelty_table.hpp): some tuple of size <= k containing an
 //     atom the transition added is unseen. There is no duplicate-detection table: a novel successor is
 //     necessarily a new state. Non-novel successors are never materialized in IW(1) (add-effect precheck);
-//   - width 0 (WidthZero::ExpandDepthOne, mimir's default): every successor of the start state other than the
-//     start state itself enters the tree (duplicates count once per action in generated_in_tree, as in mimir,
+//   - width 0 (WidthZero::ExpandDepthOne, the default): every successor of the start state other than the
+//     start state itself enters the tree (duplicates count once per action in generated_in_tree,
 //     but are expanded once), and every such depth-1 state is expanded with all of its successors pruned. The
-//     alternative WidthZero::RootOnly (C#) goal-tests the depth-1 states without expanding them;
-//   - optimized IW(1) (`optimize_iw1`, mimir's default, used when max_arity == 1): the width-0 pass is replaced
+//     alternative WidthZero::RootOnly goal-tests the depth-1 states without expanding them;
+//   - optimized IW(1) (`optimize_iw1`, the default, used when max_arity == 1): the width-0 pass is replaced
 //     by an empty placeholder entry (arity 0, all zeros), and the width-1 pass admits every distinct successor of the
 //     start state; those that are not novel are goal-tested and counted as expanded but not expanded
 //     (IwPassStatistics::skipped counts them; expanded - skipped is the classical count);
 //   - budgets: max_seconds spans the whole ladder, max_states (states in the tree, the root included) and
 //     max_expanded apply per pass, max_depth bounds the depth of expanded states (deeper ones are popped,
-//     goal-tested and counted, not expanded: mimir's max_depth). blocked_states are never entered: they are
-//     checked before the novelty test and mark no tuple (mimir's semantics). The goal, the blocked states and
+//     goal-tested and counted, not expanded). blocked_states are never entered: they are
+//     checked before the novelty test and mark no tuple. The goal, the blocked states and
 //     the observer are forwarded to every pass;
-//   - statistics per pass follow mimir's brfs::Statistics: expanded, generated (every applicable action of every
-//     expanded state; with witness pruning off, which is the default here, this equals mimir's count),
+//   - statistics per pass follow the breadth-first ones: expanded, generated (every applicable action of every
+//     expanded state; with witness pruning off, which is the default),
 //     generated_in_tree (successors admitted).
 // Numeric fluents: states carry their numeric values and the goal's numeric constraints are tested; novelty
-// looks at the atoms only. Plan cost is mimir's (heuristics/action_costs.hpp): the metric value of the plan's
+// looks at the atoms only. Plan cost (heuristics/action_costs.hpp): the metric value of the plan's
 // last state, where between two consecutive plan states the action giving the lowest metric value is taken (the plan
 // is rewritten to it). With total-cost: the problem's initial total-cost plus every fired total-cost effect (any
 // operator, conditional ones, expressions over static and fluent functions); else with a metric: the metric on the
@@ -69,8 +68,8 @@ class TransitionOrdering;  // search/transition_ordering.hpp
 /// How the width-0 pass of the IW ladder treats the successors of the start state.
 enum class WidthZero : u8
 {
-    ExpandDepthOne,  // mimir (ArityZeroNoveltyPruningStrategy): they enter the tree and are expanded
-    RootOnly,        // C# (IwSearch.SearchK0): they are goal-tested but not expanded
+    ExpandDepthOne,  // they enter the tree and are expanded
+    RootOnly,        // they are goal-tested but not expanded
 };
 
 struct IwOptions
@@ -78,15 +77,15 @@ struct IwOptions
     SearchControl control;
     u32 max_arity = 2;  // the ladder runs arities 0..max_arity (at most novelty::k_max_arity)
     WidthZero width_zero = WidthZero::ExpandDepthOne;
-    bool optimize_iw1 = true;       // mimir's optimized IW(1) when max_arity == 1 (see above)
-    bool witness_pruning = false;   // off: every applicable action is a transition (mimir's generated counts)
+    bool optimize_iw1 = true;       // optimized IW(1) when max_arity == 1 (see above)
+    bool witness_pruning = false;   // off: every applicable action is a transition
     bool canonical_order = true;    // successors per state in (schema, binding) order
     novelty::TableOptions tables;   // dense/sparse budget of the novelty tables
     std::optional<State> start;     // default: the task's initial state
     /// Optional successor order. Called once per expanded state with its actions in generation order; writes into
     /// `order` the indices in the order the transitions are to be tested (invalid and repeated indices are dropped,
     /// missing ones follow in generation order). Setting it runs the observed (slow) path, which buffers every
-    /// transition. The parity gate uses it to replay mimir's successor order.
+    /// transition. It fixes the order of a replayed run.
     std::function<void(StateView state, std::span<const Action> actions, std::vector<u32>& order)> successor_order;
     /// Optional layer transition ordering of the width-1 pass (search/transition_ordering.hpp; e.g.
     /// landmarks::LandmarkTransitionOrdering): the pass then generates a whole layer, orders it and decides novelty
@@ -104,7 +103,7 @@ struct IwPassStatistics
 {
     u32 arity = 0;
     SearchStatus status = SearchStatus::Exhausted;
-    u64 expanded = 0;           // popped non-goal states (mimir's count; includes skipped states)
+    u64 expanded = 0;           // popped non-goal states
     u64 generated = 0;          // transitions generated from expanded states
     u64 generated_in_tree = 0;  // successors admitted to the tree
     u64 skipped = 0;            // counted as expanded, successors not generated (optimized IW(1), RootOnly, max_depth)
@@ -126,7 +125,7 @@ struct IwResult
 {
     SearchStatus status = SearchStatus::Exhausted;
     std::vector<Action> plan;
-    double cost = 0;                 // mimir's plan cost (see above); 0 unless solved
+    double cost = 0;                 // the plan cost (see above); 0 unless solved
     bool cost_exact = true;          // always true (every total-cost effect is evaluated)
     std::optional<State> goal_state;
     std::vector<IwPassStatistics> passes;  // one per arity run, index = arity
@@ -144,7 +143,4 @@ struct IwResult
 /// One IW(k) pass alone (arity 0..k_max_arity), without the ladder and without the optimized-IW(1) root
 /// continuation: the width-k pass of a ladder, in isolation.
 [[nodiscard]] IwResult iw_pass(const Task& task, u32 arity, const IwOptions& options = {});
-
-/// mimir's name of an IW status ("solved", "failed" for an exhausted ladder, "out_of_time", ...).
-[[nodiscard]] const char* mimir_status_name(SearchStatus s) noexcept;
 }  // namespace mymyr::search

@@ -82,7 +82,7 @@ struct Delta
     u32 nnum = 0;
     /// The numeric effects that produced `num` (empty when no numeric effect fired).
     std::span<const NumericWrite> writes{};
-    /// The total-cost effects of the fired (conditional) effects, in order (tasks with total-cost). mimir's metric
+    /// The total-cost effects of the fired (conditional) effects, in order (tasks with total-cost). The metric
     /// value of the successor is heuristics::ActionCosts::next(g, delta, successor).
     std::span<const AuxWrite> aux{};
 };

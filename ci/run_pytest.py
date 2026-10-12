@@ -50,7 +50,7 @@ def main(argv: list[str]) -> int:
     print(f"run_pytest: {counter.passed} passed, at least {minimum} expected")
     if code == 0 and counter.passed < minimum:
         print(f"error: only {counter.passed} tests passed (expected at least {minimum}); "
-              "check that MYMYR_FORK_DATA, MYMYR_IPC and MYMYR_WORK point at the test data", file=sys.stderr)
+              "check that MYMYR_PARITY_DATA points at the parity test data", file=sys.stderr)
         return 1
     return code
 

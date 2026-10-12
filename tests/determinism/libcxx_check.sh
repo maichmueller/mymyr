@@ -49,6 +49,6 @@ for i in 1 2 3 4 5; do
   run tests/python/test_determinism.py > "$OUT/determinism-$i.log" 2>&1 || status=1
   echo "determinism run $i: $(tail -1 "$OUT/determinism-$i.log")"
 done
-run tests/python > "$OUT/suite.log" 2>&1 || status=1
+run tests/python tests/parity/python > "$OUT/suite.log" 2>&1 || status=1
 echo "suite: $(tail -1 "$OUT/suite.log")"
 exit $status

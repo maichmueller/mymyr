@@ -42,11 +42,9 @@
 
 namespace mymyr::test
 {
-std::filesystem::path fork_data_dir()
+std::filesystem::path data_dir()
 {
-    if (const char* d = std::getenv("MYMYR_FORK_DATA"); d && *d)
-        return d;
-    return std::filesystem::path(MYMYR_FORK_DATA_DIR);
+    return std::filesystem::path(MYMYR_TEST_DATA_DIR);
 }
 }  // namespace mymyr::test
 
@@ -111,7 +109,7 @@ std::vector<std::string> parse_names(const std::string& s)
     return out;
 }
 
-fs::path sokoban_dir() { return fork_data_dir() / "ipc" / "sokoban-ipc"; }
+fs::path sokoban_dir() { return data_dir() / "ipc" / "sokoban-ipc"; }
 
 /// The bench's sets: table_instance_sets() plus "sokoban" (sokoban-ipc: 54, 87, 106, 151, 177 objects; 1 to 9 words).
 std::vector<InstanceSet> bench_sets()
@@ -555,7 +553,7 @@ void run_views(const std::vector<u64>& envs)
 void run_table(const std::vector<u64>& sizes, int reps)
 {
     auto ctx = context();
-    const fs::path d = fork_data_dir() / "ipc" / "blocksworld-ipc" / "train";
+    const fs::path d = data_dir() / "ipc" / "blocksworld-ipc" / "train";
     std::vector<fs::path> probs;
     for (const auto& e : fs::directory_iterator(d))
         if (e.path().filename().string().starts_with("p") && e.path().extension() == ".pddl")

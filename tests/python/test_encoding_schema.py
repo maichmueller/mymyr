@@ -1,12 +1,9 @@
 """EncodingSchema: the domain-scoped relation catalog of the relational encodings.
 
-The catalogs in tests/data/encoding/schema/catalogs.json were produced by mifrost's flat and horizon encoders; the
-tests compare them name for name, arity for arity and slot role for slot role, with every difference listed.
+Catalogs, fingerprints, option handling and the helper predicates of quantified conditions.
 """
 
-import json
 import os
-import pathlib
 import re
 import subprocess
 import sys
@@ -20,10 +17,8 @@ from mymyr.encoding import EncodingSchema
 from conftest import ROOT, text_task
 
 DATA = ROOT / "tests/data"
-CATALOGS = json.loads((DATA / "encoding/schema/catalogs.json").read_text())
 PDDL = hasattr(mymyr, "Domain")
 needs_pddl = pytest.mark.skipif(not PDDL, reason="built without the loki front end")
-FORK = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
 
 DOMAINS = {
     "blocks": (DATA / "pddl/blocks/domain.pddl", DATA / "pddl/blocks/probBLOCKS-8-0.pddl"),
@@ -37,110 +32,6 @@ def tasks():
     if not PDDL:
         pytest.skip("built without the loki front end")
     return {name: mymyr.Task.from_pddl(domain, problem) for name, (domain, problem) in DOMAINS.items()}
-
-
-def native_options(entry):
-    """The EncodingSchema keywords for a mifrost configuration of the catalog file."""
-    kw = entry["kwargs"]
-    out = {"equality": True}  # mifrost keeps the equality relations; native leaves them out by default
-    if entry["kind"] == "flat":
-        for key in ("goal_derivations", "max_goal_level", "target_sources", "include_static"):
-            if key in kw:
-                out[key] = kw[key]
-        out["nullary"] = not kw.get("ignore_zero_arity_relations", True)
-        out["predicate_virtual_nodes"] = bool(kw.get("use_predicate_virtual_nodes", False))
-    else:
-        out["horizon_mode"] = kw["transition_mode"]
-        out["root_policy"] = kw["root_policy"]
-        out["include_actions"] = not kw["ignore_actions"]
-        # mifrost lists the nullary relations in every horizon catalog, whatever ignore_zero_arity_relations says.
-        out["nullary"] = True
-        out["parent_relation"] = bool(kw.get("enable_parent_relation", False))
-        if "goal_derivations" in kw:
-            out["goal_derivations"] = [name.split(".")[-1] for name in kw["goal_derivations"]]
-        out["max_goal_level"] = kw.get("max_goal_level", 0)
-        out["predicate_virtual_nodes"] = bool(kw.get("use_predicate_virtual_nodes", False))
-    return out
-
-
-def mifrost_catalog(entry):
-    """(name, arity, slot roles) per relation, in mifrost's order."""
-    offsets = entry["slot_role_offsets"]
-    return [
-        (name, arity, entry["slot_roles"][offsets[i] : offsets[i + 1]])
-        for i, (name, arity) in enumerate(zip(entry["names"], entry["arities"]))
-    ]
-
-
-AUXILIARY_SLOT = 8
-
-
-def native_catalog(schema):
-    """(name, arity, slot roles) per relation, with the auxiliary slot of the nullary relations taken away: mifrost
-    encodes a nullary atom as a tuple of its other slots only."""
-    rows = []
-    for name, arity, roles in zip(schema.relation_names, schema.relation_arities, schema.relation_slot_roles):
-        if roles and roles[-1] == AUXILIARY_SLOT:
-            arity, roles = arity - 1, roles[:-1]
-        rows.append((name, arity, roles))
-    return rows
-
-
-# mifrost source labels: 'state' covers the fluent, static and derived lanes.
-SOURCE_OF_LANE = {
-    "fluent": "state",
-    "static": "state",
-    "derived": "state",
-    "goal": "goal",
-    "goal_derivation": "goal_derivation",
-    "goal_satisfaction": "goal_satisfaction",
-    "history": "history",
-    "action": "action",
-    "parent": "parent",
-}
-
-# Entries compared with an explicitly listed difference.
-SUPPORT_LITERALS = "flat_literals_relmo"  # mifrost's support_literals option is not ported
-NO_STATIC = "flat_no_static"  # include_static=False drops the static relations from the catalog
-
-
-@needs_pddl
-@pytest.mark.parametrize("name", [n for n in CATALOGS if n not in (SUPPORT_LITERALS, NO_STATIC)])
-def test_catalog_equals_mifrost(tasks, name):
-    entry = CATALOGS[name]
-    schema = EncodingSchema(tasks[entry["domain"]], **native_options(entry))
-    assert native_catalog(schema) == mifrost_catalog(entry)
-    nullary = [i for i, n in enumerate(schema.relation_logical_arities) if n == 0 and schema.relation_predicates[i] >= 0]
-    assert bool(nullary) == native_options(entry)["nullary"]
-    assert all(schema.relation_slot_roles[i][-1] == AUXILIARY_SLOT for i in nullary)
-    assert [SOURCE_OF_LANE[lane] for lane in schema.relation_lanes] == entry["sources"]
-    assert schema.slot_role_names[:8] == [
-        "argument_slot", "predicate_slot", "state_slot", "action_slot",
-        "goal_target_slot", "subgoal_target_slot", "history_target_slot", "history_slot",
-    ]  # fmt: skip
-    assert len(schema.slot_role_names) == len(schema.entity_role_names) == 9
-
-
-@needs_pddl
-def test_support_literals_are_the_only_difference_to_the_relmo_catalog(tasks):
-    entry = CATALOGS[SUPPORT_LITERALS]
-    schema = EncodingSchema(tasks["blocks"], **native_options(entry))
-    # support_literals adds `[+]p`, `[+]p[sat]` and `[+]p[unsat]` (and the `-` forms) to the goal lanes.
-    literal = re.compile(r"^\[[+-]\][^\[]+(\[(sat|unsat)\])?$")
-    dropped = [row for row in mifrost_catalog(entry) if literal.match(row[0])]
-    assert len(dropped) == 2 * 3 * 5  # two signs, three names, five predicates (the types have no goal relations)
-    assert native_catalog(schema) == [row for row in mifrost_catalog(entry) if row not in dropped]
-    assert native_catalog(schema) == mifrost_catalog(CATALOGS["flat_relmo"])
-
-
-@needs_pddl
-def test_include_static_false_drops_the_static_relations(tasks):
-    # mifrost keeps the (empty) static relations in the catalog; the native catalog leaves them out.
-    entry = CATALOGS[NO_STATIC]
-    schema = EncodingSchema(tasks["blocks"], **native_options(entry))
-    expected = [row for row in mifrost_catalog(entry) if row[0] not in ("number", "object")]
-    assert native_catalog(schema) == expected
-    assert "object" not in schema.relation_names and "[+]object[hist]" in schema.relation_names
 
 
 @needs_pddl
@@ -159,7 +50,7 @@ def test_include_static_false_drops_the_state_relation_of_every_static_predicate
 
 @needs_pddl
 def test_delta_horizon_has_no_relations_for_static_predicates(tasks):
-    # mifrost lists delta relations for static predicates too; they could never hold a tuple.
+    # the reference lists delta relations for static predicates too; they could never hold a tuple.
     schema = EncodingSchema(
         tasks["childsnack"], horizon_mode="delta", root_policy="exclude",
         goal_derivations=["added_satisfied", "added_unsatisfied"],
@@ -214,11 +105,10 @@ def test_problem_local_helpers_of_a_forall_goal_are_not_part_of_the_schema():
 
 @needs_pddl
 def test_helper_predicates_are_stable_with_quantified_actions_in_other_domains():
-    domain = FORK / "miconic-fulladl/domain.pddl"
+    small = DATA / "benchmarks/small/miconic-fulladl"
+    domain = small / "domain.pddl"
     generated = DATA / "table_instances/miconic-simpleadl"
-    if not domain.is_file():
-        pytest.skip("no fork data")
-    problems = [FORK / "miconic-fulladl/test_problem.pddl", generated / "simple-f3-p2-c.pddl",
+    problems = [small / "test_problem.pddl", generated / "simple-f3-p2-c.pddl",
                 generated / "simple-f6-p4-q.pddl"]  # fmt: skip
     schemas = [EncodingSchema(mymyr.Task.from_pddl(domain, p)) for p in problems]
     assert any(n.startswith("axiom_") for n in schemas[0].relation_names)

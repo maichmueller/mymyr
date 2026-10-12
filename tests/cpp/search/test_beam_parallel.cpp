@@ -1,6 +1,6 @@
 // The beam's layer step on several threads (IwOptions::threads, AbstractedIwOptions::threads, BrfsOptions::threads;
 // search/layer_ordering.hpp, "Threads") and the relaxed SurvivorsOnly beam (BeamNovelty::RelaxedSurvivorsOnly):
-//   - on the beam suite (the tasks of tests/data/beam/fork_beam.json), IW(2) and BrFS with widths 1, 4 and 32, both
+//   - on the beam suite, IW(2) and BrFS with widths 1, 4 and 32, both
 //     novelty modes, both goal-count directions, ties in generation order and random with three seeds: 2, 4 and 8
 //     threads give the plan, the counts of every pass (BrFS: the counts and the fingerprint of the store) of one
 //     thread;

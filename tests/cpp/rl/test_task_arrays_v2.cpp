@@ -235,7 +235,7 @@ TEST_P(TaskArraysV2, DeviceMatcherFlagsFollowTheSearchCosts)
     EXPECT_EQ(a, v.n_axioms);
     if (std::get<0>(GetParam()) == "sokoban-opt08-strips__p14")
     {
-        // the fixed order starts at a 35-object parameter (mimir's order heuristic): forward checking starts at the player
+        // the fixed order starts at a 35-object parameter (the order of the parameters by object count): forward checking starts at the player
         u32 s = 0;
         while (s < v.num_schemas && task->schema_name(SchemaId{s}) != "move")
             ++s;

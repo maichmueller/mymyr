@@ -1,11 +1,9 @@
 #pragma once
-// Generalized state spaces, as mimir's `GeneralizedStateSpaceImpl`: one graph over the state spaces of several problems
+// Generalized state spaces: one graph over the state spaces of several problems
 // of one domain, their disjoint union in input order. Vertex v of problem p is vertex vertex_offsets()[p] + v, and edge
 // e of problem p is edge edge_offsets()[p] + e, so the edges out of a vertex are its state's transitions in their
 // forward order. The initial, goal and unsolvable vertices are the problems' ones.
-// mimir's StateSpaceImpl::create(GeneralizedSearchContext, options) sorts the spaces by their number of states
-// (its option sort_ascending_by_num_states) with std::sort, whose order of ties is unspecified; ordered_spaces() sorts
-// stably (ties keep the input order), which is what mimir's libstdc++ std::sort does for up to 16 spaces.
+// ordered_spaces() sorts the spaces by their number of states, stably (ties keep the input order).
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/datasets/state_space.hpp"
@@ -16,7 +14,7 @@
 
 namespace mymyr::datasets
 {
-/// The successful spaces of `results` (the failed ones are skipped, as mimir skips them), sorted ascending by their
+/// The successful spaces of `results` (the failed ones are skipped), sorted ascending by their
 /// number of states if `sort_ascending` (stable).
 [[nodiscard]] std::vector<StateSpacePtr> ordered_spaces(std::span<const StateSpaceResult> results, bool sort_ascending = true);
 

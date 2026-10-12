@@ -861,15 +861,14 @@ PyKnowledgeBase restore_kb(nb::handle table, nb::handle options, nb::handle spac
 }
 
 const char* k_space_doc =
-    "The full transition model of a task as flat arrays (datasets/state_space.hpp), with the semantics of mimir's "
-    "StateSpace: every reachable state (ids in breadth-first discovery order, the same at every thread count), every "
+    "The full transition model of a task as flat arrays (datasets/state_space.hpp): every reachable state (ids in breadth-first discovery order, the same at every thread count), every "
     "applicable action as a transition (parallel edges and self-loops included), forward and reverse CSR, labels, "
     "transition costs, goal distances (V*: unit by BFS, cost by Dijkstra) and goal / unsolvable / alive flags. "
     "arrays() exports them zero-copy. The initial state is id 0.";
 
 const char* k_options_doc =
     "Options: threads (0: all cores; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
-    "or more, as in mimir), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
+    "or more), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
     "labels (keep (schema, binding) per transition). State words are the same for every thread count (a task with lazy atom slots has none).";
 
 #define MYMYR_SS_ARGS                                                                                                      \
@@ -1040,7 +1039,7 @@ void bind_datasets(nb::module_& parent)
             return nb::typed<nb::object, std::optional<PyStateSpace>>(wrap(o, run_generation(o.core->task, opts)).space);
         },
         "task"_a, MYMYR_SS_ARGS,
-        (std::string("The state space of a task, or None if the generation failed (as in mimir's StateSpace.create). ") +
+        (std::string("The state space of a task, or None if the generation failed. ") +
          k_options_doc)
             .c_str());
 
@@ -1072,7 +1071,7 @@ void bind_datasets(nb::module_& parent)
     // ---------------------------------------------------------------------------------------------- generalized
     nb::class_<PyGeneralizedStateSpace>(
         m, "GeneralizedStateSpace",
-        "One graph over the state spaces of several problems of one domain, as mimir's GeneralizedStateSpace "
+        "One graph over the state spaces of several problems of one domain "
         "(datasets/generalized_state_space.hpp): their disjoint union in input order. State s of problem p is vertex "
         "vertex_offsets[p] + s and transition e of problem p is edge edge_offsets[p] + e, so the edges out of a vertex "
         "are its state's transitions in their order. The initial, goal and unsolvable vertices are the problems' ones.")
@@ -1095,7 +1094,7 @@ void bind_datasets(nb::module_& parent)
                 }
                 new (self) PyGeneralizedStateSpace{g, std::move(in)};
             },
-            "spaces"_a, "From state spaces in their order (see sorted_by_size / generalized_state_space for mimir's order).")
+            "spaces"_a, "From state spaces in their order (see sorted_by_size / generalized_state_space for the usual order).")
         .def_prop_ro(
             "spaces",
             [](const PyGeneralizedStateSpace& g) {
@@ -1186,13 +1185,13 @@ void bind_datasets(nb::module_& parent)
         },
         "spaces"_a,
         "The spaces (None entries dropped) sorted ascending by their number of states, ties in input order: "
-        "mimir's order of the problems of a generalized state space.");
+        "the order of the problems of a generalized state space.");
 
     // ---------------------------------------------------------------------------------------------- samplers
     nb::class_<PySampler>(m, "StateSpaceSampler",
-                          "Uniform samplers over a state space (as in mimir's StateSpaceSampler): any state, states n "
-                          "steps from a goal, dead ends. Deterministic for a seed on every platform (xoshiro256**, not "
-                          "mimir's std::mt19937). Samples are state ids. The space may be a device state space "
+                          "Uniform samplers over a state space : any state, states n "
+                          "steps from a goal, dead ends. Deterministic for a seed on every platform (xoshiro256**). "
+                          "Samples are state ids. The space may be a device state space "
                           "(mymyr.cuda.DeviceStateSpace, CUDA builds): the sampler then holds its unit goal distances "
                           "on the host (downloaded once) and gives the samples of its host copy.")
         .def(
@@ -1300,7 +1299,7 @@ void bind_datasets(nb::module_& parent)
         .def_prop_ro("num_states", [](const PySampler& s) { return s.core->sampler.num_states(); })
         .def_prop_ro("num_dead_end_states", [](const PySampler& s) { return s.core->sampler.num_dead_end_states(); })
         .def_prop_ro("num_alive_states", [](const PySampler& s) { return s.core->sampler.num_alive_states(); },
-                     "States that are not dead ends (goal states included), as in mimir's sampler.")
+                     "States that are not dead ends (goal states included).")
         .def_prop_ro("max_steps_to_goal", [](const PySampler& s) { return s.core->sampler.max_steps_to_goal(); })
         .def(
             "states_n_steps_from_goal",
@@ -1321,7 +1320,7 @@ void bind_datasets(nb::module_& parent)
     // ---------------------------------------------------------------------------------------------- tuple graphs
     nb::class_<PyTupleGraph>(
         m, "TupleGraph",
-        "The tuple graph of a state-space vertex (the root), as in mimir's TupleGraph (datasets/tuple_graph.hpp; "
+        "The tuple graph of a state-space vertex (the root; datasets/tuple_graph.hpp; "
         "Lipovetzky and Geffner 2012): which tuples of at most `width` fluent atoms are first reached at each "
         "breadth-first distance from the root, the problem vertices (states) at that distance in which each is novel, "
         "and the edges u -> t between consecutive distances where every problem vertex of u has a successor among "
@@ -1458,7 +1457,7 @@ void bind_datasets(nb::module_& parent)
             return out;
         },
         "space"_a, nb::kw_only(), "width"_a = 0, "dominance_pruning"_a = true, "threads"_a = 0,
-        "The tuple graph of every vertex of a state space (index = state id), as mimir's TupleGraphFactory: width "
+        "The tuple graph of every vertex of a state space (index = state id): width "
         "0..5 (0: the root and its successor states), dominance_pruning, threads (0: all cores; the result is the "
         "same at every count). Cost: a breadth-first search per vertex, enumerating the tuples of at most width atoms "
         "of every state it reaches; tuple_graph() builds one.");
@@ -1484,7 +1483,7 @@ void bind_datasets(nb::module_& parent)
     // ---------------------------------------------------------------------------------------------- knowledge bases
     nb::class_<PyKnowledgeBase>(
         m, "KnowledgeBase",
-        "What is known about a set of tasks of one domain, as mimir's KnowledgeBase (datasets/knowledge_base.hpp): the "
+        "What is known about a set of tasks of one domain (datasets/knowledge_base.hpp): the "
         "tasks (a mymyr.rl.TaskTable), the state space of every task whose generation succeeded (failures skipped; "
         "max_states and max_seconds bound each one), sorted ascending by size unless sort_by_size=False (ties in task "
         "order), optionally the generalized state space over them (generalized=True), and optionally the tuple graphs "

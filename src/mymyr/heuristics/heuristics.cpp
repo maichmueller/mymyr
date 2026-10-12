@@ -1,4 +1,4 @@
-// Heuristic evaluators: blind, goal count, and h_max / h_add / h_FF / set-additive over mimir's delete relaxation,
+// Heuristic evaluators: blind, goal count, and h_max / h_add / h_FF / set-additive over the delete relaxation,
 // grounded (relaxed_task.hpp: GroundedEval extended with negative propositions, axiom rules and relaxed-plan
 // extraction) or lifted (lifted_relaxation.hpp: a cost-bucketed semi-naive fixpoint over the relaxed reachability
 // matchers; not for set-additive). h² is in h2.cpp, LM-cut in lm_cut.cpp, landmark count in landmark_count.cpp.
@@ -337,7 +337,7 @@ private:
                     m_q.push(val, q);
                 }
         };
-        // h_FF: an axiom forwards the supporter of its last settled precondition (mimir's FF); set-additive: every
+        // h_FF: an axiom forwards the supporter of its last settled precondition; set-additive: every
         // operator supports what it reaches, so that the achiever sets pass through axioms
         for (u32 o : R.zero_ops())
             if (m_cnt[o] == 0)
@@ -376,7 +376,7 @@ private:
 
     /// h of one goal from the explored costs. h_FF and set-additive walk the best supporters back from the goal and mark
     /// the ground actions met; h_FF counts each ground action once, set-additive each supported proposition (the union
-    /// of the achiever sets has one member per proposition and supporter: mimir's unary actions).
+    /// of the achiever sets has one member per proposition and supporter: its unary actions).
     u64 fold(std::span<const u32> goal)
     {
         u64 h = 0;

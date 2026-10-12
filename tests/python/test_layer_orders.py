@@ -1,5 +1,5 @@
 """Layer orderings of search.iw, siw, iw_pass and brfs (layer_order, seed, max_next_layer_states,
-prefer_more_satisfied_goals): mimir's layer ordering strategies from Python."""
+prefer_more_satisfied_goals): the layer ordering strategies from Python."""
 
 import pytest
 

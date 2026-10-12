@@ -1,7 +1,5 @@
-// Port of mimir's ToMimirStructures (src/formalism/to_mimir_structures.cpp) and
-// EncodeParameterIndexInVariables (src/formalism/translator/encode_parameter_index_in_variables.cpp plus the default
-// traversal of translator/recursive_base.hpp), replayed on index-only tables. See translate.hpp for the overview.
-// Comments of the form "mimir:" point at the behaviour being reproduced.
+// The translation of loki's normalized structures (the first pass) and the re-encoding of parameter indices in
+// variables (the second pass), replayed on index-only tables. See translate.hpp for the overview.
 
 #include "translate.hpp"
 
@@ -39,8 +37,8 @@ struct Kinds
 
 u32 key_u32(u64 v) { return static_cast<u32>(v); }
 
-/// Entity construction shared by both passes: the parts of mimir's `Repositories::get_or_create_*` that canonicalize
-/// (sorting by index, grounding nullary parts) and `Repositories::ground` (constant folding).
+/// Entity construction shared by both passes: the canonicalizing parts of entity creation
+/// (sorting by index, grounding nullary parts) and grounding (constant folding).
 class Core
 {
 public:
@@ -51,9 +49,9 @@ public:
     u32 gbin(u64 op, u32 a, u32 b) { return r.gfe.id(Key{kFeBinary, r.gbin.id(Key{op, a, b})}); }
     u32 gmulti(u64 op, std::vector<u32> xs)
     {
-        // mimir: sorted by the index of the variant alternative (each alternative has its own index space), so
+        // sorted by the index of the variant alternative (each alternative has its own index space), so
         // operands of different alternatives can tie. stable_sort keeps ties in operand order on every standard
-        // library; up to 16 operands that is also what mimir's libstdc++ std::sort does.
+        // library; up to 16 operands that is also what libstdc++'s std::sort does.
         std::stable_sort(xs.begin(), xs.end(), [&](u32 a, u32 b) { return r.gfe[a].back() < r.gfe[b].back(); });
         Key key{op};
         key.insert(key.end(), xs.begin(), xs.end());
@@ -74,7 +72,7 @@ public:
     u32 fnum(f64 v) { return r.fe.id(Key{kFeNumber, f64_bits(v)}); }
     u32 fbin(u64 op, u32 a, u32 b)
     {
-        // mimir: operands of commutative operators are ordered by index
+        // operands of commutative operators are ordered by index
         if ((op == static_cast<u64>(loki::BinaryOperatorEnum::MUL) || op == static_cast<u64>(loki::BinaryOperatorEnum::PLUS)) && a > b)
             std::swap(a, b);
         return r.fe.id(Key{kFeBinary, op, a, b});
@@ -110,8 +108,8 @@ public:
         return static_cast<loki::MultiOperatorEnum>(op) == loki::MultiOperatorEnum::PLUS ? a + b : a * b;
     }
 
-    /// mimir: Repositories::ground(FunctionExpression, {}) -- used for nullary numeric constraints; folds constants.
-    /// Unlike mimir, a unary minus over a non-constant operand is kept (mimir drops it, which negates the constraint).
+    /// Grounds a function expression with no bindings; used for nullary numeric constraints; folds constants.
+    /// A unary minus over a non-constant operand is kept.
     u32 ground(u32 f)
     {
         const Key& key = r.fe[f];
@@ -173,7 +171,7 @@ public:
     u32 lit_arity(u32 l) const { return static_cast<u32>(r.lit[l].size() - 2); }
     u8 lit_kind(u32 l) const { return k.pred.at(key_u32(r.lit[l][0])); }
 
-    /// mimir: Repositories::get_or_create_conjunctive_condition
+    /// A conjunctive condition.
     u32 cond(const std::vector<u32>& params, std::vector<u32> lits[3], std::vector<u32> ncs)
     {
         Repo::CondExtra extra;
@@ -185,7 +183,7 @@ public:
                     extra.nullary[kind].push_back(glit(key_u32(r.lit[l][0]), r.lit[l][1] != 0, {}));
             std::sort(extra.nullary[kind].begin(), extra.nullary[kind].end());
         }
-        for (u32 n : ncs)  // mimir: grounded before the constraints are sorted
+        for (u32 n : ncs)  // grounded before the constraints are sorted
             if (r.nc[n][3] == 0)
             {
                 const Key& nk = r.nc[n];
@@ -211,7 +209,7 @@ public:
         return id;
     }
 
-    /// mimir: Repositories::get_or_create_conjunctive_effect
+    /// A conjunctive effect.
     u32 ceff(const std::vector<u32>& params, std::vector<u32> lits, std::vector<u32> nes, std::optional<u32> aux)
     {
         std::sort(lits.begin(), lits.end());
@@ -344,7 +342,7 @@ void effect_conjuncts(const loki::Condition& c, loki::ConditionList& out, loki::
         throw std::logic_error("Expected literal in conjunctive condition.");
 }
 
-/// mimir: which predicates are fluent / derived and which functions appear in effects (ToMimirStructures::prepare).
+/// Which predicates are fluent / derived and which functions appear in effects.
 struct Classifier
 {
     absl::flat_hash_set<std::string>& fluent;
@@ -495,7 +493,7 @@ public:
     u32 param(loki::Parameter p)
     {
         const u32 v = var(p->get_variable());
-        Key key{v};  // mimir: variable first, then the types
+        Key key{v};  // variable first, then the types
         std::vector<u32> types;
         for (const auto& t : p->get_bases())
             types.push_back(lk.type(t));
@@ -636,7 +634,7 @@ public:
                 {
                     const u32 f = lk.func(arg->get_function()->get_function_skeleton());
                     if (k.func.at(f) == kAuxiliary)
-                        throw std::logic_error("ToMimirStructures::translate_lifted: FunctionExpressionFunction<AuxiliaryTag> must not exist.");
+                        throw std::logic_error("translate_lifted: FunctionExpressionFunction<AuxiliaryTag> must not exist.");
                     const auto ts = terms(arg->get_function()->get_terms());
                     return ffunc(f, ts);
                 }
@@ -644,7 +642,7 @@ public:
             e->get_function_expression());
     }
 
-    /// Distinct terms of an expression (mimir's NumericConstraint::get_terms, only its size matters).
+    /// Distinct terms of an expression.
     void collect_terms(u32 f, absl::flat_hash_set<u64>& out) const
     {
         const Key& key = r.fe[f];
@@ -677,7 +675,7 @@ public:
         return r.nc.id(Key{static_cast<u64>(c->get_binary_comparator()), a, b, ts.size()});
     }
 
-    /// mimir: ToMimirStructures::translate_lifted(Condition, parameters)
+    /// A lifted condition over the parameters.
     u32 cond(loki::Condition c, const std::vector<u32>& ps)
     {
         loki::ConditionList parts;
@@ -707,7 +705,7 @@ public:
         return Core::cond(ps, lits, {});
     }
 
-    /// mimir: ToMimirStructures::translate_lifted(Effect, parameters). Effects are grouped by condition in an
+    /// A lifted effect over the parameters. Effects are grouped by condition in an
     /// std::unordered_map keyed by the condition pointer, and the conditional effects are created while iterating it.
     std::vector<u32> effects(loki::Effect effect, const std::vector<u32>& action_params)
     {
@@ -739,7 +737,7 @@ public:
                 e = (*w)->get_effect();
             }
             if (!c)
-                c = empty_cond();  // mimir: forall parameters without a `when` are dropped here
+                c = empty_cond();  // forall parameters without a `when` are dropped here
             auto [it, inserted] = group_of.try_emplace(*c, groups.size());
             if (inserted)
                 groups.push_back(Group{*c, {}, {}, std::nullopt});
@@ -766,7 +764,7 @@ public:
                 else if (k.func.at(f) == kAuxiliary)
                     g.aux = r.nea.id(key);
                 else
-                    throw std::logic_error("ToMimirStructures::translate_lifted: Function<StaticTag> must not exist.");
+                    throw std::logic_error("translate_lifted: Function<StaticTag> must not exist.");
             }
             else
                 throw std::logic_error("Unexpected effect type. This error indicates a bug in the translation.");
@@ -781,7 +779,7 @@ public:
         else
             one(effect);
 
-        // mimir's unordered_map (libstdc++; libc++ does the same) iterates at most two groups in reverse insertion
+        // the unordered_map (libstdc++ and libc++ alike) iterates at most two groups in reverse insertion
         // order: a node for an empty bucket goes to the list front, a node for an occupied bucket in front of that
         // bucket's nodes. With three or more groups a shared bucket changes the order (address-dependent), see
         // domain.hpp.
@@ -855,8 +853,8 @@ public:
         out.name = a->get_name();
         out.original_arity = static_cast<u32>(a->get_original_arity());
         out.params = params(a->get_parameters());
-        // mimir: `std::sort(params.begin() + original_arity, params.end())` over Parameter pointers, i.e. allocation
-        // order; creation order is our proxy.
+        // the parameters after original_arity are sorted by Parameter pointer, i.e. allocation order; creation order is
+        // the proxy.
         std::sort(out.params.begin() + std::min<size_t>(out.original_arity, out.params.size()), out.params.end());
         out.cond = a->get_condition() ? cond(*a->get_condition(), out.params) : empty_cond(out.params);
         if (a->get_effect())
@@ -893,7 +891,7 @@ public:
         m_scope_pos.clear();
         const u32 h = lit(x->get_literal());
         if (lit_kind(h) != kDerived)
-            throw std::runtime_error("ToMimirStructures::translate_lifted: Expected Literal<DerivedTag> in axiom head.");
+            throw std::runtime_error("translate_lifted: Expected Literal<DerivedTag> in axiom head.");
         return r.axiom.id(Key{c, h});
     }
 
@@ -920,7 +918,7 @@ public:
     }
     u32 glit_of(loki::Literal l) { return r.glit.id(glit_key(l)); }
 
-    /// mimir: ToMimirStructures::translate_grounded(FunctionExpression) -- no folding
+    /// A grounded function expression, without folding.
     u32 gfexpr(loki::FunctionExpression e)
     {
         return std::visit(
@@ -976,7 +974,7 @@ private:
 
 // ================================================================================================ pass 2 (R1 -> R2)
 
-/// mimir: EncodeParameterIndexInVariables on top of RecursiveBaseTranslator (no caching).
+/// The second pass: parameter indices encoded in variables, on top of the recursive base translation (no caching).
 class Pass2 : public Core
 {
 public:
@@ -1006,7 +1004,7 @@ public:
             out.push_back(param(p));
         return out;
     }
-    /// mimir: predicates and function skeletons are translated with the encoding disabled
+    /// Predicates and function skeletons are translated with the encoding disabled.
     void unencoded_params(const std::vector<u32>& ps)
     {
         m_encode = false;
@@ -1095,7 +1093,7 @@ public:
             aux = numeric_effect(r1.nea, r.nea, *v.aux);
         return Core::ceff(ps, std::move(lits), std::move(nes), aux);
     }
-    /// mimir: EncodeParameterIndexInVariables::translate_level_2(ConditionalEffect)
+    /// A conditional effect with its parameter indices encoded.
     u32 ce(u32 ce1)
     {
         const Key& key1 = r1.ce[ce1];
@@ -1286,7 +1284,7 @@ public:
     {
         return static_cast<loki::MultiOperatorEnum>(op) == loki::MultiOperatorEnum::PLUS ? ExprOp::Add : ExprOp::Mul;
     }
-    /// A multi-operator becomes a left-associated chain, as mimir's exporter writes it.
+    /// A multi-operator becomes a left-associated chain, left to right.
     u32 chain(ExprOp op, const std::vector<u32>& xs)
     {
         if (xs.empty())
@@ -1443,7 +1441,7 @@ public:
         return e;
     }
 
-    /// Lifted literals by kind, then the nullary ground literals by kind (mimir's exporter order), then the numeric
+    /// Lifted literals by kind, then the nullary ground literals by kind, then the numeric
     /// constraints and the grounded nullary ones.
     Condition cond(u32 c)
     {
@@ -1682,7 +1680,7 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
 
     Classifier{ds->fluent_predicates, ds->derived_predicates, ds->effect_functions}.domain(dl);
 
-    // predicates: ids by kind (static, fluent, derived), each in loki's order (mimir: DomainBuilder sorts each kind by
+    // predicates: ids by kind (static, fluent, derived), each in loki's order (each kind is sorted by
     // index, and both passes create them in the domain's order)
     auto pred_kind = [&](const std::string& name)
     {
@@ -1751,7 +1749,7 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
             t.predicates.push_back(out);
         }
 
-    // functions: static, fluent, auxiliary (mimir: `total-cost` is auxiliary, fluent iff it appears in an effect)
+    // functions: static, fluent, auxiliary
     auto func_kind = [&](const std::string& name)
     {
         if (name == "total-cost")
@@ -1796,7 +1794,7 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
     Lookups lk;
     lk.ds = ds.get();
 
-    // ---- pass 1 (ToMimirStructures): predicates, function skeletons, actions, axioms, in loki's order
+    // ---- pass 1: predicates, function skeletons, actions, axioms, in loki's order
     Repo r1;
     Pass1 p1(r1, kinds, lk);
     std::vector<std::vector<u32>> pred_params1(t.predicates.size()), func_params1(t.functions.size());
@@ -1922,7 +1920,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
         }
     }
 
-    // problem-level derived predicates (mimir: every problem predicate is derived)
+    // problem-level derived predicates
     Kinds kinds = domain_kinds(ds);
     absl::flat_hash_map<const loki::PredicateImpl*, u32> problem_preds;
     absl::flat_hash_map<std::string, u32> problem_preds_by_name;
@@ -1968,7 +1966,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
         if (!problem_preds_by_name.contains(x->get_literal()->get_atom()->get_predicate()->get_name()))
             fail("problem axiom over a domain predicate is not supported");
 
-    // mimir: ToMimirStructures::prepare(problem) checks that the goal and the axiom bodies are conjunctive
+    // the goal and the axiom bodies must be conjunctive
     {
         absl::flat_hash_set<std::string> f, d, e;
         Classifier cl{f, d, e};
@@ -1985,7 +1983,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
     lk.problem_preds_by_name = &problem_preds_by_name;
     lk.problem_perm = &problem_perm;
 
-    // ---- pass 1 (ToMimirStructures::translate(problem)) into R1p, a child of the final domain repositories
+    // ---- pass 1 (the problem) into R1p, a child of the final domain repositories
     Repo r1(ds.r2d.get());
     Pass1 p1(r1, kinds, lk);
     std::vector<std::vector<u32>> pred_params1;
@@ -2021,12 +2019,12 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
         }
     }
 
-    // Initial atoms. Mimir creates them in R1p, uniquifies, sorts by R1p index, recreates them in R2p and sorts
+    // Initial atoms. They are created in R1p, uniquified, sorted by R1p index, recreated in R2p and sorted
     // again; R1p and R2p are children of R2d, and nothing creates a ground literal in them before the initial atoms.
     // So per kind the order is: the atoms R2d already has (nullary literals of domain conditions) by R2d index, then
     // the others in order of first occurrence. That order is computed directly; only the atoms that later ground
     // literals of this problem can meet (nullary ones, goal literals, nullary literals of problem axioms) are entered
-    // into R1p/R2p, which keeps every later id relation of mimir (rovers p30-hard has 232,000 initial atoms).
+    // into R1p/R2p, which keeps every later id relation (a large problem can have hundreds of thousands of initial atoms).
     absl::flat_hash_set<Key> later;  // keys of ground literals created after the initial atoms
     {
         auto collect = [&](const loki::Condition& c, bool nullary_only)
@@ -2086,7 +2084,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
             if (kind == kDerived)
                 fail("derived atom in the initial state");
             if (!a.positive)
-                fail("negative literals in the initial state are not supported");  // mimir: ProblemImpl
+                fail("negative literals in the initial state are not supported");
             if (!first_time(a))
                 continue;
             const std::span<const u32> objs(init.objects.data() + a.begin, a.count);
@@ -2171,7 +2169,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
     Pass2 p2(r2, r1, kinds);
     for (const auto& ps : pred_params1)
         p2.unencoded_params(ps);
-    // the tracked initial atoms, in mimir's pass-2 order (static, then fluent, each in its final order)
+    // the tracked initial atoms, in the pass-2 order (static, then fluent, each in its final order)
     if (!tracked1.empty())
     {
         const absl::flat_hash_set<u32> tracked(tracked1.begin(), tracked1.end());

@@ -189,7 +189,7 @@ int run_search(const std::string& path, const TaskPtr& task, const std::string& 
         const double dev = median(times);
         const bool solved = d.result.status == search::SearchStatus::Solved;
         const f64 cost = solved ? replay(*task, s0, d.result.plan) : 0;
-        const bool valid = !solved || cost == d.result.cost || greedy;  // GBFS: the fork's plan extraction may differ
+        const bool valid = !solved || cost == d.result.cost || greedy;  // GBFS: the plans may differ
         ok = ok && valid && (greedy || !solved || c.status != search::SearchStatus::Solved || d.result.cost == c.cost);
         std::printf("{\"task\": \"%s\", \"mode\": \"%s\", \"h\": \"%s\", \"B\": %llu, \"single_bucket\": %s, "
                     "\"cpu_status\": \"%s\", \"cpu_expanded\": %llu, \"cpu_generated\": %llu, \"cpu_search_s\": %.4f, "

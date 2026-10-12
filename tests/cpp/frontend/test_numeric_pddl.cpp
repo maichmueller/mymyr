@@ -1,7 +1,7 @@
-// Numeric fluents and action costs from PDDL: the fork's applicability rules for numeric and total-cost effects,
+// Numeric fluents and action costs from PDDL: the applicability rules for numeric and total-cost effects,
 // canonical values, metric kinds, and plan costs of tasks with numeric functions (transport-opt08, folding).
 
-#include "golden.hpp"
+#include "../support/benchmarks.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/heuristics/action_costs.hpp"
 #include "mymyr/search/brfs.hpp"
@@ -107,8 +107,7 @@ TEST(NumericPddl, EffectApplicability)
                                         "negative-zero", "zero"};
     // not applicable: an increase of a function without a value, an assignment with another effect on the same
     // target, additive with multiplicative effects, a NaN value (division by zero), a total-cost over an undefined
-    // value, a constraint over one. An assign gives a function without a value one (as in the fork); unlike the fork,
-    // a conditional effect that does not fire conflicts with nothing (ce-families-conflict).
+    // value, a constraint over one. An assign gives a function without a value one; a conditional effect that does not fire conflicts with nothing (ce-families-conflict).
     EXPECT_EQ(applicable, want);
     EXPECT_TRUE(std::isnan(value(*task, s0.view(), "(u)")));
     EXPECT_EQ(value(*task, next.at("assign-undefined").view(), "(u)"), 1);
@@ -122,8 +121,8 @@ TEST(NumericPddl, EffectApplicability)
     EXPECT_EQ(value(*task, next.at("inc").view(), "(x)"), 2);
     EXPECT_EQ(value(*task, next.at("two-increases").view(), "(x)"), 4);
     EXPECT_EQ(value(*task, next.at("increase-decrease").view(), "(x)"), -1);
-    // loki merges the effects of one operator on one target by adding their expressions, for scale-up too (as in the
-    // fork): (scale-up (y) 2) (scale-up (y) 3) becomes (scale-up (y) (+ 2 3))
+    // loki merges the effects of one operator on one target by adding their expressions, for scale-up too:
+    // (scale-up (y) 2) (scale-up (y) 3) becomes (scale-up (y) (+ 2 3))
     EXPECT_EQ(value(*task, next.at("two-scales").view(), "(y)"), 10);
     EXPECT_EQ(value(*task, next.at("ce-not-firing").view(), "(x)"), 2);
     // -0 is stored as +0: the two successors are one state
@@ -139,7 +138,7 @@ TEST(NumericPddl, EffectApplicability)
 
 TEST(NumericPddl, OnlyConditionalEffectsThatFireRecordTheirFamilies)
 {
-    // The fork records the effect families of every conditional effect in turn, also when its condition is false, so
+    // The effect families are recorded of every conditional effect in turn, also when its condition is false, so
     // that the order loki gives the conditional effects decides applicability: (when (p) (increase (y) 1)) with p
     // false, then (when (q) (assign (y) 5)), which fires, made ce-families-conflict inapplicable there. An effect
     // that does not fire does not execute: both actions are applicable, and an assignment and an increase of one
@@ -214,18 +213,17 @@ TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
     EXPECT_EQ(r.goal_states, 1u);  // x = 3 at depth 2 (y doubled 0 times); depth-3 states are not expanded
 }
 
-TEST(NumericPddl, TransportOpt08SiwPlanCostIsTheForks)
+TEST(NumericPddl, TransportOpt08SiwPlanCost)
 {
-    const auto dir = test::work_dir() / "mimir-cs/Benchmark/strips/transport-opt08-strips";
-    if (!std::filesystem::exists(dir / "p23.pddl"))
-        GTEST_SKIP() << "no " << dir;
+    const auto dir = test::classic_dir() / "strips/transport-opt08-strips";
+    ASSERT_TRUE(std::filesystem::exists(dir / "p23.pddl")) << dir;
     const auto task = Task::create(*frontend::load_task(dir / "domain.pddl", dir / "p23.pddl"));
     search::SiwOptions o;
     o.max_arity = 2;
     const search::SiwResult r = search::siw(*task, o);
     ASSERT_EQ(r.status, search::SearchStatus::Solved);
     EXPECT_EQ(r.plan.size(), 21u);
-    EXPECT_EQ(r.cost, 1102);  // the fork's SIW(2); 21 is the plan length, with cost_exact = false
+    EXPECT_EQ(r.cost, 1102);  // 21 is the plan length
     EXPECT_TRUE(r.cost_exact);
 }
 
@@ -240,9 +238,8 @@ TEST(NumericPddl, TasksWithNumericFunctionsKeepTheirStateSpace)
     };
     for (const Case& c : {Case{"adl/folding-opt23-adl", "p01.pddl", 148260, 170776, 1}})
     {
-        const auto dir = test::work_dir() / "mimir-cs/Benchmark" / c.dir;
-        if (!std::filesystem::exists(dir / c.problem))
-            GTEST_SKIP() << "no " << dir;
+        const auto dir = test::classic_dir() / c.dir;
+        ASSERT_TRUE(std::filesystem::exists(dir / c.problem)) << dir;
         const auto task = Task::create(*frontend::load_task(dir / "domain.pddl", dir / c.problem));
         EXPECT_EQ(task->numeric_slots(), 0u);
         const BrfsResult r = brfs(*task, {.stop_at_goal = false});
