@@ -28,7 +28,9 @@
 //                      none) names the instances autoresetting rows restart in. binding [0, L] and final_states
 //                      [0, 2 RW] are not written (the caller asked for neither)
 //   mymyr_expand       (states, task_ids) -> succ [N, K, 2 RW], schema, binding [N, K, L], goal, mask [N, K], count [N]
+//                      (+ derived [N, K, 2 D], D = the table's derived words, as an optional seventh result)
 //   mymyr_expand_flat  (states, task_ids) -> succ [M, 2 RW], parent, schema, binding [M, L], goal [M], offsets
+//                      (+ derived [M, 2 D] as an optional seventh result)
 //                      [N + 1]: the first M successors in canonical order; rows past the total are padding (succ 0,
 //                      parent, schema and binding -1, goal false); offsets keep the true counts
 // The in-place results (the environment state) alias their operands (ffi_call's input_output_aliases); a handler that
@@ -107,6 +109,7 @@ struct Entry
     std::vector<u64> scratch_succ;
     std::vector<i32> scratch_schema, scratch_binding, scratch_offsets;
     std::vector<u8> scratch_goal;
+    std::vector<u64> scratch_derived;
 #if defined(MYMYR_HAS_CUDA)
     struct Device
     {
@@ -114,7 +117,7 @@ struct Entry
         cuda::ContextPtr ctx;
         std::unique_ptr<cuda::DeviceEnv> fast, general;
         std::unique_ptr<cuda::SuiteExpander> expander;
-        cuda::Scratch succ, schema, binding, goal, offsets;
+        cuda::Scratch succ, schema, binding, goal, derived, offsets;
     };
     std::mutex devices_mutex;
     std::map<int, std::shared_ptr<Device>> devices;
@@ -748,7 +751,7 @@ ffi::Error env_step_cpu(i64 handle, MYMYR_STEP_PARAMS)
 }
 
 /// rl::expand of the states into the entry's host scratch (all successors): the offsets and the total.
-u64 host_expand(Entry& e, const View& st, const i32* ids)
+u64 host_expand(Entry& e, const View& st, const i32* ids, bool derived)
 {
     const rl::StateBatchView in{st.as<u64>(), st.rows, e.W, 0, e.NN};
     rl::ExpandOptions opt;
@@ -771,6 +774,12 @@ u64 host_expand(Entry& e, const View& st, const i32* ids)
     x.schema = e.scratch_schema.data();
     x.binding = e.scratch_binding.data();
     x.goal = e.scratch_goal.data();
+    if (derived)
+    {
+        x.derived_words = e.suite->derived_words();
+        e.scratch_derived.resize(std::max<u64>(total, 1) * x.derived_words);
+        x.derived = x.derived_words ? e.scratch_derived.data() : nullptr;
+    }
     rl::expand(*e.suite, in, ids, x, opt);
     if (x.words_needed > e.W)
         fail("a successor needs " + std::to_string(x.words_needed) + " words; the rows have " + std::to_string(e.W));
@@ -781,14 +790,30 @@ u64 host_expand(Entry& e, const View& st, const i32* ids)
 struct PaddedBufs
 {
     View succ, schema, binding, goal, mask, count;
+    std::optional<View> derived;  // the optional extra result: [N, K, 2 D] uint32
     u32 K = 0;
 };
 
+/// The optional result after an expansion call's six: the derived words, uint32 [..., 2 D].
+std::optional<View> derived_result(const Entry& e, const ffi::RemainingRets& rest)
+{
+    if (rest.size() == 0)
+        return std::nullopt;
+    if (rest.size() > 1)
+        fail("an expansion has one optional extra result (the derived words)");
+    auto r = rest.get<ffi::AnyBuffer>(0);
+    if (!r.has_value())
+        fail("the extra result of an expansion must be a buffer");
+    return view(**r, "derived", ffi::DataType::U32, false, 2 * static_cast<i64>(e.suite->derived_words()));
+}
+
 PaddedBufs padded_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> schema,
                           ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> goal,
-                          ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count)
+                          ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count,
+                          const ffi::RemainingRets& rest)
 {
     PaddedBufs p;
+    p.derived = derived_result(e, rest);
     p.succ = view(*succ, "succ", ffi::DataType::U32, false, 2 * e.row_words());
     p.schema = view(*schema, "schema", ffi::DataType::S32, false);
     p.binding = view(*binding, "binding", ffi::DataType::S32, false);
@@ -800,6 +825,8 @@ PaddedBufs padded_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> suc
     expect_rows(p.count, N, "count");
     if (p.succ.rows != N * p.K || p.goal.count != N * p.K || p.mask.count != N * p.K || p.binding.rows != N * p.K)
         fail("the padded results must be [N, K, ...] with the same K");
+    if (p.derived && p.derived->rows != N * p.K)
+        fail("the padded 'derived' must be [N, K, 2 D] with the same K");
     if (p.binding.cols < e.L)
         fail("'binding' needs at least " + std::to_string(e.L) + " columns (the largest schema arity)");
     return p;
@@ -818,21 +845,26 @@ rl::PaddedExpansion make_padded(const Entry& e, const PaddedBufs& p)
     out.label_width = static_cast<u32>(p.binding.cols);
     out.binding = p.binding.as<i32>();
     out.goal = p.goal.as<u8>();
+    if (p.derived)
+    {
+        out.derived_words = e.suite->derived_words();
+        out.derived = out.derived_words ? p.derived->as<u64>() : nullptr;
+    }
     return out;
 }
 
 ffi::Error expand_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::Result<ffi::AnyBuffer> succ,
                       ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,
                       ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> mask,
-                      ffi::Result<ffi::AnyBuffer> count)
+                      ffi::Result<ffi::AnyBuffer> count, ffi::RemainingRets rest)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
         const View st = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), st.rows);
-        const PaddedBufs p = padded_results(*e, st.rows, succ, schema, binding, goal, mask, count);
+        const PaddedBufs p = padded_results(*e, st.rows, succ, schema, binding, goal, mask, count, rest);
         std::lock_guard lock(e->host_mutex);
-        const u64 total = host_expand(*e, st, ids);
+        const u64 total = host_expand(*e, st, ids, p.derived.has_value());
         rl::Expansion x;
         x.capacity = total;
         x.words = e->W;
@@ -842,6 +874,11 @@ ffi::Error expand_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids
         x.schema = e->scratch_schema.data();
         x.binding = e->scratch_binding.data();
         x.goal = e->scratch_goal.data();
+        if (p.derived)
+        {
+            x.derived_words = e->suite->derived_words();
+            x.derived = x.derived_words ? e->scratch_derived.data() : nullptr;
+        }
         x.offsets = e->scratch_offsets.data();
         x.total = total;
         rl::PaddedExpansion out = make_padded(*e, p);
@@ -853,14 +890,17 @@ ffi::Error expand_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids
 struct FlatBufs
 {
     View succ, parent, schema, binding, goal, offsets;
+    std::optional<View> derived;  // the optional extra result: [M, 2 D] uint32
     u64 M = 0;
 };
 
 FlatBufs flat_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> parent,
                       ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,
-                      ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> offsets)
+                      ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> offsets,
+                      const ffi::RemainingRets& rest)
 {
     FlatBufs f;
+    f.derived = derived_result(e, rest);
     f.succ = view(*succ, "succ", ffi::DataType::U32, false, 2 * e.row_words());
     f.parent = view(*parent, "parent", ffi::DataType::S32, true);
     f.schema = view(*schema, "schema", ffi::DataType::S32, true);
@@ -872,6 +912,8 @@ FlatBufs flat_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> succ, f
         fail("the flat results must have the same capacity M");
     if (f.offsets.rows != N + 1)
         fail("'offsets' must have N + 1 entries");
+    if (f.derived && f.derived->rows != f.M)
+        fail("'derived' must have the same capacity M as the other flat results");
     if (f.binding.cols < e.L)
         fail("'binding' needs at least " + std::to_string(e.L) + " columns (the largest schema arity)");
     return f;
@@ -889,6 +931,11 @@ rl::Expansion make_flat(const Entry& e, const FlatBufs& f)
     x.schema = f.schema.as<i32>();
     x.binding = f.binding.as<i32>();
     x.goal = f.goal.as<u8>();
+    if (f.derived)
+    {
+        x.derived_words = e.suite->derived_words();
+        x.derived = x.derived_words ? f.derived->as<u64>() : nullptr;
+    }
     x.offsets = f.offsets.as<i32>();
     return x;
 }
@@ -896,13 +943,13 @@ rl::Expansion make_flat(const Entry& e, const FlatBufs& f)
 ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::Result<ffi::AnyBuffer> succ,
                            ffi::Result<ffi::AnyBuffer> parent, ffi::Result<ffi::AnyBuffer> schema,
                            ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> goal,
-                           ffi::Result<ffi::AnyBuffer> offsets)
+                           ffi::Result<ffi::AnyBuffer> offsets, ffi::RemainingRets rest)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
         const View st = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), st.rows);
-        const FlatBufs f = flat_results(*e, st.rows, succ, parent, schema, binding, goal, offsets);
+        const FlatBufs f = flat_results(*e, st.rows, succ, parent, schema, binding, goal, offsets, rest);
         // padding first: rows past the total keep it
         if (f.succ.count)
             std::memset(f.succ.data, 0, f.succ.count * 4);
@@ -911,6 +958,8 @@ ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer tas
                 std::memset(v->data, 0xFF, v->count * 4);
         if (f.goal.count)
             std::memset(f.goal.data, 0, f.goal.count);
+        if (f.derived && f.derived->count)
+            std::memset(f.derived->data, 0, f.derived->count * 4);
         rl::Expansion x = make_flat(*e, f);
         rl::ExpandOptions opt;
         opt.canonical_order = e->cfg.canonical_order;
@@ -986,7 +1035,8 @@ ffi::Error expand_flat_cpu(i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer tas
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
         .Ret<ffi::AnyBuffer>()                                                                                          \
-        .Ret<ffi::AnyBuffer>()
+        .Ret<ffi::AnyBuffer>()                                                                                          \
+        .RemainingRets()
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_init_cpu, env_init_cpu, ffi::Ffi::Bind().Attr<i64>("handle") MYMYR_INIT_BINDING);
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_env_reset_cpu, env_reset_cpu,
@@ -1140,7 +1190,7 @@ cuda::SuiteExpander& device_expander(Entry& e, Entry::Device& d, cudaStream_t s)
 }
 
 /// The expansion of `st` on the device into the slot's flat scratch (all successors): the flat arrays.
-rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i32* ids, cudaStream_t s)
+rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i32* ids, cudaStream_t s, bool derived)
 {
     cuda::SuiteExpander& x0 = device_expander(e, d, s);
     rl::ExpandOptions opt;
@@ -1158,6 +1208,11 @@ rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i3
     x.schema = static_cast<i32*>(d.schema.ensure(d.ctx, rows * 4, s));
     x.binding = static_cast<i32*>(d.binding.ensure(d.ctx, rows * e.L * 4, s));
     x.goal = static_cast<u8*>(d.goal.ensure(d.ctx, rows, s));
+    if (derived)
+    {
+        x.derived_words = e.suite->derived_words();
+        x.derived = x.derived_words ? static_cast<u64*>(d.derived.ensure(d.ctx, rows * x.derived_words * 8, s)) : nullptr;
+    }
     x.offsets = static_cast<i32*>(d.offsets.ensure(d.ctx, (N + 1) * 4, s));
     x0.write(x);
     if (x.words_needed > e.W)
@@ -1168,19 +1223,19 @@ rl::Expansion device_expand(Entry& e, Entry::Device& d, const View& st, const i3
 ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
                        ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> schema,
                        ffi::Result<ffi::AnyBuffer> binding, ffi::Result<ffi::AnyBuffer> goal,
-                       ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count)
+                       ffi::Result<ffi::AnyBuffer> mask, ffi::Result<ffi::AnyBuffer> count, ffi::RemainingRets rest)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
-        const PaddedBufs p = padded_results(*e, sv.rows, succ, schema, binding, goal, mask, count);
+        const PaddedBufs p = padded_results(*e, sv.rows, succ, schema, binding, goal, mask, count, rest);
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
         cuda::DeviceGuard g(ordinal);
         if (sv.rows == 0)
             return;
-        const rl::Expansion x = device_expand(*e, *d, sv, ids, st);
+        const rl::Expansion x = device_expand(*e, *d, sv, ids, st, p.derived.has_value());
         rl::PaddedExpansion out = make_padded(*e, p);
         d->expander->pad(x, sv.rows, out);
     });
@@ -1189,13 +1244,14 @@ ffi::Error expand_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer 
 ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
                             ffi::Result<ffi::AnyBuffer> succ, ffi::Result<ffi::AnyBuffer> parent,
                             ffi::Result<ffi::AnyBuffer> schema, ffi::Result<ffi::AnyBuffer> binding,
-                            ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> offsets)
+                            ffi::Result<ffi::AnyBuffer> goal, ffi::Result<ffi::AnyBuffer> offsets,
+                            ffi::RemainingRets rest)
 {
     return guarded([&] {
         EntryPtr e = entry(handle);
         const View sv = view(states, "states", ffi::DataType::U32, false, 2 * e->row_words());
         const i32* ids = task_ids_of(*e, view(task_ids, "task_ids", ffi::DataType::S32, true), sv.rows);
-        const FlatBufs f = flat_results(*e, sv.rows, succ, parent, schema, binding, goal, offsets);
+        const FlatBufs f = flat_results(*e, sv.rows, succ, parent, schema, binding, goal, offsets, rest);
         auto d = e->device(ordinal);
         std::lock_guard lock(d->mutex);
         cuda::DeviceGuard g(ordinal);
@@ -1206,6 +1262,8 @@ ffi::Error expand_flat_cuda(cudaStream_t st, i32 ordinal, i64 handle, ffi::AnyBu
                 cuda::check(cudaMemsetAsync(v->data, 0xFF, v->count * 4, st), "cudaMemsetAsync");
         if (f.goal.count)
             cuda::check(cudaMemsetAsync(f.goal.data, 0, f.goal.count, st), "cudaMemsetAsync");
+        if (f.derived && f.derived->count)
+            cuda::check(cudaMemsetAsync(f.derived->data, 0, f.derived->count * 4, st), "cudaMemsetAsync");
         cuda::SuiteExpander& x0 = device_expander(*e, *d, st);
         rl::ExpandOptions opt;
         opt.canonical_order = e->cfg.canonical_order;
@@ -1371,6 +1429,8 @@ void bind_rl_jax(nb::module_& parent)
         .def_prop_ro("row_words", [](const PyJaxEnv& e) { return e.entry().row_words(); },
                      "u64 words per state row (a JAX row is 2 row_words uint32).")
         .def_prop_ro("label_width", [](const PyJaxEnv& e) { return e.entry().L; }, "Columns of the binding labels.")
+        .def_prop_ro("derived_words", [](const PyJaxEnv& e) { return e.entry().suite->derived_words(); },
+                     "Derived words per successor row of expand(derived=True) (uint32 columns: twice this).")
         .def_prop_ro("cache_schemas", &PyJaxEnv::cache_schemas,
                      "uint32 columns of the fast path's count cache (0 on the CPU and on the general path).")
         .def_prop_ro("cache_view_words", &PyJaxEnv::cache_view_words,

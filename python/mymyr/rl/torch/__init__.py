@@ -17,7 +17,8 @@ of one):
 
 - torch custom ops (``torch.library``; :mod:`mymyr.rl.torch._ops`): ``torch.ops.mymyr.reset / refresh / step /
   random_actions`` on an environment handle, and ``torch.ops.mymyr.expand`` (padded [N, K]) / ``expand_flat`` (CSR;
-  ``capacity=None``: the row count is an unbacked symbolic size under ``torch.compile``) on a table or suite handle
+  ``capacity=None``: the row count is an unbacked symbolic size under ``torch.compile``; ``expand_derived`` /
+  ``expand_flat_derived`` add the derived words of the successors) on a table or suite handle
   (:func:`register`). All have fake implementations: they trace under ``torch.compile`` without graph breaks
   (``fullgraph=True`` works for loops of ``step``; the TorchRL env's own Python and TensorDict code is not meant to be
   compiled).
@@ -59,7 +60,9 @@ from ._batched import BatchedEnv, Observation, StepResult
 from ._graph import CapturedRollout, Rollout
 from ._ops import (
     expand,
+    expand_derived,
     expand_flat,
+    expand_flat_derived,
     lookup,
     random_actions,
     refresh,
@@ -80,7 +83,9 @@ __all__ = [
     "Rollout",
     "StepResult",
     "expand",
+    "expand_derived",
     "expand_flat",
+    "expand_flat_derived",
     "fast_unsupported",
     "lookup",
     "random_actions",

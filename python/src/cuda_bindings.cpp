@@ -566,8 +566,9 @@ struct DeviceFlat
     OpStream os;
     u64 rows = 0, capacity = 0, total = 0;
     u32 words = 0, label_width = 0, words_needed = 0, numeric_words = 0;
-    u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_offsets = 0;
-    bool has_goal = false;
+    u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0, off_offsets = 0;
+    u32 derived_words = 0;
+    bool has_goal = false, has_derived = false;
 
     [[nodiscard]] u64 valid() const noexcept { return std::min(total, capacity); }
     template<class T>
@@ -587,6 +588,8 @@ struct DeviceFlat
         x.schema = at<i32>(off_schema);
         x.binding = at<i32>(off_binding);
         x.goal = has_goal ? at<u8>(off_goal) : nullptr;
+        x.derived = has_derived && derived_words ? at<u64>(off_derived) : nullptr;
+        x.derived_words = derived_words;
         x.offsets = at<i32>(off_offsets);
         x.total = total;
         x.words_needed = words_needed;
@@ -604,7 +607,8 @@ struct DeviceFlat
     }
 };
 
-DeviceFlat allocate_device_flat(const PyContext& c, const OpStream& os, u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal)
+DeviceFlat allocate_device_flat(const PyContext& c, const OpStream& os, u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal,
+                                std::optional<u32> derived)
 {
     DeviceFlat f;
     BlockLayout lay;
@@ -615,11 +619,14 @@ DeviceFlat allocate_device_flat(const PyContext& c, const OpStream& os, u64 rows
     f.numeric_words = NN;
     f.label_width = L;
     f.has_goal = goal;
+    f.has_derived = derived.has_value();
+    f.derived_words = derived.value_or(0);
     f.off_succ = lay.add(cap, (u64{W} + NN) * sizeof(u64));
     f.off_parent = lay.add(cap, sizeof(i32));
     f.off_schema = lay.add(cap, sizeof(i32));
     f.off_binding = lay.add(cap, u64{L} * sizeof(i32));
     f.off_goal = lay.add(goal ? cap : 0, 1);
+    f.off_derived = lay.add(derived ? cap : 0, u64{f.derived_words} * sizeof(u64));
     f.off_offsets = lay.add(checked_add(rows, 1, "the offsets"), sizeof(i32));
     f.buf = device_output(c, lay.bytes, os);
     return f;
@@ -632,8 +639,9 @@ struct DevicePadded
     OpStream os;
     u64 rows = 0;
     u32 K = 0, words = 0, label_width = 0, numeric_words = 0;
-    u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0;
-    bool has_goal = false, overflow = false;
+    u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
+    u32 derived_words = 0;
+    bool has_goal = false, has_derived = false, overflow = false;
     Framework fw = Framework::DLPack;
     WordEncoding enc;
 
@@ -679,6 +687,8 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.numeric_words = f.numeric_words;
     p.label_width = f.label_width;
     p.has_goal = f.has_goal;
+    p.has_derived = f.has_derived;
+    p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
     const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
@@ -689,6 +699,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.off_schema = lay.add(NK, sizeof(i32));
     p.off_binding = lay.add(NK, u64{f.label_width} * sizeof(i32));
     p.off_goal = lay.add(f.has_goal ? NK : 0, 1);
+    p.off_derived = lay.add(f.has_derived ? NK : 0, u64{f.derived_words} * sizeof(u64));
     p.buf = device_output(*c, lay.bytes, f.os);
     auto* b = static_cast<std::byte*>(p.buf->data());
     rl::PaddedExpansion out;
@@ -703,6 +714,8 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     out.label_width = f.label_width;
     out.binding = reinterpret_cast<i32*>(b + p.off_binding);
     out.goal = f.has_goal ? reinterpret_cast<u8*>(b + p.off_goal) : nullptr;
+    out.derived_words = f.derived_words;
+    out.derived = f.has_derived && f.derived_words ? reinterpret_cast<u64*>(b + p.off_derived) : nullptr;
     {
         ExpanderLease ex(ref, c);
         nb::gil_scoped_release release;
@@ -747,7 +760,8 @@ nb::object device_expand(const ExpandArgs& a)
             W = 1;
         for (int attempt = 0;; ++attempt)
         {
-            f = allocate_device_flat(*c, os, w.rows, cap, W, NN, L, a.goal);
+            f = allocate_device_flat(*c, os, w.rows, cap, W, NN, L, a.goal,
+                                     a.derived ? std::optional<u32>(tt.derived_words()) : std::nullopt);
             rl::Expansion x = f.view();
             ex->write(x);
             f.total = x.total;
@@ -880,6 +894,27 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
     {
         DeviceInput d = dest(a.goal, "goal");
         x.goal = device_dest<u8>(d, "goal", {boolt, u8t}, 1);
+        take_cap(d.im.shape[0]);
+    }
+    if (!a.derived.is_none())
+    {
+        DeviceInput d = dest(a.derived, "derived");
+        if (d.im.shape.size() != 2)
+            throw nb::type_error("mymyr: 'derived' must be [capacity, D] (64-bit) or [capacity, 2D] (32-bit)");
+        if (d.im.dtype.bits == 64)
+        {
+            x.derived = device_dest<u64>(d, "derived", {u64t, i64t}, 2);
+            x.derived_words = static_cast<u32>(d.im.shape[1]);
+        }
+        else if (d.im.dtype.bits == 32)
+        {
+            x.derived = reinterpret_cast<u64*>(device_dest<u32>(d, "derived", {u32t, i32t}, 2));
+            if (d.im.shape[1] % 2 != 0 || reinterpret_cast<std::uintptr_t>(d.im.data) % 8 != 0)
+                throw nb::type_error("mymyr: 32-bit 'derived' needs an even number of columns and 8-byte alignment");
+            x.derived_words = static_cast<u32>(d.im.shape[1] / 2);
+        }
+        else
+            throw nb::type_error("mymyr: 'derived' must hold 64-bit or 32-bit integers");
         take_cap(d.im.shape[0]);
     }
     if (!a.offsets.is_none())
@@ -1412,6 +1447,11 @@ void bind_cuda(nb::module_& parent)
                 return nb::none();
             return p.array(p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.K});
         }, "[N, K] bool goal flags (if requested)")
+        .def_prop_ro("derived", [](const DevicePadded& p) -> MaybeArray {
+            if (!p.has_derived)
+                return nb::none();
+            return p.array(p.off_derived, rl::DType::U64, {static_cast<i64>(p.rows), p.K, static_cast<i64>(p.derived_words)}, true);
+        }, "[N, K, D] derived words of the successors (zero padding), if requested")
         .def("__repr__", [](const DevicePadded& p) {
             return "DevicePaddedExpansion(states=" + std::to_string(p.rows) + ", K=" + std::to_string(p.K) +
                    (p.overflow ? ", overflow" : "") + ")";
@@ -1441,6 +1481,12 @@ void bind_cuda(nb::module_& parent)
                 return nb::none();
             return e.array(e.flat.off_goal, rl::DType::Bool, {static_cast<i64>(e.flat.valid())});
         }, "[M] bool goal flags of the successors (expand(..., goal=True))")
+        .def_prop_ro("derived", [](const PyDeviceExpansion& e) -> MaybeArray {
+            if (!e.flat.has_derived)
+                return nb::none();
+            return e.array(e.flat.off_derived, rl::DType::U64, {static_cast<i64>(e.flat.valid()), static_cast<i64>(e.flat.derived_words)}, true);
+        }, "[M, D] derived words of the successors (expand(..., derived=True))")
+        .def_prop_ro("derived_words", [](const PyDeviceExpansion& e) { return e.flat.derived_words; })
         .def_prop_ro("counts", [](const PyDeviceExpansion& e) -> ArrayOut {
             const std::vector<i32> off = e.flat.host_offsets();
             std::vector<i32> c(e.flat.rows);
