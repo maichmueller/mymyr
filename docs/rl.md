@@ -175,9 +175,9 @@ print(env.states.shape, step.reward.shape)
 
 ## A learning smoke example
 
-Run `python examples/rl_learning.py` for a NumPy REINFORCE successor scorer using native goal-relation counts and
-action-schema readouts. It trains on three chain instances with 3–5 objects, then evaluates on held-out 8- and
+Run `python examples/rl_learning.py` for a NumPy REINFORCE successor scorer. It scores each applicable action by an
+action-schema one-hot and by the agent's position in the native relational encoding of the successor state. It trains on three chain instances with 3–5 objects, then evaluates on held-out 8- and
 12-object instances against a random policy. The report includes success, solved plan length, instance coverage,
 truncations, elapsed time and a counted subset of live array storage (not process peak memory).
-The scorer is intentionally small: it pools goal counts and scores action schemas, not object-level relational
-reasoning. It exercises the path from collection through native encoding to a policy update, not general planning ability.
+The scorer is intentionally small: the position is the object index of the successor's `at` tuple, which equals the
+chain position because the example declares its cells in chain order. It is not object-level relational reasoning. It exercises the path from collection through native encoding to a policy update, not general planning ability.

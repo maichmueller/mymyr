@@ -1,8 +1,9 @@
 """Learn a tiny successor scorer from sparse rewards; evaluate on longer, held-out chains.
 
-This NumPy REINFORCE smoke example uses native relations and applicable-action
-readouts. Its schema/count features are deliberately simple, not a relational
-neural network or a benchmark of general planning ability.
+This NumPy REINFORCE smoke example scores each applicable action by its schema and by the position that the
+native relational encoding of the successor gives the agent: the object index of the successor's `at` tuple, which
+equals the position in the chain because the cells are declared in chain order. Its features are deliberately simple,
+not a relational neural network or a benchmark of general planning ability.
 """
 
 from time import perf_counter
@@ -35,24 +36,19 @@ def chain_tasks(sizes):
 
 
 def action_features(encoder, states, task_ids):
-    expansion = rl.expand(encoder.table, states, task_ids=task_ids)
+    table = encoder.table
+    expansion = rl.expand(table, states, task_ids=task_ids)
     if expansion.overflow:
         raise RuntimeError("this example requires every applicable action")
-    observation = encoder.encode(states, task_ids=task_ids, actions=expansion)
     successors = encoder.encode(expansion.succ, task_ids=task_ids[expansion.parent])
-    satisfied = np.array([source == "goal_satisfied" for source in encoder.relation_sources])
-    unsatisfied = np.array([source == "goal_unsatisfied" for source in encoder.relation_sources])
-    counts = successors.relation_counts
-    goal_counts = np.column_stack((counts[:, satisfied].sum(1), counts[:, unsatisfied].sum(1)))
-    goal_counts = goal_counts / np.maximum(goal_counts.sum(1, keepdims=True), 1)
-    schemas = np.eye(encoder.table.num_schemas)[observation.action_schema]
-    features = np.column_stack((schemas, goal_counts))
-    arrays = (expansion.succ, observation.relation_args, observation.relation_counts,
-              observation.relation_offsets, observation.relation_tuple_offsets, observation.object_offsets,
-              observation.action_schema, observation.action_binding, observation.action_parent,
-              observation.action_offsets, observation.action_tuple, successors.relation_args,
-              successors.relation_counts, successors.relation_offsets, successors.relation_tuple_offsets,
-              successors.object_offsets, features)
+    # The agent's position in each successor graph, relative to the chain's length. It is the object index of the
+    # graph's one `at` tuple, which is the chain position only because the cells are declared in chain order.
+    cells = np.arange(successors.num_graphs) * successors.num_relations + encoder.relation_id("at")
+    position = successors.relation_args[successors.relation_arg_offsets[cells]] - successors.entity_offsets[:-1]
+    progress = position / np.maximum(successors.num_objects - 1, 1)
+    features = np.column_stack((np.eye(table.num_schemas)[expansion.schema], progress))
+    arrays = (expansion.succ, successors.relation_args, successors.relation_counts, successors.relation_offsets,
+              successors.relation_arg_offsets, successors.entity_offsets, successors.num_objects, features)
     return features, sum(array.nbytes for array in arrays)
 
 
@@ -80,7 +76,7 @@ def episode(pool, encoder, weights, rng, task_id, *, greedy=False):
 
 def evaluate(tasks, weights, seed, episodes=64, *, greedy=False):
     table = rl.TaskTable(tasks)
-    encoder = encoding.FlatRelationEncoder(table)
+    encoder = encoding.FlatRelationEncoder(table, goal_derivations=())
     pool = rl.CpuEnvPool(table, num_envs=1, threads=1, max_steps=2 * max(task.num_objects for task in tasks),
                          autoreset=False)
     rng = np.random.default_rng(seed)
@@ -100,11 +96,11 @@ def run(training_episodes=400, evaluation_episodes=64, seed=7):
     training_sizes, evaluation_sizes = (3, 4, 5), (8, 12)
     tasks = chain_tasks(training_sizes)
     table = rl.TaskTable(tasks)
-    encoder = encoding.FlatRelationEncoder(table)
+    encoder = encoding.FlatRelationEncoder(table, goal_derivations=())
     pool = rl.CpuEnvPool(table, num_envs=1, threads=1, max_steps=2 * max(training_sizes), autoreset=False)
     sampler = rl.InstanceSampler(len(tasks))
     rng = np.random.default_rng(seed)
-    weights = np.zeros(table.num_schemas + 2)
+    weights = np.zeros(table.num_schemas + 1)
     visits = np.zeros(len(tasks), np.int32)
     baseline = 0.0
     for counter in range(training_episodes):

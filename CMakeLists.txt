@@ -169,7 +169,7 @@ target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/knowledge_base.cpp
 )
 
-add_library(mymyr_encoding STATIC src/mymyr/encoding/flat.cpp src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
+add_library(mymyr_encoding STATIC src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
     src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/validate.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)
 set_target_properties(mymyr_encoding PROPERTIES EXPORT_NAME encoding)
@@ -194,6 +194,7 @@ if(MYMYR_FRONTEND)
         src/mymyr/frontend/domain.cpp
         src/mymyr/frontend/encoding_goal.cpp
         src/mymyr/frontend/init_reader.cpp
+        src/mymyr/frontend/normalize.cpp
         src/mymyr/frontend/translate.cpp
     )
     add_library(mymyr::frontend ALIAS mymyr_frontend)
