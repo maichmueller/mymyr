@@ -25,7 +25,7 @@ assert np.array_equal(encoder.encode(state).relation_args, batch.relation_args)
 ## The encoder
 
 `FlatRelationEncoder(table_or_task, *, <options>)` takes a `Task`, a `TaskHandle` or a one-domain `rl.TaskTable` and the
-options of the [schema](#encoding-schema). `encoder.encode(states, task_ids=None, *, derived=None, framework=None)`
+options of the [schema](#encoding-schema). `encoder.encode(states, task_ids=None, *, derived=None, framework=None, threads=1, capacities=None)`
 returns a `FlatBatch`. It is reentrant: one encoder serves any number of concurrent calls.
 
 - **`states`:**
@@ -43,9 +43,17 @@ second parse of the same file), and refused with a `ValueError` naming the row a
 - **`derived`:** the derived atom words of each row, `[N, D]` u64 (or u32 halves), as `rl.expand` computes them. By
   default they are evaluated here, and only for rows whose instance has derived relations in the schema.
 - **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).
+- **`threads`:** the threads that encode the batch (default 1; 0 means the hardware threads). The result does not depend
+  on it: a batch is byte-identical for every thread count. Threads pay off for batches of many or large graphs; a
+  single state is encoded on the calling thread whatever the count.
+- **`capacities`:** `None` (default) sizes every array to the batch. A dict with the keys `entities`, `tuples` and
+  `args` gives the capacity of the variable arrays instead: the entity arrays have `entities` entries, the tuple
+  offset arrays `tuples + 1`, `relation_args` has `args` entries. The batch fills the first entries of each array and
+  the rest is zero, so batches of different sizes share array shapes (for example under `jax.jit`). A capacity of
+  zero or one that is too small leaves every array zero; `batch.sizes` then tells which capacity overflowed.
 
 Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `goal_derivations`,
-`max_goal_level` above 0, `target_sources`, `predicate_virtual_nodes`, `horizon_mode` and `layout='relation'`. The
+`max_goal_level` above 0, `target_sources`, `predicate_virtual_nodes` and `horizon_mode`. The
 default of `goal_derivations` is among them: **pass `goal_derivations=()`**. Numeric tasks raise as well. Every
 other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed `derived`
 array) raises `ValueError` too; a batch that needs more indices than the index type holds raises `OverflowError`
@@ -76,14 +84,14 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `task_ids` | int32 `[G]` | the instance of each row |
 | `num_objects` | I `[G]` | the objects of the instance (the auxiliary entity is not counted) |
 | `entity_offsets` | I `[G + 1]` | graph `g`'s entities are `[entity_offsets[g], entity_offsets[g + 1])` |
-| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 8 auxiliary (`schema.entity_role_names`) |
-| `entity_ref` | I `[E]` | an object's instance-local id; -1 for the auxiliary entity |
-| `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)` |
-| `relation_offsets` | I `[G * R + 1]` | cell `g * R + r` holds the tuples `[relation_offsets[c], relation_offsets[c + 1])` |
+| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 8 auxiliary (`schema.entity_role_names`); omitted under `entity_arrays='auto'` when implicit |
+| `entity_ref` | I `[E]` | an object's instance-local id; -1 for the auxiliary entity; omitted like `entity_role` |
+| `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)` (graph layout) or `[R, G]` (relation layout); omitted with `emit_counts=False` |
+| `relation_offsets` | I `[G * R + 1]` | segment `c` holds the tuples `[relation_offsets[c], relation_offsets[c + 1])`; the segment of cell `(g, r)` is `c = g * R + r` (graph layout) or `c = r * G + g` (relation layout) |
 | `relation_arg_offsets` | I `[G * R + 1]` | the same offsets into `relation_args` |
 | `relation_args` | I `[A]` | the entities of the tuples, tuple after tuple, `relation_arities[r]` per tuple |
 
-The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph), `index_dtype` (0: int32, 1: int64),
+The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32, 1: int64),
 `schema_fingerprint` (the schema's fingerprint as a signed 64-bit value) and `statics` (0: the static tuples are
 repeated in every graph) come with `batch.as_dict()`.
 
@@ -96,6 +104,19 @@ instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]
 batch's framework. NumPy arrays are read-only; do not mutate the shared buffers through frameworks whose tensor APIs
 cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
 `batch.schema` is its `EncodingSchema`.
+
+## Layouts and omitted arrays
+
+`layout='graph'` (the default) stores the tuples graph by graph; `layout='relation'` stores them relation by relation
+across the graphs, so one relation's tuples of the whole batch are contiguous (a good fit for per-relation message
+passing). Both hold the same tuples in the same order within a cell; only the order of the cells differs: a permutation
+of the segments. Slicing a batch is a slice of the encoding in both layouts.
+
+`emit_counts=False` drops `relation_counts`; the count of a cell is the difference of two consecutive
+`relation_offsets`. `entity_arrays='auto'` drops `entity_role` and `entity_ref` when they carry no information: every
+entity is an object (role 0, `entity_ref` the instance-local id) or the auxiliary entity (role 8, ref -1), which holds
+without `target_sources`, `predicate_virtual_nodes`, `include_actions` and a horizon mode (`batch.implicit_entities` is the batch's flag). Omitted arrays raise `AttributeError` on the batch and are
+absent from `as_dict()`.
 
 ## Encoding schema
 
@@ -134,4 +155,9 @@ relations. An encoder has the same properties.
 `mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
 encoder (pass `options.goal_derivations = {}`), and `encode(EncodeInput{states, task_ids, derived, derived_stride})`
 returns the batch as an `rl::ArrayBundle` with the arrays and scalars above. `mymyr/encoding/validate.hpp` checks a
-batch against the contract. The encoder runs on the calling thread and is not a CUDA or JAX-jitted operation.
+batch against the contract. `encode(in, pool, scratch)` takes a `ThreadPool` (the batch is encoded by its workers, byte-identically for any pool) and a
+reusable `EncodeScratch`. `count(in, pool, scratch)` returns the `FlatSizes` of a batch (entities, tuples,
+args); `fill(in, sizes, buffers, pool, scratch)` then writes it into caller-provided `FlatBuffers`, and
+`encode_into(in, capacities, buffers, pool, scratch)` does both within `FlatCapacities`, reporting `overflow` in the
+sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scratch, sizes)` returns a bundle whose
+variable arrays have the capacity sizes, zero after the batch. The encoder is not a CUDA or JAX-jitted operation.

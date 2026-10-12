@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -481,39 +482,46 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return encode(in, pool, scratch);
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in, ThreadPool& pool,
-                                                           EncodeScratch& scratch) const
+namespace
 {
-    const FlatSizes sizes = count(in, pool, scratch);
-    const IndexType index = m_schema->options().index;
-    const u64 graphs = in.states.rows;
-    const u64 R = m_schema->num_relations();
-    if (sizes.overflow & k_overflow_index)
-    {
-        detail::check_index_range(sizes.entities, index, "entities");
-        detail::check_index_range(sizes.tuples, index, "tuples");
-        detail::check_index_range(sizes.args, index, "tuple arguments");
-        detail::check_index_range(graphs * R + 1, index, "relation cells");
-        detail::check_index_range(graphs + 1, index, "graphs");
-    }
+/// The array of a bundle under construction, null if the bundle has none of that name.
+void* array_of(rl::ArrayBundle& bundle, const char* name) { return bundle.mutable_data(name); }
 
+FlatBuffers buffers_of(rl::ArrayBundle& bundle)
+{
+    FlatBuffers out;
+    out.task_ids = static_cast<i32*>(array_of(bundle, "task_ids"));
+    out.num_objects = array_of(bundle, "num_objects");
+    out.entity_offsets = array_of(bundle, "entity_offsets");
+    out.entity_role = static_cast<u8*>(array_of(bundle, "entity_role"));
+    out.entity_ref = array_of(bundle, "entity_ref");
+    out.relation_counts = array_of(bundle, "relation_counts");
+    out.relation_offsets = array_of(bundle, "relation_offsets");
+    out.relation_arg_offsets = array_of(bundle, "relation_arg_offsets");
+    out.relation_args = array_of(bundle, "relation_args");
+    return out;
+}
+}  // namespace
+
+rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args) const
+{
+    const IndexType index = m_schema->options().index;
+    const u64 R = m_schema->num_relations();
     const rl::DType itype = index == IndexType::I64 ? rl::DType::I64 : rl::DType::I32;
-    const bool counts = m_schema->emits_counts();
-    const bool entity_arrays = !m_schema->implicit_entity_arrays();
     rl::ArrayBundle::Builder builder;
     builder.add_uninitialized("task_ids", rl::DType::I32, shape1(graphs));
     builder.add_uninitialized("num_objects", itype, shape1(graphs));
     builder.add_uninitialized("entity_offsets", itype, shape1(graphs + 1));
-    if (entity_arrays)
+    if (!m_schema->implicit_entity_arrays())
     {
-        builder.add_uninitialized("entity_role", rl::DType::U8, shape1(sizes.entities));
-        builder.add_uninitialized("entity_ref", itype, shape1(sizes.entities));
+        builder.add_uninitialized("entity_role", rl::DType::U8, shape1(entities));
+        builder.add_uninitialized("entity_ref", itype, shape1(entities));
     }
-    if (counts)
+    if (m_schema->emits_counts())
         builder.add_uninitialized("relation_counts", itype, shape2(graphs, R));
     builder.add_uninitialized("relation_offsets", itype, shape1(graphs * R + 1));
     builder.add_uninitialized("relation_arg_offsets", itype, shape1(graphs * R + 1));
-    builder.add_uninitialized("relation_args", itype, shape1(sizes.args));
+    builder.add_uninitialized("relation_args", itype, shape1(args));
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
     builder.scalar("num_relations", static_cast<i64>(R));
@@ -521,19 +529,57 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
     builder.scalar("statics", 0);
-    auto bundle = std::make_shared<rl::ArrayBundle>(builder.build());
+    return builder.build();
+}
 
-    FlatBuffers out;
-    out.task_ids = static_cast<i32*>(bundle->mutable_data("task_ids"));
-    out.num_objects = bundle->mutable_data("num_objects");
-    out.entity_offsets = bundle->mutable_data("entity_offsets");
-    out.entity_role = static_cast<u8*>(bundle->mutable_data("entity_role"));
-    out.entity_ref = bundle->mutable_data("entity_ref");
-    out.relation_counts = bundle->mutable_data("relation_counts");
-    out.relation_offsets = bundle->mutable_data("relation_offsets");
-    out.relation_arg_offsets = bundle->mutable_data("relation_arg_offsets");
-    out.relation_args = bundle->mutable_data("relation_args");
-    fill(in, sizes, out, pool, scratch);
+std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in, ThreadPool& pool,
+                                                           EncodeScratch& scratch) const
+{
+    const FlatSizes sizes = count(in, pool, scratch);
+    if (sizes.overflow & k_overflow_index)
+    {
+        const IndexType index = m_schema->options().index;
+        const u64 graphs = in.states.rows;
+        const u64 R = m_schema->num_relations();
+        detail::check_index_range(sizes.entities, index, "entities");
+        detail::check_index_range(sizes.tuples, index, "tuples");
+        detail::check_index_range(sizes.args, index, "tuple arguments");
+        detail::check_index_range(graphs * R + 1, index, "relation cells");
+        detail::check_index_range(graphs + 1, index, "graphs");
+    }
+    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(in.states.rows, sizes.entities, sizes.args));
+    fill(in, sizes, buffers_of(*bundle), pool, scratch);
+    return bundle;
+}
+
+std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in, const FlatCapacities& capacities,
+                                                                    ThreadPool& pool, EncodeScratch& scratch,
+                                                                    FlatSizes& sizes) const
+{
+    sizes = count(in, pool, scratch);
+    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args)
+        sizes.overflow |= k_overflow_capacity;
+    const u64 graphs = in.states.rows;
+    const bool fits = !sizes.overflowed();
+    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args));
+    const FlatBuffers out = buffers_of(*bundle);
+    const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
+    // the entries a batch does not use are zero, and an overflowing batch is all zero
+    auto zero = [](void* data, u64 from, u64 to, usize width)
+    { std::memset(static_cast<std::byte*>(data) + from * width, 0, (to - from) * width); };
+    if (fits)
+    {
+        fill(in, sizes, out, pool, scratch);
+        zero(out.relation_args, sizes.args, capacities.args, index_bytes);
+        if (out.entity_role)
+        {
+            zero(out.entity_role, sizes.entities, capacities.entities, 1);
+            zero(out.entity_ref, sizes.entities, capacities.entities, index_bytes);
+        }
+    }
+    else
+        for (const rl::ArrayInfo& info : bundle->arrays())
+            std::memset(bundle->mutable_data(info), 0, info.elements() * rl::dtype_bytes(info.dtype));
     return bundle;
 }
 }  // namespace mymyr::encoding

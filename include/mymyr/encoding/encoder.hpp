@@ -142,6 +142,13 @@ public:
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in, ThreadPool& pool,
                                                                 EncodeScratch& scratch) const;
 
+    /// The capacity form into a new bundle whose variable-size arrays (the entity arrays and relation_args) have the
+    /// capacities' sizes. The arrays hold the batch in their first `sizes.entities` / `sizes.args` entries and are zero
+    /// beyond; if `sizes.overflow` is set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
+    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
+                                                                         const FlatCapacities& capacities, ThreadPool& pool,
+                                                                         EncodeScratch& scratch, FlatSizes& sizes) const;
+
     /// The capacity form, step one: checks the input (the exceptions of encode, except std::overflow_error), counts and
     /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not fit
     /// the index type. `scratch` keeps the counts for fill().
@@ -158,6 +165,8 @@ public:
 
 private:
     FlatEncoder() = default;
+    /// An uninitialized bundle of `graphs` graphs with room for `entities` entities and `args` tuple arguments.
+    [[nodiscard]] rl::ArrayBundle allocate(u64 graphs, u64 entities, u64 args) const;
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;

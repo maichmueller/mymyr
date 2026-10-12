@@ -365,6 +365,45 @@ TEST(EncoderCapacity, ExactShortAndZeroCapacitiesWriteNothingPastThem)
     run_capacity_cases<i64>(options_with(Layout::Relation, IndexType::I64));
 }
 
+TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
+{
+    const auto table = two_instance_table();
+    const test::Rows rows = mixed_rows(*table, 20, 6);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+    {
+        const auto encoder = FlatEncoder::create(table, options_with(layout));
+        const auto expected = encoder->encode(input_of(rows));
+        const FlatCapacities exact{static_cast<u64>(ints(*expected, "entity_offsets").back()),
+                                   static_cast<u64>(ints(*expected, "relation_offsets").back()),
+                                   static_cast<u64>(ints(*expected, "relation_arg_offsets").back())};
+        ThreadPool pool(2);
+        EncodeScratch scratch;
+        FlatSizes sizes;
+        const auto same = encoder->encode_capacity(input_of(rows), exact, pool, scratch, sizes);
+        EXPECT_EQ(sizes.overflow, 0u);
+        expect_same_bytes(*expected, *same);
+        const FlatCapacities roomy{exact.entities + 7, exact.tuples, exact.args + 5};
+        const auto padded = encoder->encode_capacity(input_of(rows), roomy, pool, scratch, sizes);
+        EXPECT_EQ(sizes.overflow, 0u);
+        const auto args = ints(*padded, "relation_args");
+        ASSERT_EQ(args.size(), roomy.args);
+        EXPECT_TRUE(std::equal(args.begin(), args.begin() + static_cast<std::ptrdiff_t>(exact.args),
+                               ints(*expected, "relation_args").begin()));
+        EXPECT_TRUE(std::all_of(args.begin() + static_cast<std::ptrdiff_t>(exact.args), args.end(), [](i64 v) { return v == 0; }));
+        const auto roles = ints(*padded, "entity_role");
+        EXPECT_TRUE(std::all_of(roles.begin() + static_cast<std::ptrdiff_t>(exact.entities), roles.end(), [](i64 v) { return v == 0; }));
+        // too small: true sizes, every array zero
+        const auto short_bundle = encoder->encode_capacity(input_of(rows), {exact.entities, exact.tuples, exact.args - 1}, pool, scratch, sizes);
+        EXPECT_EQ(sizes.overflow, k_overflow_capacity);
+        EXPECT_EQ(sizes.args, exact.args);
+        for (const rl::ArrayInfo& info : short_bundle->arrays())
+        {
+            const auto values = ints(*short_bundle, info.name.c_str());
+            EXPECT_TRUE(std::all_of(values.begin(), values.end(), [](i64 v) { return v == 0; })) << info.name;
+        }
+    }
+}
+
 TEST(EncoderCapacity, AnEmptyBatchFitsAnyCapacity)
 {
     const auto table = two_instance_table();

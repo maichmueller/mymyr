@@ -10,7 +10,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,6 +32,9 @@ struct EncodingHorizonMode
 struct EncodingRootPolicy
 {
 };
+struct EncodingEntityArrays
+{
+};
 }
 
 namespace nanobind::detail
@@ -43,6 +48,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingIndexDtype>
 {
     static constexpr auto Name = const_name("typing.Literal['int32', 'int64']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingEntityArrays>
+{
+    static constexpr auto Name = const_name("typing.Literal['auto', 'always']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingHorizonMode>
@@ -76,6 +86,23 @@ struct PyFlatEncoder
 {
     TableRef reference;
     std::shared_ptr<const encoding::FlatEncoder> encoder;
+    std::mutex pools_mutex;                            // guards pools
+    std::map<u32, std::shared_ptr<ThreadPool>> pools;  // by thread count, created on first use
+
+    PyFlatEncoder(TableRef reference_, std::shared_ptr<const encoding::FlatEncoder> encoder_)
+        : reference(std::move(reference_)), encoder(std::move(encoder_))
+    {
+    }
+
+    /// The pool of `threads` members (at least 1), shared by the calls of this encoder.
+    std::shared_ptr<ThreadPool> pool(u32 threads)
+    {
+        std::lock_guard lock(pools_mutex);
+        auto& slot = pools[threads];
+        if (!slot)
+            slot = std::make_shared<ThreadPool>(threads);
+        return slot;
+    }
 };
 
 struct PyFlatBatch
@@ -83,6 +110,7 @@ struct PyFlatBatch
     std::shared_ptr<const rl::ArrayBundle> arrays;
     std::shared_ptr<const encoding::EncodingSchema> schema;
     Framework framework = Framework::Numpy;
+    std::optional<encoding::FlatSizes> sizes;  // set by an encoding with capacities
 };
 
 // ------------------------------------------------------------------------------------------------ options
@@ -128,7 +156,7 @@ encoding::EnumSet<E> choice_set(nb::handle value, const char* name, Parse parse,
 encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_static, bool include_derived,
                                      bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
-                                     nb::handle index_dtype, nb::handle horizon_mode, nb::handle root_policy,
+                                     nb::handle index_dtype, bool emit_counts, nb::handle entity_arrays, nb::handle horizon_mode, nb::handle root_policy,
                                      bool parent_relation)
 {
     using namespace encoding;
@@ -150,6 +178,8 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
                                                "'goal', 'subgoal', 'action', 'history'");
     options.layout = choice(layout, "layout", parse_layout, "'graph', 'relation'");
     options.index = choice(index_dtype, "index_dtype", parse_index_type, "'int32', 'int64'");
+    options.emit_counts = emit_counts;
+    options.entity_arrays = choice(entity_arrays, "entity_arrays", parse_entity_arrays, "'auto', 'always'");
     if (!horizon_mode.is_none())
     {
         options.horizon.mode =
@@ -187,6 +217,8 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["target_sources"] = nb::tuple(texts_of(o.targets.members()));
     out["layout"] = std::string(encoding::to_string(o.layout));
     out["index_dtype"] = std::string(encoding::to_string(o.index));
+    out["emit_counts"] = o.emit_counts;
+    out["entity_arrays"] = std::string(encoding::to_string(o.entity_arrays));
     const bool horizon = o.horizon.mode != encoding::HorizonMode::None;
     out["horizon_mode"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.mode)))) : nb::none();
     out["root_policy"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.root)))) : nb::none();
@@ -203,7 +235,11 @@ constexpr const char* k_option_doc =
     "slot in the predicate relations' tuples. include_actions: one relation per action schema. target_sources: "
     "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
     "targets need the plain goal derivation, action targets include_actions). layout, "
-    "index_dtype: how a batch is stored. horizon_mode, root_policy, parent_relation: the horizon variants "
+    "index_dtype: how a batch is stored; layout='relation' stores the tuples relation by relation across the graphs "
+    "(cell (g, r) is segment r * G + g instead of g * R + r). emit_counts=False omits relation_counts (the tuples of "
+    "a segment are the difference of two relation_offsets). entity_arrays='auto' omits entity_role and entity_ref "
+    "when every entity is an object or the auxiliary entity (no target_sources, predicate_virtual_nodes, "
+    "include_actions or horizon_mode). horizon_mode, root_policy, parent_relation: the horizon variants "
     "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid "
     "combinations and for numeric tasks.";
 
@@ -218,20 +254,20 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
         [make](Py* self, TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static,
                bool include_derived, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,
-               Arg<ann::EncodingHorizonMode> horizon_mode, Arg<ann::EncodingRootPolicy> root_policy,
+               bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingHorizonMode> horizon_mode, Arg<ann::EncodingRootPolicy> root_policy,
                bool parent_relation)
         {
             const TableRef reference = table_of(table);
             const encoding::FlatOptions options = schema_options(
                 max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes,
-                include_actions, goal_derivations, target_sources, layout, index_dtype, horizon_mode, root_policy,
-                parent_relation);
+                include_actions, goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays,
+                horizon_mode, root_policy, parent_relation);
             make(self, reference, options);
         },
         "table"_a, nb::kw_only(), "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0,
         "include_static"_a = true, "include_derived"_a = true, "nullary"_a = true, "equality"_a = false,
         "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
-        "layout"_a = "graph", "index_dtype"_a = "int32", "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(),
+        "layout"_a = "graph", "index_dtype"_a = "int32", "emit_counts"_a = true, "entity_arrays"_a = "always", "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(),
         "parent_relation"_a = false, doc);
 }
 
@@ -400,9 +436,38 @@ nb::object batch_array(const PyFlatBatch& batch, const char* name)
     return export_array(std::move(spec), batch.framework, default_words(batch.framework));
 }
 
-PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
-                   Arg<ann::Framework> framework)
+using CapacitiesArg = std::optional<nb::typed<nb::dict, std::string, std::uint64_t>>;
+
+encoding::FlatCapacities capacities_of(const nb::dict& value)
 {
+    encoding::FlatCapacities out;
+    bool entities = false, tuples = false, args = false;
+    for (auto [key, item] : value)
+    {
+        const std::string name = text_of(key, "capacities key");
+        if (name == "entities")
+            out.entities = int_arg<u64>(item, "capacities['entities']"), entities = true;
+        else if (name == "tuples")
+            out.tuples = int_arg<u64>(item, "capacities['tuples']"), tuples = true;
+        else if (name == "args")
+            out.args = int_arg<u64>(item, "capacities['args']"), args = true;
+        else
+            throw nb::value_error(("mymyr: encoding: capacities has the unknown key '" + name +
+                                   "'; the keys are 'entities', 'tuples' and 'args'")
+                                      .c_str());
+    }
+    if (!(entities && tuples && args))
+        throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'tuples' and 'args'");
+    return out;
+}
+
+PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
+                   Arg<ann::Framework> framework, IntArg threads_in, CapacitiesArg capacities_in)
+{
+    const u32 threads = threads_arg(threads_in);
+    const std::optional<encoding::FlatCapacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in)) : std::nullopt;
+
     StateBatch states = import_states(state_arg, packed_words(state_arg));
     std::vector<i32> ids_copy;
     std::shared_ptr<void> ids_keep;
@@ -438,9 +503,18 @@ PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg t
     PyFlatBatch output;
     output.framework = parse_framework(framework, state_arg);
     output.schema = self.encoder->schema_ptr();
+    const std::shared_ptr<ThreadPool> pool = self.pool(threads == 0 ? hardware_threads() : threads);
+    thread_local encoding::EncodeScratch scratch;
     {
         nb::gil_scoped_release release;
-        output.arrays = self.encoder->encode(input);
+        if (capacities)
+        {
+            encoding::FlatSizes sizes;
+            output.arrays = self.encoder->encode_capacity(input, *capacities, *pool, scratch, sizes);
+            output.sizes = sizes;
+        }
+        else
+            output.arrays = self.encoder->encode(input, *pool, scratch);
     }
     return output;
 }
@@ -450,11 +524,16 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"num_objects", "index [G]: the objects of each graph's instance (the auxiliary entity is not counted)."},
     {"entity_offsets",
      "index [G + 1]: graph g's entities are [entity_offsets[g], entity_offsets[g + 1]); entity ids are batch-global."},
-    {"entity_role", "uint8 [E]: the role of each entity, an index into entity_role_names."},
-    {"entity_ref", "index [E]: an object's instance-local id, -1 for the auxiliary entity."},
-    {"relation_counts", "index [G, R]: the tuples of each (graph, relation) cell."},
+    {"entity_role",
+     "uint8 [E]: the role of each entity, an index into entity_role_names. Absent when the entity arrays are implicit "
+     "(FlatBatch.implicit_entities)."},
+    {"entity_ref", "index [E]: an object's instance-local id, -1 for the auxiliary entity. Absent when implicit."},
+    {"relation_counts",
+     "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
+     "emit_counts=False."},
     {"relation_offsets",
-     "index [G * R + 1]: cell g * R + r holds the tuples [relation_offsets[g * R + r], relation_offsets[g * R + r + 1])."},
+     "index [G * R + 1]: cell (g, r) is the segment s = g * R + r (layout 'graph') or r * G + g (layout 'relation') and "
+     "holds the tuples [relation_offsets[s], relation_offsets[s + 1])."},
     {"relation_arg_offsets", "index [G * R + 1]: the same offsets into relation_args."},
     {"relation_args", "index [A]: the entities of the tuples, tuple after tuple, `arity` per tuple of the relation."},
 };
@@ -489,6 +568,26 @@ void bind_encoding(nb::module_& parent)
         .def_prop_ro(
             "schema", [](const PyFlatBatch& self) { return PyEncodingSchema{self.schema}; },
             "The EncodingSchema the batch was encoded for.")
+        .def_prop_ro(
+            "implicit_entities", [](const PyFlatBatch& self) { return self.schema->implicit_entity_arrays(); },
+            "True if the batch has no entity_role and entity_ref: entity j of graph g is an object with role 0 and ref j "
+            "if j < num_objects[g], else the graph's auxiliary entity (role 8, ref -1).")
+        .def_prop_ro(
+            "sizes",
+            [](const PyFlatBatch& self) -> std::optional<nb::dict>
+            {
+                if (!self.sizes)
+                    return std::nullopt;
+                nb::dict out;
+                out["entities"] = self.sizes->entities;
+                out["tuples"] = self.sizes->tuples;
+                out["args"] = self.sizes->args;
+                out["overflow"] = (self.sizes->overflow & encoding::k_overflow_capacity) != 0;
+                out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
+                return out;
+            },
+            "After an encoding with capacities: the true entities, tuples and args of the batch and whether it "
+            "overflowed the capacities (`overflow`) or the index type (`index_overflow`); None otherwise.")
         .def(
             "as_dict",
             [](const PyFlatBatch& self, Arg<ann::Framework> framework)
@@ -524,11 +623,16 @@ void bind_encoding(nb::module_& parent)
             "schema", [](const PyFlatEncoder& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
             "The EncodingSchema of the encoder.")
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
-             "framework"_a = nb::none(),
+             "framework"_a = nb::none(), "threads"_a = 1, "capacities"_a = nb::none(),
              "Encodes the rows `states` (an array of state words [N, W] of any DLPack framework, u64 words or u32 halves "
              "[N, 2W], or a State or list of States) into one graph each. task_ids: the instance of each row (required "
              "for a table of several instances). derived: the derived atom words of each row [N, D] (default: evaluated "
              "here). The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
-             "ValueError for invalid input.");
+             "ValueError for invalid input. threads: graphs are split over this many threads (0: one per hardware thread); "
+             "the result does not depend on it. capacities: a dict with the keys 'entities', 'tuples' and 'args'; the "
+             "batch then has relation_args and the entity arrays of exactly the capacities' sizes (the first "
+             "sizes['entities'] / sizes['args'] entries hold the encoding, the rest is zero) and `sizes` reports the true "
+             "sizes. A batch that does not fit its capacities (or the index type) is all zero and has sizes['overflow'] "
+             "set; nothing raises.");
 }
 }
