@@ -1,6 +1,6 @@
 """Multi-instance batches over a mymyr.rl.TaskTable through the Python layer.
 
-Instance sets of the fork's data (as tests/cpp/rl/table_instance_sets.hpp; each spans at least 3x in object count and two row-width
+Instance sets of the vendored data (as tests/cpp/rl/table_instance_sets.hpp; each spans at least 3x in object count and two row-width
 buckets): blocks, gripper, miconic, logistics and miconic-simpleadl (conditional effects, goal axioms). Checked:
 - the table: domain predicate ids a function of the domain (two tables over other instances agree), problem-local
   predicates apart, the atom metadata and object offsets round-trip by name;
@@ -18,8 +18,6 @@ GPU cases run only with a visible GPU (conftest.py hides GPUs by default), e.g.
         .venv-rl/bin/python -m pytest tests/python/test_rl_table.py
 """
 
-import os
-import pathlib
 import threading
 
 import numpy as np
@@ -29,21 +27,22 @@ import mymyr
 from mymyr import rl
 from conftest import ROOT, walk
 
-FORK = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
+SMALL = ROOT / "tests/data/benchmarks/small"
+IPC = ROOT / "tests/data/ipc"
 GEN = ROOT / "tests/data/table_instances"
-BW = FORK / "ipc/blocksworld-ipc/train"
-MI = FORK / "ipc/miconic-ipc/test"
+BW = IPC / "blocksworld-ipc/train"
+MI = IPC / "miconic-ipc/test"
 SETS = {  # as tests/cpp/rl/table_instance_sets.hpp
     "blocks": (BW / "domain.pddl", [BW / f"p{k}.pddl" for k in (13, 25, 37, 49, 61)]),
-    "gripper": (FORK / "gripper/domain.pddl",
-                [FORK / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
+    "gripper": (SMALL / "gripper/domain.pddl",
+                [SMALL / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
     "miconic": (MI / "domain.pddl",
                 [MI / p for p in ("p01-easy.pddl", "p20-easy.pddl", "p01-medium.pddl", "p04-medium.pddl", "p16-medium.pddl")]),
-    "logistics": (FORK / "logistics/domain.pddl",
-                  [FORK / "logistics/test_problem.pddl"]
+    "logistics": (SMALL / "logistics/domain.pddl",
+                  [SMALL / "logistics/test_problem.pddl"]
                   + [GEN / f"logistics/logistics-{k}.pddl" for k in ("c2-s3-p4-a1", "c3-s3-p8-a2", "c4-s4-p16-a3", "c6-s5-p30-a4")]),
-    "miconic-simpleadl": (FORK / "miconic-simpleadl/domain.pddl",
-                          [FORK / "miconic-simpleadl/test_problem.pddl"]
+    "miconic-simpleadl": (SMALL / "miconic-simpleadl/domain.pddl",
+                          [SMALL / "miconic-simpleadl/test_problem.pddl"]
                           + [GEN / f"miconic-simpleadl/simple-{k}.pddl"
                              for k in ("f6-p4-q", "f12-p8-c", "f24-p16-q", "f40-p50-q", "f60-p100-c")]),
 }
@@ -57,7 +56,7 @@ def sets():
     out = {}
     for name, (dom, probs) in SETS.items():
         if not dom.is_file() or not all(p.is_file() for p in probs):
-            pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
+            pytest.skip(f"the table instances of {name} are missing")
         out[name] = [mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]
     return out
 
@@ -583,6 +582,7 @@ def last_successor(td):
     return td.set("action", (td["count"].clamp(max=k) - 1).clamp(min=0))
 
 
+@pytest.mark.needs_gil
 def test_torchrl_over_tables(sets):
     """TorchRL over a mixed table: the specs, resets that carry next_task_id (curriculum), SerialEnv == ParallelEnv (the
     table pickled into spawned workers), a collector, and rollouts equal to a BatchedEnv with the same actions."""

@@ -213,7 +213,7 @@ void Context::solved(const Nodes& nodes, u32 id, StateView goal, bool cheapest)
     r.goal_state = State(goal);
     if (!cheapest || costs->unit())
         return;
-    // As in mimir's plan extraction: between two consecutive states of the path the action that gives the successor
+    // Plan extraction: between two consecutive states of the path the action that gives the successor
     // the lowest metric value is taken.
     r.cost = heuristics::plan_metric(succ, *costs, start, g0, r.plan);
 }

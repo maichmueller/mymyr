@@ -17,12 +17,11 @@ struct LandmarkNovelty
 {
     /// The landmarks: fact landmarks give one rank each. Null: no landmarks (every state's coordinate is BOT).
     std::shared_ptr<const landmarks::FactLandmarkGraph> graph;
-    /// Also rank the graph's disjunctive landmarks (mimir's landmark_novelty_disjunctive): each set shares a rank.
+    /// Also rank the graph's disjunctive landmarks: each set shares a rank.
     bool disjunctive = false;
-    /// With `disjunctive`: every disjunctive member gets its own rank (mimir's landmark_novelty_all_private).
+    /// With `disjunctive`: every disjunctive member gets its own rank.
     bool all_private = false;
-    /// With `disjunctive`: atoms taken out of every shared set and given their own rank (mimir's
-    /// landmark_novelty_unshared_atoms). Cannot be combined with all_private.
+    /// With `disjunctive`: atoms taken out of every shared set and given their own rank. Cannot be combined with all_private.
     std::vector<CanonicalAtom> unshared_atoms;
     novelty::LandmarkTableOptions tables;
 };

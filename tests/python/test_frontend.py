@@ -25,14 +25,6 @@ def test_instantiate_returns_normalized_task():
     assert repr(dom) == f"Domain({dom.name})"
 
 
-def test_untyped_task_equals_the_fork_export():
-    # blocks is untyped, so the fork's export is deterministic and must match token for token. The golden is
-    # read and rewritten first: the fork's lifted exporter always writes an axiom section ("X 0"), ours only when needed.
-    task = mymyr.Domain.from_file(BLOCKS / "domain.pddl").instantiate(BLOCKS / "probBLOCKS-8-0.pddl")
-    golden = fm.read_task_text(str(ROOT / "tests/data/golden/suite/blocks__probBLOCKS-8-0.txt"))
-    assert task.to_text().split() == golden.to_text().split()
-
-
 def test_fast_init_equals_full_path():
     for d in (BLOCKS, PHILOSOPHERS):
         dom = mymyr.Domain.from_file(d / "domain.pddl")

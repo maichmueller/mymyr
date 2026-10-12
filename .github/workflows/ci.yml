@@ -30,6 +30,15 @@ env:
   UV_LINK_MODE: copy
 
 jobs:
+  # Only the parity area (tests/parity, bench/parity) may name the reference implementations.
+  references:
+    name: No reference implementation outside the parity area
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 ci/check_no_mimir.py
+
   # The dependency superbuild, built once per pin and compiler and restored by the jobs below.
   deps:
     name: Dependencies
@@ -156,7 +165,7 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ""
           JAX_PLATFORMS: cpu
-        run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+        run: .venv/bin/python ci/run_pytest.py --runtimes ${{ matrix.python == '3.14t' && 'rl' || 'none' }} -W error -q -rs -p no:cacheprovider tests/python tests/parity/python
       - name: C++ consumer of the installed package
         run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer
 
@@ -346,6 +355,6 @@ jobs:
       - name: Test
         env:
           JAX_PLATFORMS: cpu
-        run: .venv/bin/python ci/run_pytest.py -W error -q -rs -p no:cacheprovider tests/python
+        run: .venv/bin/python ci/run_pytest.py --runtimes none -W error -q -rs -p no:cacheprovider tests/python tests/parity/python
       - name: C++ consumer of the installed package
         run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer-wheel

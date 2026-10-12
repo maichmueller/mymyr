@@ -1,6 +1,5 @@
 #pragma once
-// The atomic-goal portfolio, matching mimir 0.16.3's iw::find_solution_atomic_goal_portfolio
-// (src/search/algorithms/iw/atomic_goal_portfolio.cpp): one canonical IW(1) certifier plus K goal-guided Rollout IW(1)
+// The atomic-goal portfolio: one canonical IW(1) certifier plus K goal-guided Rollout IW(1)
 // workers over one goal, side by side under a shared SearchCoordination (search/control.hpp).
 //
 //   mymyr::search::PortfolioOptions o;
@@ -11,25 +10,25 @@
 //
 // Workers: 0 is the certifier, the ladder of search/iw.hpp with max_arity 1 (optimized IW(1)) on the IW family engine,
 // publishing completed depths; 1..K run rollout_iw (search/rollout_iw.hpp) with ordering rollout_orderings[(k - 1) %
-// size], or, when that is empty, mimir's built-in cycle DirectGoalAchieverFirst, MixedRegressionRandom, Randomized,
+// size], or, when that is empty, the built-in cycle DirectGoalAchieverFirst, MixedRegressionRandom, Randomized,
 // GoalRegressionRelevance with seed base_seed + k - 1. The best plan so far is kept under a mutex (its length is the
-// coordination's incumbent, which prunes the rollouts). As in mimir:
+// coordination's incumbent, which prunes the rollouts):
 //   - a certifier plan is shortest in the width-1 space and cancels everyone; otherwise the certifier cancels everyone
 //     once it has certified the incumbent;
 //   - a rollout worker that finds a plan publishes it, cancels everyone if it is certified, and otherwise restarts
 //     (with its original seed) only if the incumbent is now strictly shorter than when its round began;
 //   - certified_optimal: the certifier found the plan, or it completed depth plan_length - 1 and did not exhaust its
 //     space (a certifier that searched its whole width-1 space without a plan certifies nothing about a rollout plan);
-//   - no plan: Unsolvable (static goal false), Exhausted (the certifier exhausted the width-1 space; mimir reports
-//     its certifier's FAILED), or the certifier's status.
+//   - no plan: Unsolvable (static goal false), Exhausted (the certifier exhausted the width-1 space),
+//     or the certifier's status.
 // num_threads (0: the hardware's) is capped at K + 1; with one thread every worker runs to completion in order on the
 // calling thread (certifier first), which is fully reproducible. With more, workers are handed to threads in index
 // order and the calling thread polls every 5 ms, cancelling on the deadline, the total expansion budget and the
-// CancelToken; the result then depends on timing, as in mimir.
+// CancelToken; the result then depends on timing.
 //
 // SearchControl: goal is the atomic goal (Task, AnyOf or Custom; the goal-directed orderings use its positive atoms,
 // see rollout_iw.hpp); budget.max_seconds spans the call; budget.max_expanded caps the expansions of all workers
-// together (mimir's max_total_expansions; one per popped IW node, one per materialized rollout node);
+// together (one per popped IW node, one per materialized rollout node);
 // budget.max_depth applies to every worker; budget.max_states applies per worker (per IW pass, per rollout round);
 // cancel and blocked_states apply to every worker. coordination must be null (the portfolio coordinates its workers
 // itself). Observer (tyr's make_worker protocol, search/control.hpp): SearchObserver::make_worker(k) is called for
@@ -83,7 +82,7 @@ struct PortfolioResult
     u32 iw_lower_bound = 0;                                 // iw_completed_depth + 1, or 0
     u32 iw_completed_depth = SearchCoordination::k_no_depth;  // deepest layer the certifier finished
     u32 winning_worker = ~u32{0};                           // 0: the certifier, 1..K: rollout workers
-    std::string message;                                    // mimir's stop_reason
+    std::string message;                                    // why the search stopped
 
     bool certifier_ran = false;
     SearchStatus certifier_status = SearchStatus::Exhausted;  // valid if certifier_ran

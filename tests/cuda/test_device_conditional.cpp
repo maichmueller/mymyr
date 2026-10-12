@@ -1,6 +1,6 @@
 // Device tests for conditional effects and axiom strata.
 //   - on every task with conditional effects or axioms of the suite (tests/data/tasks) and of the
-//     fork's data (MYMYR_FORK_DATA_DIR, PDDL through the front end), dense and lazy slots: no schema with conditional effects
+//     tests/data/benchmarks/small (PDDL through the front end), dense and lazy slots: no schema with conditional effects
 //     is left on the CPU fallback and the axioms run on the device; the device BrFS equals the CPU BrFS (counts, layers,
 //     deterministic ids), stop_at_goal returns the CPU's plan, and the device expand is byte-equal to rl::expand (goal
 //     flags over derived atoms included; dense and reachable slots: a table takes fixed slots); the ids do not depend on the chunk size; the device goal test over derived
@@ -8,7 +8,7 @@
 //   - the CPU fallback still works next to the device paths (forward-checking conditions stay on the CPU).
 // MYMYR_TEST_FULL_SUITE=1 also runs the tasks above 100,000 states; MYMYR_TEST_SANITIZER=1 shrinks the expand batches.
 
-#include "../cpp/frontend/golden.hpp"
+#include "../cpp/support/benchmarks.hpp"
 #include "../cpp/support/device_ref.hpp"
 #include "../cpp/support/suite.hpp"
 #include "mymyr/core/bitset.hpp"
@@ -71,12 +71,12 @@ u64 suite_state_limit()
     return sanitizer_size() ? 50'000 : 100'000;
 }
 
-/// A task with conditional effects or axioms: an exported suite task (text) or a PDDL task of the fork's data.
+/// A task with conditional effects or axioms: an exported suite task (text) or a PDDL task of tests/data/benchmarks/small.
 struct ConditionalTask
 {
     std::string name;     // test name
     std::string text;     // suite task file stem, or empty
-    std::string dir;      // fork data directory
+    std::string dir;      // directory below tests/data/benchmarks/small
     std::string domain, problem;
     u64 states = 0;       // exhaustive BrFS states (for the size limit)
 };
@@ -88,18 +88,18 @@ const std::vector<ConditionalTask>& conditional_tasks()
         {"miconic_simpleadl_s10_2", "miconic-simpleadl__s10-2", "", "", "", 316680},
         {"openstacks_adl_p03", "openstacks-opt08-adl__p03", "", "", "", 97953},
         {"philosophers_p03_phil4", "philosophers__p03-phil4", "", "", "", 47938},
-        {"fork_philosophers", "", "philosophers", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_relaxed_reachability_axiom", "", "relaxed_reachability_axiom", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_airport", "", "airport", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_assembly", "", "assembly", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_landmark_cond_effect_dedup", "", "landmark_cond_effect_dedup", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_landmark_lifted_cond_effect", "", "landmark_lifted_cond_effect", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_liw_precheck_conditional", "", "liw_precheck", "conditional_domain.pddl", "conditional_problem.pddl", 0},
-        {"fork_miconic_fulladl", "", "miconic-fulladl", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_miconic_simpleadl", "", "miconic-simpleadl", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_pushworld", "", "pushworld", "domain.pddl", "problem.pddl", 3101889},
-        {"fork_relaxed_reachability_chain", "", "relaxed_reachability_chain", "domain.pddl", "test_problem.pddl", 0},
-        {"fork_schedule", "", "schedule", "domain.pddl", "test_problem.pddl", 15279078},
+        {"small_philosophers", "", "philosophers", "domain.pddl", "test_problem.pddl", 0},
+        {"small_relaxed_reachability_axiom", "", "relaxed_reachability_axiom", "domain.pddl", "test_problem.pddl", 0},
+        {"small_airport", "", "airport", "domain.pddl", "test_problem.pddl", 0},
+        {"small_assembly", "", "assembly", "domain.pddl", "test_problem.pddl", 0},
+        {"small_landmark_cond_effect_dedup", "", "landmark_cond_effect_dedup", "domain.pddl", "test_problem.pddl", 0},
+        {"small_landmark_lifted_cond_effect", "", "landmark_lifted_cond_effect", "domain.pddl", "test_problem.pddl", 0},
+        {"small_liw_precheck_conditional", "", "liw_precheck", "conditional_domain.pddl", "conditional_problem.pddl", 0},
+        {"small_miconic_fulladl", "", "miconic-fulladl", "domain.pddl", "test_problem.pddl", 0},
+        {"small_miconic_simpleadl", "", "miconic-simpleadl", "domain.pddl", "test_problem.pddl", 0},
+        {"small_pushworld", "", "pushworld", "domain.pddl", "problem.pddl", 3101889},
+        {"small_relaxed_reachability_chain", "", "relaxed_reachability_chain", "domain.pddl", "test_problem.pddl", 0},
+        {"small_schedule", "", "schedule", "domain.pddl", "test_problem.pddl", 15279078},
     };
     return t;
 }
@@ -120,7 +120,7 @@ TaskPtr load(const ConditionalTask& g, TaskOptions::Atoms atoms, TaskOptions::Ma
     o.matching = matching;
     if (!g.text.empty())
         return Task::from_text_file(task_path(g.text), o);
-    const std::filesystem::path d = fork_data_dir() / g.dir;
+    const std::filesystem::path d = test::small_dir() / g.dir;
     if (!std::filesystem::exists(d / g.domain) || !std::filesystem::exists(d / g.problem))
         return nullptr;
     return Task::create(*frontend::load_task(d / g.domain, d / g.problem), o);
@@ -180,7 +180,7 @@ TEST_P(DeviceConditionalEffectsSuite, NothingOfItOnTheHost)
     const auto& [name, frozen] = GetParam();
     const auto task = load(conditional_task(name), frozen);
     if (!task)
-        GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+        GTEST_SKIP() << "PDDL not found under " << test::small_dir();
     ASSERT_TRUE(task->compiled().has_conditional_effects || task->has_axioms());
     const cuda::ChunkGenerator gen(context(), task);
     for (bool witness : {true, false})
@@ -207,7 +207,7 @@ TEST_P(DeviceConditionalEffectsSuite, BrfsEqualsTheCpu)
         GTEST_SKIP() << g.states << " states (MYMYR_TEST_FULL_SUITE=1 runs it)";
     const auto task = load(g, frozen);
     if (!task)
-        GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+        GTEST_SKIP() << "PDDL not found under " << test::small_dir();
     for (bool witness : {true, false})
     {
         SCOPED_TRACE(witness ? "witness pruning" : "no witness pruning");
@@ -241,7 +241,7 @@ TEST_P(DeviceConditionalEffectsSuite, StopAtGoalReturnsTheCpuPlan)
         GTEST_SKIP() << g.states << " states (MYMYR_TEST_FULL_SUITE=1 runs it)";
     const auto task = load(g, frozen);
     if (!task)
-        GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+        GTEST_SKIP() << "PDDL not found under " << test::small_dir();
     const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = true, .fingerprint = true});
     const BrfsResult c = brfs(*task, {.threads = 1, .stop_at_goal = true, .fingerprint = true});
     EXPECT_EQ(d.result.solved, c.solved);
@@ -341,7 +341,7 @@ TEST_P(DeviceConditionalEffectsSuite, ExpandByteEqualToRlExpand)
         SCOPED_TRACE(device_first ? "device first" : "cpu first");
         const auto task = load(conditional_task(name), frozen ? TaskOptions::Atoms::Dense : TaskOptions::Atoms::Reachable);
         if (!task)
-            GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+            GTEST_SKIP() << "PDDL not found under " << test::small_dir();
         u32 Win = 0;
         const std::vector<u64> states = sanitizer_size() ? walk_rows(*task, 2, 8, 17, Win) : walk_rows(*task, 4, 25, 17, Win);
         const u64 N = states.size() / Win;
@@ -395,8 +395,8 @@ TEST(DeviceConditionalEffects, ChunkSizeDoesNotChangeTheIds)
 {
     SKIP_WITHOUT_GPU();
     // axioms (non-recursive and recursive strata, derived goals) and conditional effects (forall), in chunks down to 7
-    for (const char* name : {"philosophers_p03_phil4", "openstacks_adl_p03", "fork_miconic_fulladl", "fork_relaxed_reachability_axiom",
-                             "fork_miconic_simpleadl", "fork_airport"})
+    for (const char* name : {"philosophers_p03_phil4", "openstacks_adl_p03", "small_miconic_fulladl", "small_relaxed_reachability_axiom",
+                             "small_miconic_simpleadl", "small_airport"})
         for (bool frozen : {true, false})
         {
             SCOPED_TRACE(std::string(name) + (frozen ? " frozen" : " lazy"));
@@ -407,7 +407,7 @@ TEST(DeviceConditionalEffects, ChunkSizeDoesNotChangeTheIds)
             {
                 const auto task = load(conditional_task(name), frozen);
                 if (!task)
-                    GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+                    GTEST_SKIP() << "PDDL not found under " << test::small_dir();
                 if (sanitizer_size() && chunk < 100u)
                     continue;
                 const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = false, .fingerprint = true, .chunk_states = chunk});
@@ -427,12 +427,12 @@ TEST(DeviceConditionalEffects, DerivedAtomsFirstMetOnTheDevice)
 {
     SKIP_WITHOUT_GPU();
     // fresh lazy tasks: the device interns the derived atoms it derives (canonical-id order) and reruns the chunk
-    for (const char* name : {"philosophers_p03_phil4", "fork_miconic_fulladl", "fork_relaxed_reachability_axiom"})
+    for (const char* name : {"philosophers_p03_phil4", "small_miconic_fulladl", "small_relaxed_reachability_axiom"})
     {
         SCOPED_TRACE(name);
         const auto task = load(conditional_task(name), false);
         if (!task)
-            GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+            GTEST_SKIP() << "PDDL not found under " << test::small_dir();
         const u32 derived0 = task->atoms().derived_slots();
         const cuda::DeviceBrfsResult d = cuda::brfs(context(), task, {.stop_at_goal = false, .fingerprint = true});
         EXPECT_GT(task->atoms().derived_slots(), derived0);
@@ -447,13 +447,13 @@ TEST(DeviceConditionalEffects, DerivedAtomsFirstMetOnTheDevice)
 TEST(DeviceConditionalEffects, GoalFlagsEqualTaskIsGoal)
 {
     SKIP_WITHOUT_GPU();
-    for (const char* name : {"philosophers_p03_phil4", "fork_miconic_fulladl", "fork_relaxed_reachability_axiom", "fork_philosophers"})
+    for (const char* name : {"philosophers_p03_phil4", "small_miconic_fulladl", "small_relaxed_reachability_axiom", "small_philosophers"})
         for (bool frozen : {true, false})
         {
             SCOPED_TRACE(std::string(name) + (frozen ? " frozen" : " lazy"));
             const auto task = load(conditional_task(name), frozen);
             if (!task)
-                GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+                GTEST_SKIP() << "PDDL not found under " << test::small_dir();
             ASSERT_TRUE(task->compiled().goal.uses_derived);
             u32 W = 0;
             const std::vector<u64> rows = walk_rows(*task, 6, 30, 5, W);
@@ -497,7 +497,7 @@ TEST(DeviceConditionalEffects, GeneratorOutlivesItsCallersStreams)
     SKIP_WITHOUT_GPU();
     const auto task = load(conditional_task("philosophers_p03_phil4"), false);
     if (!task)
-        GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+        GTEST_SKIP() << "PDDL not found under " << test::small_dir();
     u32 W = 0;
     const std::vector<u64> rows = walk_rows(*task, 6, 30, 5, W);
     const u64 N = rows.size() / W;
@@ -539,14 +539,14 @@ TEST(DeviceConditionalEffects, ForcedForwardCheckingEqualsTheCpu)
     // bindings does not matter (rl::dev::device_fc: counts, rows in canonical order, axiom bodies, the conditions of
     // conditional effects, so nothing stays on the CPU) and forward checks the schemas whose rows keep the matcher's
     // order; both equal the CPU
-    for (const char* name : {"fork_miconic_fulladl", "fork_assembly", "fork_airport", "philosophers_p03_phil4"})
+    for (const char* name : {"small_miconic_fulladl", "small_assembly", "small_airport", "philosophers_p03_phil4"})
         for (bool frozen : {true, false})
             for (bool canonical : {true, false})
             {
                 SCOPED_TRACE(std::string(name) + (frozen ? " frozen" : " lazy") + (canonical ? " canonical" : " matcher order"));
                 const auto task = load(conditional_task(name), frozen, TaskOptions::Matching::ForwardChecking);
                 if (!task)
-                    GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+                    GTEST_SKIP() << "PDDL not found under " << test::small_dir();
                 const cuda::DeviceBrfsResult d =
                     cuda::brfs(context(), task, {.canonical_order = canonical, .stop_at_goal = false, .fingerprint = true});
                 const BrfsResult c = brfs(*task, {.threads = 2, .canonical_order = canonical, .stop_at_goal = false, .fingerprint = true});
@@ -562,14 +562,14 @@ TEST(DeviceConditionalEffects, MultiIwEqualsTheCpu)
 {
     SKIP_WITHOUT_GPU();
     // IW(1) and IW(2) from random-walk states (the device IW search): conditional effects, axioms and derived goals on the device
-    for (const char* name : {"fork_miconic_fulladl", "fork_airport", "fork_assembly", "fork_schedule", "fork_relaxed_reachability_axiom",
-                             "fork_philosophers"})
+    for (const char* name : {"small_miconic_fulladl", "small_airport", "small_assembly", "small_schedule", "small_relaxed_reachability_axiom",
+                             "small_philosophers"})
         for (bool frozen : {true, false})
         {
             SCOPED_TRACE(std::string(name) + (frozen ? " frozen" : " lazy"));
             const auto task = load(conditional_task(name), frozen);
             if (!task)
-                GTEST_SKIP() << "PDDL not found under " << fork_data_dir();
+                GTEST_SKIP() << "PDDL not found under " << test::small_dir();
             const std::vector<State> starts = device_ref_walks(*task, sanitizer_size() ? 1 : 3, 8, 23);
             for (u32 arity : {1u, 2u})
             {

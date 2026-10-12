@@ -9,7 +9,7 @@
 //     binding (the schema's parameter order). Schemas whose matcher already binds its parameters in index order with
 //     the fixed-order search emit in that order for free; the others are buffered per schema and sorted.
 // Numeric tasks (task/numeric.hpp): numeric preconditions are checked inside the matchers; a binding whose numeric
-// or total-cost effects break mimir's applicability rules is not applicable (never emitted); the Delta carries the
+// or total-cost effects break the applicability rules is not applicable (never emitted); the Delta carries the
 // successor's numeric words and the total-cost effects of the action (the shared cost evaluation: every search takes
 // action costs from it through heuristics::ActionCosts).
 // A Successors object lives in a Workspace: lease one with `WorkspaceLease ws = task.workspace();` and use

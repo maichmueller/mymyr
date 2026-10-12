@@ -1,6 +1,5 @@
 #pragma once
-// State spaces: the full transition model of a task as flat arrays, matching the semantics of mimir's
-// `StateSpaceImpl::create` (mimir 0.16.3).
+// State spaces: the full transition model of a task as flat arrays.
 //
 //   auto r = mymyr::datasets::generate_state_space(task, {.threads = 8, .remove_if_unsolvable = false});
 //   if (r.space) { r.space->forward_targets(); r.space->unit_goal_distances(); ... }
@@ -9,21 +8,17 @@
 //   - every reachable state, with ids in breadth-first discovery order (parent id, then the successor's index in the
 //     parent's canonical successor order). The ids are deterministic: the same at every thread count;
 //   - every applicable action of every state is a transition (witness pruning off, so every binding counts, parallel
-//     edges and self-loops included, as in mimir's state space graph); the forward CSR lists them per source in
+//     edges and self-loops included); the forward CSR lists them per source in
 //     canonical order, with the label (schema, binding) and the transition cost;
 //   - a reverse CSR (per target, its incoming transitions in forward edge order);
 //   - goal distances (V*) by backward search from the goal states: breadth-first for the unit distance, Dijkstra over
 //     the transition costs for the cost distance (for unit-cost tasks the two are equal);
-//   - flags: goal, unsolvable (no path to a goal) and alive (neither), as in mimir. The initial state is id 0.
+//   - flags: goal, unsolvable (no path to a goal) and alive (neither). The initial state is id 0.
 //
 // Transition costs (heuristics::ActionCosts::transition): with total-cost, the sum of the action's total-cost
-// increases, added up from 0 (other total-cost effects: applied to the parent's depth, minus that depth, as in mimir's
-// StateRepositoryImpl::get_or_create_successor_state called by its BrFS with the search depth as the metric value);
-// with a metric over the fluents, the metric difference between successor and parent; otherwise 1. Two deliberate
-// deviations from mimir: mimir computes (depth + c) - depth also for increases, which rounds fractional costs (so
-// that goal distances would not equal plan costs), and with a metric it subtracts the parent's depth from the
-// successor's metric value, which makes the costs depend on the search order (and negative, which its Dijkstra
-// rejects).
+// increases, added up from 0 (a cost is never computed as a difference of metric values there, which would round
+// fractional costs, so that goal distances equal plan costs); with a metric over the fluents, the metric difference
+// between successor and parent; otherwise 1.
 //
 // Generators:
 //   - threads == 1: a layer-synchronous breadth-first generator run on one thread;
@@ -37,11 +32,10 @@
 // depends on the order in which atoms were first reached and hence on the thread count. Every other array is
 // independent of the thread count.
 //
-// Options that mirror mimir's `StateSpaceOptions`: max_states (mimir's max_num_states: the generation fails when
-// the space has max_states states or more), remove_if_unsolvable (no state space when the initial state cannot
-// reach a goal: the name notwithstanding, mimir removes the whole space, never single states) and max_seconds (mimir
-// declares timeout_ms but does not use it). As in mimir, a task whose goal is statically false has no state space (its
-// BrFS ends as unsolvable before expanding anything), whatever remove_if_unsolvable.
+// Options: max_states (the generation fails when the space has max_states states or more), remove_if_unsolvable (no
+// state space when the initial state cannot reach a goal: the whole space is removed, never single states) and
+// max_seconds. A task whose goal is statically false has no state space (the generation ends as unsolvable before
+// expanding anything), whatever remove_if_unsolvable.
 
 #include "mymyr/core/once.hpp"
 #include "mymyr/core/types.hpp"
@@ -77,11 +71,20 @@ enum class StateSpaceStatus : u8
 };
 [[nodiscard]] const char* to_string(StateSpaceStatus s) noexcept;
 
-/// Unit goal distance of a state that cannot reach a goal (mimir uses INT32_MAX).
+/// Unit goal distance of a state that cannot reach a goal.
 inline constexpr i32 k_unsolvable_distance = -1;
 
-/// The arrays of a state space generated elsewhere (the device state spaces, cuda/state_space.hpp), for
-/// StateSpace::create; each has the size and meaning of the StateSpace accessor of the same name.
+/// What StateSpace::create checks of its arrays.
+enum class ArraysCheck : u8
+{
+    Full,       // all of create's checks: arrays from outside (files, pickles, user arrays)
+    Structure,  // sizes and index ranges only, what indexing the arrays relies on: arrays a mymyr generator made (the
+                // device state spaces), whose contents need no second check
+};
+
+/// The arrays of a state space: generated elsewhere (the device state spaces, cuda/state_space.hpp) or saved
+/// (StateSpace::to_arrays), for StateSpace::create; each has the size and meaning of the StateSpace accessor of the
+/// same name.
 struct StateSpaceArrays
 {
     TaskPtr task;
@@ -106,9 +109,22 @@ class StateSpace
 {
 public:
     /// A state space from its arrays (moved in). The goal and unsolvable counts and the largest goal distance are
-    /// computed from them. Throws std::invalid_argument when a size does not match or an offset array is not a CSR over
-    /// num_states states.
-    [[nodiscard]] static std::shared_ptr<const StateSpace> create(StateSpaceArrays&& arrays);
+    /// computed from them. Throws std::invalid_argument unless the arrays are a state space of their task (the first
+    /// two points only with ArraysCheck::Structure):
+    ///   - sizes: every array has its accessor's size, and the offset arrays are CSRs over num_states (> 0) states;
+    ///   - ranges: targets and sources are states, backward edges are transitions, and the backward CSR lists every
+    ///     forward transition once, in the row of its target, ascending, with its source;
+    ///   - the task: the row layout is the task's (words() for frozen atom slots, at most max_words() for lazy ones,
+    ///     and numeric_words()), no row sets an atom slot the task has not assigned, and row 0 is the task's initial
+    ///     state; labels name schemas and objects of the task (unused binding positions ~0u);
+    ///   - labels of states: flags are 0 or 1, goal states are exactly those at unit distance 0, unsolvable ones
+    ///     exactly those at k_unsolvable_distance (cost distance +inf; finite and nonnegative otherwise), alive ones
+    ///     those neither goal nor unsolvable, and no cost is NaN.
+    /// Linear in the size of the arrays. The goal distances themselves are taken as given.
+    [[nodiscard]] static std::shared_ptr<const StateSpace> create(StateSpaceArrays&& arrays,
+                                                                  ArraysCheck check = ArraysCheck::Full);
+    /// A copy of the arrays: create(to_arrays()) is an equal state space.
+    [[nodiscard]] StateSpaceArrays to_arrays() const;
 
     [[nodiscard]] const TaskPtr& task() const noexcept { return m_task; }
     [[nodiscard]] u32 num_states() const noexcept { return m_n; }
@@ -188,6 +204,8 @@ public:
 
 private:
     friend class StateSpaceBuilder;
+    static void check_contents(const StateSpaceArrays& a, const std::function<void(bool, const char*)>& need);
+    static std::shared_ptr<const StateSpace> assemble(StateSpaceArrays&& a);
 
     TaskPtr m_task;
     u32 m_n = 0;

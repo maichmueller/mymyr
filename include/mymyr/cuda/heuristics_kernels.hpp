@@ -24,8 +24,8 @@
 //      a proposition gets level r in round r from the tight achievers whose preconditions have levels at most r - 1,
 //      one of them r - 1; its supporter is the smallest such operator id (atomicMin). The sweeps evaluate every
 //      operator per level, the frontier each operator once, when its last precondition gets its level (counters). An
-//      axiom passes on the supporter of its precondition of level r - 1 with the smallest proposition id (mimir's
-//      "derived atom takes over the supporter of its axiom's last settled precondition"). The relaxed plan is the
+//      axiom passes on the supporter of its precondition of level r - 1 with the smallest proposition id (a derived
+//      atom takes over the supporter of its axiom's last settled precondition). The relaxed plan is the
 //      closure of the goal under x -> pre(supp(x)), counted once per ground action; the closure is a set, so the order
 //      of the frontier does not matter. heuristics::make_heuristic breaks the ties among supporters by its queue order
 //      instead, so h_FF equals the CPU's where no ties decide; heuristics.hpp has the CPU reference of this rule.

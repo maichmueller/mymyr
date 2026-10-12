@@ -1,6 +1,6 @@
 ;; miconic-simpleadl, 28 floors, 14 passengers (14,515,200 states), from
-;; pddl-generators miconic-simpleadl/miconic -f 28 -p 14 -r 1; domain: the fork's
-;; data/miconic-simpleadl/domain.pddl
+;; pddl-generators miconic-simpleadl/miconic -f 28 -p 14 -r 1; domain:
+;; tests/data/benchmarks/small/miconic-simpleadl/domain.pddl
 
 
 

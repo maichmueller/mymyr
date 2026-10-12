@@ -1,7 +1,6 @@
 """The Python API of the relational encoder: FlatRelationEncoder and FlatBatch. The graphs are checked against an
-independent reconstruction from the state's atoms and against the C++ encoder's bytes, and the input and output interop
-(State lists, u32 rows, zero-copy exports) and the error mapping are tested. Parity is in
-test_encoding_parity.py."""
+independent reconstruction from the state's atoms, against the C++ encoder's bytes, and for the input and output
+interop (State lists, u32 rows, zero-copy exports) and the error mapping."""
 
 import gc
 import importlib.util
@@ -376,8 +375,8 @@ def test_the_default_goal_derivations_are_refused():
     "options, match",
     [
         ({"goal_derivations": ("plain",)}, "goal_derivations is not supported"),
-        ({"max_goal_level": 1, "target_sources": ("goal", "subgoal")}, "max_goal_level is not supported"),
-        ({"target_sources": ("goal",)}, "targets is not supported"),
+        ({"max_goal_level": 1}, "max_goal_level is not supported"),
+        ({"target_sources": ("action",)}, "targets is not supported"),
         ({"predicate_virtual_nodes": True}, "predicate_virtual_nodes is not supported"),
         ({"horizon_mode": "full"}, "horizon is not supported"),
         ({"layout": "relation"}, "layout='relation' is not supported"),
@@ -386,6 +385,33 @@ def test_the_default_goal_derivations_are_refused():
 def test_options_the_encoder_does_not_encode_raise_value_error(options, match):
     with pytest.raises(ValueError, match=f"^mymyr: encoding: .*{match}"):
         encoding.FlatRelationEncoder(text_task("gripper__prob05"), **{"goal_derivations": (), **options})
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        ({"target_sources": ("subgoal",)}, "subgoal targets need max_goal_level"),
+        ({"target_sources": ("action",), "include_actions": False}, "action targets need"),
+        ({"max_goal_level": 1, "target_sources": ("goal", "subgoal"), "goal_derivations": ("satisfied",)},
+         "plain goal derivation"),
+        ({"horizon_mode": "full", "target_sources": ("action",)}, "horizon"),
+    ],
+)
+def test_invalid_combinations_give_the_error_of_the_schema(options, match):
+    task = text_task("gripper__prob05")
+    with pytest.raises(ValueError, match=match) as encoder_error:
+        encoder_of(task, **options)
+    with pytest.raises(ValueError, match=match) as schema_error:
+        encoding.EncodingSchema(task, **{"goal_derivations": (), **options})
+    assert str(encoder_error.value) == str(schema_error.value)
+    assert "not supported" not in str(encoder_error.value)
+
+
+def test_horizon_mode_none_is_spelled_none_not_as_a_string():
+    task = text_task("gripper__prob05")
+    for cls in (encoding.EncodingSchema, encoding.FlatRelationEncoder):
+        with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
+            cls(task, goal_derivations=(), horizon_mode="none")
 
 
 @pytest.mark.parametrize(
@@ -429,7 +455,7 @@ def test_lazy_atom_slots_are_refused():
 def test_invalid_inputs_raise(atoms):
     first, second = feature_task(atoms=atoms), feature_task("a b c", atoms=atoms)
     encoder = encoder_of(first)
-    with pytest.raises(ValueError, match="another task"):
+    with pytest.raises(ValueError, match="^mymyr: encoding: state 0 is not a state of instance 0 of the table"):
         encoder.encode(second.initial_state)
     bad = first.encode([first.initial_state])
     assert first.num_atoms < 63
@@ -450,13 +476,41 @@ def test_invalid_inputs_raise(atoms):
         table_encoder.encode([first.initial_state])
     with pytest.raises(ValueError, match="task id"):
         table_encoder.encode([first.initial_state], task_ids=[2])
-    with pytest.raises(ValueError, match="another task"):
+    with pytest.raises(ValueError, match="state 0 is not a state of instance 1 of the table"):
         table_encoder.encode([first.initial_state], task_ids=[1])
+    with pytest.raises(ValueError, match="state 1 is not a state of instance 0 of the table"):
+        table_encoder.encode([first.initial_state, second.initial_state], task_ids=[0, 0])
     rows = first.encode([first.initial_state] * 2)
     with pytest.raises(ValueError):
         encoder.encode(rows, derived=np.zeros((3, 1), np.uint64))
     with pytest.raises(TypeError):
         encoder.encode(rows, derived=np.zeros((2, 1), np.float32))
+
+
+def test_states_of_an_equal_task_are_accepted():
+    task, twin = text_task("gripper__prob05"), text_task("gripper__prob05")
+    assert task.fingerprint == twin.fingerprint and task.encoding_fingerprint == twin.encoding_fingerprint
+    encoder = encoder_of(task)
+    states = walk(twin, steps=3, walks=1)
+    from_twin = encoder.encode(states)
+    from_task = encoder.encode(twin.encode(states))
+    for key, value in from_twin.as_dict().items():
+        assert np.array_equal(value, from_task.as_dict()[key]), key
+    assert unpack(encoder.encode(twin.initial_state), 0) == unpack(encoder.encode(task.initial_state), 0)
+    table = encoder_of(rl.TaskTable([task, twin]))
+    batch = table.encode([task.initial_state, twin.initial_state], task_ids=[1, 0])
+    assert unpack(batch, 0) == unpack(batch, 1) and batch.task_ids.tolist() == [1, 0]
+
+
+def test_states_of_a_task_with_another_atom_encoding_are_refused():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    directory = ROOT / "tests/data/pddl/logistics00"
+    task, other = (mymyr.Task.from_pddl(directory / "domain.pddl", directory / "probLOGISTICS-6-1.pddl", atoms=atoms)
+                   for atoms in ("auto", "reachable"))
+    assert task.fingerprint == other.fingerprint and task.encoding_fingerprint != other.encoding_fingerprint
+    with pytest.raises(ValueError, match="state 1 is not a state of instance 0 of the table"):
+        encoder_of(task).encode([task.initial_state, other.initial_state])
 
 
 def test_a_derived_array_narrower_than_the_instance_needs_is_refused():

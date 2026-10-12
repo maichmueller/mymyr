@@ -28,7 +28,7 @@ import mymyr
 from mymyr import datasets, rl
 from conftest import walk
 from test_rl_table import (  # noqa: F401
-    FORK,
+    SMALL,
     MASK_SETS,
     ROT,
     assert_same_batches,
@@ -441,6 +441,7 @@ def test_pool_suite_equals_host(sets, key):
         pool.reset(task_ids=np.full(4, len(s), np.int32))
 
 
+@pytest.mark.needs_gil
 def test_torchrl_over_suites(sets):
     pytest.importorskip("torchrl")
     import torch
@@ -506,10 +507,10 @@ def test_mctx_over_suite(sets):
 def small_suite():
     if not hasattr(mymyr, "Domain"):
         pytest.skip("built without the loki front end")
-    paths = [FORK / "gripper/p-1-0.pddl", FORK / "blocks_4/p02-easy.pddl", FORK / "gripper/p-2-0.pddl",
-             FORK / "blocks_4/test_problem.pddl"]
+    paths = [SMALL / "gripper/p-1-0.pddl", SMALL / "blocks_4/p02-easy.pddl", SMALL / "gripper/p-2-0.pddl",
+             SMALL / "blocks_4/test_problem.pddl"]
     if not all(p.is_file() for p in paths):
-        pytest.skip("fork data missing")
+        pytest.skip("instances missing")
     return rl.TaskSuite.group([mymyr.Task.from_pddl(p.parent / "domain.pddl", p, atoms="dense") for p in paths])
 
 

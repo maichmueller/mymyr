@@ -1,11 +1,11 @@
 #pragma once
-// Exact delete-relaxed reachability over ground atoms without grounding, matching mimir 0.16.3's semantics.
+// Exact delete-relaxed reachability over ground atoms without grounding.
 //
 //   auto rr = mymyr::reachability::RelaxedReachability::create(*task);
 //   bool r = rr->table().is_reachable(cid);                          // canonical id (task/atom_index.hpp)
 //   bool g = rr->goal_reachable_without(std::vector<CanonicalAtom>{cid});  // the complete landmark test
 //
-// The reading is mimir's: the schemas are Datalog rules over object tuples, never instantiated as actions.
+// The schemas are Datalog rules over object tuples, never instantiated as actions.
 //   - Rules: one per (schema, conditional effect, positive effect literal), head = the effect atom, body = the positive
 //     fluent and derived literals of the schema's precondition and of the effect's condition plus their static
 //     literals of both polarities; one per axiom (head = the derived atom). Negative fluent and derived literals are
@@ -46,8 +46,8 @@ namespace mymyr::reachability
 {
 struct Options
 {
-    /// Evaluate negative static literals (including PDDL (not (= ?x ?y))). false reproduces mimir's
-    /// LiftedGrounder exploration, which drops every negative literal.
+    /// Evaluate negative static literals (including PDDL (not (= ?x ?y))). false drops every negative
+    /// literal, as the grounded delete relaxation does.
     bool enforce_negative_static = true;
     /// Record the first derivation of every derived atom (witness_query).
     bool record_witnesses = true;

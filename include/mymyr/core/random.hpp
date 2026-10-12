@@ -14,7 +14,6 @@
 //     2019): draw x, m = x * n (128-bit); reject while low64(m) < (2^64 - n) mod n; return high64(m). Unbiased;
 //   - SplitMix64::shuffle: Fisher-Yates from the back, for i = n-1 down to 1 swap a[i] with a[bounded(i + 1)];
 //   - Xoshiro256::uniform: the top 53 bits of a draw times 2^-53, in [0, 1).
-// mimir's parity tool re-implements SplitMix64's three functions, so its randomized runs replay mymyr's.
 
 #include "mymyr/core/hash.hpp"
 #include "mymyr/core/types.hpp"

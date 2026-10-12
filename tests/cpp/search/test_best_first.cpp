@@ -2,7 +2,7 @@
 // total-cost): A* is optimal (the BrFS plan length) with blind and h_max, eager and lazy, on every store and queue, and
 // the stores and queues do not change the search (identical counts: the queues share one total order); GBFS and beam
 // return valid plans; SearchControl budgets, cancellation, observer events, blocked states and goal specs. Also
-// heuristic unit tests on the same tasks (the golden comparison with the fork is mymyr_heuristics_golden_tests).
+// heuristic unit tests on the same tasks.
 
 #include "../support/suite.hpp"
 #include "mymyr/heuristics/heuristic.hpp"
@@ -125,12 +125,12 @@ TEST(BestFirst, AStarIsOptimalWithBlindAndHmax)
                 {
                     if (!requeue && a.run != &astar_lazy)
                         continue;
-                    SCOPED_TRACE(std::string(a.name) + "/" + heuristics::to_string(k) + (requeue ? "" : "/fork-keys"));
+                    SCOPED_TRACE(std::string(a.name) + "/" + heuristics::to_string(k) + (requeue ? "" : "/lazy-keys"));
                     BestFirstOptions o = with_h(k);
                     o.lazy_requeue = requeue;
                     const BestFirstResult r = a.run(*task, o);
                     ASSERT_EQ(r.status, SearchStatus::Solved) << r.message;
-                    if (requeue)  // the fork's lazy keys give no guarantee
+                    if (requeue)  // lazy keys give no guarantee
                     {
                         EXPECT_EQ(r.plan.size(), L);
                     }
@@ -511,8 +511,8 @@ TEST(Heuristics, BasicPropertiesAlongAnOptimalPlan)
                 EXPECT_EQ(hmax, 0.0);
                 EXPECT_EQ(hff, 0.0);
             }
-            // The fork's relaxation treats every negative derived literal as true at cost 0 (RelaxedPlanningGraph
-            // initializes all negative derived propositions), so with derived predicates (philosophers, openstacks)
+            // The relaxation treats every negative derived literal as true at cost 0 (all negative derived
+            // propositions start reached), so with derived predicates (philosophers, openstacks)
             // h can be 0 outside the goal and a relaxed plan need not contain an applicable action.
             const bool derived = std::string(name) == "philosophers__p03-phil4" || std::string(name) == "openstacks-opt08-adl__p03";
             EXPECT_EQ(lifted[heuristics::Kind::Max]->evaluate(s), hmax);

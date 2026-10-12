@@ -1,8 +1,7 @@
 // Relaxed reachability (reachability/relaxed_reachability.hpp), the approximate and lifted fact landmark generators
 // (landmarks/approximate.hpp, landmarks/lifted.hpp), the landmark transition ordering of IW's width-1 pass
 // (landmarks/transition_ordering.hpp, search/transition_ordering.hpp) and the lifted heuristic fallback, on the text
-// tasks of the lifted suite (suite.hpp). The fork comparison is against the fork's own landmark generator; these tests
-// check what holds without the fork: the reachable set against an independent relaxed exploration through the
+// tasks of the lifted suite (suite.hpp): the reachable set against an independent relaxed exploration through the
 // successor generator, restricted fixpoints, witnesses and conjunctive queries against brute force, the landmark
 // graphs' invariants and the Pi+ property, the admission order of an ordered layer, and the lifted h_max / h_add
 // against the grounded evaluation for atom goals.
@@ -317,7 +316,7 @@ TEST(ApproximateLandmarks, GraphInvariants)
         }
         for (const auto& d : g.disjunctive())
         {
-            EXPECT_GE(d.size(), 1u);  // the fork keeps singleton sets that hold no fact landmark
+            EXPECT_GE(d.size(), 1u);  // singleton sets that hold no fact landmark are kept
             EXPECT_LE(d.size(), 4u);
             for (CanonicalAtom c : d)
                 EXPECT_FALSE(lms.count(c)) << "a disjunctive landmark holds the fact landmark " << format_atom(*task, c);

@@ -1,5 +1,4 @@
-// Parallel IW rollouts (search/parallel_rollouts.hpp): a port of mimir's iw::find_rollouts_parallel
-// (src/search/algorithms/iw/parallel_rollouts.cpp) on the IW family engine.
+// Parallel IW rollouts (search/parallel_rollouts.hpp): K IW ladders on the IW family engine.
 
 #include "mymyr/search/parallel_rollouts.hpp"
 
@@ -76,9 +75,8 @@ private:
     std::vector<u64> m_scratch;
 };
 
-/// The states mimir's plan extraction creates in the rollout's repository (search_space.hpp
-/// extract_total_ordered_plan: every successor of every non-goal state of the plan, looking for the cheapest action to
-/// the next one), recorded after the search as mimir's tracking records them. They are new only where the search
+/// The states the plan extraction creates in the rollout's repository (every successor of every non-goal state of the plan, looking for the cheapest action to
+/// the next one), recorded after the search. They are new only where the search
 /// did not enumerate a plan state's successors completely (a layer truncated by max_next_layer_states).
 void record_plan_extraction(detail::Env& env, detail::StateTracker& tr, const State& start, const std::vector<Action>& plan)
 {

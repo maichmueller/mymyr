@@ -146,6 +146,7 @@ def test_torch_cuda_graph_around_env_calls():
         expect_equal_envs(a, b, t)
 
 
+@pytest.mark.needs_gil
 def test_capture_on_the_general_path_and_the_cpu_is_refused():
     dev = gpu_device()
     task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
@@ -164,6 +165,7 @@ def test_capture_on_the_general_path_and_the_cpu_is_refused():
 # ------------------------------------------------------------------------------------------------ TorchRL
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("name", ["gripper", "blocks__probBLOCKS-8-0"])
 def test_planning_env_graph_equals_eager(sets, name):
     """PlanningEnv steps replaying the captured step == eager steps (graph=False): rollouts with random actions and a
@@ -230,6 +232,7 @@ def k_steps(K):
 
 
 # torch's CUDA graph trees capture an empty graph when their manager starts (CUDAGraphTreeManager.__init__), which warns
+@pytest.mark.needs_gil
 @pytest.mark.filterwarnings("ignore:The CUDA Graph is empty:UserWarning")
 @pytest.mark.parametrize("path", ["auto", "general"])
 def test_reduce_overhead_rollout_equals_eager(path):
@@ -390,7 +393,7 @@ def test_jax_scan_with_command_buffers_equals_without(name, path, tmp_path):
     the CPU and on the GPU without command buffers, by default, with the scan's body as a CUDA graph and with the whole
     loop as one; the fast path's step is inside the command buffers, the general path's (it synchronizes) outside."""
     if name in SETS and not all(p.is_file() for p in SETS[name][1]):
-        pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
+        pytest.skip(f"the table instances of {name} are missing")
     runs = run_xla_modes(tmp_path, SCAN, "roll", name, path)
     rj = pytest.importorskip("mymyr.rl.jax")
     for mode, a in runs.items():

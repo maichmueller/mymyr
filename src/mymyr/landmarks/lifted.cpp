@@ -183,7 +183,7 @@ private:
                             return true;
                     return false;
                 };
-                // a condition is a set of literals in mimir (TaskData repeats nullary ones)
+                // a condition is a set of literals (TaskData repeats nullary ones)
                 if (k == PredKind::Fluent && l.positive && !dup(se.pos_fluent, f0))
                     se.pos_fluent.push_back(std::move(r));
                 else if (k == PredKind::Static && !dup(se.statics, s0))

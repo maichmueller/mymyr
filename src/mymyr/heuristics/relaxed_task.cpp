@@ -1,6 +1,6 @@
-// Grounding of the delete relaxation (see relaxed_task.hpp): mimir's LiftedGrounder (delete-free fixpoint, then the
-// statically applicable unrelaxed ground actions and axioms) and RelaxedPlanningGraph construction (one operator per
-// ground action and conditional effect instance), over mymyr's lifted successor generator.
+// Grounding of the delete relaxation (see relaxed_task.hpp): the delete-free fixpoint, then the
+// statically applicable unrelaxed ground actions and axioms, and the operator construction (one operator per
+// ground action and conditional effect instance), over the lifted successor generator.
 
 #include "mymyr/heuristics/relaxed_task.hpp"
 
@@ -118,7 +118,7 @@ private:
 };
 
 /// The delete-free exploration task: negative literals and deletes dropped, derived predicates fluent, each axiom an
-/// action adding its head (mimir's DeleteRelaxTranslator + delete-free axiom evaluation, as a plain task).
+/// action adding its head.
 TaskData make_explore_data(const TaskData& T)
 {
     TaskData R;
@@ -370,7 +370,7 @@ private:
         return m_atoms.intern(l.pred.v, args);
     }
 
-    /// As in mimir's is_statically_applicable: static literals hold, no fluent/derived atom required both true and false.
+    /// Static applicability: static literals hold, no fluent/derived atom required both true and false.
     /// Appends the fluent/derived entries to `entries` (negated derived atoms left out: they always cost 0).
     bool condition_entries(std::span<const Literal> lits, const ObjectId* b, std::vector<u32>& entries, bool check)
     {
@@ -392,8 +392,8 @@ private:
                 continue;
             }
             const u32 e = l.positive ? a : (a | k_neg_bit);
-            // A condition is a set of literals in mimir: loki's normalized conditions (and with them mymyr's TaskData,
-            // which reproduces mimir's export) repeat nullary literals, which mimir keeps once per condition.
+            // A condition is a set of literals: loki's normalized conditions (and with them the TaskData) repeat
+            // nullary literals, which are kept once per condition.
             if (std::find(entries.begin() + static_cast<std::ptrdiff_t>(first), entries.end(), e) == entries.end())
                 entries.push_back(e);
         }
@@ -412,8 +412,8 @@ private:
         return true;
     }
 
-    /// Candidate objects of the quantified parameters of conditional effect `ce` of schema `s`: mimir's
-    /// StaticConsistencyGraph::compute_vertices over the effect condition's static literals, per parameter alone.
+    /// Candidate objects of the quantified parameters of conditional effect `ce` of schema `s`: the
+    /// single-parameter static consistency test over the effect condition's static literals, per parameter alone.
     const std::vector<std::vector<u32>>& candidates(u32 s, u32 cei, const ConditionalEffect& ce)
     {
         const u64 key = (static_cast<u64>(s) << 32) | cei;
@@ -563,7 +563,7 @@ private:
         m_check.clear();
         const bool can_fire = condition_entries(T.literals_of(ce.condition), b, m_check, true);
         m_pre = m_apre;
-        condition_entries(T.literals_of(ce.condition), b, m_pre, false);  // static ce literals ignored, as in mimir's RPG
+        condition_entries(T.literals_of(ce.condition), b, m_pre, false);  // static ce literals ignored
         m_eff.clear();
         for (const Literal& l : TaskData::slice(T.literals, ce.effects))
         {

@@ -1,7 +1,6 @@
-// Knowledge bases: the fork's knowledge base tests (tests/unit/datasets/knowledge_base.cpp: spanner and gripper, tuple
-// graphs of width 0, 1 and 2), the order of the state spaces and the options.
+// Knowledge bases: spanner and gripper, tuple graphs of width 0, 1 and 2, the order of the state spaces and the options.
 
-#include "../frontend/golden.hpp"
+#include "../support/benchmarks.hpp"
 #include "mymyr/datasets/knowledge_base.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/task_table.hpp"
@@ -10,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -18,9 +18,9 @@ using namespace mymyr::datasets;
 
 namespace
 {
-rl::TaskTablePtr fork_table(const std::string& dir, std::initializer_list<const char*> problems)
+rl::TaskTablePtr small_table(const std::string& dir, std::initializer_list<const char*> problems)
 {
-    const auto root = test::fork_data_dir() / dir;
+    const auto root = test::small_dir() / dir;
     std::vector<TaskPtr> tasks;
     const auto domain = frontend::Domain::from_file(root / "domain.pddl");
     for (const char* p : problems)
@@ -58,9 +58,7 @@ KnowledgeBaseOptions options(u32 width)
 // The spanner at location 1 in one problem and at location 2 in the other.
 TEST(KnowledgeBase, Spanner)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "spanner/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("spanner", {"p-1-1-2-1.pddl", "p-1-1-2-1(2).pddl"});
+    const auto table = small_table("spanner", {"p-1-1-2-1.pddl", "p-1-1-2-1(2).pddl"});
     ASSERT_TRUE(table);
     const auto kb = KnowledgeBase::create(table, options(2));
     const auto& G = *kb->generalized_state_space();
@@ -82,9 +80,7 @@ TEST(KnowledgeBase, Spanner)
 // One and two balls.
 TEST(KnowledgeBase, Gripper)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("gripper", {"p-1-0.pddl", "p-2-0.pddl"});
+    const auto table = small_table("gripper", {"p-1-0.pddl", "p-2-0.pddl"});
     ASSERT_TRUE(table);
     struct Expect
     {
@@ -113,9 +109,7 @@ TEST(KnowledgeBase, Gripper)
 
 TEST(KnowledgeBase, PartsAndOrder)
 {
-    if (!std::filesystem::exists(test::fork_data_dir() / "gripper/domain.pddl"))
-        GTEST_SKIP();
-    const auto table = fork_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
+    const auto table = small_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
     ASSERT_TRUE(table);
     // the defaults: state spaces only, ascending by size
     const auto kb = KnowledgeBase::create(table);
@@ -159,5 +153,63 @@ TEST(KnowledgeBase, PartsAndOrder)
     KnowledgeBaseOptions wide;
     wide.tuple_graphs = TupleGraphOptions{.width = 6};
     EXPECT_THROW((void)KnowledgeBase::create(table, wide), std::invalid_argument);
+}
+
+TEST(KnowledgeBase, FromParts)
+{
+    const auto table = small_table("gripper", {"test_problem4.pddl", "p-2-0.pddl", "p-1-0.pddl"});
+    ASSERT_TRUE(table);
+    const auto kb = KnowledgeBase::create(table, options(1));
+    auto parts = [&] {
+        return KnowledgeBaseParts{kb->state_spaces(), {kb->task_indices().begin(), kb->task_indices().end()}, kb->tuple_graphs()};
+    };
+    const auto back = KnowledgeBase::create(table, kb->options(), parts());
+    EXPECT_EQ(back->state_spaces(), kb->state_spaces());
+    EXPECT_TRUE(std::ranges::equal(back->task_indices(), kb->task_indices()));
+    ASSERT_TRUE(back->generalized_state_space());
+    EXPECT_TRUE(std::ranges::equal(back->generalized_state_space()->forward_targets(), kb->generalized_state_space()->forward_targets()));
+    EXPECT_EQ(back->tuple_graphs(), kb->tuple_graphs());
+    // without tuple graphs or the generalized state space
+    KnowledgeBaseOptions plain;
+    const auto bare = KnowledgeBase::create(table, plain, KnowledgeBaseParts{kb->state_spaces(), parts().task_indices, {}});
+    EXPECT_FALSE(bare->generalized_state_space());
+    EXPECT_FALSE(bare->has_tuple_graphs());
+
+    struct Case
+    {
+        const char* what;  // part of the message
+        std::function<void(KnowledgeBaseParts&)> mutate;
+    };
+    const Case cases[] = {
+        {"one per state space", [](KnowledgeBaseParts& p) { p.task_indices.pop_back(); }},
+        {"out of range or repeated", [](KnowledgeBaseParts& p) { p.task_indices[0] = 3; }},
+        {"out of range or repeated", [](KnowledgeBaseParts& p) { p.task_indices[1] = p.task_indices[0]; }},
+        {"not of its task", [](KnowledgeBaseParts& p) { std::swap(p.task_indices[0], p.task_indices[1]); }},
+        {"knowledge-base order", [](KnowledgeBaseParts& p) {
+             std::ranges::reverse(p.state_spaces);
+             std::ranges::reverse(p.task_indices);
+             std::ranges::reverse(p.tuple_graphs);
+         }},
+        {"one list per state space", [](KnowledgeBaseParts& p) { p.tuple_graphs.pop_back(); }},
+        {"one tuple graph per state", [](KnowledgeBaseParts& p) { p.tuple_graphs[0].pop_back(); }},
+        {"not of its state", [](KnowledgeBaseParts& p) { std::swap(p.tuple_graphs[1][0], p.tuple_graphs[1][1]); }},
+    };
+    for (const Case& c : cases)
+    {
+        SCOPED_TRACE(c.what);
+        KnowledgeBaseParts p = parts();
+        c.mutate(p);
+        try
+        {
+            (void)KnowledgeBase::create(table, kb->options(), std::move(p));
+            ADD_FAILURE() << "accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(c.what), std::string::npos) << e.what();
+        }
+    }
+    EXPECT_THROW((void)KnowledgeBase::create(table, plain, parts()), std::invalid_argument);  // tuple graphs without options
+    EXPECT_THROW((void)KnowledgeBase::create(nullptr, plain, {}), std::invalid_argument);
 }
 }  // namespace

@@ -1,8 +1,9 @@
 """Learn a tiny successor scorer from sparse rewards; evaluate on longer, held-out chains.
 
 This NumPy REINFORCE smoke example scores each applicable action by its schema and by the position that the
-native relational encoding of the successor gives the agent. Its features are deliberately simple, not a
-relational neural network or a benchmark of general planning ability.
+native relational encoding of the successor gives the agent: the object index of the successor's `at` tuple, which
+equals the position in the chain because the cells are declared in chain order. Its features are deliberately simple,
+not a relational neural network or a benchmark of general planning ability.
 """
 
 from time import perf_counter
@@ -40,7 +41,8 @@ def action_features(encoder, states, task_ids):
     if expansion.overflow:
         raise RuntimeError("this example requires every applicable action")
     successors = encoder.encode(expansion.succ, task_ids=task_ids[expansion.parent])
-    # The agent's position in each successor graph, relative to the chain's length: its `at` tuple holds one entity.
+    # The agent's position in each successor graph, relative to the chain's length. It is the object index of the
+    # graph's one `at` tuple, which is the chain position only because the cells are declared in chain order.
     cells = np.arange(successors.num_graphs) * successors.num_relations + encoder.relation_id("at")
     position = successors.relation_args[successors.relation_arg_offsets[cells]] - successors.entity_offsets[:-1]
     progress = position / np.maximum(successors.num_objects - 1, 1)

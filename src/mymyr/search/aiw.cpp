@@ -1,5 +1,4 @@
-// Abstracted IW and abstracted LIW (search/aiw.hpp): the IW family engine with the abstracted novelty pruner, a port
-// of mimir's AbstractedNoveltyPruningStrategyImpl (src/search/algorithms/iw/pruning_strategy.cpp).
+// Abstracted IW and abstracted LIW (search/aiw.hpp): the IW family engine with the abstracted novelty pruner.
 
 #include "mymyr/search/aiw.hpp"
 
@@ -61,7 +60,7 @@ public:
             return true;
         }
         state_update<true>(w, n, 0);
-        return true;  // mimir's test_prune_initial_state returns false (never prunes the start state)
+        return true;  // the start state is never pruned
     }
     void begin(const u64* w, u32 n)
     {
@@ -234,7 +233,7 @@ private:
         for (u32 a : m_gatoms)
             m_gfeat.push_back(features(a));
     }
-    /// Mimir's generate_tuples + insert over the loaded groups, for one rank.
+    /// Generates the tuples and inserts them over the loaded groups, for one rank.
     template<bool Mark>
     bool group_tuples(u32 rank)
     {
@@ -530,7 +529,7 @@ private:
         m_dense_bytes = 0;
         m_dense2 = false;
     }
-    /// Every tuple of a state (mimir's test_state_novelty_and_update_table).
+    /// Every tuple of a state.
     template<bool Mark>
     bool state_update(const u64* w, u32 n, u32 rank)
     {
@@ -548,7 +547,7 @@ private:
         load_groups(w, n, nullptr, 0);
         return group_tuples<Mark>(rank);
     }
-    /// The tuples of a transition that contain an added atom (mimir's test_transition_novelty_and_update_table).
+    /// The tuples of a transition that contain an added atom.
     template<bool Mark>
     bool transition_update(const u64* pw, u32 pn, const u64* cw, u32 cn, std::span<const u32> add, u32 rank)
     {
