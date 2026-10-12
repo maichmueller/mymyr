@@ -37,7 +37,9 @@ returns a `FlatBatch`. It is reentrant: one encoder serves any number of concurr
   narrower than its instance, or one that sets an atom bit its instance does not have, raises `ValueError`. Tasks with
   lazy atom slots are refused, since their rows have no fixed layout ([State encodings](parsing-and-tasks.md#state-encodings)).
 - **`task_ids`:** the instance of each row, an int32 array or a sequence of ints. It is required for a table of several
-  instances; a `State` must belong to the task of its row.
+  instances. A `State` must be a state of the task of its row (the table's instance named by its task id): a `State` of
+another `Task` object is accepted when that task has the same `fingerprint()` and `encoding_fingerprint()` (for example a
+second parse of the same file), and refused with a `ValueError` naming the row and the instance otherwise.
 - **`derived`:** the derived atom words of each row, `[N, D]` u64 (or u32 halves), as `rl.expand` computes them. By
   default they are evaluated here, and only for rows whose instance has derived relations in the schema.
 - **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).

@@ -151,8 +151,12 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.layout = choice(layout, "layout", parse_layout, "'graph', 'relation'");
     options.index = choice(index_dtype, "index_dtype", parse_index_type, "'int32', 'int64'");
     if (!horizon_mode.is_none())
+    {
         options.horizon.mode =
             choice(horizon_mode, "horizon_mode", parse_horizon_mode, "'full', 'delta', 'action' or None");
+        if (options.horizon.mode == HorizonMode::None)  // None is the spelling of no horizon
+            option_error("horizon_mode", "'full', 'delta', 'action' or None", horizon_mode);
+    }
     if (!root_policy.is_none())
         options.horizon.root =
             choice(root_policy, "root_policy", parse_root_policy, "'include', 'exclude', 'encode_only' or None");
@@ -385,6 +389,8 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
 nb::object batch_array(const PyFlatBatch& batch, const char* name)
 {
     const rl::ArrayInfo* info = batch.arrays->find(name);
+    if (!info)
+        throw nb::attribute_error((std::string("mymyr: encoding: this batch has no ") + name).c_str());
     ArraySpec spec;
     spec.owner = std::shared_ptr<const void>(batch.arrays, batch.arrays->data(*info));
     spec.data = batch.arrays->data(*info);
@@ -405,9 +411,19 @@ PyFlatBatch encode(const PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg t
     if (states.view.rows && table.size() > 1 && !ids)
         throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
     table.check_task_ids(ids, states.view.rows);
-    for (u64 row = 0; row < states.owners.size(); ++row)
-        if (states.owners[row] != table.task(ids ? static_cast<u32>(ids[row]) : 0)->uid())
-            throw nb::value_error("mymyr: encoding: a State belongs to another task or task id");
+    for (u64 row = 0; row < states.owner_tasks.size(); ++row)
+    {
+        const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
+        const Task& expected = *table.task(instance);
+        const Task& given = *states.owner_tasks[row];
+        if (given.uid() == expected.uid() ||
+            (given.fingerprint() == expected.fingerprint() && given.encoding_fingerprint() == expected.encoding_fingerprint()))
+            continue;
+        throw nb::value_error(("mymyr: encoding: state " + std::to_string(row) + " is not a state of instance " +
+                               std::to_string(instance) + " of the table (its task id): its task differs in fingerprint or "
+                               "atom encoding")
+                                  .c_str());
+    }
 
     rlimp::Imports imports(-1, dl::k_stream_default, false);
     encoding::EncodeInput input;
