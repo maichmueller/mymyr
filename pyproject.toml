@@ -41,7 +41,7 @@ test-requires = ["pytest>=8", "nanobind>=3.1,<4", "cmake>=3.25", "ninja"]
 before-test = "bash {project}/ci/fetch_test_data.sh /tmp/mymyr-test-data"
 test-command = [
     "python -c \"import importlib.metadata as m, mymyr; assert mymyr.__version__ == m.version('mymyr'), (mymyr.__version__, m.version('mymyr'))\"",
-    "python {project}/ci/run_pytest.py -W error -q -rs -p no:cacheprovider {project}/tests/python",
+    "python {project}/ci/run_pytest.py --runtimes none -W error -q -rs -p no:cacheprovider {project}/tests/python",
     "bash {project}/ci/check_cmake_consumer.sh \"$(python -c 'import mymyr; print(mymyr.get_cmake_dir())')\" /tmp/mymyr-consumer",
 ]
 

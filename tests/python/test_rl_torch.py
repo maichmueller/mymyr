@@ -265,10 +265,12 @@ def check_ops(env, task, dev):
     rt.unregister(rt.register(task))
 
 
+@pytest.mark.needs_gil
 def test_ops_fake_implementations_agree_with_real(blocks):
     check_ops(rt.BatchedEnv(blocks, 12, max_steps=4), blocks, torch.device("cpu"))
 
 
+@pytest.mark.needs_gil
 def test_expand_ops_equal_rl_expand(blocks):
     env = rt.BatchedEnv(blocks, 10)
     for _ in range(4):
@@ -323,10 +325,12 @@ def check_compile(task, dev):
     assert ex.graph_break_count == 0
 
 
+@pytest.mark.needs_gil
 def test_torch_compile_without_graph_breaks(blocks):
     check_compile(blocks, torch.device("cpu"))
 
 
+@pytest.mark.needs_gil
 def test_random_actions_compile_without_graph_breaks(blocks):
     """PlanningEnv.rand_action's op (mymyr::random_actions) in one graph with steps: no graph break, same choices."""
     a = rt.BatchedEnv(blocks, 16, seed=3, max_steps=4)
@@ -367,10 +371,12 @@ def check_planning_env(task, dev):
         env.close()
 
 
+@pytest.mark.needs_gil
 def test_planning_env_specs(blocks):
     check_planning_env(blocks, "cpu")
 
 
+@pytest.mark.needs_gil
 def test_planning_env_partial_reset(blocks):
     pytest.importorskip("torchrl")
     from torchrl.envs.utils import step_mdp
@@ -452,6 +458,7 @@ def test_device_env_batches_streams_and_resets(blocks):
     assert torch.equal(whole.states.cpu(), cpu.states) and torch.equal(whole.count.cpu(), cpu.count)
 
 
+@pytest.mark.needs_gil
 def test_device_ops_and_compile(blocks):
     dev = gpu()
     check_ops(rt.BatchedEnv(blocks, 12, device=dev, max_steps=4), blocks, dev)
@@ -472,6 +479,7 @@ def test_device_ops_and_compile(blocks):
         assert all(torch.equal(x.cpu()[:rows], y[:rows]) for x, y in zip(d[:5], c[:5])) and torch.equal(d[5].cpu(), c[5])
 
 
+@pytest.mark.needs_gil
 def test_device_planning_env(blocks):
     dev = gpu()
     check_planning_env(blocks, dev)
@@ -525,6 +533,7 @@ def test_host_task_ids_outside_the_table_raise_before_they_are_written():
         rt.BatchedEnv(gripper_table(), 2, task_ids=[0, 2])
 
 
+@pytest.mark.needs_gil
 def test_device_task_ids_outside_the_table_raise():
     dev = gpu()
     table = gripper_table()
@@ -561,6 +570,7 @@ def planning_devices():
     return out
 
 
+@pytest.mark.needs_gil
 @pytest.mark.parametrize("max_actions", [None, 3])
 def test_rand_action_is_the_counter_random_policy(blocks, max_actions):
     pytest.importorskip("torchrl")
@@ -611,6 +621,7 @@ def planning_env(n=8, seed=0, max_actions=None):
     return rt.PlanningEnv(task, n, seed=seed, max_steps=5, goal_reward=1.0, max_actions=max_actions)
 
 
+@pytest.mark.needs_gil
 def test_serial_and_parallel_envs():
     pytest.importorskip("torchrl")
     import functools
@@ -635,6 +646,7 @@ def test_serial_and_parallel_envs():
         serial.close()
 
 
+@pytest.mark.needs_gil
 def test_collector():
     pytest.importorskip("torchrl")
     import warnings
@@ -676,3 +688,14 @@ def test_numeric_device_env_equals_cpu():
             for key in ("reward", "terminated", "truncated", "goal", "invalid", "schema", "binding", "count"):
                 assert torch.equal(getattr(a, key), getattr(b, key).cpu()), key
             assert torch.equal(cpu.states, device.states.cpu())
+
+
+@pytest.mark.needs_gil
+def test_static_marking_equals_torch_dynamo():
+    """The marking BatchedEnv applies to its tensors is what torch._dynamo.mark_static_address sets."""
+    from mymyr.rl.torch._batched import _mark_static
+
+    mine, reference = torch.zeros(1), torch.zeros(1)
+    _mark_static(mine)
+    torch._dynamo.mark_static_address(reference)
+    assert mine._dynamo_static_input_type == reference._dynamo_static_input_type

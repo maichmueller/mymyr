@@ -28,6 +28,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -183,6 +184,14 @@ void check_task_rows(const StateBatch& b, const Task& task);
 /// import_task_states for rows of at least `words` atom words (packed States) and NN numeric words (a task table's
 /// rows: NN = TaskTable::numeric_words(); a State may carry fewer numeric words).
 [[nodiscard]] StateBatch import_rows(nb::handle obj, u32 words, u32 NN);
+
+/// The lazy atom slots of a task: u64 [2 + F + D], the numbers F and D of assigned fluent and derived slots, then
+/// their canonical ids in slot order; empty for frozen slots.
+[[nodiscard]] std::vector<u64> lazy_slots(const Task& task);
+/// Gives `task` (lazy slots) the numbering `slots` (lazy_slots of a task with the same content): the slots it has
+/// assigned must agree with it, and it assigns the others in its order. Raises ValueError otherwise, and for a task
+/// with frozen slots or a malformed table; `what` names the object being restored in the message.
+void adopt_lazy_slots(const Task& task, std::span<const u64> slots, const char* what);
 
 /// The TaskOptions of the Python keyword arguments (MYMYR_TASK_OPTION_ARGS); raises ValueError for unknown names and
 /// values out of range.

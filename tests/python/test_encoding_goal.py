@@ -45,6 +45,30 @@ CASES = {
     "static_false": ({"(heavy t2)", "(lit a)"}, True, True),
     "static_true": ({"(heavy t1)", "(not (heavy t2))", "(lit a)"}, True, False),
     "duplicate": ({"(lit home)", "(lit a)", "(lit b)", "(not (ok t1))"}, True, False),
+    # guarded quantifiers: a static guard is decided per binding; a fluent guard, or a disjunction with two or more
+    # disjuncts that static atoms do not decide, is not expandable
+    "forall_static_guard": ({"(ok t1)", "(ok b1)"}, True, False),
+    "forall_forall_static_guard": ({"(lit a)", "(lit b)"}, True, False),
+    "forall_guard_equality": ({"(lit home)", "(lit b)"}, True, False),
+    "forall_static_guard_unsatisfiable": ({"(road b b)"}, True, True),
+    "forall_fluent_guard": ({"(lit a)"}, False, False),
+    "forall_or": ({"(lit a)"}, False, False),
+    "forall_partly_expandable": ({"(ok b1)"}, False, False),
+    "exists_conjunctive_body": ({"(lit a)"}, False, False),
+    "exists_forall": ({"(lit a)"}, False, False),
+    "or_conjunctions": ({"(lit b)"}, False, False),
+    # disjunctions that static atoms and equality decide: a disjunct that holds leaves nothing to require, the one
+    # disjunct they leave open is expanded (static literals of its conjunctions kept), and when all fail the last one
+    # is (with its failing static literal)
+    "forall_or_equality": ({"(not (ok k0))", "(not (ok t2))", "(not (ok b1))"}, True, False),
+    "forall_or_equality_static": ({"(not (heavy b1))"}, True, True),
+    "not_exists_static_part": ({"(not (ok t1))", "(not (ok b1))"}, True, False),
+    "negated_forall_single_witness": ({"(heavy b1)", "(not (= b1 t1))", "(not (ok b1))"}, True, False),
+    "exists_single_witness": ({"(road b a)", "(lit b)"}, True, False),
+    "or_static_true": ({"(lit a)"}, True, False),
+    "or_static_false": ({"(lit a)", "(ok t2)"}, True, False),
+    "or_all_static_false": ({"(lit a)", "(= a b)"}, True, True),
+    "imply_static_false_consequent": ({"(lit a)", "(not (lit b))"}, True, False),
 }
 
 

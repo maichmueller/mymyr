@@ -291,6 +291,59 @@ struct Action1
 
 std::string strip_question(std::string_view s) { return std::string(!s.empty() && s[0] == '?' ? s.substr(1) : s); }
 
+bool is_atomic(const loki::Condition& c)
+{
+    return std::holds_alternative<loki::ConditionLiteral>(c->get_condition())
+           || std::holds_alternative<loki::ConditionNumericConstraint>(c->get_condition());
+}
+
+/// The conjuncts of a conjunctive condition, in order: its literals and numeric constraints, with nested conjunctions
+/// flattened. loki's problem translation adds the type literals of a generated derived predicate's parameters last,
+/// as a conjunction around the body, so a body that is a conjunction itself arrives nested. Every other condition is
+/// compiled away by loki and the forall-effect normalization (normalize.hpp) before it gets here.
+void conjuncts(const loki::Condition& c, loki::ConditionList& out)
+{
+    if (const auto* a = std::get_if<loki::ConditionAnd>(&c->get_condition()))
+    {
+        for (const auto& part : (*a)->get_conditions())
+        {
+            if (std::holds_alternative<loki::ConditionAnd>(part->get_condition()))
+                conjuncts(part, out);
+            else if (is_atomic(part))
+                out.push_back(part);
+            else
+                throw std::logic_error("Expected literal in conjunctive condition.");
+        }
+    }
+    else if (is_atomic(c))
+        out.push_back(c);
+    else
+        throw std::logic_error("Expected conjunctive condition.");
+}
+
+/// The conjuncts of the condition of a conditional effect (conjuncts), where existential quantifiers may occur too:
+/// loki merges the conditions of nested conditional effects (`c1 > (c2 > e)` is `(c1 and c2) > e`) after it moved the
+/// existential quantifiers out of conditions, so an existential condition met by another one arrives as a part of a
+/// conjunction. Its variables are appended to `params`, the parameters of the conditional effect, and its body joins
+/// the conjuncts, as loki compiles an existential condition on its own (`exists(vs, c) > e` is `forall(vs, c > e)`).
+void effect_conjuncts(const loki::Condition& c, loki::ConditionList& out, loki::ParameterList& params)
+{
+    if (const auto* a = std::get_if<loki::ConditionAnd>(&c->get_condition()))
+    {
+        for (const auto& part : (*a)->get_conditions())
+            effect_conjuncts(part, out, params);
+    }
+    else if (const auto* x = std::get_if<loki::ConditionExists>(&c->get_condition()))
+    {
+        params.insert(params.end(), (*x)->get_parameters().begin(), (*x)->get_parameters().end());
+        effect_conjuncts((*x)->get_condition(), out, params);
+    }
+    else if (is_atomic(c))
+        out.push_back(c);
+    else
+        throw std::logic_error("Expected literal in conjunctive condition.");
+}
+
 /// mimir: which predicates are fluent / derived and which functions appear in effects (ToMimirStructures::prepare).
 struct Classifier
 {
@@ -300,16 +353,8 @@ struct Classifier
 
     void condition(loki::Condition c)
     {
-        if (const auto* a = std::get_if<loki::ConditionAnd>(&c->get_condition()))
-        {
-            for (const auto& part : (*a)->get_conditions())
-                if (!std::holds_alternative<loki::ConditionLiteral>(part->get_condition())
-                    && !std::holds_alternative<loki::ConditionNumericConstraint>(part->get_condition()))
-                    throw std::logic_error("Expected literal in conjunctive condition.");
-        }
-        else if (!std::holds_alternative<loki::ConditionLiteral>(c->get_condition())
-                 && !std::holds_alternative<loki::ConditionNumericConstraint>(c->get_condition()))
-            throw std::logic_error("Expected conjunctive condition.");
+        loki::ConditionList parts;
+        conjuncts(c, parts);
     }
     void effect(loki::Effect effect)
     {
@@ -319,12 +364,9 @@ struct Classifier
                 e = (*f)->get_effect();
             if (const auto* w = std::get_if<loki::EffectCompositeWhen>(&e->get_effect()))
             {
-                const auto& c = (*w)->get_condition()->get_condition();
-                if (const auto* a = std::get_if<loki::ConditionAnd>(&c))
-                    for (const auto& part : (*a)->get_conditions())
-                        if (!std::holds_alternative<loki::ConditionLiteral>(part->get_condition())
-                            && !std::holds_alternative<loki::ConditionNumericConstraint>(part->get_condition()))
-                            throw std::logic_error("Expected literal in conjunctive condition.");
+                loki::ConditionList parts;
+                loki::ParameterList params;
+                effect_conjuncts((*w)->get_condition(), parts, params);
                 e = (*w)->get_effect();
             }
             if (const auto* l = std::get_if<loki::EffectLiteral>(&e->get_effect()))
@@ -638,32 +680,25 @@ public:
     /// mimir: ToMimirStructures::translate_lifted(Condition, parameters)
     u32 cond(loki::Condition c, const std::vector<u32>& ps)
     {
+        loki::ConditionList parts;
+        conjuncts(c, parts);
+        return cond(std::move(parts), ps);
+    }
+    /// The condition of the conjuncts `parts`.
+    u32 cond(loki::ConditionList parts, const std::vector<u32>& ps)
+    {
         std::vector<u32> lits[3], ncs;
-        auto add_lit = [&](loki::Literal l)
+        canonicalize_type_runs(parts);
+        for (const auto& part : parts)
         {
-            const u32 id = lit(l);
-            lits[lit_kind(id)].push_back(id);
-        };
-        if (const auto* a = std::get_if<loki::ConditionAnd>(&c->get_condition()))
-        {
-            loki::ConditionList parts = (*a)->get_conditions();
-            canonicalize_type_runs(parts);
-            for (const auto& part : parts)
+            if (const auto* l = std::get_if<loki::ConditionLiteral>(&part->get_condition()))
             {
-                if (const auto* l = std::get_if<loki::ConditionLiteral>(&part->get_condition()))
-                    add_lit((*l)->get_literal());
-                else if (const auto* n = std::get_if<loki::ConditionNumericConstraint>(&part->get_condition()))
-                    ncs.push_back(nc(*n));
-                else
-                    throw std::logic_error("Expected literal in conjunctive condition.");
+                const u32 id = lit((*l)->get_literal());
+                lits[lit_kind(id)].push_back(id);
             }
+            else
+                ncs.push_back(nc(std::get<loki::ConditionNumericConstraint>(part->get_condition())));
         }
-        else if (const auto* l = std::get_if<loki::ConditionLiteral>(&c->get_condition()))
-            add_lit((*l)->get_literal());
-        else if (const auto* n = std::get_if<loki::ConditionNumericConstraint>(&c->get_condition()))
-            ncs.push_back(nc(*n));
-        else
-            throw std::logic_error("Expected conjunctive condition.");
         return Core::cond(ps, lits, std::move(ncs));
     }
     u32 empty_cond(const std::vector<u32>& ps = {})
@@ -695,7 +730,12 @@ public:
             std::optional<u32> c;
             if (const auto* w = std::get_if<loki::EffectCompositeWhen>(&e->get_effect()))
             {
-                c = cond((*w)->get_condition(), forall_params);
+                loki::ConditionList parts;
+                loki::ParameterList exists_params;
+                effect_conjuncts((*w)->get_condition(), parts, exists_params);
+                for (u32 p : params(exists_params))
+                    forall_params.push_back(p);
+                c = cond(std::move(parts), forall_params);
                 e = (*w)->get_effect();
             }
             if (!c)
@@ -1928,7 +1968,7 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
         if (!problem_preds_by_name.contains(x->get_literal()->get_atom()->get_predicate()->get_name()))
             fail("problem axiom over a domain predicate is not supported");
 
-    // mimir: ToMimirStructures::prepare(problem) rejects non-conjunctive goals and axiom bodies
+    // mimir: ToMimirStructures::prepare(problem) checks that the goal and the axiom bodies are conjunctive
     {
         absl::flat_hash_set<std::string> f, d, e;
         Classifier cl{f, d, e};
@@ -2001,14 +2041,11 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
                                      [](const loki::Term& t) { return std::holds_alternative<loki::Object>(t->get_object_or_variable()); }))
                     later.insert(p1.glit_key(l));
             };
-            if (const auto* a = std::get_if<loki::ConditionAnd>(&c->get_condition()))
-            {
-                for (const auto& part : (*a)->get_conditions())
-                    if (const auto* l = std::get_if<loki::ConditionLiteral>(&part->get_condition()))
-                        one((*l)->get_literal());
-            }
-            else if (const auto* l = std::get_if<loki::ConditionLiteral>(&c->get_condition()))
-                one((*l)->get_literal());
+            loki::ConditionList parts;
+            conjuncts(c, parts);
+            for (const auto& part : parts)
+                if (const auto* l = std::get_if<loki::ConditionLiteral>(&part->get_condition()))
+                    one((*l)->get_literal());
         };
         if (pl->get_goal_condition())
             collect(*pl->get_goal_condition(), false);
@@ -2102,25 +2139,15 @@ TaskData translate_problem(const DomainState& ds, const loki::Problem& pl, const
             const u32 id = p1.glit_of(l);
             goal1[kinds.pred.at(key_u32(r1.glit[id][0]))].push_back(id);
         };
-        const auto& c = (*pl->get_goal_condition())->get_condition();
-        if (const auto* a = std::get_if<loki::ConditionAnd>(&c))
+        loki::ConditionList parts;
+        conjuncts(*pl->get_goal_condition(), parts);
+        for (const auto& part : parts)
         {
-            for (const auto& part : (*a)->get_conditions())
-            {
-                if (const auto* l = std::get_if<loki::ConditionLiteral>(&part->get_condition()))
-                    add((*l)->get_literal());
-                else if (const auto* n = std::get_if<loki::ConditionNumericConstraint>(&part->get_condition()))
-                    goal_ncs1.push_back(p1.gnc_of(*n));
-                else
-                    throw std::logic_error("Expected literal in conjunctive condition.");
-            }
+            if (const auto* l = std::get_if<loki::ConditionLiteral>(&part->get_condition()))
+                add((*l)->get_literal());
+            else
+                goal_ncs1.push_back(p1.gnc_of(std::get<loki::ConditionNumericConstraint>(part->get_condition())));
         }
-        else if (const auto* l = std::get_if<loki::ConditionLiteral>(&c))
-            add((*l)->get_literal());
-        else if (const auto* n = std::get_if<loki::ConditionNumericConstraint>(&c))
-            goal_ncs1.push_back(p1.gnc_of(*n));
-        else
-            throw std::logic_error("Expected conjunctive condition.");
     }
     for (auto& v : goal1)
         std::sort(v.begin(), v.end());

@@ -12,6 +12,8 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
+
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -428,6 +430,55 @@ TEST(TupleGraph, IndependentOfTheThreadCount)
                 for (u32 v = 0; v < S->num_states(); v += std::max<u32>(1, S->num_states() / 7))
                     EXPECT_TRUE(tuple_graph(S, v, {.width = w, .dominance_pruning = pruning}) == ref[v]);
             }
+    }
+}
+
+// ----------------------------------------------------------------------------------------------- from arrays
+TEST(TupleGraph, CreateFromArrays)
+{
+    const StateSpacePtr S = space_of(chain_task());
+    ASSERT_TRUE(S);
+    for (u32 w : {0u, 1u, 2u})
+        for (bool pruning : {true, false})
+            for (const TupleGraph& g : tuple_graphs(S, {.width = w, .dominance_pruning = pruning}))
+                EXPECT_TRUE(TupleGraph::create(g.to_arrays()) == g);
+    const TupleGraph g = tuple_graph(S, 0, {.width = 1, .dominance_pruning = false});
+    ASSERT_EQ(g.num_distances(), 3u);
+    ASSERT_GT(g.num_edges(), 1u);
+    const u32 slots = S->task()->atoms().fluent_slots();
+    struct Case
+    {
+        const char* what;  // part of the message
+        std::function<void(TupleGraphArrays&)> mutate;
+    };
+    const Case cases[] = {
+        {"no state space", [](TupleGraphArrays& a) { a.space = nullptr; }},
+        {"root", [](TupleGraphArrays& a) { a.root = 3; }},
+        {"width", [](TupleGraphArrays& a) { a.width = 6; }},
+        {"distance_offsets", [](TupleGraphArrays& a) { a.distance_offsets[1] = 0; }},
+        {"tuple_offsets", [](TupleGraphArrays& a) { a.tuple_offsets.pop_back(); }},
+        {"atom slots", [&](TupleGraphArrays& a) { a.tuple_atoms.back() = slots; }},
+        {"more atoms than width", [](TupleGraphArrays& a) { a.width = 0; }},
+        {"layer 0", [](TupleGraphArrays& a) { a.layer_vertex_ids[0] = 1; }},
+        {"not in its vertex's layer", [](TupleGraphArrays& a) { a.problem_vertex_ids.back() = 0; }},
+        {"successors", [](TupleGraphArrays& a) { a.successor_ids[0] = 0; }},
+        {"predecessors", [](TupleGraphArrays& a) { std::ranges::reverse(a.predecessor_ids); }},
+        {"problem_offsets", [](TupleGraphArrays& a) { a.problem_offsets.back() += 1; }},
+    };
+    for (const Case& c : cases)
+    {
+        SCOPED_TRACE(c.what);
+        TupleGraphArrays a = g.to_arrays();
+        c.mutate(a);
+        try
+        {
+            (void)TupleGraph::create(std::move(a));
+            ADD_FAILURE() << "accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(c.what), std::string::npos) << e.what();
+        }
     }
 }
 }  // namespace
