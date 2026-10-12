@@ -29,6 +29,7 @@ class Rollout(NamedTuple):
     task_ids: Tensor
     goal_pos: Tensor
     goal_neg: Tensor
+    at_goal: Tensor  # bool [K, N]: the observed state after each step is a goal
 
 
 class CapturedRollout:
@@ -101,6 +102,7 @@ class CapturedRollout:
                 torch.empty((K, n), dtype=torch.int32, device=dev),
                 torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
                 torch.empty((K, n, env.words if env.goals else 0), dtype=env.states.dtype, device=dev),
+                torch.empty_like(b),
             )  # fmt: skip
             actions = None if policy is None else torch.empty((K, n), dtype=torch.int64, device=dev)
             for k in range(K):

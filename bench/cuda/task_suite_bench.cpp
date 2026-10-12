@@ -181,7 +181,7 @@ Layout layout(const rl::TaskSuite& S, u64 N)
 /// A device batch of environments (the fast path's arrays).
 struct Batch
 {
-    cuda::DeviceBuffer states, ids, steps, draws, counts, views, reward, term, trunc, count;
+    cuda::DeviceBuffer states, ids, steps, draws, counts, views, reward, term, trunc, count, at_goal;
     rl::EnvBatch b;
     rl::StepOutputs out;
 
@@ -195,7 +195,8 @@ struct Batch
         reward(ctx, std::max<u64>(h_ids.size(), 1) * 4, s),
         term(ctx, std::max<u64>(h_ids.size(), 1), s),
         trunc(ctx, std::max<u64>(h_ids.size(), 1), s),
-        count(ctx, std::max<u64>(h_ids.size(), 1) * 4, s)
+        count(ctx, std::max<u64>(h_ids.size(), 1) * 4, s),
+        at_goal(ctx, std::max<u64>(h_ids.size(), 1), s)
     {
         const u64 N = h_ids.size();
         if (N)
@@ -210,6 +211,7 @@ struct Batch
         b.draws = static_cast<u64*>(draws.data());
         b.counts = env.cache_schemas() ? static_cast<u32*>(counts.data()) : nullptr;
         b.views = env.cache_view_words() ? static_cast<u64*>(views.data()) : nullptr;
+        b.at_goal = static_cast<u8*>(at_goal.data());
         out.reward = static_cast<f32*>(reward.data());
         out.terminated = static_cast<u8*>(term.data());
         out.truncated = static_cast<u8*>(trunc.data());

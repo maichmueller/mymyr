@@ -234,21 +234,21 @@ public:
 
     void reset(nb::handle states, nb::handle task_ids, nb::handle steps, nb::handle counts, nb::handle views,
                nb::handle goal_pos, nb::handle goal_neg, nb::handle count, nb::handle mask, bool keep_goals,
-               nb::handle stream)
+               nb::handle at_goal, nb::handle stream)
     {
         Call c(*this, stream);
-        rl::EnvBatch b = batch(c.in, states, task_ids, steps, nb::none(), counts, views, goal_pos, goal_neg);
+        rl::EnvBatch b = batch(c.in, states, task_ids, steps, nb::none(), counts, views, goal_pos, goal_neg, at_goal);
         const i64 n = static_cast<i64>(b.rows);
         const u8* m = c.in.get<const u8>(mask, "mask", {boolt, u8t}, {n}, false);
         i32* cnt = c.in.get<i32>(count, "count", {i32t}, {n}, true);
         c.run([&] { run_reset(b, m, cnt, keep_goals); });
     }
 
-    void refresh(nb::handle states, nb::handle task_ids, nb::handle counts, nb::handle views, nb::handle count,
-                 nb::handle stream)
+    void refresh(nb::handle states, nb::handle task_ids, nb::handle counts, nb::handle views, nb::handle goal_pos,
+                 nb::handle goal_neg, nb::handle count, nb::handle at_goal, nb::handle stream)
     {
         Call c(*this, stream);
-        rl::EnvBatch b = batch(c.in, states, task_ids, nb::none(), nb::none(), counts, views, nb::none(), nb::none());
+        rl::EnvBatch b = batch(c.in, states, task_ids, nb::none(), nb::none(), counts, views, goal_pos, goal_neg, at_goal);
         i32* cnt = c.in.get<i32>(count, "count", {i32t}, {static_cast<i64>(b.rows)}, true);
         c.run([&] { run_refresh(b, cnt); });
     }
@@ -258,7 +258,7 @@ public:
     {
         Call call(*this, stream);
         const rl::EnvBatch batch = this->batch(call.in, states, task_ids, nb::none(), nb::none(), nb::none(), nb::none(),
-                                             goal_pos, goal_neg);
+                                             goal_pos, goal_neg, nb::none());
         u8* flags = call.in.get<u8>(out, "out", {boolt, u8t}, {static_cast<i64>(batch.rows)}, true);
         call.run([&] {
 #if defined(MYMYR_HAS_CUDA)
@@ -272,11 +272,11 @@ public:
     void step(nb::handle states, nb::handle task_ids, nb::handle steps, nb::handle draws, nb::handle counts,
               nb::handle views, nb::handle goal_pos, nb::handle goal_neg, nb::handle action, nb::handle next_task_ids,
               nb::handle reward, nb::handle terminated, nb::handle truncated, nb::handle count, nb::handle final_states,
-              nb::handle schema, nb::handle binding, nb::handle invalid, nb::handle goal, u64 first_env,
-              nb::handle stream)
+              nb::handle schema, nb::handle binding, nb::handle invalid, nb::handle goal, nb::handle at_goal,
+              u64 first_env, nb::handle stream)
     {
         Call c(*this, stream);
-        rl::EnvBatch b = batch(c.in, states, task_ids, steps, draws, counts, views, goal_pos, goal_neg);
+        rl::EnvBatch b = batch(c.in, states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, at_goal);
         b.first_env = first_env;
         const i64 n = static_cast<i64>(b.rows);
         const i64* act = c.in.get<const i64>(action, "action", {i64t}, {n}, false);
@@ -304,30 +304,31 @@ public:
     // DLPack imports (about 10 us per torch tensor).
     using Ptrs = std::vector<std::uintptr_t>;
 
-    // states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask
+    // states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal
     void reset_ptrs(u64 rows, const Ptrs& p, bool keep_goals, StreamArg stream)
     {
-        check_ptrs(p, 9);
+        check_ptrs(p, 10);
         Call c(*this, stream);
-        rl::EnvBatch b = raw_batch(rows, p[0], p[1], p[2], 0, p[3], p[4], p[5], p[6]);
+        rl::EnvBatch b = raw_batch(rows, p[0], p[1], p[2], 0, p[3], p[4], p[5], p[6], p[9]);
         c.run([&] { run_reset(b, ptr<const u8>(p[8]), ptr<i32>(p[7]), keep_goals); });
     }
 
-    void refresh_ptrs(u64 rows, const Ptrs& p, StreamArg stream)  // states, task_ids, counts, views, count
+    // states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal
+    void refresh_ptrs(u64 rows, const Ptrs& p, StreamArg stream)
     {
-        check_ptrs(p, 5);
+        check_ptrs(p, 8);
         Call c(*this, stream);
-        rl::EnvBatch b = raw_batch(rows, p[0], p[1], 0, 0, p[2], p[3], 0, 0);
-        c.run([&] { run_refresh(b, ptr<i32>(p[4])); });
+        rl::EnvBatch b = raw_batch(rows, p[0], p[1], 0, 0, p[2], p[3], p[4], p[5], p[7]);
+        c.run([&] { run_refresh(b, ptr<i32>(p[6])); });
     }
 
     // states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, next_task_ids, reward, terminated,
-    // truncated, count, final_states, schema, binding, invalid, goal
+    // truncated, count, final_states, schema, binding, invalid, goal, at_goal
     void step_ptrs(u64 rows, const Ptrs& p, u32 label_width, u64 first_env, StreamArg stream)
     {
-        check_ptrs(p, 19);
+        check_ptrs(p, 20);
         Call c(*this, stream);
-        rl::EnvBatch b = raw_batch(rows, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+        rl::EnvBatch b = raw_batch(rows, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[19]);
         b.first_env = first_env;
         const i64* act = ptr<const i64>(p[8]);
         if (!act && !b.draws && rows > 0)
@@ -431,8 +432,7 @@ private:
         if (m_dev)
             return m_dev->refresh(b, count);
 #endif
-        if (count)
-            m_host->count(b, count, m_pool.get());
+        m_host->refresh(b, count, m_pool.get());
     }
     void run_step(rl::EnvBatch& b, const rl::StepOutputs& o, const i64* action, const i32* next_task_ids)
     {
@@ -473,7 +473,7 @@ private:
     }
     rl::EnvBatch raw_batch(u64 rows, std::uintptr_t states, std::uintptr_t task_ids, std::uintptr_t steps,
                            std::uintptr_t draws, std::uintptr_t counts, std::uintptr_t views, std::uintptr_t goal_pos,
-                           std::uintptr_t goal_neg) const
+                           std::uintptr_t goal_neg, std::uintptr_t at_goal) const
     {
         rl::EnvBatch b;
         b.rows = rows;
@@ -487,11 +487,12 @@ private:
         b.views = ptr<u64>(views);
         b.goal_pos = ptr<u64>(goal_pos);
         b.goal_neg = ptr<u64>(goal_neg);
+        b.at_goal = ptr<u8>(at_goal);
         return b;
     }
 
     rl::EnvBatch batch(Imports& in, nb::handle states, nb::handle task_ids, nb::handle steps, nb::handle draws,
-                       nb::handle counts, nb::handle views, nb::handle goal_pos, nb::handle goal_neg)
+                       nb::handle counts, nb::handle views, nb::handle goal_pos, nb::handle goal_neg, nb::handle at_goal)
     {
         rl::EnvBatch b;
         if (states.is_none())
@@ -507,6 +508,7 @@ private:
         b.views = in.get<u64>(views, "views", {i64t, u64t}, {n, static_cast<i64>(m_V)}, true);
         b.goal_pos = in.words(goal_pos, "goal_pos", n, m_W, true);
         b.goal_neg = in.words(goal_neg, "goal_neg", n, m_W, true);
+        b.at_goal = in.get<u8>(at_goal, "at_goal", {boolt, u8t}, {n}, true);
         return b;
     }
 
@@ -696,56 +698,67 @@ void bind_rl_torch(nb::module_& parent)
         .def(
             "reset",
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg counts, ArrayArg views,
-               ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg count, ArrayArg mask, bool keep_goals, StreamArg stream) {
-                e.reset(states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, keep_goals, stream);
+               ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg count, ArrayArg mask, bool keep_goals, ArrayArg at_goal,
+               StreamArg stream) {
+                e.reset(states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, keep_goals, at_goal,
+                        stream);
             },
             "states"_a, "task_ids"_a = nb::none(), "steps"_a = nb::none(), nb::kw_only(), "counts"_a = nb::none(),
             "views"_a = nb::none(), "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(), "count"_a = nb::none(),
-            "mask"_a = nb::none(), "keep_goals"_a = false, "stream"_a = nb::none(),
+            "mask"_a = nb::none(), "keep_goals"_a = false, "at_goal"_a = nb::none(), "stream"_a = nb::none(),
             "Resets the rows with mask[i] (all rows without a mask) to the initial states of their instances "
             "(task_ids [N] int32, set by the caller first; None over a table of one): states [N, row_words], steps [N] "
             "int32 (0), the fast path's cache counts [N, cache_schemas] and views [N, cache_view_words], per-env goal "
             "masks goal_pos / goal_neg [N, words] (the instances' goals, unless keep_goals), count [N] int32 (the "
-            "initial states' successors). The draw counters are kept.")
+            "initial states' successors), at_goal [N] bool (whether the reset state is a goal; required on a device). "
+            "The draw counters are kept.")
         .def(
             "refresh",
-            [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg counts, ArrayArg views, ArrayArg count,
-               StreamArg stream) { e.refresh(states, task_ids, counts, views, count, stream); },
+            [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg counts, ArrayArg views, ArrayArg goal_pos,
+               ArrayArg goal_neg, ArrayArg count, ArrayArg at_goal, StreamArg stream) {
+                e.refresh(states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal, stream);
+            },
             "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "counts"_a = nb::none(), "views"_a = nb::none(),
-            "count"_a = nb::none(), "stream"_a = nb::none(),
-            "Recomputes the fast path's cache and the successor counts [N] of states (or task ids) the caller wrote.")
+            "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(), "count"_a = nb::none(), "at_goal"_a = nb::none(),
+            "stream"_a = nb::none(),
+            "Recomputes the fast path's cache, the successor counts [N] and the at_goal flags [N] of states, task ids or "
+            "goal masks the caller wrote.")
         .def(
             "step",
             [](PyEnv& e, ArrayArg states, ArrayArg task_ids, ArrayArg steps, ArrayArg draws, ArrayArg counts,
                ArrayArg views, ArrayArg goal_pos, ArrayArg goal_neg, ArrayArg action, ArrayArg next_task_ids,
                ArrayArg reward, ArrayArg terminated, ArrayArg truncated, ArrayArg count, ArrayArg final_states,
-               ArrayArg schema, ArrayArg binding, ArrayArg invalid, ArrayArg goal, IntArg first_env_in, StreamArg stream) {
+               ArrayArg schema, ArrayArg binding, ArrayArg invalid, ArrayArg goal, ArrayArg at_goal, IntArg first_env_in,
+               StreamArg stream) {
                 const u64 first_env = int_arg<u64>(first_env_in, "first_env");
                 e.step(states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, next_task_ids, reward,
-                       terminated, truncated, count, final_states, schema, binding, invalid, goal, first_env, stream);
+                       terminated, truncated, count, final_states, schema, binding, invalid, goal, at_goal, first_env,
+                       stream);
             },
             "states"_a, "task_ids"_a = nb::none(), "steps"_a = nb::none(), "draws"_a = nb::none(), nb::kw_only(),
             "counts"_a = nb::none(), "views"_a = nb::none(), "goal_pos"_a = nb::none(), "goal_neg"_a = nb::none(),
             "action"_a = nb::none(), "next_task_ids"_a = nb::none(), "reward"_a = nb::none(),
             "terminated"_a = nb::none(), "truncated"_a = nb::none(), "count"_a = nb::none(),
             "final_states"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(), "invalid"_a = nb::none(),
-            "goal"_a = nb::none(), "first_env"_a = 0, "stream"_a = nb::none(),
+            "goal"_a = nb::none(), "at_goal"_a = nb::none(), "first_env"_a = 0, "stream"_a = nb::none(),
             "One step of every environment (rl/env.hpp): action [N] int64 indexes the canonical successor order "
             "(None: the random policy, drawing from draws [N] (u)int64 with the env ids first_env + i); next_task_ids "
             "[N] int32 names the instances autoresetting rows restart in. In place: states, task_ids, steps, draws, "
-            "the cache and the goal masks; outputs (None: not written): reward [N] float32, terminated, truncated, "
+            "the cache, the goal masks and at_goal [N] bool (the rows at a goal, which the step absorbs; required on a "
+            "device); outputs (None: not written): reward [N] float32, terminated, truncated, "
             "invalid and goal [N] bool, count [N] int32, final_states [N, row_words], schema [N] int32, binding "
             "[N, >= label_width] int32.")
         .def("_reset_ptrs", &PyEnv::reset_ptrs, "rows"_a, "ptrs"_a, "keep_goals"_a = false, "stream"_a = nb::none(),
-             "reset() on data pointers (states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask; 0: "
-             "None) of checked tensors; the torch ops' entry point.")
+             "reset() on data pointers (states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, at_goal; "
+             "0: None) of checked tensors; the torch ops' entry point.")
         .def("_refresh_ptrs", &PyEnv::refresh_ptrs, "rows"_a, "ptrs"_a, "stream"_a = nb::none(),
-             "refresh() on data pointers (states, task_ids, counts, views, count; 0: None) of checked tensors.")
+             "refresh() on data pointers (states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal; 0: "
+             "None) of checked tensors.")
         .def("_step_ptrs", &PyEnv::step_ptrs, "rows"_a, "ptrs"_a, "label_width"_a, "first_env"_a = 0,
              "stream"_a = nb::none(),
              "step() on data pointers (states, task_ids, steps, draws, counts, views, goal_pos, goal_neg, action, "
-             "next_task_ids, reward, terminated, truncated, count, final_states, schema, binding, invalid, goal; 0: "
-             "None) of checked tensors.")
+             "next_task_ids, reward, terminated, truncated, count, final_states, schema, binding, invalid, goal, "
+             "at_goal; 0: None) of checked tensors.")
         .def("_random_actions_ptrs", &PyEnv::random_actions_ptrs, "rows"_a, "ptrs"_a, "first_env"_a = 0,
              "max_actions"_a = 0, "stream"_a = nb::none(),
              "random_actions() on data pointers (draws, count, out) of checked tensors.")

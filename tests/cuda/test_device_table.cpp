@@ -204,6 +204,8 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
         custom_goals(h.v, W);
         upload(d.gpos.data(), h.v.gpos, d.s);
         upload(d.gneg.data(), h.v.gneg, d.s);
+        host.refresh(h.b, h.out.count);  // goal masks written directly: the at_goal flags
+        env.refresh(d.b, d.out.count);
     }
     for (int t = 0; t < r.steps; ++t)
     {
@@ -225,6 +227,7 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
             permute_host(h.v.steps, perm, 1);
             permute_host(h.v.draws, perm, 1);
             permute_host(h.v.count, perm, 1);
+            permute_host(h.v.at_goal, perm, 1);
             if (r.goals)
             {
                 permute_host(h.v.gpos, perm, W);
@@ -235,6 +238,7 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
             permute_device<i32>(d.steps, N, 1, perm, d.s);
             permute_device<u64>(d.draws, N, 1, perm, d.s);
             permute_device<i32>(d.count, N, 1, perm, d.s);
+            permute_device<u8>(d.at_goal, N, 1, perm, d.s);
             permute_device<u32>(d.counts, N, d.C, perm, d.s, r.keep_order && I > 1 ? d.C - 2 : d.C);
             permute_device<u64>(d.views, N, d.V, perm, d.s);
             if (r.goals)

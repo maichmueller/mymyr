@@ -24,7 +24,10 @@ class EnvState(NamedTuple):
     goal masks (uint32 [N, 2 words] with goals=True, else [N, 0]). ``counts`` / ``views`` are the device fast path's
     cache of the current state (uint32 [N, C] and [N, 2V]; [N, 0] on the CPU and on the general path): opaque, kept
     current by reset, step and refresh. ``reset_counts`` [N] uint32 and ``sampling_seed`` [N, 2] uint32 hold the
-    independent instance sampler's per-environment counters and keys."""
+    independent instance sampler's per-environment counters and keys. ``at_goal`` [N] bool says whether the current
+    state is a goal (by the goal masks with goals=True, else the instance's goal): reset, step and refresh keep it,
+    and a step leaves those environments where they are (absorbing). Writing ``states`` or the goal masks needs
+    :meth:`Env.refresh`."""
 
     states: Any
     task_id: Any
@@ -38,18 +41,21 @@ class EnvState(NamedTuple):
     goal_neg: Any
     reset_counts: Any
     sampling_seed: Any
+    at_goal: Any
 
 
 class Observation(NamedTuple):
     """What a policy sees: the state words (uint32 [N, 2 row_words]), the successor count [N] (the action mask of
-    successor slots is ``arange(K) < count``), the instance [N] and the per-env goal masks ([N, 2 words], or [N, 0]
-    without goals=True)."""
+    successor slots is ``arange(K) < count``), the instance [N], the per-env goal masks ([N, 2 words], or [N, 0]
+    without goals=True) and whether the state is a goal already (bool [N]: a reset into a solved state, or a goal mask
+    that holds; the next step absorbs it)."""
 
     state: Any
     count: Any
     task_id: Any
     goal_pos: Any
     goal_neg: Any
+    at_goal: Any
 
 
 class PaddedExpansion(NamedTuple):
@@ -247,7 +253,7 @@ class Env:
 
     def observation(self, state: EnvState) -> Observation:
         """The observation of ``state``."""
-        return Observation(state.states, state.count, state.task_id, state.goal_pos, state.goal_neg)
+        return Observation(state.states, state.count, state.task_id, state.goal_pos, state.goal_neg, state.at_goal)
 
     # ---------------------------------------------------------------------------------------------- env functions
 
@@ -276,7 +282,7 @@ class Env:
         n = ids.shape[0]
         with self._dev():
             ids = jnp.asarray(ids)
-            states, steps, count, counts, views, gpos, gneg = _ffi.env_init(
+            states, steps, count, counts, views, gpos, gneg, at_goal = _ffi.env_init(
                 self.handle, ids, 2 * self.row_words, self.cache_schemas, 2 * self.cache_view_words, self._goal_cols()
             )
             draws = jnp.zeros((n, 2), jnp.uint32)
@@ -288,7 +294,10 @@ class Env:
                 raise ValueError("mymyr: per-env goals need goals=True and both goal_pos and goal_neg")
             gpos = jnp.asarray(goal_pos, jnp.uint32).reshape(gpos.shape)
             gneg = jnp.asarray(goal_neg, jnp.uint32).reshape(gneg.shape)
-        state = EnvState(states, ids, steps, draws, env_id, count, counts, views, gpos, gneg, reset_counts, sampling_seed)
+            at_goal = _masks_hold(states, gpos, gneg)
+        state = EnvState(
+            states, ids, steps, draws, env_id, count, counts, views, gpos, gneg, reset_counts, sampling_seed, at_goal
+        )
         if not isinstance(states, jax.core.Tracer):
             # committed to the environment's device: jitted steps of this state run there, whatever the default device
             state = jax.device_put(state, self.device)
@@ -322,22 +331,26 @@ class Env:
             gpos = jnp.where(m[:, None], jnp.asarray(goal_pos, jnp.uint32), gpos)
             gneg = jnp.where(m[:, None], jnp.asarray(goal_neg, jnp.uint32), gneg)
         with self._dev():
-            states, steps, count, counts, views, gpos, gneg = _ffi.env_reset(
-                self.handle, state.states, ids, state.steps, state.count, state.counts, state.views, gpos, gneg, m, keep
-            )
+            states, steps, count, counts, views, gpos, gneg, at_goal = _ffi.env_reset(
+                self.handle, state.states, ids, state.steps, state.count, state.counts, state.views, gpos, gneg,
+                state.at_goal, m, keep,
+            )  # fmt: skip
         s = state._replace(
             states=states, task_id=ids, steps=steps, count=count, counts=counts, views=views, goal_pos=gpos, goal_neg=gneg,
+            at_goal=at_goal,
             reset_counts=reset_counts + m.astype(jnp.uint32),
             sampling_seed=jnp.where(m[:, None], sampling_seed, state.sampling_seed),
         )
         return s, self.observation(s)
 
     def refresh(self, state: EnvState) -> EnvState:
-        """Recomputes the successor counts and the device cache of states (or task ids) the caller wrote into
-        ``state``."""
+        """Recomputes the successor counts, the device cache and ``at_goal`` of states, task ids or goal masks the
+        caller wrote into ``state``."""
         with self._dev():
-            count, counts, views = _ffi.env_refresh(self.handle, state.states, state.task_id, state.counts, state.views)
-        return state._replace(count=count, counts=counts, views=views)
+            count, counts, views, at_goal = _ffi.env_refresh(
+                self.handle, state.states, state.task_id, state.counts, state.views, state.goal_pos, state.goal_neg
+            )
+        return state._replace(count=count, counts=counts, views=views, at_goal=at_goal)
 
     def step(
         self, key: Any, state: EnvState, action: Optional[Any] = None, *, next_task_ids: Optional[Any] = None
@@ -368,6 +381,7 @@ class Env:
                 state.views,
                 state.goal_pos,
                 state.goal_neg,
+                state.at_goal,
                 state.env_id,
                 seed,
                 act,
@@ -375,14 +389,14 @@ class Env:
                 self.label_width if self.labels else 0,
                 self.final_state,
             )
-        (states, task_id, steps, draws, count, counts, views, gpos, gneg, reward, terminated, truncated, goal, invalid,
-         schema, binding, final) = outs  # fmt: skip
+        (states, task_id, steps, draws, count, counts, views, gpos, gneg, at_goal, reward, terminated, truncated, goal,
+         invalid, schema, binding, final) = outs  # fmt: skip
         reset_counts = state.reset_counts
         if self.autoreset:
             reset_counts = reset_counts + (terminated | truncated).astype(jnp.uint32)
         s = state._replace(
             states=states, task_id=task_id, steps=steps, draws=draws, count=count, counts=counts, views=views,
-            goal_pos=gpos, goal_neg=gneg, reset_counts=reset_counts,
+            goal_pos=gpos, goal_neg=gneg, reset_counts=reset_counts, at_goal=at_goal,
         )
         info: dict[str, Any] = {"goal": goal, "invalid": invalid, "schema": schema}
         if self.labels:
@@ -434,6 +448,13 @@ class Env:
         """Waits for this environment's device work and raises if a fast-path step met a stale cache (states written
         without :meth:`refresh`) or task ids outside the table."""
         self.native.check_errors()
+
+
+def _masks_hold(states: Any, goal_pos: Any, goal_neg: Any) -> Any:
+    """Whether each state row (uint32 halves) holds its goal masks ([N, 2 words]: the rows' first 2 words columns)."""
+    w = goal_pos.shape[-1]
+    head = states[..., :w]
+    return jnp.all((head & goal_pos) == goal_pos, axis=-1) & jnp.all((head & goal_neg) == 0, axis=-1)
 
 
 def as_words(x: Union[np.ndarray, Any]) -> np.ndarray:

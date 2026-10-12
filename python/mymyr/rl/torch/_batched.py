@@ -22,6 +22,7 @@ class Observation(NamedTuple):
     count: Tensor
     goal_pos: Tensor
     goal_neg: Tensor
+    at_goal: Tensor  # bool: the state is a goal (a solved reset, a goal mask that holds): the next step absorbs it
 
 
 class StepResult(NamedTuple):
@@ -44,6 +45,7 @@ class StepResult(NamedTuple):
     task_ids: Tensor
     goal_pos: Tensor
     goal_neg: Tensor
+    at_goal: Tensor  # bool: the next observation's state is a goal (an autoreset into a solved initial state)
 
 
 def _mark_static(t: Tensor) -> None:
@@ -97,11 +99,13 @@ class BatchedEnv:
     The environments' state is held in tensors on ``device``: ``states`` [N, row_words] int64 (rows over a
     table are the table's words wide, over a suite the widest domain's), ``task_ids`` [N] int32 (each env's instance;
     global ids over a suite), ``steps`` [N] int32 (the episode's steps), ``draws`` [N] int64 (the RNG draw counters),
-    ``count`` [N] int32 (successors of the current state), with ``goals=True`` the per-env goal masks ``goal_pos`` /
+    ``count`` [N] int32 (successors of the current state), ``at_goal`` [N] bool (the current state is a goal: reset,
+    step and refresh keep it, a step absorbs those rows), with ``goals=True`` the per-env goal masks ``goal_pos`` /
     ``goal_neg`` [N, words] int64 (the step's goal test is then the mask test; reset sets the instances' goals unless
-    given), and, on a device's fast path, the cache ``counts`` / ``views``. The methods run the custom ops ``mymyr::reset`` / ``mymyr::step`` / ``mymyr::refresh`` on these tensors
-    in place (on torch's current stream), so they trace under ``torch.compile``. Writing ``states`` or ``task_ids``
-    directly needs :meth:`refresh`.
+    given), and, on a device's fast path, the cache ``counts`` / ``views``. The methods run the custom ops
+    ``mymyr::reset`` / ``mymyr::step`` / ``mymyr::refresh`` on these tensors in place (on torch's current stream), so
+    they trace under ``torch.compile``. Writing ``states``, ``task_ids`` or the goal masks directly needs
+    :meth:`refresh`.
 
     ``sampler="auto"`` samples instances uniformly unless constructor ``task_ids`` pin the assignment. ``sampler=None``
     keeps instances, ``"uniform"`` always samples, and ``rl.InstanceSampler(I, weights)`` specifies a weighted
@@ -169,6 +173,7 @@ class BatchedEnv:
         self.counts = torch.zeros((n, self.core.cache_schemas), dtype=torch.int32, device=d)
         self.views = torch.zeros((n, self.core.cache_view_words), dtype=torch.int64, device=d)
         self.count = torch.zeros(n, dtype=torch.int32, device=d)
+        self.at_goal = torch.zeros(n, dtype=torch.bool, device=d)
         self.goal_pos: Optional[Tensor] = None
         self.goal_neg: Optional[Tensor] = None
         if goals:
@@ -217,18 +222,20 @@ class BatchedEnv:
         return Observation(
             keep(self.states), keep(self.task_ids), keep(self.count),
             keep(self.goal_pos) if self.goals else empty, keep(self.goal_neg) if self.goals else empty,
+            keep(self.at_goal),
         )
 
     def is_goal(self) -> Tensor:
         """Whether each environment's current state is a goal (the goal masks' test with goals=True): [N] bool on
-        ``device``, computed on torch's current stream without stepping."""
+        ``device``, tested on torch's current stream without stepping (``at_goal`` holds the same flags when the
+        tensors were not written since the last reset, step or refresh)."""
         out = torch.empty(self.num_envs, dtype=torch.bool, device=self.device)
         self.core.goal(self.states, self._ids(), goal_pos=self.goal_pos, goal_neg=self.goal_neg, out=out,
                        stream=_ops._stream(self.states))
         return out
 
     def _tensors(self) -> list[Tensor]:
-        t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count,
+        t = [self.states, self.task_ids, self.steps, self.draws, self.counts, self.views, self.count, self.at_goal,
              self._reset_counts, self._sampling_seed, self._sampling_env_ids]
         return t + ([self.goal_pos, self.goal_neg] if self.goals else [])
 
@@ -251,8 +258,9 @@ class BatchedEnv:
         goal_neg: Optional[Tensor] = None,
     ) -> Tensor:
         """Resets all environments, or those with mask[i] ([N] bool), to sampled instances (their current instances
-        with sampler=None); returns ``count``. ``task_ids`` [N] overrides sampling for reset rows; ``goal_pos`` / ``goal_neg``
-        [N, words] (goals=True) set the reset rows' goals (default: their instances' goals)."""
+        with sampler=None); returns ``count``. ``task_ids`` [N] overrides sampling for reset rows; ``goal_pos`` /
+        ``goal_neg`` [N, words] (goals=True) set the reset rows' goals (default: their instances' goals). ``at_goal``
+        reports the reset states that are goals already (solved initial states, given goals that hold)."""
         if mask is not None:
             mask = mask.reshape(self.num_envs).to(device=self.device, dtype=torch.bool).contiguous()
         if task_ids is None and self.sampler is not None:
@@ -269,7 +277,7 @@ class BatchedEnv:
             self.goal_neg.copy_(_where(mask, goal_neg.to(self.goal_neg), self.goal_neg))
         args = (
             self.handle, self.states, self._ids(), self.steps, self.counts, self.views, self.goal_pos, self.goal_neg,
-            self.count, mask, keep,
+            self.count, self.at_goal, mask, keep,
         )  # fmt: skip
         if torch.compiler.is_compiling():
             torch.ops.mymyr.reset(*args)
@@ -279,8 +287,12 @@ class BatchedEnv:
         return self.count
 
     def refresh(self) -> Tensor:
-        """Recomputes the cache and ``count`` after the caller wrote ``states`` (or ``task_ids``)."""
-        args = (self.handle, self.states, self._ids(), self.counts, self.views, self.count)
+        """Recomputes the cache, ``count`` and ``at_goal`` after the caller wrote ``states``, ``task_ids`` or the goal
+        masks."""
+        args = (
+            self.handle, self.states, self._ids(), self.counts, self.views, self.goal_pos, self.goal_neg, self.count,
+            self.at_goal,
+        )  # fmt: skip
         if torch.compiler.is_compiling():
             (torch.ops.mymyr.refresh if self.capturable else torch.ops.mymyr.refresh_sync)(*args)
         else:
@@ -304,7 +316,7 @@ class BatchedEnv:
             self._advance_resets(r[1] | r[2])
         observation = self.observation(copy=copy)
         return StepResult(*r, observation.count, observation.states, observation.task_ids,
-                          observation.goal_pos, observation.goal_neg)
+                          observation.goal_pos, observation.goal_neg, observation.at_goal)
 
     def _step_args(self, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool) -> tuple:
         if action is not None:
@@ -319,7 +331,7 @@ class BatchedEnv:
                 next_task_ids = None  # a table of one: every instance is 0
         return (
             self.handle, self.states, self._ids(), self.steps, self.draws, self.counts, self.views, self.count,
-            self.goal_pos, self.goal_neg, action, next_task_ids, self.first_env, final,
+            self.at_goal, self.goal_pos, self.goal_neg, action, next_task_ids, self.first_env, final,
         )  # fmt: skip
 
     def _step_into(
@@ -331,6 +343,7 @@ class BatchedEnv:
         if self._autoreset:
             self._advance_resets(out.terminated | out.truncated)
         out.count.copy_(self.count)
+        out.at_goal.copy_(self.at_goal)
         out.states.copy_(self.states)
         out.task_ids.copy_(self.task_ids)
         if self.goals:

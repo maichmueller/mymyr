@@ -1874,6 +1874,10 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("goal", [](const PyPoolBatch& p) {
             return ArrayOut(p.array(p.b->goal, rl::DType::Bool, {p.rows()}));
         }, "[B] bool: the reached state is a goal state (initial state after a reset)")
+        .def_prop_ro("at_goal", [](const PyPoolBatch& p) {
+            return ArrayOut(p.array(p.b->at_goal, rl::DType::Bool, {p.rows()}));
+        }, "[B] bool: the observed state (states) is a goal: after a step, the autoreset's state where the env "
+           "restarted (the next step absorbs it)")
         .def_prop_ro("final_states", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] {
                 return p.array(p.b->final_states, rl::DType::U64, {p.rows(), static_cast<i64>(p.b->row_words())}, true);

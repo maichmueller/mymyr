@@ -42,10 +42,17 @@ batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL
 Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step
 counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
 end from a nonterminal state still receives the configured transition reward once. Draw counters advance once per
-native step, including absorbing steps. `CpuEnvPool.reset()` reports `goal` and `terminated` for the initial states;
-TorchRL resets also report solved and terminal initial states as terminated.
-The mctx adapter preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero;
-zero-successor tree nodes are terminal even when the environment disables dead-end termination.
+native step, including absorbing steps.
+
+Every environment reports the reset states that are goals already: solved initial states, and states that satisfy
+the goals given to `reset(goal_pos=..., goal_neg=...)`. `CpuEnvPool.reset()` sets `goal` and `terminated`; TorchRL
+resets set `terminated` (also for terminal dead ends); torch `BatchedEnv` and JAX `Env` keep a per-environment
+`at_goal` flag, which reset, step and `refresh()` write and observations and step results carry. A step reads the
+flag instead of testing the current state again, so the next step absorbs those rows. Writing states, instances or
+goal masks directly needs `refresh()`.
+The mctx adapter reads the terminal test of the root and of each node from `at_goal` and the successor count, without
+a step; it preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero.
+Zero-successor tree nodes are terminal even when the environment disables dead-end termination.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
 A padded action space of K slots (`PlanningEnv(max_actions=K)`, padded expansions) holds a state's first K successors
 in canonical order: later successors are out of reach even when only they lead to a goal (a padded expansion reports

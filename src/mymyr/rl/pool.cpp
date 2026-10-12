@@ -71,6 +71,7 @@ void size_batch(PoolBatch& b, u64 n, u32 W, u32 NN, u32 L, bool goals, bool step
     b.truncated.resize(step ? n : 0);
     b.invalid.resize(step ? n : 0);
     b.goal.resize(n);
+    b.at_goal.resize(n);
     b.final_states.resize(step ? n * (W + NN) : 0);
     b.schema.resize(step ? n : 0);
     b.binding.resize(step ? n * L : 0);
@@ -120,6 +121,7 @@ struct CpuEnvPool::Impl
     bool goals = false;
     std::vector<u64> states, draws, gpos, gneg;
     std::vector<i32> task_ids, steps;
+    std::vector<u8> at_goal;  // per env: its state is a goal (EnvBatch::at_goal)
     EnvBatch batch;
 
     // under mu: the envs held by sends in flight, and the marks of the env id checks
@@ -211,6 +213,7 @@ struct CpuEnvPool::Impl
         std::copy_n(s + W, NN, d + OW);
         out.task_ids[pos] = task_ids[e];
         out.steps[pos] = steps[e];
+        out.at_goal[pos] = at_goal[e];
         out.env_ids[pos] = e;
         if (goals)
         {
@@ -332,6 +335,7 @@ struct CpuEnvPool::Impl
             append(out.truncated, o.truncated);
             append(out.invalid, o.invalid);
             append(out.goal, o.goal);
+            append(out.at_goal, o.at_goal);
             append(out.final_states, o.final_states);
             append(out.schema, o.schema);
             append(out.binding, o.binding);
@@ -419,6 +423,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     I.draws.assign(I.N, 0);
     I.task_ids.assign(I.N, 0);
     I.steps.assign(I.N, 0);
+    I.at_goal.assign(I.N, 0);
     if (I.goals)
     {
         I.gpos.assign(u64{I.N} * I.W, 0);
@@ -436,6 +441,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     b.goal_neg = I.goals ? I.gneg.data() : nullptr;
     b.steps = I.steps.data();
     b.draws = I.draws.data();
+    b.at_goal = I.at_goal.data();
     b.first_env = 0;
     check_env(tt, b, nullptr);
     I.env.reset(b);  // every env at instance 0's initial state
@@ -508,7 +514,8 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
             std::copy_n(goal_neg + p * goal_words, w, gn);
             std::fill(gn + w, gn + z, u64{0});
         }
-        out.goal[p] = I.env.goal_row(I.batch, e) ? 1 : 0;
+        I.at_goal[e] = I.env.reset_goal(I.batch, e, inst) ? 1 : 0;
+        out.goal[p] = I.at_goal[e];
         out.terminated[p] = out.goal[p] || (out.count[p] == 0 && I.env.config().dead_end == DeadEnd::NoSuccessors &&
                                           I.env.config().dead_end_terminal) ? 1 : 0;
         I.observe(e, out, p);

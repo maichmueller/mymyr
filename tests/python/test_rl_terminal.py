@@ -99,6 +99,113 @@ def test_partial_pool_reset_uses_each_instances_goal():
     assert reset.goal.tolist() == [False] and reset.terminated.tolist() == [True]
 
 
+def toggle_table():
+    """Instance 0 starts unsolved (goal (q), reached by up then finish), instance 1 starts solved."""
+    domain = mymyr.Domain.from_string(
+        """(define (domain toggles) (:requirements :strips :negative-preconditions) (:predicates (p) (q))
+        (:action up :parameters () :precondition (not (p)) :effect (p))
+        (:action down :parameters () :precondition (p) :effect (not (p)))
+        (:action finish :parameters () :precondition (p) :effect (q)))"""
+    )
+    inits = ["", "(q)"]
+    return rl.TaskTable([
+        mymyr.Task(domain.instantiate_string(f"(define (problem p{i}) (:domain toggles) (:init {init}) (:goal (q)))"))
+        for i, init in enumerate(inits)
+    ])
+
+
+def test_batched_resets_report_solved_states(device_path):
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device, path = device_path
+    env = rt.BatchedEnv(toggle_table(), 4, task_ids=[0, 1, 1, 0], device=device, path=path, autoreset=False)
+    assert env.at_goal.tolist() == [False, True, True, False]
+    assert env.observation().at_goal.tolist() == [False, True, True, False]
+    mask = torch.tensor([True, True, False, False], device=device)
+    env.reset(mask, task_ids=torch.tensor([1, 0, 0, 0], dtype=torch.int32, device=device))
+    assert env.at_goal.tolist() == [True, False, True, False]
+    step = env.step(torch.zeros(4, dtype=torch.int64, device=device))
+    assert step.terminated.tolist() == [True, False, True, False]
+    assert step.reward.tolist() == [0.0, 0.0, 0.0, 0.0] and step.schema[0] == -1 and step.schema[2] == -1
+    assert step.at_goal.tolist() == [True, False, True, False]
+    env.states.copy_(env.states[torch.tensor([0, 0, 0, 0], device=device)])
+    env.task_ids.fill_(1)
+    env.refresh()
+    assert env.at_goal.all()
+
+
+def test_batched_resets_report_given_goals_that_hold(device_path):
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    device, path = device_path
+    table = toggle_table()
+    env = rt.BatchedEnv(table, 2, task_ids=[0, 0], goals=True, device=device, path=path, autoreset=False)
+    assert not env.at_goal.any()
+    pos, neg = rl.goal_masks(table, np.array([0, 0], np.int32))
+    pos[0], neg[0] = 0, 0  # the empty goal holds in every state
+    as_tensor = lambda a: torch.from_numpy(np.ascontiguousarray(a).view(np.int64)).to(device)
+    env.reset(goal_pos=as_tensor(pos), goal_neg=as_tensor(neg))
+    assert env.at_goal.tolist() == [True, False]
+    step = env.step(torch.zeros(2, dtype=torch.int64, device=device))
+    assert step.terminated.tolist() == [True, False] and step.goal.tolist() == [True, False]
+    assert int(step.schema[0]) == -1 and int(step.schema[1]) >= 0
+
+
+@pytest.mark.needs_gil
+def test_torchrl_resets_report_given_goals_that_hold(device_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchrl")
+    from mymyr.rl.torch import PlanningEnv
+
+    device, path = device_path
+    table = toggle_table()
+    env = PlanningEnv(table, 2, goals=True, task_ids=[0, 0], device=device, path=path)
+    try:
+        source = env.reset()
+        assert not bool(source["terminated"].any())
+        pos, neg = rl.goal_masks(table, np.array([0, 0], np.int32))
+        pos[1], neg[1] = 0, 0
+        as_tensor = lambda a: torch.from_numpy(np.ascontiguousarray(a).view(np.int64)).to(device)
+        result = env.reset(goal_pos=as_tensor(pos), goal_neg=as_tensor(neg))
+        assert result["terminated"].reshape(-1).tolist() == [False, True]
+    finally:
+        env.close()
+
+
+def jax_env_module(device):
+    jax = pytest.importorskip("jax")
+    rj = pytest.importorskip("mymyr.rl.jax")
+    if device == "cuda":
+        try:
+            jax.devices("gpu")
+        except RuntimeError:
+            pytest.skip("no visible JAX CUDA device")
+    return rj
+
+
+def test_jax_resets_report_solved_states_and_given_goals(device_path):
+    device, path = device_path
+    rj = jax_env_module(device)
+    jnp = pytest.importorskip("jax.numpy")
+    table = toggle_table()
+    env = rj.Env(table, device=device, path=path, goals=True, autoreset=False)
+    state, obs = env.reset(None, jnp.asarray([0, 1, 1, 0], jnp.int32))
+    assert np.asarray(obs.at_goal).tolist() == [False, True, True, False]
+    state, obs = env.reset_where(state, jnp.asarray([True, False, False, True]), task_ids=jnp.asarray([1, 0, 0, 1], jnp.int32))
+    assert np.asarray(obs.at_goal).tolist() == [True, True, True, True]
+    pos, neg = rl.goal_masks(table, np.array([0, 0, 0, 0], np.int32))
+    pos[2], neg[2] = 0, 0
+    state, obs = env.reset(
+        None, jnp.asarray([0, 0, 0, 0], jnp.int32), goal_pos=jnp.asarray(pos.view(np.uint32)),
+        goal_neg=jnp.asarray(neg.view(np.uint32)),
+    )
+    assert np.asarray(obs.at_goal).tolist() == [False, False, True, False]
+    state, obs, reward, terminated, truncated, info = env.step(0, state, jnp.zeros(4, jnp.int32))
+    assert np.asarray(terminated).tolist() == [False, False, True, False]
+    assert np.asarray(info["schema"]).tolist()[2] == -1 and not np.asarray(reward).any()
+    assert np.asarray(obs.at_goal).tolist() == [False, False, True, False]
+
+
 def test_goal_query_requires_destination(solved_task):
     from mymyr._core import _rl_torch
 
@@ -282,6 +389,7 @@ def absorbing_rollout(env, steps, autoreset):
             done = torch.from_numpy(record["step_terminated"] | record["step_truncated"]).to(env.device)
             record["reset_count"] = env.reset(done).cpu().numpy().copy()
         record.update(env_arrays(env))
+        assert np.array_equal(record["at_goal"], env.is_goal().cpu().numpy())  # the flags are the states' goal tests
         record.update(draws=env.draws.cpu().numpy().copy(), reset_counts=env._reset_counts.cpu().numpy().copy())
         out.append(record)
     return out

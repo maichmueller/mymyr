@@ -34,6 +34,10 @@
 //     internal flat buffers with SuiteExpander (a table's DeviceExpander, or one per domain; canonical order, goal
 //     flags; it synchronizes), moves every environment to its chosen row, and counts the reached states'
 //     successors with a second expansion. The cache arrays are not used.
+// Both paths keep the batch's at_goal flags (rl::EnvBatch::at_goal, required): reset() writes them, a step reads them
+// for its absorbing rows instead of testing the current states, and writes those of the reached states (the goal test
+// of its finish, or the flat expansion's goal flags) and of autoresets (the initial state's), so no step tests a state
+// on the host; refresh() recomputes them.
 // The results do not depend on the path, the chunk sizes, the bucket launches or the launch configuration, and an
 // environment's trajectory does not depend on the batch it runs in (its RNG stream is its id, EnvBatch::first_env +
 // row, or env_ids[row]).
@@ -142,8 +146,9 @@ public:
     /// caller's (global ids of the suite); an id outside it resets the row into instance 0 and is reported by
     /// check_errors().
     void reset(rl::EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false);
-    /// Recomputes the cache (fast path: counts, views, launch order) and the successor counts of the current states,
-    /// after the caller wrote states or task ids.
+    /// Recomputes the cache (fast path: counts, views, launch order), the successor counts of the current states and
+    /// the at_goal flags, after the caller wrote states, task ids or goal masks (the general path tests goals without
+    /// per-env masks on the host).
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
     void goal(const rl::EnvBatch& b, u8* goal);
     /// rl::HostEnv::step on device arrays; action [rows] (device, none: the random policy); next_task_ids [rows]

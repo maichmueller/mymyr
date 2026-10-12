@@ -338,7 +338,7 @@ TEST(DeviceCountCache, SokobanRecordsKeysAndStaysEqualToTheHost)
     host.reset(hb);
     cuda::DeviceBuffer ds(ctx, N * W * 8, s), dd(ctx, N * 8, s), dsteps(ctx, N * 4, s), dcounts(ctx, N * C * 4, s),
         dviews(ctx, std::max<u64>(N * V, 1) * 8, s), dcount(ctx, N * 4, s), df(ctx, N * W * 8, s), dschema(ctx, N * 4, s),
-        dbinding(ctx, N * L * 4, s), daction(ctx, N * 8, s);
+        dbinding(ctx, N * L * 4, s), daction(ctx, N * 8, s), dat_goal(ctx, N, s);
     cuda::check(cudaMemsetAsync(dd.data(), 0, N * 8, s), "memset");
     rl::EnvBatch db;
     db.states = ptr<u64>(ds);
@@ -348,6 +348,7 @@ TEST(DeviceCountCache, SokobanRecordsKeysAndStaysEqualToTheHost)
     db.draws = ptr<u64>(dd);
     db.counts = ptr<u32>(dcounts);
     db.views = ptr<u64>(dviews);
+    db.at_goal = ptr<u8>(dat_goal);
     rl::StepOutputs dout{nullptr, nullptr, nullptr, ptr<i32>(dcount), ptr<u64>(df), ptr<i32>(dschema), ptr<i32>(dbinding), L,
                          nullptr, nullptr};
     env.reset(db, nullptr, ptr<i32>(dcount));
