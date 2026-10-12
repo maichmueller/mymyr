@@ -15,22 +15,29 @@ from conftest import SMALL_TASKS, text_task
 MASK_TASKS = SMALL_TASKS + ["sokoban-opt08-strips__p14", "freecell__p02"]
 
 
-def window(task, n=24, steps=30, seed=3, max_steps=6):
-    """Reached states [T, N, RW] (uint64) and done [T, N] of random-policy environments (rl::HostEnv)."""
+def trajectory(task, n=24, steps=30, seed=3, max_steps=6):
+    """The states the steps started from [T, N, RW] (uint64), the states they reached [T, N, RW] and done [T, N] of
+    random-policy environments (rl::HostEnv)."""
     env = _rl_torch.Env(task, seed=seed, max_steps=max_steps)
     rw = env.row_words
     states = np.tile(env.initial_states()[0], (n, 1))
     steps_ = np.zeros(n, np.int32)
     draws = np.zeros(n, np.uint64)
-    out_s, out_d = [], []
+    out_p, out_s, out_d = [], [], []
     for _ in range(steps):
         final = np.zeros((n, rw), np.uint64)
         term = np.zeros(n, np.bool_)
         trunc = np.zeros(n, np.bool_)
+        out_p.append(states.copy())
         env.step(states, steps=steps_, draws=draws, final_states=final, terminated=term, truncated=trunc)
         out_s.append(final)
         out_d.append(term | trunc)
-    return np.stack(out_s), np.stack(out_d)
+    return np.stack(out_p), np.stack(out_s), np.stack(out_d)
+
+
+def window(task, n=24, steps=30, seed=3, max_steps=6):
+    """Reached states [T, N, RW] (uint64) and done [T, N] of random-policy environments (rl::HostEnv)."""
+    return trajectory(task, n, steps, seed, max_steps)[1:]
 
 
 def queries(exp, n):
@@ -113,7 +120,7 @@ def test_novelty_update_counts_new_atoms(name):
         rl.novelty_update(seen, states[0], width=2)
 
 
-def check_her(states, done, h, strategy, k, subset, atoms=None):
+def check_her(states, done, h, strategy, k, subset, atoms=None, prev=None):
     T, N, W = states.shape
     for t in range(T):
         for i in range(N):
@@ -135,19 +142,30 @@ def check_her(states, done, h, strategy, k, subset, atoms=None):
                 ok = bool(np.all(states[t, i] & g == g))
                 assert bool(h.achieved[t, i, j]) == ok
                 assert float(h.reward[t, i, j]) == (3.0 if ok else 0.0)
+                earlier = [states[u, i] for u in range(start, t)] + ([] if prev is None else [prev[start, i]])
+                assert bool(h.valid[t, i, j]) == (not any(np.all(e & g == g) for e in earlier)), (t, i, j)
 
 
 @pytest.mark.parametrize("strategy", ["future", "final", "episode"])
 @pytest.mark.parametrize("subset", [None, 1, 3])
 def test_her_relabel(strategy, subset):
     task = text_task("gripper__prob05")
-    states, done = window(task, n=10, steps=20)
+    prev, states, done = trajectory(task, n=10, steps=20)
     h = rl.her_relabel(states, done, strategy=strategy, k=3, subset=subset, seed=11, goal_reward=3.0)
     assert h.goal.shape == (20, 10, 3, states.shape[-1]) and h.goal.dtype == np.uint64
+    assert h.valid.shape == (20, 10, 3) and h.valid.dtype == np.bool_
     check_her(states, done, h, strategy, 3, subset)
     atoms = np.full(states.shape[-1], 0x5555555555555555, np.uint64)
-    ha = rl.her_relabel(states, done, strategy=strategy, k=3, subset=subset, seed=11, goal_reward=3.0, goal_atoms=atoms)
-    check_her(states, done, ha, strategy, 3, subset, atoms)
+    ha = rl.her_relabel(
+        states, done, prev_states=prev, strategy=strategy, k=3, subset=subset, seed=11, goal_reward=3.0,
+        goal_atoms=atoms,
+    )
+    check_her(states, done, ha, strategy, 3, subset, atoms, prev)
+    if subset == 1:  # single-atom goals: some hold before the transition (dropped), others do not
+        assert h.valid.any() and not h.valid.all()
+        assert ha.valid.any() and not ha.valid.all()
+    with pytest.raises(ValueError, match="prev_states"):
+        rl.her_relabel(states, done, prev_states=prev[:-1].copy(), k=1)
     # deterministic; a column block with its env ids equals the whole batch's columns
     h2 = rl.her_relabel(states, done, strategy=strategy, k=3, subset=subset, seed=11, goal_reward=3.0)
     assert all(np.array_equal(a, b) for a, b in zip(h, h2))
@@ -190,7 +208,8 @@ def test_torch_equals_numpy():
     want_schema = rl.schema_masks(exp)
     seen = np.zeros((12, states.shape[-1]), np.uint64)
     want_r = [rl.novelty_update(seen, states[t])[0].copy() for t in range(16)]
-    want_h = rl.her_relabel(states, done, k=2, subset=2, seed=4)
+    prev = trajectory(task, n=12, steps=16)[0]
+    want_h = rl.her_relabel(states, done, prev_states=prev, k=2, subset=2, seed=4)
     for dev in torch_devices():
         s = torch.from_numpy(states.view(np.int64)).to(dev)
         rows = s[-1].contiguous()
@@ -215,7 +234,8 @@ def test_torch_equals_numpy():
         for t in range(16):
             r, _ = rl.novelty_update(tseen, s[t])
             assert np.array_equal(r.cpu().numpy(), want_r[t]), (dev, t)
-        h = rl.her_relabel(s, torch.from_numpy(done).to(dev), k=2, subset=2, seed=4)
+        tp = torch.from_numpy(prev.view(np.int64)).to(dev)
+        h = rl.her_relabel(s, torch.from_numpy(done).to(dev), prev_states=tp, k=2, subset=2, seed=4)
         assert np.array_equal(h.goal.cpu().numpy().view(np.uint64), want_h.goal)
         for a, b in zip(h[1:], want_h[1:]):
             assert np.array_equal(a.cpu().numpy(), b), dev

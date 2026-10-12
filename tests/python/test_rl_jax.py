@@ -434,6 +434,12 @@ def jwindow(task, n, steps, seed=3):
     return window(task, n=n, steps=steps, seed=seed)
 
 
+def jtrajectory(task, n, steps, seed=3):
+    from test_rl_ops import trajectory
+
+    return trajectory(task, n=n, steps=steps, seed=seed)
+
+
 def on(device):
     return jax.devices("gpu")[0] if device == "cuda" else jax.devices("cpu")[0]
 
@@ -482,20 +488,23 @@ def test_jnp_novelty_equals_native():
 @pytest.mark.parametrize("strategy", ["future", "final", "episode"])
 def test_jnp_her_equals_native(strategy):
     task = text_task("sokoban-opt08-strips__p14")
-    states, done = jwindow(task, 12, 24)
+    prev, states, done = jtrajectory(task, 12, 24)
     atoms = np.full(states.shape[-1], 0x0F0F0F0F0F0F0F0F, np.uint64)
     for device in devices():
         for subset in (None, 2, 5):
             for extras in (False, True):
                 kw = dict(strategy=strategy, k=3, subset=subset, step_reward=-0.5, goal_reward=4.0)
                 if extras:
-                    kw.update(goal_atoms=atoms, env_ids=np.arange(100, 112, dtype=np.uint32))
+                    kw.update(goal_atoms=atoms, env_ids=np.arange(100, 112, dtype=np.uint32), prev_states=prev)
                 want = rl.her_relabel(states, done, seed=0xABCDEF123, **kw)
                 js = jax.device_put(jnp.asarray(states.view(np.uint32)), on(device))
                 jd = jax.device_put(jnp.asarray(done), on(device))
                 jkw = dict(kw)
                 if extras:
-                    jkw.update(goal_atoms=jnp.asarray(atoms.view(np.uint32)), env_ids=jnp.asarray(kw["env_ids"]))
+                    jkw.update(
+                        goal_atoms=jnp.asarray(atoms.view(np.uint32)), env_ids=jnp.asarray(kw["env_ids"]),
+                        prev_states=jax.device_put(jnp.asarray(prev.view(np.uint32)), on(device)),
+                    )
                 f = jax.jit(lambda s, d: rj.her_relabel(s, d, 0xABCDEF123, **jkw))
                 got = f(js, jd)
                 assert np.array_equal(rj.as_words(got.goal), want.goal), (device, subset, extras)
@@ -504,6 +513,7 @@ def test_jnp_her_equals_native(strategy):
                 # rl.her_relabel dispatches JAX arrays to the jnp version
                 g2 = rl.her_relabel(js, jd, seed=0xABCDEF123, **jkw)
                 assert np.array_equal(np.asarray(g2.source), want.source)
+                assert np.array_equal(np.asarray(g2.valid), want.valid)
 
 
 @pytest.mark.parametrize("name", ["gripper__prob05", "logistics00__probLOGISTICS-6-1"])

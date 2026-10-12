@@ -1,7 +1,7 @@
 // Device RL-helper-kernel tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device):
 //   - the device kernels of the RL helpers (cuda/rl_ops.hpp) equal the host loops (rl/novelty.hpp, rl/prefix.hpp,
 //     rl/her.hpp) byte for byte on suite windows: novelty rewards and tables, prefix and schema masks, hindsight
-//     relabels (every strategy, goal subsets, eligible-atom masks, env ids);
+//     relabels (every strategy, goal subsets, eligible-atom masks, env ids, the states the steps started from);
 //   - the random policy's actions without a step (envk::launch_random_actions) equal rl::rng::successor_index;
 //   - the count cache's recorded keys (lifted::CountCache regions): sokoban p14 records its deep sorted schemas, its
 //     device steps still equal the host's, and a state written without refresh() is reported by check_errors().
@@ -84,6 +84,7 @@ struct Window
 {
     u32 RW = 0, W = 0;
     std::vector<u64> states;
+    std::vector<u64> prev;  // [T, N, RW]: the states the steps started from
     std::vector<u8> done;
 };
 
@@ -113,6 +114,7 @@ Window rollout(const TaskPtr& task, u64 N, u64 T, u64 seed)
     o.truncated = trunc.data();
     for (u64 t = 0; t < T; ++t)
     {
+        w.prev.insert(w.prev.end(), states.begin(), states.end());
         env.step(b, o);
         w.states.insert(w.states.end(), finals.begin(), finals.end());
         for (u64 i = 0; i < N; ++i)
@@ -242,7 +244,7 @@ TEST(DeviceRlOps, HerDeviceEqualsHost)
         for (u64 i = 0; i < N; ++i)
             ids[i] = static_cast<u32>(1000 + 3 * i);
         cuda::DeviceBuffer dstates = upload(ctx, w.states, s), ddone = upload(ctx, w.done, s), datoms = upload(ctx, atoms, s),
-                           dids = upload(ctx, ids, s);
+                           dids = upload(ctx, ids, s), dprev = upload(ctx, w.prev, s);
         for (const rl::HerStrategy st : {rl::HerStrategy::Future, rl::HerStrategy::Final, rl::HerStrategy::Episode})
             for (const u32 subset : {0u, 1u, 4u})
                 for (const bool extras : {false, true})
@@ -259,17 +261,22 @@ TEST(DeviceRlOps, HerDeviceEqualsHost)
                     std::vector<i32> source(R);
                     std::vector<u8> achieved(R);
                     std::vector<f32> reward(R);
-                    rl::HerBatch hb{T, N, w.W, w.RW, w.states.data(), w.done.data(), extras ? atoms.data() : nullptr, 0u,
-                                    extras ? ids.data() : nullptr, goal.data(), source.data(), achieved.data(), reward.data()};
+                    std::vector<u8> valid(R);
+                    rl::HerBatch hb{T, N, w.W, w.RW, w.states.data(), w.done.data(), extras ? w.prev.data() : nullptr,
+                                    extras ? atoms.data() : nullptr, 0u, extras ? ids.data() : nullptr, goal.data(),
+                                    source.data(), achieved.data(), reward.data(), valid.data()};
                     rl::her_relabel(hb, c);
-                    cuda::DeviceBuffer dgoal(ctx, R * w.W * 8, s), dsource(ctx, R * 4, s), dach(ctx, R, s), drew(ctx, R * 4, s);
+                    cuda::DeviceBuffer dgoal(ctx, R * w.W * 8, s), dsource(ctx, R * 4, s), dach(ctx, R, s), drew(ctx, R * 4, s),
+                        dvalid(ctx, R, s);
                     rl::HerBatch db{T, N, w.W, w.RW, ptr<const u64>(dstates), ptr<const u8>(ddone),
-                                    extras ? ptr<const u64>(datoms) : nullptr, 0u, extras ? ptr<const u32>(dids) : nullptr,
-                                    ptr<u64>(dgoal), ptr<i32>(dsource), ptr<u8>(dach), ptr<f32>(drew)};
+                                    extras ? ptr<const u64>(dprev) : nullptr, extras ? ptr<const u64>(datoms) : nullptr, 0u,
+                                    extras ? ptr<const u32>(dids) : nullptr, ptr<u64>(dgoal), ptr<i32>(dsource),
+                                    ptr<u8>(dach), ptr<f32>(drew), ptr<u8>(dvalid)};
                     cuda::check(cuda::launch_her_relabel(db, c, s), "her");
                     ASSERT_EQ(download<u64>(dgoal, R * w.W, s), goal) << name;
                     ASSERT_EQ(download<i32>(dsource, R, s), source) << name;
                     ASSERT_EQ(download<u8>(dach, R, s), achieved) << name;
+                    ASSERT_EQ(download<u8>(dvalid, R, s), valid) << name;
                     const std::vector<f32> dr = download<f32>(drew, R, s);
                     ASSERT_EQ(std::memcmp(dr.data(), reward.data(), R * sizeof(f32)), 0) << name;
                 }

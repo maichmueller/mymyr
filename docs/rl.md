@@ -79,9 +79,12 @@ raises rather than recording an unrelated reset row when final states are disabl
 may disable final states because its next observation is the reached state. Goal-conditioned observations propagate
 their source masks automatically; initialize replay with `transition_example(env, goals=True)` for those items.
 
-HER helpers recompute rewards from reached states. They do not receive source states and cannot detect a relabelled
-goal that was already satisfied before the action. Filter such transitions or cut the relabelled episode at first
-achievement; next-state reward recomputation alone does not reproduce absorbing dynamics.
+HER helpers recompute `achieved` and `reward` from the transitions' reached states. Under a relabelled goal the episode
+ends at its first state that satisfies the goal, so `valid` marks the relabels whose transition is still part of that
+episode: no reached state of the episode's earlier steps in the window satisfies the goal. With `prev_states` (the
+states the steps started from: the observations) the episode's first state, its reset state or the state before the
+window, is tested too; without them a goal that already held there goes undetected. Drop the relabels with `valid`
+false.
 
 The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, verifies that the framework imports and
 XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
