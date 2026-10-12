@@ -28,10 +28,12 @@
 //     rows' positions only and run on a stream of their own (forked from the env's stream and joined back by events);
 //     select, the views (one launch over every domain's rows) and finish run once over the batch (the count cache is
 //     laid out with the suite's widest schema count, a domain's schemas past its own counting 0);
-//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms. A
-//     step expands the current states into internal flat buffers with SuiteExpander (a table's DeviceExpander, or one
-//     per domain; canonical order, goal flags; it synchronizes), moves every environment to its chosen row, and counts
-//     the reached states' successors with a second expansion. The cache arrays are not used.
+//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms, and instances the
+//     device kernels cannot run at all (ChunkGenerator::unsupported: their rows are expanded on the host, the
+//     DeviceExpander's Host parts; the other instances stay on the device). A step expands the current states into
+//     internal flat buffers with SuiteExpander (a table's DeviceExpander, or one per domain; canonical order, goal
+//     flags; it synchronizes), moves every environment to its chosen row, and counts the reached states'
+//     successors with a second expansion. The cache arrays are not used.
 // The results do not depend on the path, the chunk sizes, the bucket launches or the launch configuration, and an
 // environment's trajectory does not depend on the batch it runs in (its RNG stream is its id, EnvBatch::first_env +
 // row, or env_ids[row]).
@@ -71,8 +73,6 @@ public:
         General,  // always the flat expand
     };
 
-    /// Throws std::invalid_argument for suites the device cannot run (a domain's
-    /// DeviceTaskTable::unsupported, rows wider than lifted::k_max_words).
     DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig& config, Path path = Path::Auto,
               cudaStream_t stream = nullptr);
     /// Over a table: the suite of its one domain (TaskSuite::of).
@@ -156,7 +156,8 @@ public:
     void random_actions(const u64* draws, const i32* count, u64 rows, u64 first_env, u32 max_actions, i64* out);
     /// Synchronizes the stream; throws std::logic_error if a fast-path step found a state whose cache did not match it
     /// (states written without refresh()), std::invalid_argument for task ids outside the suite (reset, next_task_ids).
-    /// Not during a capture (the flags of replayed graphs accumulate until the next check).
+    /// Not during a capture (the flags of replayed graphs accumulate until the next check). The general path's step()
+    /// and refresh() synchronize anyway: they raise the flagged task ids first.
     void check_errors();
 
     struct Impl;

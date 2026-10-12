@@ -7,6 +7,11 @@
 
 namespace mymyr::cuda::lifted
 {
+namespace wide_units
+{
+cudaError_t write_multi(const GenArgs& a, cudaStream_t s);
+}  // namespace wide_units
+
 cudaError_t launch_write_multi(const Multi& m, Parents p, Views v, SchemaSet set, const u32* offsets, Labels labels,
                                SuccessorRows out, u32 wb, cudaStream_t s)
 {
@@ -21,6 +26,7 @@ cudaError_t launch_write_multi(const Multi& m, Parents p, Views v, SchemaSet set
         case 4: return dispatch_ow<true, 4, false, true>(a, s);
         case 16: return dispatch_ow<true, 16, false, true>(a, s);
         case k_max_words: return dispatch_ow<true, k_max_words, false, true>(a, s);
+        case k_wide: return wide_units::write_multi(a, s);
         default: return cudaErrorInvalidValue;
     }
 }

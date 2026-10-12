@@ -37,6 +37,8 @@ target_sources(mymyr_cuda PRIVATE src/heuristics.cu src/h2.cu src/heuristics.cpp
 # src/lifted_device.cuh with lifted.cu and are instantiated in units of their own (parallel builds)
 target_sources(mymyr_cuda PRIVATE src/lifted_ce.cu src/lifted_ce16.cu src/lifted_ce64.cu src/axioms.cu src/lifted_deep.cu
                                    src/lifted_deep64.cu)
+# successor rows wider than 64 words (built in chunks)
+target_sources(mymyr_cuda PRIVATE src/lifted_wide.cu src/lifted_wide_ce.cu src/lifted_wide_pick.cu)
 # task tables on the device and the multi-instance launches of the kernels (units of their own: parallel builds)
 target_sources(mymyr_cuda PRIVATE src/device_table.cpp src/table_launch.cpp src/lifted_multi.cu src/lifted_multi_write.cu src/lifted_multi_pick.cu)
 # device state spaces, one task or the instances of a table in waves (cuda/state_space.hpp)

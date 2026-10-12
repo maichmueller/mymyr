@@ -25,7 +25,7 @@
 // the search's own SplitMix64 stream (cuda/device_rng.hpp) before it is popped, and max_next_layer_states truncates the
 // next layer, as the CPU's randomized layer ordering does.
 //
-// Refused with std::invalid_argument ("mymyr: ..."): arities above 2 and tasks beyond ChunkGenerator::unsupported limits.
+// Refused with std::invalid_argument ("mymyr: ..."): arities above 2 and tasks beyond ChunkGenerator::search_unsupported limits.
 // Not offered: callable goals, blocked states, observers and successor-order hooks. Goals are the task's or, per search,
 // one ground conjunction of fluent/derived literals and numeric constraints (search::GoalSpec::AtomGoal: the CPU's
 // AnyOf with a single goal). Numeric goal programs use at most 64 stack values; derived goals use the device axiom

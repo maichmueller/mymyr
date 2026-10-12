@@ -173,9 +173,21 @@ std::string ChunkGenerator::unsupported(const Task& task)
     if (C.ow > lifted::k_max_ow)
         return "object bitsets of " + std::to_string(C.ow) + " words (the device kernels take at most " +
                std::to_string(lifted::k_max_ow) + ", i.e. " + std::to_string(64 * lifted::k_max_ow) + " objects)";
-    if (task.numeric_slots() > lifted::k_max_words ||
-        (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words))
-        return "states of " + std::to_string(task.words() + task.numeric_slots()) + " words (the device kernels take at most " +
+    // the numeric kernels hold whole rows
+    if (task.numeric_slots() &&
+        (task.numeric_slots() > lifted::k_max_words ||
+         (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words)))
+        return "numeric states of " + std::to_string(task.words() + task.numeric_slots()) +
+               " words (the numeric kernels take at most " + std::to_string(lifted::k_max_words) + ")";
+    return {};
+}
+
+std::string ChunkGenerator::search_unsupported(const Task& task)
+{
+    if (std::string why = unsupported(task); !why.empty())
+        return why;
+    if (task.atoms().frozen() && task.words() + task.numeric_slots() > lifted::k_max_words)
+        return "states of " + std::to_string(task.words() + task.numeric_slots()) + " words (the device searches take at most " +
                std::to_string(lifted::k_max_words) + ")";
     return {};
 }
@@ -970,8 +982,8 @@ void ChunkGenerator::goal_flags_impl(const u64* rows, u64 stride, u32 words, u64
     if (derived && !m_device_axioms)
         throw std::logic_error("mymyr: ChunkGenerator::goal_flags: the axioms of this task run on the CPU (" +
                                m_host_axioms_reason + ")");
-    if (words > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: ChunkGenerator::goal_flags: rows of " + std::to_string(words) + " words");
+    if (m_task->numeric_slots() && words > lifted::k_max_words)
+        throw std::invalid_argument("mymyr: ChunkGenerator::goal_flags: numeric rows of " + std::to_string(words) + " words");
     const bool gather = order || stride != words;
     if (!goals && !derived && !gather && !m_task->numeric_slots())
     {

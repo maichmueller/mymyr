@@ -2,8 +2,8 @@
 // The device side of the lifted successor kernels (include/mymyr/cuda/lifted.hpp), shared by the translation units that
 // instantiate them: lifted.cu (views, counts, rows without conditional effects, picks), lifted_ce.cu (rows of schemas
 // with conditional effects) and axioms.cu (axiom strata). Internal: included by .cu files only (nvcc, C++20;
-// the device-code subset). Everything lives in an unnamed namespace, so each translation unit instantiates its own
-// kernels.
+// the device-code subset). Everything but GenArgs (the launch arguments the units pass each other) lives in an unnamed
+// namespace, so each translation unit instantiates its own kernels.
 
 #include "mymyr/cuda/lifted.hpp"
 
@@ -505,10 +505,13 @@ __device__ inline void sort_rows(u32* base, u64 cnt, u32 stride, u32 n)
     }
 }
 
-/// Everything a count / write launch reads.
+}  // namespace
+
+/// Everything a count / write launch reads (outside the unnamed namespace: the units of the wide rows take it across
+/// translation units).
 struct GenArgs
 {
-    TaskView t;
+    rl::dev::TaskView t;
     Parents p;
     Views v;
     SchemaSet set;
@@ -518,6 +521,9 @@ struct GenArgs
     SuccessorRows out;
     Multi m{};  // multi-instance launches: the instances and the row order
 };
+
+namespace
+{
 
 /// Bindings of a segment that needs sorting and fits k_local_keys packed keys stay in registers / local memory.
 constexpr u32 k_local_keys = 32;
@@ -625,7 +631,7 @@ __device__ __forceinline__ void put_bit(u64 (&y)[WB], u32 slot, bool on)
 }
 
 /// The rows of one (state, schema): label columns, and the successor (delete, then add) with rl::expand's width rules.
-/// WB >= max(parent words, output words).
+/// WB >= max(parent words, output words), or k_wide (rows of any width, built in chunks).
 /// CEOW > 0 (the task's OW): the schema's conditional effects are evaluated at each row, as sub-plans at the DFS
 /// leaf: every conditional effect's condition matcher (fixed order, at most k_ce_depth free
 /// parameters: the forall parameters) runs with the schema's binding prebound over the parent's view and derived bitset,
@@ -693,40 +699,53 @@ struct RowWriter
         const SuccessorRows& out = a.out;
         if (!(out.words && inside) && !out.words_needed && !out.missing_flag)
             return;
-        u64 y[WB];
-#pragma unroll
-        for (u32 i = 0; i < WB; ++i)
-            y[i] = i < pw ? st[i] : 0;
+        if constexpr (WB == k_wide)
+            successor_chunks(pos, b, inside);
+        else
+            successor_whole(pos, b, inside);
+    }
+
+    /// The words of row `pos` written over its parent's: over several instances, a row written over its parent keeps
+    /// the parent's zero words past its instance's (the env's pick); otherwise the output row's.
+    __device__ u32 written_words(u64 pos) const
+    {
+        const SuccessorRows& out = a.out;
+        const u32 ow = out.out_words;
+        return a.m.inst && out.words == a.p.data && ow == a.p.stride && pos == local && pw < ow ? pw : ow;
+    }
+
+    /// The action's effects on the successor words [c0, c0 + CW) held in y (the parent's words there): the deletes, then
+    /// the adds (with conditional effects: those of the conditional effects firing over the parent; every delete before
+    /// every add). Adds without a slot set `missing` (and their missing bits, recorded with c0 = 0); `max_add` gets the
+    /// highest added word + 1, wherever it lies.
+    template<u32 CW>
+    __device__ void effects(const u32* b, u32 c0, u64 (&y)[CW], bool& missing, u32& max_add) const
+    {
+        const SuccessorRows& out = a.out;
+        auto in_chunk = [&](u32 slot) { return (slot >> 6) >= c0 && (slot >> 6) - c0 < CW; };
         auto del = [&](u64 key)
         {
             const u32 slot = slot_of(t, key);
-            if (slot != k_none && (slot >> 6) < WB)
-                put_bit<WB>(y, slot, false);
+            if (slot != k_none && in_chunk(slot))
+                put_bit<CW>(y, slot - c0 * 64, false);
         };
-        for (u32 i = 0; i < sc[k_sc_dels_n]; ++i)
-            del(pattern_key(t, sc[k_sc_dels] + i, b));
-        u32 beyond = 0;   // words needed by adds past WB
-        u32 max_add = 0;  // highest added word + 1
-        bool missing = false;
-        auto add = [&](u64 key, u64 (&to)[WB])
+        auto add = [&](u64 key, u64 (&to)[CW])
         {
             const u32 slot = slot_of(t, key);
             if (slot == k_none)
             {
                 missing = true;
-                if (out.missing_bits && key < t.atom_total)
+                if (c0 == 0 && out.missing_bits && key < t.atom_total)
                     atomicOr(out.missing_bits + (key >> 5), 1u << (key & 31));
                 return;
             }
             const u32 w = slot >> 6;
             max_add = max_add > w + 1 ? max_add : w + 1;
-            if (w >= WB)
-            {
-                beyond = beyond > w + 1 ? beyond : w + 1;
-                return;
-            }
-            put_bit<WB>(to, slot, true);
+            if (in_chunk(slot))
+                put_bit<CW>(to, slot - c0 * 64, true);
         };
+        for (u32 i = 0; i < sc[k_sc_dels_n]; ++i)
+            del(pattern_key(t, sc[k_sc_dels] + i, b));
         if constexpr (CEOW == 0)
         {
             for (u32 i = 0; i < sc[k_sc_adds_n]; ++i)
@@ -735,9 +754,9 @@ struct RowWriter
         else
         {
             // the adds are collected apart and applied last: a conditional delete must not remove an add
-            u64 adds[WB];
+            u64 adds[CW];
 #pragma unroll
-            for (u32 i = 0; i < WB; ++i)
+            for (u32 i = 0; i < CW; ++i)
                 adds[i] = 0;
             for (u32 i = 0; i < sc[k_sc_adds_n]; ++i)
                 add(pattern_key(t, sc[k_sc_adds] + i, b), adds);
@@ -765,9 +784,22 @@ struct RowWriter
                 }
             }
 #pragma unroll
-            for (u32 i = 0; i < WB; ++i)
+            for (u32 i = 0; i < CW; ++i)
                 y[i] |= adds[i];
         }
+    }
+
+    /// The successor held whole in y[WB] (WB at least the parent's and the output row's words).
+    __device__ void successor_whole(u64 pos, const u32* b, bool inside) const
+    {
+        const SuccessorRows& out = a.out;
+        u64 y[WB];
+#pragma unroll
+        for (u32 i = 0; i < WB; ++i)
+            y[i] = i < pw ? st[i] : 0;
+        bool missing = false;
+        u32 max_add = 0;  // highest added word + 1 (adds past WB are not held)
+        effects<WB>(b, 0, y, missing, max_add);
         if (missing && out.missing_flag)
             *out.missing_flag = 1;
         const u32 ow = out.out_words;
@@ -775,7 +807,7 @@ struct RowWriter
         if (!fits && !missing && out.words_needed)
         {
             // the exact trimmed width of the successor (rl::expand reports it for rows that do not fit)
-            u32 ex = beyond;
+            u32 ex = max_add > WB ? max_add : 0;
 #pragma unroll
             for (u32 i = 0; i < WB; ++i)
                 if (y[i])
@@ -787,9 +819,7 @@ struct RowWriter
             u64* r = out.words + pos * ow;
             if (fits)
             {
-                // over several instances, a row written over its parent keeps the parent's zero words past its
-                // instance's (the env's pick)
-                const u32 lim = a.m.inst && out.words == a.p.data && ow == a.p.stride && pos == local && pw < ow ? pw : ow;
+                const u32 lim = written_words(pos);
 #pragma unroll
                 for (u32 i = 0; i < WB; ++i)
                     if (i < lim)
@@ -801,6 +831,57 @@ struct RowWriter
                 for (u32 i = 0; i < ow; ++i)
                     r[i] = 0;
         }
+    }
+
+    /// The successor of a row of any width, k_max_words words at a time (WB = k_wide): each chunk takes the parent's
+    /// words and the effects that fall into it (the effects are resolved again per chunk; the conditional effects'
+    /// conditions are evaluated again too, over the parent, so the row must not be written over its parent then: the
+    /// env's picks have no conditional effects). The first chunk settles whether the row fits; a row that does not is
+    /// zeroed after its exact trimmed width is taken.
+    __device__ void successor_chunks(u64 pos, const u32* b, bool inside) const
+    {
+        const SuccessorRows& out = a.out;
+        const u32 ow = out.out_words;
+        u64* r = out.words && inside ? out.words + pos * ow : nullptr;
+        bool missing = false, fits = true;
+        u32 max_add = 0, ex = 0, end = 0;
+        for (u32 c0 = 0; c0 == 0 || c0 < end; c0 += k_max_words)
+        {
+            u64 y[k_max_words];
+            for (u32 i = 0; i < k_max_words; ++i)
+                y[i] = c0 + i < pw ? st[c0 + i] : 0;
+            bool m = false;
+            u32 hi = 0;
+            effects<k_max_words>(b, c0, y, m, hi);
+            if (c0 == 0)
+            {
+                missing = m;
+                max_add = hi;
+                if (missing && out.missing_flag)
+                    *out.missing_flag = 1;
+                fits = !missing && ptrim <= ow && max_add <= ow;
+                if (fits && !r)
+                    return;
+                if (!fits && (missing || !out.words_needed))
+                    break;
+                // a fitting row: its written words; otherwise the words its exact width may reach
+                end = fits ? written_words(pos) : (pw > max_add ? pw : max_add);
+            }
+            if (fits)
+                for (u32 i = 0; i < k_max_words && c0 + i < end; ++i)
+                    r[c0 + i] = y[i];
+            else
+                for (u32 i = 0; i < k_max_words; ++i)
+                    if (y[i])
+                        ex = c0 + i + 1;
+        }
+        if (fits)
+            return;
+        if (!missing && out.words_needed)
+            atomicMax(out.words_needed, ex > max_add ? ex : max_add);
+        if (r)
+            for (u32 i = 0; i < ow; ++i)
+                r[i] = 0;
     }
 };
 
@@ -1316,8 +1397,20 @@ cudaError_t dispatch_ow(const GenArgs& a, cudaStream_t s)
         case 6: return launch_gen<6, false, Write, WB, CE, M>(a, s);
         case 7: return launch_gen<7, false, Write, WB, CE, M>(a, s);
         case 8: return launch_gen<8, false, Write, WB, CE, M>(a, s);
-        default: return cudaErrorInvalidValue;
+        default: break;
     }
+    if constexpr (!Write || WB >= k_max_words)
+    {
+        switch (ow)
+        {
+            case 12: return launch_gen<12, false, Write, WB, CE, M>(a, s);
+            case 16: return launch_gen<16, false, Write, WB, CE, M>(a, s);
+            case 24: return launch_gen<24, false, Write, WB, CE, M>(a, s);
+            case 32: return launch_gen<32, false, Write, WB, CE, M>(a, s);
+            default: break;
+        }
+    }
+    return cudaErrorInvalidValue;
 }
 
 // ------------------------------------------------------------------------------------------------ deferred successors
@@ -1360,12 +1453,13 @@ struct PutGroup
 };
 
 /// Row j's successor (launch_put) by one group of lanes, rl::expand's rules as RowWriter::successor: lane `sub` holds
-/// words sub and sub + G of the row (rows of at most 2G words): the parent's words are read and the row is written
-/// coalesced, without a copy of the row per thread; the deletes and adds are resolved one per lane and passed round the
-/// group (the deletes first). A row that does not fit out.out_words (an added atom without a slot, a parent or an add
-/// past it) is zeroed, and (no atom missing) the exact trimmed width of the successor goes to words_needed. A row whose
-/// label holds no binding of the schema is skipped: a write leaves the rows of a segment it cannot sort unlabeled (no
-/// scratch for a segment that straddles the capacity: Labels::error, and the caller redoes the chunk).
+/// words base + sub and base + sub + G of the row, a round of 2G words at a time (rows of at most 2G words take one
+/// round): the parent's words are read and the row is written coalesced, without a copy of the row per thread; the
+/// deletes and adds are resolved one per lane and passed round the group (the deletes first), once per round. A row
+/// that does not fit out.out_words (an added atom without a slot, a parent or an add past it) is zeroed, and (no atom
+/// missing) the exact trimmed width of the successor goes to words_needed. A row whose label holds no binding of the
+/// schema is skipped: a write leaves the rows of a segment it cannot sort unlabeled (no scratch for a segment that
+/// straddles the capacity: Labels::error, and the caller redoes the chunk).
 template<bool M>
 __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, const PutGroup& g, const TaskView& t,
                                         u32 schema, u32 li, u64 j)
@@ -1391,68 +1485,104 @@ __device__ __forceinline__ void put_row(const GenArgs& a, const PutRows& to, con
         const u32 iw = t.state_words ? t.state_words : 1;  // frozen slots: every successor fits
         pw = iw < pw ? iw : pw;
     }
-    const u32 i0 = g.sub, i1 = g.sub + g.G;
-    u64 y0 = i0 < pw ? st[i0] : 0, y1 = i1 < pw ? st[i1] : 0;
-    const u32 ptrim = g.max(y1 ? i1 + 1 : y0 ? i0 + 1 : 0);
-    // the deletes, then the adds: item k's slot is resolved by lane k mod G and passed round the group
+    const u32 ow = out.out_words, nw = a.p.words > ow ? a.p.words : ow, span = 2 * g.G;
     const u32 nd = sc[k_sc_dels_n], items = nd + sc[k_sc_adds_n];
     u32 max_add = 0;  // highest added word + 1
     bool missing = false;
-    for (u32 r = 0; r < items; r += g.G)
+    // the deletes, then the adds on the round's words: item k's slot is resolved by lane k mod G and passed round the
+    // group
+    auto apply = [&](u32 i0, u64& y0, u64& y1, bool first)
     {
-        u32 mine = k_none;
-        if (const u32 k = r + g.sub; k < items)
+        const u32 i1 = i0 + g.G;
+        for (u32 r = 0; r < items; r += g.G)
         {
-            const u64 key = k < nd ? pattern_key(t, sc[k_sc_dels] + k, b) : pattern_key(t, sc[k_sc_adds] + (k - nd), b);
-            mine = slot_of(t, key);
-            if (mine == k_none && k >= nd && out.missing_bits && key < t.atom_total)
-                atomicOr(out.missing_bits + (key >> 5), 1u << (key & 31));
-        }
-        const u32 n = items - r < g.G ? items - r : g.G;
-        for (u32 q = 0; q < n; ++q)
-        {
-            const u32 slot = __shfl_sync(g.gm, mine, q, g.G);
-            const bool add = r + q >= nd;
-            if (slot == k_none)
+            u32 mine = k_none;
+            if (const u32 k = r + g.sub; k < items)
             {
-                missing = missing || add;
-                continue;
+                const u64 key = k < nd ? pattern_key(t, sc[k_sc_dels] + k, b) : pattern_key(t, sc[k_sc_adds] + (k - nd), b);
+                mine = slot_of(t, key);
+                if (first && mine == k_none && k >= nd && out.missing_bits && key < t.atom_total)
+                    atomicOr(out.missing_bits + (key >> 5), 1u << (key & 31));
             }
-            const u32 w = slot >> 6;
-            const u64 m = 1ull << (slot & 63);
-            if (add)
-                max_add = max_add > w + 1 ? max_add : w + 1;
-            if (w == i0)
-                y0 = add ? (y0 | m) : (y0 & ~m);
-            else if (w == i1)
-                y1 = add ? (y1 | m) : (y1 & ~m);
+            const u32 n = items - r < g.G ? items - r : g.G;
+            for (u32 q = 0; q < n; ++q)
+            {
+                const u32 slot = __shfl_sync(g.gm, mine, q, g.G);
+                const bool add = r + q >= nd;
+                if (slot == k_none)
+                {
+                    missing = missing || add;
+                    continue;
+                }
+                const u32 w = slot >> 6;
+                const u64 m = 1ull << (slot & 63);
+                if (add)
+                    max_add = max_add > w + 1 ? max_add : w + 1;
+                if (w == i0)
+                    y0 = add ? (y0 | m) : (y0 & ~m);
+                else if (w == i1)
+                    y1 = add ? (y1 | m) : (y1 & ~m);
+            }
         }
+    };
+    const u32 i0 = g.sub, i1 = g.sub + g.G;
+    u64 y0 = i0 < pw ? st[i0] : 0, y1 = i1 < pw ? st[i1] : 0;
+    u32 ptrim = y1 ? i1 + 1 : y0 ? i0 + 1 : 0;
+    for (u32 base = span; base < pw; base += span)  // the parent's words past the first round
+    {
+        const u32 k0 = base + i0, k1 = base + i1;
+        if (k1 < pw && st[k1])
+            ptrim = k1 + 1;
+        else if (k0 < pw && st[k0])
+            ptrim = k0 + 1;
     }
+    ptrim = g.max(ptrim);
+    apply(i0, y0, y1, true);
     if (missing && out.missing_flag && g.sub == 0)
         *out.missing_flag = 1;
-    const u32 ow = out.out_words;
     const bool fits = !missing && ptrim <= ow && max_add <= ow;
-    if (!fits && !missing && out.words_needed)
+    // the exact trimmed width of the successor (rl::expand reports it for rows that do not fit): its highest word held,
+    // or an add past them
+    const bool width = !fits && !missing && out.words_needed;
+    u32 hi = y1 ? i1 + 1 : y0 ? i0 + 1 : 0;
+    u64* row = inside && out.words ? out.words + pos * ow : nullptr;
+    // over several instances, a row written over its parent keeps the parent's zero words past its instance's (the
+    // env's pick)
+    const u32 lim = !fits ? ow : M && out.words == a.p.data && ow == a.p.stride && pos == li && pw < ow ? pw : ow;
+    if (row)
     {
-        // the exact trimmed width of the successor (rl::expand reports it for rows that do not fit): its highest word
-        // held here, or an add past them
-        const u32 hi = g.max(y1 ? i1 + 1 : y0 ? i0 + 1 : 0);
-        if (g.sub == 0)
-            atomicMax(out.words_needed, hi > max_add ? hi : max_add);
-    }
-    if (!inside)
-        return;
-    if (out.words)
-    {
-        u64* row = out.words + pos * ow;
-        // over several instances, a row written over its parent keeps the parent's zero words past its instance's
-        // (the env's pick)
-        const u32 lim = !fits ? ow : M && out.words == a.p.data && ow == a.p.stride && pos == li && pw < ow ? pw : ow;
         if (i0 < lim)
             row[i0] = fits ? y0 : 0;
         if (i1 < lim)
             row[i1] = fits ? y1 : 0;
     }
+    for (u32 base = span; base < nw && (width || row); base += span)
+    {
+        const u32 k0 = base + i0, k1 = base + i1;
+        u64 z0 = 0, z1 = 0;
+        if (fits || width)
+        {
+            z0 = k0 < pw ? st[k0] : 0;
+            z1 = k1 < pw ? st[k1] : 0;
+            apply(k0, z0, z1, false);
+            hi = z1 ? k1 + 1 : z0 ? k0 + 1 : hi;
+        }
+        if (row)
+        {
+            if (k0 < lim)
+                row[k0] = fits ? z0 : 0;
+            if (k1 < lim)
+                row[k1] = fits ? z1 : 0;
+        }
+    }
+    if (width)
+    {
+        hi = g.max(hi);
+        if (g.sub == 0)
+            atomicMax(out.words_needed, hi > max_add ? hi : max_add);
+    }
+    if (!inside)
+        return;
     if (to.rows)
     {
         // the labels at the batch row, widened (-1 past the part's label columns)
@@ -1531,13 +1661,13 @@ __global__ void __launch_bounds__(k_put_block) k_put(GenArgs a, PutRows to, cons
     }
 }
 
-/// k_put over about rows_hint rows: two words of the row per lane (a group as wide as half the wider of the parent and
-/// output rows, at most a warp).
+/// k_put over about rows_hint rows: two words of the row per lane and round (a group as wide as half the wider of the
+/// parent and output rows, at most a warp).
 template<bool M>
 cudaError_t launch_put_rows(const GenArgs& a, const PutRows& to, const u8* deferred, u64 rows_hint, cudaStream_t s)
 {
     const u32 ow = a.out.out_words, nw = a.p.words > ow ? a.p.words : ow;
-    if (nw > k_max_words || (to.rows && !to.batch_offsets))
+    if (to.rows && !to.batch_offsets)
         return cudaErrorInvalidValue;
     if (a.p.rows == 0 || rows_hint == 0)
         return cudaSuccess;

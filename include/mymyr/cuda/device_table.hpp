@@ -41,7 +41,7 @@ public:
     /// instance (unsupported()).
     static std::shared_ptr<DeviceTaskTable> upload(ContextPtr ctx, rl::TaskTablePtr table);
     /// Empty if the device kernels run every instance, else `instance i: <why>` for the first one they do not
-    /// (more than lifted::k_max_ow object words, states wider than lifted::k_max_words words).
+    /// (ChunkGenerator::unsupported).
     [[nodiscard]] static std::string unsupported(const rl::TaskTable& table);
 
     DeviceTaskTable(Private, ContextPtr ctx, rl::TaskTablePtr table);

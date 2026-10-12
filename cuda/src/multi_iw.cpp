@@ -238,7 +238,7 @@ search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& star
 
 std::string multi_iw_unsupported(const Task& task, const MultiIwOptions& o)
 {
-    if (std::string why = ChunkGenerator::unsupported(task); !why.empty())
+    if (std::string why = ChunkGenerator::search_unsupported(task); !why.empty())
         return why;
     if (o.max_arity > 2)
         return "IW arity " + std::to_string(o.max_arity) + " (the device runs arities 0, 1 and 2)";

@@ -11,6 +11,7 @@
 // Pointers to per-state tables are TableRefs (a view row), resolved by each thread's workspace (successor/detail/
 // engine.hpp); static tables are word offsets into Compiled::static_words.
 
+#include "mymyr/core/bitset.hpp"
 #include "mymyr/core/ids.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/formalism/task_data.hpp"
@@ -227,10 +228,18 @@ struct StaticRelation
     }
 };
 
+/// Words per object bitset over n objects: words_for(n), at least 1; past 8 words, rounded up to a width class (12, 16,
+/// 24 or 32 words: the widths the device kernels are instantiated for).
+[[nodiscard]] constexpr u32 object_words(u32 n)
+{
+    const u32 w = bits::words_for(n);
+    return w <= 1 ? 1u : w <= 8 ? w : w <= 12 ? 12u : w <= 16 ? 16u : w <= 24 ? 24u : w <= 32 ? 32u : w;
+}
+
 struct Compiled
 {
     u32 num_objects = 0;
-    u32 ow = 0;  // words per object bitset
+    u32 ow = 0;  // words per object bitset (object_words(num_objects))
     std::vector<formalism::PredKind> kinds;  // per predicate
     std::vector<u32> arity;                  // per predicate
     CanonicalLayout layout;

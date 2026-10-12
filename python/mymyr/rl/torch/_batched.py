@@ -61,11 +61,14 @@ def _device_index(device: torch.device) -> Optional[int]:
 
 
 def _task_ids(core: Any, ids: Any, mask: Optional[Tensor], n: int, device: torch.device, name: str) -> Tensor:
-    """``ids`` as [n] int32 on ``device``. Host values (ints, sequences, NumPy arrays, CPU tensors) are checked here:
-    ValueError for an id outside the table's (suite's) instances in a row the call uses (``mask``: the masked rows); the
-    device environment reports device ids outside them at :meth:`BatchedEnv.check_errors`."""
+    """``ids`` (one id for every row, or [n]) as [n] int32 on ``device``. Host values (ints, sequences, NumPy arrays,
+    CPU tensors) are checked here: ValueError for an id outside the table's (suite's) instances in a row the call uses
+    (``mask``: the masked rows). Device ids are checked on the device: a device environment raises ids outside them at
+    :meth:`BatchedEnv.check_errors` and at the general path's next step or refresh (which synchronize)."""
     instances = core.num_instances
     t = torch.as_tensor(ids)
+    if t.dim() == 0:
+        t = t.expand(n)  # one id for every row
     if t.device.type == "cpu":
         flat = t.reshape(n).to(torch.int64)
         bad = (flat < 0) | (flat >= instances)
@@ -376,8 +379,8 @@ class BatchedEnv:
 
     def check_errors(self) -> None:
         """Waits for the device work and raises if a fast-path step met states written without :meth:`refresh`, or
-        met task ids outside the table (device ``task_ids`` / ``next_task_ids``; host values are checked when given).
-        A no-op on the CPU."""
+        met task ids outside the table (device ``task_ids`` / ``next_task_ids``; host values are checked when given;
+        the general path's step and refresh raise such ids themselves). A no-op on the CPU."""
         self.core.check_errors()
 
     def close(self) -> None:

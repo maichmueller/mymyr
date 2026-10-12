@@ -235,6 +235,8 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     r.threads = 0;
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
 
+    if (const std::string why = ChunkGenerator::search_unsupported(*task); !why.empty())
+        throw std::invalid_argument("mymyr: DeviceBrfs: the device cannot run " + why);
     gen = std::make_unique<ChunkGenerator>(ctx, task, s);
     gen->set_timing(o.timings);
     st.host_schemas = gen->placement(witness).host_count;

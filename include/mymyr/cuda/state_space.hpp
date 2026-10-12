@@ -57,7 +57,7 @@
 //
 // Device arrays live in buffers shared by the instances of a wave (DeviceStateSpace::storage() keeps them alive) and
 // are written on the result's stream; to_host() downloads one space into a datasets::StateSpace. Numeric tasks are
-// supported with the CPU numeric encoding; tasks beyond ChunkGenerator::unsupported limits are refused.
+// supported with the CPU numeric encoding; tasks beyond ChunkGenerator::search_unsupported limits are refused.
 //
 // Host output overlaps the post-processing: the members' host arrays are sized (first touch, threads) in the
 // background once their sizes are known, each array is downloaded as soon as it is final (the rows, offsets, labels,
@@ -206,7 +206,7 @@ struct DeviceStateSpaces
     DeviceStateSpaceStats stats;
 };
 
-/// Why the device cannot generate the state space of `task` (empty: it can): ChunkGenerator::unsupported.
+/// Why the device cannot generate the state space of `task` (empty: it can): ChunkGenerator::search_unsupported.
 [[nodiscard]] std::string state_space_unsupported(const Task& task);
 
 /// The state space of one task. Throws std::invalid_argument for tasks the device cannot run, std::length_error beyond

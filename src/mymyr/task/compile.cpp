@@ -65,7 +65,7 @@ public:
     void run()
     {
         n = T.num_objects();
-        OW = std::max<u32>(1, bits::words_for(n));
+        OW = plan::object_words(n);
         C.num_objects = n;
         C.ow = OW;
         const u32 m = static_cast<u32>(T.predicates.size());

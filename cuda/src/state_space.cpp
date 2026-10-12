@@ -1968,7 +1968,7 @@ datasets::StateSpacePtr DeviceStateSpace::to_host() const
 // ---------------------------------------------------------------------------------------------- entry points
 std::string state_space_unsupported(const Task& task)
 {
-    return ChunkGenerator::unsupported(task);
+    return ChunkGenerator::search_unsupported(task);
 }
 
 DeviceStateSpaceResult state_space(ContextPtr ctx, TaskPtr task, const DeviceStateSpaceOptions& options, DeviceStateSpaceStats* stats)

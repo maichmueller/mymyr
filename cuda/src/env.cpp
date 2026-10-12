@@ -67,7 +67,6 @@ DeviceBuffer upload(const ContextPtr& ctx, const std::vector<T>& v, cudaStream_t
     return b;
 }
 
-
 /// Why the fast path does not run one instance (empty: it does).
 std::string fast_why(const Task& task, const rl::EnvConfig& config)
 {
@@ -262,6 +261,28 @@ struct DeviceEnv::Impl
     }
 
     [[nodiscard]] u32* dctl() const { return static_cast<u32*>(ctl.data()); }
+
+    /// Waits for the stream and raises the error flags of the calls before (cleared): task ids outside the suite
+    /// (std::invalid_argument) and, unless `ids_only`, stale caches and over-wide successors (std::logic_error).
+    void raise_errors(bool ids_only)
+    {
+        u32* d = dctl();
+        auto* h = static_cast<u32*>(host_ctl.data());
+        check(cudaMemcpyAsync(h, d, k_ctl_words * sizeof(u32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+        const u32 err = h[k_err], wide = h[k_words_needed];
+        if (ids_only ? !(err & 4u) : !(err || wide))
+            return;
+        check(cudaMemsetAsync(d + k_err, 0, 2 * sizeof(u32), s), "cudaMemsetAsync");
+        if (err & 4u)
+            throw std::invalid_argument("mymyr: device env: a task id outside the " + std::string(suite->noun()) + "'s " +
+                                        std::to_string(I) + " instances (reset, a batch's task ids or next_task_ids)");
+        if (err)
+            throw std::logic_error("mymyr: device env: a step found a state whose cached counts do not belong to it "
+                                   "(states written without refresh())");
+        throw std::logic_error("mymyr: device env: a successor was wider than the rows (internal error)");
+    }
+
     [[nodiscard]] const u64* dseed() const { return static_cast<const u64*>(seed.data()); }
     /// The order of the env's bindings: its actions are labels (under witness pruning, with the CPU's witnesses).
     [[nodiscard]] rl::dev::MatchOrder env_order() const noexcept
@@ -832,16 +853,10 @@ DeviceEnv::DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig
     I.cfg = config;
     I.home = I.ctx->stream();
     I.s = I.home;  // the setup runs on the context's stream; set_stream(stream) at the end
-    if (const std::string why = SuiteExpander::unsupported(*I.suite); !why.empty())
-        throw std::invalid_argument("mymyr: the CUDA backend cannot run " + why);
     I.I = I.suite->size();
     I.D = I.suite->num_domains();
     I.W = I.suite->words();
     I.NN = I.suite->numeric_words();
-    if (I.W > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: the CUDA backend cannot run this " + std::string(I.suite->noun()) +
-                                    ": states of " + std::to_string(I.W) + " words (the device env takes at most " +
-                                    std::to_string(lifted::k_max_words) + ")");
     I.L = std::max<u32>(1, I.suite->label_width());
     const std::string why = fast_unsupported(*I.suite, I.cfg);
     if (path == Path::Fast && !why.empty())
@@ -1074,6 +1089,7 @@ void DeviceEnv::refresh(rl::EnvBatch& b, i32* count)
         return;
     }
     I.no_capture("refresh");
+    I.raise_errors(true);  // the general path synchronizes: task ids an earlier call flagged
     auto* off = I.grow<i32>(I.f_offsets2, b.rows + 1);
     (void)I.expand(b.states, b.task_ids, b.rows, false, off);
     if (count)
@@ -1219,7 +1235,9 @@ void DeviceEnv::step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions ac
             I.order_rows(b.task_ids, N, b.counts);
         return;
     }
-    // general path: 1. the flat expansion of the current states (canonical order, goal flags)
+    // general path (it synchronizes: task ids an earlier call flagged are raised first): 1. the flat expansion of the
+    // current states (canonical order, goal flags)
+    I.raise_errors(true);
     auto* off = I.grow<i32>(I.f_offsets, N + 1);
     const rl::Expansion e = I.expand(b.states, b.task_ids, N, true, off);
     // 2. choose and move
@@ -1257,22 +1275,6 @@ void DeviceEnv::check_errors()
     DeviceGuard g(I.ctx->device());
     I.begin_call();
     I.no_capture("check_errors");
-    u32* d = I.dctl();
-    auto* h = static_cast<u32*>(I.host_ctl.data());
-    check(cudaMemcpyAsync(h, d, k_ctl_words * sizeof(u32), cudaMemcpyDeviceToHost, I.s), "cudaMemcpyAsync");
-    check(cudaStreamSynchronize(I.s), "cudaStreamSynchronize");
-    const u32 err = h[k_err], wide = h[k_words_needed];
-    if (err || wide)
-    {
-        check(cudaMemsetAsync(d + k_err, 0, 2 * sizeof(u32), I.s), "cudaMemsetAsync");
-        if (err & 4u)
-            throw std::invalid_argument("mymyr: device env: a task id outside the " + std::string(I.suite->noun()) +
-                                        "'s " + std::to_string(I.I) + " instances (reset, a batch's task ids or "
-                                        "next_task_ids)");
-        if (err)
-            throw std::logic_error("mymyr: device env: a step found a state whose cached counts do not belong to it "
-                                   "(states written without refresh())");
-        throw std::logic_error("mymyr: device env: a successor was wider than the rows (internal error)");
-    }
+    I.raise_errors(false);
 }
 }  // namespace mymyr::cuda

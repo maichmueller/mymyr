@@ -973,10 +973,12 @@ TEST(DeviceTaskSuiteEnv, TaskIdsAreChecked)
         env.check_errors();
         std::vector<i32> next(ids.size(), static_cast<i32>(I));
         upload(d.next.data(), next, d.s);
-        for (int t = 0; t < 12; ++t)
-            env.step(d.b, d.out, {}, static_cast<const i32*>(d.next.data()));
+        const auto* next_ids = static_cast<const i32*>(d.next.data());
         try
         {
+            // the general path synchronizes in its steps: a step raises what an earlier one flagged
+            for (int t = 0; t < 12; ++t)
+                env.step(d.b, d.out, {}, next_ids);
             env.check_errors();
             ADD_FAILURE() << "a next task id outside the suite was not reported";
         }
