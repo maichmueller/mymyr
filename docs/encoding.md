@@ -2,7 +2,7 @@
 
 `mymyr.encoding` encodes states of classical tasks into relational graphs: one graph per state, with the task's objects
 as entities and, for every relation of an `EncodingSchema`, the tuples of the state's atoms. It runs in C++, reads
-native state words directly, and needs neither a model framework nor mifrost. The result is a batch of flat integer
+native state words directly, and needs no model framework. The result is a batch of flat integer
 arrays that every framework imports without a copy.
 
 ```python

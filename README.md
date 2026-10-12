@@ -110,7 +110,7 @@ User guides and tested scripts are in [docs/](docs/README.md) and [examples/](ex
 `mymyr.encoding.FlatRelationEncoder(task_or_table, goal_derivations=())` encodes states into relational graphs: the
 objects are the entities, and the fluent, derived and static atoms are the tuples of the relations of an
 `EncodingSchema`. The batches are flat integer arrays that NumPy, Torch, JAX and DLPack import without a copy, with no
-mifrost, Pymimir or PyG dependency. See [native encoding](docs/encoding.md) for the array contract and the options.
+PyG dependency. See [native encoding](docs/encoding.md) for the array contract and the options.
 
 ## License
 
