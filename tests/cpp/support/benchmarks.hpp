@@ -28,7 +28,7 @@ struct PddlTask
     std::filesystem::path domain, problem;
 };
 
-namespace detail
+namespace benchmark_files
 {
 /// The domain file next to the problem: domain_<stem>.pddl, domain-<stem>.pddl or domain.pddl.
 inline bool locate(const std::filesystem::path& dir, const std::string& problem, PddlTask& t)
@@ -45,7 +45,7 @@ inline bool locate(const std::filesystem::path& dir, const std::string& problem,
     t.problem = dir / problem;
     return !t.domain.empty() && fs::exists(t.problem);
 }
-}  // namespace detail
+}  // namespace benchmark_files
 
 /// The 22-task classical suite (21 competition instances and the philosophers domain of tests/data/pddl). Tasks whose
 /// PDDL is missing are left out and reported in `missing`.
@@ -85,7 +85,7 @@ inline std::vector<PddlTask> classic_suite(std::vector<std::string>* missing = n
     for (const auto& e : entries)
     {
         PddlTask t;
-        if (detail::locate((e.local ? test_data_dir() / "pddl" : classic_dir()) / e.tag, e.problem, t))
+        if (benchmark_files::locate((e.local ? test_data_dir() / "pddl" : classic_dir()) / e.tag, e.problem, t))
             out.push_back(std::move(t));
         else if (missing)
             missing->push_back(std::string(e.tag) + "/" + e.problem);

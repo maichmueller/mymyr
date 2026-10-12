@@ -98,7 +98,7 @@ def test_problem_local_helpers_of_a_forall_goal_are_not_part_of_the_schema():
         for local in list(table.predicate_names)[table.num_domain_predicates :]:
             assert not [n for n in schema.relation_names if local in n]
     assert schemas[0].relation_names == schemas[1].relation_names
-    assert schemas[0].slot_roles == schemas[1].slot_roles
+    assert schemas[0].relation_slot_roles == schemas[1].relation_slot_roles
     assert schemas[0].schema_fingerprint == schemas[1].schema_fingerprint
     assert EncodingSchema(rl.TaskTable(tasks)).schema_fingerprint == schemas[0].schema_fingerprint
 
@@ -131,14 +131,14 @@ def test_catalog_metadata_is_consistent():
     columns = [
         schema.relation_names, schema.relation_arities, schema.relation_logical_arities, schema.relation_lanes,
         schema.relation_signs, schema.relation_levels, schema.relation_derivations, schema.relation_predicates,
-        schema.relation_schemas, schema.slot_roles,
+        schema.relation_schemas, schema.relation_slot_roles,
     ]  # fmt: skip
     assert all(len(c) == n for c in columns)
     assert schema.relation_names == sorted(schema.relation_names, key=lambda s: s.encode())
     assert len(set(schema.relation_names)) == n
     for i, name in enumerate(schema.relation_names):
         assert schema.relation_id(name) == i
-        roles = schema.slot_roles[i]
+        roles = schema.relation_slot_roles[i]
         assert len(roles) == schema.relation_arities[i]
         assert roles[len(roles) - schema.relation_logical_arities[i] :] == [0] * schema.relation_logical_arities[i]
         assert (schema.relation_predicates[i] >= 0) != (schema.relation_schemas[i] >= 0)
@@ -150,10 +150,10 @@ def test_catalog_metadata_is_consistent():
     assert schema.relation_derivations[schema.relation_id("[-]blocked[sg][unsat]")] == "unsatisfied"
     assert schema.relation_derivations[schema.relation_id("[-]blocked[sg]")] is None
     # goal target slots, subgoal target slots, history target + history slots, and a predicate slot behind them
-    assert schema.slot_roles[schema.relation_id("[+]blocked[g]")][:2] == [4, 1]
-    assert schema.slot_roles[schema.relation_id("[+]blocked[sg]")][:2] == [5, 1]
-    assert schema.slot_roles[schema.relation_id("[+]blocked[hist]")][:3] == [6, 7, 1]
-    assert schema.slot_roles[schema.relation_id("[+]blocked[g][unsat]")][:1] == [1]
+    assert schema.relation_slot_roles[schema.relation_id("[+]blocked[g]")][:2] == [4, 1]
+    assert schema.relation_slot_roles[schema.relation_id("[+]blocked[sg]")][:2] == [5, 1]
+    assert schema.relation_slot_roles[schema.relation_id("[+]blocked[hist]")][:3] == [6, 7, 1]
+    assert schema.relation_slot_roles[schema.relation_id("[+]blocked[g][unsat]")][:1] == [1]
     assert schema.entity_role_names[:3] == ["object", "predicate_virtual", "goal"]
     assert schema.target_group_names == ["goal", "subgoal", "action", "history", "state"]
     with pytest.raises(KeyError, match="no relation"):
@@ -166,14 +166,14 @@ def test_nullary_and_derived_predicates_follow_the_options():
     assert "axiom_0" in default.relation_names
     row = default.relation_id("axiom_0")
     assert default.relation_arities[row] == 1 and default.relation_logical_arities[row] == 0
-    assert default.slot_roles[row] == [8]  # the auxiliary slot: nullary atoms are tuples over the graph's one auxiliary entity
+    assert default.relation_slot_roles[row] == [8]  # the auxiliary slot: nullary atoms are tuples over the graph's one auxiliary entity
     assert default.slot_role_names[8] == "auxiliary_slot" and default.entity_role_names[8] == "auxiliary"
-    assert default.slot_roles[default.relation_id("[+]axiom_0[hist]")] == [7, 8]
+    assert default.relation_slot_roles[default.relation_id("[+]axiom_0[hist]")] == [7, 8]
     without_nullary = EncodingSchema(task, nullary=False)
     assert "axiom_0" not in without_nullary.relation_names and "[+]axiom_0[g]" not in without_nullary.relation_names
     assert without_nullary.entity_role_names == default.entity_role_names
     assert without_nullary.slot_role_names == default.slot_role_names
-    assert 8 not in {role for roles in without_nullary.slot_roles for role in roles}
+    assert 8 not in {role for roles in without_nullary.relation_slot_roles for role in roles}
     assert len(default.entity_role_names) == 9 and len(default.slot_role_names) == 9
     assert "=" not in default.relation_names and "[+]=[g]" not in default.relation_names
     with_equality = EncodingSchema(task, equality=True)

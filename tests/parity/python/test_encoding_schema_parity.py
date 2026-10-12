@@ -71,7 +71,7 @@ def native_catalog(schema):
     """(name, arity, slot roles) per relation, with the auxiliary slot of the nullary relations taken away: mifrost
     encodes a nullary atom as a tuple of its other slots only."""
     rows = []
-    for name, arity, roles in zip(schema.relation_names, schema.relation_arities, schema.slot_roles):
+    for name, arity, roles in zip(schema.relation_names, schema.relation_arities, schema.relation_slot_roles):
         if roles and roles[-1] == AUXILIARY_SLOT:
             arity, roles = arity - 1, roles[:-1]
         rows.append((name, arity, roles))
@@ -104,7 +104,7 @@ def test_catalog_equals_mifrost(tasks, name):
     assert native_catalog(schema) == mifrost_catalog(entry)
     nullary = [i for i, n in enumerate(schema.relation_logical_arities) if n == 0 and schema.relation_predicates[i] >= 0]
     assert bool(nullary) == native_options(entry)["nullary"]
-    assert all(schema.slot_roles[i][-1] == AUXILIARY_SLOT for i in nullary)
+    assert all(schema.relation_slot_roles[i][-1] == AUXILIARY_SLOT for i in nullary)
     assert [SOURCE_OF_LANE[lane] for lane in schema.relation_lanes] == entry["sources"]
     assert schema.slot_role_names[:8] == [
         "argument_slot", "predicate_slot", "state_slot", "action_slot",
