@@ -1,0 +1,1 @@
+Competition instances of the classical and numeric benchmark collections of the International Planning Competitions and the numeric planning benchmark suites derived from them: strips/ and adl/ (IPC 1998-2018 domains, one instance each) and numeric/ (the first problem of ten numeric domains). Files are unchanged.

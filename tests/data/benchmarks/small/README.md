@@ -1,0 +1,1 @@
+Small instances of well-known planning domains (several from IPC competitions, several hand-written or reduced for testing), with their domain files. One directory per domain; the problems next to domain.pddl are the ones the tests use.
