@@ -25,7 +25,9 @@ struct Job
     bool all = false;          // every env, in order (env_ids is empty)
     std::vector<u32> env_ids;
     std::vector<i64> actions;  // empty: the random policy
-    std::vector<i32> next;     // empty: autoresets keep the instance
+    std::vector<i32> next;     // empty: autoresets sample (sample) or keep the instance
+    bool sample = false;       // autoresets restart in the envs' next sampled instances (next is empty)
+    bool count_resets = false;  // the step advances the reset counters of the envs that finish
     PoolBatch out;
     StepOutputs so;
     // the rows in home ranges, one per worker: worker t claims pieces of range t first, then of the others (so an
@@ -123,6 +125,8 @@ struct CpuEnvPool::Impl
     std::vector<i32> task_ids, steps;
     std::vector<u8> at_goal;  // per env: its state is a goal (EnvBatch::at_goal)
     EnvBatch batch;
+    InstanceSampling sampling;
+    std::vector<u32> resets;  // per env: the sampler's reset counter
 
     // under mu: the envs held by sends in flight, and the marks of the env id checks
     mutable std::mutex mu;
@@ -178,6 +182,9 @@ struct CpuEnvPool::Impl
             spare.push_back(std::move(b));
     }
 
+    /// Env e's next sampled instance.
+    [[nodiscard]] i32 sample(u32 e) const { return sampling.sample(env.config().seed, e, resets[e]); }
+
     /// The atom words of instance g's rows.
     [[nodiscard]] u32 instance_words(i32 g) const { return inst_words[static_cast<u32>(g)]; }
 
@@ -232,7 +239,10 @@ struct CpuEnvPool::Impl
         for (u64 p = lo; p < hi; ++p)
         {
             const u32 e = j.all ? static_cast<u32>(p) : j.env_ids[p];
-            env.step_row(batch, e, j.so, p, random ? 0 : j.actions[p], random, j.next.empty() ? -1 : j.next[p], s);
+            const i32 next = !j.next.empty() ? j.next[p] : j.sample ? sample(e) : -1;
+            env.step_row(batch, e, j.so, p, random ? 0 : j.actions[p], random, next, s);
+            if (j.count_resets && (j.so.terminated[p] || j.so.truncated[p]))
+                ++resets[e];
             observe(e, j.out, p);
         }
     }
@@ -431,6 +441,26 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     }
     I.busy.assign(I.N, 0);
     I.mark.assign(I.N, 0);
+    if (options.sampling.enabled())
+    {
+        const InstanceSampling& smp = options.sampling;
+        if (smp.instances != tt.size())
+            throw std::invalid_argument("mymyr: CpuEnvPool: a sampler over " + std::to_string(smp.instances) +
+                                        " instances; the " + tt.noun() + " has " + std::to_string(tt.size()));
+        if (!smp.indices.empty() && smp.thresholds.size() + 1 != smp.indices.size())
+            throw std::invalid_argument("mymyr: CpuEnvPool: a weighted sampler needs one threshold fewer than indices");
+        if (!std::is_sorted(smp.thresholds.begin(), smp.thresholds.end()))
+            throw std::invalid_argument("mymyr: CpuEnvPool: the sampler's thresholds are not ascending");
+        for (const i32 g : smp.indices)
+            if (g < 0 || static_cast<u32>(g) >= tt.size())
+                throw std::invalid_argument("mymyr: CpuEnvPool: the sampler's instance " + std::to_string(g) +
+                                            " is outside the " + tt.noun());
+        I.sampling = smp;
+        I.resets.assign(I.N, 0);
+        for (u32 e = 0; e < I.N; ++e)
+            I.task_ids[e] = I.sample(e);
+        std::fill(I.resets.begin(), I.resets.end(), 1u);
+    }
     EnvBatch& b = I.batch;
     b.states = I.states.data();
     b.rows = I.N;
@@ -444,7 +474,7 @@ CpuEnvPool::CpuEnvPool(TaskSuitePtr suite, const EnvConfig& config, u32 num_envs
     b.at_goal = I.at_goal.data();
     b.first_env = 0;
     check_env(tt, b, nullptr);
-    I.env.reset(b);  // every env at instance 0's initial state
+    I.env.reset(b);  // every env at its instance's initial state (instance 0 without sampling)
     I.scratch.resize(I.T);
     I.workers.reserve(I.T);
     for (u32 t = 0; t < I.T; ++t)
@@ -484,6 +514,14 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
     I.env.suite()->check_task_ids(task_ids, ids.size());
     std::lock_guard lock(I.mu);
     I.check_envs(ids, env_ids == nullptr, "reset");
+    std::vector<i32> sampled;
+    if (!task_ids && I.sampling.enabled())
+    {
+        sampled.resize(ids.size());
+        for (u64 p = 0; p < ids.size(); ++p)
+            sampled[p] = I.sample(ids[p]);
+        task_ids = sampled.data();
+    }
     const bool current = task_ids == nullptr;
     const u32 W = I.batch_words(ids.data(), ids.size(), task_ids, current);
     if (goal_pos)
@@ -514,6 +552,8 @@ PoolBatch CpuEnvPool::reset(const u32* env_ids, u64 n, const i32* task_ids, cons
             std::copy_n(goal_neg + p * goal_words, w, gn);
             std::fill(gn + w, gn + z, u64{0});
         }
+        if (I.sampling.enabled())
+            ++I.resets[e];
         I.at_goal[e] = I.env.reset_goal(I.batch, e, inst) ? 1 : 0;
         out.goal[p] = I.at_goal[e];
         out.terminated[p] = out.goal[p] || (out.count[p] == 0 && I.env.config().dead_end == DeadEnd::NoSuccessors &&
@@ -542,6 +582,8 @@ u64 CpuEnvPool::send(const u32* env_ids, u64 n, Actions actions, const i32* next
     }
     if (next_task_ids)
         job->next.assign(next_task_ids, next_task_ids + B);
+    job->count_resets = I.sampling.enabled() && I.env.config().autoreset;
+    job->sample = job->count_resets && !next_task_ids;
     job->out = I.take_spare();
     // home ranges of at least 128 rows, at most one per worker, claimed in pieces of about a quarter of a range
     job->parts = static_cast<u32>(std::clamp<u64>(B / 128, 1, I.T));
@@ -557,8 +599,16 @@ u64 CpuEnvPool::send(const u32* env_ids, u64 n, Actions actions, const i32* next
         std::lock_guard lock(I.mu);
         I.check_envs(job->env_ids, job->all, "send");
         // the batch's width: the envs' instances' and those they may autoreset into (read under the lock: no env of
-        // the send is in flight)
-        const u32 W = I.batch_words(job->all ? nullptr : job->env_ids.data(), B, next_task_ids, true);
+        // the send is in flight); sampled ones are drawn here when they decide it, else by the workers
+        if (job->sample && !I.fixed_words && !I.uniform)
+        {
+            job->next.resize(B);
+            for (u64 p = 0; p < B; ++p)
+                job->next[p] = I.sample(job->all ? static_cast<u32>(p) : job->env_ids[p]);
+            job->sample = false;
+        }
+        const u32 W =
+            I.batch_words(job->all ? nullptr : job->env_ids.data(), B, job->next.empty() ? nullptr : job->next.data(), true);
         size_batch(job->out, B, W, I.NN, I.L, I.goals, true);
         PoolBatch& o = job->out;
         job->so = StepOutputs{o.reward.data(), o.terminated.data(), o.truncated.data(), o.count.data(),

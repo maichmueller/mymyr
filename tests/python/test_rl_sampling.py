@@ -90,6 +90,61 @@ def test_batched_sampler_partial_reset_and_reseed(table):
     assert torch.equal(whole._reset_counts, expected + mask.long())
 
 
+@pytest.mark.parametrize("weights", [None, [1, 3]])
+@pytest.mark.parametrize("threads", [1, 3])
+def test_pool_samples_the_batched_envs_instances(table, weights, threads):
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    sampler = "auto" if weights is None else rl.InstanceSampler(2, weights)
+    n = 12
+    env = rt.BatchedEnv(table, n, seed=5, max_steps=2, sampler=sampler)
+    pool = rl.CpuEnvPool(table, num_envs=n, threads=threads, seed=5, max_steps=2, sampler=sampler)
+    assert (pool.sampler is not None) and pool.sampler.num_instances == 2
+
+    def ids(batch):
+        return np.asarray(batch.task_ids)[np.argsort(np.asarray(batch.env_ids))].tolist()
+
+    env.reset()
+    assert ids(pool.reset()) == env.task_ids.tolist()
+    mask = np.arange(n) % 4 == 1
+    env.reset(torch.from_numpy(mask))
+    part = pool.reset(env_ids=np.flatnonzero(mask).astype(np.uint32))
+    assert ids(part) == env.task_ids[torch.from_numpy(mask)].tolist()
+    for _ in range(7):  # max_steps 2: the truncations autoreset into sampled instances
+        env.step(torch.zeros(n, dtype=torch.int64))
+        assert ids(pool.step(actions=np.zeros(n, np.int64))) == env.task_ids.tolist()
+    # explicit ids override the draw and still advance the row's counter, as in BatchedEnv
+    env.reset(torch.from_numpy(mask), task_ids=torch.ones(n, dtype=torch.int32))
+    pool.reset(env_ids=np.flatnonzero(mask).astype(np.uint32), task_ids=np.ones(int(mask.sum()), np.int32))
+    env.reset()
+    assert ids(pool.reset()) == env.task_ids.tolist()
+    fixed = rl.CpuEnvPool(table, num_envs=4, max_steps=1, sampler=None)
+    assert fixed.sampler is None
+    assert ids(fixed.reset()) == [0, 0, 0, 0]
+    assert ids(fixed.reset(task_ids=np.array([1, 0, 1, 0], np.int32))) == [1, 0, 1, 0]
+    assert ids(fixed.step(actions=np.zeros(4, np.int64))) == [1, 0, 1, 0]
+
+
+@pytest.mark.parametrize("weights", [None, [1, 3]])
+def test_pool_instances_are_the_numpy_samplers_draws(table, weights):
+    """The pool's resets and autoresets draw InstanceSampler.sample(seed, env id, the env's reset counter); the
+    constructor's start takes counter 0 and every reset or autoreset of an env advances its counter."""
+    sampler = rl.InstanceSampler(2, weights)
+    n = 16
+    pool = rl.CpuEnvPool(table, num_envs=n, threads=3, seed=9, max_steps=1, sampler=sampler)
+    env_ids = np.arange(n, dtype=np.uint32)
+
+    def ids(batch):
+        return np.asarray(batch.task_ids)[np.argsort(np.asarray(batch.env_ids))]
+
+    def draws(k):
+        return sampler.sample(9, env_ids, np.full(n, k, np.uint32))
+
+    assert np.array_equal(ids(pool.reset()), draws(1))
+    for k in range(2, 6):  # max_steps 1: every step autoresets each env into its next draw
+        assert np.array_equal(ids(pool.step(actions=np.zeros(n, np.int64))), draws(k))
+
+
 @pytest.mark.needs_gil
 def test_batched_sampler_compiled_autoreset_and_fixed_ids(table):
     torch = pytest.importorskip("torch")

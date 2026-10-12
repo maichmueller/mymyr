@@ -15,6 +15,12 @@
 // own row step: the same semantics, the same RNG streams (env id = the env's index, draws from the config's seed), so a
 // result depends only on the env's actions, never on the thread count, the batch composition or the order of sends.
 //
+// Instances: with PoolOptions::sampling every env starts in a sampled instance, and resets without task ids and
+// autoresets without next_task_ids restart it in its next sampled one (rl/sampling.hpp: the draw of the config's seed,
+// the env's index and its reset counter, which every reset and every autoresetting step advances): the draws of a torch
+// BatchedEnv with the same seed and sampler. Without it every env starts at instance 0 and keeps its instance unless
+// told otherwise.
+//
 // Thread safety: every member function may be called from any number of threads at once (free-threaded Python calls
 // them without holding a lock of its own). Sends from several threads are ordered by the pool's lock; each thread's
 // recv(ticket) gets its own sends' results. A send's rows are cut into home ranges, one per worker (at least 128 rows
@@ -24,6 +30,7 @@
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/env.hpp"
+#include "mymyr/rl/sampling.hpp"
 #include "mymyr/rl/task_suite.hpp"
 #include "mymyr/rl/task_table.hpp"
 
@@ -74,6 +81,9 @@ struct PoolOptions
     /// Atom words of every batch's rows (at least the suite's words()); 0: each batch is as wide as the widest instance
     /// of its envs (after a reset: their new instances; after a step: their instances and those they autoreset into).
     u32 words = 0;
+    /// The instances of the envs' starts, resets and autoresets (instances: the suite's size; disabled: instance 0,
+    /// then the envs keep theirs).
+    InstanceSampling sampling = {};
 };
 
 /// The results of one or more sends (recv), or of a reset: arrays of B rows in the order of their env ids.
@@ -121,14 +131,16 @@ public:
     [[nodiscard]] u32 numeric_words() const noexcept;
     [[nodiscard]] u32 label_width() const noexcept;
 
-    /// Resets envs `env_ids` [n] (null: every env, n ignored) into instances `task_ids` [n] (null: their current
-    /// ones) with goal masks `goal_pos` / `goal_neg` [n, goal_words] (null: their instances' goals; per-env goals
-    /// only; each row's words past its instance's are not read); returns their observations. Draw counters are kept.
+    /// Resets envs `env_ids` [n] (null: every env, n ignored) into instances `task_ids` [n] (null: sampled ones with
+    /// PoolOptions::sampling, else their current ones) with goal masks `goal_pos` / `goal_neg` [n, goal_words] (null:
+    /// their instances' goals; per-env goals only; each row's words past its instance's are not read); returns their
+    /// observations. Draw counters are kept.
     /// Throws if one of them has a step in flight.
     PoolBatch reset(const u32* env_ids, u64 n, const i32* task_ids, const u64* goal_pos = nullptr,
                     const u64* goal_neg = nullptr, u32 goal_words = 0);
     /// Enqueues one step of envs `env_ids` [n] (null: every env): `actions` [n] (none: the random policy),
-    /// `next_task_ids` [n] (optional: the instances autoresetting envs restart in). Returns the send's ticket.
+    /// `next_task_ids` [n] (optional: the instances autoresetting envs restart in; null: sampled ones with
+    /// PoolOptions::sampling, else their own). Returns the send's ticket.
     /// Throws for an unknown or repeated env id, or one with a step in flight.
     u64 send(const u32* env_ids, u64 n, Actions actions, const i32* next_task_ids);
     /// The results of the oldest pending sends, in send order: at least `min_rows` rows (0: exactly one send),

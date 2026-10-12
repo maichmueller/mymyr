@@ -8,7 +8,8 @@
 //   - a mixed HostEnv batch equals single-instance HostEnvs over the same rows and RNG streams, step by step (states,
 //     labels, rewards, terminated / truncated, final states, counts, autoreset); next_task_ids and per-env goals;
 //   - the CPU pool equals the HostEnv for any thread count, any split of the envs into sends and any send order, with
-//     sends of several home ranges from several caller threads at once and recycled batches.
+//     sends of several home ranges from several caller threads at once and recycled batches; with instance sampling
+//     its starts, resets and autoresets are the counter draws of each env (rl/sampling.hpp).
 
 #include "../frontend/golden.hpp"
 #include "table_instance_sets.hpp"
@@ -22,6 +23,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 #include <thread>
@@ -906,4 +908,126 @@ TEST(TablePool, ConcurrentCallersHomeRangesAndRecycledBatches)
             EXPECT_EQ(failures[c], "") << "caller " << c;
         EXPECT_EQ(pool2.pending(), 0u);
     }
+}
+
+TEST(TablePool, SampledInstancesAreTheEnvsCounterDraws)
+{
+    // with PoolOptions::sampling every env starts in, resets into and autoresets into the draw of (seed, env, its
+    // reset counter): the HostEnv stepped with those ids, for any thread count and split of the sends, uniform and
+    // weighted, over rows of each batch's own width (the send draws the autoresets' instances) and of uniform width
+    for (const auto atoms : {TaskOptions::Atoms::Dense, TaskOptions::Atoms::Reachable})
+        for (const Set& s : sets(atoms))
+        {
+            SCOPED_TRACE(s.name);
+            const rl::TaskTable& T = *s.table;
+            const u32 I = T.size(), N = 5 * I + 3;
+            ASSERT_GE(I, 2u);
+            rl::InstanceSampling uniform;
+            uniform.instances = I;
+            // weights: instance 0 never, the last one three times as often as each of the others
+            rl::InstanceSampling weighted;
+            weighted.instances = I;
+            double sum = 0;
+            for (u32 g = 1; g < I; ++g)
+                sum += g + 1 == I ? 3.0 : 1.0;
+            double cum = 0;
+            for (u32 g = 1; g < I; ++g)
+            {
+                weighted.indices.push_back(static_cast<i32>(g));
+                cum += (g + 1 == I ? 3.0 : 1.0) / sum;
+                if (g + 1 < I)
+                    weighted.thresholds.push_back(static_cast<u32>(std::min(std::floor(cum * 4294967296.0), 4294967295.0)));
+            }
+            for (const rl::InstanceSampling* smp : {&uniform, &weighted})
+                for (const u32 threads : {1u, 4u})
+                {
+                    SCOPED_TRACE(std::string(smp == &uniform ? "uniform" : "weighted") + " threads " +
+                                 std::to_string(threads));
+                    const rl::EnvConfig cfg = config();
+                    rl::HostEnv env(s.table, cfg);
+                    std::vector<u32> resets(N, 0);
+                    std::vector<i32> ids(N);
+                    for (u32 e = 0; e < N; ++e)
+                        ids[e] = smp->sample(cfg.seed, e, resets[e]++);
+                    Envs ref(T, ids);
+                    env.reset(ref.b, nullptr, ref.count.data());
+                    rl::CpuEnvPool pool(s.table, cfg, N, {.threads = threads, .sampling = *smp});
+                    std::vector<u32> even, odd;
+                    for (u32 e = 0; e < N; ++e)
+                        (e % 2 ? odd : even).push_back(e);
+                    std::vector<u32> seen(I, 0);
+                    for (int t = 0; t < 24; ++t)
+                    {
+                        if (t == 8 || t == 16)
+                        {
+                            // a partial reset: sampled instances (t 8) or given ones (t 16) advance the same counters
+                            std::vector<u8> mask(N, 0);
+                            std::vector<u32> envs;
+                            std::vector<i32> given;
+                            for (u32 e = 1; e < N; e += 3)
+                            {
+                                mask[e] = 1;
+                                envs.push_back(e);
+                                const i32 drawn = smp->sample(cfg.seed, e, resets[e]++);
+                                given.push_back(static_cast<i32>(1 + e % (I - 1)));
+                                ref.task_ids[e] = t == 8 ? drawn : given.back();
+                            }
+                            env.reset(ref.b, mask.data(), ref.count.data());
+                            const rl::PoolBatch r =
+                                pool.reset(envs.data(), envs.size(), t == 8 ? nullptr : given.data(), nullptr, nullptr);
+                            for (u64 k = 0; k < r.rows; ++k)
+                                expect_batch_rows(r, k, ref, r.env_ids[k], false);
+                        }
+                        std::vector<i32> next(N);
+                        for (u32 e = 0; e < N; ++e)
+                            next[e] = smp->sample(cfg.seed, e, resets[e]);
+                        env.step(ref.b, ref.out, {}, next.data());
+                        for (u32 e = 0; e < N; ++e)
+                            if (ref.terminated[e] || ref.truncated[e])
+                                ++resets[e];
+                        if (t % 2 == 0)
+                        {
+                            const rl::PoolBatch p = pool.step(nullptr, 0, {}, nullptr);
+                            for (u64 e = 0; e < N; ++e)
+                                expect_batch_rows(p, e, ref, e, true);
+                        }
+                        else
+                        {
+                            (void)pool.send(odd.data(), odd.size(), {}, nullptr);
+                            (void)pool.send(even.data(), even.size(), {}, nullptr);
+                            const rl::PoolBatch both = pool.recv(N);
+                            ASSERT_EQ(both.rows, N);
+                            for (u64 k = 0; k < both.rows; ++k)
+                                expect_batch_rows(both, k, ref, both.env_ids[k], true);
+                        }
+                        if (::testing::Test::HasFatalFailure())
+                            return;
+                        for (u32 e = 0; e < N; ++e)
+                            ++seen[static_cast<u32>(ref.task_ids[e])];
+                    }
+                    if (smp == &weighted)
+                        EXPECT_EQ(seen[0], 0u);
+                    else
+                        for (u32 g = 0; g < I; ++g)
+                            EXPECT_GT(seen[g], 0u) << "instance " << g;
+                }
+        }
+}
+
+TEST(TablePool, SamplersAreChecked)
+{
+    const Set s = sets(TaskOptions::Atoms::Dense).front();
+    const u32 I = s.table->size();
+    rl::InstanceSampling bad;
+    bad.instances = I + 1;
+    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
+    bad.instances = I;
+    bad.indices = {0, 1};
+    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
+    bad.thresholds = {7};
+    bad.indices = {0, static_cast<i32>(I)};
+    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
+    bad.thresholds = {9, 7};
+    bad.indices = {0, 1, 0};
+    EXPECT_THROW(rl::CpuEnvPool(s.table, config(), 4, {.threads = 1, .sampling = bad}), std::invalid_argument);
 }

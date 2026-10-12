@@ -89,7 +89,8 @@ CPU framework bundle used for validation; those packages remain optional runtime
 
 ## Instance sampling and curricula
 
-Without constructor `task_ids`, the torch environments sample uniformly across a table or suite at each reset.
+Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at
+each reset.
 Explicit constructor ids retain a fixed assignment (`sampler="auto"`); `sampler="uniform"` enables sampling even with
 an explicit initial assignment. JAX `Env.reset(key, N)` samples N instances uniformly; `reset(key, ids)` overrides
 the initial draw. In either framework, `sampler=None` disables sampling and
@@ -106,9 +107,10 @@ External curricula override a draw with `reset(task_ids=ids)` or `step(..., next
 TensorDict uses `next_task_id`, not the observation's `task_id`: collectors therefore do not accidentally pin each
 new episode to the preceding one. Likewise custom reset goals use `next_goal_pos` / `next_goal_neg` or explicit
 `reset(goal_pos=..., goal_neg=...)` kwargs; observed goal masks do not override a new instance's default goals.
-For `CpuEnvPool`, use the same sampler's NumPy API and pass the resulting ids to
-`reset(..., task_ids=ids)` or `send(..., next_task_ids=ids)`; the caller owns each row's reset counter in asynchronous
-collection. Sampling does not change the pool's thread-safety or enqueue order.
+`CpuEnvPool(sampler=...)` takes the same samplers (`"auto"` and `"uniform"` sample uniformly, `None` starts every
+env at instance 0 and keeps its instance) and draws what a torch `BatchedEnv` with the same seed and sampler draws: the
+pool's env id is its index, and each reset and each autoresetting step of an env advances that env's counter, whichever
+send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)` override the draws.
 
 ## CUDA
 
