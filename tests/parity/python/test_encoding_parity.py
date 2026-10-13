@@ -22,15 +22,10 @@ IDS = [p.stem[:3] for p in FIXTURES]
 CONFIGS = sorted({config for _, config in fixture_cases()})
 
 
-def case_params(selected):
-    """pytest parameters for the (fixture, config) cases: compared ones run, the others skip with their lane."""
-    params = []
-    for path, config in fixture_cases():
-        marks = []
-        if config not in SUPPORTED:
-            marks.append(pytest.mark.skip(reason=f"pending: {PENDING_CONFIGS.get(config, 'unlisted')}"))
-        params.append(pytest.param(path, config, id=f"{path.stem[:3]}-{config}", marks=marks))
-    return [p for p in params if selected(p.values[1])]
+def case_params():
+    """pytest parameters of the (fixture, config) cases of the compared configs."""
+    return [pytest.param(path, config, id=f"{path.stem[:3]}-{config}")
+            for path, config in fixture_cases() if config in SUPPORTED]
 
 
 def prefix_path(prefix):
@@ -58,16 +53,8 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
     assert COMPARED_LANES == ("fluent", "static", "derived")
 
 
-@pytest.mark.parametrize("config", sorted(SUPPORTED))
-@pytest.mark.parametrize(
-    "source", [pytest.param(s, marks=pytest.mark.skip(reason=f"pending: {lane}")) for s, lane in PENDING_SOURCES.items()]
-)
-def test_relations_of_pending_sources_in_a_compared_config(config, source):
-    pytest.fail("the relations of this source are compared once its lane exists")
-
-
 # ------------------------------------------------------------------------------------------------ parity
-@pytest.mark.parametrize("path, config", case_params(lambda config: True))
+@pytest.mark.parametrize("path, config", case_params())
 def test_native_graphs_equal_mifrost_up_to_the_registered_differences(path, config):
     fixture = read(path)
     expected_states = [r["state"] for r in fixture["encodings"] if r["config"] == config]
@@ -278,7 +265,83 @@ def test_the_auxiliary_entity_and_its_tuples_are_not_hidden():
         other.tuples[nullary[0]] = [(actual.entities[0][1],)]
         assert {(m.kind, m.where) for m in compare(expected, other, context)} == {("tuple", nullary[0])}
         assert any(role == "auxiliary" and name == AUXILIARY for role, name in actual.entities)
+        for name in nullary:
+            lost = copy(actual)
+            lost.catalog = [c for c in actual.catalog if c[0] != name]
+            del lost.tuples[name]
+            assert {m.kind for m in compare(expected, lost, context)} == {"catalog", "tuple"}
     assert exercised >= 10
+
+
+@pytest.mark.parametrize("path", [prefix_path("f10"), prefix_path("f08")], ids=["f10", "f08"])
+def test_a_native_catalog_without_nullary_relations_is_not_accepted(path):
+    expected, actual, context = native_case(path)
+    nullary = {n for n, a in actual.catalog if a == 0}
+    assert nullary
+    bare = copy(actual)
+    bare.catalog = [c for c in actual.catalog if c[1] != 0]
+    bare.tuples = {n: ts for n, ts in actual.tuples.items() if n not in nullary}
+    bare.entities = [e for e in actual.entities if e[0] != "auxiliary"]
+    found = compare(expected, bare, context)
+    assert {m.kind for m in found} >= {"catalog"} and any(m.detail.startswith("missing ('") for m in found)
+
+
+class Rewritten:
+    """A batch whose ``relation_args`` are replaced; every other attribute is the batch's."""
+
+    def __init__(self, batch, relation_args):
+        self._batch = batch
+        self.relation_args = relation_args
+
+    def __getattr__(self, name):
+        return getattr(self._batch, name)
+
+
+def reversed_tuples(encoder, batch, row):
+    """The relation_args of ``batch`` with the tuples of every cell of ``row`` in reverse order."""
+    arguments = np.array(batch.relation_args)
+    relations = batch.num_relations
+    for relation, arity in enumerate(encoder.relation_arities):
+        cell = row * relations + relation
+        first, last = (int(x) for x in batch.relation_arg_offsets[cell : cell + 2])
+        arguments[first:last] = arguments[first:last].reshape(-1, arity)[::-1].reshape(-1)
+    return arguments
+
+
+def test_the_native_tuple_order_is_checked_not_excused():
+    fixture, task = load(prefix_path("f03"))
+    encoder = native_encoder(task, "C1")
+    states = [replay(task, s["path"]) for s in fixture["states"]]
+    batch = encoder.encode(states)
+    row = len(states) - 1
+    assert native_graph(encoder, batch, row, [task], COMPARED_LANES).unordered == ()
+    rewritten = Rewritten(batch, reversed_tuples(encoder, batch, row))
+    backwards = native_graph(encoder, rewritten, row, [task], COMPARED_LANES)
+    assert backwards.unordered
+    record = [r for r in fixture["encodings"] if r["config"] == "C1"][row]
+    context = Context(fixture, task, fixture["states"][row], "C1")
+    found = compare(fixture_graph(fixture, record, COMPARED_SOURCES), backwards, context)
+    assert {m.kind for m in found} == {"order"} and {m.where for m in found} == set(backwards.unordered)
+
+
+def test_arguments_outside_the_graph_are_refused():
+    fixture, task = load(prefix_path("f03"))
+    encoder = native_encoder(task, "C1")
+    batch = encoder.encode([replay(task, s["path"]) for s in fixture["states"]])
+    arguments = np.array(batch.relation_args) - int(batch.entity_offsets[1])
+    with pytest.raises(AssertionError, match="outside the graph"):
+        native_graph(encoder, Rewritten(batch, arguments), 1, [task], COMPARED_LANES)
+
+
+def test_the_object_order_is_excused_only_for_the_task_order():
+    expected, actual, context = native_case(prefix_path("f04"))
+    objects = [n for r, n in actual.entities if r == "object"]
+    assert objects == list(context.task.objects)
+    remap = dict(zip(objects, objects[::-1]))
+    backwards = copy(actual)
+    backwards.entities = [(r, remap.get(n, n)) if r == "object" else (r, n) for r, n in actual.entities]
+    backwards.tuples = {rel: [tuple(remap.get(n, n) for n in t) for t in ts] for rel, ts in actual.tuples.items()}
+    assert {m.kind for m in compare(expected, backwards, context)} == {"entity", "tuple"}
 
 
 def test_the_argument_order_of_helper_predicates_is_mapped_not_ignored():
@@ -295,13 +358,14 @@ def test_the_argument_order_of_helper_predicates_is_mapped_not_ignored():
     assert {m.where for m in compare(expected, actual, context, unmapped)} == {n for n in actual.tuples if HELPER.match(n)}
 
 
-def test_equality_is_compared_when_the_native_catalog_has_it():
+def test_equality_is_excused_only_while_the_config_does_not_ask_for_it(monkeypatch):
     expected, actual, context = native_case(prefix_path("f05"))
     assert ("=", 2) in expected.catalog and all(n != "=" for n, _ in actual.catalog)
+    assert compare(expected, actual, context) == []
+    monkeypatch.setitem(SUPPORTED, "C1", {**SUPPORTED["C1"], "equality": True})
+    assert {(m.kind, m.where) for m in compare(expected, actual, context)} >= {("catalog", None), ("tuple", "=")}
     with_equality = copy(actual)
     with_equality.catalog = sorted(actual.catalog + [("=", 2)], key=lambda c: c[0].encode())
-    found = compare(expected, with_equality, context)
-    assert {(m.kind, m.where) for m in found} == {("tuple", "=")}
     with_equality.tuples["="] = list(expected.tuples["="])
     assert compare(expected, with_equality, context) == []
 

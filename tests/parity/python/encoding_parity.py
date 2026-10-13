@@ -20,20 +20,21 @@ import random
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Callable
 
 import pytest
 
 import mymyr
+from parity_support import DATA, ROOT
 
-ROOT = Path(__file__).resolve().parents[3]
-FIXTURES = sorted((ROOT / "tests/parity/data/encoding/mifrost").glob("f*.json"))
+FIXTURES = sorted((DATA / "encoding/mifrost").glob("f*.json"))
 HELPER = re.compile(r"axiom_\d+$")
 DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 FLAT_ENCODERS = ("FlatRelationEncoder", "FlatHorizonEncoder", "FlatRootedHorizonEncoder", "FlatTransitionEncoder",
                  "FlatTransitionEffectsEncoder")
 AUXILIARY = "<auxiliary>"
+# The config recorded with nullary relations kept: its catalog lists the nullary relations of the domain.
+NULLARY_CONFIG = "C2"
 
 
 # ------------------------------------------------------------------------------------------------ fixtures
@@ -66,20 +67,31 @@ def state_path(fixture, state_id):
     return next(s["path"] for s in fixture["states"] if s["id"] == state_id)
 
 
-def helper_arguments_in_fixture_order(task, fixture, atom):
-    """The atom ``(axiom_<k> ...)`` with its arguments in the argument order of the fixture's (pymimir's) predicate.
+def helper_column_order(task, fixture, predicate):
+    """For the helper predicate ``axiom_<k>``: the positions of mymyr's arguments that give the argument order of the
+    fixture's (pymimir's) predicate. ``None`` if the fixture records no such predicate, or one without parameters.
 
     mymyr orders the parameters of a helper predicate by name, pymimir by its own traversal; the parameters carry the
-    same names, so the arguments are mapped by name. ``None`` if the predicate is a helper of the problem as written
-    that the fixture's (pymimir) task does not have."""
-    predicate, *arguments = atom.strip("()").split()
+    same names, so the arguments are mapped by name."""
     recorded = fixture["task"]["helper_predicates"].get(predicate)
-    if recorded is None:
+    if not recorded:
         return None
     own = next(p for p in task.formalism.predicates if p.name == predicate)
     names = [parameter.name for parameter in own.parameters]
     assert sorted(names) == sorted(recorded), predicate
-    return "(" + " ".join([predicate] + [arguments[names.index(name)] for name in recorded]) + ")"
+    return [names.index(name) for name in recorded]
+
+
+def helper_arguments_in_fixture_order(task, fixture, atom):
+    """The atom ``(axiom_<k> ...)`` with its arguments in the fixture's argument order. ``None`` if the predicate is a
+    helper of the problem as written that the fixture's task does not have."""
+    predicate, *arguments = atom.strip("()").split()
+    if predicate not in fixture["task"]["helper_predicates"]:
+        return None
+    order = helper_column_order(task, fixture, predicate)
+    if order is not None:
+        arguments = [arguments[i] for i in order]
+    return "(" + " ".join([predicate] + arguments) + ")"
 
 
 def derived_in_fixture_order(task, fixture, state):
@@ -120,16 +132,18 @@ def fixture_cases():
 class Graph:
     """One encoded graph by names. ``catalog``: ordered ``(relation, arity)`` with the arity of the atoms (a nullary
     relation has arity 0). ``entities``: ``(role, name)`` by entity id. ``tuples``: relation to its tuples of entity
-    names, in the order of the encoding; relations without tuples are absent."""
+    names, in the order of the encoding; relations without tuples are absent. ``unordered``: the relations whose argument
+    rows are not strictly ascending in entity ids (the native encoding's canonical order); empty for a fixture."""
 
     catalog: list
     entities: list
     tuples: dict
+    unordered: tuple = ()
 
 
 @dataclass(frozen=True)
 class Mismatch:
-    """One difference between two graphs: ``kind`` is ``catalog``, ``entity`` or ``tuple``, ``where`` the relation (or
+    """One difference between two graphs: ``kind`` is ``catalog``, ``entity``, ``tuple`` or ``order``, ``where`` the relation (or
     ``None``) and ``detail`` says what is missing, unexpected or misplaced."""
 
     kind: str
@@ -206,6 +220,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     relations = batch.num_relations
     selected = [i for i, lane in enumerate(encoder.relation_lanes) if lanes is None or lane in lanes]
     tuples = {}
+    unordered = []
     for relation in selected:
         count = int(batch.relation_counts[row, relation])
         if not count:
@@ -214,9 +229,13 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
         first, last = (int(x) for x in batch.relation_arg_offsets[cell : cell + 2])
         assert last - first == count * arities[relation]
         arguments = (batch.relation_args[first:last] - begin).reshape(count, arities[relation])
-        tuples[names[relation]] = [tuple(entities[int(x)][1] for x in row_) for row_ in arguments]
+        assert ((0 <= arguments) & (arguments < end - begin)).all(), f"{names[relation]}: argument outside the graph"
+        keys = [tuple(int(x) for x in row_) for row_ in arguments]
+        if any(a >= b for a, b in zip(keys, keys[1:])):
+            unordered.append(names[relation])
+        tuples[names[relation]] = [tuple(entities[x][1] for x in key) for key in keys]
     catalog = [(names[i], encoder.relation_logical_arities[i]) for i in selected]
-    return Graph(catalog, entities, tuples)
+    return Graph(catalog, entities, tuples, tuple(unordered))
 
 
 # ------------------------------------------------------------------------------------------------ comparison
@@ -238,6 +257,7 @@ def compare_exactly(expected, actual):
     """Every mismatch of ``actual`` against ``expected``: the catalog and the entities as ordered lists, the tuples of
     every relation as ordered lists."""
     found = _differences("catalog", None, expected.catalog, actual.catalog)
+    found += [Mismatch("order", name, "tuples are not strictly ascending in entity ids") for name in actual.unordered]
     found += _differences("entity", None, expected.entities, actual.entities)
     for relation in sorted(set(expected.tuples) | set(actual.tuples), key=lambda n: n.encode()):
         found += _differences("tuple", relation, expected.tuples.get(relation, []), actual.tuples.get(relation, []))
@@ -270,7 +290,15 @@ def _sorted_tuples(expected, actual, context):
     return _map_tuples(expected, order), _map_tuples(actual, order)
 
 
+def _objects(graph):
+    return [name for role, name in graph.entities if role == "object"]
+
+
 def _sorted_objects(expected, actual, context):
+    """Applies only when the native objects are in task order and the reference's are in name order."""
+    if _objects(actual) != list(context.task.objects) or _objects(expected) != sorted(_objects(expected)):
+        return expected, actual
+
     def order(graph):
         positions = [i for i, (role, _) in enumerate(graph.entities) if role == "object"]
         entities = list(graph.entities)
@@ -282,7 +310,7 @@ def _sorted_objects(expected, actual, context):
 
 
 def _without_equality(expected, actual, context):
-    if any(name == "=" for name, _ in actual.catalog):
+    if SUPPORTED[context.config].get("equality", False):
         return expected, actual
     kept = {name: ts for name, ts in expected.tuples.items() if name != "="}
     return replace(expected, catalog=[c for c in expected.catalog if c[0] != "="], tuples=kept), actual
@@ -295,40 +323,33 @@ def _holding_nullary_atoms(context):
 
 
 def _nullary_over_auxiliary(expected, actual, context):
-    """mifrost's catalog omits nullary relations or lists them without tuples. The native encoder lists every nullary
-    relation of its catalog and holds, for each nullary atom that is true, the unary tuple over the auxiliary entity,
-    which the graph has exactly then. The expectation is rebuilt that way from the atoms of the recorded state; a
-    nullary relation that only mifrost lists stays a mismatch."""
-    native = [c for c in actual.catalog if c[1] == 0]
-    if not native and not any(c[1] == 0 for c in expected.catalog):
-        return expected, actual
-    foreign = [c for c in expected.catalog if c[1] == 0 and c not in native]
-    catalog = [c for c in expected.catalog if c[1] != 0] + foreign + native
-    catalog.sort(key=lambda c: c[0].encode())
+    """The reference's catalog omits nullary relations or lists them without tuples. The native catalog has every
+    nullary relation of the domain (the reference lists them in its config with ``ignore_zero_arity_relations`` off),
+    and each nullary atom that is true is the unary tuple over the auxiliary entity, which the graph has exactly then.
+    The expectation is rebuilt that way from the atoms of the recorded state; a nullary relation that the native
+    catalog lacks, or has in addition, stays a mismatch."""
+    fixture = context.fixture
+    catalog = fixture["catalogs"][fixture["configs"][NULLARY_CONFIG]["catalog"]]
+    nullary = [(name, 0) for name, arity, source in zip(catalog["names"], catalog["logical_arities"], catalog["sources"])
+               if arity == 0 and source in COMPARED_SOURCES]
+    names = {name for name, _ in nullary}
     holding = _holding_nullary_atoms(context)
-    tuples = {name: ts for name, ts in expected.tuples.items() if name not in {n for n, _ in native}}
-    present = [name for name, _ in native if name in holding]
+    expected_catalog = sorted([c for c in expected.catalog if c[1] != 0] + nullary, key=lambda c: c[0].encode())
+    tuples = {name: ts for name, ts in expected.tuples.items() if name not in names}
+    present = [name for name, _ in nullary if name in holding]
     for name in present:
         tuples[name] = [(AUXILIARY,)]
     entities = list(expected.entities)
     if present:
         last = max((i for i, (role, _) in enumerate(entities) if role == "object"), default=-1)
         entities.insert(last + 1, ("auxiliary", AUXILIARY))
-    return replace(expected, catalog=catalog, entities=entities, tuples=tuples), actual
+    return replace(expected, catalog=expected_catalog, entities=entities, tuples=tuples), actual
 
 
 def _helper_argument_order(expected, actual, context):
-    recorded_by_name = context.fixture["task"]["helper_predicates"]
-
     def permute(name, ts):
-        recorded = recorded_by_name.get(name)
-        if not recorded or not HELPER.match(name):
-            return ts
-        own = next(p for p in context.task.formalism.predicates if p.name == name)
-        names = [parameter.name for parameter in own.parameters]
-        assert sorted(names) == sorted(recorded), name
-        order = [names.index(parameter) for parameter in recorded]
-        return [tuple(t[i] for i in order) for t in ts]
+        order = helper_column_order(context.task, context.fixture, name) if HELPER.match(name) else None
+        return ts if order is None else [tuple(t[i] for i in order) for t in ts]
 
     return expected, _map_tuples(actual, permute)
 
@@ -369,9 +390,9 @@ REGISTRY = (
     ),
     Difference(
         "tuple_order",
-        "The tuples of a relation are in the lexicographic order of their entity ids (task order) in the native "
-        "encoder; mifrost emits them in its backend's order.",
-        "the order of the tuples within each relation: compared as sorted lists",
+        "mifrost emits the tuples of a relation in its backend's order; the native encoder's are strictly ascending "
+        "in entity ids, which ``native_graph`` checks.",
+        "the order of the reference's tuples within each relation: compared as sorted lists",
         (("f01", "C1"), ("f05", "C1")),
         _sorted_tuples,
     ),
