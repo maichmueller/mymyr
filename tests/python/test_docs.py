@@ -3,10 +3,9 @@
 import json
 import pathlib
 import re
-import subprocess
-import sys
-
+import mymyr
 import pytest
+from python_children import requires_frontend, run_python
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs"
@@ -36,6 +35,8 @@ PAGES = [path for path in sorted(DOCS.glob("*.md")) if python_blocks(path)]
 @pytest.mark.parametrize("page", PAGES, ids=lambda path: path.stem)
 def test_documentation_python_blocks(page, tmp_path):
     blocks = python_blocks(page)
+    if not hasattr(mymyr, "Domain") and any(requires_frontend(source) for _, source in blocks):
+        pytest.skip("built without the PDDL front end")
     has_cuda = _cuda_available()
     runnable, skipped = [], 0
     for options, source in blocks:
@@ -51,7 +52,6 @@ def test_documentation_python_blocks(page, tmp_path):
         ]
         script = tmp_path / f"{page.stem}.py"
         script.write_text("namespace = {'__name__': '__main__'}\n" + "\n".join(statements) + "\n")
-        subprocess.run([sys.executable, "-W", "error", str(script)], cwd=ROOT, check=True,
-                       timeout=None if has_cuda else 45)
+        run_python(script, cwd=ROOT, timeout=None if has_cuda else 45)
 
     print(f"docs {page.name}: {len(runnable)} blocks run, {skipped} skipped")
