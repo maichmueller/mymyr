@@ -2,10 +2,9 @@
 
 import importlib.util
 import pathlib
-import subprocess
-import sys
-
+import mymyr
 import pytest
+from python_children import requires_frontend, run_python
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "examples"
@@ -27,6 +26,8 @@ def _cuda_available():
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.stem)
 def test_example_script(script):
+    if not hasattr(mymyr, "Domain") and requires_frontend(script.read_text()):
+        pytest.skip("built without the PDDL front end")
     requirements = REQUIREMENTS.get(script.name, ())
     missing = [name for name in requirements if name != "cuda" and importlib.util.find_spec(name) is None]
     if missing:
@@ -37,5 +38,5 @@ def test_example_script(script):
         pytest.skip("needs a visible CUDA device and a CUDA-enabled mymyr build")
 
     timeout = None if "cuda" in requirements else 180 if requirements else 45
-    subprocess.run([sys.executable, "-W", "error", str(script)], cwd=ROOT, check=True, timeout=timeout)
+    run_python(script, cwd=ROOT, timeout=timeout)
     print(f"example {script.name}: ran")

@@ -4,7 +4,7 @@ mymyr is derived from [mimir](https://github.com/maichmueller/mimir) (a fork of
 [simon-stahlberg/mimir](https://github.com/simon-stahlberg/mimir), v0.16.3), and mifrost's relational encoders, and
 this directory is the only place where the code base refers to them: the tests here compare mymyr with results recorded
 from those implementations. Everything outside `tests/parity/` and `bench/parity/` is independent of them and needs
-none of their data (`ci/check_no_mimir.py` enforces that).
+none of their data.
 
 Parity tests carry the ctest label `parity` and the pytest marker `parity`. They run by default, and skip cleanly when
 the reference data they need is absent. Select them or leave them out with `ctest -L parity` / `ctest -LE parity` and
