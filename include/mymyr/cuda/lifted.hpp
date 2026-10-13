@@ -20,10 +20,12 @@
 //                         deterministic too). Matchers that do not bind in parameter order have their segment sorted
 //                         lexicographically first (packed keys in local memory for short segments, a heapsort of the
 //                         rows in global memory otherwise): the CPU sorts the same unique keys, so the orders agree.
-// The count and write kernels are templated on the object-bitset width OW (1..k_max_ow words; forward checking
-// 1..k_max_fc_ow) and the write kernel on the successor-row width (u64 y[WB] with WB = 2, 4, 16 or k_max_words: rows of
-// up to 4 words stay in registers); launch_put writes deferred rows by groups of lanes (no row copy per thread). Schemas with conditional effects are written by launch_write_ce: their
-// conditional effects run as sub-plans at the DFS leaf. Before the goal test and the counts, launch_axioms closes the
+// The count and write kernels are templated on the object-bitset width OW (1..8 words and the wider classes of
+// plan::object_words, up to k_max_ow; forward checking 1..k_max_fc_ow) and the write kernel on the successor-row width
+// (u64 y[WB] with WB = 2, 4, 16 or k_max_words: rows of up to 4 words stay in registers; WB = k_wide builds wider rows
+// in chunks of k_max_words words); launch_put writes deferred rows by groups of lanes (no row copy per thread).
+// Schemas with conditional effects are written by launch_write_ce: their conditional effects run as sub-plans at the
+// DFS leaf. Before the goal test and the counts, launch_axioms closes the
 // parents' derived bitsets under the axiom strata. Matchers deeper than k_max_depth (up to k_deep_depth
 // parameters and label columns: organic-synthesis' reactions) run in kernels of their own (SchemaSet::deep), a warp
 // per search with one lane per parameter. Schemas the device does not run
@@ -40,11 +42,23 @@
 
 namespace mymyr::cuda::lifted
 {
-/// Deepest matcher (free parameters) and widest object bitset the device kernels run; others use the CPU fallback.
+/// Deepest matcher (free parameters) the device kernels run.
 inline constexpr u32 k_max_depth = rl::dev::k_max_matcher_depth;
-inline constexpr u32 k_max_ow = 8;
-/// Widest state rows of the successor kernels (words).
+/// Widest object bitset the device kernels run (words): 1..8 words, then the classes plan::object_words rounds wider
+/// bitsets up to (12, 16, 24 and 32 words: up to 2048 objects). Tasks with more objects run on the CPU.
+inline constexpr u32 k_max_ow = 32;
+/// The successor kernels' widest row held whole (words; a local array beyond 4 words). Wider rows take WB = k_wide:
+/// the successor is built k_max_words words at a time. The other device searches (BrFS, IW, A*, state spaces) and the
+/// numeric kernels hold whole rows and take rows of at most k_max_words words.
 inline constexpr u32 k_max_words = 64;
+inline constexpr u32 k_wide = 0xFFFFFFFFu;
+/// The successor kernels' row width WB for rows of `words` words over object bitsets of `ow` words: 2, 4, 16,
+/// k_max_words or k_wide. The kernels of object bitsets past 8 words are instantiated for WB >= k_max_words only.
+[[nodiscard]] constexpr u32 row_class(u32 words, u32 ow)
+{
+    const u32 w = ow > 8 && words <= 16 ? 17u : words;
+    return w <= 2 ? 2u : w <= 4 ? 4u : w <= 16 ? 16u : w <= k_max_words ? k_max_words : k_wide;
+}
 /// Forward checking keeps a domain stack of (depth + 1) x depth x OW words per thread: limited to OW <= 4.
 inline constexpr u32 k_max_fc_ow = rl::dev::k_max_fc_ow;
 /// Binding columns of the kernels' label rows.
@@ -156,8 +170,8 @@ cudaError_t launch_view(const rl::dev::TaskView& t, Parents p, Views v, cudaStre
 cudaError_t launch_count(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, u32* counts, cudaStream_t s);
 
 /// Writes the rows of every segment at offsets[state * S + schema] (an exclusive scan of the counts): labels and
-/// successor rows (see Labels, SuccessorRows); rows past labels.capacity are clipped. The parents and the output rows
-/// are at most k_max_words words wide.
+/// successor rows (see Labels, SuccessorRows); rows past labels.capacity are clipped. Rows of any width (k_wide past
+/// k_max_words words).
 cudaError_t launch_write(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, const u32* offsets, Labels labels,
                          SuccessorRows out, cudaStream_t s);
 /// launch_write for schemas with conditional effects (lifted_ce.cu): at each row every conditional effect's
@@ -420,8 +434,8 @@ cudaError_t launch_view_multi(const Multi& m, Parents p, Views v, cudaStream_t s
 /// launch_count over the rows of m.ow (set: the schemas; entries of other kinds or rows are not written).
 cudaError_t launch_count_multi(const Multi& m, Parents p, Views v, SchemaSet set, u32* counts, cudaStream_t s);
 /// launch_write over the rows of m.ow in the row-width bucket (m.words_lo, m.words_hi]: the kernels hold a successor in
-/// `wb` words (2, 4, 16 or k_max_words, at least m.words_hi; the parent and output rows may be wider, their words past
-/// the instance's are zero). No conditional effects.
+/// `wb` words (2, 4, 16 or k_max_words, at least m.words_hi; k_wide: chunks of k_max_words; the parent and output rows
+/// may be wider, their words past the instance's are zero). No conditional effects.
 cudaError_t launch_write_multi(const Multi& m, Parents p, Views v, SchemaSet set, const u32* offsets, Labels labels,
                                SuccessorRows out, u32 wb, cudaStream_t s);
 /// Where launch_put_multi puts its rows besides `out`. Unmapped (rows null): row j at row j of out.words, and its

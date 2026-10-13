@@ -226,6 +226,10 @@ cudaError_t launch_axioms(const rl::dev::TaskView& t, Parents p, Views v, Derive
         case 6: return launch_axioms_ow<6, false>(t, p, v, d, st, s);
         case 7: return launch_axioms_ow<7, false>(t, p, v, d, st, s);
         case 8: return launch_axioms_ow<8, false>(t, p, v, d, st, s);
+        case 12: return launch_axioms_ow<12, false>(t, p, v, d, st, s);
+        case 16: return launch_axioms_ow<16, false>(t, p, v, d, st, s);
+        case 24: return launch_axioms_ow<24, false>(t, p, v, d, st, s);
+        case 32: return launch_axioms_ow<32, false>(t, p, v, d, st, s);
         default: return cudaErrorInvalidValue;
     }
 }

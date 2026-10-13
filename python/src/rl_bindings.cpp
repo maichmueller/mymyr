@@ -1138,11 +1138,29 @@ struct PoolRecycler
     rl::CpuEnvPool* pool = nullptr;
 };
 
+/// The pool's instance sampling from a `sampler` argument ("auto" / "uniform": uniform, None: none, or an
+/// mymyr.rl.InstanceSampler), and the InstanceSampler object (None without sampling or over one instance).
+std::pair<rl::InstanceSampling, nb::object> pool_sampling(nb::handle sampler, u32 instances)
+{
+    nb::object s = nb::module_::import_("mymyr.rl._sampling").attr("_instance_sampler")(sampler, instances, true);
+    rl::InstanceSampling out;
+    if (s.is_none())
+        return {std::move(out), std::move(s)};
+    out.instances = instances;
+    if (!s.attr("weights").is_none())
+    {
+        out.thresholds = nb::cast<std::vector<u32>>(s.attr("_thresholds").attr("tolist")());
+        out.indices = nb::cast<std::vector<i32>>(s.attr("_indices").attr("tolist")());
+    }
+    return {std::move(out), std::move(s)};
+}
+
 class PyCpuPool
 {
 public:
-    PyCpuPool(SuiteRef ref, const rl::EnvConfig& cfg, u32 num_envs, const rl::PoolOptions& opt, Framework fw)
-        : m_ref(std::move(ref)), m_fw(fw), m_recycler(std::make_shared<PoolRecycler>())
+    PyCpuPool(SuiteRef ref, const rl::EnvConfig& cfg, u32 num_envs, const rl::PoolOptions& opt, Framework fw,
+              nb::object sampler)
+        : m_ref(std::move(ref)), m_fw(fw), m_sampler(std::move(sampler)), m_recycler(std::make_shared<PoolRecycler>())
     {
         nb::gil_scoped_release release;
         m_pool = std::make_unique<rl::CpuEnvPool>(m_ref.suite, cfg, num_envs, opt);
@@ -1163,6 +1181,7 @@ public:
     [[nodiscard]] const rl::CpuEnvPool& pool() const noexcept { return *m_pool; }
     [[nodiscard]] const SuiteRef& ref() const noexcept { return m_ref; }
     [[nodiscard]] Framework framework() const noexcept { return m_fw; }
+    [[nodiscard]] const nb::object& sampler() const noexcept { return m_sampler; }
 
     PyPoolBatch reset(nb::handle env_ids, nb::handle task_ids, nb::handle goal_pos, nb::handle goal_neg)
     {
@@ -1254,6 +1273,7 @@ private:
 
     SuiteRef m_ref;
     Framework m_fw;
+    nb::object m_sampler;
     std::shared_ptr<PoolRecycler> m_recycler;
     std::unique_ptr<rl::CpuEnvPool> m_pool;
 };
@@ -1874,6 +1894,10 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("goal", [](const PyPoolBatch& p) {
             return ArrayOut(p.array(p.b->goal, rl::DType::Bool, {p.rows()}));
         }, "[B] bool: the reached state is a goal state (initial state after a reset)")
+        .def_prop_ro("at_goal", [](const PyPoolBatch& p) {
+            return ArrayOut(p.array(p.b->at_goal, rl::DType::Bool, {p.rows()}));
+        }, "[B] bool: the observed state (states) is a goal: after a step, the autoreset's state where the env "
+           "restarted (the next step absorbs it)")
         .def_prop_ro("final_states", [opt](const PyPoolBatch& p) {
             return opt(p.stepped(), [&] {
                 return p.array(p.b->final_states, rl::DType::U64, {p.rows(), static_cast<i64>(p.b->row_words())}, true);
@@ -1904,7 +1928,8 @@ void bind_rl(nb::module_& parent)
             "__init__",
             [](PyCpuPool* self, SuiteArg table, IntArg num_envs_in, IntArg threads_in, bool goals, IntArg seed_in, IntArg max_steps_in,
                f32 step_reward, f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal,
-               bool autoreset, bool canonical, bool witness, FrameworkArg framework, SizeArg words_in) {
+               bool autoreset, bool canonical, bool witness, FrameworkArg framework, SizeArg words_in,
+               Arg<ann::SamplerArg> sampler) {
                 const u32 num_envs = int_arg<u32>(num_envs_in, "num_envs", 1);
                 const std::optional<u32> words = opt_int_arg<u32>(words_in, "words", 1);
                 const u32 threads = threads_arg(threads_in);
@@ -1926,16 +1951,23 @@ void bind_rl(nb::module_& parent)
                 o.goals = goals;
                 o.words = words.value_or(0);
                 const Framework fw = framework.is_none() ? Framework::Numpy : parse_framework(framework, nb::none());
-                new (self) PyCpuPool(suite_of(table), c, num_envs, o, fw);
+                SuiteRef ref = suite_of(table);
+                auto [sampling, sampler_obj] = pool_sampling(sampler, ref.suite->size());
+                o.sampling = std::move(sampling);
+                new (self) PyCpuPool(std::move(ref), c, num_envs, o, fw, std::move(sampler_obj));
             },
             "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 0, "goals"_a = false, "seed"_a = 0, "max_steps"_a = 0,
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
             "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
-            "framework"_a = nb::none(), "words"_a = nb::none(),
+            "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto",
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "
-            "results come as `framework` arrays (None: NumPy). Every env starts at instance 0's initial state: "
-            "reset(task_ids=...) places them. A batch's rows are as wide as the widest instance among its envs (after "
-            "a step: their instances and those they autoreset into), so a step costs each env's own instance width; "
+            "results come as `framework` arrays (None: NumPy). sampler (\"auto\" and \"uniform\": uniform, or an "
+            "rl.InstanceSampler) places every env in a sampled instance and restarts it in its next one on each reset "
+            "without task_ids and each autoreset without next_task_ids: the draw of the seed, the env id and the "
+            "env's reset counter, the draws of a torch BatchedEnv with the same seed and sampler. sampler=None starts "
+            "every env at instance 0 and keeps its instance unless reset or next_task_ids name one. A batch's rows are "
+            "as wide as the widest instance among its envs (after a step: their instances and those they autoreset "
+            "into), so a step costs each env's own instance width; "
             "words fixes the width of every batch instead (at least table.words).")
         .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); })
         .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); })
@@ -1952,6 +1984,8 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("numeric_words", [](const PyCpuPool& p) { return p.pool().numeric_words(); })
         .def_prop_ro("label_width", [](const PyCpuPool& p) { return p.pool().label_width(); })
         .def_prop_ro("framework", [](const PyCpuPool& p) { return framework_name(p.framework()); })
+        .def_prop_ro("sampler", [](const PyCpuPool& p) { return Arg<ann::Sampler>(p.sampler()); },
+                     "The rl.InstanceSampler of resets and autoresets (None: instances are kept).")
         .def_prop_ro("seed", [](const PyCpuPool& p) { return p.pool().config().seed; })
         .def_prop_ro("max_steps", [](const PyCpuPool& p) { return p.pool().config().max_steps; })
         .def_prop_ro("dead_end", [](const PyCpuPool& p) { return std::string(dead_end_name(p.pool().config().dead_end)); })
@@ -1963,7 +1997,8 @@ void bind_rl(nb::module_& parent)
             },
             "env_ids"_a = nb::none(), "task_ids"_a = nb::none(), nb::kw_only(), "goal_pos"_a = nb::none(),
             "goal_neg"_a = nb::none(),
-            "Resets envs env_ids [n] (None: every env) into instances task_ids [n] (None: their current ones), with "
+            "Resets envs env_ids [n] (None: every env) into instances task_ids [n] (None: sampled ones, or their "
+            "current ones with sampler=None), with "
             "goal masks goal_pos / goal_neg [n, W] (W at least each env's instance words; None: their instances' "
             "goals; goals=True pools only); returns their observations. Draw counters are kept. Raises if one of them "
             "has a step in flight.")
@@ -1975,8 +2010,8 @@ void bind_rl(nb::module_& parent)
             "env_ids"_a = nb::none(), "actions"_a = nb::none(), nb::kw_only(), "next_task_ids"_a = nb::none(),
             "Enqueues one step of envs env_ids [n] (None: every env) and returns its ticket at once: actions [n] "
             "(int64 or int32 indices into the canonical successor order; None: the random policy), next_task_ids [n] "
-            "(the instances autoresetting envs restart in; None: their own). Raises for an unknown or repeated env id "
-            "or one with a step in flight.")
+            "(the instances autoresetting envs restart in; None: sampled ones, or their own with sampler=None). Raises "
+            "for an unknown or repeated env id or one with a step in flight.")
         .def("recv", &PyCpuPool::recv, "min_rows"_a = 0,
              "The results of the oldest pending sends, in send order: whole sends with at least min_rows rows together "
              "(0: exactly one send). Blocks until they are done; raises if fewer rows are pending.")

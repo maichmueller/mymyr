@@ -148,8 +148,8 @@ def test_rows_cost_their_own_instance_width(grippers):
     assert mixed.shape == (3, 2)
     assert rl.expand(table, mixed, np.array([0, 1, 0], np.int32)).words == 2
     assert table.initial_states().shape == (3, 7)
-    # the pool: each batch as wide as its envs' instances (and those they autoreset into)
-    pool = rl.CpuEnvPool(table, 8, threads=2, seed=1)
+    # the pool: each batch as wide as its envs' instances (and those they autoreset into; kept without a sampler)
+    pool = rl.CpuEnvPool(table, 8, threads=2, seed=1, sampler=None)
     assert pool.words is None
     assert pool.reset(task_ids=np.zeros(8, np.int32)).words == 1
     b = pool.step()
@@ -189,7 +189,7 @@ def test_one_numeric_storage_per_table():
     assert got.dtype == np.float64 and np.array_equal(got, want, equal_nan=True)
     assert got[1, 0] == 0.5
     # env observations: the decoded values follow the per-state API along each env's moves
-    pool = rl.CpuEnvPool(table, 6, threads=2, seed=3)
+    pool = rl.CpuEnvPool(table, 6, threads=2, seed=3, sampler=None)  # autoresets keep the instances
     ids = np.array([0, 1, 2, 1, 0, 2], np.int32)
     obs = pool.reset(task_ids=ids)
     cur = [table.tasks[i].initial_state for i in ids]

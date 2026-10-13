@@ -98,7 +98,7 @@ public:
     DeviceBrfs& operator=(const DeviceBrfs&) = delete;
 
     /// Runs the search (once). Throws std::invalid_argument for tasks the device cannot run (ChunkGenerator::
-    /// unsupported), std::length_error beyond 2^31 - 2 states.
+    /// search_unsupported), std::length_error beyond 2^31 - 2 states.
     DeviceBrfsResult run();
 
     /// State rows [0, size) of words() words in BrFS order (numeric tasks: atom padding, then double fluent slots),

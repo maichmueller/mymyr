@@ -10,7 +10,12 @@
 //      episode continues past the window: only the window's steps are drawn);
 //   2. the goal: the atoms of states[t', i] (restricted to goal_atoms if given), or `subset` of them drawn one by one
 //      without replacement (the r-th set bit in ascending slot order, r uniform over the remaining ones);
-//   3. achieved = (states[t, i] & goal) == goal; reward = step_reward, plus goal_reward if achieved.
+//   3. achieved = (states[t, i] & goal) == goal; reward = step_reward, plus goal_reward if achieved;
+//   4. valid: under the relabelled goal the episode ends at its first state that holds the goal, so the transition is
+//      part of that episode only if no earlier state of the episode holds it: none of the reached states of steps
+//      start .. t - 1 and, when prev_states (the states the steps started from) is given, not the episode's first state
+//      prev_states[start, i] (its reset state, or the state before the window). Without prev_states that first state
+//      is not tested. Callers drop the relabels with valid == 0 (they would follow a terminal state).
 // Every draw is a Philox block of rl/rng.hpp: (seed; draw, env, purpose k_her) with env = env_ids[i] (or first_env + i)
 // and draw = (t k + j)(1 + subset) + d, d = 0 for the step and d = 1 .. subset for the atoms. A relabel therefore depends
 // on (seed, env id, t, j) and the window only, not on the batch, the thread or the device: the host loop, the device
@@ -49,6 +54,7 @@ struct HerBatch
     u32 row_words = 0;                // state row stride (>= words)
     const u64* states = nullptr;      // [T, N, row_words]
     const u8* done = nullptr;         // [T, N]
+    const u64* prev_states = nullptr; // [T, N, row_words]: the states the steps started from, or null (see valid)
     const u64* goal_atoms = nullptr;  // [words], [N, words] (goal_atoms_stride = words) or null (all atoms)
     u32 goal_atoms_stride = 0;        // 0: one row shared by every env; words: env i's row i (its instance's atoms)
     const u32* env_ids = nullptr;     // [N] or null (first_env + i)
@@ -57,6 +63,7 @@ struct HerBatch
     i32* source = nullptr;
     u8* achieved = nullptr;
     f32* reward = nullptr;
+    u8* valid = nullptr;
 };
 
 /// The episode bounds of step t of environment i: (start, end) as in the file comment.
@@ -68,6 +75,15 @@ MYMYR_HD void her_bounds(const HerBatch& b, u64 t, u64 i, u64& start, u64& end)
     end = t;
     while (end + 1 < b.steps && !b.done[end * b.envs + i])
         ++end;
+}
+
+/// Whether the state row s holds every atom of the goal g (the first `words` words).
+MYMYR_HD bool her_holds(const u64* s, const u64* g, u32 words)
+{
+    bool ok = true;
+    for (u32 w = 0; w < words; ++w)
+        ok = ok && (s[w] & g[w]) == g[w];
+    return ok;
 }
 
 /// Relabel j of transition (t, i).
@@ -116,10 +132,14 @@ MYMYR_HD void her_one(const HerBatch& b, const HerConfig& c, u64 t, u64 i, u32 j
             }
         }
     }
-    const u64* reached = b.states + (t * b.envs + i) * b.row_words;
-    bool ok = true;
-    for (u32 w = 0; w < b.words; ++w)
-        ok = ok && (reached[w] & g[w]) == g[w];
+    const bool ok = her_holds(b.states + (t * b.envs + i) * b.row_words, g, b.words);
+    if (b.valid)
+    {
+        bool first = !(b.prev_states && her_holds(b.prev_states + (start * b.envs + i) * b.row_words, g, b.words));
+        for (u64 u = start; first && u < t; ++u)
+            first = !her_holds(b.states + (u * b.envs + i) * b.row_words, g, b.words);
+        b.valid[out] = first ? 1 : 0;
+    }
     if (b.source)
         b.source[out] = static_cast<i32>(src);
     if (b.achieved)
@@ -128,7 +148,7 @@ MYMYR_HD void her_one(const HerBatch& b, const HerConfig& c, u64 t, u64 i, u32 j
         b.reward[out] = c.step_reward + (ok ? c.goal_reward : 0.0f);
 }
 
-/// Every relabel of the window (host loop; T * N * k independent relabels). Throws std::invalid_argument for a
-/// missing array or k == 0.
+/// Every relabel of the window (host loop; T * N * k independent relabels, valid tests O(t - start) states each).
+/// Throws std::invalid_argument for a missing array or k == 0.
 void her_relabel(const HerBatch& b, const HerConfig& c);
 }  // namespace mymyr::rl

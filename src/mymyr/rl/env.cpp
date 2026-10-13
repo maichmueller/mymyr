@@ -116,6 +116,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
     if (!m_suite)
         throw std::invalid_argument("mymyr: HostEnv: null task suite");
     m_init_count.resize(m_suite->size());
+    m_init_goal.resize(m_suite->size());
     m_tasks.resize(m_suite->size());
     m_label_width = std::max<u32>(1, m_suite->label_width());
     for (u32 i = 0; i < m_suite->size(); ++i)
@@ -126,6 +127,7 @@ HostEnv::HostEnv(TaskSuitePtr suite, const EnvConfig& config) : m_suite(std::mov
         Successors& succ = lease->successors();
         succ.prepare(view_of(m_suite->instance(i).init.data(), m_suite->table_of(i).words(), task.numeric_words()));
         m_init_count[i] = count_prepared(succ, m_config);
+        m_init_goal[i] = succ.goal_holds() ? 1 : 0;
     }
 }
 
@@ -153,7 +155,7 @@ u32 HostEnv::reset_row(EnvBatch& b, u64 i, u32 instance, bool keep_goals, u32 di
     return m_init_count[instance];
 }
 
-void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals, u8* goal) const
+void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals) const
 {
     check_env(*m_suite, b, nullptr);
     m_suite->check_task_ids(b.task_ids, b.rows);
@@ -164,8 +166,8 @@ void HostEnv::reset(EnvBatch& b, const u8* mask, i32* count, bool keep_goals, u8
         const u32 c = reset_row(b, i, b.instance(i), keep_goals, b.words);  // what the row held: unknown
         if (count)
             count[i] = static_cast<i32>(c);
-        if (goal)
-            goal[i] = goal_row(b, i) ? 1 : 0;
+        if (b.at_goal)
+            b.at_goal[i] = reset_goal(b, i, b.instance(i)) ? 1 : 0;
     }
 }
 
@@ -178,6 +180,11 @@ bool HostEnv::goal_row(const EnvBatch& b, u64 i) const
     return task.is_goal(row_view(b, i, task));
 }
 
+bool HostEnv::reset_goal(const EnvBatch& b, u64 i, u32 instance) const
+{
+    return b.goals() ? goal_row(b, i) : m_init_goal[instance] != 0;
+}
+
 void HostEnv::goal(const EnvBatch& b, u8* goal) const
 {
     if (b.rows && !goal)
@@ -186,6 +193,14 @@ void HostEnv::goal(const EnvBatch& b, u8* goal) const
     m_suite->check_task_ids(b.task_ids, b.rows);
     for (u64 row = 0; row < b.rows; ++row)
         goal[row] = goal_row(b, row) ? 1 : 0;
+}
+
+void HostEnv::refresh(EnvBatch& b, i32* count, ThreadPool* pool)
+{
+    if (count)
+        this->count(b, count, pool);
+    if (b.at_goal)
+        goal(b, b.at_goal);
 }
 
 u32 HostEnv::count_row(const EnvBatch& b, u64 i) const
@@ -254,7 +269,9 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
     // 1. the successors of the current state, in canonical order
     const u32 nw = bits::trimmed_size(row, w);
     succ.prepare(StateView{row, nw, nn ? row + W : nullptr, nn});
-    const bool already_goal = b.goals() ? mask_goal(row, b.goal_pos + i * W, b.goal_neg + i * W, w) : succ.goal_holds();
+    const bool already_goal = b.at_goal ? b.at_goal[i] != 0
+                              : b.goals() ? mask_goal(row, b.goal_pos + i * W, b.goal_neg + i * W, w)
+                                          : succ.goal_holds();
     S.succ.clear();
     S.schema.clear();
     S.binding.clear();
@@ -349,8 +366,12 @@ void HostEnv::step_row(EnvBatch& b, u64 i, const StepOutputs& out, u64 o, i64 ac
         const u32 n0 = reset_row(b, i, next, false, w);
         if (out.count)
             out.count[o] = static_cast<i32>(n0);
+        if (b.at_goal)
+            b.at_goal[i] = reset_goal(b, i, next) ? 1 : 0;
         return;
     }
+    if (b.at_goal)
+        b.at_goal[i] = g ? 1 : 0;
     if (st == k_ok)
     {
         std::copy_n(s2, w, row);

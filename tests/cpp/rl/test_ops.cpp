@@ -4,7 +4,9 @@
 //   - prefix_masks / schema_masks equal the masks computed from the expanded labels one by one, for every prefix of a
 //     taken action and for prefixes no action extends;
 //   - her_relabel: sources inside the episode window of the strategy, goals are (subsets of) the source's atoms,
-//     achieved / reward are the goal test, and a relabel depends on (seed, env id, t, j) only (not on the batch).
+//     achieved / reward are the goal test, valid is "no earlier state of the episode holds the goal" (with and
+//     without the states the steps started from), and a relabel depends on (seed, env id, t, j) only (not on the
+//     batch).
 
 #include "../support/suite.hpp"
 #include "mymyr/novelty/novelty_table.hpp"
@@ -39,6 +41,7 @@ struct Window
 {
     u32 RW = 0, W = 0;
     std::vector<u64> states;
+    std::vector<u64> prev;  // [T, N, RW]: the states the steps started from
     std::vector<u8> done;
 };
 
@@ -68,6 +71,7 @@ Window rollout(const TaskPtr& task, u64 N, u64 T, u64 seed)
     o.truncated = trunc.data();
     for (u64 t = 0; t < T; ++t)
     {
+        w.prev.insert(w.prev.end(), states.begin(), states.end());
         env.step(b, o);
         w.states.insert(w.states.end(), finals.begin(), finals.end());
         for (u64 i = 0; i < N; ++i)
@@ -237,20 +241,23 @@ struct Relabels
     std::vector<i32> source;
     std::vector<u8> achieved;
     std::vector<f32> reward;
+    std::vector<u8> valid;
 };
 
 Relabels relabel(const Window& w, u64 T, u64 N, const rl::HerConfig& c, const u64* atoms = nullptr,
-                 const u32* env_ids = nullptr, u64 column = 0, u64 columns = 0)
+                 const u32* env_ids = nullptr, u64 column = 0, u64 columns = 0, bool with_prev = false)
 {
     // columns [column, column + columns) of the window (all of them when columns == 0)
     const u64 n = columns ? columns : N;
-    std::vector<u64> states(T * n * w.RW);
+    std::vector<u64> states(T * n * w.RW), prev(T * n * w.RW);
     std::vector<u8> done(T * n);
     for (u64 t = 0; t < T; ++t)
         for (u64 i = 0; i < n; ++i)
         {
             std::copy_n(w.states.begin() + static_cast<std::ptrdiff_t>((t * N + column + i) * w.RW), w.RW,
                         states.begin() + static_cast<std::ptrdiff_t>((t * n + i) * w.RW));
+            std::copy_n(w.prev.begin() + static_cast<std::ptrdiff_t>((t * N + column + i) * w.RW), w.RW,
+                        prev.begin() + static_cast<std::ptrdiff_t>((t * n + i) * w.RW));
             done[t * n + i] = w.done[t * N + column + i];
         }
     Relabels r;
@@ -258,6 +265,7 @@ Relabels relabel(const Window& w, u64 T, u64 N, const rl::HerConfig& c, const u6
     r.source.assign(T * n * c.k, 0);
     r.achieved.assign(T * n * c.k, 0);
     r.reward.assign(T * n * c.k, 0);
+    r.valid.assign(T * n * c.k, 2);
     rl::HerBatch b;
     b.steps = T;
     b.envs = n;
@@ -265,12 +273,14 @@ Relabels relabel(const Window& w, u64 T, u64 N, const rl::HerConfig& c, const u6
     b.row_words = w.RW;
     b.states = states.data();
     b.done = done.data();
+    b.prev_states = with_prev ? prev.data() : nullptr;
     b.goal_atoms = atoms;
     b.env_ids = env_ids;
     b.goal = r.goal.data();
     b.source = r.source.data();
     b.achieved = r.achieved.data();
     b.reward = r.reward.data();
+    b.valid = r.valid.data();
     rl::her_relabel(b, c);
     return r;
 }
@@ -283,55 +293,75 @@ TEST(HerOps, RelabelsFollowTheStrategyAndTheGoalTest)
     std::vector<u64> atoms(w.W, 0);
     for (u32 k = 0; k < w.W; ++k)
         atoms[k] = 0x5555'5555'5555'5555ull << (k % 2);
+    const auto holds = [&](const u64* s, const u64* g)
+    {
+        for (u32 k = 0; k < w.W; ++k)
+            if ((s[k] & g[k]) != g[k])
+                return false;
+        return true;
+    };
+    u64 valid = 0, dropped = 0, dropped_at_start = 0;
     for (const rl::HerStrategy st : {rl::HerStrategy::Future, rl::HerStrategy::Final, rl::HerStrategy::Episode})
         for (const u32 subset : {0u, 1u, 3u})
             for (const bool restrict : {false, true})
-            {
-                rl::HerConfig c;
-                c.strategy = st;
-                c.k = 4;
-                c.subset = subset;
-                c.seed = 99;
-                c.step_reward = -1.0f;
-                c.goal_reward = 10.0f;
-                const Relabels r = relabel(w, T, N, c, restrict ? atoms.data() : nullptr);
-                for (u64 t = 0; t < T; ++t)
-                    for (u64 i = 0; i < N; ++i)
-                    {
-                        u64 start = t, end = t;
-                        while (start > 0 && !w.done[(start - 1) * N + i])
-                            --start;
-                        while (end + 1 < T && !w.done[end * N + i])
-                            ++end;
-                        for (u32 j = 0; j < c.k; ++j)
+                for (const bool with_prev : {false, true})
+                {
+                    rl::HerConfig c;
+                    c.strategy = st;
+                    c.k = 4;
+                    c.subset = subset;
+                    c.seed = 99;
+                    c.step_reward = -1.0f;
+                    c.goal_reward = 10.0f;
+                    const Relabels r = relabel(w, T, N, c, restrict ? atoms.data() : nullptr, nullptr, 0, 0, with_prev);
+                    for (u64 t = 0; t < T; ++t)
+                        for (u64 i = 0; i < N; ++i)
                         {
-                            const u64 o = (t * N + i) * c.k + j;
-                            const u64 src = static_cast<u64>(r.source[o]);
-                            const u64 lo = st == rl::HerStrategy::Future ? t : st == rl::HerStrategy::Final ? end : start;
-                            EXPECT_TRUE(src >= lo && src <= end) << t << " " << i;
-                            const u64* s = w.states.data() + (src * N + i) * w.RW;
-                            const u64* g = r.goal.data() + o * w.W;
-                            const u64* reached = w.states.data() + (t * N + i) * w.RW;
-                            u32 size = 0, cand = 0;
-                            bool ok = true;
-                            for (u32 k = 0; k < w.W; ++k)
+                            u64 start = t, end = t;
+                            while (start > 0 && !w.done[(start - 1) * N + i])
+                                --start;
+                            while (end + 1 < T && !w.done[end * N + i])
+                                ++end;
+                            for (u32 j = 0; j < c.k; ++j)
                             {
-                                const u64 a = restrict ? atoms[k] : ~u64{0};
-                                EXPECT_EQ(g[k] & ~(s[k] & a), 0u);  // a subset of the source's (eligible) atoms
-                                size += static_cast<u32>(std::popcount(g[k]));
-                                cand += static_cast<u32>(std::popcount(s[k] & a));
-                                ok = ok && (reached[k] & g[k]) == g[k];
-                            }
-                            EXPECT_EQ(size, subset ? std::min(subset, cand) : cand);
-                            EXPECT_EQ(r.achieved[o], ok ? 1 : 0);
-                            EXPECT_EQ(r.reward[o], ok ? 9.0f : -1.0f);
-                            if (src == t)
-                            {
-                                EXPECT_TRUE(ok);  // the transition's own reached state
+                                const u64 o = (t * N + i) * c.k + j;
+                                const u64 src = static_cast<u64>(r.source[o]);
+                                const u64 lo = st == rl::HerStrategy::Future ? t : st == rl::HerStrategy::Final ? end : start;
+                                EXPECT_TRUE(src >= lo && src <= end) << t << " " << i;
+                                const u64* s = w.states.data() + (src * N + i) * w.RW;
+                                const u64* g = r.goal.data() + o * w.W;
+                                const u64* reached = w.states.data() + (t * N + i) * w.RW;
+                                u32 size = 0, cand = 0;
+                                bool ok = true;
+                                for (u32 k = 0; k < w.W; ++k)
+                                {
+                                    const u64 a = restrict ? atoms[k] : ~u64{0};
+                                    EXPECT_EQ(g[k] & ~(s[k] & a), 0u);  // a subset of the source's (eligible) atoms
+                                    size += static_cast<u32>(std::popcount(g[k]));
+                                    cand += static_cast<u32>(std::popcount(s[k] & a));
+                                    ok = ok && (reached[k] & g[k]) == g[k];
+                                }
+                                EXPECT_EQ(size, subset ? std::min(subset, cand) : cand);
+                                EXPECT_EQ(r.achieved[o], ok ? 1 : 0);
+                                EXPECT_EQ(r.reward[o], ok ? 9.0f : -1.0f);
+                                // valid: no earlier state of the episode (its first one with prev_states) holds the goal
+                                const bool first_holds = holds(w.prev.data() + (start * N + i) * w.RW, g);
+                                bool before = with_prev && first_holds;
+                                for (u64 u = start; !before && u < t; ++u)
+                                    before = holds(w.states.data() + (u * N + i) * w.RW, g);
+                                EXPECT_EQ(r.valid[o], before ? 0 : 1) << t << " " << i;
+                                (before ? dropped : valid) += 1;
+                                dropped_at_start += with_prev && first_holds ? 1 : 0;
+                                if (src == t)
+                                {
+                                    EXPECT_TRUE(ok);  // the transition's own reached state
+                                }
                             }
                         }
-                    }
-            }
+                }
+    EXPECT_GT(valid, 0u);
+    EXPECT_GT(dropped, 0u);
+    EXPECT_GT(dropped_at_start, 0u);
 }
 
 TEST(HerOps, RelabelsDoNotDependOnTheBatch)

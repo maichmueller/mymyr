@@ -59,8 +59,7 @@ def mctx_root(
     _check(env)
     obs = env.observation(state)
     k = int(num_actions)
-    goal = env.step(0, state, jnp.full(state.task_id.shape, -1, jnp.int32))[-1]["goal"]
-    terminal = goal | (state.count == 0)
+    terminal = state.at_goal | (state.count == 0)
     root = mctx.RootFnOutput(
         prior_logits=_logits(prior_fn, params, obs, k),
         value=jnp.where(terminal, jnp.float32(0), jnp.asarray(value_fn(params, obs), jnp.float32)),
@@ -91,7 +90,7 @@ def mctx_recurrent_fn(
         del rng_key  # the dynamics are deterministic: the action is given
         state, obs, reward, terminated, truncated, info = env.step(0, embedding, action)
         invalid = info["invalid"]
-        absorbed = (embedding.count == 0) | (terminated & (info["schema"] < 0))
+        absorbed = embedding.at_goal | (embedding.count == 0)  # the step did not move
 
         def keep_absorbing(previous: Any, current: Any) -> Any:
             mask = absorbed.reshape(absorbed.shape + (1,) * (current.ndim - absorbed.ndim))

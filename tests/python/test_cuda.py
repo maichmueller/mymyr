@@ -377,14 +377,17 @@ def test_state_arena_refuses_capacities_and_widths_beyond_64_bits(ctx):
     assert arena.capacity == 4
 
 
-def test_device_expand_refuses_capacities_and_widths_beyond_its_limits(ctx, blocks):
-    rows = mc.to_memory(np.asarray(blocks.encode([blocks.initial_state])), "device", ctx)
+def test_device_expand_refuses_capacities_beyond_its_limits_and_takes_any_width(ctx, blocks):
+    host = np.asarray(blocks.encode([blocks.initial_state]))
+    rows = mc.to_memory(host, "device", ctx)
     with pytest.raises(ValueError, match=r"^mymyr: capacity must be None or an int in \[0, 2147483647\], got 4611686018427387904$"):
         rl.expand(blocks, rows, capacity=2**62)
-    with pytest.raises(ValueError, match=r"^mymyr: words must be None or an int in \[0, 64\], got 65$"):
-        rl.expand(blocks, rows, words=65)
     e = rl.expand(blocks, rows, capacity=64)
     assert e.capacity == 64 and not e.overflow
+    # successor rows wider than 64 words, as on the host
+    wide = rl.expand(blocks, rows, words=65)
+    want = rl.expand(blocks, host, words=65)
+    assert wide.words == 65 and wide.total == want.total and tuple(wide.succ.shape) == want.succ.shape
 
 
 def test_presizing_hints_above_the_state_id_limit_raise(ctx, blocks):

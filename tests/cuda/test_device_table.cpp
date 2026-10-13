@@ -9,10 +9,13 @@
 //     next_task_ids, per-env goals, both dead-end modes; with the bucket launch changing between steps, tiny chunks, a
 //     stream switch, and the batch's rows rearranged in the middle (a stale launch order: not a permutation of the
 //     rows, or one no longer sorted by key, so the range launches take every position);
-//   - task ids outside the table are reported.
+//   - task ids outside the table are reported;
+//   - tables of wide tasks (rows past 64 words, object bitsets past 8 words, instances past the device kernels' 2048
+//     objects: expanded on the host, per instance) expand and step as on the host, on every path.
 
 #include "env_harness.hpp"
 #include "mymyr/cuda/expand.hpp"
+#include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
 
 #include <gtest/gtest.h>
@@ -201,6 +204,8 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
         custom_goals(h.v, W);
         upload(d.gpos.data(), h.v.gpos, d.s);
         upload(d.gneg.data(), h.v.gneg, d.s);
+        host.refresh(h.b, h.out.count);  // goal masks written directly: the at_goal flags
+        env.refresh(d.b, d.out.count);
     }
     for (int t = 0; t < r.steps; ++t)
     {
@@ -222,6 +227,7 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
             permute_host(h.v.steps, perm, 1);
             permute_host(h.v.draws, perm, 1);
             permute_host(h.v.count, perm, 1);
+            permute_host(h.v.at_goal, perm, 1);
             if (r.goals)
             {
                 permute_host(h.v.gpos, perm, W);
@@ -232,6 +238,7 @@ void run_env(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const r
             permute_device<i32>(d.steps, N, 1, perm, d.s);
             permute_device<u64>(d.draws, N, 1, perm, d.s);
             permute_device<i32>(d.count, N, 1, perm, d.s);
+            permute_device<u8>(d.at_goal, N, 1, perm, d.s);
             permute_device<u32>(d.counts, N, d.C, perm, d.s, r.keep_order && I > 1 ? d.C - 2 : d.C);
             permute_device<u64>(d.views, N, d.V, perm, d.s);
             if (r.goals)
@@ -578,9 +585,22 @@ TEST(DeviceTableEnv, TaskIdsAreChecked)
         // a next task id outside the table: reported, the row keeps its instance
         std::vector<i32> next(ids.size(), static_cast<i32>(I));
         upload(d.next.data(), next, d.s);
-        for (int t = 0; t < 12; ++t)
-            env.step(d.b, d.out, {}, static_cast<const i32*>(d.next.data()));
-        EXPECT_THROW(env.check_errors(), std::invalid_argument);
+        const auto* next_ids = static_cast<const i32*>(d.next.data());
+        bool raised = false;
+        try
+        {
+            for (int t = 0; t < 12; ++t)
+                env.step(d.b, d.out, {}, next_ids);
+        }
+        catch (const std::invalid_argument&)
+        {
+            raised = true;
+        }
+        EXPECT_EQ(raised, !env.fast());  // the general path synchronizes: a step raises what an earlier one flagged
+        if (env.fast())
+        {
+            EXPECT_THROW(env.check_errors(), std::invalid_argument);
+        }
         env.check_errors();  // reported once
         // a task id outside the table in reset
         ids[5] = -2;
@@ -588,4 +608,128 @@ TEST(DeviceTableEnv, TaskIdsAreChecked)
         env.reset(d.b);
         EXPECT_THROW(env.check_errors(), std::invalid_argument);
     }
+}
+
+// ------------------------------------------------------------------------------------------------ wide tasks
+
+namespace
+{
+/// A chain of n lights (with a few cross links): spread lights a linked light next to a lit one, dim darkens a lit
+/// light and paint-k marks a lit light with color k (`colors` fluent unary predicates). 2n + colors x n fluent atoms
+/// over n objects, so the sizes reach rows past 64 words, object bitsets past 8 words (plan::object_words' classes)
+/// and instances past the device kernels' 2048 objects. Goal: light 1 lit (and of color 0).
+TaskPtr lights(u32 n, u32 colors)
+{
+    std::string d = "(define (domain lights) (:requirements :strips :typing) (:types light) (:predicates (on ?x - light) "
+                     "(off ?x - light) (linked ?x ?y - light)";
+    for (u32 k = 0; k < colors; ++k)
+        d += " (c" + std::to_string(k) + " ?x - light)";
+    d += ") (:action spread :parameters (?x ?y - light) :precondition (and (on ?x) (linked ?x ?y) (off ?y)) :effect "
+         "(and (on ?y) (not (off ?y)))) (:action dim :parameters (?x - light) :precondition (on ?x) :effect (and (off ?x) "
+         "(not (on ?x))))";
+    for (u32 k = 0; k < colors; ++k)
+        d += " (:action paint-" + std::to_string(k) + " :parameters (?x - light) :precondition (on ?x) :effect (c" +
+             std::to_string(k) + " ?x))";
+    d += ")";
+    std::string p = "(define (problem p) (:domain lights) (:objects";
+    for (u32 i = 0; i < n; ++i)
+        p += " l" + std::to_string(i);
+    p += " - light) (:init (on l0)";
+    for (u32 i = 1; i < n; ++i)
+        p += " (off l" + std::to_string(i) + ")";
+    for (u32 i = 0; i + 1 < n; ++i)
+        p += " (linked l" + std::to_string(i) + " l" + std::to_string(i + 1) + ")";
+    for (u32 i = 0; i < n; i += 5)
+        p += " (linked l" + std::to_string(i) + " l" + std::to_string((i * 7 + 3) % n) + ")";
+    p += std::string(") (:goal ") + (colors ? "(and (on l1) (c0 l1))" : "(on l1)") + "))";
+    TaskOptions o;
+    o.atoms = TaskOptions::Atoms::Reachable;
+    return Task::create(*frontend::Domain::from_string(d, "lights.pddl")->instantiate_string(p, "p.pddl"), o);
+}
+
+struct WideTable
+{
+    std::string name;
+    rl::TaskTablePtr table;
+    cuda::DeviceExpander::Mode mode;
+    bool fast;  // the env's fast path runs it
+};
+
+std::vector<WideTable> wide_tables()
+{
+    auto table = [](std::initializer_list<std::pair<u32, u32>> sizes)
+    {
+        std::vector<TaskPtr> tasks;
+        for (const auto& [n, colors] : sizes)
+            tasks.push_back(lights(n, colors));
+        return rl::TaskTable::create(tasks);
+    };
+    using M = cuda::DeviceExpander::Mode;
+    return {
+        {"rows of 75 words", table({{300, 14}}), M::Single, true},
+        {"object bitsets of 12 words", table({{700, 0}}), M::Single, true},
+        {"object bitsets of 24 words, rows of 104", table({{1100, 4}}), M::Single, true},
+        {"one pass over every width", table({{40, 4}, {300, 4}, {700, 4}, {1100, 4}}), M::Multi, true},
+        {"an instance on the host", table({{40, 4}, {700, 4}, {2200, 4}, {300, 4}}), M::PerInstance, false},
+        {"one instance on the host", table({{2200, 0}}), M::Host, false},
+    };
+}
+}  // namespace
+
+TEST(DeviceTableWide, ExpandEqualsHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const WideTable& w : wide_tables())
+    {
+        SCOPED_TRACE(w.name);
+        const rl::TaskTable& T = *w.table;
+        std::vector<u64> rows;
+        std::vector<i32> ids;
+        table_rows(T, 4, rows, ids);
+        const u32 W = T.words(), L = std::max<u32>(1, T.label_width());
+        const u64 N = ids.size();
+        const Flat full = host_expand(T, rows, ids, 1, L);
+        cuda::DeviceExpander ex(ctx, w.table);
+        EXPECT_EQ(ex.mode(), w.mode);
+        const cudaStream_t s = ex.stream();
+        const cuda::DeviceBuffer d_rows = to_device(ctx, rows, s);
+        const cuda::DeviceBuffer d_ids = to_device(ctx, ids, s);
+        for (const u64 chunk : {u64{0}, u64{3}})
+            for (const auto launch : {cuda::BucketLaunch::Widest, cuda::BucketLaunch::PerBucket})
+                for (const u64 cap : {full.total, full.total / 2})
+                {
+                    SCOPED_TRACE("chunk " + std::to_string(chunk) + (launch == cuda::BucketLaunch::Widest ? " widest" : " per bucket") +
+                                 " capacity " + std::to_string(cap));
+                    ex.set_chunk_rows(chunk);
+                    ex.set_launch(launch);
+                    const Flat h = host_expand(T, rows, ids, cap, L);
+                    u64 total = 0;
+                    const Flat d = device_expand(ctx, ex, d_rows, d_ids, N, W, cap, L, &total);
+                    ASSERT_EQ(total, h.total);
+                    expect_flat_equal(d, h);
+                    if (::testing::Test::HasFatalFailure())
+                        return;
+                }
+    }
+}
+
+TEST(DeviceTableWide, EnvEqualsHost)
+{
+    SKIP_WITHOUT_GPU();
+    auto ctx = context();
+    for (const WideTable& w : wide_tables())
+        for (const auto path : {cuda::DeviceEnv::Path::Auto, cuda::DeviceEnv::Path::General})
+        {
+            SCOPED_TRACE(w.name + (path == cuda::DeviceEnv::Path::Auto ? " auto" : " general"));
+            const std::string why = cuda::DeviceEnv::fast_unsupported(*w.table, config(1));
+            EXPECT_EQ(why.empty(), w.fast) << why;
+            RunOptions r;
+            r.goals = true;
+            r.rearrange = true;
+            r.steps = 18;
+            run_env(ctx, w.table, config(0x71de + w.table->size()), path, r);
+            if (::testing::Test::HasFatalFailure())
+                return;
+        }
 }

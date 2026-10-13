@@ -195,7 +195,7 @@ rl::HerStrategy her_strategy(const std::string& s)
 }
 
 void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source, ArrayArg achieved, ArrayArg reward,
-                 Arg<ann::HerStrategy> strategy, u32 subset, u64 seed, u64 first_env, ArrayArg env_ids, ArrayArg goal_atoms,
+                 ArrayArg valid, ArrayArg prev_states, Arg<ann::HerStrategy> strategy, u32 subset, u64 seed, u64 first_env, ArrayArg env_ids, ArrayArg goal_atoms,
                  f32 step_reward, f32 goal_reward, StreamArg stream)
 {
     const Place pl = place_of(states, stream);
@@ -216,6 +216,11 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
     b.envs = static_cast<u64>(N);
     b.row_words = RW;
     b.done = in.get<const u8>(done, "done", {boolt, u8t}, {T, N}, false);
+    std::vector<i64> plead;
+    u32 PW = 0;
+    b.prev_states = in.words_nd(prev_states, "prev_states", {T, N}, false, plead, PW);
+    if (b.prev_states && PW != RW)
+        throw nb::value_error("mymyr: 'prev_states' must have the shape of 'states'");
     std::vector<i64> glead;
     b.goal = in.words_nd(goal, "goal", {T, N, -1}, true, glead, W);
     if (!b.goal || !b.done)
@@ -230,6 +235,7 @@ void her_relabel(ArrayArg states, ArrayArg done, ArrayArg goal, ArrayArg source,
     b.source = in.get<i32>(source, "source", {i32t}, {T, N, K}, true);
     b.achieved = in.get<u8>(achieved, "achieved", {boolt, u8t}, {T, N, K}, true);
     b.reward = in.get<f32>(reward, "reward", {f32t}, {T, N, K}, true);
+    b.valid = in.get<u8>(valid, "valid", {boolt, u8t}, {T, N, K}, true);
     b.env_ids = in.get<const u32>(env_ids, "env_ids", {u32t, i32t}, {N}, false);
     if (!goal_atoms.is_none())
     {
@@ -269,12 +275,14 @@ void bind_rl_ops(nb::module_& parent)
           "The schema masks [N, num_schemas] (bool), mask[i, s] set iff a successor of state i is labelled with schema "
           "s.");
     m.def("her_relabel", &her_relabel, "states"_a, "done"_a, "goal"_a, "source"_a = nb::none(), "achieved"_a = nb::none(),
-          "reward"_a = nb::none(), nb::kw_only(), "strategy"_a = "future", "subset"_a = 0, "seed"_a = 0,
+          "reward"_a = nb::none(), "valid"_a = nb::none(), nb::kw_only(), "prev_states"_a = nb::none(),
+          "strategy"_a = "future", "subset"_a = 0, "seed"_a = 0,
           "first_env"_a = 0, "env_ids"_a = nb::none(), "goal_atoms"_a = nb::none(), "step_reward"_a = 0.0f,
           "goal_reward"_a = 1.0f, "stream"_a = nb::none(),
           "Hindsight relabels (rl/her.hpp) of states [T, N, RW] (64-bit words or 32-bit halves; the reached states) "
           "and done [T, N] into goal [T, N, k, W] (k relabels, W <= RW goal words), source [T, N, k] int32, achieved "
-          "[T, N, k] bool and reward [T, N, k] float32. subset 0: every atom of the source state (restricted to "
+          "[T, N, k] bool, reward [T, N, k] float32 and valid [T, N, k] bool (no earlier state of the episode holds the "
+          "goal; prev_states [T, N, RW], the states the steps started from, adds each episode's first state). subset 0: every atom of the source state (restricted to "
           "goal_atoms [W], or [N, W]: env i's own, e.g. its instance's fluent atoms); env_ids [N] uint32 (None: first_env + "
           "i) name the RNG streams.");
 }
