@@ -409,7 +409,8 @@ TEST(EncodingSchema, TheStoredArraysAreOptionsOfTheFingerprint)
     FlatOptions with_actions_auto;
     with_actions_auto.entity_arrays = EntityArrays::Auto;
     EXPECT_FALSE(EncodingSchema::create(d, with_actions_auto)->implicit_entity_arrays());
-    EXPECT_EQ(EncodingSchema::create(d, with_actions_auto)->fingerprint(), EncodingSchema::create(d, with_actions)->fingerprint());
+    EXPECT_EQ(EncodingSchema::create(d, with_actions_auto)->fingerprint(),
+              EncodingSchema::create(d, with_actions)->fingerprint());
     EXPECT_EQ(parse_entity_arrays("auto"), EntityArrays::Auto);
     EXPECT_EQ(parse_entity_arrays("always"), EntityArrays::Always);
     EXPECT_FALSE(parse_entity_arrays("never"));

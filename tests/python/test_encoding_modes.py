@@ -191,7 +191,7 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
     }
     for threads in (1, 4):
         batch = encoder.encode(states, capacities=exact, threads=threads)
-        assert batch.sizes == {**exact, "overflow": False, "index_overflow": False}
+        assert batch.sizes == {**exact, "overflow": False, "capacity_overflow": False, "index_overflow": False}
         same_arrays(batch, expected)
         roomy = {"entities": exact["entities"] + 9, "tuples": exact["tuples"], "args": exact["args"] + 13}
         batch = encoder.encode(states, capacities=roomy, threads=threads)
@@ -224,3 +224,69 @@ def test_capacities_of_an_empty_batch_and_bad_capacities():
                        ({"entities": -1, "tuples": 1, "args": 1}, (ValueError, OverflowError))):
         with pytest.raises(error):
             encoder.encode(state, capacities=bad)
+
+
+def test_a_capacity_overflow_is_an_overflow_with_its_detail():
+    task = text_task("blocks__probBLOCKS-8-0")
+    states = walk(task, steps=10, walks=1)
+    encoder = encoder_of(task)
+    zero = encoder.encode(states, capacities={"entities": 0, "tuples": 0, "args": 0})
+    assert zero.sizes["overflow"] and zero.sizes["capacity_overflow"] and not zero.sizes["index_overflow"]
+
+
+def test_the_schema_and_the_encoder_say_whether_the_entity_arrays_are_implicit():
+    task = text_task("blocks__probBLOCKS-8-0")
+    for options, implicit in [
+        ({}, False),
+        ({"entity_arrays": "auto"}, False),
+        ({"entity_arrays": "auto", "include_actions": False}, True),
+    ]:
+        assert encoding.EncodingSchema(task, goal_derivations=(), **options).implicit_entities is implicit
+        assert encoder_of(task, **options).implicit_entities is implicit
+
+
+def big_rows(task):
+    """More rows than two threads' share of the graphs (the batch is split only that far)."""
+    rows = task.encode(walk(task, steps=40, walks=4))
+    return np.ascontiguousarray(np.tile(rows, (14, 1)))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_large_batches_are_split_over_threads_and_pools(layout):
+    from mymyr import rl
+
+    task = text_task("gripper__prob05")
+    rows = big_rows(task)
+    assert len(rows) > 2 * 1024
+    encoder = encoder_of(task, layout=layout)
+    base = encoder.encode(rows)
+    for threads in (2, 3, 8, 0):
+        same_arrays(base, encoder.encode(rows, threads=threads))
+    held = rl.ThreadPool(3)
+    same_arrays(base, encoder.encode(rows, pool=held))
+    same_arrays(encoder.encode(rows[:7]), encoder.encode(rows[:7], pool=held))
+    with pytest.raises(TypeError, match="ThreadPool"):
+        encoder.encode(rows, pool=3)
+
+
+def test_a_forked_child_encodes_with_the_threads_of_its_parent():
+    import os
+    import signal
+
+    if not hasattr(os, "fork"):
+        pytest.skip("no fork on this platform")
+    task = text_task("gripper__prob05")
+    rows = big_rows(task)
+    encoder = encoder_of(task)
+    parent = encoder.encode(rows, threads=2)  # the parent's pool exists before the fork
+    child_id = os.fork()
+    if child_id == 0:
+        status = 1
+        try:
+            signal.alarm(60)  # a child that waits on workers it does not have ends here
+            child = encoder.encode(rows, threads=2)
+            status = 0 if np.array_equal(child.relation_args, parent.relation_args) else 2
+        finally:
+            os._exit(status)
+    _, wait_status = os.waitpid(child_id, 0)
+    assert os.waitstatus_to_exitcode(wait_status) == 0

@@ -16,14 +16,15 @@ namespace mymyr::encoding
 namespace
 {
 constexpr usize k_cache_line = 64;
-// Graphs per tile of the relation-major scan: it runs over the tile's graphs one relation at a time, so that the strided
-// writes (G entries apart) fill whole cache lines.
+// Graphs per tile of the relation-major scan: it runs over the tile's graphs one relation at a time, so that the
+// strided writes (G entries apart) fill whole cache lines.
 constexpr u64 k_scan_tile = 128;
 constexpr u64 k_none = std::numeric_limits<u64>::max();
 
 [[nodiscard]] u64 index_limit(IndexType index)
 {
-    return static_cast<u64>(index == IndexType::I64 ? std::numeric_limits<i64>::max() : std::numeric_limits<i32>::max());
+    return static_cast<u64>(index == IndexType::I64 ? std::numeric_limits<i64>::max()
+                                                    : std::numeric_limits<i32>::max());
 }
 
 [[noreturn]] void invalid(const std::string& why) { throw std::invalid_argument("mymyr: encoding: " + why); }
@@ -77,7 +78,7 @@ struct alignas(k_cache_line) Member
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;  // the first row of each kind of invalid input
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0;  // where the slice starts in the batch
-    std::vector<u64> start_tuples, start_args;             // [R] where the slice starts in each relation (relation-major)
+    std::vector<u64> start_tuples, start_args;  // [R] where the slice starts in each relation (relation-major)
     // pass two
     std::vector<u64> run_tuples, run_args;  // [R] the running positions
     std::vector<u32> tile_counts;           // [R, k_scan_tile] the counts of the tile being scanned
@@ -287,11 +288,29 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
     }
 }
 
-/// Runs `f(t)` on every member of the pool without allocating a closure.
-template<class F>
-void run(ThreadPool& pool, const F& f)
+/// The members that encode a batch of `graphs` graphs: all of the pool for a large batch, fewer for a small one, one
+/// (the calling thread) for a batch under the grain.
+[[nodiscard]] u32 members_for(u64 graphs, const ThreadPool& pool) noexcept
 {
-    const std::function<void(u32)> job = [&f](u32 t) { f(t); };
+    const u64 wanted = std::max<u64>(1, (graphs + k_graphs_per_member - 1) / k_graphs_per_member);
+    return static_cast<u32>(std::min<u64>(pool.size(), wanted));
+}
+
+/// Runs `f(t)` for the members [0, members) without allocating a closure: inline for one member, on the pool otherwise
+/// (a pool member beyond `members` has nothing to do).
+template<class F>
+void run(ThreadPool& pool, u32 members, const F& f)
+{
+    if (members == 1)
+    {
+        f(0);
+        return;
+    }
+    const std::function<void(u32)> job = [&f, members](u32 t)
+    {
+        if (t < members)
+            f(t);
+    };
     pool.run(job);
 }
 }  // namespace
@@ -341,11 +360,12 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         s.derived_capacity = graphs * s.derived_stride;
         s.derived = std::make_unique_for_overwrite<u64[]>(s.derived_capacity);
     }
-    s.members.resize(pool.size());
+    const u32 members = members_for(graphs, pool);
+    s.members.resize(members);
 
     // 2. validate, evaluate and count, in parallel over the graphs
-    const Pass pass{in, s, context, context.view(), graphs, pool.size(), R, relation_major, evaluate};
-    run(pool, [&pass](u32 t) { count_range(pass, t); });
+    const Pass pass{in, s, context, context.view(), graphs, members, R, relation_major, evaluate};
+    run(pool, members, [&pass](u32 t) { count_range(pass, t); });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;
     for (const Member& m : s.members)
     {
@@ -358,8 +378,8 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         invalid("task id " + std::to_string(in.task_ids[bad_id]) + " of row " + std::to_string(bad_id) +
                 " is outside the table's " + std::to_string(table.size()) + " instances");
     if (narrow != k_none)
-        invalid("row " + std::to_string(narrow) + " has " + std::to_string(states.words) + " words, its instance needs " +
-                std::to_string(table.instance(pass.instance_of(narrow)).words));
+        invalid("row " + std::to_string(narrow) + " has " + std::to_string(states.words) +
+                " words, its instance needs " + std::to_string(table.instance(pass.instance_of(narrow)).words));
     if (bad_bits != k_none)
         invalid("row " + std::to_string(bad_bits) + " sets an atom bit its instance does not have");
 
@@ -423,13 +443,16 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         invalid("fill needs the scratch and the sizes of count() on the same input");
     if (sizes.overflow != 0)
         invalid("the batch does not fit: its sizes overflow");
-    if (s.members.size() != pool.size())
+    const u32 members = static_cast<u32>(s.members.size());
+    if (pool.size() < members)
         invalid("fill needs the thread pool of count()");
     const EncodingSchema& schema = *m_schema;
     const FlatOptions& options = schema.options();
     const u64 graphs = in.states.rows;
     if (!out.task_ids || !out.num_objects || !out.entity_offsets || !out.relation_offsets || !out.relation_arg_offsets)
         invalid("a destination array of the batch is null");
+    if (sizes.args > 0 && !out.relation_args)
+        invalid("relation_args is null, the batch has tuple arguments");
     if ((out.relation_counts != nullptr) != options.emit_counts)
         invalid(options.emit_counts ? "relation_counts is null, the schema stores it"
                                     : "relation_counts must be null, the schema omits it");
@@ -443,14 +466,14 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
                     *m_context,
                     m_context->view(),
                     graphs,
-                    pool.size(),
+                    members,
                     static_cast<u32>(schema.num_relations()),
                     options.layout == Layout::Relation,
                     evaluate};
     if (options.index == IndexType::I64)
-        run(pool, [&pass, &out](u32 t) { fill_range<i64>(pass, out, t); });
+        run(pool, members, [&pass, &out](u32 t) { fill_range<i64>(pass, out, t); });
     else
-        run(pool, [&pass, &out](u32 t) { fill_range<i32>(pass, out, t); });
+        run(pool, members, [&pass, &out](u32 t) { fill_range<i32>(pass, out, t); });
     const u64 cells = graphs * pass.R;
     auto close = [&]<class I>(I)
     {
@@ -552,9 +575,9 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return bundle;
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in, const FlatCapacities& capacities,
-                                                                    ThreadPool& pool, EncodeScratch& scratch,
-                                                                    FlatSizes& sizes) const
+std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in,
+                                                                    const FlatCapacities& capacities, ThreadPool& pool,
+                                                                    EncodeScratch& scratch, FlatSizes& sizes) const
 {
     sizes = count(in, pool, scratch);
     if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args)

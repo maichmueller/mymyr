@@ -101,7 +101,8 @@ struct Batch
         }
         if (variant.counts)
             b.add("relation_counts", rl::DType::I32,
-                  flat_counts ? std::vector<i64>{2 * static_cast<i64>(R)} : std::vector<i64>{2, static_cast<i64>(R)}, counts);
+                  flat_counts ? std::vector<i64>{2 * static_cast<i64>(R)} : std::vector<i64>{2, static_cast<i64>(R)},
+                  counts);
         b.add("relation_offsets", rl::DType::I32, {size(offsets)}, offsets);
         b.add("relation_arg_offsets", rl::DType::I32, {size(arg_offsets)}, arg_offsets);
         b.add("relation_args", rl::DType::I32, {size(args)}, args);
@@ -261,11 +262,19 @@ TEST(EncodingValidate, ImplicitEntitiesAreCheckedFromTheTuples)
 {
     const Variant implicit{IndexType::I32, Layout::Graph, true, true};
     const auto none = [](Batch&) {};
-    expect_rejected("an object at an auxiliary slot", [](Batch& b) { b.tuples[0][b.handempty] = {{0}}; }, none, implicit);
-    expect_rejected("the auxiliary entity at an argument slot", [](Batch& b) { b.tuples[0][b.on] = {{0, 2}}; }, none, implicit);
-    expect_rejected("an auxiliary entity that no tuple uses", [](Batch& b) { b.tuples[0][b.handempty].clear(); }, none, implicit);
+    expect_rejected("an object at an auxiliary slot", [](Batch& b) { b.tuples[0][b.handempty] = {{0}}; }, none,
+                    implicit);
+    expect_rejected("the auxiliary entity at an argument slot", [](Batch& b) { b.tuples[0][b.on] = {{0, 2}}; }, none,
+                    implicit);
+    expect_rejected("an auxiliary entity that no tuple uses", [](Batch& b) { b.tuples[0][b.handempty].clear(); }, none,
+                    implicit);
     expect_rejected("two entities past the objects", none,
-                    [](Batch& b) { b.entity_offsets = {0, 4, 6}; b.entity_ref.assign(6, 0); b.entity_role.assign(6, 0); },
+                    [](Batch& b)
+                    {
+                        b.entity_offsets = {0, 4, 6};
+                        b.entity_ref.assign(6, 0);
+                        b.entity_role.assign(6, 0);
+                    },
                     implicit);
 }
 }  // namespace

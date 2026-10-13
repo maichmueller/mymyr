@@ -25,11 +25,11 @@
 // graph over several threads calls the same functions. A cell's count is per cell: an instance's cells are sorted by
 // relation id, at most one per relation, and per-cell counts are indexed by the cell, not by the relation.
 //
-// Layouts. The cell (g, r) of G graphs and R relations is segment g * R + r in the graph-major layout and r * G + g in the
-// relation-major one (cell_segment). Graph-major positions are a prefix over the graph's own cells and need nothing but
-// the graph's base (fill_graph). Relation-major positions come from an exclusive scan over all G * R segments in
-// segment order (the cells' counts, as count_graph reports them), written to relation_offsets and
-// relation_arg_offsets before the fill; fill_graph_relation_major reads its cells' positions from the two arrays.
+// Layouts. The cell (g, r) of G graphs and R relations is segment g * R + r in the graph-major layout and r * G + g in
+// the relation-major one (cell_segment). Graph-major positions are a prefix over the graph's own cells and need nothing
+// but the graph's base (fill_graph). Relation-major positions come from an exclusive scan over all G * R segments in
+// segment order (the cells' counts, as count_graph reports them), written to relation_offsets and relation_arg_offsets
+// before the fill; fill_graph_relation_major reads its cells' positions from the two arrays.
 
 #include "mymyr/core/types.hpp"
 
@@ -378,8 +378,8 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
 /// auxiliary entity if totals say the graph has one); and, for its segments g*R .. g*R+R-1, the counts (unless
 /// out.relation_counts is null) and the offsets, which start at `tuple_base` and `arg_base`, and the tuples' arguments.
 /// `totals` is count_graph's result for the same graph. The end entries of the offset arrays are the caller's. A loop
-/// over fill_entities and fill_cell: the cells of an instance are sorted by relation, and the relations between them are
-/// empty.
+/// over fill_entities and fill_cell: the cells of an instance are sorted by relation, and the relations between them
+/// are empty.
 template<class I>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& in, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out)
@@ -445,7 +445,8 @@ MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& i
             for (; r < c.relation; ++r)
                 counts[r] = static_cast<I>(0);
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
-        const u32 n = fill_cell<I>(v, c, in, entity_base, auxiliary, out.relation_args + out.relation_arg_offsets[segment]);
+        const u32 n =
+            fill_cell<I>(v, c, in, entity_base, auxiliary, out.relation_args + out.relation_arg_offsets[segment]);
         if (counts)
         {
             counts[c.relation] = static_cast<I>(n);

@@ -10,7 +10,8 @@ namespace mymyr::encoding
 {
 /// Throws std::invalid_argument ("mymyr: encoding: ...") naming the first violation of the contract of a batch encoded
 /// for `schema`:
-/// - array names, dtypes and shapes, and the scalars; relation_counts is present iff the schema stores counts, and
+/// - array names, dtypes and shapes, and the scalars; entity_role, entity_ref and relation_args may be longer than the
+///   batch needs (a capacity bundle), with zeros past it; relation_counts is present iff the schema stores counts, and
 ///   entity_role and entity_ref are present iff the schema does not have implicit entity arrays;
 /// - offsets: start at 0, never decrease, end at the sizes of the arrays they index; the differences of relation_offsets
 ///   (cell (g, r) is segment g * R + r, or r * G + g in a relation-major batch) equal relation_counts, those of

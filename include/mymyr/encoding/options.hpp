@@ -156,7 +156,8 @@ struct FlatOptions
     /// Stores `relation_counts`. Without it, the tuples of a cell are the difference of two consecutive
     /// `relation_offsets` (in layout order).
     bool emit_counts = true;
-    /// Always stores the entity arrays; Auto omits them when the schema allows it (EncodingSchema::implicit_entity_arrays).
+    /// Always stores the entity arrays; Auto omits them when the schema allows it
+    /// (EncodingSchema::implicit_entity_arrays).
     EntityArrays entity_arrays = EntityArrays::Always;
     HorizonOptions horizon{};
 
@@ -174,8 +175,8 @@ struct FlatOptions
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
-/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "none", "full", "delta", "action";
-/// "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no enumerator.
+/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "none", "full", "delta",
+/// "action"; "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
 [[nodiscard]] std::string_view to_string(Layout value) noexcept;

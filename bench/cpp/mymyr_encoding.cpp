@@ -4,7 +4,8 @@
 //
 // The walk starts at the initial state and restarts there at dead ends. The line reports the best of 5 timed encodes of
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
-// buffers (into_us_per_state, the capacity form; count_us_per_state and fill_us_per_state split it), and the tuples and tuple arguments of the batch.
+// buffers (into_us_per_state, the capacity form; count_us_per_state and fill_us_per_state split it), and the tuples and
+// tuple arguments of the batch.
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -102,9 +103,9 @@ int main(int argc, char** argv)
             arg_buffer(n * R + 1), entity_ref(bundle->find("entity_ref")->elements()),
             args(bundle->find("relation_args")->elements());
         std::vector<u8> entity_role(entity_ref.size());
-        encoding::FlatBuffers buffers{task_ids.data(),   num_objects.data(),   entity_offsets.data(), entity_role.data(),
-                                      entity_ref.data(), counts.data(),        tuple_offsets.data(),  arg_buffer.data(),
-                                      args.data()};
+        encoding::FlatBuffers buffers{task_ids.data(),    num_objects.data(),  entity_offsets.data(),
+                                      entity_role.data(), entity_ref.data(),   counts.data(),
+                                      tuple_offsets.data(), arg_buffer.data(), args.data()};
         const encoding::FlatCapacities capacities{entity_ref.size(), args.size() + n * R, args.size()};
         double best_into = 1e300;
         for (int rep = 0; rep < 6; ++rep)
@@ -135,10 +136,10 @@ int main(int argc, char** argv)
         std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
                     "\"tuples\": %d, \"args\": %d}\n",
-                    std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n), layout.c_str(),
-                    threads, best * 1e6 / static_cast<double>(n), best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), offsets[cells],
-                    arg_offsets[cells]);
+                    std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
+                    layout.c_str(), threads, best * 1e6 / static_cast<double>(n),
+                    best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
+                    best_fill * 1e6 / static_cast<double>(n), offsets[cells], arg_offsets[cells]);
     }
     catch (const std::exception& error)
     {

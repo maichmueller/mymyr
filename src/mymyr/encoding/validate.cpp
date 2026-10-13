@@ -52,6 +52,29 @@ const rl::ArrayInfo* array(const rl::ArrayBundle& batch, const char* name, rl::D
     return info;
 }
 
+/// A one-dimensional array of at least `size` entries (a capacity bundle pads it) whose entries from `size` on are
+/// zero.
+const rl::ArrayInfo* padded_array(const rl::ArrayBundle& batch, const char* name, rl::DType dtype, u64 size, bool wide)
+{
+    const rl::ArrayInfo* info = batch.find(name);
+    if (!info)
+        fail(std::string("the array ") + name + " is missing");
+    if (info->dtype != dtype)
+        fail(std::string("the array ") + name + " has the wrong dtype");
+    if (info->shape.size() != 1 || info->shape[0] < static_cast<i64>(size))
+        fail(std::string("the array ") + name + " is shorter than the batch needs");
+    const void* data = batch.data(*info);
+    for (u64 i = size; i < info->elements(); ++i)
+    {
+        const bool nonzero = dtype == rl::DType::U8 ? static_cast<const u8*>(data)[i] != 0
+                             : wide                 ? static_cast<const i64*>(data)[i] != 0
+                                                    : static_cast<const i32*>(data)[i] != 0;
+        if (nonzero)
+            fail(std::string("the array ") + name + " is not zero past the batch");
+    }
+    return info;
+}
+
 void check_offsets(const Ints& offsets, u64 end, const char* name)
 {
     if (offsets.size == 0 || offsets[0] != 0)
@@ -101,26 +124,28 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         fail("entity_offsets does not start at 0");
     const u64 E = static_cast<u64>(entity_offsets[G]);
     const bool implicit_entities = schema.implicit_entity_arrays();
-    if (implicit_entities != (batch.find("entity_role") == nullptr) || implicit_entities != (batch.find("entity_ref") == nullptr))
+    if (implicit_entities != (batch.find("entity_role") == nullptr) ||
+        implicit_entities != (batch.find("entity_ref") == nullptr))
         fail(implicit_entities ? "entity_role and entity_ref must be omitted: the schema's entity arrays are implicit"
                                : "entity_role and entity_ref are missing");
     Ints entity_ref;
     const u8* entity_role = nullptr;
     if (!implicit_entities)
     {
-        entity_ref = ints(*array(batch, "entity_ref", itype, {static_cast<i64>(E)}));
-        entity_role = static_cast<const u8*>(batch.data(*array(batch, "entity_role", rl::DType::U8, {static_cast<i64>(E)})));
+        entity_ref = ints(*padded_array(batch, "entity_ref", itype, E, wide));
+        entity_role = static_cast<const u8*>(batch.data(*padded_array(batch, "entity_role", rl::DType::U8, E, wide)));
     }
     const bool stored_counts = schema.emits_counts();
     if (stored_counts != (batch.find("relation_counts") != nullptr))
-        fail(stored_counts ? "relation_counts is missing" : "relation_counts must be omitted: the schema does not store counts");
+        fail(stored_counts ? "relation_counts is missing"
+                           : "relation_counts must be omitted: the schema does not store counts");
     Ints counts;
     if (stored_counts)
         counts = ints(*array(batch, "relation_counts", itype, {g_i64, r_i64}));
     const Ints tuple_offsets = ints(*array(batch, "relation_offsets", itype, {g_i64 * r_i64 + 1}));
     const Ints arg_offsets = ints(*array(batch, "relation_arg_offsets", itype, {g_i64 * r_i64 + 1}));
     const u64 total_args = static_cast<u64>(arg_offsets[G * R]);
-    const Ints args = ints(*array(batch, "relation_args", itype, {static_cast<i64>(total_args)}));
+    const Ints args = ints(*padded_array(batch, "relation_args", itype, total_args, wide));
 
     check_offsets(entity_offsets, E, "entity_offsets");
     check_offsets(tuple_offsets, static_cast<u64>(tuple_offsets[G * R]), "relation_offsets");
@@ -135,7 +160,8 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         if (objects < 0 || first + objects > last)
             fail("graph " + std::to_string(g) + " has more objects than entities");
         // The role of an entity: stored, or implied (an object below num_objects, else the auxiliary entity).
-        auto role_of = [&](i64 e) { return entity_role ? entity_role[e] : (e < first + objects ? k_object : k_auxiliary); };
+        auto role_of = [&](i64 e)
+        { return entity_role ? entity_role[e] : (e < first + objects ? k_object : k_auxiliary); };
         if (implicit_entities && last - first - objects > 1)
             fail("graph " + std::to_string(g) + " has more than one entity past its objects");
         for (i64 e = first; e < last && !implicit_entities; ++e)

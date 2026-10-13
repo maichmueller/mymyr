@@ -16,16 +16,17 @@
 //   relation_offsets     I   [G * R + 1]      cell (g, r) is segment s: its tuples are [offsets[s], offsets[s + 1])
 //   relation_arg_offsets I   [G * R + 1]      the same for the argument array
 //   relation_args        I   [A]       the entities of the tuples, tuple after tuple, Relation::arity per tuple
-// and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0: int32,
-// 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static tuples are
-// repeated in every graph).
+// and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0:
+// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
+// tuples are repeated in every graph).
 //
-// Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the relation-major
-// one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two layouts are a
-// permutation of each other: task_ids, num_objects, entity_offsets, the entity arrays, relation_counts and every cell's
-// tuples (their order and their entity ids) are equal; relation_offsets and relation_arg_offsets are the exclusive prefix
-// sums of the cells' tuple and argument counts in segment order, and relation_args is the concatenation of the cells'
-// arguments in segment order. So the cell at relation-major segment r * G + g is the cell at graph-major segment g * R + r.
+// Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
+// relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
+// layouts are a permutation of each other: task_ids, num_objects, entity_offsets, the entity arrays, relation_counts
+// and every cell's tuples (their order and their entity ids) are equal; relation_offsets and relation_arg_offsets are
+// the exclusive prefix sums of the cells' tuple and argument counts in segment order, and relation_args is the
+// concatenation of the cells' arguments in segment order. So the cell at relation-major segment r * G + g is the cell
+// at graph-major segment g * R + r.
 //
 // Omitted arrays. With FlatOptions::emit_counts = false a batch has no relation_counts: the tuples of segment s are
 // relation_offsets[s + 1] - relation_offsets[s]. When EncodingSchema::implicit_entity_arrays() holds, a batch has no
@@ -38,8 +39,8 @@
 // their own segments).
 //
 // Threads. The calls that take a ThreadPool split the graphs into one contiguous slice per member (ThreadPool::slice)
-// and run two parallel passes, count and fill, between which the members' sizes are scanned serially. Every position
-// is a sum over the graphs before it in batch order, so the output does not depend on the pool size.
+// and run two parallel passes, count and fill, between which the members' sizes are scanned serially. Every position is
+// a sum over the graphs before it in batch order, so the output does not depend on the pool size.
 
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/encoding/context.hpp"
@@ -60,8 +61,8 @@ struct EncodeInput
 };
 
 /// The capacities of the variable-size arrays of a batch, for the capacity form: how many entities (the entries of the
-/// entity arrays), tuples and tuple arguments (the entries of relation_args) the caller's buffers hold. The arrays whose
-/// size follows from the number of graphs and relations are always large enough by contract (see FlatBuffers).
+/// entity arrays), tuples and tuple arguments (the entries of relation_args) the caller's buffers hold. The arrays
+/// whose size follows from the number of graphs and relations are always large enough by contract (see FlatBuffers).
 struct FlatCapacities
 {
     u64 entities = 0;
@@ -73,8 +74,8 @@ struct FlatCapacities
 inline constexpr u32 k_overflow_capacity = 1;  // some size exceeds its capacity
 inline constexpr u32 k_overflow_index = 2;     // some size or count does not fit the index type
 
-/// The true sizes of a batch (not clipped to any capacity) and whether the batch can be written. A POD, so that a device
-/// call can return it in the same form.
+/// The true sizes of a batch (not clipped to any capacity) and whether the batch can be written. A POD, so that a
+/// device call can return it in the same form.
 struct FlatSizes
 {
     u64 entities = 0;
@@ -86,8 +87,9 @@ struct FlatSizes
 
 /// The destination arrays of a batch of G graphs and R relations, typed by the index type of the options (int32 or
 /// int64). The caller owns them. Arrays of size G, G + 1, G * R or G * R + 1 must have that size; relation_args,
-/// entity_role and entity_ref must hold at least the capacities. entity_role and entity_ref must be null iff the schema
-/// has implicit entity arrays, relation_counts iff it does not store counts. Nothing is written past these sizes.
+/// entity_role and entity_ref must hold at least the sizes of the batch (FlatSizes). entity_role and entity_ref must
+/// be null iff the schema has implicit entity arrays, relation_counts iff it does not store counts. Nothing is written
+/// past the sizes: the entries of relation_args, entity_role and entity_ref beyond them keep their old values.
 struct FlatBuffers
 {
     i32* task_ids = nullptr;
@@ -100,6 +102,11 @@ struct FlatBuffers
     void* relation_arg_offsets = nullptr;
     void* relation_args = nullptr;
 };
+
+/// The graphs a pool member should have at least: waking a member costs about as much as encoding several hundred
+/// graphs, so a batch is split over members only as far as each gets this many, and a batch of at most this many
+/// graphs is encoded on the calling thread whatever the size of the pool.
+inline constexpr u64 k_graphs_per_member = 1024;
 
 /// Working memory of encoder calls: per-member graph sizes, derived words and tallies. It is reused across calls (grown
 /// as needed). One scratch serves one call at a time, and fill() needs the scratch of the count() before it.
@@ -137,8 +144,9 @@ public:
     /// invalid input (a task id out of range, a row narrower than its instance, a state bit its instance does not have,
     /// numeric words) and std::overflow_error when a count exceeds the index type.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in) const;
-    /// The same on every member of `pool` (graphs are split over the members). The bundle is bitwise equal for every
-    /// pool size. `scratch` is not shared with a concurrent call.
+    /// The same on the members of `pool` (graphs are split over at most ceil(graphs / k_graphs_per_member) of them, on
+    /// the calling thread alone for a small batch). The bundle is bitwise equal for every pool size. `scratch` is not
+    /// shared with a concurrent call.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in, ThreadPool& pool,
                                                                 EncodeScratch& scratch) const;
 
@@ -146,12 +154,13 @@ public:
     /// capacities' sizes. The arrays hold the batch in their first `sizes.entities` / `sizes.args` entries and are zero
     /// beyond; if `sizes.overflow` is set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
-                                                                         const FlatCapacities& capacities, ThreadPool& pool,
-                                                                         EncodeScratch& scratch, FlatSizes& sizes) const;
+                                                                         const FlatCapacities& capacities,
+                                                                         ThreadPool& pool, EncodeScratch& scratch,
+                                                                         FlatSizes& sizes) const;
 
     /// The capacity form, step one: checks the input (the exceptions of encode, except std::overflow_error), counts and
-    /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not fit
-    /// the index type. `scratch` keeps the counts for fill().
+    /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not
+    /// fit the index type. `scratch` keeps the counts for fill().
     [[nodiscard]] FlatSizes count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
     /// Step two: writes the batch counted by the last count() of `scratch` (`in` and `sizes` must be that call's) into
     /// `out`. Requires sizes.overflow == 0 and the buffers as described at FlatBuffers; throws std::invalid_argument
@@ -159,9 +168,10 @@ public:
     void fill(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,
               EncodeScratch& scratch) const;
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
-    /// returned sizes are true; if they overflow, no array of `out` is written. Reuses the buffers of `scratch`.
-    FlatSizes encode_into(const EncodeInput& in, const FlatCapacities& capacities, const FlatBuffers& out, ThreadPool& pool,
-                          EncodeScratch& scratch) const;
+    /// returned sizes are true; if they overflow, no array of `out` is written. Entries of `out` past the sizes are
+    /// left as they were. Reuses the buffers of `scratch`.
+    FlatSizes encode_into(const EncodeInput& in, const FlatCapacities& capacities, const FlatBuffers& out,
+                          ThreadPool& pool, EncodeScratch& scratch) const;
 
 private:
     FlatEncoder() = default;

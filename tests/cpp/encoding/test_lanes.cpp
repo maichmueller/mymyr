@@ -135,8 +135,8 @@ struct Arrays
 };
 
 template<class I>
-Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<u64>>>& rows, std::vector<GraphTotals>* totals_out,
-           bool relation_major = false)
+Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<u64>>>& rows,
+           std::vector<GraphTotals>* totals_out, bool relation_major = false)
 {
     const ContextView view = fixture.view();
     const u64 G = rows.size();
@@ -157,7 +157,8 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
     std::vector<I> num_objects(G), counts(G * Fixture::R), offsets(G * Fixture::R + 1), arg_offsets(G * Fixture::R + 1),
         arg(args), ref(entities);
     std::vector<u8> role(entities);
-    const GraphOut<I> out{G, num_objects.data(), counts.data(), offsets.data(), arg_offsets.data(), arg.data(), role.data(), ref.data()};
+    const GraphOut<I> out{G,         num_objects.data(), counts.data(), offsets.data(),
+                          arg_offsets.data(), arg.data(),   role.data(),   ref.data()};
     if (relation_major)
     {
         // the scan: the first position of every relation, then the graphs in order
@@ -199,8 +200,8 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
     }
     else
         for (u64 g = 0; g < G; ++g)
-            fill_graph<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g, tuple_base[g], arg_base[g],
-                          entity_base[g], totals[g], out);
+            fill_graph<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g, tuple_base[g],
+                          arg_base[g], entity_base[g], totals[g], out);
     offsets[G * Fixture::R] = static_cast<I>(tuples);
     arg_offsets[G * Fixture::R] = static_cast<I>(args);
     if (totals_out)
@@ -394,8 +395,10 @@ TEST(EncodingLanes, OmittedCountsAndEntityArraysAreNotWritten)
     const auto rows = random_rows(rng, 4);
     const u64 G = rows.size();
     const Arrays reference = run<i32>(fixture, rows, nullptr, false);
-    std::vector<i32> num_objects(G), offsets(G * Fixture::R + 1), arg_offsets(G * Fixture::R + 1), args(reference.args.size());
-    GraphOut<i32> out{G, num_objects.data(), nullptr, offsets.data(), arg_offsets.data(), args.data(), nullptr, nullptr};
+    std::vector<i32> num_objects(G), offsets(G * Fixture::R + 1), arg_offsets(G * Fixture::R + 1),
+        args(reference.args.size());
+    GraphOut<i32> out{G,           num_objects.data(), nullptr, offsets.data(), arg_offsets.data(),
+                      args.data(), nullptr,            nullptr};
     u64 entity = 0, tuple = 0, arg = 0;
     for (u64 g = 0; g < G; ++g)
     {

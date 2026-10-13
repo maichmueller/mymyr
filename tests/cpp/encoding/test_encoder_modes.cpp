@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <thread>
 
@@ -21,9 +23,15 @@ struct Problem
     const char* domain;
     const char* problem;
 };
-const std::vector<Problem> k_problems = {{"blocks", "smedium"},          {"blocks", "probBLOCKS-8-0"}, {"gripper", "p01"},
-                                         {"logistics00", "probLOGISTICS-6-1"}, {"philosophers", "p03-phil4"},
-                                         {"features", "p01"},            {"blocks_flags", "p01"},      {"relay", "p01"}};
+const std::vector<Problem> k_problems = {
+    {"blocks", "smedium"},
+    {"blocks", "probBLOCKS-8-0"},
+    {"gripper", "p01"},
+    {"logistics00", "probLOGISTICS-6-1"},
+    {"philosophers", "p03-phil4"},
+    {"features", "p01"},
+    {"blocks_flags", "p01"},
+    {"relay", "p01"}};
 
 std::vector<i64> ints(const rl::ArrayBundle& bundle, const char* name)
 {
@@ -108,7 +116,8 @@ TEST(EncoderLayout, RelationMajorIsThePermutationOfGraphMajor)
         validate(*relation_major, relation_encoder->schema());
         EXPECT_EQ(relation_major->scalar("layout"), 1);
         EXPECT_EQ(graph_major->scalar("layout"), 0);
-        for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref", "relation_counts"})
+        for (const char* name :
+             {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref", "relation_counts"})
             EXPECT_EQ(ints(*graph_major, name), ints(*relation_major, name)) << name;
 
         const u64 G = rows.size();
@@ -168,15 +177,18 @@ TEST(EncoderThreads, EveryThreadCountGivesTheSameBytes)
     const auto derived = rl::TaskTable::single(test::pddl_task("philosophers", "p03-phil4"));
     for (const rl::TaskTablePtr& table : {mixed, derived})
     {
-        const u64 per_instance = 150;
+        const u64 per_instance = 3 * k_graphs_per_member / 2 + 40;
         const test::Rows all = mixed_rows(*table, per_instance, 7);
         for (const Layout layout : {Layout::Graph, Layout::Relation})
             for (const IndexType index : {IndexType::I32, IndexType::I64})
             {
                 SCOPED_TRACE(std::string(to_string(layout)) + " " + std::string(to_string(index)));
                 const auto encoder = FlatEncoder::create(table, options_with(layout, index));
-                for (const u64 n : {u64{0}, u64{1}, u64{5}, all.size()})
+                for (const u64 n :
+                     {u64{0}, u64{1}, u64{5}, k_graphs_per_member + 1, 2 * k_graphs_per_member + 7, all.size()})
                 {
+                    if (n > all.size())
+                        continue;
                     test::Rows rows = all;
                     rows.data.resize(n * table->row_words());
                     rows.task_ids.resize(n);
@@ -241,14 +253,18 @@ struct Guarded
     {
         return std::all_of(storage.begin(), storage.end(), [](T v) { return v == k_canary; });
     }
-    [[nodiscard]] std::vector<i64> values() const { return {storage.begin() + k_guard, storage.begin() + k_guard + capacity}; }
+    [[nodiscard]] std::vector<i64> values() const
+    {
+        return {storage.begin() + k_guard, storage.begin() + k_guard + capacity};
+    }
 };
 
 template<class I>
 struct Destination
 {
     Guarded<i32> task_ids;
-    Guarded<I> num_objects, entity_offsets, relation_counts, relation_offsets, relation_arg_offsets, relation_args, entity_ref;
+    Guarded<I> num_objects, entity_offsets, relation_counts, relation_offsets, relation_arg_offsets, relation_args,
+        entity_ref;
     Guarded<u8> entity_role;
     Destination(u64 G, u64 R, const FlatCapacities& cap)
         : task_ids(G), num_objects(G), entity_offsets(G + 1), relation_counts(G * R), relation_offsets(G * R + 1),
@@ -257,18 +273,21 @@ struct Destination
     }
     [[nodiscard]] FlatBuffers buffers()
     {
-        return {task_ids.data(),       num_objects.data(),       entity_offsets.data(),   entity_role.data(), entity_ref.data(),
-                relation_counts.data(), relation_offsets.data(), relation_arg_offsets.data(), relation_args.data()};
+        return {task_ids.data(),        num_objects.data(),       entity_offsets.data(),
+                entity_role.data(),     entity_ref.data(),        relation_counts.data(),
+                relation_offsets.data(), relation_arg_offsets.data(), relation_args.data()};
     }
     [[nodiscard]] bool guards_intact() const
     {
         return task_ids.guards_intact() && num_objects.guards_intact() && entity_offsets.guards_intact() &&
-               relation_counts.guards_intact() && relation_offsets.guards_intact() && relation_arg_offsets.guards_intact() &&
+               relation_counts.guards_intact() && relation_offsets.guards_intact() &&
+               relation_arg_offsets.guards_intact() &&
                relation_args.guards_intact() && entity_ref.guards_intact() && entity_role.guards_intact();
     }
     [[nodiscard]] bool untouched() const
     {
-        return task_ids.untouched() && num_objects.untouched() && entity_offsets.untouched() && relation_counts.untouched() &&
+        return task_ids.untouched() && num_objects.untouched() && entity_offsets.untouched() &&
+               relation_counts.untouched() &&
                relation_offsets.untouched() && relation_arg_offsets.untouched() && relation_args.untouched() &&
                entity_ref.untouched() && entity_role.untouched();
     }
@@ -317,8 +336,9 @@ void run_capacity_cases(const FlatOptions& options)
             {
                 // a buffer larger than the batch keeps the canary past the batch
                 const std::vector<i64> want = ints(*expected, name);
-                EXPECT_EQ(std::vector<i64>(got.begin(), got.begin() + static_cast<std::ptrdiff_t>(want.size())), want) << name;
-                EXPECT_TRUE(std::all_of(got.begin() + static_cast<std::ptrdiff_t>(want.size()), got.end(), [](i64 v) { return v == 0x5a; })) << name;
+                const auto past = got.begin() + static_cast<std::ptrdiff_t>(want.size());
+                EXPECT_EQ(std::vector<i64>(got.begin(), past), want) << name;
+                EXPECT_TRUE(std::all_of(past, got.end(), [](i64 v) { return v == 0x5a; })) << name;
             }
         }
         else
@@ -347,15 +367,68 @@ void run_capacity_cases(const FlatOptions& options)
     fewer.data.resize(10 * table->row_words());
     fewer.task_ids.resize(10);
     EXPECT_THROW(encoder->fill(input_of(fewer), sizes, destination.buffers(), pool, scratch), std::invalid_argument);
-    ThreadPool other(2);
-    EXPECT_THROW(encoder->fill(input_of(rows), sizes, destination.buffers(), other, scratch), std::invalid_argument);
     FlatSizes overflowing = sizes;
     overflowing.overflow = k_overflow_capacity;
-    EXPECT_THROW(encoder->fill(input_of(rows), overflowing, destination.buffers(), pool, scratch), std::invalid_argument);
+    EXPECT_THROW(encoder->fill(input_of(rows), overflowing, destination.buffers(), pool, scratch),
+                 std::invalid_argument);
     // omitted arrays must be null, stored ones not
     FlatBuffers wrong = destination.buffers();
     wrong.relation_counts = nullptr;
     EXPECT_THROW(encoder->fill(input_of(rows), sizes, wrong, pool, scratch), std::invalid_argument);
+    wrong = destination.buffers();
+    wrong.relation_args = nullptr;
+    EXPECT_THROW(encoder->fill(input_of(rows), sizes, wrong, pool, scratch), std::invalid_argument);
+}
+
+TEST(EncoderCapacity, FillNeedsAPoolAsLargeAsTheCountUsed)
+{
+    const auto table = two_instance_table();
+    const test::Rows rows = mixed_rows(*table, 2 * k_graphs_per_member, 13);
+    const auto encoder = FlatEncoder::create(table, options_with(Layout::Relation));
+    ThreadPool pool(4);
+    EncodeScratch scratch;
+    const FlatSizes sizes = encoder->count(input_of(rows), pool, scratch);
+    Destination<i32> destination(rows.size(), encoder->schema().num_relations(),
+                                 {sizes.entities, sizes.tuples, sizes.args});
+    ThreadPool one(1);
+    EXPECT_THROW(encoder->fill(input_of(rows), sizes, destination.buffers(), one, scratch), std::invalid_argument);
+    encoder->fill(input_of(rows), sizes, destination.buffers(), pool, scratch);
+    EXPECT_EQ(destination.relation_args.values(), ints(*encoder->encode(input_of(rows)), "relation_args"));
+}
+
+TEST(EncoderThreads, ASmallBatchRunsOnTheCallingThread)
+{
+    const auto table = two_instance_table();
+    const test::Rows rows = mixed_rows(*table, k_graphs_per_member / 2, 17);
+    ASSERT_LE(rows.size(), k_graphs_per_member);
+    const auto encoder = FlatEncoder::create(table, options_with(Layout::Relation));
+    const auto expected = encoder->encode(input_of(rows));
+    ThreadPool pool(4);
+    // keep the pool busy: a call that needs it would wait for the job to end (at its time-out)
+    std::atomic<bool> started{false}, encoded{false}, timed_out{false};
+    std::thread holder(
+        [&]
+        {
+            pool.run(
+                [&](u32 member)
+                {
+                    if (member != 0)
+                        return;
+                    started = true;
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    while (!encoded && std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    timed_out = !encoded;
+                });
+        });
+    while (!started)
+        std::this_thread::yield();
+    EncodeScratch scratch;
+    const auto got = encoder->encode(input_of(rows), pool, scratch);
+    encoded = true;
+    holder.join();
+    EXPECT_FALSE(timed_out);
+    expect_same_bytes(*expected, *got);
 }
 
 TEST(EncoderCapacity, ExactShortAndZeroCapacitiesWriteNothingPastThem)
@@ -385,15 +458,19 @@ TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
         const FlatCapacities roomy{exact.entities + 7, exact.tuples, exact.args + 5};
         const auto padded = encoder->encode_capacity(input_of(rows), roomy, pool, scratch, sizes);
         EXPECT_EQ(sizes.overflow, 0u);
+        validate(*padded, encoder->schema());
         const auto args = ints(*padded, "relation_args");
         ASSERT_EQ(args.size(), roomy.args);
         EXPECT_TRUE(std::equal(args.begin(), args.begin() + static_cast<std::ptrdiff_t>(exact.args),
                                ints(*expected, "relation_args").begin()));
-        EXPECT_TRUE(std::all_of(args.begin() + static_cast<std::ptrdiff_t>(exact.args), args.end(), [](i64 v) { return v == 0; }));
+        EXPECT_TRUE(std::all_of(args.begin() + static_cast<std::ptrdiff_t>(exact.args), args.end(),
+                                [](i64 v) { return v == 0; }));
         const auto roles = ints(*padded, "entity_role");
-        EXPECT_TRUE(std::all_of(roles.begin() + static_cast<std::ptrdiff_t>(exact.entities), roles.end(), [](i64 v) { return v == 0; }));
+        EXPECT_TRUE(std::all_of(roles.begin() + static_cast<std::ptrdiff_t>(exact.entities), roles.end(),
+                                [](i64 v) { return v == 0; }));
         // too small: true sizes, every array zero
-        const auto short_bundle = encoder->encode_capacity(input_of(rows), {exact.entities, exact.tuples, exact.args - 1}, pool, scratch, sizes);
+        const auto short_bundle = encoder->encode_capacity(
+            input_of(rows), {exact.entities, exact.tuples, exact.args - 1}, pool, scratch, sizes);
         EXPECT_EQ(sizes.overflow, k_overflow_capacity);
         EXPECT_EQ(sizes.args, exact.args);
         for (const rl::ArrayInfo& info : short_bundle->arrays())
@@ -437,8 +514,8 @@ TEST(EncoderOmitted, WithoutCountsTheOffsetsStillGiveThem)
         validate(*b, without->schema());
         EXPECT_EQ(b->find("relation_counts"), nullptr);
         ASSERT_NE(a->find("relation_counts"), nullptr);
-        for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref", "relation_offsets",
-                                 "relation_arg_offsets", "relation_args"})
+        for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref",
+                                 "relation_offsets", "relation_arg_offsets", "relation_args"})
             EXPECT_EQ(ints(*a, name), ints(*b, name)) << name;
         const u64 G = rows.size(), R = with->schema().num_relations();
         const auto counts = ints(*a, "relation_counts");
@@ -506,7 +583,8 @@ TEST(EncoderOmitted, TheImplicitRuleFollowsTheOptions)
     FlatOptions options = test::encoder_options();
     options.entity_arrays = EntityArrays::Auto;
     options.include_actions = false;
-    auto implicit = [&](const FlatOptions& o) { return FlatEncoder::create(table, o)->schema().implicit_entity_arrays(); };
+    auto implicit = [&](const FlatOptions& o)
+    { return FlatEncoder::create(table, o)->schema().implicit_entity_arrays(); };
     EXPECT_TRUE(implicit(options));
     FlatOptions with_actions = options;
     with_actions.include_actions = true;
