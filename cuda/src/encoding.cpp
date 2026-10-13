@@ -1,32 +1,46 @@
-// DeviceEncodingContext and DeviceEncoder (include/mymyr/cuda/encoding.hpp).
-
 #include "mymyr/cuda/encoding.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace mymyr::cuda
 {
 namespace detail
 {
-u64 scan_temp_bytes(u64 n);  // encoding.cu
+u64 scan_temp_bytes(u64 n, bool wide);
 }
-
 namespace
 {
-using encoding::detail::Cell;
+u64 add(u64 a, u64 b)
+{
+    if (b > std::numeric_limits<u64>::max() - a)
+        throw std::overflow_error("mymyr: encoding: byte size overflow");
+    return a + b;
+}
+u64 mul(u64 a, u64 b)
+{
+    if (b && a > std::numeric_limits<u64>::max() / b)
+        throw std::overflow_error("mymyr: encoding: size product overflow");
+    return a * b;
+}
+u64 round_up(u64 n) { return add(n, 63) & ~u64{63}; }
 
-constexpr u64 round_up(u64 x) noexcept { return (x + 63) & ~u64{63}; }
+void finish_use(const std::shared_ptr<LastUse>& last, cudaStream_t stream) noexcept
+{
+    if (!last)
+        return;
+    try { last->record(stream); }
+    catch (...) { (void)cudaStreamSynchronize(stream); }
+}
 
 [[noreturn]] void not_an_extension(const std::string& why)
 {
     throw std::invalid_argument("mymyr: encoding: the grown context is not an extension of the uploaded one: " + why);
 }
-
-/// Throws unless `grown` has the schema of `current`, the instances of `current` at the same rows of every array, and
-/// at least as many instances.
 void check_extension(const encoding::EncodingContext& current, const encoding::EncodingContext& grown)
 {
     if (grown.schema().fingerprint() != current.schema().fingerprint())
@@ -40,61 +54,114 @@ void check_extension(const encoding::EncodingContext& current, const encoding::E
         const rl::ArrayInfo* b = grown.arrays().find(a.name);
         if (!b || b->dtype != a.dtype || b->elements() < a.elements())
             not_an_extension("the array " + a.name + " is missing or shorter");
-        if (std::memcmp(current.arrays().data(a), grown.arrays().data(*b), a.elements() * rl::dtype_bytes(a.dtype)) != 0)
+        if (std::memcmp(current.arrays().data(a), grown.arrays().data(*b), mul(a.elements(), rl::dtype_bytes(a.dtype))))
             not_an_extension("the array " + a.name + " differs in the rows of the uploaded instances");
     }
 }
-
-[[noreturn]] void derived_refused(u32 instance)
+void check_schema(const encoding::EncodingSchema& schema)
 {
-    throw std::invalid_argument("mymyr: encoding: the device does not encode derived relations (instance " +
-                                std::to_string(instance) + " has derived atoms): set include_derived = false");
+    for (const auto& relation : schema.relations())
+        if (schema.options().include_derived && relation.lane == encoding::Lane::Derived)
+            throw std::invalid_argument("mymyr: encoding: the device does not encode derived relations: "
+                                        "set include_derived = false");
+    if (schema.options().layout != encoding::Layout::Graph)
+        throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
+}
+GraphBounds graph_bounds(const encoding::EncodingContext& host)
+{
+    const auto v = host.view();
+    GraphBounds bounds;
+    for (u32 i = 0; i < host.table().size(); ++i)
+    {
+        const auto inst = encoding::detail::instance_view(v, i);
+        GraphBounds b;
+        b.cells = inst.num_cells;
+        bool nullary = false;
+        for (u32 c = 0; c < inst.num_cells; ++c)
+        {
+            const auto& cell = inst.cells[c];
+            b.tuples = add(b.tuples, cell.b - cell.a);
+            b.args = add(b.args, mul(cell.b - cell.a, cell.arity));
+            nullary = nullary || cell.logical_arity == 0;
+        }
+        b.entities = add(inst.num_objects, nullary ? 1 : 0);
+        bounds.entities = std::max(bounds.entities, b.entities);
+        bounds.tuples = std::max(bounds.tuples, b.tuples);
+        bounds.args = std::max(bounds.args, b.args);
+        bounds.cells = std::max(bounds.cells, b.cells);
+    }
+    return bounds;
+}
+BatchShape worst_shape(u64 graphs, const GraphBounds& bounds)
+{
+    return {graphs, mul(graphs, bounds.entities), mul(graphs, bounds.args)};
 }
 }  // namespace
 
-// ------------------------------------------------------------------------------------------------ context
+EncodingAcquisition::EncodingAcquisition(encoding::detail::ContextView v, std::shared_ptr<const DeviceBuffer> gen,
+                                         u64 n, std::shared_ptr<LastUse> last, cudaStream_t stream)
+    : view(v), generation(std::move(gen)), number(n), m_last(std::move(last)), m_stream(stream)
+{
+}
+EncodingAcquisition::EncodingAcquisition(EncodingAcquisition&& other) noexcept
+    : view(other.view), generation(std::move(other.generation)), number(other.number),
+      m_last(std::move(other.m_last)), m_stream(other.m_stream)
+{
+}
+EncodingAcquisition::~EncodingAcquisition() { finish_use(m_last, m_stream); }
 
 std::shared_ptr<DeviceEncodingContext> DeviceEncodingContext::upload(ContextPtr ctx,
-                                                                      std::shared_ptr<const encoding::EncodingContext> host,
-                                                                      cudaStream_t stream)
+    std::shared_ptr<const encoding::EncodingContext> host, cudaStream_t stream)
 {
     if (!ctx || !host)
         throw std::invalid_argument("mymyr: encoding: a device context needs a device context and a host context");
-    DeviceGuard g(ctx->device());
-    std::shared_ptr<DeviceEncodingContext> out(new DeviceEncodingContext(std::move(ctx), std::move(host)));
-    out->copy(stream ? stream : out->m_ctx->stream());
+    DeviceGuard guard(ctx->device());
+    auto out = std::shared_ptr<DeviceEncodingContext>(new DeviceEncodingContext(std::move(ctx), host));
+    out->copy(host, stream ? stream : out->m_ctx->stream());
     return out;
 }
-
 DeviceEncodingContext::DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host)
     : m_ctx(std::move(ctx)), m_host(std::move(host))
 {
 }
-
 DeviceEncodingContext::~DeviceEncodingContext()
 {
-    // the staging buffer is the source of the copy in flight; the block frees itself after the work of its users
-    if (m_uploads)
-        cudaEventSynchronize(m_ready.get());
+    if (m_generation)
+    {
+        try { DeviceGuard guard(m_ctx->device()); m_ready.synchronize(); }
+        catch (...) {}
+    }
 }
-
-void DeviceEncodingContext::copy(cudaStream_t stream)
+void DeviceEncodingContext::copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream)
 {
-    const rl::ArrayBundle& arrays = m_host->arrays();
-    const u64 bytes = arrays.bytes();
-    if (m_uploads)
-        m_ready.synchronize();  // the staging buffer of the previous upload is free once its copy ran
-    PinnedBuffer staging(bytes);
-    std::memcpy(staging.data(), arrays.block(), bytes);
-    DeviceBuffer block(m_ctx, bytes, stream);
-    check(cudaMemcpyAsync(block.data(), staging.data(), bytes, cudaMemcpyHostToDevice, stream),
-          "cudaMemcpyAsync (encoding context)");
-    m_ready.record(stream);
-    m_block = std::move(block);  // the previous block frees after the work of the streams that used it
+    if (m_generation)
+        m_ready.synchronize();
+    auto staging = m_ctx->lease_pinned(1, host->arrays().bytes());
+    std::memcpy(staging.data(0), host->arrays().block(), host->arrays().bytes());
+    auto block = std::make_shared<DeviceBuffer>(m_ctx, host->arrays().bytes());
+    Event allocated;
+    allocated.record(m_ctx->stream());
+    allocated.wait_on(stream);
+    auto last = std::make_shared<LastUse>(m_ctx->device());
+    block->track(last);
+    try
+    {
+        check(cudaMemcpyAsync(block->data(), staging.data(0), block->size(), cudaMemcpyHostToDevice, stream),
+              "cudaMemcpyAsync (encoding context)");
+        last->record(stream);
+        m_ready.record(stream);
+    }
+    catch (...)
+    {
+        (void)cudaStreamSynchronize(stream);
+        throw;
+    }
+    m_block = std::move(block);
     m_staging = std::move(staging);
-    ++m_uploads;
+    m_host = host;
+    m_uses.clear();
+    ++m_generation;
 }
-
 bool DeviceEncodingContext::refresh(std::shared_ptr<const encoding::EncodingContext> grown, cudaStream_t stream)
 {
     if (!grown)
@@ -103,180 +170,273 @@ bool DeviceEncodingContext::refresh(std::shared_ptr<const encoding::EncodingCont
     check_extension(*m_host, *grown);
     if (grown->table().size() == m_host->table().size())
         return false;
-    DeviceGuard g(m_ctx->device());
-    m_host = std::move(grown);
-    copy(stream ? stream : m_ctx->stream());
+    DeviceGuard guard(m_ctx->device());
+    copy(grown, stream ? stream : m_ctx->stream());
     return true;
 }
-
-encoding::detail::ContextView DeviceEncodingContext::view() const
+std::shared_ptr<const encoding::EncodingContext> DeviceEncodingContext::host() const
 {
     std::lock_guard lock(m_mutex);
-    return m_host->view(static_cast<const std::byte*>(m_block.data()));
+    return m_host;
 }
-
-void DeviceEncodingContext::acquire(cudaStream_t s) const
+u32 DeviceEncodingContext::num_instances() const
 {
     std::lock_guard lock(m_mutex);
-    if (s != m_block.stream())
-        m_ready.wait_on(s);
-    m_block.record_stream(s);
-    if (m_staging.data() && m_ready.done())
-        m_staging = PinnedBuffer();
+    return m_host->table().size();
 }
-
-std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t s) const
+u64 DeviceEncodingContext::bytes() const
 {
     std::lock_guard lock(m_mutex);
-    DeviceGuard g(m_ctx->device());
-    if (!s)
-        s = m_ctx->stream();
-    m_ready.wait_on(s);
-    std::vector<std::byte> out(m_block.size());
-    PinnedBuffer staging(out.size());
-    check(cudaMemcpyAsync(staging.data(), m_block.data(), out.size(), cudaMemcpyDeviceToHost, s),
+    return m_block->size();
+}
+u64 DeviceEncodingContext::generation() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_generation;
+}
+EncodingAcquisition DeviceEncodingContext::acquire(cudaStream_t stream) const
+{
+    std::lock_guard lock(m_mutex);
+    DeviceGuard guard(m_ctx->device());
+    if (!stream)
+        stream = m_ctx->stream();
+    m_ready.wait_on(stream);
+    auto& last = m_uses[stream];
+    if (!last)
+    {
+        last = std::make_shared<LastUse>(m_ctx->device());
+        m_block->track(last);
+    }
+    if (m_staging.size() && m_ready.done())
+        m_staging = PinnedLease();
+    return {m_host->view(static_cast<const std::byte*>(m_block->data())), m_block, m_generation, last, stream};
+}
+std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) const
+{
+    auto lease = acquire(stream);
+    DeviceGuard guard(m_ctx->device());
+    if (!stream)
+        stream = m_ctx->stream();
+    std::vector<std::byte> out(lease.generation->size());
+    auto staging = m_ctx->lease_pinned(1, out.size());
+    check(cudaMemcpyAsync(staging.data(0), lease.generation->data(), out.size(), cudaMemcpyDeviceToHost, stream),
           "cudaMemcpyAsync (encoding context)");
-    check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
-    std::memcpy(out.data(), staging.data(), out.size());
+    check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
+    std::memcpy(out.data(), staging.data(0), out.size());
     return out;
 }
 
-// ------------------------------------------------------------------------------------------------ sizes
-
-OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations) noexcept
+OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations)
 {
     const u64 I = index == encoding::IndexType::I32 ? 4 : 8;
-    const u64 G = shape.graphs, E = shape.entities, A = shape.args, R = relations;
+    const u64 G = shape.graphs, E = shape.entities, A = shape.args, GR = mul(G, relations);
     OutputLayout out;
     u64 at = 0;
     auto place = [&](u64& offset, u64 bytes)
     {
         offset = at;
-        at += round_up(bytes);
+        at = add(at, round_up(bytes));
     };
-    place(out.task_ids, 4 * G);
-    place(out.num_objects, I * G);
-    place(out.entity_offsets, I * (G + 1));
+    place(out.task_ids, mul(4, G));
+    place(out.num_objects, mul(I, G));
+    place(out.entity_offsets, mul(I, add(G, 1)));
     place(out.entity_role, E);
-    place(out.entity_ref, I * E);
-    place(out.relation_counts, I * G * R);
-    place(out.relation_offsets, I * (G * R + 1));
-    place(out.relation_arg_offsets, I * (G * R + 1));
-    place(out.relation_args, I * A);
+    place(out.entity_ref, mul(I, E));
+    place(out.relation_counts, mul(I, GR));
+    place(out.relation_offsets, mul(I, add(GR, 1)));
+    place(out.relation_arg_offsets, mul(I, add(GR, 1)));
+    place(out.relation_args, mul(I, A));
     out.bytes = at;
     return out;
 }
-
-u64 scratch_bytes(u64 graphs, u64 max_cells)
+ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds, encoding::Layout layout)
 {
-    return round_up(24 * graphs) + round_up(24 * graphs) + round_up(4 * graphs * max_cells) +
-           round_up(detail::scan_temp_bytes(graphs + 1));
+    if (layout != encoding::Layout::Graph)
+        throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
+    ScratchLayout out;
+    const u64 limit = std::numeric_limits<u32>::max();
+    const u64 entities = std::max(shape.entities, mul(shape.graphs, bounds.entities));
+    const u64 tuples = mul(shape.graphs, bounds.tuples);
+    const u64 args = std::max(shape.args, mul(shape.graphs, bounds.args));
+    out.wide = entities > limit || tuples > limit || args > limit;
+    const u64 span = mul(out.wide ? 8 : 4, add(shape.graphs, 1));
+    out.tuples = span;
+    out.args = mul(2, span);
+    out.cell_counts = round_up(mul(3, span));
+    out.scan_temp = add(out.cell_counts, round_up(mul(4, mul(shape.graphs, bounds.cells))));
+    out.scan_temp_bytes = detail::scan_temp_bytes(add(shape.graphs, 1), out.wide);
+    out.bytes = add(out.scan_temp, round_up(out.scan_temp_bytes));
+    return out;
 }
 
-// ------------------------------------------------------------------------------------------------ encoder
+EncodingWorkspace::EncodingWorkspace(EncodingAcquisition c, std::shared_ptr<const DeviceBuffer> s,
+                                     BatchShape sh, ScratchLayout l, std::shared_ptr<LastUse> last, cudaStream_t stream)
+    : context(std::move(c)), scratch(std::move(s)), shape(sh), layout(l), m_last(std::move(last)), m_stream(stream)
+{
+}
+EncodingWorkspace::EncodingWorkspace(EncodingWorkspace&& other) noexcept
+    : context(std::move(other.context)), scratch(std::move(other.scratch)), shape(other.shape), layout(other.layout),
+      m_last(std::move(other.m_last)), m_stream(other.m_stream)
+{
+}
+EncodingWorkspace::~EncodingWorkspace() { finish_use(m_last, m_stream); }
 
 DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder)
     : m_ctx(std::move(ctx)), m_encoder(std::move(encoder))
 {
     if (!m_ctx || !m_encoder)
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
-    const encoding::EncodingContext& host = m_encoder->context();
-    for (u32 i = 0; i < host.table().size(); ++i)
-        if (host.needs_derived(i))
-            derived_refused(i);
+    m_schema = m_encoder->schema_ptr();
+    check_schema(*m_schema);
+    m_bounds = graph_bounds(m_encoder->context());
     m_context = DeviceEncodingContext::upload(m_ctx, m_encoder->context_ptr());
-    set_bounds();
 }
-
-void DeviceEncoder::set_bounds()
+std::shared_ptr<const encoding::FlatEncoder> DeviceEncoder::encoder() const
 {
-    const encoding::EncodingContext& host = m_encoder->context();
-    const encoding::detail::ContextView v = host.view();
-    GraphBounds bounds;
-    for (u32 i = 0; i < host.table().size(); ++i)
-    {
-        const encoding::detail::InstanceView inst = encoding::detail::instance_view(v, i);
-        GraphBounds b;
-        b.cells = inst.num_cells;
-        bool nullary = false;
-        for (u32 c = 0; c < inst.num_cells; ++c)
-        {
-            const Cell& cell = inst.cells[c];
-            b.tuples += cell.b - cell.a;
-            b.args += u64{cell.b - cell.a} * cell.arity;
-            nullary = nullary || cell.logical_arity == 0;
-        }
-        b.entities = inst.num_objects + (nullary ? 1 : 0);
-        bounds.entities = std::max(bounds.entities, b.entities);
-        bounds.tuples = std::max(bounds.tuples, b.tuples);
-        bounds.args = std::max(bounds.args, b.args);
-        bounds.cells = std::max(bounds.cells, b.cells);
-    }
-    m_bounds = bounds;
+    std::shared_lock lock(m_state_mutex);
+    return m_encoder;
 }
-
-BatchShape DeviceEncoder::worst_case(u64 graphs) const noexcept
+GraphBounds DeviceEncoder::bounds() const
 {
-    return {graphs, graphs * m_bounds.entities, graphs * m_bounds.args};
+    std::shared_lock lock(m_state_mutex);
+    return m_bounds;
 }
-
+BatchShape DeviceEncoder::worst_case(u64 graphs) const { return worst_shape(graphs, bounds()); }
+ScratchLayout DeviceEncoder::scratch_layout(const BatchShape& shape) const
+{
+    DeviceGuard guard(m_ctx->device());
+    return cuda::scratch_layout(shape, bounds(), options().layout);
+}
 u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
 {
-    return scratch_bytes(shape.graphs, m_bounds.cells) + output_layout(shape, options().index, schema().num_relations()).bytes;
+    std::shared_lock lock(m_state_mutex);
+    DeviceGuard guard(m_ctx->device());
+    const auto output = output_layout(shape, options().index, schema().num_relations());
+    return add(cuda::scratch_layout(shape, m_bounds, options().layout).bytes, output.bytes);
+}
+u64 DeviceEncoder::bytes_needed(u64 graphs) const
+{
+    std::shared_lock lock(m_state_mutex);
+    DeviceGuard guard(m_ctx->device());
+    const auto shape = worst_shape(graphs, m_bounds);
+    return add(cuda::scratch_layout(shape, m_bounds, options().layout).bytes,
+               output_layout(shape, options().index, schema().num_relations()).bytes);
 }
 
-u64 DeviceEncoder::bytes_needed(u64 graphs) const { return bytes_needed(worst_case(graphs)); }
-
-OutputLayout DeviceEncoder::reserved_layout() const noexcept
+std::shared_ptr<DeviceEncoder::Workspace> DeviceEncoder::workspace(cudaStream_t stream, bool create) const
 {
-    return output_layout(m_reserved, options().index, schema().num_relations());
+    std::lock_guard lock(m_workspace_mutex);
+    const auto it = m_workspaces.find(stream);
+    if (it != m_workspaces.end())
+        return it->second;
+    if (!create)
+        return nullptr;
+    auto out = std::make_shared<Workspace>();
+    m_workspaces.emplace(stream, out);
+    return out;
 }
-
-void DeviceEncoder::reserve(const BatchShape& shape, cudaStream_t stream)
+void DeviceEncoder::reserve_workspace(Workspace& work, const BatchShape& shape)
 {
-    std::lock_guard lock(m_mutex);
-    if (m_output.data() && shape.graphs <= m_reserved.graphs && shape.entities <= m_reserved.entities &&
-        shape.args <= m_reserved.args)
-        return;
-    const BatchShape want{std::max(shape.graphs, m_reserved.graphs), std::max(shape.entities, m_reserved.entities),
-                          std::max(shape.args, m_reserved.args)};
-    DeviceGuard g(m_ctx->device());
+    std::lock_guard lock(work.mutex);
+    const BatchShape want{std::max(shape.graphs, work.shape.graphs), std::max(shape.entities, work.shape.entities),
+                          std::max(shape.args, work.shape.args)};
+    (void)output_layout(want, options().index, schema().num_relations());
+    const auto layout = cuda::scratch_layout(want, m_bounds, options().layout);
+    if (!work.scratch || layout.bytes != work.layout.bytes || layout.wide != work.layout.wide ||
+        layout.tuples != work.layout.tuples || layout.cell_counts != work.layout.cell_counts ||
+        layout.scan_temp != work.layout.scan_temp)
+    {
+        auto scratch = std::make_shared<DeviceBuffer>(m_ctx, layout.bytes);
+        auto last = std::make_shared<LastUse>(m_ctx->device());
+        scratch->track(last);
+        work.ready.record(m_ctx->stream());
+        work.scratch = std::move(scratch);
+        work.last = std::move(last);
+    }
+    work.shape = want;
+    work.layout = layout;
+}
+void DeviceEncoder::reserve_locked(const BatchShape& shape, cudaStream_t stream)
+{
     if (!stream)
         stream = m_ctx->stream();
-    DeviceBuffer scratch(m_ctx, scratch_bytes(want.graphs, m_bounds.cells), stream);
-    DeviceBuffer output(m_ctx, output_layout(want, options().index, schema().num_relations()).bytes, stream);
-    check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
-    m_scratch = std::move(scratch);
-    m_output = std::move(output);
-    m_reserved = want;
+    // Validate output sizes as well, before any device allocation.
+    (void)output_layout(shape, options().index, schema().num_relations());
+    auto work = workspace(stream, true);
+    reserve_workspace(*work, shape);
+    std::lock_guard work_lock(work->mutex);
+    work->ready.wait_on(stream);
 }
-
-void DeviceEncoder::reserve(u64 max_graphs, cudaStream_t stream) { reserve(worst_case(max_graphs), stream); }
-
-void DeviceEncoder::acquire(cudaStream_t s) const
+void DeviceEncoder::reserve(const BatchShape& shape, cudaStream_t stream)
 {
-    m_context->acquire(s);
-    std::lock_guard lock(m_mutex);
-    if (m_output.data())
-    {
-        m_scratch.record_stream(s);
-        m_output.record_stream(s);
-    }
+    std::shared_lock lock(m_state_mutex);
+    DeviceGuard guard(m_ctx->device());
+    reserve_locked(shape, stream);
 }
-
+void DeviceEncoder::reserve(u64 graphs, cudaStream_t stream)
+{
+    std::shared_lock lock(m_state_mutex);
+    DeviceGuard guard(m_ctx->device());
+    reserve_locked(worst_shape(graphs, m_bounds), stream);
+}
+BatchShape DeviceEncoder::reserved(cudaStream_t stream) const
+{
+    auto work = workspace(stream ? stream : m_ctx->stream(), false);
+    if (!work)
+        return {};
+    std::lock_guard lock(work->mutex);
+    return work->shape;
+}
+u64 DeviceEncoder::reserved_bytes(cudaStream_t stream) const
+{
+    auto work = workspace(stream ? stream : m_ctx->stream(), false);
+    if (!work)
+        return 0;
+    std::lock_guard lock(work->mutex);
+    return work->scratch ? work->scratch->size() : 0;
+}
+OutputLayout DeviceEncoder::reserved_layout(cudaStream_t stream) const
+{
+    return output_layout(reserved(stream), options().index, schema().num_relations());
+}
+EncodingWorkspace DeviceEncoder::acquire(cudaStream_t stream) const
+{
+    std::shared_lock lock(m_state_mutex);
+    DeviceGuard guard(m_ctx->device());
+    if (!stream)
+        stream = m_ctx->stream();
+    auto work = workspace(stream, false);
+    if (!work)
+        throw std::invalid_argument("mymyr: encoding: reserve scratch on this stream before acquire");
+    std::lock_guard work_lock(work->mutex);
+    const auto needed = cuda::scratch_layout(work->shape, m_bounds, options().layout);
+    if (!work->scratch || needed.bytes != work->layout.bytes || needed.wide != work->layout.wide ||
+        needed.scan_temp != work->layout.scan_temp)
+        throw std::invalid_argument("mymyr: encoding: reserve scratch again after a failed refresh");
+    work->ready.wait_on(stream);
+    return {m_context->acquire(stream), work->scratch, work->shape, work->layout, work->last, stream};
+}
 bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, cudaStream_t stream)
 {
     if (!grown)
         throw std::invalid_argument("mymyr: encoding: a refresh needs an encoder");
-    if (grown->schema().options() != options())
-        throw std::invalid_argument("mymyr: encoding: the grown encoder has other options");
-    for (u32 i = 0; i < grown->table().size(); ++i)
-        if (grown->context().needs_derived(i))
-            derived_refused(i);
+    std::unique_lock lock(m_state_mutex);
+    if (grown->schema().fingerprint() != m_schema->fingerprint())
+        throw std::invalid_argument("mymyr: encoding: the grown encoder has another schema or options");
+    check_schema(grown->schema());
+    const auto bounds = graph_bounds(grown->context());
     const bool copied = m_context->refresh(grown->context_ptr(), stream);
-    std::lock_guard lock(m_mutex);
     m_encoder = std::move(grown);
-    set_bounds();
+    m_bounds = bounds;
+    std::vector<std::shared_ptr<Workspace>> workspaces;
+    {
+        std::lock_guard map_lock(m_workspace_mutex);
+        for (const auto& [s, work] : m_workspaces)
+            workspaces.push_back(work);
+    }
+    DeviceGuard guard(m_ctx->device());
+    for (const auto& work : workspaces)
+        reserve_workspace(*work, {});
     return copied;
 }
 }  // namespace mymyr::cuda

@@ -1,176 +1,191 @@
 #pragma once
-// The relational encoder on the device (encoding/encoder.hpp):
-//   - DeviceEncodingContext: the host EncodingContext block copied byte for byte into device memory, read by kernels
-//     through the POD view detail::ContextView (encoding/detail/lanes.hpp) rebased onto the copy;
-//   - DeviceEncoder: the context copy of an encoder's table plus the scratch and output memory of its batches, sized
-//     once by reserve().
-//
-// Shareable across streams like DeviceTaskTable: the upload runs on the stream it is given and records an event;
-// acquire(s) makes stream s wait for it and records s as a user of the block: the device memory is freed after the
-// work enqueued on s, so s must still exist when the object is destroyed. The copy is immutable after the upload.
+// Relational encoding contexts are immutable device generations. An acquisition holds its generation while work
+// is enqueued; releasing it records completion on its stream. Buffers allocate and free on the context's compute
+// stream, so a caller stream may be destroyed after its acquisitions have been released.
 
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/encoding/encoder.hpp"
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace mymyr::cuda
 {
-/// The host context of a table on the device.
+/// A device view and its owning generation, acquired together. Keep the stream alive until this object is released.
+/// A captured graph must retain this acquisition until its last replay; release it while its stream is still alive.
+/// Acquisitions on the same stream may overlap; callers order work on that stream. Move-only.
+class EncodingAcquisition
+{
+public:
+    EncodingAcquisition(encoding::detail::ContextView view, std::shared_ptr<const DeviceBuffer> generation,
+                        u64 number, std::shared_ptr<LastUse> last, cudaStream_t stream);
+    ~EncodingAcquisition();
+    EncodingAcquisition(EncodingAcquisition&& other) noexcept;
+    EncodingAcquisition& operator=(EncodingAcquisition&&) = delete;
+    EncodingAcquisition(const EncodingAcquisition&) = delete;
+    EncodingAcquisition& operator=(const EncodingAcquisition&) = delete;
+
+    encoding::detail::ContextView view;
+    std::shared_ptr<const DeviceBuffer> generation;
+    u64 number;
+
+private:
+    std::shared_ptr<LastUse> m_last;
+    cudaStream_t m_stream;
+};
+
+/// The host encoding context copied byte for byte onto the device. Refresh and all accessors are thread-safe.
 class DeviceEncodingContext
 {
 public:
-    /// Copies the context's block to the device on `stream` (nullptr: the device context's compute stream) and
-    /// records an event after the copy. Returns before the copy has run. Throws CudaError.
-    static std::shared_ptr<DeviceEncodingContext> upload(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host,
-                                                         cudaStream_t stream = nullptr);
-
+    /// Copies on `stream` (nullptr: the compute stream), after allocation on the compute stream.
+    /// Returns before the copy completes. The caller may destroy its stream after this call.
+    static std::shared_ptr<DeviceEncodingContext> upload(ContextPtr ctx,
+        std::shared_ptr<const encoding::EncodingContext> host, cudaStream_t stream = nullptr);
     DeviceEncodingContext(const DeviceEncodingContext&) = delete;
     DeviceEncodingContext& operator=(const DeviceEncodingContext&) = delete;
-    /// Waits for the upload; the device memory is freed after the work enqueued on the streams that acquired it.
     ~DeviceEncodingContext();
 
-    /// Replaces the copy by the copy of `grown`, a context of the same schema over a table whose first instances are
-    /// the instances of the current one, with more instances after them. The instances keep their rows in every array
-    /// (so their offsets and bytes), and their slot, tuple and cell rows are the same bytes in the new block. One
-    /// upload on `stream` (nullptr: the compute stream) with a new event. Thread-safe. Returns false and uploads nothing if
-    /// `grown` has the instances of the current context only. Views taken before stay valid for the work enqueued
-    /// before the call; take a new view for later work. Throws std::invalid_argument ("mymyr: encoding: ...") if
-    /// `grown` is not an extension, and CudaError.
+    /// Uploads an extension as a new generation. Every old array must be a prefix of its new array.
+    /// Existing acquisitions and captured graphs keep their old generation. False if no instances were added.
     bool refresh(std::shared_ptr<const encoding::EncodingContext> grown, cudaStream_t stream = nullptr);
-
     [[nodiscard]] const ContextPtr& context() const noexcept { return m_ctx; }
-    [[nodiscard]] const std::shared_ptr<const encoding::EncodingContext>& host() const noexcept { return m_host; }
-    [[nodiscard]] u32 num_instances() const noexcept { return m_host->table().size(); }
-    /// The view of the context on the device: the same arrays at the same offsets, as pointers into the copy.
-    [[nodiscard]] encoding::detail::ContextView view() const;
-    /// The copy: arrays().bytes() bytes, equal to host()->arrays().block().
-    [[nodiscard]] const void* data() const noexcept { return m_block.data(); }
-    [[nodiscard]] u64 bytes() const noexcept { return m_block.size(); }
-    /// Makes `s` wait for the latest upload and records `s` as a user of the block. Thread-safe.
-    void acquire(cudaStream_t s) const;
-    /// Copies the block back to the host, after the upload and the work enqueued on `s` (nullptr: the compute stream).
-    [[nodiscard]] std::vector<std::byte> download(cudaStream_t s = nullptr) const;
-    /// The uploads so far: 1 after upload(), plus 1 for each refresh() that copied.
-    [[nodiscard]] u32 uploads() const noexcept { return m_uploads; }
+    [[nodiscard]] std::shared_ptr<const encoding::EncodingContext> host() const;
+    [[nodiscard]] u32 num_instances() const;
+    [[nodiscard]] u64 bytes() const;
+    [[nodiscard]] u64 generation() const;
+    [[nodiscard]] u64 uploads() const { return generation(); }
+    /// Atomically obtains the view and generation, waits for the upload, and tracks completion when released.
+    [[nodiscard]] EncodingAcquisition acquire(cudaStream_t stream = nullptr) const;
+    [[nodiscard]] std::vector<std::byte> download(cudaStream_t stream = nullptr) const;
 
 private:
     DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host);
-    void copy(cudaStream_t stream);
+    void copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream);
 
     ContextPtr m_ctx;
     std::shared_ptr<const encoding::EncodingContext> m_host;
-    mutable DeviceBuffer m_block;
-    mutable PinnedBuffer m_staging;  // the source of the copy in flight; freed once its event has passed
+    std::shared_ptr<DeviceBuffer> m_block;
+    mutable PinnedLease m_staging;
     Event m_ready;
-    u32 m_uploads = 0;
+    u64 m_generation = 0;
+    mutable std::unordered_map<cudaStream_t, std::shared_ptr<LastUse>> m_uses;
     mutable std::mutex m_mutex;
 };
 
-/// What a batch needs, as totals over its graphs.
 struct BatchShape
 {
     u64 graphs = 0;
-    u64 entities = 0;  // entities of all graphs (objects and auxiliary)
-    u64 args = 0;      // entries of relation_args of all graphs (the sum over tuples of their arity)
-
+    u64 entities = 0;
+    u64 args = 0;
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
-/// The most one graph of any instance of a table can have.
+/// Conservative maxima per graph, including repeated statics and the auxiliary entity.
 struct GraphBounds
 {
-    u64 entities = 0;  // num_objects, plus 1 if the instance has a nullary relation
-    u64 tuples = 0;    // the slots and static rows of all its cells
-    u64 args = 0;      // the same weighted by the arity of the cell
-    u64 cells = 0;     // num_cells
+    u64 entities = 0, tuples = 0, args = 0, cells = 0;
 };
 
-/// Byte offsets, in the output block, of the arrays of a graph-major batch of `shape` (encoder.hpp lists them): each
-/// array starts at a multiple of 64 bytes.
+/// Byte offsets in a caller-owned graph-major output block; each array begins at a multiple of 64 bytes.
 struct OutputLayout
 {
     u64 task_ids = 0, num_objects = 0, entity_offsets = 0, entity_role = 0, entity_ref = 0, relation_counts = 0,
         relation_offsets = 0, relation_arg_offsets = 0, relation_args = 0;
-    u64 bytes = 0;  // the block: the end of relation_args
+    u64 bytes = 0;
 };
-/// For `relations` relations and index type `index` (4 or 8 bytes per index entry, I below), with G = shape.graphs,
-/// R = relations, E = shape.entities, A = shape.args, the arrays take
-///   task_ids 4 G; num_objects I G; entity_offsets I (G + 1); entity_role E; entity_ref I E;
-///   relation_counts I G R; relation_offsets I (G R + 1); relation_arg_offsets I (G R + 1); relation_args I A
-/// bytes, each rounded up to a multiple of 64.
-[[nodiscard]] OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations) noexcept;
+/// Throws std::overflow_error if a size product, sum or alignment exceeds u64.
+[[nodiscard]] OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations);
 
-/// The scratch of a batch, in bytes, as the sum of
-///   per-graph totals (encoding::detail::GraphTotals): 24 G,
-///   per-graph bases (entity, tuple and argument offsets, three u64): 24 G,
-///   per-cell counts of the graphs (u32), for the most cells an instance has: 4 G C,
-///   the temporary storage of an inclusive prefix sum of G + 1 u64 values (cub::DeviceScan::InclusiveSum),
-/// each rounded up to a multiple of 64 bytes (C: GraphBounds::cells maximum).
-[[nodiscard]] u64 scratch_bytes(u64 graphs, u64 max_cells);
+/// Three in-place scalar scans of G+1 entries: entities, tuples and arguments. u32 is used when conservative totals
+/// fit it, u64 otherwise. Cell counts and CUB temporary storage are separate aligned spans. Relation-major scratch
+/// is refused: it needs [G,R] counts instead of [G,C] counts.
+struct ScratchLayout
+{
+    u64 entities = 0, tuples = 0, args = 0, cell_counts = 0, scan_temp = 0;
+    u64 scan_temp_bytes = 0, bytes = 0;
+    bool wide = false;
+};
+/// Uses the current CUDA device for the CUB query; throws CudaError or std::overflow_error.
+[[nodiscard]] ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds, encoding::Layout layout);
+
+/// A leased scratch generation plus its context generation. Outputs belong to the caller.
+class EncodingWorkspace
+{
+public:
+    EncodingWorkspace(EncodingAcquisition context, std::shared_ptr<const DeviceBuffer> scratch,
+                      BatchShape shape, ScratchLayout layout, std::shared_ptr<LastUse> last, cudaStream_t stream);
+    ~EncodingWorkspace();
+    EncodingWorkspace(EncodingWorkspace&& other) noexcept;
+    EncodingWorkspace& operator=(EncodingWorkspace&&) = delete;
+    EncodingWorkspace(const EncodingWorkspace&) = delete;
+    EncodingWorkspace& operator=(const EncodingWorkspace&) = delete;
+
+    EncodingAcquisition context;
+    std::shared_ptr<const DeviceBuffer> scratch;
+    BatchShape shape;
+    ScratchLayout layout;
+
+private:
+    std::shared_ptr<LastUse> m_last;
+    cudaStream_t m_stream;
+};
 
 class DeviceEncoder
 {
 public:
-    /// The encoder's context copied to the device (on the compute stream of `ctx`). Throws std::invalid_argument
-    /// ("mymyr: encoding: ...") for a null argument and for options the device does not encode: derived relations of a
-    /// table that has derived atoms (set `include_derived = false`).
+    /// Derived state relations are refused per schema when include_derived is true. Each stream has its own scratch.
     DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder);
     DeviceEncoder(const DeviceEncoder&) = delete;
     DeviceEncoder& operator=(const DeviceEncoder&) = delete;
 
-    [[nodiscard]] const std::shared_ptr<const encoding::FlatEncoder>& encoder() const noexcept { return m_encoder; }
-    [[nodiscard]] const encoding::EncodingSchema& schema() const noexcept { return m_encoder->schema(); }
-    [[nodiscard]] const encoding::FlatOptions& options() const noexcept { return m_encoder->schema().options(); }
+    [[nodiscard]] std::shared_ptr<const encoding::FlatEncoder> encoder() const;
+    [[nodiscard]] const encoding::EncodingSchema& schema() const noexcept { return *m_schema; }
+    [[nodiscard]] const encoding::FlatOptions& options() const noexcept { return m_schema->options(); }
     [[nodiscard]] const DeviceEncodingContext& context() const noexcept { return *m_context; }
-    [[nodiscard]] DeviceEncodingContext& context() noexcept { return *m_context; }
-    /// Per-graph maxima over the instances of the table.
-    [[nodiscard]] const GraphBounds& bounds() const noexcept { return m_bounds; }
-
-    /// The shape of `graphs` graphs that each have the most any instance can have.
-    [[nodiscard]] BatchShape worst_case(u64 graphs) const noexcept;
-    /// The bytes of the scratch and the output block for a batch of `shape`: scratch_bytes(shape.graphs, bounds().cells)
-    /// + output_layout(shape, options().index, schema().num_relations()).bytes. reserve(shape) allocates exactly this.
+    [[nodiscard]] GraphBounds bounds() const;
+    [[nodiscard]] BatchShape worst_case(u64 graphs) const;
+    /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;
-    /// bytes_needed(worst_case(graphs)): any batch of at most `graphs` graphs fits.
     [[nodiscard]] u64 bytes_needed(u64 graphs) const;
+    [[nodiscard]] ScratchLayout scratch_layout(const BatchShape& shape) const;
 
-    /// Allocates scratch and output memory for batches up to `shape` (on `stream`, nullptr: the compute stream) and
-    /// returns when it is allocated. A shape inside the reserved one allocates nothing; a larger one replaces the
-    /// memory by one of the elementwise maximum of the two shapes. Nothing else allocates device memory.
+    /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
+    /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.
     void reserve(const BatchShape& shape, cudaStream_t stream = nullptr);
-    /// reserve(worst_case(max_graphs)).
     void reserve(u64 max_graphs, cudaStream_t stream = nullptr);
-    /// The shape reserve() has allocated for (zero before the first call).
-    [[nodiscard]] const BatchShape& reserved() const noexcept { return m_reserved; }
-    [[nodiscard]] u64 reserved_bytes() const noexcept { return m_scratch.size() + m_output.size(); }
-    /// The reserved scratch and output memory (null before reserve). One batch at a time uses them: callers order
-    /// their calls on one stream, or with events.
-    [[nodiscard]] void* scratch() const noexcept { return m_scratch.data(); }
-    [[nodiscard]] void* output() const noexcept { return m_output.data(); }
-    /// The layout of the output block for the reserved shape.
-    [[nodiscard]] OutputLayout reserved_layout() const noexcept;
-
-    /// Makes `s` wait for the context upload and records `s` as a user of the context copy and of the reserved
-    /// memory. Thread-safe.
-    void acquire(cudaStream_t s) const;
-
-    /// Replaces the table by a grown one (DeviceEncodingContext::refresh): `grown` has the schema and options of this
-    /// encoder and a table that extends the current one. The reserved memory stays; bytes_needed changes with the
-    /// bounds. Returns whether the context was copied.
+    [[nodiscard]] BatchShape reserved(cudaStream_t stream = nullptr) const;
+    /// Scratch bytes owned on this stream (outputs are owned by the caller).
+    [[nodiscard]] u64 reserved_bytes(cudaStream_t stream = nullptr) const;
+    [[nodiscard]] OutputLayout reserved_layout(cudaStream_t stream = nullptr) const;
+    /// Leases context and scratch together; throws unless reserve was called for this stream.
+    [[nodiscard]] EncodingWorkspace acquire(cudaStream_t stream = nullptr) const;
     bool refresh(std::shared_ptr<const encoding::FlatEncoder> grown, cudaStream_t stream = nullptr);
 
 private:
-    void set_bounds();
+    struct Workspace
+    {
+        BatchShape shape;
+        ScratchLayout layout;
+        std::shared_ptr<DeviceBuffer> scratch;
+        std::shared_ptr<LastUse> last;
+        Event ready;
+        std::mutex mutex;
+    };
+    [[nodiscard]] std::shared_ptr<Workspace> workspace(cudaStream_t stream, bool create) const;
+    void reserve_workspace(Workspace& workspace, const BatchShape& shape);
+    void reserve_locked(const BatchShape& shape, cudaStream_t stream);
 
     ContextPtr m_ctx;
     std::shared_ptr<const encoding::FlatEncoder> m_encoder;
+    std::shared_ptr<const encoding::EncodingSchema> m_schema;
     std::shared_ptr<DeviceEncodingContext> m_context;
     GraphBounds m_bounds;
-    BatchShape m_reserved;
-    mutable DeviceBuffer m_scratch, m_output;
-    mutable std::mutex m_mutex;
+    mutable std::shared_mutex m_state_mutex;
+    mutable std::mutex m_workspace_mutex;
+    mutable std::unordered_map<cudaStream_t, std::shared_ptr<Workspace>> m_workspaces;
 };
 }  // namespace mymyr::cuda

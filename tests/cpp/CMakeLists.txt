@@ -161,17 +161,12 @@ if(TARGET mymyr_cuda)
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
         # the relational encoder's context and memory on the device (cuda/encoding.hpp) against the host
         add_executable(mymyr_device_encoding_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encoding.cpp
-                                                   ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu frontend/golden.cpp)
+                                                   ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend GTest::gtest_main)
-        # the warning flags of mymyr_warnings for the C++ sources only: nvcc's host pass rejects -Wpedantic
-        target_compile_options(mymyr_device_encoding_tests PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra --Werror=all-warnings>)
+        target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr_warnings)
         set_target_properties(mymyr_device_encoding_tests PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
         target_compile_definitions(mymyr_device_encoding_tests PRIVATE
-            MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-            MYMYR_WORK_DIR="${MYMYR_WORK_DIR}"
-            MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
+            MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
         gtest_discover_tests(mymyr_device_encoding_tests DISCOVERY_TIMEOUT 60
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
         # the device env's calls captured into CUDA graphs and replayed, against eager calls and the host

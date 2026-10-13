@@ -60,10 +60,9 @@ set_target_properties(mymyr_cuda PROPERTIES
     CUDA_EXTENSIONS OFF
     CUDA_RUNTIME_LIBRARY Static
     POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(mymyr_cuda PUBLIC mymyr::core mymyr::encoding CUDA::cudart_static)
-target_compile_options(mymyr_cuda PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
-    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo -Xcompiler=-Wall,-Wextra --Werror=all-warnings>)
+target_link_libraries(mymyr_cuda PUBLIC mymyr::core mymyr::encoding CUDA::cudart_static
+    PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
+target_compile_options(mymyr_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 target_compile_definitions(mymyr_cuda PUBLIC MYMYR_HAS_CUDA=1)
 
 # The gtests (tests/cuda/test_cuda.cpp) are declared in tests/cpp/CMakeLists.txt, where GTest is found.
