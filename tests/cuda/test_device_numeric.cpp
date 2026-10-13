@@ -1,3 +1,4 @@
+#include "../cpp/support/benchmarks.hpp"
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/cuda/brfs.hpp"
 #include "mymyr/cuda/astar.hpp"
@@ -538,31 +539,11 @@ TEST_P(DeviceNumericPddl, ExpandBrfsAndIwEqualCpu)
 {
     if (cuda::device_count() == 0) GTEST_SKIP();
     const auto name = GetParam();
-    const char* work_env = std::getenv("MYMYR_WORK_DIR");
-    const char* fork_env = std::getenv("MYMYR_FORK_DATA_DIR");
-    if (!work_env || !fork_env) GTEST_SKIP() << "set MYMYR_WORK_DIR and MYMYR_FORK_DATA_DIR";
     std::filesystem::path domain, problem;
-    if (name.starts_with("cs-"))
-    {
-        std::string d = name.substr(3);
-        if (d == "block-grouping-conj") d = "block-grouping";
-        if (d == "delivery-nometric") d = "delivery";
-        const auto dir = std::filesystem::path(work_env) / "mimir-cs/Benchmark/numeric" / d;
-        domain = dir / "domain.pddl";
-        problem = dir / "pfile1.pddl";
-        if (name == "cs-block-grouping-conj" || name == "cs-delivery-nometric")
-            problem = std::filesystem::path(MYMYR_SOURCE_DIR) / "tests/data/numeric_tasks/pddl" / (name.substr(3) + ".pddl");
-    }
-    else
-    {
-        std::string d = name.substr(2);
-        if (d == "tpp-numeric") d = "tpp/numeric";
-        if (d == "zenotravel-numeric") d = "zenotravel/numeric";
-        const auto dir = std::filesystem::path(fork_env) / d;
-        domain = dir / "domain.pddl";
-        problem = dir / "test_problem.pddl";
-    }
-    if (!std::filesystem::exists(domain) || !std::filesystem::exists(problem)) GTEST_SKIP() << problem;
+    for (const auto& t : test::numeric_suite())
+        if (t.name == name)
+            domain = t.domain, problem = t.problem;
+    ASSERT_FALSE(domain.empty()) << name;
     const auto parsed = frontend::Domain::from_file(domain);
     const auto task = Task::create(*parsed->instantiate_file(problem));
     const auto ctx = context();

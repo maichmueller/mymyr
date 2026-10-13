@@ -4,7 +4,7 @@
 //
 // The relaxation is relaxed_task.hpp's, read the same way as the grounded evaluation: one operator per (schema,
 // conditional effect with effects) and one per axiom; positive fluent and derived preconditions (a condition's literals
-// as a set), the action precondition's static literals, and for a quantified effect parameter mimir's single-
+// as a set), the action precondition's static literals, and for a quantified effect parameter the single-
 // parameter static candidates (the effect condition's static literals are otherwise ignored); negated fluent
 // preconditions cost 0 when the atom is false in the evaluated state and otherwise the cost of deleting it; negated
 // derived preconditions hold. Actions cost 1 (or their real cost), axioms 0; h_add sums the preconditions of an action

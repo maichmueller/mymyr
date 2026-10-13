@@ -42,7 +42,7 @@ Successors::Successors(detail::Engine& engine, AxiomEvaluator& axioms) : m_e(eng
 }
 
 // The applicability rules for the numeric and total-cost effects of one (conditional) effect that fires, checked in
-// mimir's order (ActionSatisficingBindingGenerator::is_valid_binding): fluent effects, then the total-cost effect; each
+// this order: fluent effects, then the total-cost effect; each
 // records its family on its target before its value is checked. The effects are appended to `writes` / `auxes`.
 bool Successors::numeric_effects(const std::vector<plan::NumEffect>& es, bool has_aux, const plan::AuxEffect& aux,
                                  std::vector<NumericWrite>& writes, std::vector<AuxWrite>& auxes)

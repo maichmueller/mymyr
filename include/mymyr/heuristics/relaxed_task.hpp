@@ -1,25 +1,24 @@
 #pragma once
 // The grounded delete relaxation behind h_max, h_add and h_FF.
 //
-// Grounding follows mimir's LiftedGrounder + RelaxedPlanningGraph (v0.16.3) so that the heuristic values equal
-// mimir's:
+// The grounding:
 //   1. Exploration: the delete-free task (every negative literal and every delete dropped, derived predicates made
 //      fluent, each axiom an action adding its head) is explored from the initial state with mymyr's own lifted
-//      successor generator, in naive rounds until no new atom appears (mimir's delete-free fixpoint). R is the set of
+//      successor generator, in naive rounds until no new atom appears. R is the set of
 //      reached atoms.
 //   2. Ground actions G: every binding of every schema that is applicable in the final relaxed state and statically
 //      applicable in the unrelaxed task (static literals of both polarities hold, no atom required both true and
 //      false); ground axioms likewise.
 //   3. Operators: per ground action and per conditional effect instance one operator with precondition
-//      pre(action) + fluent/derived literals of the effect condition and effect "add atoms / delete atoms". As in
-//      mimir, the static literals of an effect condition are ignored and the instances of a universally quantified
-//      effect are the product of each quantified parameter's objects that pass mimir's single-parameter static
-//      consistency test (StaticConsistencyGraph::compute_vertices); static_condition_holds tells the operators whose
+//      pre(action) + fluent/derived literals of the effect condition and effect "add atoms / delete atoms". The
+//      static literals of an effect condition are ignored and the instances of a universally quantified
+//      effect are the product of each quantified parameter's objects that pass a single-parameter static
+//      consistency test; static_condition_holds tells the operators whose
 //      static effect literals hold (the others never fire). Axioms become 0-cost operators.
 //   4. Propositions: an atom true (fluent or derived) and, for fluent atoms of R used negatively somewhere, an atom
 //      false. "p false" costs 0 in a state without p and is otherwise achieved by operators deleting p. Negated
-//      derived atoms always cost 0 (mimir's "not y <- T"). Preconditions keep their multiplicity (h_add counts a
-//      repeated atom twice, as mimir does).
+//      derived atoms always cost 0. Preconditions keep their multiplicity (h_add counts a
+//      repeated atom twice).
 //
 // Everything is flat CSR, built once and shared read-only by every evaluator (one per thread). Construction respects a
 // budget; beyond it build() returns nullptr and heuristics fall back to lifted evaluation.
@@ -63,9 +62,9 @@ struct GroundingStats
 
 struct RelaxedTaskOptions
 {
-    /// Keep the operators with a positive precondition no operator can add and that is not reached (mimir's
-    /// RPG keeps them: they never fire, but their positive effects count as achievers in the landmark generator's
-    /// achiever index). The heuristics drop them.
+    /// Keep the operators with a positive precondition no operator can add and that is not reached (they
+    /// never fire, but their positive effects count as achievers in the landmark generator's achiever index). The
+    /// heuristics drop them.
     bool keep_unreachable_operators = false;
 };
 
@@ -110,7 +109,7 @@ public:
     /// Whether the operator's effect has no condition, i.e. applies whenever its ground action does (axioms: true).
     [[nodiscard]] bool unconditional(u32 op) const noexcept { return m_uncond[op] != 0; }
     /// Whether the static literals of the operator's effect condition hold and the condition requires no fluent atom
-    /// both true and false. The operators where this is false never fire; they stay for mimir's heuristic values,
+    /// both true and false. The operators where this is false never fire; they stay for the landmark generator's achiever index,
     /// and LM-cut and the landmark count leave them out.
     [[nodiscard]] bool static_condition_holds(u32 op) const noexcept { return m_can_fire[op] != 0; }
     /// Precondition entries that are not "false" propositions (the counter of unsatisfied entries starts here).

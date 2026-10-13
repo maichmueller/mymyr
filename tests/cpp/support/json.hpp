@@ -1,5 +1,5 @@
 #pragma once
-// A minimal JSON reader for test data (tests/data/expected/*.json): null, booleans, numbers, strings with the usual
+// A minimal JSON reader for test data (tests/parity/data/expected/*.json): null, booleans, numbers, strings with the usual
 // escapes (\uXXXX as UTF-8, surrogate pairs included), arrays and objects. Throws std::runtime_error on malformed input.
 
 #include <cstdint>

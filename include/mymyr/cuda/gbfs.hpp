@@ -9,7 +9,7 @@
 // Every step pops the `batch` open nodes with the smallest keys (h, g, first in first out: search::gbfs_eager's order)
 // and expands them together, as device A* does (cuda/astar.hpp): no reopening, a state keeps the g of its first
 // generation (the first candidate in pop and canonical order), and the search stops at the first new goal state of a
-// chunk (in candidate order). The plan's cost is mimir's plan extraction (cheapest action per step), as the CPU's.
+// chunk (in candidate order). The plan's cost is the extracted plan's (cheapest action per step), as on the CPU.
 // A batch expands states the sequential search never reaches; stats.expanded reports the expansion overhead against
 // search::gbfs_eager.
 //

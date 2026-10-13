@@ -1,4 +1,4 @@
-// A*, eager and lazy (best_first.hpp): ports of mimir 0.16.3 astar_eager / astar_lazy onto the SoA nodes, shared
+// A*, eager and lazy (best_first.hpp): eager and lazy A* on SoA nodes, shared
 // stores and bucket or heap open lists (best_first_detail.hpp).
 
 #include "best_first_detail.hpp"
@@ -27,7 +27,7 @@ struct AStarEager
         Nodes nodes;
         nodes.track_depth = c.o.control.budget.max_depth != std::numeric_limits<u32>::max();
         nodes.path_words = c.status_words;
-        Q open, goals;  // goal states wait in their own list: popped first among equal f (mimir's (f, GOAL) key)
+        Q open, goals;  // goal states wait in their own list: popped first among equal f
         Transitions tr;
         Cur cur;
         std::vector<u64> next;

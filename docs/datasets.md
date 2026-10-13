@@ -48,7 +48,7 @@ directory or among a pattern's matches are skipped. Instance `i` is the task `Ta
 with the same options. The table can be indexed (`table[i]`), pickled (it pickles its tasks), and passed wherever
 tasks of one domain are taken: `generalized_state_space`, `KnowledgeBase`, `TaskSuite([table, ...])`.
 
-A `KnowledgeBase` holds what is known about a task set, as mimir's knowledge base does: the state space of every
+A `KnowledgeBase` holds what is known about a task set: the state space of every
 task whose generation succeeded (failures are skipped; `max_states` and `max_seconds` bound each one), sorted by size
 unless `sort_by_size=False`; the generalized state space over them when `generalized=True`; and the tuple graph of
 every vertex of every space when `width=` is given. `task_indices[i]` is the task of state space `i`. Every step runs

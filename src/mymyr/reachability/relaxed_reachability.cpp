@@ -60,7 +60,7 @@ std::vector<i32> terms_of(const TaskData& T, const Literal& l)
     return {t.begin(), t.end()};
 }
 
-/// Adds the literals of one condition to a rule body (as in mimir's RuleBuilder reading).
+/// Adds the literals of one condition to a rule body.
 void add_condition(const TaskData& T, const reach::StaticTables& st, const Options& o, std::span<const Literal> lits, Rule& r)
 {
     for (const Literal& l : lits)

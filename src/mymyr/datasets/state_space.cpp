@@ -1,5 +1,4 @@
-// State spaces: a parallel generator over the concurrent store, with mimir's StateSpace semantics
-// (datasets/state_space.hpp).
+// State spaces: a parallel generator over the concurrent store, (datasets/state_space.hpp).
 //
 // Generation is the layer-synchronous BrFS of search/brfs.cpp (deterministic ids: atomic-min discoverer keys plus a
 // per-layer counting sort), with witness pruning off and canonical successor order, and every generated successor
@@ -345,8 +344,8 @@ private:
 
     static void dijkstra(StateSpace& S)
     {
-        // backward from every goal state: d[source] = min over edges (source -> target) of d[target] + cost (as in
-        // mimir's BGL call on the backward graph). With non-negative costs the result is the minimum over all edges,
+        // backward from every goal state: d[source] = min over edges (source -> target) of d[target] + cost (a Dijkstra
+        // over the backward graph). With non-negative costs the result is the minimum over all edges,
         // independent of the order of ties.
         for (f64 c : S.m_costs)
             if (!(c >= 0))
@@ -649,7 +648,7 @@ public:
           m_width(max_arity(m_task))
     {
         m_timed = std::isfinite(o.max_seconds);
-        m_limit = std::max<u64>(o.max_states, 2);  // mimir: fails iff the space has max(M, 2) states or more
+        m_limit = std::max<u64>(o.max_states, 2);  // fails iff the space has max(M, 2) states or more
         m_store.emplace(T, m_task.numeric_words());
         m_team.run(
             [&](u32 t)
@@ -671,7 +670,7 @@ public:
         m_t0 = t0;
         if (m_task.compiled().goal.unsatisfiable)
         {
-            r.status = StateSpaceStatus::Unsolvable;  // mimir's BrFS: a statically false goal ends it at once
+            r.status = StateSpaceStatus::Unsolvable;  // a statically false goal ends it at once
             r.seconds = seconds_since(t0);
             return r;
         }
@@ -779,7 +778,7 @@ private:
         succ.prepare(rec);
         m_goal[id] = succ.goal_holds();
         w.src_id.push_back(static_cast<u32>(id));
-        // the parent's metric value in mimir's cost formula (datasets/state_space.hpp)
+        // the parent's metric value in the cost formula (datasets/state_space.hpp)
         const f64 g = m_metric ? m_costs.initial(rec) : static_cast<f64>(m_depth);
         const bool labels = m_o.labels;
         const u32 K = m_width;
@@ -1049,7 +1048,7 @@ public:
         const auto t0 = Clock::now();
         if (m_task.compiled().goal.unsatisfiable)
         {
-            r.status = StateSpaceStatus::Unsolvable;  // mimir's BrFS: a statically false goal ends it at once
+            r.status = StateSpaceStatus::Unsolvable;  // a statically false goal ends it at once
             r.seconds = seconds_since(t0);
             return r;
         }
@@ -1058,7 +1057,7 @@ public:
         const bool labels = m_o.labels;
         const u32 K = m_width;
         const u32 NN = m_task.numeric_words();
-        const u64 limit = std::max<u64>(m_o.max_states, 2);  // mimir: fails iff the space has max(M, 2) states or more
+        const u64 limit = std::max<u64>(m_o.max_states, 2);  // fails iff the space has max(M, 2) states or more
         FlatStateStore store(std::max<u32>(1, m_task.words()), 10, NN);
         const WorkspaceLease lease = m_task.workspace();
         Successors& succ = lease->successors();

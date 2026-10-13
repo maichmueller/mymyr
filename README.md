@@ -56,9 +56,8 @@ ctest --test-dir build
 Add `-DMYMYR_CUDA=ON` (and, if needed, `-DCMAKE_CUDA_COMPILER=<path to nvcc>`) for the CUDA backend and its tests.
 Sanitizers: `-DMYMYR_SANITIZE="address;undefined"` or `-DMYMYR_SANITIZE=thread`.
 
-A handful of tests compare mymyr against the mimir fork's own PDDL instances and recorded behavior
-(`github.com/maichmueller/mimir`, its `data/` directory). Point `MYMYR_FORK_DATA` (and, for the IPC-2023 tasks,
-`MYMYR_IPC`) at a checkout of that data to run them; without it, they skip rather than fail.
+The tests that compare mymyr with recorded reference results live in `tests/parity` (ctest label `parity`, pytest
+marker `parity`); they skip when the reference data is not available. See [tests/parity/README.md](tests/parity/README.md).
 
 ## Using mymyr from C++
 
@@ -116,8 +115,7 @@ PyG dependency. See [native encoding](docs/encoding.md) for the array contract a
 
 mymyr is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version
-(SPDX: `GPL-3.0-or-later`; the full text is in [LICENSE](LICENSE)). These are the terms of mimir
-(Copyright (C) 2023 Dominik Drexler and Simon Stahlberg), from which mymyr is ported and derived.
+(SPDX: `GPL-3.0-or-later`; the full text is in [LICENSE](LICENSE)). These are the terms of mimir (Copyright (C) 2023 Dominik Drexler and Simon Stahlberg), from which mymyr is derived.
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
 warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.

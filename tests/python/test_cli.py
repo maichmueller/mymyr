@@ -1,6 +1,5 @@
 """The mymyr command line (mymyr.cli), run as ``python -m mymyr`` and as the installed ``mymyr`` script."""
 
-import json
 import pathlib
 import re
 import shutil
@@ -17,7 +16,6 @@ if not hasattr(mymyr, "Domain"):
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PDDL = ROOT / "tests/data/pddl"
-EXPECTED = ROOT / "tests/data/expected"
 
 CLASSICAL = {  # small tasks every search solves (the IW family with width 2)
     "gripper": (PDDL / "gripper/domain.pddl", PDDL / "gripper/test_problem.pddl"),
@@ -26,12 +24,15 @@ CLASSICAL = {  # small tasks every search solves (the IW family with width 2)
 }
 COUNTERS = (PDDL / "counters/domain.pddl", PDDL / "counters/p01.pddl")  # numeric, action costs
 UNSOLVABLE = (PDDL / "counters/domain.pddl", PDDL / "counters/p02.pddl")
-# tasks with an optimal cost in the goldens (tests/data/expected, the fork's A*)
-GOLDEN = {
+# tasks with a known optimal cost
+OPTIMAL = {
     "logistics00__probLOGISTICS-6-1": (PDDL / "logistics00/domain.pddl", PDDL / "logistics00/probLOGISTICS-6-1.pddl"),
     "philosophers__p03-phil4": (PDDL / "philosophers/domain.pddl", PDDL / "philosophers/p03-phil4.pddl"),
     "blocks__probBLOCKS-8-0": (PDDL / "blocks/domain.pddl", PDDL / "blocks/probBLOCKS-8-0.pddl"),
 }
+OPTIMAL_COST = {"logistics00__probLOGISTICS-6-1": 14, "philosophers__p03-phil4": 36, "blocks__probBLOCKS-8-0": 18}
+# A* with h_max expands this many states on each (the larger ones are only run with h_max)
+EXPANDED = {"logistics00__probLOGISTICS-6-1": 5802, "philosophers__p03-phil4": 28225, "blocks__probBLOCKS-8-0": 139798}
 SEARCHES = ["astar", "gbfs", "brfs", "iw", "siw", "astar_iw"]
 
 
@@ -99,21 +100,20 @@ def test_every_search_on_a_numeric_task(search_name):
 
 
 @pytest.mark.parametrize("heuristic", ["max", "blind", "h2", "lmcut"])
-@pytest.mark.parametrize("name", sorted(GOLDEN))
-def test_astar_finds_the_optimal_cost_of_the_goldens(name, heuristic):
-    golden = json.loads((EXPECTED / f"{name}.json").read_text())["astar"]
-    if golden["heuristic"] != "hmax" or (heuristic != "max" and golden["expanded"] > 30_000):
-        pytest.skip("the other heuristics on the small goldens only")
-    d, p = GOLDEN[name]
+@pytest.mark.parametrize("name", sorted(OPTIMAL))
+def test_astar_finds_the_optimal_cost(name, heuristic):
+    if heuristic != "max" and EXPANDED[name] > 30_000:
+        pytest.skip("the other heuristics on the small tasks only")
+    d, p = OPTIMAL[name]
     r = run("plan", d, p, "--heuristic", heuristic, "-v")
     assert r.returncode == 0, r.stderr
     _, goal, cost = replay_cost(mymyr.Task.from_pddl(d, p), r.stdout)
-    assert goal and cost == golden["optimal_cost"]
-    assert f"cost: {golden['optimal_cost']}" in r.stderr
+    assert goal and cost == OPTIMAL_COST[name]
+    assert f"cost: {OPTIMAL_COST[name]}" in r.stderr
 
 
 def test_plan_file_reads_back(tmp_path):
-    d, p = GOLDEN["logistics00__probLOGISTICS-6-1"]
+    d, p = OPTIMAL["logistics00__probLOGISTICS-6-1"]
     out = tmp_path / "plan.txt"
     r = run("plan", d, p, "-o", out, "--search", "gbfs", "-v")
     assert r.returncode == 0 and r.stdout == ""
@@ -128,7 +128,7 @@ def test_plan_file_reads_back(tmp_path):
 
 
 def test_exit_codes(tmp_path):
-    d, p = GOLDEN["blocks__probBLOCKS-8-0"]
+    d, p = OPTIMAL["blocks__probBLOCKS-8-0"]
     # 1: proved unsolvable / exhausted
     for s in ("astar", "brfs", "gbfs"):
         r = run("plan", *UNSOLVABLE, "--search", s)
@@ -166,7 +166,7 @@ def test_exit_codes(tmp_path):
 
 @pytest.mark.parametrize("search_name", ["astar", "gbfs", "brfs", "siw"])
 def test_plans_do_not_depend_on_the_atom_slots(search_name):
-    d, p = GOLDEN["logistics00__probLOGISTICS-6-1"]
+    d, p = OPTIMAL["logistics00__probLOGISTICS-6-1"]
     outs = [run("plan", d, p, "--search", search_name, "--atoms", atoms, "-v", *width_args(search_name))
             for atoms in ("lazy", "auto", "reachable", "dense")]
     assert all(r.returncode == 0 for r in outs), [r.stderr for r in outs]
@@ -176,7 +176,7 @@ def test_plans_do_not_depend_on_the_atom_slots(search_name):
 
 
 def test_brfs_threads():
-    d, p = GOLDEN["blocks__probBLOCKS-8-0"]
+    d, p = OPTIMAL["blocks__probBLOCKS-8-0"]
     task = mymyr.Task.from_pddl(d, p)
     one, four = run("plan", d, p, "--search", "brfs"), run("plan", d, p, "--search", "brfs", "-j", "4")
     assert one.returncode == four.returncode == 0, four.stderr

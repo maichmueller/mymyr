@@ -1,6 +1,5 @@
 #pragma once
-// FactLandmarkGraph: an immutable value holding the fact landmarks of a task, matching mimir 0.16.3's
-// FactLandmarkGraph. Produced by landmarks::approximate_fact_landmarks (grounded, with an
+// FactLandmarkGraph: an immutable value holding the fact landmarks of a task. Produced by landmarks::approximate_fact_landmarks (grounded, with an
 // achiever index) and landmarks::lifted_fact_landmarks (no grounding: lifted landmarks instead of achievers); read by
 // LIW (landmark novelty coordinates) and by search::LandmarkTransitionOrdering.
 //
@@ -8,7 +7,7 @@
 //     processes and threads, independent of the order in which lazy slots were assigned. slots() resolves them to
 //     state bit positions of a task (interning a slot on first touch, which is thread-safe).
 //   - Fact landmarks: atoms every plan makes true at some point (for a sound generator: approximate_fact_landmarks with
-//     FirstAchievers::PossiblyBefore; mimir's first achievers are not sound in general). Kept in discovery order,
+//     FirstAchievers::PossiblyBefore; the HMax first achievers are not sound in general). Kept in discovery order,
 //     without duplicates.
 //   - Disjunctive landmarks: sets of which every plan makes at least one member true. Each set is ascending and
 //     duplicate-free, no set contains a fact landmark (the fact subsumes it), no two sets are equal, and the list is
@@ -49,7 +48,7 @@ inline constexpr CanonicalAtom k_no_atom = ~CanonicalAtom{0};
 /// "No action" in achiever queries.
 inline constexpr u32 k_no_action = ~u32{0};
 
-/// The intensional form of a landmark (mimir's LiftedLandmark): `predicate(binding)` where a free position is
+/// The intensional form of a landmark: `predicate(binding)` where a free position is
 /// k_free. Every plan makes one of `members` true; a fully bound landmark is a fact landmark whose only member is its
 /// own atom.
 struct LiftedLandmark
@@ -130,7 +129,7 @@ class FactLandmarkGraph
 public:
     FactLandmarkGraph() = default;
 
-    /// Normalizes what the caller hands over, the way mimir's FactLandmarkGraphImpl::create does: fact landmarks
+    /// Normalizes what the caller hands over, fact landmarks
     /// deduplicated in order; every disjunctive set sorted and deduplicated, and empty sets, sets containing a fact
     /// landmark and duplicate sets dropped; orderings sorted and deduplicated.
     [[nodiscard]] static FactLandmarkGraph create(std::vector<CanonicalAtom> landmarks,

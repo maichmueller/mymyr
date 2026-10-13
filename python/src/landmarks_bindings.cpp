@@ -1,5 +1,4 @@
-// Landmarks and relaxed reachability in mymyr._core._search (mymyr.search; as in mimir's
-// pymimir.advanced.search): FactLandmarkGraph, approximate_fact_landmarks, lifted_fact_landmarks,
+// Landmarks and relaxed reachability in mymyr._core._search (mymyr.search): FactLandmarkGraph, approximate_fact_landmarks, lifted_fact_landmarks,
 // verify_pi_plus_fact_landmarks, RelaxedReachability with its tables, witness queries and conjunctive queries, and
 // LandmarkTransitionOrdering (the width-1 transition ordering that iw() takes).
 //
@@ -266,7 +265,7 @@ void bind_landmarks(nb::module_& m)
 {
     // enums ----------------------------------------------------------------------------------------------------------
     nb::enum_<lm::FirstAchievers>(m, "FirstAchievers",
-                                  "The first achievers of approximate_fact_landmarks: HMAX (mimir's) takes the "
+                                  "The first achievers of approximate_fact_landmarks: HMAX takes the "
                                   "operators reaching an atom at its h_max-style cost, which is not sound in general (an "
                                   "atom every cheapest achiever needs is a landmark although a costlier achiever does "
                                   "without it); POSSIBLY_BEFORE takes the operators applicable in the delete relaxation "
@@ -362,8 +361,8 @@ void bind_landmarks(nb::module_& m)
                                                std::move(o)};
             },
             "task"_a, "landmarks"_a, "disjunctive"_a = nb::none(), "orderings"_a = nb::none(),
-            "A graph from given fluent atoms (mimir's FactLandmarkGraph.create): fact landmarks, disjunctive sets and "
-            "(before, after) orderings, normalized as mimir does (duplicates dropped, sets holding a fact landmark "
+            "A graph from given fluent atoms : fact landmarks, disjunctive sets and "
+            "(before, after) orderings, normalized (duplicates dropped, sets holding a fact landmark "
             "dropped). Atoms outside the task's reachable domains are dropped (they can never hold). No achiever index.")
         .def_prop_ro("task", [](const PyFactLandmarkGraph& g) -> Arg<std::variant<PyTask, PyHandle>> { return g.o.obj; })
         .def_prop_ro("landmarks", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->landmarks()); },
@@ -554,8 +553,7 @@ void bind_landmarks(nb::module_& m)
         "max_disjunctive_landmark_size"_a = 0, "max_disjunctive_landmark_depth"_a = 0,
         "first_achievers"_a = lm::FirstAchievers::HMax, "include_derived_atoms"_a = false, "max_operators"_a = 5'000'000,
         "max_bindings"_a = 100'000'000, "max_seconds"_a = 60.0,
-        "Fact landmarks over the grounded delete relaxation (landmarks/approximate.hpp; as in mimir's "
-        "ApproximateFactLandmarkGenerator), with the achiever index. Grounds the task: max_operators, max_bindings and "
+        "Fact landmarks over the grounded delete relaxation (landmarks/approximate.hpp), with the achiever index. Grounds the task: max_operators, max_bindings and "
         "max_seconds bound the grounding (RuntimeError beyond). max_disjunctive_landmark_size 0: no disjunctive "
         "landmarks; max_disjunctive_landmark_depth 0: unbounded. first_achievers: a FirstAchievers or 'hmax' / "
         "'possibly_before' (sound; the landmark count's). include_derived_atoms: derived goal atoms and derived "
@@ -609,7 +607,7 @@ void bind_landmarks(nb::module_& m)
         "max_disjunctive_members"_a = 0, "reachability_filter_members"_a = true,
         "reachability_disambiguation"_a = lm::ReachabilityDisambiguation::Joint, "first_achievers_restricted"_a = true,
         "verify_pi_plus"_a = true, "complete_fact_landmarks"_a = lm::CompleteFactLandmarks::Members,
-        "Lifted fact landmarks straight from the schemas (landmarks/lifted.hpp; as in mimir's LiftedFactLandmarkGenerator): "
+        "Lifted fact landmarks straight from the schemas (landmarks/lifted.hpp): "
         "no grounding and no achiever index, but lifted landmarks (graph.lifted). reachability: a RelaxedReachability "
         "of the task (default options) to reuse; the enums also take their names ('joint', 'members', ...). Raises "
         "RuntimeError when verify_pi_plus finds a fact that is not a landmark.");
@@ -733,8 +731,7 @@ void bind_landmarks(nb::module_& m)
 
     nb::class_<PyRelaxedReachability>(
         m, "RelaxedReachability",
-        "Exact delete-relaxed reachability over ground atoms without grounding (reachability/relaxed_reachability.hpp; "
-        "as in mimir's RelaxedReachability): the unrestricted fixpoint at construction, restricted fixpoints and the "
+        "Exact delete-relaxed reachability over ground atoms without grounding (reachability/relaxed_reachability.hpp): the unrestricted fixpoint at construction, restricted fixpoints and the "
         "complete landmark test on demand. Immutable and thread-safe; the fixpoints run with the thread state detached.")
         .def(
             "__init__",
@@ -811,7 +808,7 @@ void bind_landmarks(nb::module_& m)
 
     nb::class_<PyLandmarkOrdering>(
         m, "LandmarkTransitionOrdering",
-        "As in mimir's LandmarkTransitionOrderingStrategy (landmarks/transition_ordering.hpp), for IW's width-1 pass: "
+        "The landmark transition ordering (landmarks/transition_ordering.hpp), for IW's width-1 pass: "
         "iw(task, max_arity=1, transition_ordering=...). Scores each transition against the fact landmarks (more new "
         "ones, more new unique ones, a unique achiever action first, fewer deleted ones) and stable-sorts the layer. "
         "Needs a graph with an achiever index (approximate_fact_landmarks).")

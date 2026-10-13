@@ -1,15 +1,14 @@
 #pragma once
-// Port of mimir's translation layer (`ToMimirStructures` + `EncodeParameterIndexInVariables`), from loki's
-// normalized structures to `formalism::TaskData`.
+// The translation layer from loki's normalized structures to `formalism::TaskData`.
 //
-// Mimir runs two full passes, each into fresh hash-consing repositories, and then orders every list (literals of
+// It runs two full passes, each into fresh hash-consing repositories, and then orders every list (literals of
 // a condition, conditional effects, initial atoms, goal literals, numeric constraints, multi-operator operands) by
 // the creation index in the *second* pass's repositories. The second pass visits the first pass's lists in
-// first-pass index order. We replay both passes on `Repo` tables that only assign those indices (repo.hpp), in
-// mimir's traversal order (Apple Clang evaluates call arguments left to right, which fixes the order where mimir
-// creates several entities inside one call), and emit the TaskData from the second pass.
+// first-pass index order. Both passes run on `Repo` tables that only assign those indices (repo.hpp), in
+// a fixed traversal order (Apple Clang evaluates call arguments left to right, which fixes the order where
+// several entities are created inside one call), and the translation emits the TaskData from the second pass.
 //
-// Repository topology, as in mimir (`formalism::Parser`):
+// Repository topology:
 //   domain:  pass 1 -> R1d (fresh), pass 2 -> R2d (fresh; the final domain repositories)
 //   problem: pass 1 -> R1p (child of R2d), pass 2 -> R2p (child of R2d)
 
@@ -94,7 +93,7 @@ struct DomainState
     absl::flat_hash_map<const loki::TypeImpl*, u32> type_of;
     absl::flat_hash_map<std::string, u32> type_by_name;
 
-    // mimir's static analysis (`ToMimirStructures::prepare`) of the domain
+    // the static analysis of the domain
     absl::flat_hash_set<std::string> fluent_predicates, derived_predicates, effect_functions;
 
     // canonical type order (see domain.hpp): for each predicate, the type whose AddTypePredicates predicate it is

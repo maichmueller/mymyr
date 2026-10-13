@@ -30,8 +30,8 @@ On the device (CUDA builds; mymyr.cuda): ``device=`` a device ordinal or a mymyr
     spaces = mymyr.datasets.state_spaces(suite, device=0)        # a TaskSuite: one pipeline per domain, global order
     sampler = mymyr.datasets.StateSpaceSampler(spaces[0], seed=0)
 
-Semantics follow mimir's StateSpace: every applicable action is a transition, the goal distances
-are computed backward from the goal states, remove_if_unsolvable (default True, as in mimir) drops the whole space when
+Every applicable action is a transition, the goal distances
+are computed backward from the goal states, remove_if_unsolvable (default True) drops the whole space when
 the initial state cannot reach a goal, and a statically false goal gives no space at all. State ids are in
 breadth-first discovery order with canonical successor order, independent of the thread count, and the device gives
 the same ids and arrays. Every generation runs with the thread state detached.
@@ -123,13 +123,13 @@ def state_space(
     remove_if_unsolvable: bool = True,
     labels: bool = True,
 ) -> StateSpace | DeviceStateSpace | None:
-    """The state space of a task, or None if the generation failed (as in mimir's StateSpace.create).
+    """The state space of a task, or None if the generation failed.
 
     device None: on the CPU (a StateSpace; threads: generation threads, default 1). Otherwise a device ordinal or a
     mymyr.cuda.Context: on that device (a mymyr.cuda.DeviceStateSpace with the same ids and arrays, in device memory;
     threads: host threads for the host-side work, default all cores).
 
-    Options: max_states (fail when the space has max(max_states, 2) states or more, as in mimir), max_seconds,
+    Options: max_states (fail when the space has max(max_states, 2) states or more), max_seconds,
     remove_if_unsolvable (no space when the initial state cannot reach a goal), labels (keep (schema, binding) per
     transition).
     """
@@ -235,7 +235,7 @@ def generalized_state_space(
     remove_if_unsolvable: bool = True,
     labels: bool = True,
 ) -> GeneralizedStateSpace:
-    """The generalized state space of tasks of one domain, as mimir builds it: each task's state space, failures
+    """The generalized state space of tasks of one domain: each task's state space, failures
     skipped, sorted ascending by size (stable), then their disjoint union. device None: the CPU instance pool (threads
     workers, default all cores). Otherwise the spaces come from one device pipeline (mymyr.cuda.generate_state_spaces
     with host output); the graph is the same. A TaskSuite of several domains raises ValueError (one generalized space

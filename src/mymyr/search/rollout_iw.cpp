@@ -1,5 +1,4 @@
-// Rollout IW(1) (search/rollout_iw.hpp): a port of mimir's RolloutIWSearch (src/search/algorithms/rollout_iw.cpp)
-// and its action orderings (rollout_iw/action_ordering.cpp), with portable randomization.
+// Rollout IW(1) (search/rollout_iw.hpp): rollouts with action orderings and portable randomization.
 
 #include "rollout_detail.hpp"
 
@@ -70,7 +69,7 @@ std::vector<CanonicalAtom> ordering_goal_atoms(const Task& task, const GoalSpec&
     return out;
 }
 
-/// Mimir's compute_schema_regression_ranks over the task's schemas.
+/// The regression rank of each schema over the task's schemas.
 std::vector<u32> regression_ranks(const Task& task, const std::vector<CanonicalAtom>& goal_atoms)
 {
     const formalism::TaskData& t = task.data();
@@ -348,7 +347,7 @@ private:
                 if (!m_taken[i])
                     m_perm.push_back(i);
         }
-        // static orders are applied once, here: the node's actions are stored in rank order (stable, as mimir's
+        // static orders are applied once, here: the node's actions are stored in rank order (stable, as a
         // per-visit stable sort of the generation order), so a visit takes the first action without a solved child
         if (directed)
             std::stable_partition(m_perm.begin(), m_perm.end(), [&](u32 i) { return m_buf_goal[i] != 0; });
@@ -392,8 +391,7 @@ private:
         return true;
     }
 
-    /// Marks a node solved and every ancestor whose actions all have solved children (mimir's
-    /// propagate_solved_labels), by counting each node's unsolved actions.
+    /// Marks a node solved and every ancestor whose actions all have solved children , by counting each node's unsolved actions.
     void mark_solved(u32 node)
     {
         if (m_nodes[node].solved)
@@ -501,7 +499,7 @@ private:
     [[nodiscard]] u32 schema_rank_of(u32 schema) const { return schema < m_schema_rank.size() ? m_schema_rank[schema] : k_inf; }
 
     /// The position of the action a visit of `node` follows: the first action without a solved child in the node's
-    /// order (mimir ranks the actions on every visit: static orders are stored ranked, see materialize; the random
+    /// order (a visit ranks the actions: static orders are stored ranked, see materialize; the random
     /// ones shuffle the generation order on every visit, mixed then stable-sorts it by schema rank). k_none: none.
     u32 select(u32 node)
     {

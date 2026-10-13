@@ -5,7 +5,6 @@
 //   - a parallel rollout batch gives identical results at every thread count, and falls back to the calling thread
 //     for observers and goals that are not parallel-safe;
 //   - the portfolio: serial reproducibility, the certifier alone equals IW(1), certification rules, hooks and budgets.
-// Fork parity of the counts is tested in test_iw_variants_golden.cpp, against tests/data/iw_variants/fork_golden.json.
 
 #include "../support/suite.hpp"
 #include "mymyr/core/random.hpp"
@@ -70,7 +69,7 @@ GoalSpec atom_goal(const Task& task, CanonicalAtom c)
     return g;
 }
 
-/// The fork's schema regression ranks, written independently (a fixpoint over a predicate map).
+/// The schema regression ranks, written independently (a fixpoint over a predicate map).
 std::vector<u32> oracle_schema_ranks(const Task& task, const std::set<u32>* goal_preds)
 {
     const formalism::TaskData& t = task.data();
@@ -1070,7 +1069,7 @@ TEST(Random, BatchedShuffleEqualsFisherYates)
             reference_shuffle(b, std::span<u32>(y));
             ASSERT_EQ(x, y);
         }
-    // pinned values (the fork's parity tool re-implements the same stream)
+    // pinned values
     SplitMix64 r(42);
     std::vector<u32> v(10);
     std::iota(v.begin(), v.end(), 0u);

@@ -1,0 +1,1 @@
+One test problem each of numeric and ADL domains (counters, refuel, tpp, zenotravel, woodworking, barman, transport) and a sokoban instance, as shipped with the numeric planning benchmark collections.

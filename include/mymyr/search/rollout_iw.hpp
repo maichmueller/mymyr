@@ -1,6 +1,5 @@
 #pragma once
-// Rollout IW(1) (Bandres, Bonet and Geffner, "Planning With Pixels in (Almost) Real Time", AAAI 2018), matching
-// mimir 0.16.3's rollout_iw::find_solution.
+// Rollout IW(1) (Bandres, Bonet and Geffner, "Planning With Pixels in (Almost) Real Time", AAAI 2018).
 //
 //   mymyr::search::RolloutIwOptions o;
 //   o.ordering = mymyr::search::ActionOrdering::DirectGoalAchieverFirst;
@@ -19,17 +18,15 @@
 //   - SOLVED propagates to a parent whose actions are materialized and whose children all exist and are SOLVED.
 // Rollouts run until a goal is found, the root is SOLVED (Exhausted: the width-1 space is exhausted, relative to the
 // depth and incumbent bounds when those cut anything) or a budget stops the search: max_seconds (OutOfTime), cancel or
-// SearchCoordination::cancel (Cancelled), max_states (OutOfStates), max_rollouts (Failed, mimir's FAILED "rollout
+// SearchCoordination::cancel (Cancelled), max_states (OutOfStates), max_rollouts (Failed, "rollout
 // budget expired"). With SearchControl::coordination the incumbent bound is also the published incumbent length and
 // every materialization adds one expansion.
 //
 // Orderings (guidance, never pruning; stable sorts keep the generation order among equals):
 //   - InOrder: generation order (canonical; or SuccessorOrder);
-//   - Randomized: a SplitMix64 shuffle (core/random.hpp; mimir uses std::shuffle with std::mt19937_64, which is
-//     not portable), drawn anew at every visit of a node as mimir does, the generator persisting across the
+//   - Randomized: a SplitMix64 shuffle (core/random.hpp; portable), drawn anew at every visit of a node, the generator persisting across the
 //     search (so a visit costs draws for all of the node's actions);
-//   - DirectGoalAchieverFirst: actions adding a positive fluent goal atom first. mimir inspects every conditional
-//     effect of the ground action whether or not its condition holds; here the adds of effects that fire, and the adds
+//   - DirectGoalAchieverFirst: actions adding a positive fluent goal atom first. The adds of effects that fire, and the adds
 //     of conditional effects without forall parameters whatever their condition, are inspected (a forall effect whose
 //     condition does not hold is not);
 //   - GoalRegressionRelevance: by the schema's rank in a regression over predicates (goal predicates 0; a predicate in
@@ -44,8 +41,7 @@
 // materializations; on_solution and on_end. Node ids are tree node indices (the root is 0).
 //
 // The plan is normalized as in the other IW searches (search/iw.hpp): between two consecutive plan states the cheapest
-// action is taken, and the cost is mimir's metric along it (it can differ from mimir's rollout plan only when
-// two actions with different costs have the same successor).
+// action is taken, and the cost is the metric along it.
 
 #include "mymyr/search/control.hpp"
 #include "mymyr/state/state.hpp"
@@ -77,7 +73,7 @@ enum class ActionOrdering : u8
 
 struct RolloutIwOptions
 {
-    /// budget.max_states: generated states (mimir's max_num_states); max_depth; max_seconds; max_expanded is not
+    /// budget.max_states: generated states; max_depth; max_seconds; max_expanded is not
     /// used. cancel, goal, blocked_states, observer, coordination as documented above.
     SearchControl control;
     ActionOrdering ordering = ActionOrdering::InOrder;
@@ -87,7 +83,7 @@ struct RolloutIwOptions
     bool canonical_order = true;
     std::optional<State> start;
     /// As IwOptions::successor_order, applied when a node's actions are materialized: its result is the node's
-    /// generation order (the parity gate replays mimir's generator order with it).
+    /// generation order (it fixes the order of a replayed run).
     std::function<void(StateView state, std::span<const Action> actions, std::vector<u32>& order)> successor_order;
 };
 
@@ -122,7 +118,7 @@ struct RolloutIwResult
     std::optional<State> goal_state;
     RolloutIwStatistics statistics;
     bool root_solved = false;  // the reachable width-1 space was exhausted (relative to the bounds, see the counters)
-    std::string message;       // why the search stopped when not solved (mimir's stop_reason)
+    std::string message;       // why the search stopped when not solved
     u32 fluent_slots = 0;
 };
 
