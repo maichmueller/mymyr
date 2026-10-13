@@ -9,12 +9,11 @@ import ast
 import filecmp
 import importlib.util
 import pathlib
-import subprocess
-import sys
 
 import pytest
 
 import mymyr  # noqa: F401
+from python_children import run_code
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SUBMODULES = {"__init__.pyi", "_datasets.pyi", "_encoding.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi",
@@ -252,9 +251,8 @@ def test_cuda_stubs_are_typed():
 def test_stubs_are_current(tmp_path):
     d = installed_stubs()
     pytest.importorskip("nanobind")
-    cmd = [sys.executable, "-m", "nanobind.stubgen", "-q", "-r", "-P", "-p", str(ROOT / "python" / "stubgen-patterns.txt"),
-           "-m", "mymyr._core", "-O", str(tmp_path)]
-    subprocess.run(cmd, check=True, timeout=120)
+    args = ["-q", "-r", "-P", "-p", str(ROOT / "python" / "stubgen-patterns.txt"), "-m", "mymyr._core", "-O", str(tmp_path)]
+    run_code("runpy.run_module('nanobind.stubgen', run_name='__main__', alter_sys=True)", *args)
     fresh = tmp_path / "_core"
     names = sorted(p.name for p in fresh.glob("*.pyi"))
     assert names == sorted(p.name for p in d.glob("*.pyi"))

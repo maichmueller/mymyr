@@ -4,8 +4,6 @@ object. Rows over a table cost their own instance's width, and every numeric ins
 alike."""
 
 import pickle
-import subprocess
-import sys
 
 import numpy as np
 import pytest
@@ -14,6 +12,7 @@ import mymyr
 from mymyr import datasets, rl, search
 
 from conftest import ROOT, text_task, walk
+from python_children import run_code
 
 GRIPPER = ROOT / "tests/data/pddl/gripper"
 COUNTERS = ROOT / "tests/data/pddl/counters"
@@ -62,8 +61,7 @@ for name in {names!r}:
 def test_two_processes_encode_alike():
     names = ["blocks__probBLOCKS-8-0", "logistics00__probLOGISTICS-6-1", "openstacks-opt08-adl__p03"]
     script = ENCODE_SCRIPT.format(tests=str(ROOT / "tests/python"), names=names)
-    outs = [subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True).stdout
-            for _ in range(2)]
+    outs = [run_code(script, capture_output=True).stdout for _ in range(2)]
     here = ""
     for name in names:
         t = text_task(name)
