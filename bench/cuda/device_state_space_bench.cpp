@@ -224,7 +224,7 @@ std::string blocks_problem(u32 n, u32 k, u64& rng)
 void table(u32 instances, const std::vector<u32>& blocks, u32 threads, u32 reps, u64 waves, const std::string& outs,
            bool baselines)
 {
-    const fs::path dom = fs::path(MYMYR_FORK_DATA_DIR) / "ipc" / "blocksworld-ipc" / "train" / "domain.pddl";
+    const fs::path dom = fs::path(MYMYR_TEST_DATA_DIR) / "ipc" / "blocksworld-ipc" / "train" / "domain.pddl";
     const auto domain = frontend::Domain::from_file(dom);
     TaskOptions to;
     to.atoms = TaskOptions::Atoms::Dense;

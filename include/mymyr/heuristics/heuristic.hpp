@@ -4,21 +4,19 @@
 //   auto h = mymyr::heuristics::make_heuristic(*task, {.kind = mymyr::heuristics::Kind::FF});
 //   double v = h->evaluate(state);  // +inf: dead end of the relaxation
 //
-// Kinds. Values equal mimir 0.16.3's except where noted:
-//   Blind      0 in every state (mimir's BlindHeuristic).
-//   GoalCount  the number of fluent and derived goal literals that do not hold. Not one of mimir's heuristics: the
-//              complement of mimir's GoalCountLayerOrderingStrategy score.
-//   Max, Add   h_max and h_add over mimir's relaxation (relaxed_task.hpp): generalized Dijkstra with per-operator
-//              counters of unsatisfied preconditions; an axiom combines its preconditions by max in both (as
-//              mimir's RelaxedPlanningGraph does); unit action costs by default.
-//   FF         the relaxed plan mimir extracts: best supporters by h_max cost (the first operator reaching an atom's
+// Kinds:
+//   Blind      0 in every state.
+//   GoalCount  the number of fluent and derived goal literals that do not hold. The
+//              complement of the goal-count layer ordering score.
+//   Max, Add   h_max and h_add over the delete relaxation (relaxed_task.hpp): generalized Dijkstra with per-operator
+//              counters of unsatisfied preconditions; an axiom combines its preconditions by max in both ; unit action costs by default.
+//   FF         the relaxed plan: best supporters by h_max cost (the first operator reaching an atom's
 //              final cost supports it), a derived atom takes over the supporter of its axiom's last settled
-//              precondition, every ground action counts once. Among equally cheap supporters mimir picks by the
-//              order of a binary heap over its atom numbering; mymyr picks by its own operator order, so h_FF can
-//              differ from mimir's where such ties exist.
-//   SetAdditive  mimir's set-additive heuristic (after Keyder and Geffner 2008): every proposition gets the achiever
+//              precondition, every ground action counts once. Among equally cheap supporters the operator
+//              order decides.
+//   SetAdditive  the set-additive heuristic (after Keyder and Geffner 2008): every proposition gets the achiever
 //              set of its h_max best supporter (the first operator reaching its h_max cost, as for h_FF) plus the
-//              member (supporter, proposition), mimir's unary action; an operator's set is the union of its
+//              member (supporter, proposition), a unary action; an operator's set is the union of its
 //              preconditions' sets, and an axiom adds no member of its own. h is the number of members of the union of
 //              the goal's sets (unit costs) or the sum of the costs of their actions (real costs). An action that
 //              supports two needed propositions is two members, so h >= h_FF for the same supporters; the relaxed plan
@@ -30,9 +28,7 @@
 //              same grounding as h_max: negative literals are the "false" propositions, axioms are 0-cost operators,
 //              and a conditional effect is an operator of its own whose pairs also combine with the effects of the same
 //              action (a pair added by two effects needs both conditions; only effects without a condition count as
-//              deleting for sure). mimir's H2Heuristic differs where its encoding errs: it ignores axioms and effect
-//              conditions, never reaches a negative literal the state does not satisfy, and its delete check excludes
-//              the negation of a deleted atom instead of the atom. Grounded only: memory and time grow with the
+//              deleting for sure). Grounded only: memory and time grow with the
 //              square of the number of propositions (make_heuristic refuses more than 8191).
 //   LmCut      LM-cut (Helmert and Domshlak 2009) over the same grounding: h_max with supporters, then repeatedly a
 //              cut of the justification graph between the state and the goal zone, whose cheapest operator cost is
@@ -54,11 +50,11 @@
 //              Path-dependent (below); not admissible. Preferred operators: applicable actions that add a needed one.
 //   Perfect    h* from a state space (heuristics/perfect.hpp: heuristics::perfect); make_heuristic refuses it.
 //   Custom     a Heuristic subclass of the caller (BestFirstOptions::evaluator), e.g. a learned value function.
-// Numeric tasks. As mimir's delete relaxation (DeleteRelaxTranslator), the relaxation heuristics ignore numeric conditions
+// Numeric tasks. The relaxation heuristics ignore numeric conditions
 // (of actions, effects and the goal) and numeric effects: they see the task's atoms only. Goal count counts the
 // fluent and derived goal literals; numeric goal constraints are not counted.
 // Costs. Auto (the default): the task's objective, i.e. Unit for a task without action costs and metric, Real
-// otherwise. Unit: every action costs 1 and every axiom 0 (mimir's heuristics). Real: the task's action costs as the
+// otherwise. Unit: every action costs 1 and every axiom 0. Real: the task's action costs as the
 // relaxation sees them (ActionCosts::relaxed_cost, heuristics/action_costs.hpp): exact for integral and decimal costs
 // (zero and fractional costs included), rounded down for others, and 0 for an action whose cost depends on the state
 // (and for every action under a state metric), so h_max and h² stay admissible for non-negative costs. A heuristic
@@ -128,7 +124,7 @@ enum class Kind : u8
 
 enum class Costs : u8
 {
-    Unit,  // every action 1, axioms 0 (mimir)
+    Unit,  // every action 1, axioms 0
     Real,  // the task's action costs (ActionCosts::relaxed_cost)
     Auto,  // the task's objective: Unit for a task without action costs and metric, else Real
 };
@@ -202,7 +198,7 @@ public:
 
     /// FF and set-additive: the ground actions of the relaxed plan of the last evaluation (set-additive: those of the
     /// members of the union of the goal's achiever sets). An applicable action is a preferred operator when it is one
-    /// of them (mimir's preferred actions).
+    /// of them.
     [[nodiscard]] virtual bool provides_preferred() const noexcept { return false; }
     [[nodiscard]] virtual bool preferred(const ActionLabel& /*action*/) const { return false; }
     [[nodiscard]] virtual std::vector<Action> relaxed_plan() const { return {}; }

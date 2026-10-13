@@ -83,7 +83,7 @@ ActionCosts::ActionCosts(const Task& task) : m_task(&task), m_num(&task.numeric(
     m_num_objects = T.num_objects();
     const plan::Numeric& N = task.numeric();
     m_schemas.assign(T.schemas.size(), SchemaCost{});
-    bool total_cost = N.has_aux;  // no metric: total-cost if the domain declares it (mimir)
+    bool total_cost = N.has_aux;  // no metric: total-cost if the domain declares it
     if (T.metric)
     {
         m_metric_text = std::string("(:metric ") + (T.metric->minimize ? "minimize " : "maximize ") + expr_text(T, T.metric->expr) + ")";
@@ -101,7 +101,7 @@ ActionCosts::ActionCosts(const Task& task) : m_task(&task), m_num(&task.numeric(
     {
         if (T.metric)
         {
-            // g is the metric evaluated on the state (mimir's state metric)
+            // g is the metric evaluated on the state
             m_kind = Kind::StateMetric;
             m_independent = false;
             m_integral = false;

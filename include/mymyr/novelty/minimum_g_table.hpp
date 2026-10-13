@@ -14,7 +14,7 @@ namespace mymyr::novelty
 {
 /// Minimum path-cost labels for fluent tuples, for best-first width pruning. Not thread-safe.
 /// State queries enumerate sizes 0..arity; transitions enumerate sizes 1..arity containing an added atom.
-/// As in mimir, neither query has tuples when the state has fewer than arity - 1 atoms.
+/// Neither query has tuples when the state has fewer than arity - 1 atoms.
 /// Combinadic ranks are independent of atom capacity; tuples whose ranks overflow use their full atom identities.
 /// Labels are exact doubles, so there is no limit on the number of distinct costs. Storage is sparse.
 class MinimumGNoveltyTable

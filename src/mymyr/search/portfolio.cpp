@@ -1,5 +1,5 @@
-// The atomic-goal portfolio (search/portfolio.hpp): a port of mimir's find_solution_atomic_goal_portfolio
-// (src/search/algorithms/iw/atomic_goal_portfolio.cpp) on the IW family engine and rollout_iw.
+// The atomic-goal portfolio (search/portfolio.hpp): the certifier and the rollout workers on the IW
+// family engine and rollout_iw.
 
 #include "mymyr/search/portfolio.hpp"
 

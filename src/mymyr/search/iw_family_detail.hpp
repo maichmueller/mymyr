@@ -27,7 +27,7 @@ inline std::vector<u32> fluent_slots_of(const Task& task, std::span<const Canoni
     return out;
 }
 
-/// The landmark coordinates of LIW options (mimir's make_grouping + LandmarkCoordinates). Throws
+/// The landmark coordinates of LIW options. Throws
 /// std::invalid_argument for all_private with unshared atoms (when disjunctive is set).
 inline novelty::LandmarkCoordinates make_coordinates(const Task& task, const LandmarkNovelty& ln)
 {

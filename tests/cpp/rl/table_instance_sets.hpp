@@ -1,12 +1,14 @@
 #pragma once
 // Instance sets for the task-table tests: instances of one domain spanning at least 3x in object count and at least
-// two width buckets (WB in {2, 4, 16, 64}), from the fork's data dir through the front end. Where the fork's own
-// instances of a domain are all small (gripper, logistics, miconic-simpleadl), the larger problems are generated for
-// the fork's domain file (tests/data/table_instances/gen.py). Shared by the host tests (tests/cpp/rl/test_table.cpp),
-// the CUDA tests (tests/cuda/test_device_table.cpp) and the benches (bench/cuda/table_*.cpp).
+// two width buckets (WB in {2, 4, 16, 64}), from tests/data (ipc/, benchmarks/small/) through the front end. Where the
+// available instances of a domain are all small (gripper, logistics, miconic-simpleadl), the larger problems are
+// generated for the domain file (tests/data/table_instances/gen.py). Shared by the host tests
+// (tests/cpp/rl/test_table.cpp), the CUDA tests (tests/cuda/test_device_table.cpp) and the benches
+// (bench/cuda/table_*.cpp).
 //
-// Needs frontend/golden.hpp (fork_data_dir()) and MYMYR_TEST_DATA_DIR.
+// Needs support/benchmarks.hpp.
 
+#include "../support/benchmarks.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/task_table.hpp"
 #include "mymyr/successor/successors.hpp"
@@ -19,8 +21,6 @@
 
 namespace mymyr::test
 {
-std::filesystem::path fork_data_dir();
-
 struct InstanceSet
 {
     std::string name;
@@ -30,10 +30,10 @@ struct InstanceSet
 
 inline std::vector<InstanceSet> table_instance_sets()
 {
-    const std::filesystem::path d = fork_data_dir();
+    const std::filesystem::path d = small_dir();
     const std::filesystem::path m = std::filesystem::path(MYMYR_TEST_DATA_DIR) / "table_instances";
-    const std::filesystem::path bw = d / "ipc" / "blocksworld-ipc" / "train";
-    const std::filesystem::path mi = d / "ipc" / "miconic-ipc" / "test";
+    const std::filesystem::path bw = ipc_dir() / "blocksworld-ipc" / "train";
+    const std::filesystem::path mi = ipc_dir() / "miconic-ipc" / "test";
     return {
         {"blocks", bw / "domain.pddl", {bw / "p13.pddl", bw / "p25.pddl", bw / "p37.pddl", bw / "p49.pddl", bw / "p61.pddl"}},
         {"gripper",

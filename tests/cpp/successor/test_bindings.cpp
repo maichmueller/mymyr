@@ -1,7 +1,7 @@
 // Binding generators (successor/bindings.hpp) and ground conditions (successor/conditions.hpp, search/goal.hpp).
 //
-// Walk oracle: on the fork's golden walks (tests/data/expected, replayed on the text exports of tests/data/tasks and
-// tests/data/tasks_iw by the names of the actions taken), for every applicable action of every walk state, enumerating
+// Walk oracle: on seeded random walks over the text exports of tests/data/tasks and tests/data/tasks_iw, for every
+// applicable action of every walk state, enumerating
 // its schema with the action's own parameters partially fixed (every subset of at most two parameters, the empty and
 // the full one) returns exactly the applicable actions that agree with the partial binding; a parameter fixed to an
 // object that no applicable action has there gives none; resumed enumerations (two bindings per call) give the same
@@ -22,7 +22,6 @@
 // goals made of ground conditions in IW, BrFS and A* (the task's goal, a derived literal, a numeric constraint); and
 // one evaluation per thread over a shared task.
 
-#include "../support/json.hpp"
 #include "../support/suite.hpp"
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/search/best_first.hpp"
@@ -67,7 +66,7 @@ constexpr bool k_sanitized = false;
 
 fs::path data_dir() { return fs::path(MYMYR_TEST_DATA_DIR); }
 
-/// The text export of a golden task: tests/data/tasks/<name>.txt or tests/data/tasks_iw/<tag>__<name>.txt.
+/// The text export of a task: tests/data/tasks/<name>.txt or tests/data/tasks_iw/<tag>__<name>.txt.
 std::optional<fs::path> text_of(const std::string& name)
 {
     const fs::path a = data_dir() / "tasks" / (name + ".txt");
@@ -83,57 +82,97 @@ std::optional<fs::path> text_of(const std::string& name)
     return std::nullopt;
 }
 
-std::vector<std::string> golden_names()
+/// The tasks of the walk tests: the suite and a sample of the IPC and classical instances (text exports in tasks/ and
+/// tasks_iw/).
+std::vector<std::string> walk_tasks()
 {
-    std::vector<std::string> out;
-    for (const auto& e : fs::directory_iterator(data_dir() / "expected"))
-        if (e.path().extension() == ".json")
-            out.push_back(e.path().stem().string());
-    std::sort(out.begin(), out.end());
-    return out;
+    return {
+        "airport-adl__p13-airport3-p2",
+        "blocks__probBLOCKS-8-0",
+        "blocksworld-ipc__p01-medium",
+        "blocksworld-ipc__p20-easy",
+        "blocksworld-ipc__p30-easy",
+        "caldera-split-opt18-adl__p04",
+        "childsnack-ipc__p01-medium",
+        "childsnack-ipc__p05-medium",
+        "childsnack-ipc__p20-easy",
+        "childsnack-ipc__p30-easy",
+        "depot__p02",
+        "driverlog__p03",
+        "ferry-ipc__p05-medium",
+        "floortile-ipc__p01-medium",
+        "floortile-ipc__p05-medium",
+        "floortile-ipc__p30-easy",
+        "folding-opt23-adl__p01",
+        "freecell__p02",
+        "gripper__prob05",
+        "logistics00__probLOGISTICS-6-1",
+        "miconic-ipc__p05-medium",
+        "miconic__s7-4",
+        "miconic-simpleadl__s10-2",
+        "openstacks-opt08-adl__p03",
+        "organic-synthesis-opt18-strips__p20",
+        "organic-synthesis-sat18-strips__p09",
+        "parcprinter-opt11-strips__p03",
+        "pathways__p02",
+        "pegsol-08-strips__p22",
+        "philosophers__p03-phil4",
+        "rovers-ipc__p01-medium",
+        "rovers-ipc__p05-medium",
+        "rovers-ipc__p20-easy",
+        "rovers-ipc__p30-easy",
+        "rovers__p02",
+        "rubiks-cube-opt23-adl__p04",
+        "rubiks-cube-sat23-adl__p04",
+        "satellite-ipc__p01-medium",
+        "satellite-ipc__p05-medium",
+        "satellite-ipc__p20-easy",
+        "satellite-ipc__p30-easy",
+        "snake-opt18-strips__p05",
+        "sokoban-ipc__p01-medium",
+        "sokoban-ipc__p05-medium",
+        "sokoban-ipc__p20-easy",
+        "sokoban-ipc__p30-easy",
+        "sokoban-opt08-strips__p14",
+        "sokoban-opt11-strips__p12",
+        "sokoban-sat08-strips__p10",
+        "transport-ipc__p01-medium",
+        "transport-ipc__p05-medium",
+        "transport-ipc__p20-easy",
+        "transport-ipc__p30-easy",
+        "transport-opt08-strips__p23",
+        "visitall__visitall_x-6_y-3_r-100",
+        "zenotravel__p05",
+    };
 }
 
-/// An action by the golden file's object names (the text exports name their objects o0, o1, ...).
-std::string golden_format(const Task& task, const ActionLabel& a, const test::json::Value& names)
+/// The states of seeded random walks from the initial state (three walks of 25 steps; the initial state first in each).
+std::vector<State> walk_states(const Task& task, const std::string& name)
 {
-    std::string s = "(" + task.schema_name(a.schema);
-    for (ObjectId o : a.binding)
-        s += " " + names["objects"][o.v].str;
-    return s + ")";
-}
-
-/// The states of the golden walks, replayed by the names of the actions taken.
-std::vector<State> walk_states(const Task& task, const test::json::Value& doc)
-{
+    u64 seed = 0xcbf29ce484222325ULL;
+    for (unsigned char c : name)
+        seed = (seed ^ c) * 0x100000001b3ULL;
+    std::mt19937_64 rng(seed);
     const WorkspaceLease lease = task.workspace();
     Successors& succ = lease->successors();
-    const auto& names = doc["names"];
     std::vector<State> out;
-    for (const auto& w : doc["walks"]["walks"].arr)
+    for (int w = 0; w < 3; ++w)
     {
         State s = task.initial_state();
-        for (const auto& st : w["steps"].arr)
+        for (int step = 0; step <= 25; ++step)
         {
             out.push_back(s);
-            const auto& taken = st["taken"];
-            if (taken.is_null())
-                break;
-            std::optional<Action> next;
+            std::vector<Action> next;
             succ.set_witness_pruning(false);
             succ.for_each_applicable(s,
                                      [&](const ActionLabel& a, const Delta&) -> bool
                                      {
-                                         if (golden_format(task, a, names) != taken.str)
-                                             return true;
-                                         next = Action(a);
-                                         return false;
+                                         next.emplace_back(a);
+                                         return true;
                                      });
-            if (!next)
-            {
-                ADD_FAILURE() << "walk replay: " << taken.str << " not applicable";
-                return out;
-            }
-            s = succ.apply(s, next->label());
+            if (next.empty())
+                break;
+            s = succ.apply(s, next[rng() % next.size()].label());
         }
     }
     return out;
@@ -199,11 +238,10 @@ TEST_P(BindingsWalk, SchemaBindingsAreTheApplicableActionsThatAgree)
     const auto txt = text_of(name);
     if (!txt)
         GTEST_SKIP() << "no text export of " << name;
-    const auto doc = test::json::parse_file((data_dir() / "expected" / (name + ".json")).string());
     const auto task = Task::from_text_file(txt->string());
     const WorkspaceLease ws_lease = task->workspace();
     Workspace& ws = *ws_lease;
-    std::vector<State> states = walk_states(*task, doc);
+    std::vector<State> states = walk_states(*task, name);
     if (k_sanitized && states.size() > 12)
         states.resize(12);
     const u32 S = task->num_schemas();
@@ -338,7 +376,7 @@ TEST_P(BindingsWalk, SchemaBindingsAreTheApplicableActionsThatAgree)
                 static_cast<unsigned long long>(pre_checks), static_cast<unsigned long long>(resumes));
 }
 
-INSTANTIATE_TEST_SUITE_P(Golden, BindingsWalk, ::testing::ValuesIn(golden_names()),
+INSTANTIATE_TEST_SUITE_P(Tasks, BindingsWalk, ::testing::ValuesIn(walk_tasks()),
                          [](const auto& info)
                          {
                              std::string s = info.param;
@@ -753,13 +791,15 @@ u32 pred(const Task& t, std::string_view name)
     return 0;
 }
 
-/// An object of a suite task by the golden file's name (the text exports name their objects o0, o1, ...).
+/// An object of gripper__prob05 by its PDDL name (the text export names its objects o0, o1, ...; the ids follow the
+/// PDDL: the constants, then the problem's objects).
 ObjectId object(const std::string& task, std::string_view name)
 {
-    const auto doc = test::json::parse_file((data_dir() / "expected" / (task + ".json")).string());
-    const auto& objs = doc["names"]["objects"].arr;
-    for (u32 o = 0; o < objs.size(); ++o)
-        if (objs[o].str == name)
+    static const char* const names[] = {"rooma", "roomb", "ball12", "ball11", "ball10", "ball9", "ball8", "ball7",
+                                        "ball6", "ball5", "ball4", "ball3", "ball2", "ball1", "left", "right"};
+    EXPECT_EQ(task, "gripper__prob05");
+    for (u32 o = 0; o < std::size(names); ++o)
+        if (name == names[o])
             return ObjectId{o};
     ADD_FAILURE() << "no object " << name;
     return ObjectId{0};
@@ -1189,13 +1229,12 @@ TEST_P(BindingsWalk, TheGoalAsAGroundConditionHoldsInTheGoalStates)
     const auto txt = text_of(name);
     if (!txt)
         GTEST_SKIP() << "no text export of " << name;
-    const auto doc = test::json::parse_file((data_dir() / "expected" / (name + ".json")).string());
     const auto task = Task::from_text_file(txt->string());
     const GroundCondition goal = GroundCondition::goal(*task);
     const auto spec = search::any_of(*task, std::span(&goal, 1));
     const WorkspaceLease lease = task->workspace();
     Successors& succ = lease->successors();
-    for (const State& s : walk_states(*task, doc))
+    for (const State& s : walk_states(*task, name))
     {
         EXPECT_EQ(holds(*task, s.view(), goal), task->is_goal(s.view())) << name;
         bool any = false;

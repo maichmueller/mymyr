@@ -1,5 +1,4 @@
-// Serialized IW (search/siw.hpp): a port of mimir's siw::find_solution (mimir 0.16.3 src/search/algorithms/siw.cpp)
-// over the IW ladder of iw.cpp.
+// Serialized IW (search/siw.hpp): SIW over the IW ladder of iw.cpp.
 
 #include "mymyr/search/siw.hpp"
 
@@ -50,7 +49,7 @@ SiwResult siw(const Task& task, const SiwOptions& options)
 
     while (true)
     {
-        // the overall goal (mimir's goal_strategy->test_dynamic_goal on the current state)
+        // the overall goal
         bool prepared = false;
         if (goal.needs_view() || task_goal.needs_view())
         {
@@ -86,7 +85,7 @@ SiwResult siw(const Task& task, const SiwOptions& options)
             return finish(ir.status);
         }
         r.max_effective_width = std::max(r.max_effective_width, ir.effective_width);
-        // mimir adds up the subplans' costs, each measured from the start value (siw.cpp out_plan_cost)
+        // the subplans' costs add up, each measured from the start value
         r.cost += plan_cost.apply(succ, cur, ir.plan);
         r.plan.insert(r.plan.end(), std::make_move_iterator(ir.plan.begin()), std::make_move_iterator(ir.plan.end()));
         cur = std::move(*ir.goal_state);

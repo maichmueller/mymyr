@@ -1,4 +1,4 @@
-"""Minimum-g width search, its heuristic adapters, controls and fork-compatible root rule."""
+"""Minimum-g width search, its heuristic adapters, controls and root rule."""
 import concurrent.futures
 import math
 

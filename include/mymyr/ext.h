@@ -7,7 +7,7 @@
  *     uint64_t h = api->hash_words(words, n);
  *
  * They never link libmymyr and never share nanobind internals with mymyr, so a mymyr minor release needs no
- * downstream rebuild (mimir's six modules sharing NB_DOMAIN had to be rebuilt in lockstep).
+ * downstream rebuild.
  *
  * Minor versions: 0 = version, hashing, state views. 1 = tasks (task_from_py), successors, apply, is_goal, atom
  * lookup, state stores; state_from_py accepts mymyr.State. 2 = numeric tasks: numeric slots and values, action costs
@@ -155,7 +155,7 @@ typedef struct mymyr_api
      * mymyr_state_view, and a view whose num_numeric is not the task's word count is rejected with -1. They also work
      * on classical tasks (no numeric words).
      *
-     * Metric. A search's path cost is the metric value g of mimir: the initial state has metric_initial; the
+     * Metric. A search's path cost is the metric value g: the initial state has metric_initial; the
      * successor of a state with value g has the value the emit callback / apply_state report. Without total-cost and
      * without a metric every action costs 1 (g' = g + 1); with total-cost g' applies the fired total-cost effects to
      * g; with a metric g' is the metric expression evaluated on the successor. The action cost is g' - g. */

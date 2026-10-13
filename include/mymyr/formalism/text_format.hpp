@@ -3,9 +3,7 @@
 // A, with numeric sections N NI NG added for tasks with functions). It carries no names beyond predicates, functions
 // and schemas; objects become "o<i>" and parameters "x<i>".
 //
-// mimir can export the same tasks in this format, so it doubles as a golden reference: a task built by mymyr's own
-// front end is written in this format and compared against mimir's export (tests/data). write_task_text() writes
-// it; read_task_text() and read_task_text_file() read it back.
+// write_task_text() writes it; read_task_text() and read_task_text_file() read it back.
 
 #include "mymyr/formalism/task_data.hpp"
 

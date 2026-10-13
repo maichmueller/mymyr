@@ -103,8 +103,8 @@ public:
             case LayerOrdering::Kind::Randomized: m_rng.shuffle(std::span<u32>(layer)); break;
             case LayerOrdering::Kind::GoalCount:
             {
-                // ranked by (key, tie token, generation position): a strict total order, so sorting equals mimir's
-                // stable sort (and its beam ranking), and a partial sort gives the same top entries
+                // ranked by (key, tie token, generation position): a strict total order, so sorting equals a
+                // stable sort (and the beam ranking), and a partial sort gives the same top entries
                 m_ranked.clear();
                 for (u32 i = 0; i < layer.size(); ++i)
                     m_ranked.push_back({keys[i], m_random_ties ? m_rng.next() : 0, i, layer[i]});
@@ -165,7 +165,7 @@ inline std::string check_layers(const LayerOrdering& lo)
     if (lo.randomize_ties && lo.kind != LayerOrdering::Kind::GoalCount)
         return "LayerOrdering::randomize_ties requires Kind::GoalCount (the only kind with scores)";
     if (lo.beam_novelty == LayerOrdering::BeamNovelty::RelaxedSurvivorsOnly && lo.kind != LayerOrdering::Kind::GoalCount)
-        return "LayerOrdering::beam_novelty RelaxedSurvivorsOnly requires Kind::GoalCount (as in mimir: it ranks by score)";
+        return "LayerOrdering::beam_novelty RelaxedSurvivorsOnly requires Kind::GoalCount (it ranks by score)";
     if (lo.beam_chunk == 0)
         return "LayerOrdering::beam_chunk must be positive";
     return {};
@@ -180,7 +180,7 @@ inline std::string check_layers(const LayerOrdering& lo)
 }
 
 /// The first transition of part p of n transitions split into `parts` (sizes differ by at most one, the longer ones
-/// first, as mimir's partitions).
+/// first).
 [[nodiscard]] inline u64 relaxed_part_begin(u64 n, u32 parts, u32 p) noexcept
 {
     const u64 base = n / parts, longer = n % parts;

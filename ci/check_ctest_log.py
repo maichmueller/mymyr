@@ -57,7 +57,7 @@ def main(argv: list[str]) -> int:
         errors.append(f"only {total} tests were registered (expected at least {min_total})")
     if skipped > max_skipped:
         errors.append(f"{skipped} tests skipped (expected at most {max_skipped}); "
-                      "check that MYMYR_FORK_DATA and MYMYR_WORK point at the test data")
+                      "check that MYMYR_PARITY_DATA points at the parity test data")
     for e in errors:
         print(f"error: {e}", file=sys.stderr)
     return 1 if errors else 0

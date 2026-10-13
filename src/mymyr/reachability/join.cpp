@@ -439,7 +439,7 @@ Plan compile(StaticTables& st, const std::vector<Lit>& lits, const CompileSpec& 
                 changed = true;
             }
     }
-    // a variable no positive literal binds ranges over its declared type, as in mimir's type-domain relation
+    // a variable no positive literal binds ranges over its declared type
     for (u32 v = 0; v < V; ++v)
         if (!pos_bound[v] && !prebound[v] && v < spec.var_types.size())
             and_dom(v, st.objects_of_types(spec.var_types[v]), false);

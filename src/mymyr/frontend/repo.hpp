@@ -1,9 +1,9 @@
 #pragma once
-// Minimal stand-ins for mimir's hash-consing repositories (mimir `Repositories`, loki `IndexedHashSet`).
+// Minimal stand-ins for hash-consing repositories.
 //
-// Mimir orders nearly every list by the *creation index* of its elements in these repositories. We do not need
-// mimir's objects, only those indices, so each repository becomes a `Table`: a key -> dense id map where ids are
-// assigned in creation order. A table may have a parent (mimir's problem repositories are children of the
+// Nearly every list of the task is ordered by the *creation index* of its elements in these repositories. Only those
+// indices are needed, so each repository becomes a `Table`: a key -> dense id map where ids are
+// assigned in creation order. A table may have a parent (the problem repositories are children of the
 // domain's): lookups check the parent first and child ids continue the parent's id space, exactly like
 // `loki::IndexedHashSet`. A parent is never modified while it has children, so concurrent children (one per
 // `instantiate` call) only read it.
@@ -122,12 +122,12 @@ enum : u64
     kFeFunction,
 };
 
-/// One level of mimir's repositories. Separate index spaces exist where mimir compares indices (per entity
-/// type); index spaces mimir never compares across (e.g. static vs fluent literals) may share a table because
+/// One level of repositories. Separate index spaces exist where indices are compared (per entity
+/// type); index spaces never compared across (e.g. static vs fluent literals) may share a table because
 /// sharing preserves the relative creation order inside each kind.
 struct Repo
 {
-    /// What mimir derives when it creates a conjunctive condition: its nullary literals as ground literals
+    /// What is derived when a conjunctive condition is created: its nullary literals as ground literals
     /// (per kind, sorted by ground-literal index) and its nullary numeric constraints grounded (sorted).
     struct CondExtra
     {
@@ -176,8 +176,8 @@ struct Repo
     Table<Key> param;          // [var, type ids...]
     Table<Key> lit;            // [pred, polarity, terms...]
     Table<Key> glit;           // [pred, polarity, objects...]
-    Table<Key> fe;             // lifted function expressions: [tag, payload...] (index = mimir's wrapper index)
-    // ground function expressions: inner tables keep their own index spaces (mimir sorts multi-operator children
+    Table<Key> fe;             // lifted function expressions: [tag, payload...] (index = the wrapper index)
+    // ground function expressions: inner tables keep their own index spaces (multi-operator children are sorted
     // by the inner index), `gfe` is the wrapper [tag, inner id]
     Table<Key> gnum, gbin, gmulti, gminus;
     Table<Key> gfunc[3];  // per function kind (static, fluent, auxiliary): [function, objects...]

@@ -169,7 +169,7 @@ target_sources(mymyr_core PRIVATE
     src/mymyr/datasets/knowledge_base.cpp
 )
 
-add_library(mymyr_encoding STATIC src/mymyr/encoding/flat.cpp src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
+add_library(mymyr_encoding STATIC src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
     src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/validate.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)
 set_target_properties(mymyr_encoding PROPERTIES EXPORT_NAME encoding)
@@ -194,6 +194,7 @@ if(MYMYR_FRONTEND)
         src/mymyr/frontend/domain.cpp
         src/mymyr/frontend/encoding_goal.cpp
         src/mymyr/frontend/init_reader.cpp
+        src/mymyr/frontend/normalize.cpp
         src/mymyr/frontend/translate.cpp
     )
     add_library(mymyr::frontend ALIAS mymyr_frontend)
@@ -272,51 +273,17 @@ endif()
 
 # ------------------------------------------------------------------------------------------------ benchmarks
 if(MYMYR_BENCH)
-    add_executable(mymyr_brfs bench/cpp/mymyr_brfs.cpp)
-    target_link_libraries(mymyr_brfs PRIVATE mymyr::core mymyr_warnings)
-    if(TARGET mymyr_frontend)
-        target_link_libraries(mymyr_brfs PRIVATE mymyr::frontend)
-    endif()
-    # IW / SIW / single passes; reads PDDL when the front end is built
-    add_executable(mymyr_iw bench/cpp/mymyr_iw.cpp)
-    target_link_libraries(mymyr_iw PRIVATE mymyr::core mymyr_warnings)
-    if(TARGET mymyr_frontend)
-        target_link_libraries(mymyr_iw PRIVATE mymyr::frontend)
-    endif()
-    # heuristics and best-first search
-    add_executable(mymyr_heur bench/cpp/mymyr_heur.cpp)
-    target_link_libraries(mymyr_heur PRIVATE mymyr::core mymyr_warnings)
-    if(TARGET mymyr_frontend)
-        target_link_libraries(mymyr_heur PRIVATE mymyr::frontend)
-    endif()
-    # relaxed reachability and landmarks
-    add_executable(mymyr_landmarks bench/cpp/mymyr_landmarks.cpp)
-    target_link_libraries(mymyr_landmarks PRIVATE mymyr::core mymyr_warnings)
-    if(TARGET mymyr_frontend)
-        target_link_libraries(mymyr_landmarks PRIVATE mymyr::frontend)
-    endif()
-    # IW family variants: AIW / LIW / Rollout IW / parallel rollouts / portfolio
-    add_executable(mymyr_iw_variants bench/cpp/mymyr_iw_variants.cpp)
-    target_link_libraries(mymyr_iw_variants PRIVATE mymyr::core mymyr_warnings)
-    if(TARGET mymyr_frontend)
-        target_link_libraries(mymyr_iw_variants PRIVATE mymyr::frontend)
-    endif()
     # CpuEnvPool env-steps/s over a task table (PDDL through the front end)
     if(TARGET mymyr_frontend)
         add_executable(mymyr_pool bench/cpp/mymyr_pool.cpp)
         target_link_libraries(mymyr_pool PRIVATE mymyr::frontend mymyr_warnings)
-    endif()
-    # datasets: state spaces, generalized state spaces, samplers
-    add_executable(mymyr_datasets bench/cpp/mymyr_datasets.cpp)
-    target_link_libraries(mymyr_datasets PRIVATE mymyr::core mymyr_warnings)
-    if(TARGET mymyr_frontend)
-        target_link_libraries(mymyr_datasets PRIVATE mymyr::frontend)
     endif()
     # relational encoding of random-walk states (PDDL through the front end)
     if(TARGET mymyr_frontend)
         add_executable(mymyr_encoding_bench bench/cpp/mymyr_encoding.cpp)
         target_link_libraries(mymyr_encoding_bench PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings)
     endif()
+    add_subdirectory(bench/parity)
 endif()
 
 # ------------------------------------------------------------------------------------------------ python

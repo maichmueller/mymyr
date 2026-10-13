@@ -20,7 +20,7 @@
 // Numeric fluents, constraints and effects (task/numeric.hpp): a state carries one value per numeric slot after
 // its atom bits ([bits | slots]); numeric_slots() == 0 for classical tasks, whose states are unchanged. Action
 // costs (total-cost effects, the metric) are evaluated by the successor generator (Delta::aux) and turned into
-// mimir's metric values by heuristics::ActionCosts.
+// metric values by heuristics::ActionCosts.
 
 #include "mymyr/core/ids.hpp"
 #include "mymyr/core/once.hpp"
@@ -123,7 +123,7 @@ struct TaskOptions
     NumericStorageMode numeric_storage = NumericStorageMode::Auto;
     /// > 0: snap every stored numeric value to the grid q * round(v / q). Changes the state space (never implicit).
     f64 numeric_quantum = 0;
-    /// Mimir-C# numeric semantics: values below 1e6 snap to a 1e-9 grid, non-finite results are undefined,
+    /// Tolerant numeric semantics: values below 1e6 snap to a 1e-9 grid, non-finite results are undefined,
     /// comparisons use a 1e-9 tolerance. Changes the state space (hydropower: 7.6x fewer states at depth 45).
     bool numeric_tolerant = false;
     u32 fc_auto_free_params = 4;
@@ -219,9 +219,10 @@ public:
     /// The goal as written, expanded into signed ground literals (TaskData::encoding_goal), for encodings; sorted by
     /// (positive first, predicate id, objects) without duplicates. The planner's goal test is unaffected.
     [[nodiscard]] std::span<const formalism::Literal> encoding_goal() const noexcept { return m_data.encoding_goal_literals(); }
-    /// Whether encoding_goal() is the whole goal: false when a conjunct could not be expanded (`or`, `exists`, `imply`
-    /// over fluents, `not and`, numeric constraints, too many quantifier bindings), or when the task came from a text without the goal as written and its
-    /// planner goal mentions predicates that goal normalization introduced.
+    /// Whether encoding_goal() is the whole goal: false when a conjunct could not be expanded (a disjunction with two
+    /// or more disjuncts that static atoms do not decide, numeric constraints, too many quantifier bindings), or when
+    /// the task came from a text without the goal as written and its planner goal mentions predicates that goal
+    /// normalization introduced.
     [[nodiscard]] bool encoding_goal_complete() const noexcept { return m_data.encoding_goal_complete; }
     /// Whether a literal of encoding_goal() over a static predicate fails in the initial atoms: no state is a goal.
     [[nodiscard]] bool encoding_goal_unsatisfiable() const noexcept { return m_data.encoding_goal_unsatisfiable; }

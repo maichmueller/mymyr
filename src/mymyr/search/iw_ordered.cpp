@@ -1,6 +1,5 @@
-// The width-1 IW pass under a layer transition ordering (search/transition_ordering.hpp): mimir 0.16.3's
-// brfs::find_solution_with_transition_ordering (src/search/algorithms/brfs/transition_ordered_layer_impl.hpp) with the
-// ArityK novelty pruning strategy of width 1 (iw/pruning_strategy.cpp), including the optimized-IW(1) root rule. The
+// The width-1 IW pass under a layer transition ordering (search/transition_ordering.hpp), with the
+// arity-k novelty pruning strategy of width 1, including the optimized-IW(1) root rule. The
 // pop, budget and observer conventions are those of the queued pass in iw.cpp.
 
 #include "iw_detail.hpp"
@@ -282,7 +281,7 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
             bool skip = false;
             if (root_continuation && x.parent == 0)
             {
-                // mimir's optimized IW(1) root: every new successor other than the root enters, the non-novel ones
+                // the optimized IW(1) root: every new successor other than the root enters, the non-novel ones
                 // are not expanded
                 if (bits::equal(child.w, child.nw, pv.w, pv.nw))
                 {

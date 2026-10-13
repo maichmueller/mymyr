@@ -1,6 +1,6 @@
 #pragma once
-// Tuple graphs (Lipovetzky and Geffner, "Width and Serialization of Classical Planning Problems", ECAI 2012), as
-// mimir's TupleGraphImpl (mimir 0.16.3) defines them: the tuple graph of a state-space vertex r describes which atom
+// Tuple graphs (Lipovetzky and Geffner, "Width and Serialization of Classical Planning Problems", ECAI 2012):
+// the tuple graph of a state-space vertex r describes which atom
 // tuples of size at most `width` are first reached at each breadth-first distance from r, and by which shortest paths.
 //
 //   auto graphs = mymyr::datasets::tuple_graphs(space, {.width = 2, .threads = 8});   // one per vertex
@@ -21,13 +21,10 @@
 // minimal under strict inclusion are kept, and of tuples with equal problem vertices only one. At distance 0 a single
 // vertex is kept (every root tuple has the problem vertices {r}). The tuple kept for a set of problem vertices is the
 // smallest in the canonical tuple order: fewer atoms first, then the lexicographic order of the sorted atom names (so
-// the empty tuple at distance 0). mimir keeps the first in an unspecified hash-set order instead; the vertices, edges
-// and problem vertices are the same, and its tuple has the same problem vertices as the one kept here.
+// the empty tuple at distance 0).
 //
 // Width 0: the root (empty tuple, problem vertices {r}) at distance 0, and at distance 1 one vertex per successor
 // state of r other than r (empty tuple, that state as its only problem vertex), each with an edge from the root.
-// Deviations from mimir, which are bugs there: mimir adds one distance-1 vertex per transition (parallel transitions
-// to one state give equal vertices) and leaves r out of the problem vertices at distance 0.
 //
 // Vertex order: by distance, and within a distance by the canonical order of their tuples. Tuples are fluent atom
 // slots in ascending slot order; problem vertices and edges are ascending. The result is a function of the state
@@ -48,13 +45,35 @@ namespace mymyr::datasets
 struct TupleGraphOptions
 {
     u32 width = 0;                  // the largest tuple size (0..novelty::k_max_arity)
-    bool dominance_pruning = true;  // keep the minimal problem-vertex sets only (mimir's enable_dominance_pruning)
+    bool dominance_pruning = true;  // keep the minimal problem-vertex sets only
     u32 threads = 1;                // tuple_graphs(): worker threads (0: std::thread::hardware_concurrency())
+};
+
+/// The arrays of a tuple graph (TupleGraph::to_arrays), for TupleGraph::create; each has the size and meaning of the
+/// TupleGraph accessor of the same name.
+struct TupleGraphArrays
+{
+    StateSpacePtr space;
+    u32 root = 0, width = 0;
+    bool dominance_pruning = true;
+    std::vector<u32> distance_offsets, tuple_offsets, tuple_atoms, problem_offsets, problem_vertex_ids, successor_offsets,
+        successor_ids, predecessor_offsets, predecessor_ids, layer_offsets, layer_vertex_ids;
 };
 
 class TupleGraph
 {
 public:
+    /// A tuple graph from its arrays (moved in). Throws std::invalid_argument unless they are a tuple graph of a
+    /// vertex of `space`: width at most novelty::k_max_arity, the root a state, every offset array a CSR (one row per
+    /// vertex, per distance), at least one vertex per distance, tuples of at most `width` assigned fluent slots of the
+    /// space's task, ascending; problem vertices nonempty, ascending, and states of the vertex's breadth-first layer;
+    /// layers of ascending states, layer 0 the root alone; successors at the next distance, ascending, and
+    /// predecessors exactly the reversed edges. Linear in the size of the arrays (problem vertices: times the log of
+    /// a layer's size). Whether the tuples are novel where the arrays say is taken as given.
+    [[nodiscard]] static TupleGraph create(TupleGraphArrays&& arrays);
+    /// A copy of the arrays: create(to_arrays()) == *this.
+    [[nodiscard]] TupleGraphArrays to_arrays() const;
+
     /// The state space and its vertex this graph is of, and the options it was built with.
     [[nodiscard]] const StateSpacePtr& space() const noexcept { return m_space; }
     [[nodiscard]] u32 root() const noexcept { return m_root; }

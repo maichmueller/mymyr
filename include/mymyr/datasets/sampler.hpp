@@ -1,14 +1,12 @@
 #pragma once
-// State space samplers over a StateSpace, matching mimir's sampler semantics:
+// State space samplers over a StateSpace:
 //   - sample_state: uniform over all states;
 //   - sample_state_n_steps_from_goal(n): uniform over the states with unit goal distance n (dead ends never);
 //   - sample_dead_end_state: uniform over the unsolvable states;
 //   - the counts: states, dead ends, "alive" states (all states that are not dead ends, goal states included), and
 //     the largest unit goal distance of a non-dead-end state.
-// mimir draws with std::mt19937 and std::uniform_int_distribution, seeded from std::random_device unless set_seed is
-// called, so its samples are neither reproducible nor portable. mymyr draws with datasets::Rng, core/random.hpp's
-// Xoshiro256 (xoshiro256**, Lemire's bounded integers): the same seed gives the same samples on every platform and
-// standard library. Samples are state ids of the space.
+// The samplers draw with datasets::Rng, core/random.hpp's Xoshiro256 (xoshiro256**, Lemire's bounded integers): the
+// same seed gives the same samples on every platform and standard library. Samples are state ids of the space.
 //
 // A sampler needs the unit goal distances only: it is built from a StateSpace or from the distances of a space held
 // elsewhere (the device state spaces of cuda/state_space.hpp download just those).

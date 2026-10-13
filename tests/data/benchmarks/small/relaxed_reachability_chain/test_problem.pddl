@@ -1,0 +1,6 @@
+(define (problem relaxed-reachability-chain-1)
+  (:domain relaxed-reachability-chain)
+  (:objects g1 g2 - gadget)
+  (:init (powered g1) (powered g2) (chargeable g1))
+  (:goal (unlocked g1))
+)

@@ -3,7 +3,7 @@ IW over task tables).
 
 Checked against the CPU (mymyr.datasets and mymyr.search.iw):
 - mymyr.datasets.state_space(task, device=...) equals the CPU space array by array (device arrays through torch, JAX
-  and dlpack, and to_host()), for suite tasks and the fork's tasks with conditional effects, axioms, action costs and
+  and dlpack, and to_host()), for suite tasks and small tasks with conditional effects, axioms, action costs and
   unsolvable states; statuses and outputs of generate_state_space;
 - state_spaces over the table instance sets (one device pipeline; waves and tiny chunks) equal the CPU pool, the
   generalized state space from device results equals the CPU one, samplers over device spaces equal samplers over the
@@ -17,7 +17,6 @@ Runs only when a GPU is made visible explicitly (conftest.py hides GPUs by defau
 """
 
 import os
-import pathlib
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -34,19 +33,20 @@ if not mc.available():
     pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)", allow_module_level=True)
 torch = pytest.importorskip("torch")
 
-FORK = pathlib.Path(os.environ.get("MYMYR_FORK_DATA", "/nonexistent/mymyr-fork-data"))
+SMALL = ROOT / "tests/data/benchmarks/small"
+IPC = ROOT / "tests/data/ipc"
 GEN = ROOT / "tests/data/table_instances"
-BW = FORK / "ipc/blocksworld-ipc/train"
+BW = IPC / "blocksworld-ipc/train"
 SETS = {  # as tests/cpp/rl/table_instance_sets.hpp (test_rl_table.py)
     "blocks": (BW / "domain.pddl", [BW / f"p{k}.pddl" for k in (13, 25, 37, 49, 61)]),
-    "gripper": (FORK / "gripper/domain.pddl",
-                [FORK / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
-    "miconic-simpleadl": (FORK / "miconic-simpleadl/domain.pddl",
-                          [FORK / "miconic-simpleadl/test_problem.pddl"]
+    "gripper": (SMALL / "gripper/domain.pddl",
+                [SMALL / "gripper/test_problem4.pddl"] + [GEN / f"gripper/gripper-{k}.pddl" for k in (10, 20, 40, 80)]),
+    "miconic-simpleadl": (SMALL / "miconic-simpleadl/domain.pddl",
+                          [SMALL / "miconic-simpleadl/test_problem.pddl"]
                           + [GEN / f"miconic-simpleadl/simple-{k}.pddl" for k in ("f6-p4-q", "f12-p8-c", "f24-p16-q")]),
 }
 TEXT = ["depot__p02", "gripper__prob05", "miconic-simpleadl__s10-2", "openstacks-opt08-adl__p03", "philosophers__p03-phil4"]
-FORK_TASKS = [("barman", "test_problem.pddl"), ("miconic-fulladl", "test_problem.pddl"), ("spanner", "p15-easy.pddl"),
+SMALL_CASES = [("barman", "test_problem.pddl"), ("miconic-fulladl", "test_problem.pddl"), ("spanner", "p15-easy.pddl"),
               ("gripper", "p-2-0.pddl")]
 KEYS = ["state_words", "forward_offsets", "forward_targets", "label_schemas", "label_bindings", "backward_offsets",
         "backward_sources", "backward_edges", "unit_goal_distances", "cost_goal_distances", "costs", "goal", "unsolvable",
@@ -65,11 +65,11 @@ def needs_frontend():
         pytest.skip("built without the loki front end")
 
 
-def fork_task(d, p):
+def small_task(d, p):
     needs_frontend()
-    dom, prob = FORK / d / "domain.pddl", FORK / d / p
+    dom, prob = SMALL / d / "domain.pddl", SMALL / d / p
     if not dom.is_file() or not prob.is_file():
-        pytest.skip(f"fork data missing: {prob}")
+        pytest.skip(f"instance missing: {prob}")
     return mymyr.Task.from_pddl(dom, prob, atoms="dense")
 
 
@@ -79,7 +79,7 @@ def sets():
     out = {}
     for name, (dom, probs) in SETS.items():
         if not dom.is_file() or not all(p.is_file() for p in probs):
-            pytest.skip(f"the table instances of {name} are missing (set MYMYR_FORK_DATA)")
+            pytest.skip(f"the table instances of {name} are missing")
         out[name] = [mymyr.Task.from_pddl(dom, p, atoms="dense") for p in probs]
     return out
 
@@ -136,9 +136,9 @@ def test_state_space_equals_cpu_text(ctx, name):
         assert_same_space(d, c)
 
 
-@pytest.mark.parametrize("case", FORK_TASKS, ids=lambda c: c[0])
-def test_state_space_equals_cpu_fork(ctx, case):
-    task = fork_task(*case)
+@pytest.mark.parametrize("case", SMALL_CASES, ids=lambda c: c[0])
+def test_state_space_equals_cpu_small(ctx, case):
+    task = small_task(*case)
     for remove in (False, True):
         c = cpu_space(task, remove_if_unsolvable=remove)
         d = datasets.state_space(task, device=ctx, remove_if_unsolvable=remove)
@@ -152,7 +152,7 @@ def test_state_space_equals_cpu_fork(ctx, case):
 
 
 def test_generation_outputs_and_statuses(ctx):
-    task = fork_task("barman", "test_problem.pddl")
+    task = small_task("barman", "test_problem.pddl")
     c = cpu_space(task)
     for output in ("device", "host", "both"):
         r = mc.generate_state_space(task, ctx=ctx, output=output, remove_if_unsolvable=False)
@@ -185,7 +185,7 @@ def test_numeric_state_spaces_equal_cpu(ctx):
 
 
 def test_device_arrays_frameworks_and_streams(ctx):
-    task = fork_task("barman", "test_problem.pddl")
+    task = small_task("barman", "test_problem.pddl")
     c = cpu_space(task)
     d = datasets.state_space(task, device=ctx, remove_if_unsolvable=False)
     ca = c.arrays()
@@ -249,7 +249,7 @@ def test_state_spaces_equal_cpu_pool(ctx, sets, name):
 
 
 def test_generalized_state_space_from_device(ctx, sets):
-    tasks = [fork_task("gripper", p) for p in ("p-1-0.pddl", "p-2-0.pddl", "test_problem2.pddl", "test_problem4.pddl")]
+    tasks = [small_task("gripper", p) for p in ("p-1-0.pddl", "p-2-0.pddl", "test_problem2.pddl", "test_problem4.pddl")]
     tasks.append(sets["gripper"][2])  # fails at max_states: skipped, as on the CPU
     cpu = datasets.generalized_state_space(tasks, remove_if_unsolvable=False, max_states=30000)
     dev = datasets.generalized_state_space(rl.TaskTable(tasks), device=ctx, remove_if_unsolvable=False, max_states=30000)
@@ -264,7 +264,7 @@ def test_generalized_state_space_from_device(ctx, sets):
 
 
 def test_samplers_over_device_spaces(ctx):
-    task = fork_task("spanner", "p15-easy.pddl")
+    task = small_task("spanner", "p15-easy.pddl")
     c = cpu_space(task)
     d = datasets.state_space(task, device=ctx, remove_if_unsolvable=False)
     sd, sc = datasets.StateSpaceSampler(d, seed=5), datasets.StateSpaceSampler(c, seed=5)

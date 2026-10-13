@@ -20,7 +20,7 @@ public:
     static constexpr u64 k_inf = std::numeric_limits<u64>::max();
 
     /// real: the grounding's real costs, else 1 per action (axioms 0).
-    ReferenceLmCut(const heuristics::RelaxedTask& R, bool real) : R(R), P(R.num_props()), O(R.num_ops())
+    ReferenceLmCut(const heuristics::RelaxedTask& R, bool real) : P(R.num_props()), O(R.num_ops())
     {
         init = P;
         for (u32 o = 0; o < R.num_ops(); ++o)
@@ -193,7 +193,6 @@ public:
     }
 
 private:
-    const heuristics::RelaxedTask& R;
     u32 P, O, init;
     std::vector<std::vector<u32>> pre, eff;
     std::vector<u32> ga;

@@ -39,14 +39,13 @@ public:
     /// Whether test() may run on several threads at once (each with its own Successors): every kind but Custom,
     /// whose user function runs on the calling thread.
     [[nodiscard]] bool concurrent() const noexcept { return m_kind != Kind::Custom; }
-    /// The task's goal contains a false static literal (as in mimir's test_static_goal() returning false). Custom and AnyOf
+    /// The task's goal contains a false static literal. Custom and AnyOf
     /// goals are never statically false.
     [[nodiscard]] bool statically_false() const noexcept { return m_static_false; }
 
     /// Goal test of state s. `prepared`: succ.prepare() already ran on it.
     [[nodiscard]] bool test(Successors& succ, StateView s, bool prepared) const;
-    /// Unsatisfied task goal literals (each distinct literal once; numeric goal constraints are not counted, as in
-    /// mimir's ProblemGoalStrategyImplCounter).
+    /// Unsatisfied task goal literals (each distinct literal once; numeric goal constraints are not counted, ).
     [[nodiscard]] u32 unsatisfied(Successors& succ, StateView s, bool prepared) const;
 
 private:
@@ -60,11 +59,10 @@ private:
     bool m_static_false = false;
 };
 
-/// Mimir's plan cost (search_space.hpp extract_total_ordered_plan, state_repository.cpp apply_action_effects):
-/// the metric value at the end of the plan, from the start state's metric value, through the shared cost evaluator
+/// The plan cost: the metric value at the end of the plan, from the start state's metric value, through the shared cost evaluator
 /// (heuristics::ActionCosts, heuristics::plan_metric): total-cost effects of any operator and expression, conditional
 /// ones when they fire, numeric metrics; without total-cost and metric every step costs 1. Between two consecutive
-/// states of the plan mimir takes the cheapest action, so apply() replaces an action by a strictly cheaper one with
+/// states of the plan the cheapest action is taken, so apply() replaces an action by a strictly cheaper one with
 /// the same successor.
 class PlanCost
 {

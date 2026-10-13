@@ -101,22 +101,19 @@ if(MYMYR_BENCH)
         target_link_libraries(mymyr_table_bench PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings)
         target_compile_definitions(mymyr_table_bench PRIVATE
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-            MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
-            MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
+            MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data")
         # device state spaces against the host (one large space; many small instances of a table)
         add_executable(mymyr_device_state_space_bench ${PROJECT_SOURCE_DIR}/bench/cuda/device_state_space_bench.cpp)
         target_link_libraries(mymyr_device_state_space_bench PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings)
         target_compile_definitions(mymyr_device_state_space_bench PRIVATE
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-            MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
-            MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
+            MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data")
         # suite batches (several domains) against one batch per domain, env steps and expand
         add_executable(mymyr_task_suite_bench ${PROJECT_SOURCE_DIR}/bench/cuda/task_suite_bench.cpp)
         target_link_libraries(mymyr_task_suite_bench PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings)
         target_compile_definitions(mymyr_task_suite_bench PRIVATE
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-            MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
-            MYMYR_FORK_DATA_DIR="${MYMYR_FORK_DATA_DIR}")
+            MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data")
     endif()
 endif()
 
