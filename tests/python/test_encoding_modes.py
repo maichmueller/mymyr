@@ -272,6 +272,7 @@ def test_large_batches_are_split_over_threads_and_pools(layout):
 def test_a_forked_child_encodes_with_the_threads_of_its_parent():
     import os
     import signal
+    import warnings
 
     if not hasattr(os, "fork"):
         pytest.skip("no fork on this platform")
@@ -279,7 +280,9 @@ def test_a_forked_child_encodes_with_the_threads_of_its_parent():
     rows = big_rows(task)
     encoder = encoder_of(task)
     parent = encoder.encode(rows, threads=2)  # the parent's pool exists before the fork
-    child_id = os.fork()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # JAX warns about every fork once it is loaded
+        child_id = os.fork()
     if child_id == 0:
         status = 1
         try:
