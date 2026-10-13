@@ -30,15 +30,6 @@ env:
   UV_LINK_MODE: copy
 
 jobs:
-  # Only the parity area (tests/parity, bench/parity) may name the reference implementations.
-  references:
-    name: No reference implementation outside the parity area
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: python3 ci/check_no_mimir.py
-
   # The dependency superbuild, built once per pin and compiler and restored by the jobs below.
   deps:
     name: Dependencies

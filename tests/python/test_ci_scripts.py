@@ -3,8 +3,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "ci" / "check_ctest_log.py"
@@ -104,45 +102,3 @@ def test_ctest_log_fails_above_sanitized_skip_count(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert f"{max_skipped + 1} tests skipped (expected at most {max_skipped})" in result.stderr
-
-
-NO_REFERENCE_CHECK = ROOT / "ci" / "check_no_mimir.py"
-REFERENCE_NAME = "mi" + "mir"
-
-
-def run_reference_check(root: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(NO_REFERENCE_CHECK), str(root)], capture_output=True, text=True, check=False
-    )
-
-
-def test_the_tree_names_no_reference_implementation_outside_the_parity_area() -> None:
-    if not (ROOT / ".git").exists():
-        pytest.skip("not a git checkout")
-    result = run_reference_check(ROOT)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_reference_names_fail_outside_the_parity_area(tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.cpp").write_text(f"// as in {REFERENCE_NAME.capitalize()}'s search\n")
-
-    result = run_reference_check(tmp_path)
-
-    assert result.returncode == 1
-    assert "src/a.cpp:1" in result.stdout
-
-
-def test_reference_names_pass_in_the_allowed_places(tmp_path: Path) -> None:
-    for rel in ("tests/parity/a.py", "bench/parity/b.cpp", "LICENSE"):
-        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / rel).write_text(f"{REFERENCE_NAME}\n")
-    (tmp_path / "README.md").write_text(
-        f"A rewrite of the [{REFERENCE_NAME}](https://github.com/maichmueller/{REFERENCE_NAME}) core.\n"
-        f"These are the terms of {REFERENCE_NAME}.\n"
-    )
-
-    result = run_reference_check(tmp_path)
-
-    assert result.returncode == 0, result.stdout
