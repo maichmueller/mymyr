@@ -1,5 +1,6 @@
 """Execute runnable Python examples from the user documentation."""
 
+import importlib.util
 import json
 import pathlib
 import re
@@ -40,7 +41,9 @@ def test_documentation_python_blocks(page, tmp_path):
     has_cuda = _cuda_available()
     runnable, skipped = [], 0
     for options, source in blocks:
-        if "skip-if-no-cuda" in options and not has_cuda:
+        # "needs-<module>": the block imports an optional package
+        missing = [o for o in options if o.startswith("needs-") and importlib.util.find_spec(o[6:]) is None]
+        if ("skip-if-no-cuda" in options and not has_cuda) or missing:
             skipped += 1
         else:
             runnable.append(source)

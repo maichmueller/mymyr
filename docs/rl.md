@@ -31,7 +31,9 @@ successor order.
 States travel as rows of atom words followed by numeric words, in the encoding of
 [State encodings](parsing-and-tasks.md#state-encodings). Tables refuse tasks with lazy atom slots and use one numeric
 storage for all instances. A batch's rows are as wide as their widest instance (`words=` fixes the width); each row
-costs its own instance's width, and the words past it are zero padding. `rl.numeric_values` decodes numeric words.
+costs its own instance's width, and the words past it are zero padding. `rl.numeric_values` decodes numeric words,
+and `rl.decode(table, rows, task_ids)` turns rows back into States (`Task.decode` reads rows in the task's own
+layout, with only its own numeric words last).
 
 ## Derived words
 
@@ -141,6 +143,147 @@ new episode to the preceding one. Likewise custom reset goals use `next_goal_pos
 env at instance 0 and keeps its instance) and draws what a torch `BatchedEnv` with the same seed and sampler draws: the
 pool's env id is its index, and each reset and each autoresetting step of an env advances that env's counter, whichever
 send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)` override the draws.
+
+## Gymnasium
+
+`mymyr.rl.gym` provides `Env`, a `gymnasium.Env` over a task, a `TaskTable` or a `TaskSuite`, and `VectorEnv`, a
+`gymnasium.vector.VectorEnv` that steps N environments in one native `CpuEnvPool`. Gymnasium (1.1 or later) is an
+optional dependency, installed by the extra `mymyr[gym]`. `import mymyr` does not import it, and importing
+`mymyr.rl.gym` without it raises an ImportError that names the extra.
+
+```python needs-gymnasium
+from pathlib import Path
+
+import gymnasium as gym
+from mymyr.rl import gym as mg
+
+data = Path("tests/data/pddl/gripper")
+env = gym.make("mymyr/PDDL-v0", domain=data / "domain.pddl", problems=data, max_steps=50, render_mode="ansi")
+env.action_space.seed(0)
+obs, info = env.reset(seed=0)
+print(env.render())
+while True:
+    action = env.action_space.sample(mask=info["action_mask"])  # one of the applicable actions
+    obs, reward, terminated, truncated, info = env.step(action)
+    if terminated or truncated:
+        break
+print(sorted(map(str, obs.atoms)), reward, terminated, info["is_goal"])
+```
+
+`examples/rl_gym.py` runs a greedy agent on symbolic observations and collects a rollout batch from a `VectorEnv` in
+the layout that PPO-style trainers take.
+
+### Observations
+
+`observation=` selects one of three observation modes:
+
+| mode | observation | space |
+| --- | --- | --- |
+| `"symbolic"` (default) | `SymbolicObservation(atoms, objects, goal, static, numeric)` | `SymbolicSpace` |
+| `"graph"` | the relational graph of `mymyr.encoding.FlatRelationEncoder`: a dict of its arrays | `Dict` of `Box` and `Sequence` |
+| `"bits"` | the state's fluent atom slots as int8 0/1 | `MultiBinary(n)`; numeric tasks: `Dict(atoms=..., numeric=Box)` |
+
+A symbolic observation holds the state's true fluent atoms as a frozenset of mymyr `GroundAtom`s (`derived=True` adds
+the derived atoms). The other fields are optional: the instance's object names (`objects=True`, the default), its
+`GroundCondition` goal (`goal=True`, the default), its static atoms, types included (`static=True`), and the numeric
+fluent values as a tuple of floats (`numeric=`, by default on for numeric tasks). A field that is turned off is
+`None`. Observations are immutable and hashable, and they pickle together with their task. Atoms compare equal within
+one `Task` object, so an observation that crossed a process boundary (as in Gymnasium's `AsyncVectorEnv`) belongs to a
+restored copy of the task; compare such observations by the atoms' text. `SymbolicSpace` is a custom space because no
+standard Gymnasium space holds sets of atoms. `Text` would reduce the atoms to strings, and `Graph` holds binary
+edges, not atoms of any arity. Its `contains` checks the fields and that the atoms are fluent atoms. Its `sample`
+returns the initial observation of a random instance.
+
+The graph mode builds observations with the native encoder (with `goal_derivations=()`, `include_actions=False`,
+`emit_counts=False` and `entity_arrays="auto"` by default; `graph_options=` passes other encoder options), so the
+arrays are the ones that [native encoding](encoding.md) documents. The space is a `Dict` of `Box` for the arrays of
+fixed length and of `Sequence(..., stack=True)` for the arrays whose length depends on the state, such as
+`relation_args`. A Gymnasium `Graph` space has nodes and binary edges, while the encoder's relations have any arity. It
+supports the classical tasks of one domain. The bits mode gives a fixed-size vector for standard networks; slot `i` is
+atom slot `i` of the current instance, and the instances of a table number their atoms independently.
+
+### Actions
+
+`action=` selects how an action is given:
+
+- `"index"` (the default): `Discrete(max_actions)`, an index into the state's applicable actions in their canonical
+  order (by schema, then by binding; `env.unwrapped.applicable_actions()` lists them). `info["action_mask"]` (int8,
+  the mask `Discrete.sample(mask=...)` takes) and `action_masks()` (bool, the method maskable policy-gradient
+  implementations call) mark the valid indices. `max_actions` defaults to the largest `rl.successor_bounds(table)`:
+  the ground actions of an instance's delete relaxation, which bound the applicable actions of every reachable state, so
+  every applicable action has an index. A smaller `max_actions` truncates the action list as a padded expansion does.
+- `"ground"`: the ground action itself, as pddlgym's literal actions: a mymyr `Action` of the current instance, or
+  its text `"(pick ball1 rooma left)"` or `("pick", ["ball1", "rooma", "left"])`. `GroundActionSpace.sample()` draws
+  an applicable action, and `contains` accepts the actions of the current instance.
+
+The index mode is the default because standard RL code works with a `Discrete` space directly: it needs no custom
+wrapper, the same network output layer serves every state, and an index that the mask rules out is still a
+well-defined step. An index past the state's actions, or an action that is not applicable, does not move. It sets
+`info["invalid"]`, pays `step_reward` and counts as a step. A state without applicable actions (`num_actions == 0`) is
+a dead end, which `dead_end=` and `dead_end_terminal=` configure as in `CpuEnvPool`. A step there does not move
+whatever the action, and it does not set `info["invalid"]`.
+
+### Contract, problems and seeding
+
+Transitions are `CpuEnvPool` steps with the same keywords (`max_steps`, `step_reward`, `goal_reward`, `dead_end`,
+`dead_end_reward`, `dead_end_terminal`), and the defaults are the same sparse reach-goal rewards. `terminated` holds at
+goals and terminal dead ends, and `truncated` holds after `max_steps` steps of an episode (`max_steps=0` never
+truncates). Goals and terminal dead ends are absorbing: a further step does not move, pays nothing and stays
+terminated. A reset into a goal (a solved instance) reports `info["is_goal"]` and `info["terminated"]`, and its first
+step is absorbing. `info` also carries `task_id`, `num_actions`, `steps` and `action_mask`.
+
+The problems are a task, a table or a suite, or `domain=` and `problems=` (a file, a directory, a glob or a list), which
+build `TaskTable.from_pddl(domain, problems)`. Each reset draws the instance with `sampler=`: uniform (`"auto"`,
+`"uniform"`), weighted (`rl.InstanceSampler(n, weights=[...])`), or `None`, which keeps the instance. Like pddlgym,
+`fix_problem_index(i)` fixes the instance of every later episode (`None` releases it), and
+`reset(options={"task_id": i})` picks the instance of one episode.
+
+`reset(seed=s)` seeds `np_random` and the instance draws, which are counter-based as in the pool: episode `k` after the
+seed starts in the sampler's draw for `(s, env_id, k)`. Transitions are deterministic, so the same seed and the same
+actions give the same trajectory in every process. As in Gymnasium, `action_space.sample()` uses the space's own
+generator (`action_space.seed(s)`).
+
+### Vector environment
+
+`VectorEnv(table, num_envs, threads=0, ...)` takes the keywords of `Env` and steps all environments in one native call.
+It does not step N Python environments. Its observations are batched: a tuple of N symbolic observations, an int8
+`[N, n]` array, or one encoder batch of the N graphs (entity ids global over the batch, the input of a message-passing
+model). Index actions are an int array `[N]` with `info["action_mask"]` `[N, max_actions]`. Env `i` is environment
+`first_env + i` of the RL contract's streams, so after `reset(seed=s)` its episodes start in the instances of the
+episodes of `CpuEnvPool(seed=s)` and of the torch `BatchedEnv(seed=s)`, whose construction starts episode 0; a list
+of N seeds seeds the environments one by one.
+
+`autoreset_mode=` follows Gymnasium's definitions. In `"next_step"`, the default, a step that ends an episode returns
+its final observation, and the next step resets that environment, ignores its action and returns reward 0. In
+`"same_step"`, the native autoreset, an ending step returns the next episode's first observation, with the final ones
+in `info["final_obs"]` and `info["final_info"]`. In `"disabled"`, finished environments stay absorbing until
+`reset(options={"reset_mask": mask})`. For curricula, `set_next_task_ids(ids)` chooses the instance of each
+environment's next autoreset, in whichever step it comes (-1 keeps an environment's draw), and
+`reset(options={"task_ids": ids})` chooses the instances of a reset.
+
+### Registration
+
+Importing `mymyr.rl.gym` registers `mymyr/PDDL-v0`: `gymnasium.make("mymyr/PDDL-v0", domain=..., problems=...,
+**keywords)` builds an `Env`, and `gymnasium.make_vec` builds a `VectorEnv`. `mg.register_pddl(domain, problems,
+**keywords)` registers one domain's problems as `mymyr/<name>-v0`, named after the domain file or its directory.
+PDDL environments are defined by files, not by a fixed catalog, so registration takes the paths as keywords instead of
+shipping a list of ids.
+
+### Differences to pddlgym
+
+- The Gymnasium API: `reset` returns `(observation, info)`, and `step` returns `terminated` and `truncated`; pddlgym
+  never truncates.
+- pddlgym pays 1 at the goal and continues stepping after it. Here the rewards are configurable, goals and terminal
+  dead ends are absorbing, dead ends can end episodes, and `max_steps` truncates.
+- Observations hold mymyr values: `GroundAtom`s, the object names and a `GroundCondition` goal (negative literals and
+  numeric constraints included). Static atoms are a separate, optional field rather than part of the state's atoms.
+  Derived atoms (axioms) and numeric fluents are supported.
+- Actions are indices with a mask by default. The ground mode takes the domain's actions as they are, where pddlgym
+  needs action predicates in the domain unless `operators_as_actions=True`. pddlgym's action spaces leave out the
+  ground actions that bind one object to several parameters, while mymyr keeps them as PDDL defines them.
+- Instance draws are counter-based per environment id and seed, weighted or uniform, and can be overridden for
+  curricula. A `VectorEnv` steps N environments natively.
+- `render` is text only (`render_mode="ansi"`); pddlgym's domain-specific image renderers have no counterpart.
 
 ## CUDA
 

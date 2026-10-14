@@ -82,8 +82,10 @@ native helpers, JAX arrays the jnp versions of :mod:`mymyr.rl.jax`.
 
 For custom encoders and environments (see also :mod:`mymyr.encoding`): ``table.atom_metadata()`` (the instances'
 atoms with ``atom_offsets``, table predicate ids), :func:`object_offsets` (PyG ``ptr``), :func:`goal_masks`,
-``table.initial_states()``, ``task.device_arrays()``, and :func:`goal_test`, :func:`goal_count`,
-:func:`is_goal` here. There is no replay buffer: feed these arrays to TorchRL / flashbax buffers.
+``table.initial_states()``, ``task.device_arrays()``, :func:`decode` (table rows to States),
+:func:`successor_bounds` (a bound of every reachable state's successor count, e.g. for a fixed action count), and
+:func:`goal_test`, :func:`goal_count`, :func:`is_goal` here. There is no replay buffer: feed these arrays to TorchRL /
+flashbax buffers. :mod:`mymyr.rl.gym` (needs gymnasium) has Gymnasium environments over these primitives.
 """
 
 import sys
@@ -107,6 +109,7 @@ from mymyr._core._rl import (
     is_goal,
     numeric_values,
     random_walks,
+    successor_bounds,
 )
 from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
 from mymyr.rl._sampling import InstanceSampler
@@ -122,6 +125,7 @@ __all__ = [
     "TaskTable",
     "ThreadPool",
     "as_table",
+    "decode",
     "expand",
     "expand_into",
     "goal_count",
@@ -135,6 +139,7 @@ __all__ = [
     "prefix_masks",
     "random_walks",
     "schema_masks",
+    "successor_bounds",
     "task_domains",
 ]
 
@@ -213,6 +218,52 @@ def task_domains(table: TableLike, task_ids: Any) -> Any:
     else:
         domains = np.zeros(len(_num_objects(table)), dtype=np.int32)
     return _gather(_framework(task_ids), domains, task_ids, task_ids)
+
+
+def decode(table: TableLike, rows: Any, task_ids: Optional[Any] = None) -> list:
+    """The States of rows of a table or suite: row i of instance ``task_ids[i]`` (None: instance 0 of a table of
+    one) in the table's layout, ``[W + NN]``: W atom words (at least the instance's) and the table's ``NN =
+    table.numeric_words`` numeric words, of which an instance uses its first ``task.numeric_words``. ``Task.decode``
+    reads a task's own rows (its numeric words last), so a row of a numeric table whose instances have different
+    numeric word counts decodes here. ``rows``: a NumPy-convertible uint64 (or int64) array [N, W + NN]; a Task or
+    TaskHandle decodes its own rows."""
+    if isinstance(table, (Task, TaskHandle)):
+        return (table.task if isinstance(table, TaskHandle) else table).decode(rows)
+    if not isinstance(table, (TaskSuite, TaskTable)):
+        raise TypeError(f"mymyr: expected a TaskSuite, a TaskTable or a Task, not {type(table).__name__}")
+    words = np.asarray(rows)
+    if words.dtype == np.int64:
+        words = words.view(np.uint64)
+    if words.ndim != 2 or words.dtype != np.uint64:
+        raise ValueError("mymyr: rows must be a uint64 (or int64) array [N, W + NN]")
+    if task_ids is None:
+        if len(table) != 1:
+            raise ValueError("mymyr: task_ids are needed for a table of several instances")
+        ids = np.zeros(len(words), np.int64)
+    else:
+        ids = np.asarray(task_ids, np.int64)
+        if ids.shape != (len(words),):
+            raise ValueError(f"mymyr: task_ids must have one entry per row ({len(words)})")
+        if ((ids < 0) | (ids >= len(table))).any():
+            raise ValueError(f"mymyr: a task id is outside the {len(table)} instances")
+    numeric = int(table.numeric_words)
+    width = words.shape[1] - numeric  # the batch's atom words: a batch is as wide as its widest instance
+    tasks = table.tasks
+    out: list = [None] * len(words)
+    for t in np.unique(ids).tolist():
+        where = np.flatnonzero(ids == t)
+        task = tasks[t]
+        if width < task.words:
+            raise ValueError(f"mymyr: rows of {words.shape[1]} words are narrower than instance {t}'s "
+                             f"{task.words} atom words plus the table's {numeric} numeric words")
+        part = words[where]
+        if numeric:
+            part = np.concatenate([part[:, : task.words], part[:, width : width + task.numeric_words]], axis=1)
+        else:
+            part = part[:, :width]
+        for i, state in zip(where.tolist(), task.decode(np.ascontiguousarray(part))):
+            out[i] = state
+    return out
 
 
 def goal_masks(table: TableLike, task_ids: Optional[Any] = None, framework: Optional[str] = None) -> tuple[Any, Any]:

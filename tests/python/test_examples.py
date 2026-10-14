@@ -12,6 +12,7 @@ REQUIREMENTS = {
     "rl_jax_cuda.py": ("cuda", "jax"),
     "rl_torch_cuda.py": ("cuda", "torch"),
     "cuda_brfs.py": ("cuda",),
+    "rl_gym.py": ("gymnasium",),
 }
 SCRIPTS = sorted(EXAMPLES.glob("*.py"))
 

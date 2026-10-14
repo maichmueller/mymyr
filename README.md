@@ -9,7 +9,7 @@ core, with free-threaded Python bindings and an optional CUDA backend.
 
 - Flat POD data with no global repositories: states are values, and containers are local and droppable.
 - Free-threaded CPython (3.14t and 3.15t) is the only Python target.
-- A CUDA backend with classical and numeric tasks, and RL/JAX/PyTorch interop are core features.
+- A CUDA backend with classical and numeric tasks, and RL/JAX/PyTorch/Gymnasium interop are core features.
 
 ## Installing from PyPI
 
@@ -17,6 +17,8 @@ core, with free-threaded Python bindings and an optional CUDA backend.
 uv venv .venv --python 3.14t
 uv pip install --python .venv/bin/python mymyr
 ```
+
+The extra `mymyr[gym]` adds Gymnasium for the environments of `mymyr.rl.gym` ([Gymnasium](docs/rl.md#gymnasium)).
 
 Releases carry CPU wheels for free-threaded CPython 3.14t and 3.15t on Linux (x86_64, glibc 2.34 or newer) and
 macOS (arm64). The CUDA backend is not part of them; build from source with `-DMYMYR_CUDA=ON` for it. The badges above

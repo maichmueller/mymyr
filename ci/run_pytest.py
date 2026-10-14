@@ -6,9 +6,9 @@ usage: run_pytest.py --runtimes {none,rl} [--platform {linux,macos}] [pytest arg
 Tests that need the benchmark data skip when it is missing, so a run with a misconfigured data
 directory can finish green with most of the suite skipped. This wrapper turns that into a failure.
 
-The floors are measured with the full test data. The tests that need torch, JAX and their RL libraries skip
+The floors are measured with the full test data. The tests that need torch, JAX, gymnasium and their RL libraries skip
 without them, so the floor depends on what the job installs:
-  --runtimes none  no torch or JAX (pytest_min_passed_plain): the Linux 3.15t job, the macOS job, the wheel tests;
+  --runtimes none  no torch, JAX or gymnasium (pytest_min_passed_plain): the Linux 3.15t job, the macOS job, the wheel tests;
   --runtimes rl    ci/rl-requirements.txt installed (pytest_min_passed_rl): the Linux 3.14t job.
 Five tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
 with RLIMIT_AS and read /proc (4 + 1 cases). The floor on macOS is lower by that many; the platform defaults to

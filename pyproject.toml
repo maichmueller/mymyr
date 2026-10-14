@@ -17,6 +17,7 @@ mymyr = "mymyr.cli:console_main"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "nanobind>=3.1,<4"]
+gym = ["gymnasium>=1.1"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
