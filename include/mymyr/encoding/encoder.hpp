@@ -139,6 +139,7 @@ public:
     [[nodiscard]] const EncodingSchema& schema() const noexcept { return *m_schema; }
     [[nodiscard]] const std::shared_ptr<const EncodingSchema>& schema_ptr() const noexcept { return m_schema; }
     [[nodiscard]] const EncodingContext& context() const noexcept { return *m_context; }
+    [[nodiscard]] const std::shared_ptr<const EncodingContext>& context_ptr() const noexcept { return m_context; }
 
     /// Encodes the rows on the calling thread into a new bundle. Const and reentrant. Throws std::invalid_argument for
     /// invalid input (a task id out of range, a row narrower than its instance, a state bit its instance does not have,

@@ -1045,6 +1045,68 @@ void ChunkGenerator::goal_flags_impl(const u64* rows, u64 stride, u32 words, u64
     }
 }
 
+void ChunkGenerator::derived_rows(const u64* rows, u64 stride, u32 words, u64 n, u64* out, u32 out_words)
+{
+    if (n == 0 || out_words == 0)
+        return;
+    DeviceGuard g(m_ctx->device());
+    const u32 own = bits::words_for(m_task->atoms().derived_slots());
+    if (out_words < own)
+        throw std::invalid_argument("mymyr: ChunkGenerator::derived_rows: derived rows of " + std::to_string(out_words) +
+                                    " words; the task has " + std::to_string(own));
+    if (m_task->numeric_slots() && words > lifted::k_max_words)
+        throw std::invalid_argument("mymyr: ChunkGenerator::derived_rows: numeric rows of " + std::to_string(words) + " words");
+    check(cudaMemsetAsync(out, 0, n * out_words * sizeof(u64), m_s), "cudaMemsetAsync");
+    if (!m_task->has_axioms() || own == 0)
+        return;
+    const u32 slots = m_task->numeric_slots();
+    if (!m_device_axioms)
+    {
+        std::vector<u64> src(n * words), res(n * out_words, 0);
+        check(cudaMemcpy2DAsync(src.data(), words * sizeof(u64), rows, stride * sizeof(u64), words * sizeof(u64), n,
+                                cudaMemcpyDeviceToHost, m_s),
+              "cudaMemcpy2DAsync");
+        check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");
+        const WorkspaceLease lease = m_task->workspace();
+        detail::Engine& e = lease->engine();
+        for (u64 i = 0; i < n; ++i)
+        {
+            const u64* row = src.data() + i * words;
+            const State decoded = slots ? numeric::decode(*m_task, row, words) : State{};
+            e.set_state(row, bits::trimmed_size(row, words - slots));
+            e.set_numeric(slots ? decoded.numeric().data() : nullptr);
+            e.build_view();
+            lease->axioms().evaluate();
+            std::copy_n(e.derived(), own, res.begin() + static_cast<std::ptrdiff_t>(i * out_words));
+        }
+        check(cudaMemcpyAsync(out, res.data(), res.size() * sizeof(u64), cudaMemcpyHostToDevice, m_s), "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");  // pageable source
+        return;
+    }
+    const u64 dw_guess = std::max<u64>(1, bits::words_for(m_view.derived_slots));
+    const u64 per = (words + m_view_words + dw_guess) * sizeof(u64);
+    const u64 chunk = std::max<u64>(1, std::min<u64>(k_goal_budget / std::max<u64>(per, 8), 0x7FFFFFFFull));
+    for (u64 b = 0; b < n; b += chunk)
+    {
+        const u64 c = std::min(chunk, n - b);
+        const bool gather = stride != words;
+        const u64* src = rows + b * stride;
+        if (gather)
+        {
+            auto* dst = static_cast<u64*>(m_goal_rows.ensure(m_ctx, c * words * sizeof(u64), m_s));
+            check(lifted::launch_gather_rows(src, stride, words, c, nullptr, c, dst, m_s), "launch_gather_rows");
+            src = dst;
+        }
+        lifted::Parents p{src, words, words - slots, static_cast<u32>(c), nullptr, 0};
+        auto* views = static_cast<u64*>(m_goal_views.ensure(m_ctx, c * m_view_words * sizeof(u64), m_s));
+        u64* der = nullptr;
+        const u32 dw = views_and_axioms(p, views, m_goal_derived, &der);
+        check(cudaMemcpy2DAsync(out + b * out_words, out_words * sizeof(u64), der, dw * sizeof(u64), std::min<u64>(dw, out_words) * sizeof(u64), c,
+                                cudaMemcpyDeviceToDevice, m_s),
+              "cudaMemcpy2DAsync");
+    }
+}
+
 void ChunkGenerator::fold_axiom_events()
 {
     if (m_axiom_event_next == 0)

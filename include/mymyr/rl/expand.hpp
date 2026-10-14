@@ -18,6 +18,10 @@
 //   - State words: little-endian u64, fluent slot i at word i >> 6, bit i & 63; missing words are zero.
 //     Under lazy slots a successor may need more words than the output rows have (new atoms): such rows are not
 //     written, and `words_needed` reports the width that fits all of them (words_needed > words is an overflow too).
+//   - Derived words (optional, `derived`): the successor's derived atoms as a bitset in derived-slot order, from one axiom
+//     evaluation of the successor row (shared with the goal flag). Rows are `derived_words` wide; an instance with fewer
+//     derived words (or none) has zeros past its own. They equal the evaluation the encoder does itself, bit for bit.
+//     Capacity and overflow rules are those of `succ`: rows past the capacity are counted, not written.
 //   - The padded [N, K] view (pad()) is built from the flat CSR by a scatter, with a validity mask and true counts.
 //   - Numeric tasks: a row is [bits | slots], the `words` atom words followed by the table's numeric words
 //     (`numeric_words` = table.numeric_words(); instance i uses the first numeric_words of its own, as in
@@ -69,11 +73,13 @@ struct Expansion
     u64 capacity = 0;        // rows of succ / parent / schema / binding / goal (at most k_max_rows)
     u32 words = 0;           // atom words per successor row
     u32 label_width = 0;     // columns of `binding` (at least the table's label_width() when binding is set)
+    u32 derived_words = 0;   // words per row of `derived` (at least the table's or suite's derived_words())
     u64* succ = nullptr;     // [capacity, words + numeric_words]
     i32* parent = nullptr;   // [capacity]: index of the expanded state in the batch (its instance: task_ids[parent])
     i32* schema = nullptr;   // [capacity]
     i32* binding = nullptr;  // [capacity, label_width]: objects, then -1 past the schema's arity
     u8* goal = nullptr;      // [capacity]: 1 iff the successor is a goal state
+    u64* derived = nullptr;  // [capacity, derived_words]: the successor's derived atoms (needs succ)
     i32* offsets = nullptr;  // [rows + 1]: successors of state i are [offsets[i], offsets[i+1]) (true counts)
 
     u64 total = 0;         // successors of the whole batch (may exceed capacity)
@@ -135,10 +141,13 @@ struct PaddedExpansion
     u8* goal = nullptr;      // [rows, K], 0 padding
     bool overflow = false;   // some count > K, or some successor was beyond the flat capacity
     u32 numeric_words = 0;   // numeric tasks: must equal the flat expansion's
+    u32 derived_words = 0;   // words per row of `derived`
+    u64* derived = nullptr;  // [rows, K, derived_words], zero padding
 };
 
-/// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null, or
-/// whose flat source is null, are not written.
+/// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null are not
+/// written; an array whose flat source is null is filled with its padding (-1 for schema and binding, 0 for succ,
+/// goal and derived).
 void pad(const Expansion& flat, u64 rows, PaddedExpansion& out);
 
 /// Goal flags of a batch (evaluates axioms when the goal mentions derived predicates): out[i] = the goal test of

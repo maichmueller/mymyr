@@ -168,6 +168,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         in.num_objects = T.num_objects();
         in.words = std::max<u32>(1, T.max_words());
         in.numeric_words = T.numeric_words();
+        in.derived_words = bits::words_for(T.atoms().derived_slots());
         in.ow = T.compiled().ow;
         const GoalMasks g = goal_masks(T);
         in.goal_pos = g.pos;
@@ -176,6 +177,7 @@ TaskTable::TaskTable(Private, std::vector<TaskPtr> tasks)
         in.goal_unsatisfiable = g.unsatisfiable;
         m_words = std::max(m_words, in.words);
         m_numeric_words = std::max(m_numeric_words, in.numeric_words);
+        m_derived_words = std::max(m_derived_words, in.derived_words);
         m_max_objects = std::max(m_max_objects, in.num_objects);
         if (T.numeric_slots() > 0)
         {
