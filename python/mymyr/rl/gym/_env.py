@@ -64,7 +64,7 @@ class Env(gymnasium.Env):
       space: ``sample()`` draws an applicable action).
 
     An action that is not applicable (or outside the space) does not move: ``info["invalid"]`` is set and the reward
-    is ``step_reward``. Rewards, terminations and truncations are those of ``mymyr.rl.CpuEnvPool`` (the RL contract,
+    is ``step_reward``. In a state without applicable actions no action moves, and ``invalid`` stays unset. Rewards, terminations and truncations are those of ``mymyr.rl.CpuEnvPool`` (the RL contract,
     with the same keywords): ``reward = step_reward``, plus ``goal_reward`` on reaching a goal, plus
     ``dead_end_reward`` on reaching (or being stuck in) a dead end; ``terminated`` at a goal or a terminal dead end;
     ``truncated`` after ``max_steps`` steps of an episode (0: never). Goals and terminal dead ends are absorbing: a step

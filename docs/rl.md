@@ -193,7 +193,8 @@ The index mode is the default because standard RL code works with a `Discrete` s
 wrapper, the same network output layer serves every state, and an index that the mask rules out is still a
 well-defined step. An index past the state's actions, or an action that is not applicable, does not move. It sets
 `info["invalid"]`, pays `step_reward` and counts as a step. A state without applicable actions (`num_actions == 0`) is
-a dead end, which `dead_end=` and `dead_end_terminal=` configure as in `CpuEnvPool`.
+a dead end, which `dead_end=` and `dead_end_terminal=` configure as in `CpuEnvPool`. A step there does not move
+whatever the action, and it does not set `info["invalid"]`.
 
 ### Contract, problems and seeding
 
