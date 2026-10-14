@@ -17,7 +17,7 @@ the reference data they need is absent. Select them or leave them out with `ctes
 | `data/` | the recorded reference results (JSON, text exports), one directory per area |
 | `cpp/` | the C++ parity tests (`test_<area>_parity.cpp`), the shared golden comparison (`golden.*`) and `export_task.cpp` |
 | `common/` | helpers shared with `bench/parity/` (the reference's status names) |
-| `python/` | the Python parity tests (`test_*_parity.py`) and `parity_support.py` |
+| `python/` | the Python parity tests (`test_*_parity.py`), `parity_support.py` and `encoding_parity.py` (the encoding comparison and its registry of differences) |
 | `tools/` | the scripts that regenerate the data (see below) |
 | `fetch_data.sh` | fetches the reference data the tests read (see below) |
 | `CMakeLists.txt` | the parity targets, included by `tests/cpp/CMakeLists.txt` |
@@ -140,5 +140,9 @@ Encodings
   relations appear in every horizon catalog of the reference, static relations are kept (empty) with
   `include_static=False`, and delta relations of static predicates are listed (they can never hold a tuple); the
   reference's `support_literals` option is not ported. The tests list each difference.
+- Object ids follow the task's order in mymyr and the name order in the reference; tuples are strictly ascending in
+  entity ids in mymyr and in the reference's backend order there; nullary atoms are unary tuples over one auxiliary
+  entity in mymyr, which the reference lacks. `encoding_parity.REGISTRY` lists each such difference with its reason,
+  its scope and the fixture cases that need it; a difference outside the registry fails.
 - Helper predicates for quantified conditions order their parameters by name in mymyr and by the reference's own
   traversal there; the fixtures map them.

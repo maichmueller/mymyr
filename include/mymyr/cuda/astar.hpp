@@ -36,7 +36,7 @@
 // canonical order as the CPU. Numeric tasks carry canonical double tails and evaluate fluent costs, ordered total-cost
 // effects and state metrics in flat device programs. Their F64 priorities use a host heap, one parent per step, with
 // eager CPU tie order; numeric searches do not capture graphs. Refused with std::invalid_argument ("mymyr: ..."): tasks the successor
-// kernels cannot run (ChunkGenerator::unsupported), heuristics other than blind, max, add, ff, h2 and set_additive (and
+// kernels cannot run (ChunkGenerator::search_unsupported), heuristics other than blind, max, add, ff, h2 and set_additive (and
 // groundings beyond the budget), other goals, blocked states, observers, caller-owned evaluators, a weight other than 1
 // (weighted A*) and a finite cost bound.
 

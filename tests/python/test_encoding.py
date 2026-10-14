@@ -379,7 +379,6 @@ def test_the_default_goal_derivations_are_refused():
         ({"target_sources": ("action",)}, "targets is not supported"),
         ({"predicate_virtual_nodes": True}, "predicate_virtual_nodes is not supported"),
         ({"horizon_mode": "full"}, "horizon is not supported"),
-        ({"layout": "relation"}, "layout='relation' is not supported"),
     ],
 )
 def test_options_the_encoder_does_not_encode_raise_value_error(options, match):

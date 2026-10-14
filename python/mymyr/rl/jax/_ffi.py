@@ -92,27 +92,30 @@ def _bool(shape: tuple) -> jax.ShapeDtypeStruct:
 
 
 def env_init(handle: int, task_ids, rw2: int, c: int, v2: int, g2: int) -> tuple[Any, ...]:
-    """states [n, rw2], steps, count [n], counts [n, c], views [n, v2], goal_pos / goal_neg [n, g2]: every row at the
-    initial state of its instance task_ids[i]."""
+    """states [n, rw2], steps, count [n], counts [n, c], views [n, v2], goal_pos / goal_neg [n, g2], at_goal [n]: every
+    row at the initial state of its instance task_ids[i]."""
     n = tuple(task_ids.shape)
     call = jax.ffi.ffi_call(
         "mymyr_env_init",
-        (_u32((*n, rw2)), _i32(n), _i32(n), _u32((*n, c)), _u32((*n, v2)), _u32((*n, g2)), _u32((*n, g2))),
+        (_u32((*n, rw2)), _i32(n), _i32(n), _u32((*n, c)), _u32((*n, v2)), _u32((*n, g2)), _u32((*n, g2)), _bool(n)),
         vmap_method="broadcast_all",
     )
     return call(task_ids, handle=np.int64(handle))
 
 
-def env_reset(handle: int, states, task_ids, steps, count, counts, views, goal_pos, goal_neg, mask, keep_goals: bool):
-    """states, steps, count, counts, views, goal_pos, goal_neg after resetting the rows with mask[i]."""
+def env_reset(
+    handle: int, states, task_ids, steps, count, counts, views, goal_pos, goal_neg, at_goal, mask, keep_goals: bool
+):
+    """states, steps, count, counts, views, goal_pos, goal_neg, at_goal after resetting the rows with mask[i]."""
+    same = (states, steps, count, counts, views, goal_pos, goal_neg, at_goal)
     call = jax.ffi.ffi_call(
         "mymyr_env_reset",
-        tuple(jax.ShapeDtypeStruct(x.shape, x.dtype) for x in (states, steps, count, counts, views, goal_pos, goal_neg)),
-        input_output_aliases={0: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6},
+        tuple(jax.ShapeDtypeStruct(x.shape, x.dtype) for x in same),
+        input_output_aliases={0: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7},
         vmap_method="broadcast_all",
     )
     return call(
-        states, task_ids, steps, count, counts, views, goal_pos, goal_neg, mask, handle=np.int64(handle),
+        states, task_ids, steps, count, counts, views, goal_pos, goal_neg, at_goal, mask, handle=np.int64(handle),
         keep_goals=bool(keep_goals),
     )  # fmt: skip
 
@@ -122,25 +125,30 @@ def _fast(counts) -> bool:
     return counts.shape[-1] > 0
 
 
-def env_refresh(handle: int, states, task_ids, counts, views) -> tuple[Any, ...]:
+def env_refresh(handle: int, states, task_ids, counts, views, goal_pos, goal_neg) -> tuple[Any, ...]:
+    """count, counts, views, at_goal of the states (under the per-env goal masks, or the instances' goals)."""
     n = states.shape[:-1]
     call = jax.ffi.ffi_call(
         "mymyr_env_refresh" if _fast(counts) else "mymyr_env_refresh_sync",
-        (_i32(n), jax.ShapeDtypeStruct(counts.shape, counts.dtype), jax.ShapeDtypeStruct(views.shape, views.dtype)),
+        (
+            _i32(n), jax.ShapeDtypeStruct(counts.shape, counts.dtype), jax.ShapeDtypeStruct(views.shape, views.dtype),
+            _bool(n),
+        ),
         input_output_aliases={2: 1, 3: 2},
         vmap_method="broadcast_all",
-    )
-    return call(states, task_ids, counts, views, handle=np.int64(handle))
+    )  # fmt: skip
+    return call(states, task_ids, counts, views, goal_pos, goal_neg, handle=np.int64(handle))
 
 
 def env_step(
-    handle: int, states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, env_id, seed, action,
-    next_task_ids, label_width: int, final: bool,
+    handle: int, states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, env_id, seed,
+    action, next_task_ids, label_width: int, final: bool,
 ):  # fmt: skip
-    """The 17 results of mymyr_env_step (see rl_jax_bindings.cpp)."""
+    """The 18 results of mymyr_env_step (see rl_jax_bindings.cpp)."""
     n = states.shape[:-1]
     same = tuple(
-        jax.ShapeDtypeStruct(x.shape, x.dtype) for x in (states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg)
+        jax.ShapeDtypeStruct(x.shape, x.dtype)
+        for x in (states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal)
     )
     outs = same + (
         _f32(n),
@@ -155,12 +163,12 @@ def env_step(
     call = jax.ffi.ffi_call(
         "mymyr_env_step" if _fast(counts) else "mymyr_env_step_sync",
         outs,
-        input_output_aliases={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8},
+        input_output_aliases={0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9},
         vmap_method="broadcast_all",
     )
     return call(
-        states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, env_id, seed, action, next_task_ids,
-        handle=np.int64(handle),
+        states, task_ids, steps, draws, count, counts, views, goal_pos, goal_neg, at_goal, env_id, seed, action,
+        next_task_ids, handle=np.int64(handle),
     )  # fmt: skip
 
 

@@ -42,10 +42,17 @@ batched tensor environments; `mymyr.rl.torch.PlanningEnv` adapts them to TorchRL
 Goal states and terminal dead ends are absorbing until reset. Stepping them preserves the state and episode step
 counter, returns zero reward and a terminal flag, and reports no action label (`schema=-1`). Reaching a goal or dead
 end from a nonterminal state still receives the configured transition reward once. Draw counters advance once per
-native step, including absorbing steps. `CpuEnvPool.reset()` reports `goal` and `terminated` for the initial states;
-TorchRL resets also report solved and terminal initial states as terminated.
-The mctx adapter preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero;
-zero-successor tree nodes are terminal even when the environment disables dead-end termination.
+native step, including absorbing steps.
+
+Every environment reports the reset states that are goals already: solved initial states, and states that satisfy
+the goals given to `reset(goal_pos=..., goal_neg=...)`. `CpuEnvPool.reset()` sets `goal` and `terminated`; TorchRL
+resets set `terminated` (also for terminal dead ends); torch `BatchedEnv` and JAX `Env` keep a per-environment
+`at_goal` flag, which reset, step and `refresh()` write and observations and step results carry. A step reads the
+flag instead of testing the current state again, so the next step absorbs those rows. Writing states, instances or
+goal masks directly needs `refresh()`.
+The mctx adapter reads the terminal test of the root and of each node from `at_goal` and the successor count, without
+a step; it preserves the entire embedding at absorbing nodes and sets reward, discount and value to zero.
+Zero-successor tree nodes are terminal even when the environment disables dead-end termination.
 Both environments use successor indices as discrete actions. JAX, PyTorch and TorchRL are optional dependencies.
 A padded action space of K slots (`PlanningEnv(max_actions=K)`, padded expansions) holds a state's first K successors
 in canonical order: later successors are out of reach even when only they lead to a goal (a padded expansion reports
@@ -72,9 +79,12 @@ raises rather than recording an unrelated reset row when final states are disabl
 may disable final states because its next observation is the reached state. Goal-conditioned observations propagate
 their source masks automatically; initialize replay with `transition_example(env, goals=True)` for those items.
 
-HER helpers recompute rewards from reached states. They do not receive source states and cannot detect a relabelled
-goal that was already satisfied before the action. Filter such transitions or cut the relabelled episode at first
-achievement; next-state reward recomputation alone does not reproduce absorbing dynamics.
+HER helpers recompute `achieved` and `reward` from the transitions' reached states. Under a relabelled goal the episode
+ends at its first state that satisfies the goal, so `valid` marks the relabels whose transition is still part of that
+episode: no reached state of the episode's earlier steps in the window satisfies the goal. With `prev_states` (the
+states the steps started from: the observations) the episode's first state, its reset state or the state before the
+window, is tested too; without them a goal that already held there goes undetected. Drop the relabels with `valid`
+false.
 
 The Python 3.14t CI lane installs `ci/rl-requirements.txt` before building, verifies that the framework imports and
 XLA FFI support are present, and runs the ordinary suite with those adapters enabled. The pinned file records the
@@ -82,7 +92,8 @@ CPU framework bundle used for validation; those packages remain optional runtime
 
 ## Instance sampling and curricula
 
-Without constructor `task_ids`, the torch environments sample uniformly across a table or suite at each reset.
+Without constructor `task_ids`, the torch environments and `CpuEnvPool` sample uniformly across a table or suite at
+each reset.
 Explicit constructor ids retain a fixed assignment (`sampler="auto"`); `sampler="uniform"` enables sampling even with
 an explicit initial assignment. JAX `Env.reset(key, N)` samples N instances uniformly; `reset(key, ids)` overrides
 the initial draw. In either framework, `sampler=None` disables sampling and
@@ -99,9 +110,10 @@ External curricula override a draw with `reset(task_ids=ids)` or `step(..., next
 TensorDict uses `next_task_id`, not the observation's `task_id`: collectors therefore do not accidentally pin each
 new episode to the preceding one. Likewise custom reset goals use `next_goal_pos` / `next_goal_neg` or explicit
 `reset(goal_pos=..., goal_neg=...)` kwargs; observed goal masks do not override a new instance's default goals.
-For `CpuEnvPool`, use the same sampler's NumPy API and pass the resulting ids to
-`reset(..., task_ids=ids)` or `send(..., next_task_ids=ids)`; the caller owns each row's reset counter in asynchronous
-collection. Sampling does not change the pool's thread-safety or enqueue order.
+`CpuEnvPool(sampler=...)` takes the same samplers (`"auto"` and `"uniform"` sample uniformly, `None` starts every
+env at instance 0 and keeps its instance) and draws what a torch `BatchedEnv` with the same seed and sampler draws: the
+pool's env id is its index, and each reset and each autoresetting step of an env advances that env's counter, whichever
+send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)` override the draws.
 
 ## CUDA
 

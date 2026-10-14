@@ -358,10 +358,9 @@ def run_xla_modes(tmp_path, script, fn, *args):
     path and command buffers cover them (always with 'body' and 'loop', never with 'off', by size by default).
     Returns {mode: the saved arrays}."""
     import os
-    import subprocess
-    import sys
 
     from conftest import ROOT
+    from python_children import run_code
 
     gpu_device()
     pytest.importorskip("jax")
@@ -371,8 +370,8 @@ def run_xla_modes(tmp_path, script, fn, *args):
         env = dict(os.environ, XLA_FLAGS=f"{flags} --xla_dump_to={dump}", CUDA_VISIBLE_DEVICES="0",
                    JAX_PLATFORMS="cuda,cpu", XLA_PYTHON_CLIENT_PREALLOCATE="false")  # fmt: skip
         out = tmp_path / f"{mode}.npz"
-        r = subprocess.run([sys.executable, "-c", script, str(ROOT / "tests/python"), *args, str(out)], env=env,
-                           capture_output=True, text=True, timeout=900)  # fmt: skip
+        r = run_code(script, str(ROOT / "tests/python"), *args, str(out), env=env, timeout=900, capture_output=True,
+                     check=False)  # fmt: skip
         assert r.returncode == 0, r.stderr[-4000:]
         runs[mode] = dict(np.load(out))
         fast = bool(runs[mode]["gpu_fast"])

@@ -91,7 +91,7 @@ u64 quantize(u64 n) { return std::bit_ceil(std::max<u64>(n, 1024)); }
 
 std::string best_first_unsupported(const Task& task, const DeviceBestFirstOptions& o)
 {
-    if (std::string why = ChunkGenerator::unsupported(task); !why.empty())
+    if (std::string why = ChunkGenerator::search_unsupported(task); !why.empty())
         return why;
     const search::BestFirstOptions& so = o.search;
     if (so.control.goal.kind != search::GoalSpec::Kind::Task)

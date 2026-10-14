@@ -237,7 +237,8 @@ instance, and `table.instance_words` lists the widths. A batch's rows are as wid
 as requested (`words=`). Words past a row's own instance width are zero padding: the CPU paths never read them, and
 the CUDA paths reject a row whose padding is not zero. Expansion, environment steps, goal tests and decoding cost
 each row its own width. `rl.numeric_values(table, states, task_ids)` decodes the numeric words of mixed rows to
-float64. The CUDA paths take tasks of at most 64 atom words and 512 objects ([CUDA](cuda.md)).
+float64. The CUDA expansion and environments take tasks of up to 2048 objects; wider instances run on the host
+([CUDA](cuda.md)).
 
 **Encoding goal.** The planner works on the normalized goal, in which `forall`, `or` and `imply` have become derived
 predicates (`axiom_<k>`). `task.encoding_goal` is the goal as written, expanded into signed ground literals, for

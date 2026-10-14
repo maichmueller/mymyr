@@ -88,13 +88,14 @@ struct Snapshot
     std::vector<u64> states, final_states, draws;
     std::vector<i32> steps, count, schema, binding;
     std::vector<f32> reward;
-    std::vector<u8> terminated, truncated, invalid, goal;
+    std::vector<u8> terminated, truncated, invalid, goal, at_goal;
     bool operator==(const Snapshot& o) const
     {
         // rewards bitwise
         return states == o.states && final_states == o.final_states && draws == o.draws && steps == o.steps &&
                count == o.count && schema == o.schema && binding == o.binding && terminated == o.terminated &&
-               truncated == o.truncated && invalid == o.invalid && goal == o.goal && reward.size() == o.reward.size() &&
+               truncated == o.truncated && invalid == o.invalid && goal == o.goal && at_goal == o.at_goal &&
+               reward.size() == o.reward.size() &&
                std::memcmp(reward.data(), o.reward.data(), reward.size() * sizeof(f32)) == 0;
     }
 };
@@ -121,6 +122,7 @@ struct HostBatch
         v.truncated.assign(rows, 0);
         v.invalid.assign(rows, 0);
         v.goal.assign(rows, 0);
+        v.at_goal.assign(rows, 0);
         b = rl::EnvBatch{};
         b.states = v.states.data();
         b.rows = rows;
@@ -128,6 +130,7 @@ struct HostBatch
         b.steps = v.steps.data();
         b.draws = v.draws.data();
         b.first_env = first_env;
+        b.at_goal = v.at_goal.data();
         out = rl::StepOutputs{v.reward.data(), v.terminated.data(), v.truncated.data(), v.count.data(),
                               v.final_states.data(), v.schema.data(), v.binding.data(), L, v.invalid.data(), v.goal.data()};
     }
@@ -141,7 +144,7 @@ struct DeviceBatch
     u64 V;
     cudaStream_t s;
     cuda::DeviceBuffer states, final_states, draws, steps, count, schema, binding, reward, terminated, truncated, invalid,
-        goal, counts, views, action, mask;
+        goal, counts, views, action, mask, at_goal;
     rl::EnvBatch b;
     rl::StepOutputs out;
 
@@ -151,7 +154,7 @@ struct DeviceBatch
           count(ctx, rows * 4, s), schema(ctx, rows * 4, s), binding(ctx, rows * L * 4, s), reward(ctx, rows * 4, s),
           terminated(ctx, rows, s), truncated(ctx, rows, s), invalid(ctx, rows, s), goal(ctx, rows, s),
           counts(ctx, std::max<u64>(rows * S, 1) * 4, s), views(ctx, std::max<u64>(rows * V, 1) * 8, s),
-          action(ctx, rows * 8, s), mask(ctx, rows, s)
+          action(ctx, rows * 8, s), mask(ctx, rows, s), at_goal(ctx, std::max<u64>(rows, 1), s)
     {
         cuda::check(cudaMemsetAsync(draws.data(), 0, rows * 8, s), "memset");
         b = rl::EnvBatch{};
@@ -163,6 +166,7 @@ struct DeviceBatch
         b.first_env = first_env;
         b.counts = S ? static_cast<u32*>(counts.data()) : nullptr;
         b.views = V ? static_cast<u64*>(views.data()) : nullptr;
+        b.at_goal = static_cast<u8*>(at_goal.data());
         out = rl::StepOutputs{static_cast<f32*>(reward.data()),   static_cast<u8*>(terminated.data()),
                               static_cast<u8*>(truncated.data()), static_cast<i32*>(count.data()),
                               static_cast<u64*>(final_states.data()), static_cast<i32*>(schema.data()),
@@ -185,6 +189,7 @@ struct DeviceBatch
         v.truncated = to_host<u8>(truncated, N, s);
         v.invalid = to_host<u8>(invalid, N, s);
         v.goal = to_host<u8>(goal, N, s);
+        v.at_goal = to_host<u8>(at_goal, N, s);
         return v;
     }
 };

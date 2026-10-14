@@ -20,12 +20,14 @@ class HerBatch(NamedTuple):
     """k relabels of every transition [T, N]: ``goal`` [T, N, k, W] (the atoms that must hold, as state words),
     ``source`` int32 [T, N, k] (the step whose reached state the goal came from), ``achieved`` bool [T, N, k] (the
     transition's reached state satisfies the goal: terminated under it), ``reward`` float32 [T, N, k] (step_reward,
-    plus goal_reward where achieved)."""
+    plus goal_reward where achieved), ``valid`` bool [T, N, k] (no earlier state of the transition's episode holds the
+    goal: under the goal the episode ends at its first goal state, so drop the relabels with valid False)."""
 
     goal: Any
     source: Any
     achieved: Any
     reward: Any
+    valid: Any
 
 
 def _framework(x: Any) -> str:
@@ -156,6 +158,7 @@ def her_relabel(
     states: Any,
     done: Any,
     *,
+    prev_states: Optional[Any] = None,
     strategy: str = "future",
     k: int = 4,
     subset: Optional[int] = None,
@@ -176,8 +179,11 @@ def her_relabel(
     the atoms of states[t', i] (restricted to ``goal_atoms`` [W]), or ``subset`` of them drawn without replacement. The
     draws are the counter-based RNG's (rl/her.hpp: seed, env id = env_ids[i] or first_env + i, purpose k_her), so a
     relabel does not depend on the batch or the device. ``words`` limits the goals to the first W words of a row (the
-    atom words of a numeric task's rows). NumPy / torch (CPU or CUDA) run the native helper; JAX arrays the jnp
-    version (``seed`` may then be a JAX key)."""
+    atom words of a numeric task's rows). ``valid`` marks the relabels whose transition is part of the episode under
+    the relabelled goal: no reached state of the episode's earlier steps in the window holds it, nor, with
+    ``prev_states`` [T, N, RW] (the states the steps started from: the observations), the episode's first state (its
+    reset state, or the state before the window), which is not tested without them. NumPy / torch (CPU or CUDA) run
+    the native helper; JAX arrays the jnp version (``seed`` may then be a JAX key)."""
     fw = _framework(states)
     kk = int(k)
     m = 0 if subset is None else int(subset)
@@ -187,8 +193,8 @@ def her_relabel(
         from mymyr.rl.jax._ops import her_relabel as jnp_relabel
 
         return jnp_relabel(
-            states, done, seed, strategy=strategy, k=kk, subset=subset, goal_atoms=goal_atoms, env_ids=env_ids,
-            first_env=first_env, step_reward=step_reward, goal_reward=goal_reward, words=words,
+            states, done, seed, prev_states=prev_states, strategy=strategy, k=kk, subset=subset, goal_atoms=goal_atoms,
+            env_ids=env_ids, first_env=first_env, step_reward=step_reward, goal_reward=goal_reward, words=words,
         )
     t_len, n, cols = (int(x) for x in states.shape)
     half = states.dtype.itemsize == 4
@@ -197,9 +203,10 @@ def her_relabel(
     source = _zeros(fw, states, (t_len, n, kk), "int32")
     achieved = _zeros(fw, states, (t_len, n, kk), "bool")
     reward = _zeros(fw, states, (t_len, n, kk), "float32")
+    valid = _zeros(fw, states, (t_len, n, kk), "bool")
     _rl_ops.her_relabel(
-        states, done, goal, source, achieved, reward, strategy=strategy, subset=m, seed=int(seed),
-        first_env=int(first_env), env_ids=env_ids, goal_atoms=goal_atoms, step_reward=float(step_reward),
-        goal_reward=float(goal_reward), stream=_stream(fw, states),
+        states, done, goal, source, achieved, reward, valid, prev_states=prev_states, strategy=strategy, subset=m,
+        seed=int(seed), first_env=int(first_env), env_ids=env_ids, goal_atoms=goal_atoms,
+        step_reward=float(step_reward), goal_reward=float(goal_reward), stream=_stream(fw, states),
     )
-    return HerBatch(goal, source, achieved, reward)
+    return HerBatch(goal, source, achieved, reward, valid)

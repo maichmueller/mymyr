@@ -31,8 +31,15 @@ search require CPU search; device A*/GBFS use the task goal. See [Formula values
 The bindings reject goals simplified as impossible because of static literals or unreachable positive atoms.
 
 Numeric searches and environments do not capture CUDA graphs, and numeric environments use the general path rather
-than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks. Backend
-limits remain 64 internal state words and 512 objects; unsupported schema/axiom plans use the documented CPU fallback.
+than the environment fast path, because these paths synchronize for counts, lazy atoms and overflow checks.
+Expansion and environments run states of any width on the device, and tasks of up to 2048 objects (object bitsets of
+up to 32 words). Successor rows wider than 64 words are built 64 words at a time; BrFS, IW, A*, state spaces and the
+numeric kernels hold whole rows and take states of at most 64 words. A `DeviceExpander` expands an instance the
+kernels cannot run (more than 2048 objects, numeric rows wider than 64 words) on the host: its rows are copied to the
+host, expanded on the host's threads and the successors copied back, which synchronizes. In a table or suite only
+those instances take the host and the others stay on the device, so the environments' general path serves every
+table and suite; the fast path and CUDA graph capture need every instance on the device. Unsupported schema/axiom
+plans use the documented CPU fallback.
 The derived predicates `axiom_<k>` compiled from quantified and disjunctive conditions (see
 [Parsing and tasks](parsing-and-tasks.md)) are axioms like any other: the device evaluates their rules, unless a rule
 has a numeric comparison or more parameters than the device kernels take; then the task's axioms run on the CPU

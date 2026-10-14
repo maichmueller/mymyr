@@ -128,6 +128,7 @@ def her_relabel(
     done: Any,
     key: Any,
     *,
+    prev_states: Optional[Any] = None,
     strategy: str = "future",
     k: int = 4,
     subset: Optional[int] = None,
@@ -146,13 +147,19 @@ def her_relabel(
     to ``goal_atoms`` [W2], or [N, W2]: env i's own, if given), or ``subset`` of them drawn without replacement. Draws are Philox blocks of
     (seed = key_seed(key); draw, env id, purpose rng.PURPOSE_HER) with draw = (t k + j)(1 + subset) + d, d = 0 for the
     step and d = 1.. for the atoms (env id: env_ids[i], else first_env + i), so relabels do not depend on the batch.
-    Episodes that continue past the window draw from the window's steps only. ``words``: the goals cover the first
-    W words of a row (2W uint32 halves; default: the whole row)."""
+    Episodes that continue past the window draw from the window's steps only. ``valid`` marks the relabels with no
+    earlier state of the episode that holds the goal (the reached states of its earlier steps in the window and, with
+    ``prev_states`` uint32 [T, N, W2], the states the steps started from, its first state). ``words``: the goals cover
+    the first W words of a row (2W uint32 halves; default: the whole row)."""
     if strategy not in _STRATEGIES:
         raise ValueError("mymyr: strategy must be 'future', 'final' or 'episode'")
     states = jnp.asarray(states, jnp.uint32)
+    prev = None if prev_states is None else jnp.asarray(prev_states, jnp.uint32)
+    if prev is not None and prev.shape != states.shape:
+        raise ValueError("mymyr: 'prev_states' must have the shape of 'states'")
     if words is not None:
         states = states[..., : 2 * int(words)]
+        prev = None if prev is None else prev[..., : 2 * int(words)]
     done = jnp.asarray(done, jnp.bool_)
     t_len, n, w2 = states.shape
     kk = int(k)
@@ -168,11 +175,13 @@ def her_relabel(
         else jnp.asarray(env_ids, jnp.uint32)
     )
     atoms = None if goal_atoms is None else jnp.asarray(goal_atoms, jnp.uint32)
-    return _her(states, done, seed, ids, atoms, _STRATEGIES[strategy], kk, m, float(step_reward), float(goal_reward))
+    return _her(
+        states, done, seed, ids, atoms, prev, _STRATEGIES[strategy], kk, m, float(step_reward), float(goal_reward)
+    )
 
 
-@functools.partial(jax.jit, static_argnums=(5, 6, 7, 8, 9))
-def _her(states, done, seed, ids, atoms, strategy, kk, m, step_reward, goal_reward):
+@functools.partial(jax.jit, static_argnums=(6, 7, 8, 9, 10))
+def _her(states, done, seed, ids, atoms, prev, strategy, kk, m, step_reward, goal_reward):
     t_len, n, w2 = states.shape
     start, end = _episode_bounds(done)
     t = jnp.arange(t_len, dtype=jnp.uint32)[:, None, None]
@@ -216,4 +225,13 @@ def _her(states, done, seed, ids, atoms, strategy, kk, m, step_reward, goal_rewa
     reached = states[:, :, None, :]
     achieved = jnp.all((reached & goal) == goal, axis=-1)
     reward = jnp.float32(step_reward) + jnp.where(achieved, jnp.float32(goal_reward), jnp.float32(0.0))
-    return HerBatch(goal, source, achieved, reward)
+
+    def held(u, seen):  # the reached state of step u, inside the episode before t, holds the goal
+        h = jnp.all((states[u][None, :, None, :] & goal) == goal, axis=-1)
+        return seen | (h & (u >= s0) & (u < tt))
+
+    seen = jax.lax.fori_loop(0, t_len, held, jnp.zeros((t_len, n, kk), jnp.bool_))
+    if prev is not None:
+        first = prev[start, jnp.arange(n)[None, :]]  # [T, N, W2]: the first state of each transition's episode
+        seen = seen | jnp.all((first[:, :, None, :] & goal) == goal, axis=-1)
+    return HerBatch(goal, source, achieved, reward, ~seen)

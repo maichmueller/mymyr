@@ -132,6 +132,10 @@ void run_graph(const cuda::ContextPtr& ctx, const rl::TaskTablePtr& table, const
         upload(g.gneg.data(), h.v.gneg, g.s);
         upload(e.gpos.data(), h.v.gpos, e.s);
         upload(e.gneg.data(), h.v.gneg, e.s);
+        // goal masks written directly: refresh() recomputes the at_goal flags
+        host.refresh(h.b, h.out.count);
+        ge.refresh(g.b, g.out.count);
+        ee.refresh(e.b, e.out.count);
     }
     ge.reserve(N);
     // step k of a graph: given actions when k % 3 == 1, else the random policy; autoresets into next_task_ids at the

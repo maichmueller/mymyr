@@ -170,6 +170,12 @@ cudaError_t launch_check_rows(const u64* data, u64 stride, u32 words, u64 rows, 
     return cudaGetLastError();
 }
 
+namespace wide_units
+{
+cudaError_t write(const GenArgs& a, cudaStream_t s);
+cudaError_t pick(const GenArgs& a, const Picks& picks, cudaStream_t s);
+}  // namespace wide_units
+
 namespace deep_units
 {
 cudaError_t count_deep(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, u32* counts, cudaStream_t s);
@@ -192,17 +198,16 @@ cudaError_t launch_write(const rl::dev::TaskView& t, Parents p, Views v, SchemaS
     if (set.deep)
         return deep_units::write_deep(t, p, v, set, offsets, labels, out, s);
     const GenArgs a{t, p, v, set, offsets, nullptr, labels, out};
-    // the successor row lives in u64 y[WB]: registers for WB <= 4, a WB-word local array up to 16, 64 words beyond
-    const u32 need = p.words > out.out_words ? p.words : out.out_words;
-    if (need <= 2)
-        return dispatch_ow<true, 2>(a, s);
-    if (need <= 4)
-        return dispatch_ow<true, 4>(a, s);
-    if (need <= 16)
-        return dispatch_ow<true, 16>(a, s);
-    if (need <= k_max_words)
-        return dispatch_ow<true, k_max_words>(a, s);
-    return cudaErrorInvalidValue;
+    // the successor row lives in u64 y[WB]: registers for WB <= 4, a WB-word local array up to 64 words, built in
+    // chunks of 64 words beyond (lifted_wide.cu)
+    switch (row_class(p.words > out.out_words ? p.words : out.out_words, t.ow))
+    {
+        case 2: return dispatch_ow<true, 2>(a, s);
+        case 4: return dispatch_ow<true, 4>(a, s);
+        case 16: return dispatch_ow<true, 16>(a, s);
+        case k_max_words: return dispatch_ow<true, k_max_words>(a, s);
+        default: return wide_units::write(a, s);
+    }
 }
 
 cudaError_t launch_put(const rl::dev::TaskView& t, Parents p, u32 num_schemas, const u8* deferred, const u32* offsets,
@@ -286,15 +291,13 @@ cudaError_t launch_pick(const rl::dev::TaskView& t, Parents p, Views v, SchemaSe
     if (!picks_valid(p, set, picks, labels, false))
         return cudaErrorInvalidValue;
     const GenArgs a{t, p, v, set, nullptr, nullptr, labels, out};
-    const u32 need = p.words > out.out_words ? p.words : out.out_words;
-    if (need <= 2)
-        return dispatch_pick<2, false>(a, picks, s);
-    if (need <= 4)
-        return dispatch_pick<4, false>(a, picks, s);
-    if (need <= 16)
-        return dispatch_pick<16, false>(a, picks, s);
-    if (need <= k_max_words)
-        return dispatch_pick<k_max_words, false>(a, picks, s);
-    return cudaErrorInvalidValue;
+    switch (row_class(p.words > out.out_words ? p.words : out.out_words, t.ow))
+    {
+        case 2: return dispatch_pick<2, false>(a, picks, s);
+        case 4: return dispatch_pick<4, false>(a, picks, s);
+        case 16: return dispatch_pick<16, false>(a, picks, s);
+        case k_max_words: return dispatch_pick<k_max_words, false>(a, picks, s);
+        default: return wide_units::pick(a, picks, s);
+    }
 }
 }  // namespace mymyr::cuda::lifted

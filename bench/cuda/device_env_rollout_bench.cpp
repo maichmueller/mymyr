@@ -148,7 +148,7 @@ int main(int argc, char** argv)
                     counts(ctx, std::max<u64>(N * S, 1) * 4, s), views(ctx, std::max<u64>(N * V, 1) * 8, s),
                     reward(ctx, N * 4, s), term(ctx, N, s), trunc(ctx, N, s), count(ctx, N * 4, s),
                     schema(ctx, labels ? N * 4 : 4, s), binding(ctx, labels ? N * L * 4 : 4, s),
-                    final_states(ctx, finals ? N * W * 8 : 8, s);
+                    final_states(ctx, finals ? N * W * 8 : 8, s), at_goal(ctx, N, s);
                 cuda::check(cudaMemsetAsync(draws.data(), 0, N * 8, s), "cudaMemsetAsync");
                 rl::EnvBatch b;
                 b.states = static_cast<u64*>(states.data());
@@ -158,6 +158,7 @@ int main(int argc, char** argv)
                 b.draws = static_cast<u64*>(draws.data());
                 b.counts = S ? static_cast<u32*>(counts.data()) : nullptr;
                 b.views = V ? static_cast<u64*>(views.data()) : nullptr;
+                b.at_goal = static_cast<u8*>(at_goal.data());
                 rl::StepOutputs out;
                 out.reward = static_cast<f32*>(reward.data());
                 out.terminated = static_cast<u8*>(term.data());

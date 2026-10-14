@@ -201,10 +201,10 @@ def test_argument_errors(blocks):
     env = rt.BatchedEnv(blocks, 4)
     with pytest.raises(ValueError, match="int64"):
         rt._ops.step_impl(env.handle, env.states.to(torch.int32), None, env.steps, env.draws, env.counts, env.views,
-                          env.count, None, None, None, None, 0, False)  # fmt: skip
+                          env.count, env.at_goal, None, None, None, None, 0, False)  # fmt: skip
     with pytest.raises(ValueError, match="shape"):
         rt._ops.step_impl(env.handle, env.states, None, env.steps, env.draws, env.counts, env.views, env.count,
-                          None, None, torch.zeros(5, dtype=torch.int64), None, 0, False)  # fmt: skip
+                          env.at_goal, None, None, torch.zeros(5, dtype=torch.int64), None, 0, False)  # fmt: skip
     with pytest.raises(ValueError):
         rt.Env(blocks, path="fast")
     with pytest.raises(TypeError, match="C-contiguous"):
@@ -223,16 +223,20 @@ def op_cases(env, task, dev):
     a = torch.zeros(env.num_envs, dtype=torch.int64, device=dev)
     m = torch.arange(env.num_envs, device=dev) % 2 == 0
     ids = env.task_ids if env.multi else None
-    base = (env.handle, env.states, ids, env.steps, env.draws, env.counts, env.views, env.count, env.goal_pos, env.goal_neg)
+    base = (
+        env.handle, env.states, ids, env.steps, env.draws, env.counts, env.views, env.count, env.at_goal, env.goal_pos,
+        env.goal_neg,
+    )  # fmt: skip
     nxt = torch.zeros(env.num_envs, dtype=torch.int32, device=dev) if env.multi else None
+    refresh = (env.handle, env.states, ids, env.counts, env.views, env.goal_pos, env.goal_neg, env.count, env.at_goal)
     return [
         (torch.ops.mymyr.step.default, base + (None, nxt, 0, True)),
         (torch.ops.mymyr.step.default, base + (a, None, 0, False)),
         (torch.ops.mymyr.reset.default, (env.handle, env.states, ids, env.steps, env.counts, env.views, env.goal_pos,
-                                         env.goal_neg, env.count, m, False)),
-        (torch.ops.mymyr.refresh.default, (env.handle, env.states, ids, env.counts, env.views, env.count)),
+                                         env.goal_neg, env.count, env.at_goal, m, False)),
+        (torch.ops.mymyr.refresh.default, refresh),
         (torch.ops.mymyr.step_sync.default, base + (a, None, 0, True)),
-        (torch.ops.mymyr.refresh_sync.default, (env.handle, env.states, ids, env.counts, env.views, env.count)),
+        (torch.ops.mymyr.refresh_sync.default, refresh),
         (torch.ops.mymyr.random_actions.default, (env.handle, env.draws, env.count, 0, 3)),
         (torch.ops.mymyr.expand.default, (h, s, ids, 8, False)),
         (torch.ops.mymyr.expand_flat.default, (h, s, ids, 64, False)),
@@ -290,11 +294,11 @@ def test_expand_ops_equal_rl_expand(blocks):
 
 
 def rollout_fn(handle):
-    def run(states, steps, draws, counts, views, count):
+    def run(states, steps, draws, counts, views, count, at_goal):
         total = torch.zeros((), device=states.device)
         for _ in range(5):
-            r = torch.ops.mymyr.step(handle, states, None, steps, draws, counts, views, count, None, None, None, None,
-                                     0, False)
+            r = torch.ops.mymyr.step(handle, states, None, steps, draws, counts, views, count, at_goal, None, None,
+                                     None, None, 0, False)
             total = total + r[0].sum() + r[1].sum()
         return total
 
@@ -305,14 +309,15 @@ def check_compile(task, dev):
     a = rt.BatchedEnv(task, 32, device=dev, max_steps=4, seed=5)
     b = rt.BatchedEnv(task, 32, device=dev, max_steps=4, seed=5)
     fn = rollout_fn(a.handle)
-    ex = torch._dynamo.explain(fn)(a.states, a.steps, a.draws, a.counts, a.views, a.count)
+    ex = torch._dynamo.explain(fn)(a.states, a.steps, a.draws, a.counts, a.views, a.count, a.at_goal)
     assert ex.graph_break_count == 0 and ex.graph_count == 1
     a = rt.BatchedEnv(task, 32, device=dev, max_steps=4, seed=5)
     compiled = torch.compile(rollout_fn(a.handle), fullgraph=True, backend="aot_eager")
     for _ in range(3):
-        x = compiled(a.states, a.steps, a.draws, a.counts, a.views, a.count)
-        y = rollout_fn(b.handle)(b.states, b.steps, b.draws, b.counts, b.views, b.count)
+        x = compiled(a.states, a.steps, a.draws, a.counts, a.views, a.count, a.at_goal)
+        y = rollout_fn(b.handle)(b.states, b.steps, b.draws, b.counts, b.views, b.count, b.at_goal)
         assert torch.equal(x, y) and torch.equal(a.states, b.states) and torch.equal(a.draws, b.draws)
+        assert torch.equal(a.at_goal, b.at_goal)
 
     def env_loop(env):
         total = torch.zeros((), device=dev)
@@ -508,7 +513,7 @@ def test_device_refusals():
     env = rt.BatchedEnv(text_task("blocks__probBLOCKS-8-0", atoms="dense"), 4, device=dev)
     with pytest.raises(ValueError, match="cuda"):  # a CPU action for a device env (BatchedEnv.step moves it)
         rt._ops.step_impl(env.handle, env.states, None, env.steps, env.draws, env.counts, env.views, env.count,
-                          None, None, torch.zeros(4, dtype=torch.int64), None, 0, False)  # fmt: skip
+                          env.at_goal, None, None, torch.zeros(4, dtype=torch.int64), None, 0, False)  # fmt: skip
     with pytest.raises(TypeError, match="cuda"):
         env.core.step(env.states.cpu())
 
@@ -552,6 +557,27 @@ def test_device_task_ids_outside_the_table_raise():
         penv.reset(td)  # the reset waits for the device and raises its errors
     td["next_task_id"] = torch.tensor([1, 1, 0, 0], device=dev)
     assert penv.reset(td)["task_id"].tolist() == [1, 1, 0, 0]
+    # a next task id outside the table is reported in any row, autoresetting or not (as the host checks them)
+    env.step(next_task_ids=torch.tensor([0, 0, 7, 0], dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.check_errors()
+
+
+@pytest.mark.needs_gil
+def test_general_path_raises_device_task_ids_at_its_next_step():
+    """The general path synchronizes in its steps and refreshes: they raise the ids an earlier call flagged."""
+    dev = gpu()
+    env = rt.BatchedEnv(gripper_table(), 4, device=dev, path="general")
+    env.reset(task_ids=torch.tensor([0, 1, 0, 99], dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.step()
+    env.step()  # reported once
+    env.reset(task_ids=torch.tensor(1, dtype=torch.int32, device=dev))  # one id for every row
+    assert env.task_ids.tolist() == [1, 1, 1, 1]
+    env.step(next_task_ids=torch.tensor([0, 0, 7, 0], dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+        env.refresh()
+    env.check_errors()
 
 
 # ------------------------------------------------------------------------------------------------ rand_action, ParallelEnv, collectors

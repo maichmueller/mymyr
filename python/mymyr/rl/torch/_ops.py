@@ -12,14 +12,17 @@ through ``refresh_sync`` and ``step_sync`` (the same ops, tagged ``cudagraph_uns
 its CUDA graphs), and so do ``expand`` and ``expand_flat``.
 
 The environment state over a table: ``states`` [N, row_words] int64, ``task_ids`` [N] int32 (the rows' instances;
-None over a table of one), ``steps``, ``draws``, the fast path's cache (``counts``, ``views``) and optional per-env goal
-masks ``goal_pos`` / ``goal_neg`` [N, words] int64 (the step's goal test is then the mask test).
+None over a table of one), ``steps``, ``draws``, the fast path's cache (``counts``, ``views``), optional per-env goal
+masks ``goal_pos`` / ``goal_neg`` [N, words] int64 (the step's goal test is then the mask test) and ``at_goal`` [N]
+bool, whether each row's state is a goal (reset, refresh and step keep it; a step absorbs those rows without testing
+the states again; required on a device).
 
-- ``mymyr::reset(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, keep_goals)``: resets
-  rows (all, or those with mask[i]) in place into their instances (task_ids, set by the caller first).
-- ``mymyr::refresh(env, states, task_ids, counts, views, count)``: recomputes the cache and counts of states the
-  caller wrote.
-- ``mymyr::step(env, states, task_ids, steps, draws, counts, views, count, goal_pos, goal_neg, action,
+- ``mymyr::reset(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask,
+  keep_goals)``: resets rows (all, or those with mask[i]) in place into their instances (task_ids, set by the caller
+  first).
+- ``mymyr::refresh(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)``: recomputes the cache,
+  counts and at_goal flags of states (task ids, goal masks) the caller wrote.
+- ``mymyr::step(env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action,
   next_task_ids, first_env, final)``: one step of every environment in place (autoresetting rows restart in
   next_task_ids[i] where given); returns (reward, terminated, truncated, goal, invalid, schema, binding, final_states).
 - ``mymyr::refresh_sync`` / ``mymyr::step_sync``: ``refresh`` / ``step`` of environments whose calls synchronize (the
@@ -163,6 +166,7 @@ def reset_impl(
     goal_pos: Optional[Tensor],
     goal_neg: Optional[Tensor],
     count: Tensor,
+    at_goal: Optional[Tensor],
     mask: Optional[Tensor],
     keep_goals: bool,
 ) -> None:
@@ -171,16 +175,33 @@ def reset_impl(
     n = states.shape[0]
     p = _batch_ptrs(info, states, task_ids, steps, None, counts, views, goal_pos, goal_neg)
     del p[3]  # draws
-    p += [_ptr(count, "count", torch.int32, (n,), info[0]), _ptr(mask, "mask", torch.bool, (n,), info[0])]
+    p += [
+        _ptr(count, "count", torch.int32, (n,), info[0]),
+        _ptr(mask, "mask", torch.bool, (n,), info[0]),
+        _ptr(at_goal, "at_goal", torch.bool, (n,), info[0]),
+    ]
     e._reset_ptrs(n, p, keep_goals, _stream(states))
 
 
-def refresh_impl(env: int, states: Tensor, task_ids: Optional[Tensor], counts: Tensor, views: Tensor, count: Tensor) -> None:
+def refresh_impl(
+    env: int,
+    states: Tensor,
+    task_ids: Optional[Tensor],
+    counts: Tensor,
+    views: Tensor,
+    goal_pos: Optional[Tensor],
+    goal_neg: Optional[Tensor],
+    count: Tensor,
+    at_goal: Optional[Tensor],
+) -> None:
     """The body of ``mymyr::refresh``."""
     e, info = _env_info(env)
     n = states.shape[0]
-    p = _batch_ptrs(info, states, task_ids, None, None, counts, views, None, None)
-    p = [p[0], p[1], p[4], p[5], _ptr(count, "count", torch.int32, (n,), info[0])]
+    p = _batch_ptrs(info, states, task_ids, None, None, counts, views, goal_pos, goal_neg)
+    p = [
+        p[0], p[1], p[4], p[5], p[6], p[7], _ptr(count, "count", torch.int32, (n,), info[0]),
+        _ptr(at_goal, "at_goal", torch.bool, (n,), info[0]),
+    ]  # fmt: skip
     e._refresh_ptrs(n, p, _stream(states))
 
 
@@ -208,6 +229,7 @@ def step_impl(
     counts: Tensor,
     views: Tensor,
     count: Tensor,
+    at_goal: Optional[Tensor],
     goal_pos: Optional[Tensor],
     goal_neg: Optional[Tensor],
     action: Optional[Tensor],
@@ -243,6 +265,7 @@ def step_impl(
         binding.data_ptr(),
         invalid.data_ptr(),
         goal.data_ptr(),
+        _ptr(at_goal, "at_goal", torch.bool, (n,), dev),
     ]
     e._step_ptrs(n, p, L, first_env, _stream(states))
     return out
@@ -260,7 +283,7 @@ def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, 
 
 
 @torch.library.custom_op(
-    "mymyr::reset", mutates_args=("states", "steps", "counts", "views", "goal_pos", "goal_neg", "count")
+    "mymyr::reset", mutates_args=("states", "steps", "counts", "views", "goal_pos", "goal_neg", "count", "at_goal")
 )
 def reset(
     env: int,
@@ -272,40 +295,63 @@ def reset(
     goal_pos: Optional[Tensor],
     goal_neg: Optional[Tensor],
     count: Tensor,
+    at_goal: Optional[Tensor],
     mask: Optional[Tensor],
     keep_goals: bool,
 ) -> None:
-    reset_impl(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, keep_goals)
+    reset_impl(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals)
 
 
 @reset.register_fake
-def _(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, mask, keep_goals):
+def _(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals):
     return None
 
 
-@torch.library.custom_op("mymyr::refresh", mutates_args=("counts", "views", "count"))
-def refresh(env: int, states: Tensor, task_ids: Optional[Tensor], counts: Tensor, views: Tensor, count: Tensor) -> None:
-    refresh_impl(env, states, task_ids, counts, views, count)
+@torch.library.custom_op("mymyr::refresh", mutates_args=("counts", "views", "count", "at_goal"))
+def refresh(
+    env: int,
+    states: Tensor,
+    task_ids: Optional[Tensor],
+    counts: Tensor,
+    views: Tensor,
+    goal_pos: Optional[Tensor],
+    goal_neg: Optional[Tensor],
+    count: Tensor,
+    at_goal: Optional[Tensor],
+) -> None:
+    refresh_impl(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)
 
 
 @refresh.register_fake
-def _(env, states, task_ids, counts, views, count):
+def _(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal):
     return None
 
 
-@torch.library.custom_op("mymyr::refresh_sync", mutates_args=("counts", "views", "count"), tags=_unsafe)
-def refresh_sync(env: int, states: Tensor, task_ids: Optional[Tensor], counts: Tensor, views: Tensor, count: Tensor) -> None:
-    refresh_impl(env, states, task_ids, counts, views, count)
+@torch.library.custom_op("mymyr::refresh_sync", mutates_args=("counts", "views", "count", "at_goal"), tags=_unsafe)
+def refresh_sync(
+    env: int,
+    states: Tensor,
+    task_ids: Optional[Tensor],
+    counts: Tensor,
+    views: Tensor,
+    goal_pos: Optional[Tensor],
+    goal_neg: Optional[Tensor],
+    count: Tensor,
+    at_goal: Optional[Tensor],
+) -> None:
+    refresh_impl(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)
 
 
 @refresh_sync.register_fake
-def _(env, states, task_ids, counts, views, count):
+def _(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal):
     return None
 
 
 @torch.library.custom_op(
     "mymyr::step",
-    mutates_args=("states", "task_ids", "steps", "draws", "counts", "views", "count", "goal_pos", "goal_neg"),
+    mutates_args=(
+        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg"
+    ),
 )
 def step(
     env: int,
@@ -316,6 +362,7 @@ def step(
     counts: Tensor,
     views: Tensor,
     count: Tensor,
+    at_goal: Optional[Tensor],
     goal_pos: Optional[Tensor],
     goal_neg: Optional[Tensor],
     action: Optional[Tensor],
@@ -324,19 +371,24 @@ def step(
     final: bool,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     return step_impl(
-        env, states, task_ids, steps, draws, counts, views, count, goal_pos, goal_neg, action, next_task_ids,
+        env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
         first_env, final,
     )  # fmt: skip
 
 
 @step.register_fake
-def _(env, states, task_ids, steps, draws, counts, views, count, goal_pos, goal_neg, action, next_task_ids, first_env, final):
+def _(
+    env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
+    first_env, final,
+):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 
 
 @torch.library.custom_op(
     "mymyr::step_sync",
-    mutates_args=("states", "task_ids", "steps", "draws", "counts", "views", "count", "goal_pos", "goal_neg"),
+    mutates_args=(
+        "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg"
+    ),
     tags=_unsafe,
 )
 def step_sync(
@@ -348,6 +400,7 @@ def step_sync(
     counts: Tensor,
     views: Tensor,
     count: Tensor,
+    at_goal: Optional[Tensor],
     goal_pos: Optional[Tensor],
     goal_neg: Optional[Tensor],
     action: Optional[Tensor],
@@ -356,13 +409,16 @@ def step_sync(
     final: bool,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     return step_impl(
-        env, states, task_ids, steps, draws, counts, views, count, goal_pos, goal_neg, action, next_task_ids,
+        env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
         first_env, final,
     )  # fmt: skip
 
 
 @step_sync.register_fake
-def _(env, states, task_ids, steps, draws, counts, views, count, goal_pos, goal_neg, action, next_task_ids, first_env, final):
+def _(
+    env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
+    first_env, final,
+):  # fmt: skip
     return _step_outputs(lookup(env).label_width, states, final)
 
 

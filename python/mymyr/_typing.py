@@ -1,4 +1,6 @@
-"""Structural types named by the stubs of mymyr._core (python/src/typing.hpp). Only type checkers use them."""
+"""Structural types named by the stubs of mymyr._core (python/src/typing.hpp), and the Python classes they name
+(imported for type checkers only: stubgen resolves mymyr._typing without the packages that define them). Only type
+checkers use them."""
 
 from __future__ import annotations
 
@@ -6,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from mymyr import State
+    from mymyr.rl import InstanceSampler as InstanceSampler
 
 __all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack"]
 

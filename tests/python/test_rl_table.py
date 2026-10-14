@@ -254,6 +254,7 @@ def env_arrays(env):
         "task_ids": env.task_ids.cpu().numpy().copy(),
         "steps": env.steps.cpu().numpy().copy(),
         "count": env.count.cpu().numpy().copy(),
+        "at_goal": env.at_goal.cpu().numpy().copy(),
     }
 
 
