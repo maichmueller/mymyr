@@ -318,80 +318,13 @@ const char* framework_name(Framework fw)
 
 // ------------------------------------------------------------------------------------------------ blocks
 
-namespace
-{
-/// Block memory released on this thread, reused by its next Block::make. Allocating fresh memory for every
-/// rl.expand result cost a page fault per 4 KB page (a third of a 256-state expand) and serialized the threads on
-/// the address-space lock. Keeps at most k_keep buffers of at most k_max_bytes each.
-struct BlockCache
-{
-    static constexpr usize k_keep = 4;
-    static constexpr u64 k_max_bytes = u64{4} << 20;
-
-    struct Entry
-    {
-        std::unique_ptr<std::byte[]> raw;
-        u64 capacity = 0;
-    };
-    std::vector<Entry> entries;
-
-    ~BlockCache() { gone() = true; }
-    /// Trivially destructible, so readable while and after the thread's cache is destroyed.
-    static bool& gone()
-    {
-        thread_local bool flag = false;
-        return flag;
-    }
-    static BlockCache* get()
-    {
-        if (gone())
-            return nullptr;
-        thread_local BlockCache cache;
-        return &cache;
-    }
-};
-}  // namespace
-
 std::shared_ptr<Block> Block::make(u64 bytes)
 {
     auto b = std::make_shared<Block>();
-    const u64 need = bytes + 64;
-    if (BlockCache* cache = BlockCache::get())
-    {
-        // the smallest cached buffer that fits and is not more than 4x the request
-        auto best = cache->entries.end();
-        for (auto it = cache->entries.begin(); it != cache->entries.end(); ++it)
-            if (it->capacity >= need && it->capacity / 4 <= need && (best == cache->entries.end() || it->capacity < best->capacity))
-                best = it;
-        if (best != cache->entries.end())
-        {
-            b->m_raw = std::move(best->raw);
-            b->m_capacity = best->capacity;
-            cache->entries.erase(best);
-        }
-    }
-    if (!b->m_raw)
-    {
-        // power-of-two sizes, so the varying sizes of successive batches reuse each other's buffers
-        b->m_capacity = need <= BlockCache::k_max_bytes ? std::bit_ceil(need) : need;
-        b->m_raw.reset(new std::byte[b->m_capacity]);
-    }
+    b->m_block = acquire_host_block(bytes);
+    b->m_base = b->m_block.get();
     b->m_size = bytes;
-    const auto addr = reinterpret_cast<std::uintptr_t>(b->m_raw.get());
-    b->m_base = b->m_raw.get() + ((64 - addr % 64) % 64);
     return b;
-}
-
-Block::~Block()
-{
-    if (!m_raw || m_capacity > BlockCache::k_max_bytes)
-        return;
-    BlockCache* cache = BlockCache::get();
-    if (!cache)
-        return;
-    if (cache->entries.size() >= BlockCache::k_keep)
-        cache->entries.erase(cache->entries.begin());  // the oldest
-    cache->entries.push_back({std::move(m_raw), m_capacity});
 }
 
 // ------------------------------------------------------------------------------------------------ export

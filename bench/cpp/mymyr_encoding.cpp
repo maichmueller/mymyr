@@ -5,7 +5,8 @@
 // The walk starts at the initial state and restarts there at dead ends. The line reports the best of 5 timed encodes of
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
 // buffers (into_us_per_state, the capacity form; count_us_per_state and fill_us_per_state split it), and the tuples and
-// tuple arguments of the batch.
+// tuple arguments of the batch. faults_per_call is the minor page faults of one timed encode, averaged over the timed
+// encodes.
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -18,6 +19,7 @@
 #include <exception>
 #include <filesystem>
 #include <random>
+#include <sys/resource.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,6 +28,13 @@ using namespace mymyr;
 
 namespace
 {
+long minor_faults()
+{
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_minflt;
+}
+
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }  // namespace
 
@@ -92,12 +101,14 @@ int main(int argc, char** argv)
         ThreadPool pool(threads);
         encoding::EncodeScratch scratch;
         bundle = encoder->encode(in, pool, scratch);
+        const long faults0 = minor_faults();
         for (int rep = 0; rep < 5; ++rep)
         {
             const double t0 = now_s();
             bundle = encoder->encode(in, pool, scratch);
             best = std::min(best, now_s() - t0);
         }
+        const long faults_per_call = (minor_faults() - faults0) / 5;
         const u64 R = encoder->schema().num_relations();
         std::vector<i32> task_ids(n), num_objects(n), entity_offsets(n + 1), counts(n * R), tuple_offsets(n * R + 1),
             arg_buffer(n * R + 1), entity_ref(bundle->find("entity_ref")->elements()),
@@ -135,11 +146,11 @@ int main(int argc, char** argv)
         const u64 cells = n * encoder->schema().num_relations();
         std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"tuples\": %d, \"args\": %d}\n",
+                    "\"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), threads, best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), offsets[cells], arg_offsets[cells]);
+                    best_fill * 1e6 / static_cast<double>(n), faults_per_call, offsets[cells], arg_offsets[cells]);
     }
     catch (const std::exception& error)
     {

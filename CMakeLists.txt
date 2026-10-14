@@ -85,6 +85,7 @@ endif()
 add_library(mymyr_core STATIC
     src/mymyr/version.cpp
     src/mymyr/core/memory.cpp
+    src/mymyr/core/block_cache.cpp
     src/mymyr/formalism/task_data.cpp
     src/mymyr/formalism/text_format.cpp
     src/mymyr/task/atom_index.cpp

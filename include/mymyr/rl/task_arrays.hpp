@@ -28,6 +28,7 @@
 // requires that an imported buffer is never written again). Under lazy slots the snapshot covers the atom slots
 // published when it was taken (F grows later); in frozen mode it covers every slot.
 
+#include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/task_arrays_view.hpp"
 #include "mymyr/task/task.hpp"
@@ -112,8 +113,8 @@ public:
 private:
     std::vector<ArrayInfo> m_arrays;
     std::vector<std::pair<std::string, i64>> m_scalars;
-    std::unique_ptr<std::byte[]> m_block;
-    std::byte* m_base = nullptr;  // 64-byte aligned start inside m_block
+    HostBlock m_block;  // 64-byte aligned; recycled through the block cache when large
+    std::byte* m_base = nullptr;
     u64 m_bytes = 0;
 };
 

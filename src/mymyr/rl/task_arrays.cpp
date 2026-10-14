@@ -68,12 +68,11 @@ ArrayBundle ArrayBundle::Builder::build()
         off += (item.size + 63) & ~u64{63};
     }
     b.m_bytes = std::max<u64>(off, 64);
-    // 64-byte aligned block (zero-copy importers such as XLA's CPU client want aligned buffers): over-allocate and
-    // align by hand. Only the padding is zeroed here, so that equal inputs give equal bytes; a reserved array is left
+    // the block is 64-byte aligned (zero-copy importers such as XLA's CPU client want aligned buffers) and recycled
+    // when large. Only the padding is zeroed here, so that equal inputs give equal bytes; a reserved array is left
     // for its writer.
-    b.m_block = std::make_unique_for_overwrite<std::byte[]>(b.m_bytes + 64);
-    const auto addr = reinterpret_cast<std::uintptr_t>(b.m_block.get());
-    b.m_base = b.m_block.get() + ((64 - addr % 64) % 64);
+    b.m_block = acquire_host_block(b.m_bytes);
+    b.m_base = b.m_block.get();
     u64 end = 0;
     for (Item& item : m_items)
     {
