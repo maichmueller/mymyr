@@ -1,6 +1,6 @@
 // The write kernels of schemas with conditional effects and of deep matchers for successor rows wider than k_max_words
 // words (include/mymyr/cuda/lifted.hpp, WB = k_wide; see lifted_ce.cu and lifted_deep.cu).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

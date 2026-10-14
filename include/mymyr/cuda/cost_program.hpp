@@ -11,7 +11,7 @@
 // arguments) is NaN, so is a division by zero, and NaN propagates. evaluate() returns the value as is; the callers decide about NaN and negative
 // costs (ActionCosts::cost throws std::domain_error for both). Unit instances cost 1.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20, and by the host builder.
+// Device-code subset: included by .cu files compiled by nvcc as C++23, and by the host builder.
 
 #include "mymyr/core/types.hpp"
 

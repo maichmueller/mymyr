@@ -54,7 +54,7 @@
 // run on those, and launch_broadcast gives every gathered row its parent's candidates in canonical order): rollouts
 // from one start state pop the same states in many searches.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20.
+// Device-code subset: included by .cu files compiled by nvcc as C++23.
 
 #include "mymyr/rl/task_arrays_view.hpp"
 

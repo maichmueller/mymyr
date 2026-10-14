@@ -5,9 +5,8 @@
 # Dialects:
 #   - host code (*.cpp here, the tests, the Python bindings) is C++26 and built by the project's C++ compiler (GCC 16);
 #     it includes <cuda_runtime_api.h>, a C header;
-#   - device translation units (*.cu) are compiled by nvcc as C++20 (nvcc's newest dialect) with a host compiler nvcc
-#     supports (CMAKE_CUDA_HOST_COMPILER; the top level picks g++-15..11 when the C++ compiler is GCC >= 16, whose
-#     libstdc++ headers nvcc's front end cannot parse). They include only the device-code subset: core/types.hpp,
+#   - device translation units (*.cu) are compiled by nvcc as C++23 (CUDA_STANDARD) with the project's GCC as nvcc's
+#     host compiler (CMAKE_CUDA_HOST_COMPILER). They include only the device-code subset: core/types.hpp,
 #     rl/task_arrays_view.hpp, cuda/kernels.hpp, cuda/lifted.hpp, cuda/state_set.hpp (and CUB / Thrust). Launchers
 #     exchange PODs, raw pointers and cudaStream_t only, so no standard-library type crosses between the two compilers.
 
@@ -55,7 +54,7 @@ target_sources(mymyr_cuda PRIVATE src/cost_program.cpp)
 target_sources(mymyr_cuda PRIVATE src/numeric.cu src/numeric_pad.cu src/goal_program.cpp)
 set_source_files_properties(src/numeric.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
 set_target_properties(mymyr_cuda PROPERTIES
-    CUDA_STANDARD 20
+    CUDA_STANDARD 23
     CUDA_STANDARD_REQUIRED ON
     CUDA_EXTENSIONS OFF
     CUDA_RUNTIME_LIBRARY Static

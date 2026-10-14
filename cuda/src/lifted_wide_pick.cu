@@ -1,6 +1,6 @@
 // The pick kernels for successor rows wider than k_max_words words (include/mymyr/cuda/lifted.hpp, WB = k_wide), one
 // task or several instances (see lifted_multi_pick.cu).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_env.cuh"
 

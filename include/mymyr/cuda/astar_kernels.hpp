@@ -19,7 +19,7 @@
 // candidate order; the entries are sorted by key with a stable radix sort; the merge places runs by binary search on
 // (key, list position). Atomics decide slots, minima and counters only.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20.
+// Device-code subset: included by .cu files compiled by nvcc as C++23.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/cuda/cost_program.hpp"

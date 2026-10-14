@@ -9,7 +9,7 @@
 // candidate's result is its slot (a duplicate's too), so that after the compaction the slot names the target of every
 // transition. Atomics decide slots, never ids.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20; POD, raw pointers and cudaStream_t.
+// Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/core/types.hpp"
 #include "mymyr/cuda/cost_program.hpp"

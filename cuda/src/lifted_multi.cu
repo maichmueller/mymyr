@@ -3,7 +3,7 @@
 // groups them by instance. The kernels are those of lifted.cu with the instance resolved per thread (lifted_env.cuh,
 // lifted_device.cuh: template flag M); the write and pick kernels are instantiated in lifted_multi_write.cu and
 // lifted_multi_pick.cu (parallel builds).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_env.cuh"
 

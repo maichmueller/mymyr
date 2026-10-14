@@ -1,6 +1,6 @@
 // The write kernels for successor rows wider than k_max_words words (include/mymyr/cuda/lifted.hpp, WB = k_wide): the
 // successor is built k_max_words words at a time (RowWriter::successor_chunks), one task or several instances.
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

@@ -8,7 +8,7 @@
 // The functions work on POD views of an EncodingContext (context.hpp): typed pointers into one block of fixed-width
 // arrays, which is either the host block or its uploaded copy. This header is part of the device-code subset: it
 // includes only core/types.hpp, uses no standard containers, exceptions, allocation, virtual calls or lambdas, and
-// compiles as C++20 under nvcc.
+// compiles as C++23 under nvcc.
 //
 // The tuples of a graph, relation after relation (a relation without a tuple has count 0):
 //   - Fluent cell: one tuple per set bit of the state words in the cell's slot range, in ascending slot order, which

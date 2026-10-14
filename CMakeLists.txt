@@ -228,30 +228,48 @@ if(MYMYR_FRONTEND)
 endif()
 
 # ------------------------------------------------------------------------------------------------ CUDA backend
-# libmymyr_cuda (cuda/CMakeLists.txt). Host code stays C++26 on the C++ compiler; nvcc compiles the device translation
-# units as C++20 with a host compiler it supports. nvcc 13.0 rejects GCC > 15, and even with
-# -allow-unsupported-compiler its front end fails on GCC 16's libstdc++ (__builtin_is_virtual_base_of in <memory>, which
-# CUB pulls in), so with GCC >= 16 as the C++ compiler an older g++ is picked for nvcc unless CMAKE_CUDA_HOST_COMPILER
-# is given. Pass the toolkit with -DCMAKE_CUDA_COMPILER=<cuda>/bin/nvcc (or CUDACXX); CMAKE_CUDA_ARCHITECTURES defaults
-# to the visible GPU ("native").
+# libmymyr_cuda (cuda/CMakeLists.txt). Host code is C++26 on the C++ compiler; nvcc compiles the device translation
+# units as C++23, with the C++ compiler (when it is GCC) as its host compiler unless CMAKE_CUDA_HOST_COMPILER (or CUDAHOSTCXX) names
+# another. The CUDA dialect needs CUDA 13.4 or newer (nvcc 13.4 accepts GCC 16 and -std=c++23) and CMake 4.4 or newer
+# (the first to map CUDA C++23 to nvcc's flag). Pass the toolkit with -DCMAKE_CUDA_COMPILER=<cuda>/bin/nvcc (or CUDACXX);
+# CMAKE_CUDA_ARCHITECTURES defaults to the visible GPU ("native").
 if(MYMYR_CUDA)
-    if(NOT CMAKE_CUDA_HOST_COMPILER AND NOT DEFINED ENV{CUDAHOSTCXX} AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-       AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
-        find_program(MYMYR_CUDA_HOST_CXX NAMES g++-15 g++-14 g++-13 g++-12 g++-11)
-        if(NOT MYMYR_CUDA_HOST_CXX)
-            message(FATAL_ERROR "MYMYR_CUDA=ON: nvcc cannot use GCC ${CMAKE_CXX_COMPILER_VERSION} as its host compiler and "
-                                "no g++-15..11 was found; pass -DCMAKE_CUDA_HOST_COMPILER=<a g++ that nvcc supports>")
+    if(CMAKE_VERSION VERSION_LESS 4.4)
+        message(FATAL_ERROR "MYMYR_CUDA=ON needs CMake 4.4 or newer, the first that maps CUDA C++23 to nvcc's flag "
+                            "(found CMake ${CMAKE_VERSION}); e.g. pip install 'cmake>=4.4'")
+    endif()
+    # An older nvcc fails inside CMake's compiler identification (it rejects GCC 16), so its version is read first.
+    set(MYMYR_NVCC_REQUESTED "${CMAKE_CUDA_COMPILER}")
+    if(NOT MYMYR_NVCC_REQUESTED)
+        set(MYMYR_NVCC_REQUESTED "$ENV{CUDACXX}")
+    endif()
+    if(NOT MYMYR_NVCC_REQUESTED)
+        find_program(MYMYR_NVCC_REQUESTED nvcc)
+    endif()
+    string(CONCAT MYMYR_NVCC_TOO_OLD_MESSAGE "MYMYR_CUDA=ON needs CUDA 13.4 or newer: the device code is C++23 and its "
+           "host compiler is GCC 16. Pass -DCMAKE_CUDA_COMPILER=<cuda 13.4 or newer>/bin/nvcc")
+    if(MYMYR_NVCC_REQUESTED)
+        execute_process(COMMAND "${MYMYR_NVCC_REQUESTED}" --version OUTPUT_VARIABLE MYMYR_NVCC_VERSION_TEXT
+                        ERROR_QUIET RESULT_VARIABLE MYMYR_NVCC_RESULT)
+        if(MYMYR_NVCC_RESULT EQUAL 0 AND MYMYR_NVCC_VERSION_TEXT MATCHES "release ([0-9]+\\.[0-9]+)"
+           AND CMAKE_MATCH_1 VERSION_LESS 13.4)
+            message(FATAL_ERROR "nvcc ${CMAKE_MATCH_1} (${MYMYR_NVCC_REQUESTED}) is too old. ${MYMYR_NVCC_TOO_OLD_MESSAGE}")
         endif()
-        set(CMAKE_CUDA_HOST_COMPILER "${MYMYR_CUDA_HOST_CXX}" CACHE FILEPATH "Host compiler of nvcc" FORCE)
-        message(STATUS "mymyr: nvcc host compiler ${CMAKE_CUDA_HOST_COMPILER} (the C++ compiler is GCC ${CMAKE_CXX_COMPILER_VERSION})")
     endif()
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         set(CMAKE_CUDA_ARCHITECTURES native)
     endif()
+    if(NOT CMAKE_CUDA_HOST_COMPILER AND NOT DEFINED ENV{CUDAHOSTCXX} AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}")
+    endif()
     enable_language(CUDA)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.4)
+        message(FATAL_ERROR "nvcc ${CMAKE_CUDA_COMPILER_VERSION} (${CMAKE_CUDA_COMPILER}) is too old. ${MYMYR_NVCC_TOO_OLD_MESSAGE}")
+    endif()
     # Executables are linked by the C++ compiler, which brings its own runtime. The CUDA language's implicit link
-    # directories include nvcc's host compiler's (e.g. /usr/lib/gcc/x86_64-linux-gnu/12): left in, -lstdc++ would
-    # resolve to that older libstdc++ and GCC 16 objects fail to link.
+    # directories include nvcc's host compiler's: when a user selects a host compiler other than the C++ compiler, its
+    # libstdc++ directory is dropped so that -lstdc++ resolves to the C++ compiler's library, which the objects of
+    # both compilers must share.
     if(CMAKE_CUDA_HOST_COMPILER AND NOT CMAKE_CUDA_HOST_COMPILER STREQUAL CMAKE_CXX_COMPILER)
         list(FILTER CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES EXCLUDE REGEX "/gcc/|/gcc-[0-9]")
         list(REMOVE_ITEM CMAKE_CUDA_IMPLICIT_LINK_LIBRARIES stdc++ m gcc_s gcc c)

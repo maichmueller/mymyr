@@ -1,7 +1,7 @@
 // The device kernels of the environment step (include/mymyr/cuda/env_kernels.hpp). Every kernel is one thread per
 // environment and mirrors the host reference rl::HostEnv::step (src/mymyr/rl/env.cpp) statement by statement, so the
 // results agree bit for bit (the rewards are the same float sums in the same order).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/env_kernels.hpp"
 #include "mymyr/rl/rng.hpp"

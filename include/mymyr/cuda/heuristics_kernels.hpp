@@ -46,7 +46,7 @@
 // Atomics decide list slots (the order of a frontier) and minima (atomicMin of costs and of operator ids), never an
 // order that reaches the result: every phase is a set operation or a minimum.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20.
+// Device-code subset: included by .cu files compiled by nvcc as C++23.
 
 #include "mymyr/core/types.hpp"
 

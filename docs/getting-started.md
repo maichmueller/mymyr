@@ -28,8 +28,8 @@ uv venv .venv --python 3.14t
 CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$PWD/dependencies/installs" uv pip install --python .venv/bin/python -e .
 ```
 
-To build the optional CUDA backend, add `-DMYMYR_CUDA=ON` and `-DCMAKE_CUDA_COMPILER=/path/to/nvcc` to `CMAKE_ARGS`.
-See the [CUDA page](cuda.md) for its current limits.
+To build the optional CUDA backend, add `-DMYMYR_CUDA=ON` and `-DCMAKE_CUDA_COMPILER=/path/to/nvcc` (CUDA 13.4 or
+newer, with CMake 4.4 or newer) to `CMAKE_ARGS`. See the [CUDA page](cuda.md) for its current limits.
 
 ## Parse a task and search it
 

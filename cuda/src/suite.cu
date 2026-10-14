@@ -1,4 +1,4 @@
-// The device kernels of task suites (include/mymyr/cuda/suite_kernels.hpp). Compiled by nvcc as C++20; includes only
+// The device kernels of task suites (include/mymyr/cuda/suite_kernels.hpp). Compiled by nvcc as C++23; includes only
 // the device-code subset.
 
 #include "mymyr/cuda/suite_kernels.hpp"

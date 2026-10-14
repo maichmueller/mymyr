@@ -160,11 +160,12 @@ jobs:
       - name: C++ consumer of the installed package
         run: ci/check_cmake_consumer.sh "$(.venv/bin/python -c 'import mymyr; print(mymyr.get_cmake_dir())')" build/consumer
 
-  # The CUDA backend compiles without a GPU to run it on (about 35 minutes for PTX). Pull requests compile PTX
-  # for sm_80 (the front end and all template instantiations); main and manual runs also assemble SASS, one job per
-  # architecture (sm_80, sm_90), where ptxas needs about half an hour for the largest translation unit.
+  # The CUDA backend (C++23 device code, nvcc 13.4 with GCC 16 as its host compiler) compiles without a GPU to run it
+  # on (about 35 minutes for PTX). Pull requests compile PTX for sm_80 (the front end and all template instantiations);
+  # main and manual runs also assemble SASS, one job per architecture (sm_80, sm_90), where ptxas needs about half an
+  # hour for the largest translation unit.
   cuda-build:
-    name: Linux CUDA 13 compile-only, ${{ matrix.name }}
+    name: Linux CUDA 13.4 compile-only, ${{ matrix.name }}
     needs: deps
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -177,13 +178,16 @@ jobs:
       - name: Install build tools and the CUDA toolkit
         run: |
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends cmake ninja-build git ca-certificates curl
+          apt-get install -y -qq --no-install-recommends ninja-build git ca-certificates curl python3 python3-venv
+          python3 -m venv /opt/cmake-venv
+          /opt/cmake-venv/bin/pip install --quiet 'cmake>=4.4'
+          echo /opt/cmake-venv/bin >> "$GITHUB_PATH"
           curl -fsSL -o /tmp/cuda-keyring.deb \
             https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb
           dpkg -i /tmp/cuda-keyring.deb
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends cuda-nvcc-13-1 cuda-cudart-dev-13-1 cuda-cccl-13-1 libcurand-dev-13-1
-          /usr/local/cuda-13.1/bin/nvcc --version | tail -2
+          apt-get install -y -qq --no-install-recommends cuda-nvcc-13-4 cuda-cudart-dev-13-4 cuda-cccl-13-4 libcurand-dev-13-4
+          /usr/local/cuda-13.4/bin/nvcc --version | tail -2
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Restore the dependency prefix
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -195,7 +199,8 @@ jobs:
         run: |
           cmake -S . -B build/cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release" \
-            -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc \
+            -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.4/bin/nvcc \
+            -DCMAKE_CUDA_HOST_COMPILER="$(command -v g++)" \
             -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.archs }}"
       - name: Build
         run: cmake --build build/cuda 2>&1 | tee build/cuda/build.log

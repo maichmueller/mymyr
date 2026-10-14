@@ -1,5 +1,5 @@
 // The deep write kernels for successor rows of 5..k_max_words words (see lifted_deep.cu; wider rows: lifted_wide_ce.cu).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

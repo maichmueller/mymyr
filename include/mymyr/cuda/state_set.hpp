@@ -15,7 +15,7 @@
 // *live of them (a device count the host does not read: Live), and the first new id may be a device count (Compact::
 // offset) that launch_advance moves past the chunk's new states, so that several chunks run per host read.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20.
+// Device-code subset: included by .cu files compiled by nvcc as C++23.
 
 #include "mymyr/core/types.hpp"
 

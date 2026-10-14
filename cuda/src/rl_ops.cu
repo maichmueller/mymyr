@@ -1,6 +1,6 @@
 // Device kernels of the RL helpers (include/mymyr/cuda/rl_ops.hpp): novelty rewards, prefix / schema masks and
 // hindsight relabels. Each thread runs the element function of the host loop (src/mymyr/rl/ops.cpp), so both give the
-// same bytes. Compiled by nvcc as C++20; includes only the device-code subset.
+// same bytes. Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/rl_ops.hpp"
 

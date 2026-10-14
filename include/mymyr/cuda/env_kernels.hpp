@@ -5,7 +5,7 @@
 // these kernels choose, move, and finish a step (rewards, termination, truncation, autoreset), with the semantics of
 // the host reference rl::HostEnv (rl/env.hpp), bit for bit.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20; POD, raw pointers and cudaStream_t.
+// Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/rl/task_arrays_view.hpp"
 

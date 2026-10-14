@@ -1,7 +1,7 @@
 // Axiom strata on the device (include/mymyr/cuda/lifted.hpp, launch_axioms): the CPU's AxiomEvaluator
 // (src/mymyr/axioms/evaluator.cpp) per parent, over section "plan" of the device task, with the matcher executors of the
 // successor kernels (lifted_device.cuh). Also the goal test over derived bitsets and a row gather.
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 
