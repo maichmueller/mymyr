@@ -58,10 +58,10 @@ def test_quick_cpu_run_writes_the_documented_json_and_a_gate_table(tmp_path, ben
     assert not any(r["group"] in ("env", "device") for r in result["records"])
     gates = {g["id"]: g for g in result["gates"]}
     assert {t["id"] for t in result["targets"]} == set(gates)
-    for gate in ("T-G1", "T-G2", "T-G3", "T-G5", "ENV"):
+    for gate in ("device-core", "device-relation-major", "device-in-step", "device-vs-cpu", "env-step"):
         assert gates[gate]["status"] == "n/a"
-    assert gates["T1"]["status"] in ("pass", "fail") and gates["T7"]["status"] in ("pass", "fail")
-    assert "T-G1" in stdout and "n/a" in stdout
+    assert gates["cpu-core-one-thread"]["status"] in ("pass", "fail") and gates["cpu-relation-major"]["status"] in ("pass", "fail")
+    assert "device-core" in stdout and "n/a" in stdout
 
 
 def test_unknown_and_absent_tasks_are_reported_not_fatal(tmp_path, bench):
@@ -109,13 +109,13 @@ def test_gates_compare_against_their_thresholds(bench):
         record("blocks-p01e", "cpu_batch_all_rel", 0.40),
     ]
     results, status, table = gate_rows(bench, records, ["blocks-p01e"])
-    assert results["T-C2"]["blocks-p01e"]["status"] == "pass"
-    assert results["T1"]["blocks-p01e"]["status"] == "pass"  # 0.30 <= 0.3 + 100 * 1e-3
-    assert results["T-C1"]["blocks-p01e"]["status"] == "pass"  # 5x
-    assert results["T6"]["blocks-p01e"]["status"] == "fail"  # 0.9 > 14 / 20
-    assert results["T7"]["blocks-p01e"]["status"] == "fail"  # 1.33x
-    assert status["T-C2"]["status"] == "pass" and status["T6"]["status"] == "fail" and status["T7"]["status"] == "fail"
-    assert status["T-G1"]["status"] == "n/a" and status["T-G5"]["status"] == "n/a" and status["T2"]["status"] == "n/a"
+    assert results["cpu-single-call"]["blocks-p01e"]["status"] == "pass"
+    assert results["cpu-core-one-thread"]["blocks-p01e"]["status"] == "pass"  # 0.30 <= 0.3 + 100 * 1e-3
+    assert results["cpu-eight-threads"]["blocks-p01e"]["status"] == "pass"  # 5x
+    assert results["cpu-vs-reference-encoder"]["blocks-p01e"]["status"] == "fail"  # 0.9 > 14 / 20
+    assert results["cpu-relation-major"]["blocks-p01e"]["status"] == "fail"  # 1.33x
+    assert status["cpu-single-call"]["status"] == "pass" and status["cpu-vs-reference-encoder"]["status"] == "fail" and status["cpu-relation-major"]["status"] == "fail"
+    assert status["device-core"]["status"] == "n/a" and status["device-vs-cpu"]["status"] == "n/a" and status["cpu-action-lane"]["status"] == "n/a"
     assert "n/a" in table and "pass" in table
 
 
@@ -128,17 +128,17 @@ def test_a_gate_with_a_missing_task_is_incomplete_and_names_it(bench):
         dict(task="rovers-p16e", mode="*", status="skipped", reason="no PDDL"),
     ]  # fmt: skip
     results, status, table = gate_rows(bench, records, tasks)
-    assert results["T7"]["blocks-p01e"]["status"] == "pass"
-    assert results["T7"]["transport-p30m"]["status"] == "error" and "boom" in results["T7"]["transport-p30m"]["reason"]
-    assert results["T7"]["rovers-p16e"]["status"] == "skipped"
-    assert status["T7"]["status"] == "error" and "transport-p30m" in status["T7"]["detail"]
-    # T1 lacks only the skipped task: never a pass, and k of n is reported
-    assert status["T1"]["status"] == "incomplete" and (status["T1"]["measured"], status["T1"]["applicable"]) == (2, 3)
-    assert "rovers-p16e" in status["T1"]["detail"] and "incomplete (2 of 3)" in table
+    assert results["cpu-relation-major"]["blocks-p01e"]["status"] == "pass"
+    assert results["cpu-relation-major"]["transport-p30m"]["status"] == "error" and "boom" in results["cpu-relation-major"]["transport-p30m"]["reason"]
+    assert results["cpu-relation-major"]["rovers-p16e"]["status"] == "skipped"
+    assert status["cpu-relation-major"]["status"] == "error" and "transport-p30m" in status["cpu-relation-major"]["detail"]
+    # cpu-core-one-thread lacks only the skipped task: never a pass, and k of n is reported
+    assert status["cpu-core-one-thread"]["status"] == "incomplete" and (status["cpu-core-one-thread"]["measured"], status["cpu-core-one-thread"]["applicable"]) == (2, 3)
+    assert "rovers-p16e" in status["cpu-core-one-thread"]["detail"] and "incomplete (2 of 3)" in table
     # a failing task wins over a missing one but still names it
     records.append(record("blocks-p01e", "cpu_single", 9.0))
     _, status, _ = gate_rows(bench, records, tasks)
-    assert status["T-C2"]["status"] == "fail" and "incomplete" in status["T-C2"]["detail"]
+    assert status["cpu-single-call"]["status"] == "fail" and "incomplete" in status["cpu-single-call"]["detail"]
 
 
 def test_gates_without_a_baseline_or_a_large_batch_are_not_applicable_with_the_reason(bench):
@@ -147,11 +147,11 @@ def test_gates_without_a_baseline_or_a_large_batch_are_not_applicable_with_the_r
         record("blocks-8", "cpu_batch_all_t8", 0.1, units=256),
     ]  # fmt: skip
     results, status, _ = gate_rows(bench, records, ["blocks-8"])
-    assert status["T6"]["status"] == "n/a" and "no recorded baseline" in status["T6"]["detail"]
-    assert status["T-C1"]["status"] == "n/a" and "under 4096" in status["T-C1"]["detail"]
-    assert status["ENV"]["status"] == "n/a" and "no recorded baseline" in status["ENV"]["detail"]
-    assert status["T-G1"]["status"] == "n/a"
-    assert results["T1"]["blocks-8"]["status"] in ("pass", "fail")
+    assert status["cpu-vs-reference-encoder"]["status"] == "n/a" and "no recorded baseline" in status["cpu-vs-reference-encoder"]["detail"]
+    assert status["cpu-eight-threads"]["status"] == "n/a" and "under 4096" in status["cpu-eight-threads"]["detail"]
+    assert status["env-step"]["status"] == "n/a" and "no recorded baseline" in status["env-step"]["detail"]
+    assert status["device-core"]["status"] == "n/a"
+    assert results["cpu-core-one-thread"]["blocks-8"]["status"] in ("pass", "fail")
 
 
 def test_a_device_encode_gate_needs_4096_states_and_unsupported_device_modes_are_not_applicable(bench):
@@ -162,7 +162,7 @@ def test_a_device_encode_gate_needs_4096_states_and_unsupported_device_modes_are
         record("blocks-p01e", "cpu_batch_all", 0.2), record("blocks-p01e", "cpu_batch_all_t8", 0.05),
     ]  # fmt: skip
     results, status, _ = gate_rows(bench, small, ["blocks-p01e"])
-    for gate in ("T-G1", "T-G3", "T-G5"):
+    for gate in ("device-core", "device-in-step", "device-vs-cpu"):
         assert results[gate]["blocks-p01e"]["status"] == "n/a" and "under 4096" in results[gate]["blocks-p01e"]["reason"]
         assert status[gate]["status"] == "n/a"
     unsupported = [
@@ -171,11 +171,11 @@ def test_a_device_encode_gate_needs_4096_states_and_unsupported_device_modes_are
         for m in ("device_encode_graph", "device_encode_rel")
     ]  # fmt: skip
     _, status, _ = gate_rows(bench, unsupported, ["blocks-p01e"])
-    assert status["T-G1"]["status"] == "n/a" and "not supported on the device" in status["T-G1"]["detail"]
-    assert status["T-G2"]["status"] == "n/a"
+    assert status["device-core"]["status"] == "n/a" and "not supported on the device" in status["device-core"]["detail"]
+    assert status["device-relation-major"]["status"] == "n/a"
     failed_setup = [dict(unsupported[0], unavailable=False, reason="device environment unavailable: x")]
     _, status, _ = gate_rows(bench, failed_setup, ["blocks-p01e"])
-    assert status["T-G1"]["status"] == "incomplete"
+    assert status["device-core"]["status"] == "incomplete"
 
 
 def test_the_environment_gate_fails_a_slower_step_and_warns_about_a_much_faster_one(bench):
@@ -184,18 +184,18 @@ def test_the_environment_gate_fails_a_slower_step_and_warns_about_a_much_faster_
                                      (1.3, "fail", False)):  # fmt: skip
         records = [record("blocks-p01e", "env_step_n16384", base * factor, group="env", N=16384)]
         results, status, table = gate_rows(bench, records, ["blocks-p01e"])
-        assert results["ENV"]["blocks-p01e"]["status"] == expected, factor
-        assert ("warning" in status["ENV"]) == warned and ("faster than recorded by >20%" in table) == warned
+        assert results["env-step"]["blocks-p01e"]["status"] == expected, factor
+        assert ("warning" in status["env-step"]) == warned and ("faster than recorded by >20%" in table) == warned
     errored = [dict(task="blocks-p01e", mode="env_step_n1024", status="error", reason="boom", units=10)]
     _, status, _ = gate_rows(bench, errored, ["blocks-p01e"])
-    assert status["ENV"]["status"] == "error"
+    assert status["env-step"]["status"] == "error"
 
 
 def test_t_c1_is_soft_and_the_table_says_so(bench):
-    assert {t["id"]: t["soft"] for t in bench.TARGETS}["T-C1"] is True
+    assert {t["id"]: t["soft"] for t in bench.TARGETS}["cpu-eight-threads"] is True
     records = [record("blocks-p01e", "cpu_batch_all", 1.0), record("blocks-p01e", "cpu_batch_all_t8", 0.9)]
     _, status, _ = gate_rows(bench, records, ["blocks-p01e"])
-    assert status["T-C1"]["status"] == "fail" and "rerun on a quiet host" in status["T-C1"]["detail"]
+    assert status["cpu-eight-threads"]["status"] == "fail" and "rerun on a quiet host" in status["cpu-eight-threads"]["detail"]
 
 
 class FakeGpu:
@@ -404,7 +404,7 @@ def test_device_modes_are_measured_or_skipped_as_not_supported_never_errors(tmp_
         if r["status"] == "skipped":
             assert r["unavailable"] and (r["reason"].startswith("not supported on the device") or "no " in r["reason"]), r
     status = {g["id"]: g["status"] for g in result["gates"]}
-    assert all(status[g] in ("n/a", "pass", "fail") for g in ("T-G1", "T-G2", "T-G3", "T-G5"))
+    assert all(status[g] in ("n/a", "pass", "fail") for g in ("device-core", "device-relation-major", "device-in-step", "device-vs-cpu"))
 
 
 def test_gpu_modes_run_the_device_environment_when_cuda_is_present(tmp_path):

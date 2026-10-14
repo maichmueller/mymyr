@@ -26,8 +26,8 @@ Every record carries the bytes written per encoded state, measured on the batch 
 the environment (GPU, driver, CUDA, mymyr version and commit, CPU count, load), the targets as data, the recorded
 reference numbers, one record per task and mode, and the result of every gate. Each gate lists the tasks it applies to
 and prints pass, fail, error, "incomplete (k of n)" naming the tasks it could not evaluate (a skipped task or mode),
-or n/a with the reason (no baseline, a batch under 4096 states, modes not selected or unavailable). T-C1 and the
-device gates are soft: a failure on a contended host or GPU blocks only after a rerun on a quiet host also fails.
+or n/a with the reason (no baseline, a batch under 4096 states, modes not selected or unavailable). The gate cpu-eight-threads
+and the device gates are soft: a failure on a contended host or GPU blocks only after a rerun on a quiet host also fails.
 
     env CUDA_VISIBLE_DEVICES=0 .venv-rl/bin/python bench/python/bench_encoding_gpu.py [--tasks T,...] [--rows 4096]
         [--rounds 20] [--modes cpu,env,device | mode names] [--json PATH] [--device 0] [--data DIR] [--quick]
@@ -80,10 +80,12 @@ TASKS = {
 TEXT_TASKS = {"blocks-8": "blocks__probBLOCKS-8-0"}  # tests/data/tasks/<name>.txt
 
 # ------------------------------------------------------------------------------------------------ reference numbers
-# Recorded timings of other encoders and prototypes on the same tasks, per task in the order of TASKS. They are the
-# baselines the gates scale from and are reported next to the measured values.
+# Timings of other encoders on the same tasks, per task in the order of TASKS: earlier and standalone encoders of the
+# same output that are not part of mymyr, and recordings of the device environment step. They are the baselines the
+# gates scale from and are reported next to the measured values.
 
-# the device environment step: microseconds per step of a captured graph of 10 steps at N = 1024 and 16384
+# the device environment step as recorded on the benchmark GPU: microseconds per step of a captured graph of 10 steps
+# at N = 1024 and 16384
 ENV_STEP_US = {
     "blocks-p01e": {1024: 37, 16384: 64},
     "childsnack-p16e": {1024: 40, 16384: 82},
@@ -94,8 +96,8 @@ ENV_STEP_US = {
     "miconic-p30m": {1024: 101, 16384: 666},
     "blocks-p20m": {},  # no recorded step times
 }
-# a recorded CPU flat encoder: microseconds per state (single call, batch of 256, 8 threads)
-RECORDED_CPU_US = {
+# an earlier CPU flat encoder of the same output, not part of mymyr: microseconds per state (single call, batch of 256, 8 threads)
+EARLIER_CPU_US = {
     "blocks-p01e": (5.4, 1.0, 0.40),
     "childsnack-p16e": (8.2, 3.6, 0.85),
     "rovers-p16e": (10.4, 5.6, 1.29),
@@ -105,7 +107,7 @@ RECORDED_CPU_US = {
     "miconic-p30m": (69.2, 62.0, 8.66),
     "blocks-p20m": (20.6, 15.5, 3.45),
 }
-# a recorded reference flat encoder: microseconds per state (single call, batch of 256)
+# a reference flat encoder outside mymyr, driven from Python: microseconds per state (single call, batch of 256)
 REFERENCE_FLAT_US = {
     "blocks-p01e": (32, 14),
     "childsnack-p16e": (55, 34),
@@ -116,8 +118,9 @@ REFERENCE_FLAT_US = {
     "miconic-p30m": (185, 171),
     "blocks-p20m": (113, 89),
 }
-# the CPU prototype with statics repeated, N = 16384: microseconds per state (1 thread, 8 threads)
-PROTOTYPE_CPU_US = {
+# a standalone CPU encoder of the same contract, not part of mymyr, with the static relations written for every graph,
+# N = 16384: microseconds per state (1 thread, 8 threads)
+STANDALONE_CPU_US = {
     "blocks-p01e": (0.141, 0.062),
     "childsnack-p16e": (0.497, 0.096),
     "rovers-p16e": (0.513, 0.163),
@@ -127,9 +130,10 @@ PROTOTYPE_CPU_US = {
     "miconic-p30m": (2.660, 0.567),
     "blocks-p20m": (2.032, 0.499),
 }
-# the GPU prototype, N = 16384: ns per graph of the full contract with statics repeated, the bytes per graph it writes,
-# and the counts-only, COO and shared-statics variants
-PROTOTYPE_GPU = {
+# a standalone device encoder of the same contract, not part of mymyr, N = 16384: ns per graph of the full contract
+# with the static relations written for every graph, the bytes per graph it writes, and the counts-only, COO and
+# shared-statics variants
+STANDALONE_DEVICE = {
     "blocks-p01e": dict(full_ns=9.6, bytes=646, counts_ns=5.0, counts_shared_ns=4.7, coo_ns=4.1, coo_shared_ns=3.4),
     "childsnack-p16e": dict(full_ns=25.5, bytes=1858, counts_ns=14.1, counts_shared_ns=8.7, coo_ns=19.1, coo_shared_ns=4.1),
     "rovers-p16e": dict(full_ns=48.9, bytes=3371, counts_ns=28.6, counts_shared_ns=13.9, coo_ns=39.8, coo_shared_ns=7.1),
@@ -139,9 +143,10 @@ PROTOTYPE_GPU = {
     "miconic-p30m": dict(full_ns=81.5, bytes=17442, counts_ns=79.6, counts_shared_ns=16.8, coo_ns=128.2, coo_shared_ns=21.1),
     "blocks-p20m": dict(full_ns=39.5, bytes=4150, counts_ns=38.8, counts_shared_ns=37.0, coo_ns=39.1, coo_shared_ns=34.9),
 }
-# the prototype added to a captured step, N = 16384: ns per environment (the step alone, then the added time of the full
-# contract with statics repeated, of COO, and of COO with shared statics)
-PROTOTYPE_E2E_NS = {
+# that standalone device encoder added to a captured step, N = 16384: ns per environment (the step alone, then the
+# added time of the full contract with the static relations written for every graph, of COO, and of COO with shared
+# statics)
+STANDALONE_DEVICE_IN_STEP_NS = {
     "blocks-p01e": dict(step=4.3, full=9.8, coo=4.2, coo_shared=3.3),
     "childsnack-p16e": dict(step=6.0, full=30.3, coo=22.4, coo_shared=4.0),
     "rovers-p16e": dict(step=21.5, full=56.7, coo=49.2, coo_shared=14.7),
@@ -155,38 +160,39 @@ PROTOTYPE_E2E_NS = {
 # The targets: `gate` is the pass threshold the harness checks, `goal` what the encoder aims for. A soft gate blocks only
 # when a rerun on a quiet host fails as well.
 TARGETS = [
-    dict(id="T1", what="core lanes, one thread, batch of all rows", gate="<= 0.3 us + 1 ns per emitted int, per state",
+    dict(id="cpu-core-one-thread", what="core lanes, one thread, batch of all rows", gate="<= 0.3 us + 1 ns per emitted int, per state",
          goal=None, soft=False),
-    dict(id="T2", what="action lane", gate="<= 1 ns per int", goal=None, soft=False,
+    dict(id="cpu-action-lane", what="action lane", gate="<= 1 ns per int", goal=None, soft=False,
          needs="the action lane"),
-    dict(id="T3", what="derived lanes", gate="T1 plus the axiom evaluation, or T1 alone with given derived words",
+    dict(id="cpu-derived-lanes", what="derived lanes", gate="cpu-core-one-thread plus the axiom evaluation, or cpu-core-one-thread alone with given derived words",
          goal=None, soft=False, needs="a task with derived predicates in the benchmark set"),
-    dict(id="T-C2", what="single call from Python", gate="<= 3 us per call", goal=None, soft=False),
-    dict(id="T-C1", what="8 threads against 1, batches of 4096 states or more", gate=">= 3.5x", goal=None,
+    dict(id="cpu-single-call", what="single call from Python", gate="<= 3 us per call", goal=None, soft=False),
+    dict(id="cpu-eight-threads", what="8 threads against 1, batches of 4096 states or more", gate=">= 3.5x", goal=None,
          soft=True),
-    dict(id="T6", what="against the recorded reference encoder, batch of 256", gate=">= 20x faster", goal=None, soft=False),
-    dict(id="T7", what="relation-major against graph-major, one thread", gate="<= 1.2x", goal=None, soft=False),
-    dict(id="ENV", what="device env step alone against the recorded step times",
+    dict(id="cpu-vs-reference-encoder", what="against the recorded reference encoder, batch of 256",
+         gate=">= 20x faster", goal=None, soft=False),
+    dict(id="cpu-relation-major", what="relation-major against graph-major, one thread", gate="<= 1.2x", goal=None, soft=False),
+    dict(id="env-step", what="device env step alone against the recorded step times",
          gate="not more than 20% slower (a step more than 20% faster is printed as a warning)", goal=None,
          soft=True),
-    dict(id="T-G1", what="device flat core, graph-major, N >= 4096",
-         gate="<= 1.25 x prototype full ns per graph x (bytes written / prototype bytes)",
+    dict(id="device-core", what="device flat core, graph-major, N >= 4096",
+         gate="<= 1.25 x the standalone encoder's ns per graph x (bytes written / its bytes)",
          goal="<= bytes / 150 GB/s + 2 ns", soft=True),
-    dict(id="T-G2", what="device relation-major against graph-major", gate="<= 1.5x", goal="<= 1.25x", soft=True),
-    dict(id="T-G3", what="encoding added to a captured env step, per environment",
-         gate="<= 1.25 x prototype e2e full ns x (bytes written / prototype bytes)",
+    dict(id="device-relation-major", what="device relation-major against graph-major", gate="<= 1.5x", goal="<= 1.25x", soft=True),
+    dict(id="device-in-step", what="encoding added to a captured env step, per environment",
+         gate="<= 1.25 x the standalone encoder's added ns in a step x (bytes written / its bytes)",
          goal="<= bytes / 150 GB/s + 3 ns", soft=True),
-    dict(id="T-G4", what="launches and sync", gate="<= 4 kernels per width class, no host sync, no allocation after "
+    dict(id="device-launches", what="launches and sync", gate="<= 4 kernels per width class, no host sync, no allocation after "
          "reserve, capturable", goal=None, soft=True, needs="the device encoder's reserve and a profiler"),
-    dict(id="T-G5", what="device against the CPU encoder at N >= 4096", gate=">= 10x one thread and >= 3x 8 threads",
+    dict(id="device-vs-cpu", what="device against the CPU encoder at N >= 4096", gate=">= 10x one thread and >= 3x 8 threads",
          goal=">= 20x / >= 5x", soft=True),
-    dict(id="T-G6", what="scratch", gate="<= 16 B per graph + 4 B per cell + CUB temp", goal=None, soft=True,
+    dict(id="device-scratch", what="scratch", gate="<= 16 B per graph + 4 B per cell + CUB temp", goal=None, soft=True,
          needs="the device encoder's bytes_needed"),
-    dict(id="T-G7", what="HGraph view", gate="zero-copy, or <= 1.3x relation-major", goal="<= 1.1x", soft=True,
+    dict(id="device-hgraph", what="HGraph view", gate="zero-copy, or <= 1.3x relation-major", goal="<= 1.1x", soft=True,
          needs="the HGraph view"),
-    dict(id="T-G8", what="Simple on the device", gate="<= 2.5x the flat core", goal=None, soft=True,
+    dict(id="device-simple", what="Simple on the device", gate="<= 2.5x the flat core", goal=None, soft=True,
          needs="the Simple encoding"),
-    dict(id="T-G9", what="shared statics", gate="<= 1.25 x the shared-statics e2e ns", goal=None, soft=True,
+    dict(id="device-shared-statics", what="shared statics", gate="<= 1.25 x the shared-statics e2e ns", goal=None, soft=True,
          needs="shared statics"),
 ]
 
@@ -717,18 +723,18 @@ def unavailable(index, task, modes):
     return worst
 
 
-def gate_t1(index, task):
+def gate_cpu_core(index, task):
     r = index.rec[(task, "cpu_batch_all")]
     limit = 0.3 + 1e-3 * r["ints_per_state"]
     return outcome(verdict(r["min"] <= limit), value=r["min"], limit=limit)
 
 
-def gate_tc2(index, task):
+def gate_cpu_single_call(index, task):
     value = index.get(task, "cpu_single")
     return outcome(verdict(value <= 3.0), value=value, limit=3.0)
 
 
-def gate_tc1(index, task):
+def gate_cpu_eight_threads(index, task):
     n = index.rec[(task, "cpu_batch_all")]["units"]
     if n < 4096:
         return outcome("n/a", f"a batch of {n} states, under 4096")
@@ -736,18 +742,18 @@ def gate_tc1(index, task):
     return outcome(verdict(speedup >= 3.5), value=speedup, limit=3.5)
 
 
-def gate_t6(index, task):
+def gate_cpu_vs_reference(index, task):
     value = index.get(task, "cpu_batch256")
     limit = REFERENCE_FLAT_US[task][1] / 20
     return outcome(verdict(value <= limit), value=value, limit=limit)
 
 
-def gate_t7(index, task):
+def gate_cpu_relation_major(index, task):
     ratio = index.get(task, "cpu_batch_all_rel") / index.get(task, "cpu_batch_all")
     return outcome(verdict(ratio <= 1.2), value=ratio, limit=1.2)
 
 
-def gate_env(index, task):
+def gate_env_step(index, task):
     """Every recorded size of the task that has a record: a step more than 20% slower fails, more than 20% faster is a
     warning (a much faster step can mean that the graph does less work)."""
     by_size, worst = {}, None
@@ -778,23 +784,23 @@ def device_batch_too_small(index, task):
     return None
 
 
-def gate_tg1(index, task):
+def gate_device_core(index, task):
     small = device_batch_too_small(index, task)
     if small:
         return small
     r = index.rec[(task, "device_encode_graph")]
-    proto = PROTOTYPE_GPU[task]
+    proto = STANDALONE_DEVICE[task]
     b = r["bytes_per_state"]
     limit = 1.25 * proto["full_ns"] * b / proto["bytes"]
     return outcome(verdict(r["min"] * 1e3 <= limit), value=r["min"] * 1e3, limit=limit, goal=b / 150 + 2)
 
 
-def gate_tg2(index, task):
+def gate_device_relation_major(index, task):
     ratio = index.get(task, "device_encode_rel") / index.get(task, "device_encode_graph")
     return outcome(verdict(ratio <= 1.5), value=ratio, limit=1.5)
 
 
-def gate_tg5(index, task):
+def gate_device_vs_cpu(index, task):
     small = device_batch_too_small(index, task)
     if small:
         return small
@@ -803,7 +809,7 @@ def gate_tg5(index, task):
     return outcome(verdict(s1 >= 10 and s8 >= 3), value=[s1, s8], limit=[10, 3])
 
 
-def gate_tg3(index, task):
+def gate_device_in_step(index, task):
     """The largest environment size with an encode-in-step record: the added time per environment of the encode."""
     sizes = [r["N"] for r in index.modes_of(task, "env_step_encode_n")]
     if not sizes:
@@ -817,27 +823,27 @@ def gate_tg3(index, task):
     enc, rand = index.rec[(task, f"env_step_encode_n{n}")], index.rec[(task, f"env_step_rand_n{n}")]
     added = enc["min_ns_per_env"] - rand["min_ns_per_env"]
     b = enc["bytes_per_state"]
-    limit = 1.25 * PROTOTYPE_E2E_NS[task]["full"] * b / PROTOTYPE_GPU[task]["bytes"]
+    limit = 1.25 * STANDALONE_DEVICE_IN_STEP_NS[task]["full"] * b / STANDALONE_DEVICE[task]["bytes"]
     return outcome(verdict(added <= limit), value=added, limit=limit, goal=b / 150 + 3)
 
 
 # per gate: (the reason it does not apply to a task or None, the modes it needs, its evaluation). The modes the gate
-# derives itself (ENV, T-G3) are named in the evaluation.
+# derives itself (env-step, device-in-step) are named in the evaluation.
 def _no_baseline(table):
     return lambda task: None if table.get(task) else f"no recorded baseline for {task}"
 
 
 GATES = {
-    "T1": (lambda task: None, ("cpu_batch_all",), gate_t1),
-    "T-C2": (lambda task: None, ("cpu_single",), gate_tc2),
-    "T-C1": (lambda task: None, ("cpu_batch_all", "cpu_batch_all_t8"), gate_tc1),
-    "T6": (_no_baseline(REFERENCE_FLAT_US), ("cpu_batch256",), gate_t6),
-    "T7": (lambda task: None, ("cpu_batch_all", "cpu_batch_all_rel"), gate_t7),
-    "ENV": (_no_baseline(ENV_STEP_US), None, gate_env),
-    "T-G1": (_no_baseline(PROTOTYPE_GPU), ("device_encode_graph",), gate_tg1),
-    "T-G2": (lambda task: None, ("device_encode_graph", "device_encode_rel"), gate_tg2),
-    "T-G3": (_no_baseline(PROTOTYPE_E2E_NS), None, gate_tg3),
-    "T-G5": (lambda task: None, ("device_encode_graph", "cpu_batch_all", "cpu_batch_all_t8"), gate_tg5),
+    "cpu-core-one-thread": (lambda task: None, ("cpu_batch_all",), gate_cpu_core),
+    "cpu-single-call": (lambda task: None, ("cpu_single",), gate_cpu_single_call),
+    "cpu-eight-threads": (lambda task: None, ("cpu_batch_all", "cpu_batch_all_t8"), gate_cpu_eight_threads),
+    "cpu-vs-reference-encoder": (_no_baseline(REFERENCE_FLAT_US), ("cpu_batch256",), gate_cpu_vs_reference),
+    "cpu-relation-major": (lambda task: None, ("cpu_batch_all", "cpu_batch_all_rel"), gate_cpu_relation_major),
+    "env-step": (_no_baseline(ENV_STEP_US), None, gate_env_step),
+    "device-core": (_no_baseline(STANDALONE_DEVICE), ("device_encode_graph",), gate_device_core),
+    "device-relation-major": (lambda task: None, ("device_encode_graph", "device_encode_rel"), gate_device_relation_major),
+    "device-in-step": (_no_baseline(STANDALONE_DEVICE_IN_STEP_NS), None, gate_device_in_step),
+    "device-vs-cpu": (lambda task: None, ("device_encode_graph", "cpu_batch_all", "cpu_batch_all_t8"), gate_device_vs_cpu),
 }
 
 
@@ -892,7 +898,7 @@ def gate_table(results):
             if status in ("fail", "incomplete") and target["soft"] and failed:
                 parts.append("soft: blocks only if a rerun on a quiet host fails as well")
             row.update(status=status, detail="; ".join(parts), measured=len(measured), applicable=len(applicable))
-        if target["id"] == "ENV":
+        if target["id"] == "env-step":
             faster = [f"{t}@{n} ({o['by_size'][n]['ratio']:.2f}x)" for t, o in per_task.items()
                       for n in o.get("faster", [])]
             if faster:
@@ -901,8 +907,9 @@ def gate_table(results):
     label = {r["id"]: (f"incomplete ({r['measured']} of {r['applicable']})" if r["status"] == "incomplete" else r["status"])
              for r in rows}
     width, status_width = max(len(r["what"]) for r in rows), max(len(v) for v in label.values())
-    lines = [f"{r['id']:<6} {label[r['id']]:<{status_width}} {r['what']:<{width}}  {r['detail']}" for r in rows]
-    lines += [f"warn   ENV {r['warning']}" for r in rows if "warning" in r]
+    id_width = max(len(r["id"]) for r in rows)
+    lines = [f"{r['id']:<{id_width}} {label[r['id']]:<{status_width}} {r['what']:<{width}}  {r['detail']}" for r in rows]
+    lines += [f"{'warn':<{id_width}} env-step {r['warning']}" for r in rows if "warning" in r]
     return rows, "\n".join(lines)
 
 
@@ -1020,11 +1027,11 @@ def run_task(key, args, gpu, pool):
 
 def baselines():
     return dict(
-        env_step_us=ENV_STEP_US, previous_cpu_us={k: dict(zip(("single", "batch256", "threads8"), v))
-                                                  for k, v in RECORDED_CPU_US.items()},
+        env_step_us=ENV_STEP_US, earlier_cpu_us={k: dict(zip(("single", "batch256", "threads8"), v))
+                                                  for k, v in EARLIER_CPU_US.items()},
         reference_flat_us={k: dict(zip(("single", "batch256"), v)) for k, v in REFERENCE_FLAT_US.items()},
-        prototype_cpu_us={k: dict(zip(("threads1", "threads8"), v)) for k, v in PROTOTYPE_CPU_US.items()},
-        prototype_gpu_ns_per_graph=PROTOTYPE_GPU, prototype_e2e_ns_per_env=PROTOTYPE_E2E_NS)
+        standalone_cpu_us={k: dict(zip(("threads1", "threads8"), v)) for k, v in STANDALONE_CPU_US.items()},
+        standalone_device_ns_per_graph=STANDALONE_DEVICE, standalone_device_in_step_ns_per_env=STANDALONE_DEVICE_IN_STEP_NS)
 
 
 def print_records(records):
