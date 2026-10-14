@@ -83,7 +83,7 @@ struct EhcStatistics
     u64 lookaheads = 0;    // breadth-first lookaheads (retries included)
     u64 improvements = 0;  // lookaheads that reached a state with a smaller h
     u64 retries = 0;       // lookaheads repeated with every action after the helpful actions found no better state
-    u64 max_depth = 0;     // the longest path from a lookahead's start to its better state, in actions
+    u64 max_depth = 0;     // the longest path from a lookahead's start to its better state or the goal, in actions
     u64 expanded = 0;      // expansions of hill-climbing (the result's stats add the fallback's)
     u64 evaluations = 0;   // heuristic evaluations of hill-climbing
     bool failed = false;   // hill-climbing found no better state from some state

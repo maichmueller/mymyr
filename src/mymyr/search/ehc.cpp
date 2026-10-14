@@ -359,6 +359,7 @@ private:
             const StateView cv = tr.view(t);
             if (m_c.is_goal(cv))
             {
+                m_st.max_depth = std::max<u64>(m_st.max_depth, depth);
                 m_c.solved(plan_to(v, t.schema, b), t.g, cv, true);
                 if (m_c.obs)  // the transitions after the goal's were generated too
                     for (usize j = i + 1; j < tr.t.size(); ++j)
