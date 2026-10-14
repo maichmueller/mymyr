@@ -12,27 +12,36 @@ rounds per mode.
     lets all 8 threads work.
   - env_step_nN: the device environment step alone, a CUDA graph of 10 steps over N environments, replayed
     (microseconds per step and nanoseconds per environment). env_step_rand_nN is the same graph with a policy that only
-    draws the random actions: the baseline of the step plus encoding. env_step_encode_nN adds the device encoder of the
+    draws the random actions: the baseline of the step plus encoding. env_step_encode_nN adds the device encode of the
     step's states to that policy.
-  - device_encode_graph / device_encode_rel: the device encoder alone on the environment's states, synchronized.
-    Skipped while mymyr.encoding has no DeviceEncoder.
+  - device_encode_graph / device_encode_rel: `FlatRelationEncoder.encode` on the device rows of the largest environment,
+    graph-major and relation-major, with `capacities=` measured from the CPU encoding of those rows. One encode is
+    captured into a CUDA graph on a side stream and 10 replays are timed between CUDA events (median over the
+    repeats); device_encode_graph_eager is the same call timed as one eager call plus a synchronize, on the host clock.
+    Every device run is built and warmed outside any capture, and only one is alive at a time. They are skipped with
+    the reason "not supported on the device" while `encode` takes no device rows; on a build that has a device
+    encode path the harness cannot drive, the run fails.
 
-Every record carries the bytes written per encoded state. The JSON output has the environment (GPU, driver, CUDA,
-mymyr version and commit, CPU count, load), the targets as data, the recorded reference numbers, one
-record per task and mode, and the result of every gate. The printed table lists each gate as pass, fail or n/a (no
-mode that the gate needs ran); the device gates are soft: a failure on a contended GPU is to be reproduced in a rerun.
+Every record carries the bytes written per encoded state, measured on the batch that mode times. The JSON output has
+the environment (GPU, driver, CUDA, mymyr version and commit, CPU count, load), the targets as data, the recorded
+reference numbers, one record per task and mode, and the result of every gate. Each gate lists the tasks it applies to
+and prints pass, fail, error, "incomplete (k of n)" naming the tasks it could not evaluate (a skipped task or mode),
+or n/a with the reason (no baseline, a batch under 4096 states, modes not selected or unavailable). T-C1 and the
+device gates are soft: a failure on a contended host or GPU blocks only after a rerun on a quiet host also fails.
 
     env CUDA_VISIBLE_DEVICES=0 .venv-rl/bin/python bench/python/bench_encoding_gpu.py [--tasks T,...] [--rows 4096]
         [--rounds 20] [--modes cpu,env,device | mode names] [--json PATH] [--device 0] [--data DIR] [--quick]
 
-Task PDDL is read from tests/data/ipc, or from DIR/<domain>-ipc/test with --data DIR; a task without data is skipped.
-The vendored tests/data/ipc holds a few problems per domain: the benchmark set's larger problems (p16, p30, ...) need
---data to point at a full copy of the IPC learning-track domains.
+Task PDDL is read from tests/data/ipc, or from DIR/<domain>-ipc/test with --data DIR; a task without data is skipped
+and its gates are incomplete. Of the eight tasks of the benchmark set only blocks-p01e is vendored under tests/data/ipc;
+the other seven (p16, p30, ...) need --data to point at a full copy of the IPC learning-track domains.
 The task `blocks-8` (tests/data/tasks, no PDDL front end needed) is not part of the default set.
 """
 
 import argparse
+import contextlib
 import json
+import math
 import os
 import pathlib
 import platform
@@ -49,6 +58,9 @@ from mymyr import encoding, rl
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STEPS = 10  # steps per captured graph
+REPLAYS = 10  # replays of a captured encode between one pair of timing events
+CAPACITY_HEADROOM = 1.25  # the measured capacities of a device encode, for rows that change between encodes
+PROBE_STATES = 8  # rows of the probe that tells whether `encode` takes device rows
 THREADS = 8
 MIN_BATCH = 8192  # rows of the all-rows batches: 8 threads at the encoder's 1024 graphs per thread
 SINGLE_CALLS = 256  # calls per timed run of the single-call mode
@@ -140,7 +152,8 @@ PROTOTYPE_E2E_NS = {
 }
 
 # ------------------------------------------------------------------------------------------------ gates as data
-# The targets: `gate` is the pass threshold the harness checks, `goal` what the encoder aims for. Device gates are soft.
+# The targets: `gate` is the pass threshold the harness checks, `goal` what the encoder aims for. A soft gate blocks only
+# when a rerun on a quiet host fails as well.
 TARGETS = [
     dict(id="T1", what="core lanes, one thread, batch of all rows", gate="<= 0.3 us + 1 ns per emitted int, per state",
          goal=None, soft=False),
@@ -150,11 +163,11 @@ TARGETS = [
          goal=None, soft=False, needs="a task with derived predicates in the benchmark set"),
     dict(id="T-C2", what="single call from Python", gate="<= 3 us per call", goal=None, soft=False),
     dict(id="T-C1", what="8 threads against 1, batches of 4096 states or more", gate=">= 3.5x", goal=None,
-         soft=False),
+         soft=True),
     dict(id="T6", what="against the recorded reference encoder, batch of 256", gate=">= 20x faster", goal=None, soft=False),
     dict(id="T7", what="relation-major against graph-major, one thread", gate="<= 1.2x", goal=None, soft=False),
     dict(id="ENV", what="device env step alone against the recorded step times",
-         gate="not more than 20% slower (within_20_percent records the two-sided check)", goal=None,
+         gate="not more than 20% slower (a step more than 20% faster is printed as a warning)", goal=None,
          soft=True),
     dict(id="T-G1", what="device flat core, graph-major, N >= 4096",
          gate="<= 1.25 x prototype full ns per graph x (bytes written / prototype bytes)",
@@ -247,18 +260,33 @@ def batch_stats(batch):
     return sum(a.nbytes for a in arrays), sum(a.size for a in arrays)
 
 
-class Mode:
-    """One timed workload. `run` does the work (and synchronizes when it uses the GPU); `units` is the number of
-    encoded states (or steps) per run, `unit` what the time is per."""
+def describe(error):
+    """One line for a failure: the type and the first line of the message."""
+    message = str(error).splitlines()[0][:200] if str(error) else ""
+    return f"{type(error).__name__}: {message}"
 
-    def __init__(self, name, group, run=None, units=1, unit="us_per_state", skip=None, **fields):
+
+class Mode:
+    """One timed workload.
+
+    `run` does the work and synchronizes when it uses the GPU. The host clock times it, unless `reports_time`: then the
+    run returns its own time in microseconds (as with CUDA events). `units` is the number of encoded
+    states (or steps) per run, `unit` what the time is per. A mode with `open` builds what it times for itself: `open()`
+    is a context manager that yields the run and releases everything on exit, so that one such mode is alive at a
+    time. `stats` = (encoder, rows or a function that returns the rows) names the batch whose output size the record
+    reports. `unavailable` marks a skip that is a property of the host or the build, not of the run."""
+
+    def __init__(self, name, group, run=None, units=1, unit="us_per_state", skip=None, open=None, stats=None,
+                 unavailable=False, reports_time=False, **fields):
+        self.reports_time = reports_time
         self.name, self.group, self.run, self.units, self.unit, self.skip = name, group, run, units, unit, skip
+        self.open, self.stats, self.unavailable = open, stats, unavailable
         self.fields = fields
         self.times = []
         self.error = None
 
-    def skipped(self, reason):
-        self.skip = reason
+    def skipped(self, reason, unavailable=False):
+        self.skip, self.unavailable = reason, unavailable
         return self
 
 
@@ -269,8 +297,9 @@ def capacities_of(encoder, rows):
                 args=int(batch.relation_arg_offsets[-1]))
 
 
-def cpu_modes(rows, big, pool, encoders):
-    """The CPU modes of one task. `encoders` = {layout: (encoder, reason)}; `pool` is an rl.ThreadPool."""
+def cpu_modes(rows, big, pool, encoders, wants):
+    """The CPU modes of one task that `wants(name)` selects. `encoders` = {layout: (encoder, reason)}; `pool` is an
+    rl.ThreadPool."""
     modes = []
     batch256 = rows[:256] if len(rows) >= 256 else tile(rows, 256)
     for layout, suffix in (("graph", ""), ("relation", "_rel")):
@@ -281,24 +310,27 @@ def cpu_modes(rows, big, pool, encoders):
             (f"cpu_batch_all{suffix}_t8", big, lambda e, d: e.encode(d, threads=THREADS)),
         ]
         if layout == "graph":
-            caps = capacities_of(encoder, big) if encoder is not None else None
-            variants += [
-                ("cpu_batch_all_pool8", big, lambda e, d: e.encode(d, pool=pool)),
-                ("cpu_batch_all_cap", big, lambda e, d, c=caps: e.encode(d, capacities=c)),
-            ]
+            variants += [("cpu_batch_all_pool8", big, lambda e, d: e.encode(d, pool=pool))]
+            if wants("cpu_batch_all_cap") and encoder is not None:
+                caps = capacities_of(encoder, big)
+                variants += [("cpu_batch_all_cap", big, lambda e, d, c=caps: e.encode(d, capacities=c))]
+            elif wants("cpu_batch_all_cap"):
+                variants += [("cpu_batch_all_cap", big, None)]
         for name, data, call in variants:
+            if not wants(name):
+                continue
             threads = THREADS if name.endswith(("_t8", "_pool8")) else 1
-            mode = Mode(name, "cpu", units=len(data), layout=layout, threads=threads)
+            mode = Mode(name, "cpu", units=len(data), layout=layout, threads=threads, stats=(encoder, data))
             if encoder is None:
-                modes.append(mode.skipped(f"layout {layout} unavailable: {reason}"))
+                modes.append(mode.skipped(f"layout {layout} unavailable: {reason}", unavailable=True))
                 continue
             mode.run = lambda e=encoder, d=data, c=call: c(e, d)
             modes.append(mode)
-        if layout == "graph":
+        if layout == "graph" and wants("cpu_single"):
             singles = [np.ascontiguousarray(r[None]) for r in tile(rows, SINGLE_CALLS)]
-            mode = Mode("cpu_single", "cpu", units=len(singles), layout=layout, threads=1)
+            mode = Mode("cpu_single", "cpu", units=len(singles), layout=layout, threads=1, stats=(encoder, batch256))
             if encoder is None:
-                modes.append(mode.skipped(f"layout {layout} unavailable: {reason}"))
+                modes.append(mode.skipped(f"layout {layout} unavailable: {reason}", unavailable=True))
             else:
                 mode.run = lambda e=encoder, d=singles: [e.encode(r) for r in d]
                 modes.append(mode)
@@ -337,143 +369,281 @@ class Gpu:
     def sync(self):
         self.torch.cuda.synchronize(self.device)
 
+    def empty_cache(self):
+        self.torch.cuda.empty_cache()
 
-def device_encoder_class():
-    return getattr(encoding, "DeviceEncoder", None)
+
+class DevicePathError(RuntimeError):
+    """The build has a device encode path that the harness cannot drive."""
+
+
+def device_path_exists(gpu):
+    """Whether the build registers the device encode op (torch.ops.mymyr.encode_flat)."""
+    try:
+        gpu.torch.ops.mymyr.encode_flat
+    except (AttributeError, RuntimeError):
+        return False
+    return True
+
+
+def host_rows(states):
+    """The state rows of a device tensor as a C-contiguous host array of u64 words."""
+    rows = np.ascontiguousarray(states.cpu().numpy())
+    return rows.view(np.uint64) if rows.dtype != np.uint64 else rows
+
+
+def padded_capacities(capacities):
+    """`capacities` with CAPACITY_HEADROOM on top, for rows that change between encodes."""
+    return {k: math.ceil(v * CAPACITY_HEADROOM) for k, v in capacities.items()}
+
+
+def probe_device_encode(gpu, encoder, states):
+    """None when `encoder.encode` takes the device rows `states` (with measured `capacities=`); otherwise the reason it
+    does not, starting with "not supported on the device". On a build that has a device encode path, a failed probe
+    raises DevicePathError instead: the harness must drive that path, not skip it."""
+    try:
+        encoder.encode(states, capacities=capacities_of(encoder, host_rows(states)))
+        gpu.sync()
+    except Exception as error:  # noqa: BLE001
+        if device_path_exists(gpu):
+            raise DevicePathError(f"the device encode path exists but the harness cannot drive it: {describe(error)}") from error
+        return f"not supported on the device ({describe(error)})"
+    return None
 
 
 class DeviceRun:
-    """A device encoder of one layout, reserved for `graphs` states, with its caller-owned output block and the
-    acquisition that a captured graph holds until its last replay. The encoder is built over the CPU encoder of the
-    layout (`DeviceEncoder(flat_encoder)`); `reserve(graphs)` sizes its scratch, `reserved_layout().bytes` is the output
-    block that the caller allocates, `encode(states, output=...)` enqueues on the current stream, and `acquire()`
-    returns the workspace to keep alive while captured work uses it."""
+    """`FlatRelationEncoder.encode` on device rows with `capacities=` measured from the CPU encoding of those rows.
+    The first encode runs at construction, outside any capture: whatever the encoder acquires for it stays with the
+    encoder, so a later encode inside a capture takes nothing new. `close()` drops the encoder and the rows and waits for
+    the device."""
 
-    def __init__(self, cls, task, gpu, graphs, layout):
-        flat, reason = make_encoder(task, **({} if layout == "graph" else {"layout": layout}))
-        if flat is None:
-            raise ValueError(reason)
-        self.encoder = cls(flat)
-        self.encoder.reserve(graphs)
-        self.output_bytes = int(self.encoder.reserved_layout().bytes)
-        self.output = gpu.torch.empty(self.output_bytes, dtype=gpu.torch.uint8, device=gpu.device)
-        self.hold = self.encoder.acquire()
+    def __init__(self, gpu, encoder, states):
+        self.gpu, self.encoder, self.states = gpu, encoder, states
+        self.capacities = padded_capacities(capacities_of(encoder, host_rows(states)))
+        self.encode()
+        gpu.sync()
 
-    def encode(self, states):
-        return self.encoder.encode(states, output=self.output)
+    def encode(self, states=None):
+        return self.encoder.encode(self.states if states is None else states, capacities=self.capacities)
 
-    def sizes(self):
-        """Scratch and output bytes of the reservation."""
-        return dict(scratch_bytes=int(self.encoder.reserved_bytes()), output_bytes=self.output_bytes)
+    def close(self):
+        self.encoder = self.states = None
+        self.gpu.sync()
 
 
-def release(graphs, holds):
-    """Destroys the captured graphs, then the acquisitions they held: a graph retains its acquisition until its last
-    replay, and an acquisition is released only after the work that used it."""
-    graphs.clear()
-    holds.clear()
+def time_graph_replays(gpu, graph, replays):
+    """Microseconds of `replays` back-to-back replays of a CUDA graph, between two timing events."""
+    cuda = gpu.torch.cuda
+    start, stop = cuda.Event(enable_timing=True), cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(replays):
+        graph.replay()
+    stop.record()
+    stop.synchronize()
+    return start.elapsed_time(stop) * 1e3
 
 
-def env_modes(task, gpu, sizes, want_encode):
-    """The device modes of one task, the objects to release (captured graphs, acquisitions) and the largest
-    environment. One environment per size N."""
-    modes, graphs, holds = [], [], []
-    env_last = None
+def replay_and_sync(gpu, graph):
+    graph.replay()
+    gpu.sync()
+
+
+@contextlib.contextmanager
+def encode_session(gpu, encoder, states, eager):
+    """The run of one device encode of `states`: a CUDA graph of one encode captured on a side stream and replayed
+    REPLAYS times per timed run (the time comes from CUDA events), or with `eager` one call and a synchronize."""
+    run = DeviceRun(gpu, encoder, states)
+    graph = output = None
+    try:
+        if eager:
+
+            def timed():
+                run.encode()
+                gpu.sync()
+
+            yield timed
+        else:
+            graph = gpu.torch.cuda.CUDAGraph()
+            with gpu.torch.cuda.graph(graph, stream=gpu.torch.cuda.Stream()):
+                output = run.encode()
+            yield lambda: time_graph_replays(gpu, graph, REPLAYS)
+    finally:
+        graph = output = None
+        run.close()
+
+
+@contextlib.contextmanager
+def encode_in_step_session(gpu, env, encoder):
+    """The run of a captured environment step whose policy encodes the step's states."""
+    run = DeviceRun(gpu, encoder, env.states)
+    graph = None
+    try:
+
+        def policy(e):
+            run.encode(e.states)
+            return e.random_actions()
+
+        graph = env.capture(STEPS, policy)
+        yield lambda: replay_and_sync(gpu, graph)
+    finally:
+        graph = None
+        run.close()
+
+
+class Resources:
+    """What the device modes keep alive: environments, their captured graphs and the modes that replay them.
+    `release()` drops the modes' references first, then the captured graphs, then the environments, and waits for the
+    device in between: a graph is destroyed before what it replays on, and nothing outlives the task."""
+
+    def __init__(self, gpu):
+        self.gpu = gpu
+        self.modes, self.graphs, self.envs = [], [], []
+
+    def release(self):
+        for mode in self.modes:
+            mode.run = mode.open = mode.stats = None
+        self.modes.clear()
+        for owned in (self.graphs, self.envs):
+            owned.clear()
+            if self.gpu.ok:
+                self.gpu.sync()
+        if self.gpu.ok:
+            self.gpu.empty_cache()
+
+
+ENV_MODES = ("env_step_n{n}", "env_step_rand_n{n}", "env_step_encode_n{n}")
+DEVICE_MODES = (("device_encode_graph", "graph", False), ("device_encode_rel", "relation", False),
+                ("device_encode_graph_eager", "graph", True))
+
+
+def device_modes(task, gpu, sizes, wants, encoders, resources):
+    """The environment and device-encode modes of one task that `wants(name)` selects. Only what a selected mode needs
+    is built. The device-encode modes take the largest environment's states. Environments, captured graphs and the
+    modes that replay them are registered in `resources`."""
+    names = {n: [pattern.format(n=n) for pattern in ENV_MODES] for n in sizes}
+    selected_env = {n: [m for m in names[n] if wants(m)] for n in sizes}
+    selected_device = [spec for spec in DEVICE_MODES if wants(spec[0])]
+    largest = max(sizes) if sizes else None
+    modes = []
+    if not gpu.ok:
+        for n in sizes:
+            modes += [Mode(m, "env", unit="us_per_step", N=n).skipped(gpu.reason, True) for m in selected_env[n]]
+        modes += [Mode(name, "device", layout=layout, timing="eager" if eager else "replay").skipped(gpu.reason, True)
+                  for name, layout, eager in selected_device]
+        return modes
+    probe = {}
+
+    def unsupported(env):
+        """The reason the device encode is not available, or None; probed once per task."""
+        if "reason" not in probe:
+            encoder, reason = encoders["graph"]
+            probe["reason"] = (f"layout graph unavailable: {reason}" if encoder is None
+                               else probe_device_encode(gpu, encoder, env.states[:PROBE_STATES]))
+        return probe["reason"]
+
     for n in sizes:
-        names = (f"env_step_n{n}", f"env_step_rand_n{n}", f"env_step_encode_n{n}")
+        need_device = n == largest and selected_device
+        if not selected_env[n] and not need_device:
+            continue
         try:
             env = gpu.rt.BatchedEnv(task, n, device=gpu.device, seed=1)
             for _ in range(5):
                 env.step()
             gpu.sync()
-            step = env.capture(STEPS)
-            rand = env.capture(STEPS, lambda e: e.random_actions())
+            resources.envs.append(env)
+            step = env.capture(STEPS) if names[n][0] in selected_env[n] else None
+            rand = env.capture(STEPS, lambda e: e.random_actions()) if names[n][1] in selected_env[n] else None
         except Exception as error:  # noqa: BLE001
             reason = f"device environment unavailable: {str(error).splitlines()[0][:160]}"
-            modes += [Mode(m, "env", unit="us_per_step", skip=reason, N=n) for m in names]
+            modes += [Mode(m, "env", unit="us_per_step", N=n, skip=reason) for m in selected_env[n]]
+            if need_device:
+                modes += [Mode(name, "device", layout=layout, timing="eager" if eager else "replay", skip=reason)
+                          for name, layout, eager in selected_device]
             continue
-        graphs += [env, step, rand]
-
-        def replay(graph):
-            graph.replay()
-            gpu.sync()
-
-        modes.append(Mode(names[0], "env", lambda g=step: replay(g), STEPS, "us_per_step", N=n, row_words=env.row_words))
-        modes.append(Mode(names[1], "env", lambda g=rand: replay(g), STEPS, "us_per_step", N=n, row_words=env.row_words))
-        cls = device_encoder_class()
-        if cls is None:
-            modes.append(Mode(names[2], "env", unit="us_per_step", N=n, skip="no device encoder"))
-        elif want_encode:
-            try:
-                device = DeviceRun(cls, task, gpu, n, "graph")
-
-                def policy(e, run=device):
-                    run.encode(e.states)
-                    return e.random_actions()
-
-                encoded = env.capture(STEPS, policy)
-                graphs.append(encoded)
-                holds.append(device)
-                modes.append(Mode(names[2], "env", lambda g=encoded: replay(g), STEPS, "us_per_step", N=n,
-                                  **device.sizes()))
-            except Exception as error:  # noqa: BLE001
-                modes.append(Mode(names[2], "env", unit="us_per_step", N=n,
-                                  skip=f"device encoder failed: {str(error).splitlines()[0][:160]}"))
-        env_last = (env, n)
-    return modes, (graphs, holds), env_last
-
-
-def device_modes(task, gpu, env_n, want):
-    """The device encoder alone on the states of the largest environment, graph-major and relation-major."""
-    names = (("device_encode_graph", "graph"), ("device_encode_rel", "relation"))
-    cls = device_encoder_class()
-    if cls is None:
-        return [Mode(n, "device", skip="no device encoder", layout=lay) for n, lay in names], []
-    if not gpu.ok or env_n is None:
-        return [Mode(n, "device", skip="no device environment to take states from", layout=lay) for n, lay in names], []
-    env, n = env_n
-    modes, holds = [], []
-    for name, layout in names:
-        try:
-            device = DeviceRun(cls, task, gpu, n, layout)
-            holds.append(device)
-
-            def run(d=device):
-                d.encode(env.states)
-                gpu.sync()
-
-            modes.append(Mode(name, "device", run, n, "us_per_state", layout=layout, N=n, **device.sizes()))
-        except Exception as error:  # noqa: BLE001
-            modes.append(Mode(name, "device", skip=f"device encoder failed: {str(error).splitlines()[0][:160]}",
-                              layout=layout))
-    return modes, holds
+        resources.graphs += [g for g in (step, rand) if g is not None]
+        env_fields = dict(N=n, row_words=env.row_words)
+        if step is not None:
+            modes.append(Mode(names[n][0], "env", lambda g=step: replay_and_sync(gpu, g), STEPS, "us_per_step",
+                              **env_fields))
+        if rand is not None:
+            modes.append(Mode(names[n][1], "env", lambda g=rand: replay_and_sync(gpu, g), STEPS, "us_per_step",
+                              **env_fields))
+        if names[n][2] in selected_env[n]:
+            mode = Mode(names[n][2], "env", unit="us_per_step", units=STEPS, **env_fields)
+            reason = unsupported(env)
+            encoder = encoders["graph"][0]
+            if reason is not None:
+                mode.skipped(reason, unavailable=True)
+            else:
+                mode.stats = (encoder, lambda e=env: host_rows(e.states))
+                mode.open = lambda e=env, enc=encoder: encode_in_step_session(gpu, e, enc)
+            modes.append(mode)
+        if need_device:
+            for name, layout, eager in selected_device:
+                fields = dict(layout=layout, N=n, timing="eager" if eager else "replay")
+                mode = Mode(name, "device", units=n if eager else n * REPLAYS, reports_time=not eager, **fields)
+                encoder, reason = encoders[layout]
+                reason = f"layout {layout} unavailable: {reason}" if encoder is None else unsupported(env)
+                if reason is not None:
+                    mode.skipped(reason, unavailable=True)
+                else:
+                    mode.stats = (encoder, lambda e=env: host_rows(e.states))
+                    mode.open = lambda e=env, enc=encoder, eg=eager: encode_session(gpu, enc, e.states, eg)
+                modes.append(mode)
+    resources.modes += modes
+    return modes
 
 
 # ------------------------------------------------------------------------------------------------ timing
 
 
+def time_once(mode):
+    """One timed run of `mode` (host clock, or the time the run reports); False after a failure."""
+    t0 = time.perf_counter()
+    try:
+        reported = mode.run()
+    except Exception as error:  # noqa: BLE001
+        mode.error = describe(error)
+        return False
+    elapsed = reported if mode.reports_time else (time.perf_counter() - t0) * 1e6
+    mode.times.append(elapsed / mode.units)
+    return True
+
+
+def warm_up(mode):
+    try:
+        for _ in range(2):
+            mode.run()
+    except Exception as error:  # noqa: BLE001
+        mode.error = describe(error)
+
+
 def time_rounds(modes, rounds):
-    """Warm up each runnable mode, then run `rounds` interleaved rounds (the start mode rotates every round)."""
+    """Warm up each runnable mode, then run `rounds` interleaved rounds (the start mode rotates every round). The modes
+    that build what they time (`open`) follow one after the other, each with its rounds, so that only one is alive."""
     live = [m for m in modes if m.run is not None and m.skip is None]
-    for mode in list(live):
-        try:
-            for _ in range(2):
-                mode.run()
-        except Exception as error:  # noqa: BLE001
-            mode.error = f"{type(error).__name__}: {str(error).splitlines()[0][:200] if str(error) else ''}"
-            live.remove(mode)
+    for mode in live:
+        warm_up(mode)
+    live = [m for m in live if not m.error]
     for r in range(rounds):
         k = r % len(live) if live else 0
         for mode in live[k:] + live[:k]:
-            if mode.error:
-                continue
-            t0 = time.perf_counter()
-            try:
-                mode.run()
-            except Exception as error:  # noqa: BLE001
-                mode.error = f"{type(error).__name__}: {str(error).splitlines()[0][:200] if str(error) else ''}"
-                continue
-            mode.times.append((time.perf_counter() - t0) * 1e6 / mode.units)
+            if not mode.error:
+                time_once(mode)
+    for mode in modes:
+        if mode.open is None or mode.skip is not None:
+            continue
+        try:
+            with mode.open() as run:
+                mode.run = run
+                warm_up(mode)
+                for _ in range(rounds if not mode.error else 0):
+                    if not time_once(mode):
+                        break
+        except Exception as error:  # noqa: BLE001
+            mode.error = describe(error)
+        finally:
+            mode.run = None
 
 
 def summarize(mode):
@@ -493,107 +663,246 @@ def summarize(mode):
 
 
 class Index:
-    """The measured records of one run, by task and mode."""
+    """The records of one run, by task and mode. Tasks that could not be loaded appear in `task_skipped`."""
 
     def __init__(self, records):
-        self.rec = {(r["task"], r["mode"]): r for r in records if r["status"] == "ok"}
-        self.tasks = sorted({r["task"] for r in records}, key=lambda t: list(TASKS).index(t) if t in TASKS else 99)
+        self.rec, self.task_skipped = {}, {}
+        for r in records:
+            if r["mode"] == "*":
+                self.task_skipped[r["task"]] = r.get("reason")
+            else:
+                self.rec[(r["task"], r["mode"])] = r
+        found = {r["task"] for r in records}
+        self.tasks = sorted(found, key=lambda t: list(TASKS).index(t) if t in TASKS else 99)
 
     def get(self, task, mode, field="min"):
         r = self.rec.get((task, mode))
-        return None if r is None else r.get(field)
+        return None if r is None or r["status"] != "ok" else r.get(field)
 
-    def bytes(self, task):
-        for mode in ("cpu_batch_all", "cpu_batch256"):
-            r = self.rec.get((task, mode))
-            if r:
-                return r.get("bytes_per_state")
-        return None
+    def modes_of(self, task, prefix):
+        """The records of `task` whose mode starts with `prefix`, any status."""
+        return [r for (t, m), r in self.rec.items() if t == task and m.startswith(prefix)]
 
-    def largest_env(self, task, prefix):
-        found = [(r["N"], r) for (t, m), r in self.rec.items() if t == task and m.startswith(prefix + "_n")]
-        return max(found, key=lambda x: x[0])[1] if found else None
+
+def outcome(status, reason=None, **fields):
+    return dict(status=status, **({} if reason is None else dict(reason=reason)), **fields)
 
 
 def verdict(ok):
     return "pass" if ok else "fail"
 
 
-def gate_results(index):
-    """{gate id: {task: dict(status, value, limit)}} for the gates that the measured modes allow."""
+RANK = {"n/a": 0, "skipped": 1, "error": 2}
+
+
+def unavailable(index, task, modes):
+    """None when every mode of `task` was measured. Otherwise the outcome that stands for the worst missing one: an
+    error, then a skip (missing data or a failed setup), then n/a (not selected, or unavailable on this host or build)."""
+    worst = None
+    for mode in modes:
+        r = index.rec.get((task, mode))
+        if r is None:
+            if task in index.task_skipped:
+                found = outcome("skipped", f"task skipped: {index.task_skipped[task]}")
+            else:
+                found = outcome("n/a", f"{mode} not selected")
+        elif r["status"] == "ok":
+            continue
+        elif r["status"] == "error":
+            found = outcome("error", f"{mode}: {r['reason']}")
+        else:
+            found = outcome("n/a" if r.get("unavailable") else "skipped", f"{mode}: {r['reason']}")
+        if worst is None or RANK[found["status"]] > RANK[worst["status"]]:
+            worst = found
+    return worst
+
+
+def gate_t1(index, task):
+    r = index.rec[(task, "cpu_batch_all")]
+    limit = 0.3 + 1e-3 * r["ints_per_state"]
+    return outcome(verdict(r["min"] <= limit), value=r["min"], limit=limit)
+
+
+def gate_tc2(index, task):
+    value = index.get(task, "cpu_single")
+    return outcome(verdict(value <= 3.0), value=value, limit=3.0)
+
+
+def gate_tc1(index, task):
+    n = index.rec[(task, "cpu_batch_all")]["units"]
+    if n < 4096:
+        return outcome("n/a", f"a batch of {n} states, under 4096")
+    speedup = index.get(task, "cpu_batch_all") / index.get(task, "cpu_batch_all_t8")
+    return outcome(verdict(speedup >= 3.5), value=speedup, limit=3.5)
+
+
+def gate_t6(index, task):
+    value = index.get(task, "cpu_batch256")
+    limit = REFERENCE_FLAT_US[task][1] / 20
+    return outcome(verdict(value <= limit), value=value, limit=limit)
+
+
+def gate_t7(index, task):
+    ratio = index.get(task, "cpu_batch_all_rel") / index.get(task, "cpu_batch_all")
+    return outcome(verdict(ratio <= 1.2), value=ratio, limit=1.2)
+
+
+def gate_env(index, task):
+    """Every recorded size of the task that has a record: a step more than 20% slower fails, more than 20% faster is a
+    warning (a much faster step can mean that the graph does less work)."""
+    by_size, worst = {}, None
+    for n, base in ENV_STEP_US[task].items():
+        missing = unavailable(index, task, [f"env_step_n{n}"])
+        if missing is not None:
+            by_size[n] = missing
+            continue
+        value = index.get(task, f"env_step_n{n}")
+        ratio = value / base
+        by_size[n] = outcome(verdict(ratio <= 1.2), value=value, limit=base, ratio=ratio, faster=ratio < 0.8,
+                             median_ratio=(index.get(task, f"env_step_n{n}", "median") or float("nan")) / base)
+    statuses = {o["status"] for o in by_size.values()}
+    for status in ("fail", "error", "skipped", "pass"):
+        if status in statuses:
+            shown = max((n for n, o in by_size.items() if o["status"] == status), default=None)
+            return outcome(status, by_size[shown].get("reason"),
+                           **{k: v for k, v in by_size[shown].items() if k not in ("status", "reason", "faster")},
+                           faster=[n for n, o in by_size.items() if o.get("faster")], by_size=by_size)
+    return outcome("n/a", next(iter(by_size.values()))["reason"], by_size=by_size)
+
+
+def device_batch_too_small(index, task):
+    """The n/a outcome when the device encode ran on under 4096 states, else None."""
+    r = index.rec[(task, "device_encode_graph")]
+    if r["N"] < 4096:
+        return outcome("n/a", f"N = {r['N']}, under 4096")
+    return None
+
+
+def gate_tg1(index, task):
+    small = device_batch_too_small(index, task)
+    if small:
+        return small
+    r = index.rec[(task, "device_encode_graph")]
+    proto = PROTOTYPE_GPU[task]
+    b = r["bytes_per_state"]
+    limit = 1.25 * proto["full_ns"] * b / proto["bytes"]
+    return outcome(verdict(r["min"] * 1e3 <= limit), value=r["min"] * 1e3, limit=limit, goal=b / 150 + 2)
+
+
+def gate_tg2(index, task):
+    ratio = index.get(task, "device_encode_rel") / index.get(task, "device_encode_graph")
+    return outcome(verdict(ratio <= 1.5), value=ratio, limit=1.5)
+
+
+def gate_tg5(index, task):
+    small = device_batch_too_small(index, task)
+    if small:
+        return small
+    graph = index.get(task, "device_encode_graph")
+    s1, s8 = index.get(task, "cpu_batch_all") / graph, index.get(task, "cpu_batch_all_t8") / graph
+    return outcome(verdict(s1 >= 10 and s8 >= 3), value=[s1, s8], limit=[10, 3])
+
+
+def gate_tg3(index, task):
+    """The largest environment size with an encode-in-step record: the added time per environment of the encode."""
+    sizes = [r["N"] for r in index.modes_of(task, "env_step_encode_n")]
+    if not sizes:
+        return unavailable(index, task, ["env_step_encode_n*"])
+    n = max(sizes)
+    missing = unavailable(index, task, [f"env_step_rand_n{n}", f"env_step_encode_n{n}"])
+    if missing:
+        return missing
+    if n < 4096:
+        return outcome("n/a", f"N = {n}, under 4096")
+    enc, rand = index.rec[(task, f"env_step_encode_n{n}")], index.rec[(task, f"env_step_rand_n{n}")]
+    added = enc["min_ns_per_env"] - rand["min_ns_per_env"]
+    b = enc["bytes_per_state"]
+    limit = 1.25 * PROTOTYPE_E2E_NS[task]["full"] * b / PROTOTYPE_GPU[task]["bytes"]
+    return outcome(verdict(added <= limit), value=added, limit=limit, goal=b / 150 + 3)
+
+
+# per gate: (the reason it does not apply to a task or None, the modes it needs, its evaluation). The modes the gate
+# derives itself (ENV, T-G3) are named in the evaluation.
+def _no_baseline(table):
+    return lambda task: None if table.get(task) else f"no recorded baseline for {task}"
+
+
+GATES = {
+    "T1": (lambda task: None, ("cpu_batch_all",), gate_t1),
+    "T-C2": (lambda task: None, ("cpu_single",), gate_tc2),
+    "T-C1": (lambda task: None, ("cpu_batch_all", "cpu_batch_all_t8"), gate_tc1),
+    "T6": (_no_baseline(REFERENCE_FLAT_US), ("cpu_batch256",), gate_t6),
+    "T7": (lambda task: None, ("cpu_batch_all", "cpu_batch_all_rel"), gate_t7),
+    "ENV": (_no_baseline(ENV_STEP_US), None, gate_env),
+    "T-G1": (_no_baseline(PROTOTYPE_GPU), ("device_encode_graph",), gate_tg1),
+    "T-G2": (lambda task: None, ("device_encode_graph", "device_encode_rel"), gate_tg2),
+    "T-G3": (_no_baseline(PROTOTYPE_E2E_NS), None, gate_tg3),
+    "T-G5": (lambda task: None, ("device_encode_graph", "cpu_batch_all", "cpu_batch_all_t8"), gate_tg5),
+}
+
+
+def gate_results(index, tasks):
+    """{gate id: {task: outcome}} for the gates that have an evaluation. `tasks` are the tasks the run was asked to
+    measure; every gate lists each of them. An outcome is pass or fail with its value and limit, error (a needed mode
+    failed), skipped (a needed mode or the task was skipped), or n/a with the reason the gate does not apply."""
     out = {t["id"]: {} for t in TARGETS}
-    for task in index.tasks:
-        g = lambda m, f="min": index.get(task, m, f)  # noqa: E731
-        b = index.bytes(task)
-        ints = index.rec.get((task, "cpu_batch_all"), {}).get("ints_per_state")
-        if g("cpu_batch_all") is not None and ints is not None:
-            limit = 0.3 + 1e-3 * ints
-            out["T1"][task] = dict(value=g("cpu_batch_all"), limit=limit, status=verdict(g("cpu_batch_all") <= limit))
-        if g("cpu_single") is not None:
-            out["T-C2"][task] = dict(value=g("cpu_single"), limit=3.0, status=verdict(g("cpu_single") <= 3.0))
-        if g("cpu_batch_all") is not None and g("cpu_batch_all_t8") is not None:
-            speedup = g("cpu_batch_all") / g("cpu_batch_all_t8")
-            n = index.rec[(task, "cpu_batch_all")]["units"]
-            if n >= 4096:
-                out["T-C1"][task] = dict(value=speedup, limit=3.5, status=verdict(speedup >= 3.5))
-        if g("cpu_batch256") is not None and task in REFERENCE_FLAT_US:
-            limit = REFERENCE_FLAT_US[task][1] / 20
-            out["T6"][task] = dict(value=g("cpu_batch256"), limit=limit, status=verdict(g("cpu_batch256") <= limit))
-        if g("cpu_batch_all") is not None and g("cpu_batch_all_rel") is not None:
-            ratio = g("cpu_batch_all_rel") / g("cpu_batch_all")
-            out["T7"][task] = dict(value=ratio, limit=1.2, status=verdict(ratio <= 1.2))
-        for n, base in ENV_STEP_US.get(task, {}).items():
-            value = g(f"env_step_n{n}")
-            if value is not None:
-                ratio = value / base
-                key = task if n == max(ENV_STEP_US[task]) else f"{task}@{n}"
-                out["ENV"][key] = dict(value=value, limit=base, ratio=ratio, status=verdict(ratio <= 1.2),
-                                       within_20_percent=abs(ratio - 1) <= 0.2,
-                                       median_ratio=(g(f"env_step_n{n}", "median") or float("nan")) / base)
-        proto = PROTOTYPE_GPU.get(task)
-        graph = g("device_encode_graph")
-        if graph is not None and proto and b:
-            run = index.rec[(task, "device_encode_graph")]
-            if run["units"] >= 4096:
-                limit = 1.25 * proto["full_ns"] * b / proto["bytes"]
-                out["T-G1"][task] = dict(value=graph * 1e3, limit=limit, status=verdict(graph * 1e3 <= limit),
-                                         goal=b / 150 + 2)
-                cpu1, cpu8 = g("cpu_batch_all"), g("cpu_batch_all_t8")
-                if cpu1 is not None and cpu8 is not None:
-                    s1, s8 = cpu1 / graph, cpu8 / graph
-                    out["T-G5"][task] = dict(value=[s1, s8], limit=[10, 3], status=verdict(s1 >= 10 and s8 >= 3))
-        rel = g("device_encode_rel")
-        if graph is not None and rel is not None:
-            out["T-G2"][task] = dict(value=rel / graph, limit=1.5, status=verdict(rel / graph <= 1.5))
-        enc_run, rand_run = index.largest_env(task, "env_step_encode"), index.largest_env(task, "env_step_rand")
-        e2e = PROTOTYPE_E2E_NS.get(task)
-        if enc_run and rand_run and e2e and b and enc_run["N"] == rand_run["N"]:
-            added = enc_run["min_ns_per_env"] - rand_run["min_ns_per_env"]
-            limit = 1.25 * e2e["full"] * b / PROTOTYPE_GPU[task]["bytes"]
-            out["T-G3"][task] = dict(value=added, limit=limit, status=verdict(added <= limit), goal=b / 150 + 3)
+    for gate, (applies, modes, evaluate) in GATES.items():
+        for task in tasks:
+            reason = applies(task)
+            if reason is not None:
+                out[gate][task] = outcome("n/a", reason)
+                continue
+            missing = None if modes is None else unavailable(index, task, modes)
+            out[gate][task] = missing or evaluate(index, task)
     return out
 
 
 def gate_table(results):
-    """(rows, text): one row per gate with its overall status."""
+    """(rows, text): one row per gate with its status: n/a (no task it applies to, with the reasons), pass, fail,
+    error, or incomplete when a task it applies to was skipped or could not be evaluated (named, with k of n tasks
+    evaluated). The result of a gate is never pass while a task it applies to is missing."""
     needs = {t["id"]: t.get("needs") for t in TARGETS}
     rows = []
     for target in TARGETS:
         per_task = results[target["id"]]
-        statuses = [r["status"] for r in per_task.values()]
-        if not statuses:
-            status, detail = "n/a", needs[target["id"]] or "the modes it needs were skipped"
-            if needs[target["id"]]:
-                detail = "needs " + detail
+        applicable = {t: o for t, o in per_task.items() if o["status"] != "n/a"}
+        row = dict(id=target["id"], what=target["what"])
+        if not applicable:
+            reasons = {}
+            for task, o in per_task.items():
+                reasons.setdefault(o["reason"], []).append(task)
+            row.update(status="n/a", detail="; ".join(f"{reason} ({', '.join(tasks)})" for reason, tasks in reasons.items())
+                       if reasons else "needs " + (needs[target["id"]] or "its modes"))
+            if not reasons and needs[target["id"]] is None:
+                row["detail"] = "no task was selected"
         else:
-            status = "fail" if "fail" in statuses else "pass"
-            detail = f"{statuses.count('pass')}/{len(statuses)} pass" + (
-                "; " + ", ".join(t for t, r in per_task.items() if r["status"] == "fail") if "fail" in statuses else "")
-            if status == "fail" and target["soft"]:
-                detail += " (soft: rerun before it blocks)"
-        rows.append(dict(id=target["id"], status=status, detail=detail, what=target["what"]))
-    width = max(len(r["what"]) for r in rows)
-    lines = [f"{r['id']:<6} {r['status']:<5} {r['what']:<{width}}  {r['detail']}" for r in rows]
+            measured = [t for t, o in applicable.items() if o["status"] in ("pass", "fail")]
+            failed = [t for t in measured if applicable[t]["status"] == "fail"]
+            errored = [t for t, o in applicable.items() if o["status"] == "error"]
+            missing = [t for t, o in applicable.items() if o["status"] == "skipped"]
+            status = "fail" if failed else "error" if errored else "incomplete" if missing else "pass"
+            parts = [f"{len(measured) - len(failed)}/{len(measured)} pass"]
+            if failed:
+                parts.append("fail: " + ", ".join(failed))
+            if errored:
+                parts.append("error: " + ", ".join(f"{t} ({applicable[t]['reason']})" for t in errored))
+            if missing:
+                parts.append(f"incomplete ({len(measured)} of {len(applicable)}): missing "
+                             + ", ".join(f"{t} ({applicable[t]['reason']})" for t in missing))
+            if status in ("fail", "incomplete") and target["soft"] and failed:
+                parts.append("soft: blocks only if a rerun on a quiet host fails as well")
+            row.update(status=status, detail="; ".join(parts), measured=len(measured), applicable=len(applicable))
+        if target["id"] == "ENV":
+            faster = [f"{t}@{n} ({o['by_size'][n]['ratio']:.2f}x)" for t, o in per_task.items()
+                      for n in o.get("faster", [])]
+            if faster:
+                row["warning"] = "faster than recorded by >20%: " + ", ".join(faster)
+        rows.append(row)
+    label = {r["id"]: (f"incomplete ({r['measured']} of {r['applicable']})" if r["status"] == "incomplete" else r["status"])
+             for r in rows}
+    width, status_width = max(len(r["what"]) for r in rows), max(len(v) for v in label.values())
+    lines = [f"{r['id']:<6} {label[r['id']]:<{status_width}} {r['what']:<{width}}  {r['detail']}" for r in rows]
+    lines += [f"warn   ENV {r['warning']}" for r in rows if "warning" in r]
     return rows, "\n".join(lines)
 
 
@@ -622,9 +931,10 @@ def environment(gpu, args):
         numpy=np.__version__, mymyr_version=getattr(mymyr, "__version__", None),
         mymyr_commit=shell("git", "rev-parse", "--short", "HEAD"), host=platform.node(), cpu_count=os.cpu_count(),
         load_average_start=os.getloadavg(), cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
-        device_encoder=device_encoder_class() is not None, gpu=None)
+        device_encode_path=None, gpu=None)
     if gpu.ok:
         torch = gpu.torch
+        env["device_encode_path"] = device_path_exists(gpu)
         props = torch.cuda.get_device_properties(gpu.device)
         env["gpu"] = dict(index=args.device, name=props.name, total_memory_mib=props.total_memory // 2**20,
                           cuda=torch.version.cuda, torch=torch.__version__,
@@ -640,8 +950,33 @@ def environment(gpu, args):
 GROUPS = ("cpu", "env", "device")
 
 
-def wanted(mode, selection):
-    return selection is None or mode.name in selection or mode.group in selection
+def group_of(name):
+    return "cpu" if name.startswith("cpu") else "env" if name.startswith("env") else "device"
+
+
+def wanted(name, selection):
+    """Whether the mode `name` is selected by `--modes` (mode names and groups; None selects all)."""
+    return selection is None or name in selection or group_of(name) in selection
+
+
+def group_wanted(group, selection):
+    return selection is None or group in selection or any(group_of(n) == group for n in selection)
+
+
+def stats_of(mode, cache):
+    """(bytes, ints) per state of the batch that `mode` timed, from its CPU encoding."""
+    encoder, rows = mode.stats
+    key = None
+    if not callable(rows):
+        key = (id(encoder), id(rows))
+        if key in cache:
+            return cache[key]
+    batch = encoder.encode(rows() if callable(rows) else rows)
+    nbytes, nints = batch_stats(batch)
+    result = nbytes / batch.num_graphs, nints / batch.num_graphs
+    if key is not None:
+        cache[key] = result
+    return result
 
 
 def run_task(key, args, gpu, pool):
@@ -650,57 +985,36 @@ def run_task(key, args, gpu, pool):
     base = dict(task=key)
     if task is None:
         return [dict(**base, mode="*", status="skipped", reason=reason)]
-    rows = walk_rows(task, args.rows, args.seed)
-    big = tile(rows, max(len(rows), args.min_batch))
-    info = dict(**base, n_rows=len(rows), words=task.words, objects=len(task.objects))
-
-    encoders = {"graph": make_encoder(task), "relation": make_encoder(task, layout="relation")}
-    modes = cpu_modes(rows, big, pool, encoders)
-    graphs, holds = [], []
-    env_n = None
     selection = args.modes
-    if gpu.ok:
-        extra, (graphs, holds), env_n = env_modes(task, gpu, args.env_sizes, want_encode=True)
-        modes += extra
-    else:
-        for n in args.env_sizes:
-            modes += [Mode(f"env_step_n{n}", "env", unit="us_per_step", N=n, skip=gpu.reason),
-                      Mode(f"env_step_rand_n{n}", "env", unit="us_per_step", N=n, skip=gpu.reason),
-                      Mode(f"env_step_encode_n{n}", "env", unit="us_per_step", N=n,
-                           skip=gpu.reason if device_encoder_class() else "no device encoder")]
-    extra, more = device_modes(task, gpu, env_n, True)
-    modes += extra
-    holds += more
-    modes = [m for m in modes if wanted(m, selection)]
 
-    # the output of the CPU encoder per state, for the bytes column
-    stats = {}
-    for layout, (encoder, _) in encoders.items():
-        if encoder is not None:
-            batch = encoder.encode(rows[: min(len(rows), 256)])
-            nbytes, nints = batch_stats(batch)
-            stats[layout] = (nbytes / batch.num_graphs, nints / batch.num_graphs)
+    def wants(name):
+        return wanted(name, selection)
+
+    info = dict(**base, words=task.words, objects=len(task.objects))
+    encoders = {"graph": make_encoder(task), "relation": make_encoder(task, layout="relation")}
+    modes = []
+    if group_wanted("cpu", selection):
+        rows = walk_rows(task, args.rows, args.seed)
+        info["n_rows"] = len(rows)
+        modes += cpu_modes(rows, tile(rows, max(len(rows), args.min_batch)), pool, encoders, wants)
+    resources = Resources(gpu)
+    modes += device_modes(task, gpu, args.env_sizes, wants, encoders, resources)
     time_rounds(modes, args.rounds)
 
+    stats = {}
     records = []
     for mode in modes:
         record = dict(info, mode=mode.name, group=mode.group, unit=mode.unit, units=mode.units, **mode.fields)
-        layout = mode.fields.get("layout")
         if mode.skip is not None:
-            record.update(status="skipped", reason=mode.skip)
+            record.update(status="skipped", reason=mode.skip, **({"unavailable": True} if mode.unavailable else {}))
         elif mode.error:
             record.update(status="error", reason=mode.error)
         else:
             record.update(status="ok", **summarize(mode))
-            if mode.group in ("cpu", "device") and (layout or "graph") in stats:
-                record["bytes_per_state"], record["ints_per_state"] = stats[layout or "graph"]
+            if mode.stats is not None:
+                record["bytes_per_state"], record["ints_per_state"] = stats_of(mode, stats)
         records.append(record)
-    if gpu.ok:
-        gpu.sync()
-    release(graphs, holds)
-    if gpu.ok:
-        gpu.sync()
-        gpu.torch.cuda.empty_cache()
+    resources.release()
     return records
 
 
@@ -714,20 +1028,20 @@ def baselines():
 
 
 def print_records(records):
-    print(f"{'task':<16}{'mode':<26}{'unit':<12}{'min':>10}{'median':>10}  bytes/state")
+    print(f"{'task':<16}{'mode':<28}{'unit':<12}{'min':>10}{'median':>10}  bytes/state")
     for r in records:
         if r["status"] == "ok":
             extra = f"{r['bytes_per_state']:.0f}" if "bytes_per_state" in r else ""
-            print(f"{r['task']:<16}{r['mode']:<26}{r['unit']:<12}{r['min']:>10.3f}{r['median']:>10.3f}  {extra}")
+            print(f"{r['task']:<16}{r['mode']:<28}{r['unit']:<12}{r['min']:>10.3f}{r['median']:>10.3f}  {extra}")
         else:
-            print(f"{r['task']:<16}{r['mode']:<26}{r['status']} ({r.get('reason', '')})")
+            print(f"{r['task']:<16}{r['mode']:<28}{r['status']} ({r.get('reason', '')})")
 
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--tasks", help=f"comma-separated task keys (default: {','.join(TASKS)})")
     p.add_argument("--rows", type=int, default=4096, help="distinct rows per task (default 4096)")
-    p.add_argument("--rounds", type=int, default=20, help="interleaved rounds (default 20)")
+    p.add_argument("--rounds", type=int, default=20, help="interleaved rounds, at least 1 (default 20)")
     p.add_argument("--modes", help="comma-separated mode names or groups (cpu, env, device); default all")
     p.add_argument("--json", metavar="PATH", help="write the result as JSON")
     p.add_argument("--device", type=int, default=0, help="CUDA device index (default 0)")
@@ -737,6 +1051,8 @@ def parse_args(argv):
     p.add_argument("--env-sizes", default=",".join(map(str, ENV_SIZES)), help="environment counts N")
     p.add_argument("--quick", action="store_true", help="a smoke configuration: one small task, few rows and rounds")
     args = p.parse_args(argv)
+    if args.rounds < 1:
+        p.error("--rounds must be at least 1")
     args.env_sizes = tuple(int(x) for x in args.env_sizes.split(",") if x)
     args.tasks = args.tasks.split(",") if args.tasks else None
     args.modes = set(args.modes.split(",")) if args.modes else None
@@ -761,8 +1077,7 @@ def main(argv=None):
     if gpu.ok:
         env["gpu"]["status_end"] = gpu_status(args.device)
     env["load_average_end"] = os.getloadavg()
-    index = Index([r for r in records if r["mode"] != "*"])
-    results = gate_results(index)
+    results = gate_results(Index(records), args.tasks)
     rows, table = gate_table(results)
     print_records(records)
     print()
