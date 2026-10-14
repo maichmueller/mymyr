@@ -1,7 +1,11 @@
-"""Run example programs with the interpreter and import paths of the module under test."""
+"""Run child Python programs on the module under test.
+
+A child gets the parent's interpreter flags and ``sys.path`` and checks that it imports the same ``mymyr`` package and
+``mymyr._core`` extension files as the parent, so a test exercises the tested build and not whichever one the
+environment's site processing (an editable install, ``PYTHONPATH`` under ``-I`` / ``-E``) would select.
+"""
 
 import os
-import pathlib
 import subprocess
 import sys
 
@@ -13,36 +17,29 @@ def requires_frontend(source):
     return ".from_pddl(" in source or "mymyr.Domain" in source
 
 
-def module_bootstrap():
-    paths = [os.path.abspath(path) for path in sys.path]
+def _prelude():
     expected = [os.path.realpath(mymyr.__file__), os.path.realpath(mymyr._core.__file__)]
-    package_paths = list(dict.fromkeys([*mymyr.__path__, str(pathlib.Path(mymyr._core.__file__).parent)]))
-    # Explicitly restore the path after startup: -I and -E ignore PYTHONPATH, and editable site hooks can otherwise
-    # select a different build. Check both the Python package and the extension before executing the program.
     return (
-        "import importlib.util, os, runpy, sys\n"
-        f"sys.path[:] = {paths!r}\n"
-        f"spec = importlib.util.spec_from_file_location('mymyr', {mymyr.__file__!r}, "
-        f"submodule_search_locations={package_paths!r})\n"
-        "package = importlib.util.module_from_spec(spec)\n"
-        "sys.modules['mymyr'] = package\n"
-        f"core_spec = importlib.util.spec_from_file_location('mymyr._core', {mymyr._core.__file__!r})\n"
-        "core = importlib.util.module_from_spec(core_spec)\n"
-        "sys.modules['mymyr._core'] = core\n"
-        "core_spec.loader.exec_module(core)\n"
-        "package._core = core\n"
-        "spec.loader.exec_module(package)\n"
-        "import mymyr, mymyr._core\n"
-        f"assert [os.path.realpath(mymyr.__file__), os.path.realpath(mymyr._core.__file__)] == {expected!r}\n"
+        f"import os, runpy, sys; sys.path[:] = {[os.path.abspath(path) for path in sys.path]!r}; "
+        f"import mymyr, mymyr._core; found = [os.path.realpath(mymyr.__file__), os.path.realpath(mymyr._core.__file__)]; "
+        f"assert found == {expected!r}, found\n"
     )
 
 
-def run_python(script, *, cwd, timeout, capture_output=False):
-    bootstrap = module_bootstrap() + (
-        f"sys.argv = [{str(pathlib.Path(script).resolve())!r}]\n"
-        "runpy.run_path(sys.argv[0], run_name='__main__')\n"
-    )
+def _run(code, args, *, cwd, env, timeout, capture_output, check):
     return subprocess.run(
-        [sys.executable, *subprocess._args_from_interpreter_flags(), "-W", "error", "-c", bootstrap],
-        cwd=cwd, check=True, timeout=timeout, capture_output=capture_output, text=True,
-    )
+        [sys.executable, *subprocess._args_from_interpreter_flags(), "-W", "error", "-c", _prelude() + code, *args],
+        cwd=cwd, env=env, check=check, timeout=timeout, capture_output=capture_output, text=True,
+    )  # fmt: skip
+
+
+def run_code(code, *args, cwd=None, env=None, timeout=120, capture_output=False, check=True):
+    """Runs the source ``code`` as ``python -c code *args`` (``sys.argv == ['-c', *args]``); its first line is the
+    prelude, so line numbers in a traceback are those of ``code`` plus one."""
+    return _run(code, args, cwd=cwd, env=env, timeout=timeout, capture_output=capture_output, check=check)
+
+
+def run_python(script, *args, cwd=None, env=None, timeout=120, capture_output=False, check=True):
+    """Runs the file ``script`` as ``python script *args``."""
+    code = f"sys.argv = [{os.path.abspath(script)!r}, *sys.argv[1:]]\nrunpy.run_path(sys.argv[0], run_name='__main__')\n"
+    return _run(code, args, cwd=cwd, env=env, timeout=timeout, capture_output=capture_output, check=check)

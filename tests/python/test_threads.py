@@ -1,7 +1,6 @@
 """Thread counts: bounded with ValueError everywhere a caller's count becomes OS threads; a refused thread start is a
 RuntimeError, never an abort or a hang."""
 
-import subprocess
 import sys
 import textwrap
 
@@ -11,6 +10,7 @@ import mymyr
 from mymyr import datasets, rl, search
 
 from conftest import TASKS, text_task
+from python_children import run_code
 
 MANY = 10**6  # above the bound max(64, 4 x the hardware threads) on any machine
 
@@ -74,12 +74,7 @@ CHILD = textwrap.dedent(
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS and /proc are Linux")
 @pytest.mark.parametrize("name", ["brfs", "thread_pool", "generate", "env_pool"])
 def test_a_refused_thread_is_a_runtime_error(name):
-    p = subprocess.run(
-        [sys.executable, "-c", CHILD, name, str(TASKS / "gripper__prob05.txt")],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    p = run_code(CHILD, name, str(TASKS / "gripper__prob05.txt"), capture_output=True, check=False)
     assert p.returncode == 0, p.stderr[-2000:]
     lines = p.stdout.splitlines()
     assert lines[0].startswith("RuntimeError mymyr: could not start worker thread"), p.stdout
@@ -106,11 +101,6 @@ LOADER = textwrap.dedent(
 @pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 def test_the_table_loader_default_fits_a_small_address_space():
     counters = TASKS.parent / "pddl" / "counters"
-    p = subprocess.run(
-        [sys.executable, "-c", LOADER, str(counters / "domain.pddl"), str(counters / "p01.pddl")],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    p = run_code(LOADER, str(counters / "domain.pddl"), str(counters / "p01.pddl"), capture_output=True, check=False)
     assert p.returncode == 0, p.stderr[-2000:]
     assert p.stdout.splitlines() == ["loaded 64"], p.stdout

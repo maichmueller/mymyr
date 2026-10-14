@@ -2,7 +2,6 @@
 
 import os
 import re
-import subprocess
 import sys
 import threading
 
@@ -12,6 +11,7 @@ import pytest
 import mymyr
 from mymyr import _core, search
 from conftest import ROOT, text_task, walk
+from python_children import run_code
 
 consumer = pytest.importorskip("mymyr._testing._ext_consumer")
 
@@ -199,7 +199,7 @@ for _ in range(2):
 @pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 def test_a_refused_metric_is_an_error_of_the_c_api():
     # a fresh interpreter: the error must reach the caller on every call, also without pytest's fault handler
-    r = subprocess.run([sys.executable, "-c", REFUSED_METRIC], capture_output=True, text=True, check=False)
+    r = run_code(REFUSED_METRIC, capture_output=True, check=False)
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["task_numeric() failed"] * 2
 
@@ -223,8 +223,7 @@ def test_a_refused_metric_raises_in_every_thread_without_the_fault_handler():
     # the lazy initialization that raises runs again for every caller, also concurrently, and no exception unwinds
     # through pthread_once (which aborts without the fault handler)
     env = {k: v for k, v in os.environ.items() if k != "PYTHONFAULTHANDLER"}
-    r = subprocess.run([sys.executable, "-c", REFUSED_METRIC_THREADS], capture_output=True, text=True, check=False,
-                       env=env)
+    r = run_code(REFUSED_METRIC_THREADS, env=env, capture_output=True, check=False)
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["task_numeric() failed"] * 8 + ["done"]
 

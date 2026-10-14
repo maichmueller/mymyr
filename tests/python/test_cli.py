@@ -10,6 +10,7 @@ import pytest
 
 import mymyr
 from mymyr import search
+from python_children import run_code
 
 if not hasattr(mymyr, "Domain"):
     pytest.skip("built without the loki front end", allow_module_level=True)
@@ -44,8 +45,10 @@ def script():
 
 
 def run(*args, how="module"):
-    cmd = [sys.executable, "-m", "mymyr"] if how == "module" else script()
-    return subprocess.run([*cmd, *map(str, args)], capture_output=True, text=True, timeout=600)
+    if how == "module":
+        code = "runpy.run_module('mymyr', run_name='__main__', alter_sys=True)"
+        return run_code(code, *map(str, args), timeout=600, capture_output=True, check=False)
+    return subprocess.run([*script(), *map(str, args)], capture_output=True, text=True, timeout=600)
 
 
 def replay_cost(task, text):

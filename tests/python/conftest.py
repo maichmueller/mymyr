@@ -4,7 +4,6 @@ JAX_PLATFORMS) explicitly: only test_cuda.py uses a GPU, and it skips otherwise.
 import json
 import os
 import pathlib
-import subprocess
 import sys
 import tempfile
 
@@ -105,13 +104,15 @@ def pytest_runtest_logreport(report):
 def _run_isolated(config, path):
     fd, report = tempfile.mkstemp(suffix=".jsonl")
     os.close(fd)
-    args = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", str(config.rootpath)]
+    from python_children import run_code
+
+    args = ["-q", "-p", "no:cacheprovider", "--rootdir", str(config.rootpath)]
     for w in config.getoption("pythonwarnings") or []:
         args += ["-W", w]
     # the child exists to load such modules
     args += ["-W", "ignore:The global interpreter lock (GIL) has been enabled:RuntimeWarning"]
-    proc = subprocess.run(args + _isolated_groups[path], env={**os.environ, ISOLATED_REPORT: report},
-                          capture_output=True, text=True)
+    proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *_isolated_groups[path],
+                    env={**os.environ, ISOLATED_REPORT: report}, timeout=None, capture_output=True, check=False)
     try:
         for line in pathlib.Path(report).read_text().splitlines():
             entry = json.loads(line)
