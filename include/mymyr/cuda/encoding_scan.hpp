@@ -1,5 +1,5 @@
 #pragma once
-// The scan of the relational encoder's totals, small enough for nvcc to compile as C++20.
+// The scan of the relational encoder's totals, small enough for nvcc to compile as C++23.
 
 #include "mymyr/core/types.hpp"
 

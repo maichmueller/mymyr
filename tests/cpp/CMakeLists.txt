@@ -186,7 +186,7 @@ if(TARGET mymyr_cuda)
                                                    ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend GTest::gtest_main)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr_warnings)
-        set_target_properties(mymyr_device_encoding_tests PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
+        set_target_properties(mymyr_device_encoding_tests PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
         target_compile_definitions(mymyr_device_encoding_tests PRIVATE
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
         gtest_discover_tests(mymyr_device_encoding_tests DISCOVERY_TIMEOUT 60
