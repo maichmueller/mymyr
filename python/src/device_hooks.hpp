@@ -13,7 +13,7 @@ namespace nb = nanobind;
 struct ExpandArgs
 {
     nb::handle table, states, task_ids, capacity, words, K;
-    bool goal = false, canonical = true, witness = false;
+    bool goal = false, derived = false, canonical = true, witness = false;
     nb::handle framework;
     bool validate = true;
     nb::handle stream, ctx;
@@ -22,7 +22,7 @@ struct ExpandArgs
 /// The arguments of rl.expand_into.
 struct ExpandIntoArgs
 {
-    nb::handle table, states, task_ids, succ, parent, schema, binding, goal, offsets;
+    nb::handle table, states, task_ids, succ, parent, schema, binding, goal, derived, offsets;
     bool canonical = true, witness = false, validate = true;
     nb::handle stream, ctx;
 };

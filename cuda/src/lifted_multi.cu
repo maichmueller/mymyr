@@ -83,6 +83,13 @@ __global__ void k_part_scatter(PartScatter p, u32 shift)
             for (u32 w = lane; w < p.out_words; w += lanes)
                 dst[w] = w < p.words ? src[w] : 0;
         }
+        if (p.out_derived)
+        {
+            const u64* src = p.derived + j * p.derived_words;
+            u64* dst = p.out_derived + at * p.out_derived_words;
+            for (u32 w = lane; w < p.out_derived_words; w += lanes)
+                dst[w] = w < p.derived_words ? src[w] : 0;
+        }
         if (p.out_binding)
         {
             const i32* src = p.binding + j * p.label_width;

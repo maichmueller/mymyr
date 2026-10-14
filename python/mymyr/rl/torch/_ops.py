@@ -35,6 +35,8 @@ the states again; required on a device).
   binding, goal, offsets). ``capacity=None`` sizes the outputs by the data: the row count M is an unbacked symbolic
   size under ``torch.compile``; a capacity gives static shapes (rows past it are dropped, rows past the total are
   padding: succ 0, parent / schema / binding -1, goal False; offsets keep the true counts).
+- ``mymyr::expand_derived`` / ``mymyr::expand_flat_derived``: the same with the derived words of the successors as a
+  seventh result, int64 [N, K, D] / [M, D] (D = ``table.derived_words``; the rows of ``rl.expand(..., derived=True)``).
 """
 
 import itertools
@@ -48,7 +50,9 @@ import mymyr.rl
 
 __all__ = [
     "expand",
+    "expand_derived",
     "expand_flat",
+    "expand_flat_derived",
     "lookup",
     "random_actions",
     "refresh",
@@ -448,8 +452,7 @@ def expand(
     return p.succ, p.schema, p.binding, p.goal, p.mask, p.count
 
 
-@expand.register_fake
-def _(table, states, task_ids, K, witness=False):
+def _padded_outputs(table: int, states: Tensor, K: int) -> tuple[Tensor, ...]:
     t = lookup(table)
     n, rw = states.shape
     return (
@@ -460,6 +463,11 @@ def _(table, states, task_ids, K, witness=False):
         states.new_empty((n, K), dtype=torch.bool),
         states.new_empty(n, dtype=torch.int32),
     )
+
+
+@expand.register_fake
+def _(table, states, task_ids, K, witness=False):
+    return _padded_outputs(table, states, K)
 
 
 @torch.library.custom_op("mymyr::expand_flat", mutates_args=(), tags=_unsafe)
@@ -498,3 +506,55 @@ def _flat_outputs(t: Any, states: Tensor, m: Any) -> tuple[Tensor, ...]:
 def _(table, states, task_ids, capacity=None, witness=False):
     m = torch.library.get_ctx().new_dynamic_size() if capacity is None else capacity
     return _flat_outputs(lookup(table), states, m)
+
+
+# ------------------------------------------------------------------------------------------------ derived words
+
+
+@torch.library.custom_op("mymyr::expand_derived", mutates_args=(), tags=_unsafe)
+def expand_derived(
+    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness: bool = False
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    t = lookup(table)
+    if K <= 0:
+        raise ValueError("mymyr: expand_derived needs K > 0 (the padded width is a static shape)")
+    words = states.shape[1] - t.numeric_words
+    x = mymyr.rl.expand(
+        t, states, task_ids, words=words, K=K, goal=True, derived=True, witness=witness, stream=_stream(states)
+    )
+    p = x.padded
+    return p.succ, p.schema, p.binding, p.goal, p.mask, p.count, p.derived
+
+
+@expand_derived.register_fake
+def _(table, states, task_ids, K, witness=False):
+    n = states.shape[0]
+    return (*_padded_outputs(table, states, K), states.new_empty((n, K, lookup(table).derived_words)))
+
+
+@torch.library.custom_op("mymyr::expand_flat_derived", mutates_args=(), tags=_unsafe)
+def expand_flat_derived(
+    table: int, states: Tensor, task_ids: Optional[Tensor], capacity: Optional[int] = None, witness: bool = False
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    t = lookup(table)
+    n, rw = states.shape
+    words = rw - t.numeric_words
+    if capacity is None:
+        x = mymyr.rl.expand(
+            t, states, task_ids, words=words, goal=True, derived=True, witness=witness, stream=_stream(states)
+        )
+        return x.succ, x.parent, x.schema, x.binding, x.goal, x.offsets, x.derived
+    out = _flat_outputs(t, states, capacity)
+    derived = states.new_zeros((capacity, t.derived_words))
+    succ, parent, schema, binding, goal, offsets = out
+    mymyr.rl.expand_into(
+        t, states, task_ids, succ=succ, parent=parent, schema=schema, binding=binding, goal=goal, derived=derived,
+        offsets=offsets, witness=witness, stream=_stream(states),
+    )  # fmt: skip
+    return (*out, derived)
+
+
+@expand_flat_derived.register_fake
+def _(table, states, task_ids, capacity=None, witness=False):
+    m = torch.library.get_ctx().new_dynamic_size() if capacity is None else capacity
+    return (*_flat_outputs(lookup(table), states, m), states.new_empty((m, lookup(table).derived_words)))

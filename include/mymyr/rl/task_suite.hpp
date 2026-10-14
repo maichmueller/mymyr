@@ -108,6 +108,8 @@ public:
     /// Numeric words of a row (the most any domain has).
     [[nodiscard]] u32 numeric_words() const noexcept { return m_numeric_words; }
     [[nodiscard]] u32 row_words() const noexcept { return m_words + m_numeric_words; }
+    /// Derived words of a row: the most any domain has (TaskTable::derived_words).
+    [[nodiscard]] u32 derived_words() const noexcept { return m_derived_words; }
     /// The largest schema arity of any domain (the label width).
     [[nodiscard]] u32 label_width() const noexcept { return m_label_width; }
     [[nodiscard]] u32 max_objects() const noexcept { return m_max_objects; }
@@ -146,7 +148,7 @@ private:
     std::vector<std::vector<u32>> m_global;  // [D][I_d] local -> global (empty: identity)
     std::vector<u32> m_schema_offsets;
     std::vector<u32> m_instance_words;  // [I] each global instance's words
-    u32 m_size = 0, m_words = 1, m_numeric_words = 0, m_label_width = 0, m_max_objects = 0, m_max_schemas = 0;
+    u32 m_size = 0, m_words = 1, m_numeric_words = 0, m_derived_words = 0, m_label_width = 0, m_max_objects = 0, m_max_schemas = 0;
     bool m_numeric = false;
 };
 

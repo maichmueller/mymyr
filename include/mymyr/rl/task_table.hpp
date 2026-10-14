@@ -54,6 +54,7 @@ public:
         u32 num_objects = 0;
         u32 words = 1;          // Task::max_words(), at least 1
         u32 numeric_words = 0;  // Task::numeric_words()
+        u32 derived_words = 0;  // words of the instance's derived bitset (0 without derived atoms)
         u32 ow = 1;             // object-bitset words (the device kernels' OW)
         std::vector<u64> init;  // the initial state as a table row [table words + table numeric words]
         std::vector<u64> goal_pos, goal_neg;  // the fluent goal literals as masks [table words]
@@ -87,6 +88,9 @@ public:
     /// Numeric words of a row (the most any instance has; 0 for classical tables).
     [[nodiscard]] u32 numeric_words() const noexcept { return m_numeric_words; }
     [[nodiscard]] u32 row_words() const noexcept { return m_words + m_numeric_words; }
+    /// Words of a derived-atom row: the most derived words any instance has (0 if none has derived atoms). The derived
+    /// words of a state are its derived atoms' bits in slot order, from a fresh axiom evaluation.
+    [[nodiscard]] u32 derived_words() const noexcept { return m_derived_words; }
     /// Schemas (every instance's) and the largest schema arity (the label width).
     [[nodiscard]] u32 num_schemas() const noexcept { return static_cast<u32>(m_schema_names.size()); }
     [[nodiscard]] u32 label_width() const noexcept { return m_label_width; }
@@ -121,7 +125,7 @@ public:
 
 private:
     std::vector<Instance> m_inst;
-    u32 m_words = 1, m_numeric_words = 0, m_label_width = 0, m_max_objects = 0;
+    u32 m_words = 1, m_numeric_words = 0, m_derived_words = 0, m_label_width = 0, m_max_objects = 0;
     bool m_numeric = false;
     NumericStorage m_numeric_storage = NumericStorage::F64;
     u32 m_numeric_instance = 0;  // the first numeric instance

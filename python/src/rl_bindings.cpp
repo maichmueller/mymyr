@@ -204,8 +204,9 @@ struct FlatResult
     u64 rows = 0, capacity = 0, total = 0;
     u32 words = 0, label_width = 0, words_needed = 0;
     u32 numeric_words = 0;  // numeric tables: rows are [words | numeric_words]
-    u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_offsets = 0;
-    bool has_goal = false;
+    u64 off_succ = 0, off_parent = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0, off_offsets = 0;
+    u32 derived_words = 0;  // words per row of the derived array
+    bool has_goal = false, has_derived = false;
 
     [[nodiscard]] u64 valid() const noexcept { return std::min(total, capacity); }
     template<class T>
@@ -224,6 +225,8 @@ struct FlatResult
         x.schema = at<i32>(off_schema);
         x.binding = at<i32>(off_binding);
         x.goal = has_goal ? at<u8>(off_goal) : nullptr;
+        x.derived = has_derived && derived_words ? at<u64>(off_derived) : nullptr;
+        x.derived_words = derived_words;
         x.offsets = at<i32>(off_offsets);
         x.total = total;
         x.words_needed = words_needed;
@@ -233,7 +236,7 @@ struct FlatResult
     [[nodiscard]] i64 row_words() const noexcept { return static_cast<i64>(words) + numeric_words; }
 };
 
-FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal)
+FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal, std::optional<u32> derived)
 {
     FlatResult r;
     BlockLayout lay;
@@ -243,11 +246,14 @@ FlatResult allocate_flat(u64 rows, u64 cap, u32 W, u32 NN, u32 L, bool goal)
     r.numeric_words = NN;
     r.label_width = L;
     r.has_goal = goal;
+    r.has_derived = derived.has_value();
+    r.derived_words = derived.value_or(0);
     r.off_succ = lay.add(cap, (u64{W} + NN) * sizeof(u64));
     r.off_parent = lay.add(cap, sizeof(i32));
     r.off_schema = lay.add(cap, sizeof(i32));
     r.off_binding = lay.add(cap, u64{L} * sizeof(i32));
     r.off_goal = lay.add(goal ? cap : 0, 1);
+    r.off_derived = lay.add(derived ? cap : 0, u64{r.derived_words} * sizeof(u64));
     r.off_offsets = lay.add(checked_add(rows, 1, "the offsets"), sizeof(i32));
     r.block = Block::make(lay.bytes);
     return r;
@@ -258,8 +264,9 @@ struct PaddedResult
     std::shared_ptr<Block> block;
     u64 rows = 0;
     u32 K = 0, words = 0, label_width = 0, numeric_words = 0;
-    u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0;
-    bool has_goal = false, overflow = false;
+    u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
+    u32 derived_words = 0;
+    bool has_goal = false, has_derived = false, overflow = false;
     Framework fw = Framework::Numpy;
     WordEncoding enc;
 };
@@ -274,6 +281,8 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     p.numeric_words = f.numeric_words;
     p.label_width = f.label_width;
     p.has_goal = f.has_goal;
+    p.has_derived = f.has_derived;
+    p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
     const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
@@ -284,6 +293,7 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     p.off_schema = lay.add(NK, sizeof(i32));
     p.off_binding = lay.add(NK, u64{f.label_width} * sizeof(i32));
     p.off_goal = lay.add(f.has_goal ? NK : 0, 1);
+    p.off_derived = lay.add(f.has_derived ? NK : 0, u64{f.derived_words} * sizeof(u64));
     p.block = Block::make(lay.bytes);
     std::byte* b = p.block->data();
     rl::PaddedExpansion out;
@@ -298,6 +308,8 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     out.label_width = f.label_width;
     out.binding = reinterpret_cast<i32*>(b + p.off_binding);
     out.goal = f.has_goal ? reinterpret_cast<u8*>(b + p.off_goal) : nullptr;
+    out.derived_words = f.derived_words;
+    out.derived = f.has_derived && f.derived_words ? reinterpret_cast<u64*>(b + p.off_derived) : nullptr;
     {
         nb::gil_scoped_release release;
         rl::pad(f.view(), f.rows, out);
@@ -448,12 +460,12 @@ using ResultDict = nb::typed<nb::dict, std::string, ann::Any>;
 using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
 
 ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, SizeArg capacity, SizeArg words, SizeArg K,
-                    bool goal, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
+                    bool goal, bool derived, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
                     bool validate, StreamArg stream, ContextArg ctx)
 {
     if (device_hooks().expand && is_cuda_array(states))
         return device_hooks().expand(
-            {table, states, task_ids, capacity, words, K, goal, canonical, witness, framework, validate, stream, ctx});
+            {table, states, task_ids, capacity, words, K, goal, derived, canonical, witness, framework, validate, stream, ctx});
     const u32 threads = threads_arg(threads_in);
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
@@ -480,7 +492,8 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     FlatResult f;
     for (int attempt = 0;; ++attempt)
     {
-        f = allocate_flat(N, cap, W, tt.numeric_words(), L, goal);
+        f = allocate_flat(N, cap, W, tt.numeric_words(), L, goal,
+                          derived ? std::optional<u32>(tt.derived_words()) : std::nullopt);
         rl::Expansion x = f.view();
         run_expand(tt, in.view, ids.ptr, x, opt, p, threads);
         f.total = x.total;
@@ -524,8 +537,10 @@ T* dest_ptr(const Dest& d, const char* name, rl::DType want, rl::DType also, usi
         throw nb::type_error((std::string("mymyr: '") + name + "' has the wrong dtype").c_str());
     if (d.shape.size() != ndim)
         throw nb::type_error((std::string("mymyr: '") + name + "' has the wrong number of dimensions").c_str());
+    // An array without elements is contiguous whatever its strides (torch gives a (N, 0) tensor strides (1, 1)).
+    const bool empty = std::find(d.shape.begin(), d.shape.end(), 0) != d.shape.end();
     i64 expect = 1;
-    for (usize k = ndim; k-- > 0;)
+    for (usize k = ndim; !empty && k-- > 0;)
     {
         if (d.shape[k] > 1 && d.strides[k] != expect)
             throw nb::type_error((std::string("mymyr: '") + name + "' must be C-contiguous").c_str());
@@ -535,13 +550,13 @@ T* dest_ptr(const Dest& d, const char* name, rl::DType want, rl::DType also, usi
 }
 
 ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, ArrayArg succ, ArrayArg parent,
-                       ArrayArg schema, ArrayArg binding, ArrayArg goal, ArrayArg offsets, bool canonical, bool witness,
+                       ArrayArg schema, ArrayArg binding, ArrayArg goal, ArrayArg derived, ArrayArg offsets, bool canonical, bool witness,
                        PoolArg pool, bool validate, StreamArg stream, ContextArg ctx)
 {
     if (device_hooks().expand_into && (is_cuda_array(states) || is_cuda_array(succ) || is_cuda_array(parent) ||
                                        is_cuda_array(schema) || is_cuda_array(binding) || is_cuda_array(goal) ||
-                                       is_cuda_array(offsets)))
-        return device_hooks().expand_into({table, states, task_ids, succ, parent, schema, binding, goal, offsets,
+                                       is_cuda_array(derived) || is_cuda_array(offsets)))
+        return device_hooks().expand_into({table, states, task_ids, succ, parent, schema, binding, goal, derived, offsets,
                                            canonical, witness, validate, stream, ctx});
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
@@ -602,6 +617,31 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
     {
         Dest d = import_dest(goal, "goal");
         x.goal = dest_ptr<u8>(d, "goal", rl::DType::Bool, rl::DType::U8, 1);
+        take_cap(d.shape[0]);
+        keep.push_back(std::move(d));
+    }
+    if (!derived.is_none())
+    {
+        Dest d = import_dest(derived, "derived");
+        if (d.shape.size() != 2)
+            throw nb::type_error("mymyr: 'derived' must be [capacity, D] (64-bit) or [capacity, 2D] (32-bit)");
+        const u32 isz = rl::dtype_bytes(d.dtype);
+        if (isz == 8)
+            x.derived = dest_ptr<u64>(d, "derived", rl::DType::U64, rl::DType::I64, 2), x.derived_words = static_cast<u32>(d.shape[1]);
+        else if (isz == 4)
+        {
+            x.derived = reinterpret_cast<u64*>(dest_ptr<u32>(d, "derived", rl::DType::U32, rl::DType::I32, 2));
+            if (d.shape[1] % 2 != 0 || reinterpret_cast<std::uintptr_t>(d.data) % 8 != 0)
+                throw nb::type_error("mymyr: 32-bit 'derived' needs an even number of columns and 8-byte alignment");
+            x.derived_words = static_cast<u32>(d.shape[1] / 2);
+        }
+        else
+            throw nb::type_error("mymyr: 'derived' must hold 64-bit or 32-bit integers");
+        // an array without elements may carry no data pointer: the width is checked here, not by the expansion
+        if (x.derived_words < tt.derived_words())
+            throw nb::value_error(("mymyr: expand_into: 'derived' rows of " + std::to_string(x.derived_words) +
+                                   " words; the table has instances of " + std::to_string(tt.derived_words()))
+                                      .c_str());
         take_cap(d.shape[0]);
         keep.push_back(std::move(d));
     }
@@ -1351,6 +1391,9 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("numeric_words", [](const PyTable& t) { return t.table->numeric_words(); },
                      "Numeric words of a row after the atom words (the most any instance has; 0 for classical tables).")
         .def_prop_ro("row_words", [](const PyTable& t) { return t.table->row_words(); }, "words + numeric_words.")
+        .def_prop_ro("derived_words", [](const PyTable& t) { return t.table->derived_words(); },
+                     "Words of a derived-atom row (rl.expand(..., derived=True)): the most any instance has; 0 without "
+                     "derived atoms.")
         .def_prop_ro("label_width", [](const PyTable& t) { return t.table->label_width(); }, "The largest schema arity.")
         .def_prop_ro("num_schemas", [](const PyTable& t) { return t.table->num_schemas(); })
         .def_prop_ro("max_objects", [](const PyTable& t) { return t.table->max_objects(); },
@@ -1533,6 +1576,9 @@ void bind_rl(nb::module_& parent)
         .def_prop_ro("numeric_words", [](const PySuite& t) { return t.suite->numeric_words(); },
                      "Numeric words of a row after the atom words (the most any domain has).")
         .def_prop_ro("row_words", [](const PySuite& t) { return t.suite->row_words(); }, "words + numeric_words.")
+        .def_prop_ro("derived_words", [](const PySuite& t) { return t.suite->derived_words(); },
+                     "Words of a derived-atom row (rl.expand(..., derived=True)): the most any domain has; 0 without "
+                     "derived atoms.")
         .def_prop_ro("label_width", [](const PySuite& t) { return t.suite->label_width(); },
                      "The largest schema arity of any domain.")
         .def_prop_ro("num_schemas", [](const PySuite& t) { return t.suite->max_schemas(); },
@@ -1628,6 +1674,12 @@ void bind_rl(nb::module_& parent)
                 return nb::none();
             return padded_array(p, p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.K});
         }, "[N, K] bool goal flags (if requested)")
+        .def_prop_ro("derived", [](const PaddedResult& p) -> ArrayOut {
+            if (!p.has_derived)
+                return nb::none();
+            return padded_array(p, p.off_derived, rl::DType::U64,
+                                {static_cast<i64>(p.rows), p.K, static_cast<i64>(p.derived_words)}, true);
+        }, "[N, K, D] derived words of the successors (zero padding), if requested")
         .def("__repr__", [](const PaddedResult& p) {
             return "PaddedExpansion(states=" + std::to_string(p.rows) + ", K=" + std::to_string(p.K) +
                    (p.overflow ? ", overflow" : "") + ")";
@@ -1658,6 +1710,14 @@ void bind_rl(nb::module_& parent)
                 return nb::none();
             return e.array(e.flat.off_goal, rl::DType::Bool, {static_cast<i64>(e.flat.valid())});
         }, "[M] bool goal flags of the successors (expand(..., goal=True))")
+        .def_prop_ro("derived", [](const PyExpansion& e) -> ArrayOut {
+            if (!e.flat.has_derived)
+                return nb::none();
+            return e.array(e.flat.off_derived, rl::DType::U64, {static_cast<i64>(e.flat.valid()), e.flat.derived_words}, true);
+        }, "[M, D] derived words of the successors (expand(..., derived=True)): the bitset of each successor's derived "
+           "atoms in derived-slot order, from one axiom evaluation of the row; D = table.derived_words")
+        .def_prop_ro("derived_words", [](const PyExpansion& e) { return e.flat.derived_words; },
+                     "Derived words per row (D) of the derived array (0 if not requested).")
         .def_prop_ro("counts", [](const PyExpansion& e) {
             auto block = Block::make(e.flat.rows * sizeof(i32));
             const i32* off = e.flat.at<i32>(e.flat.off_offsets);
@@ -1728,12 +1788,12 @@ void bind_rl(nb::module_& parent)
         .def("__repr__", &words_repr);
 
     m.def("expand", &expand, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "capacity"_a = nb::none(),
-          "words"_a = nb::none(), "K"_a = nb::none(), "goal"_a = false, "canonical"_a = true, "witness"_a = false,
+          "words"_a = nb::none(), "K"_a = nb::none(), "goal"_a = false, "derived"_a = false, "canonical"_a = true, "witness"_a = false,
           "pool"_a = nb::none(), "threads"_a = 1, "framework"_a = nb::none(), "validate"_a = true,
           "stream"_a = nb::none(), "ctx"_a = nb::none(), "Expands a batch of states [N, W] (see mymyr.rl.expand).");
     m.def("expand_into", &expand_into, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),
           "succ"_a = nb::none(), "parent"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(),
-          "goal"_a = nb::none(), "offsets"_a = nb::none(), "canonical"_a = true, "witness"_a = false,
+          "goal"_a = nb::none(), "derived"_a = nb::none(), "offsets"_a = nb::none(), "canonical"_a = true, "witness"_a = false,
           "pool"_a = nb::none(), "validate"_a = true, "stream"_a = nb::none(), "ctx"_a = nb::none(),
           "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
     m.def(

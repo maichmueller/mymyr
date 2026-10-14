@@ -103,6 +103,7 @@ TaskSuite::TaskSuite(Private, std::vector<TaskTablePtr> tables, std::vector<Ref>
     {
         m_words = std::max(m_words, t->words());
         m_numeric_words = std::max(m_numeric_words, t->numeric_words());
+        m_derived_words = std::max(m_derived_words, t->derived_words());
         m_label_width = std::max(m_label_width, t->label_width());
         m_max_objects = std::max(m_max_objects, t->max_objects());
         m_max_schemas = std::max(m_max_schemas, t->num_schemas());

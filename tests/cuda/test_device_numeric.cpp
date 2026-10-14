@@ -807,7 +807,7 @@ TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
 
 namespace
 {
-TaskPtr ground_goal_task(bool numeric_axiom, TaskOptions options)
+TaskPtr ground_goal_task(bool numeric_axiom, TaskOptions options, bool goal_ready = false)
 {
     std::string domain = R"(
 (define (domain steps)
@@ -821,8 +821,9 @@ TaskPtr ground_goal_task(bool numeric_axiom, TaskOptions options)
     domain += numeric_axiom ? "(>= (x) 2)" : "(q)";
     domain += ")) )";
     const auto d = frontend::Domain::from_string(domain, "steps.pddl");
-    return Task::create(*d->instantiate_string(R"(
-(define (problem s) (:domain steps) (:init (= (x) 0) (= (limit) 3)) (:goal (and (r))))
+    return Task::create(*d->instantiate_string(std::string(R"(
+(define (problem s) (:domain steps) (:init (= (x) 0) (= (limit) 3)) (:goal (and )") + (goal_ready ? "(ready)" : "(r)") +
+                                               R"()))
 )", "s.pddl"), options);
 }
 
@@ -1072,4 +1073,95 @@ TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
     EXPECT_EQ(device.states, cpu.states);
     EXPECT_EQ(device.generated, cpu.generated);
     EXPECT_EQ(device.goal_states, cpu.goal_states);
+}
+
+namespace
+{
+/// The derived words and goal flags of the device expand against rl::expand over `states` of a numeric task, flat
+/// (full and clipped capacity) and padded.
+void expect_derived_equal_host(const cuda::ContextPtr& ctx, const TaskPtr& task, const std::vector<State>& states)
+{
+    const auto table = rl::TaskTable::single(task);
+    const u32 W = std::max<u32>(1, task->words()), NN = task->numeric_words(), RW = W + NN, DW = table->derived_words();
+    const u32 L = std::max<u32>(1, table->label_width()), N = static_cast<u32>(states.size()), K = 4;
+    ASSERT_GT(DW, 0u);
+    std::vector<u64> input(u64{N} * RW, 0);
+    for (u64 i = 0; i < N; ++i)
+    {
+        std::copy(states[i].words().begin(), states[i].words().end(), input.begin() + static_cast<std::ptrdiff_t>(i * RW));
+        std::copy(states[i].numeric().begin(), states[i].numeric().end(), input.begin() + static_cast<std::ptrdiff_t>(i * RW + W));
+    }
+    cuda::DeviceBuffer din(ctx, input.size() * 8);
+    cuda::check(cudaMemcpy(din.data(), input.data(), input.size() * 8, cudaMemcpyHostToDevice), "numeric input");
+    cuda::DeviceExpander expander(ctx, table);
+    const rl::StateBatchView device_in{static_cast<const u64*>(din.data()), N, W, RW, NN};
+    const u64 count = expander.count(device_in, nullptr, {});
+    for (u64 capacity : {count, count / 2})
+    {
+        const u64 cap = std::max<u64>(capacity, 1);
+        std::vector<u64> succ(cap * RW), derived(cap * DW);
+        std::vector<i32> parent(cap), schema(cap), binding(cap * L), offsets(N + 1);
+        std::vector<u8> goal(cap);
+        rl::Expansion host;
+        host.capacity = capacity; host.words = W; host.numeric_words = NN; host.label_width = L;
+        host.succ = succ.data(); host.parent = parent.data(); host.schema = schema.data(); host.binding = binding.data();
+        host.goal = goal.data(); host.offsets = offsets.data(); host.derived = derived.data(); host.derived_words = DW;
+        rl::expand(*table, {input.data(), N, W, RW, NN}, nullptr, host, {});
+        ASSERT_EQ(host.total, count);
+        cuda::DeviceBuffer dsucc(ctx, cap * RW * 8), dparent(ctx, cap * 4), dschema(ctx, cap * 4), dbinding(ctx, cap * L * 4),
+                           dgoal(ctx, cap), doffsets(ctx, offsets.size() * 4), dderived(ctx, cap * DW * 8);
+        rl::Expansion device = host;
+        device.succ = static_cast<u64*>(dsucc.data()); device.parent = static_cast<i32*>(dparent.data());
+        device.schema = static_cast<i32*>(dschema.data()); device.binding = static_cast<i32*>(dbinding.data());
+        device.goal = static_cast<u8*>(dgoal.data()); device.offsets = static_cast<i32*>(doffsets.data());
+        device.derived = static_cast<u64*>(dderived.data());
+        expander.write(device);
+        const u64 valid = std::min(count, capacity);
+        auto equal = [&](const auto& expected, const cuda::DeviceBuffer& src, u64 n)
+        {
+            using Value = typename std::decay_t<decltype(expected)>::value_type;
+            std::vector<Value> got(n);
+            cuda::check(cudaMemcpy(got.data(), src.data(), n * sizeof(Value), cudaMemcpyDeviceToHost), "readback");
+            EXPECT_TRUE(std::equal(got.begin(), got.end(), expected.begin()));
+        };
+        equal(succ, dsucc, valid * RW);
+        equal(goal, dgoal, valid);
+        equal(derived, dderived, valid * DW);
+        equal(offsets, doffsets, offsets.size());
+        if (capacity != count)
+            continue;
+        // the padded view
+        std::vector<u64> padded_succ(u64{N} * K * RW), padded_derived(u64{N} * K * DW, 0x77);
+        std::vector<u8> padded_goal(u64{N} * K);
+        rl::PaddedExpansion padded;
+        padded.K = K; padded.words = W; padded.numeric_words = NN; padded.label_width = L;
+        padded.succ = padded_succ.data(); padded.goal = padded_goal.data();
+        padded.derived = padded_derived.data(); padded.derived_words = DW;
+        rl::pad(host, N, padded);
+        cuda::DeviceBuffer psucc(ctx, padded_succ.size() * 8), pgoal(ctx, padded_goal.size()), pderived(ctx, padded_derived.size() * 8);
+        rl::PaddedExpansion on_device = padded;
+        on_device.succ = static_cast<u64*>(psucc.data()); on_device.goal = static_cast<u8*>(pgoal.data());
+        on_device.derived = static_cast<u64*>(pderived.data());
+        expander.pad(device, N, on_device);
+        EXPECT_EQ(on_device.overflow, padded.overflow);
+        equal(padded_succ, psucc, padded_succ.size());
+        equal(padded_goal, pgoal, padded_goal.size());
+        equal(padded_derived, pderived, padded_derived.size());
+    }
+}
+}  // namespace
+
+TEST(DeviceExpandDerived, NumericTasksWithAxiomsEqualHost)
+{
+    if (cuda::device_count() == 0) GTEST_SKIP();
+    const auto ctx = context();
+    for (bool numeric_axiom : {false, true})
+        for (bool goal_ready : {false, true})
+        {
+            SCOPED_TRACE(std::string(numeric_axiom ? "numeric axiom" : "classical axiom") + (goal_ready ? ", derived goal" : ", plain goal"));
+            const auto task = ground_goal_task(numeric_axiom, {}, goal_ready);
+            // an axiom with a numeric condition has no device kernel: the derived words are evaluated on the CPU
+            EXPECT_EQ(cuda::ChunkGenerator(ctx, task).device_axioms(), !numeric_axiom);
+            expect_derived_equal_host(ctx, task, walks(*task, 6));
+        }
 }

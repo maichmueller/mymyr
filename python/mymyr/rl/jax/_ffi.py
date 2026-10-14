@@ -16,7 +16,7 @@ others), which XLA runs outside command buffers.
 """
 
 import threading
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -172,8 +172,9 @@ def env_step(
     )  # fmt: skip
 
 
-def expand(handle: int, states, task_ids, k: int, label_width: int) -> tuple[Any, ...]:
+def expand(handle: int, states, task_ids, k: int, label_width: int, derived_words: Optional[int] = None) -> tuple[Any, ...]:
     n = states.shape[:-1]
+    extra = () if derived_words is None else (_u32((*n, k, 2 * derived_words)),)
     call = jax.ffi.ffi_call(
         "mymyr_expand",
         (
@@ -183,14 +184,18 @@ def expand(handle: int, states, task_ids, k: int, label_width: int) -> tuple[Any
             _bool((*n, k)),
             _bool((*n, k)),
             _i32(n),
+            *extra,
         ),
         vmap_method="broadcast_all",
     )
     return call(states, task_ids, handle=np.int64(handle))
 
 
-def expand_flat(handle: int, states, task_ids, capacity: int, label_width: int) -> tuple[Any, ...]:
+def expand_flat(
+    handle: int, states, task_ids, capacity: int, label_width: int, derived_words: Optional[int] = None
+) -> tuple[Any, ...]:
     n = states.shape[0]
+    extra = () if derived_words is None else (_u32((capacity, 2 * derived_words)),)
     call = jax.ffi.ffi_call(
         "mymyr_expand_flat",
         (
@@ -200,6 +205,7 @@ def expand_flat(handle: int, states, task_ids, capacity: int, label_width: int) 
             _i32((capacity, label_width)),
             _bool((capacity,)),
             _i32((n + 1,)),
+            *extra,
         ),
         vmap_method="sequential",
     )
