@@ -31,7 +31,9 @@ successor order.
 States travel as rows of atom words followed by numeric words, in the encoding of
 [State encodings](parsing-and-tasks.md#state-encodings). Tables refuse tasks with lazy atom slots and use one numeric
 storage for all instances. A batch's rows are as wide as their widest instance (`words=` fixes the width); each row
-costs its own instance's width, and the words past it are zero padding. `rl.numeric_values` decodes numeric words.
+costs its own instance's width, and the words past it are zero padding. `rl.numeric_values` decodes numeric words,
+and `rl.decode(table, rows, task_ids)` turns rows back into States (`Task.decode` reads rows in the task's own
+layout, with only its own numeric words last).
 
 ## JAX and PyTorch
 

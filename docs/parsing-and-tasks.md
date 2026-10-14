@@ -159,6 +159,7 @@ without instantiating a problem.
 A state is stored as a row of 64-bit words: `task.words` atom words, one bit per fluent atom slot, and for numeric
 tasks `task.numeric_words` words of numeric values after them. `task.encode(states)` returns these rows and
 `task.decode(rows)` turns them back into states; `mymyr.rl` and `mymyr.datasets` exchange states in the same layout.
+The rows of a table or suite hold the table's numeric words, so `rl.decode(table, rows, task_ids)` decodes them.
 Derived atoms have slots too, but rows do not store them: they follow from the fluent atoms.
 
 `Task.from_pddl`, `Task.from_text`, `Task(normalized)` and `rl.TaskTable.from_pddl` take the same keyword options,
