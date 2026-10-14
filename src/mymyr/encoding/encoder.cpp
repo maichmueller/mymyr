@@ -3,6 +3,7 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/task/workspace.hpp"
 
+#include <cassert>
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -63,8 +64,8 @@ void refuse_unsupported(const FlatOptions& o)
         unsupported("horizon");
 }
 
-std::vector<i64> shape1(u64 n) { return {static_cast<i64>(n)}; }
-std::vector<i64> shape2(u64 n, u64 m) { return {static_cast<i64>(n), static_cast<i64>(m)}; }
+rl::ArrayShape shape1(u64 n) { return {static_cast<i64>(n)}; }
+rl::ArrayShape shape2(u64 n, u64 m) { return {static_cast<i64>(n), static_cast<i64>(m)}; }
 
 /// The state of one pool member: it counts a contiguous slice of the graphs and later fills the same slice, so that the
 /// per-graph data of the slice stays with the member. Aligned so that members never share a cache line.
@@ -507,21 +508,31 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
 
 namespace
 {
-/// The array of a bundle under construction, null if the bundle has none of that name.
-void* array_of(rl::ArrayBundle& bundle, const char* name) { return bundle.mutable_data(name); }
-
-FlatBuffers buffers_of(rl::ArrayBundle& bundle)
+/// The arrays of a bundle that allocate() built, in the order it adds them: task_ids, num_objects, entity_offsets,
+/// [entity_role, entity_ref], [relation_counts], relation_offsets, relation_arg_offsets, relation_args.
+FlatBuffers buffers_of(rl::ArrayBundle& bundle, bool entity_arrays, bool counts)
 {
     FlatBuffers out;
-    out.task_ids = static_cast<i32*>(array_of(bundle, "task_ids"));
-    out.num_objects = array_of(bundle, "num_objects");
-    out.entity_offsets = array_of(bundle, "entity_offsets");
-    out.entity_role = static_cast<u8*>(array_of(bundle, "entity_role"));
-    out.entity_ref = array_of(bundle, "entity_ref");
-    out.relation_counts = array_of(bundle, "relation_counts");
-    out.relation_offsets = array_of(bundle, "relation_offsets");
-    out.relation_arg_offsets = array_of(bundle, "relation_arg_offsets");
-    out.relation_args = array_of(bundle, "relation_args");
+    const auto& arrays = bundle.arrays();
+    usize next = 0;
+    auto take = [&](const char* name)
+    {
+        assert(arrays[next].name == name);
+        return bundle.mutable_data(arrays[next++]);
+    };
+    out.task_ids = static_cast<i32*>(take("task_ids"));
+    out.num_objects = take("num_objects");
+    out.entity_offsets = take("entity_offsets");
+    if (entity_arrays)
+    {
+        out.entity_role = static_cast<u8*>(take("entity_role"));
+        out.entity_ref = take("entity_ref");
+    }
+    if (counts)
+        out.relation_counts = take("relation_counts");
+    out.relation_offsets = take("relation_offsets");
+    out.relation_arg_offsets = take("relation_arg_offsets");
+    out.relation_args = take("relation_args");
     return out;
 }
 }  // namespace
@@ -571,7 +582,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(graphs + 1, index, "graphs");
     }
     auto bundle = std::make_shared<rl::ArrayBundle>(allocate(in.states.rows, sizes.entities, sizes.args));
-    fill(in, sizes, buffers_of(*bundle), pool, scratch);
+    fill(in, sizes, buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts()), pool, scratch);
     return bundle;
 }
 
@@ -585,7 +596,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
     const u64 graphs = in.states.rows;
     const bool fits = !sizes.overflowed();
     auto bundle = std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args));
-    const FlatBuffers out = buffers_of(*bundle);
+    const FlatBuffers out = buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts());
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
     // the entries a batch does not use are zero, and an overflowing batch is all zero
     auto zero = [](void* data, u64 from, u64 to, usize width)

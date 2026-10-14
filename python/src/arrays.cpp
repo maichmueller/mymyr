@@ -407,17 +407,17 @@ nb::object export_bundle(const std::shared_ptr<const rl::ArrayBundle>& bundle, F
 {
     nb::dict d;
     for (const auto& [name, value] : bundle->scalars())
-        d[nb::str(name.c_str())] = value;
+        d[nb::str(name.data(), name.size())] = value;
     for (const rl::ArrayInfo& a : bundle->arrays())
     {
         ArraySpec s;
         s.owner = std::shared_ptr<const void>(bundle, bundle->data(a));
         s.data = bundle->data(a);
         s.dtype = a.dtype;
-        s.shape = a.shape;
+        s.shape = a.shape.vec();
         s.readonly = true;  // snapshots are shared and immutable
         s.words = a.words;
-        d[nb::str(a.name.c_str())] = export_array(std::move(s), fw, enc);
+        d[nb::str(a.name.data(), a.name.size())] = export_array(std::move(s), fw, enc);
     }
     return d;
 }

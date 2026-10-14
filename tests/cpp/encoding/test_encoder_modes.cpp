@@ -475,7 +475,7 @@ TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
         EXPECT_EQ(sizes.args, exact.args);
         for (const rl::ArrayInfo& info : short_bundle->arrays())
         {
-            const auto values = ints(*short_bundle, info.name.c_str());
+            const auto values = ints(*short_bundle, info.name.str().c_str());
             EXPECT_TRUE(std::all_of(values.begin(), values.end(), [](i64 v) { return v == 0; })) << info.name;
         }
     }

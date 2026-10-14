@@ -6,7 +6,7 @@
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
 // buffers (into_us_per_state, the capacity form; count_us_per_state and fill_us_per_state split it), and the tuples and
 // tuple arguments of the batch. faults_per_call is the minor page faults of one timed encode, averaged over the timed
-// encodes.
+// encodes. single_us_per_call is one encode per state of the first min(N, 256) states (one row per call).
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -109,6 +109,20 @@ int main(int argc, char** argv)
             best = std::min(best, now_s() - t0);
         }
         const long faults_per_call = (minor_faults() - faults0) / 5;
+        const u64 singles = std::min<u64>(n, 256);
+        double best_single = 1e300;
+        std::shared_ptr<const rl::ArrayBundle> one_bundle;
+        for (int rep = 0; rep < 40; ++rep)
+        {
+            const double t0 = now_s();
+            for (u64 i = 0; i < singles; ++i)
+            {
+                encoding::EncodeInput one;
+                one.states = {rows.data() + i * words, 1, words, 0, 0};
+                one_bundle = encoder->encode(one, pool, scratch);
+            }
+            best_single = std::min(best_single, now_s() - t0);
+        }
         const u64 R = encoder->schema().num_relations();
         std::vector<i32> task_ids(n), num_objects(n), entity_offsets(n + 1), counts(n * R), tuple_offsets(n * R + 1),
             arg_buffer(n * R + 1), entity_ref(bundle->find("entity_ref")->elements()),
@@ -146,11 +160,11 @@ int main(int argc, char** argv)
         const u64 cells = n * encoder->schema().num_relations();
         std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
+                    "\"single_us_per_call\": %.3f, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), threads, best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), faults_per_call, offsets[cells], arg_offsets[cells]);
+                    best_fill * 1e6 / static_cast<double>(n), best_single * 1e6 / static_cast<double>(singles), faults_per_call, offsets[cells], arg_offsets[cells]);
     }
     catch (const std::exception& error)
     {

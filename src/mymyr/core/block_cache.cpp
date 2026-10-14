@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdint>
 #include <mutex>
 #include <new>
 
@@ -23,10 +24,13 @@ struct Entry
 
 std::byte* allocate_system(u64 capacity)
 {
-    return static_cast<std::byte*>(::operator new(capacity, std::align_val_t{k_cache_line}));
+    auto* raw = static_cast<std::byte*>(::operator new(capacity + k_cache_line));
+    std::byte* aligned = raw + k_cache_line - reinterpret_cast<std::uintptr_t>(raw) % k_cache_line;
+    aligned[-1] = static_cast<std::byte>(aligned - raw);
+    return aligned;
 }
 
-void free_system(std::byte* block) noexcept { ::operator delete(block, std::align_val_t{k_cache_line}); }
+void free_system(std::byte* block) noexcept { ::operator delete(block - static_cast<unsigned>(block[-1])); }
 
 /// Blocks of at most k_thread_block_max bytes released on this thread, reused by its next acquire without locking.
 struct ThreadTier
@@ -58,9 +62,11 @@ struct ThreadTier
 
     std::byte* take(u64 need, u64& capacity) noexcept
     {
-        Entry* best = nullptr;  // the smallest cached block that fits and is at most 4x the request
+        Entry* best = nullptr;  // the smallest cached block that fits and is at most 4x the request, the most recently released among equals (its
+        // lines are the likeliest to still be cached)
         for (Entry& e : slots)
-            if (e.block && e.capacity >= need && e.capacity / 4 <= need && (!best || e.capacity < best->capacity))
+            if (e.block && e.capacity >= need && e.capacity / 4 <= need &&
+                (!best || e.capacity < best->capacity || (e.capacity == best->capacity && e.stamp > best->stamp)))
                 best = &e;
         if (!best)
             return nullptr;
@@ -125,7 +131,8 @@ HostBlock acquire_host_block(u64 bytes)
         const std::scoped_lock lock(g.mutex);
         Entry* best = nullptr;  // the smallest cached block that fits without wasting more than the request itself
         for (Entry& e : g.slots)
-            if (e.block && e.capacity >= bytes && e.capacity <= 2 * bytes && (!best || e.capacity < best->capacity))
+            if (e.block && e.capacity >= bytes && e.capacity <= 2 * bytes &&
+                (!best || e.capacity < best->capacity || (e.capacity == best->capacity && e.stamp > best->stamp)))
                 best = &e;
         if (best)
         {
