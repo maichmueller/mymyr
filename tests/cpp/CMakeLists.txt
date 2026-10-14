@@ -160,6 +160,16 @@ if(TARGET mymyr_cuda)
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
         gtest_discover_tests(mymyr_device_table_tests DISCOVERY_TIMEOUT 60
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+        # the relational encoder's context and memory on the device (cuda/encoding.hpp) against the host
+        add_executable(mymyr_device_encoding_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encoding.cpp
+                                                   ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu)
+        target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend GTest::gtest_main)
+        target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr_warnings)
+        set_target_properties(mymyr_device_encoding_tests PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
+        target_compile_definitions(mymyr_device_encoding_tests PRIVATE
+            MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        gtest_discover_tests(mymyr_device_encoding_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
         # the device env's calls captured into CUDA graphs and replayed, against eager calls and the host
         add_executable(mymyr_device_graphs_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_graphs.cpp)
         target_link_libraries(mymyr_device_graphs_tests PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings GTest::gtest_main)
