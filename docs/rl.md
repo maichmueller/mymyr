@@ -208,8 +208,8 @@ step is absorbing. `info` also carries `task_id`, `num_actions`, `steps` and `ac
 The problems are a task, a table or a suite, or `domain=` and `problems=` (a file, a directory, a glob or a list), which
 build `TaskTable.from_pddl(domain, problems)`. Each reset draws the instance with `sampler=`: uniform (`"auto"`,
 `"uniform"`), weighted (`rl.InstanceSampler(n, weights=[...])`), or `None`, which keeps the instance. Like pddlgym,
-`fix_problem_index(i)` fixes the instance of every later episode (`None` releases it), and `reset(options={"task_id":
-i})` picks the instance of one episode.
+`fix_problem_index(i)` fixes the instance of every later episode (`None` releases it), and
+`reset(options={"task_id": i})` picks the instance of one episode.
 
 `reset(seed=s)` seeds `np_random` and the instance draws, which are counter-based as in the pool: episode `k` after the
 seed starts in the sampler's draw for `(s, env_id, k)`. Transitions are deterministic, so the same seed and the same
