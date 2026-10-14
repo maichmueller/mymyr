@@ -78,7 +78,8 @@ class Env(gymnasium.Env):
 
     ``info``: ``task_id`` (the instance), ``num_actions`` (applicable actions of the observed state), ``is_goal``
     (the observed state is a goal), ``steps`` (the episode's steps), ``action_mask`` (index actions), ``invalid``
-    (steps). ``render_mode="ansi"``: :meth:`render` returns the state's atoms and the goal as text.
+    (steps), ``terminated`` (resets: the initial state is terminal, a goal or a terminal dead end, so the first step
+    is absorbing). ``render_mode="ansi"``: :meth:`render` returns the state's atoms and the goal as text.
     """
 
     metadata = {"render_modes": ["ansi"], "render_fps": 4}
@@ -222,8 +223,12 @@ class Env(gymnasium.Env):
         if task_id is not None:
             ids[0] = task_id
         self._draws.start(envs, ids)
-        self._capture(self._open_pool().reset(task_ids=ids))
-        return self._observe(), self._info()
+        batch = self._open_pool().reset(task_ids=ids)
+        terminal = bool(batch.terminated[0])
+        self._capture(batch)
+        info = self._info()
+        info["terminated"] = terminal
+        return self._observe(), info
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
         self._require_reset()

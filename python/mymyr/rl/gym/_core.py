@@ -9,8 +9,9 @@ import numpy as np
 from gymnasium import spaces
 
 from mymyr._core import Action, State, Task, TaskHandle
-from mymyr._core._formalism import GroundAtom, GroundCondition, Object
+from mymyr._core._formalism import GroundAtom, GroundCondition
 from mymyr._core._rl import TaskSuite, TaskTable, successor_bounds
+from mymyr.rl import decode
 from mymyr.rl._sampling import InstanceSampler, _instance_sampler
 
 OBSERVATION_MODES = ("symbolic", "graph", "bits")
@@ -74,14 +75,9 @@ class Problems:
 
     def decode(self, rows: np.ndarray, task_ids: np.ndarray) -> list[State]:
         """The States of rows [N, row_words] of instances task_ids [N]."""
-        if len(self.tasks) == 1:
-            return self.tasks[0].decode(rows) if len(rows) else []
-        out: list[Optional[State]] = [None] * len(rows)
-        for t in np.unique(task_ids):
-            where = np.flatnonzero(task_ids == t)
-            for i, state in zip(where, self.tasks[int(t)].decode(rows[where])):
-                out[i] = state
-        return out  # type: ignore[return-value]
+        if isinstance(self.table, Task):
+            return self.table.decode(rows) if len(rows) else []
+        return decode(self.table, rows, task_ids)
 
 
 def _problem_arg(problems: Any) -> Any:
@@ -146,10 +142,14 @@ class SymbolicObservation(NamedTuple):
     """A state as ground atoms (immutable, hashable values; the fields not requested are None).
 
     - ``atoms``: frozenset of the true fluent GroundAtoms (and, with ``derived=True``, the derived ones);
-    - ``objects``: tuple of the instance's Objects in object order (``objects=True``);
+    - ``objects``: tuple of the instance's object names in object order (``objects=True``; ``task.objects``, their
+      types in ``task.formalism.objects``);
     - ``goal``: the instance's goal as a GroundCondition (``goal=True``);
     - ``static``: frozenset of the instance's static GroundAtoms, the types included (``static=True``);
     - ``numeric``: tuple of the numeric fluents' values in ``task.numeric_names`` order (``numeric=True``).
+
+    Atoms compare equal when they are atoms of the same Task object. An observation pickles with its Task (a copy
+    in the receiving process) and is its own (deep) copy.
     """
 
     atoms: frozenset
@@ -157,6 +157,12 @@ class SymbolicObservation(NamedTuple):
     goal: Optional[GroundCondition] = None
     static: Optional[frozenset] = None
     numeric: Optional[tuple] = None
+
+    def __copy__(self) -> "SymbolicObservation":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "SymbolicObservation":
+        return self
 
 
 class SymbolicObserver:
@@ -173,11 +179,11 @@ class SymbolicObserver:
         parts = self._parts.get(t)
         if parts is None:
             task = self.problems.tasks[t]
-            formalism = task.formalism if (self.objects or self.static) else None
             parts = (
-                tuple(formalism.objects) if self.objects else None,
+                tuple(task.objects) if self.objects else None,
                 task.goal_condition if self.goal else None,
-                frozenset(formalism.static_init) if self.static else None,
+                # the Task's own atoms (equal to the formalism's), which pickle with the Task
+                frozenset(task.atom(a) for a in task.formalism.static_init) if self.static else None,
             )
             self._parts[t] = parts
         return parts
@@ -230,7 +236,7 @@ class SymbolicSpace(gymnasium.Space):
         for atom in x.atoms:
             if not isinstance(atom, GroundAtom) or atom.predicate.name not in self._predicates:
                 return False
-        if x.objects is not None and not (isinstance(x.objects, tuple) and all(isinstance(o, Object) for o in x.objects)):
+        if x.objects is not None and not (isinstance(x.objects, tuple) and all(isinstance(o, str) for o in x.objects)):
             return False
         if x.goal is not None and not isinstance(x.goal, GroundCondition):
             return False
@@ -270,9 +276,10 @@ class SymbolicSpace(gymnasium.Space):
 class GroundActionSpace(gymnasium.Space):
     """The ground actions of an environment's current instance (pddlgym's literal action space): its elements are
     mymyr Actions of that instance's Task, applicable or not. ``sample`` draws uniformly among the applicable actions
-    of the current state; without one, it returns the first applicable action of the instance's initial state, which
-    does not move the environment here. Bound to one environment (the vector environment's spaces to one env each);
-    equal to the spaces of every environment over the same instances."""
+    of the current state; without one, it returns an inapplicable action of the instance (the first applicable
+    action of its initial state, else a binding of its schema of the fewest parameters to object 0), which makes no
+    move. Bound to one environment (the vector environment's spaces to one env each); equal to the spaces of every
+    environment over the same instances."""
 
     def __init__(self, problems: Problems, current: Any, seed: Optional[int] = None) -> None:
         super().__init__(shape=None, dtype=None, seed=seed)
@@ -287,13 +294,16 @@ class GroundActionSpace(gymnasium.Space):
         if mask is not None or probability is not None:
             raise ValueError("mymyr: a GroundActionSpace samples without masks")
         t, actions = self._current()
-        if not actions:
-            task = self._problems.tasks[t]
-            actions = task.applicable_actions(task.initial_state)
-            if not actions:
-                raise ValueError("mymyr: the instance has no applicable action to sample")
-            return actions[0]
-        return actions[int(self.np_random.integers(len(actions)))]
+        if actions:
+            return actions[int(self.np_random.integers(len(actions)))]
+        task = self._problems.tasks[t]
+        initial = task.applicable_actions(task.initial_state)
+        if initial:
+            return initial[0]
+        if task.num_objects or not any(s.arity for s in task.formalism.schemas):
+            schema = min(range(task.num_schemas), key=lambda i: task.formalism.schemas[i].arity)
+            return task.action(schema, [0] * task.formalism.schemas[schema].arity)
+        raise ValueError("mymyr: the instance has no ground action to sample (no objects for its schemas)")
 
     def contains(self, x: Any) -> bool:
         if not isinstance(x, Action):
@@ -317,13 +327,21 @@ class GroundActionSpace(gymnasium.Space):
 
 
 def ground_index(problems: Problems, t: int, actions: list[Action], action: Any, max_actions: int) -> int:
-    """The index of a ground action (an Action, '(schema o1 ...)' or (schema, objects)) among the applicable actions
-    of a state of instance t; -1 (no move) when it is not one of them or its index is max_actions or more."""
+    """The index of a ground action among the applicable actions of a state of instance t; -1 (no move) when it is
+    not one of them or its index is max_actions or more. An Action of another task (another instance of the
+    domain), a text '(schema o1 ...)' and a (schema, objects) pair are read by their names in instance t, as
+    pddlgym's literals are; names that instance does not have make no move either."""
     task = problems.tasks[t]
+    if isinstance(action, Action) and int(action.task.uid) != problems.uids[t]:
+        action = str(action)
     if not isinstance(action, Action):
-        action = task.action(action)
-    elif int(action.task.uid) != problems.uids[t]:
-        raise ValueError("mymyr: the action belongs to another task than the environment's current instance")
+        if not isinstance(action, (str, tuple)):
+            raise TypeError(f"mymyr: a ground action is an Action, a str or a (schema, objects) tuple, not "
+                            f"{type(action).__name__}")
+        try:
+            action = task.action(action)
+        except (KeyError, ValueError):
+            return -1
     try:
         index = actions.index(action)
     except ValueError:
@@ -416,7 +434,7 @@ class GraphObserver:
                 # bounded by at least 1 so that a table of one instance does not give a degenerate Box
                 out[key] = spaces.Box(0, max(1, len(self.problems) - 1), (n,), dtype)
             elif key == "num_objects":
-                out[key] = spaces.Box(0, self.max_entities - 1, (n,), dtype)
+                out[key] = spaces.Box(0, max(1, self.max_entities - 1), (n,), dtype)
             else:
                 out[key] = spaces.Box(0, min(high, _INT32_MAX), self._shape(key, n), dtype)
         return spaces.Dict(out)

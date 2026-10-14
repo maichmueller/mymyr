@@ -67,8 +67,9 @@ class VectorEnv(gymnasium.vector.VectorEnv):
     ``reset(options=...)``: ``"task_ids"`` (the instances of the reset envs) and ``"reset_mask"`` (bool [N]: reset only
     these envs; the others keep their episodes). :meth:`set_next_task_ids` names the instances of the next
     autoresets (a curriculum); :meth:`fix_problem_index` fixes the instance of every episode. ``info``: per-env arrays
-    ``task_id``, ``num_actions``, ``is_goal``, ``steps``, ``action_mask`` (index actions) and ``invalid`` (steps), each
-    with its ``_key`` mask.
+    ``task_id``, ``num_actions``, ``is_goal``, ``steps``, ``action_mask`` (index actions), ``invalid`` (steps) and
+    ``terminated`` (resets: the reset envs' initial states are terminal), each with its ``_key`` mask. ``max_episode_steps`` (what ``gymnasium.make_vec`` passes for a registered time limit)
+    truncates natively, like ``max_steps`` (the smaller one when both are given).
     """
 
     metadata = {"render_modes": ["ansi"], "render_fps": 4, "autoreset_mode": AutoresetMode.NEXT_STEP}
@@ -101,9 +102,12 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
         render_mode: Optional[str] = None,
+        max_episode_steps: Optional[int] = None,
     ) -> None:
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
             raise ValueError(f"mymyr: render_mode must be None or 'ansi', not {render_mode!r}")
+        if max_episode_steps is not None:  # gymnasium.make_vec's time limit: the native truncation
+            max_steps = int(max_episode_steps) if max_steps == 0 else min(int(max_steps), int(max_episode_steps))
         if isinstance(num_envs, (bool, np.bool_)) or not isinstance(num_envs, (int, np.integer)) or num_envs < 1:
             raise ValueError("mymyr: num_envs must be a positive int")
         self.num_envs = int(num_envs)
@@ -242,16 +246,20 @@ class VectorEnv(gymnasium.vector.VectorEnv):
             self._draws.seed(envs, int(seed))
         elif not self._draws.seeded:
             self._draws.seed(np.arange(n), int(self.np_random.integers(0, 2**63)))
+        terminal = np.zeros(n, np.bool_)
         if len(envs):
             ids = self._draws.peek(envs)
             if task_ids is not None:
                 ids = task_ids[envs]
             self._draws.start(envs, ids)
             batch = self._open_pool().reset(env_ids=envs.astype(np.int32), task_ids=ids)
+            terminal[envs] = batch.terminated
             self._capture(envs, batch)
             self._autoreset[envs] = False
         self._started = True
-        return self._observe(), self._infos()
+        infos = self._infos()
+        infos["terminated"], infos["_terminated"] = terminal, mask.copy()
+        return self._observe(), infos
 
     def step(self, actions: Any) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, dict]:
         self._require_reset()
