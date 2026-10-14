@@ -156,14 +156,16 @@ the layout that PPO-style trainers take.
 | `"graph"` | the relational graph of `mymyr.encoding.FlatRelationEncoder`: a dict of its arrays | `Dict` of `Box` and `Sequence` |
 | `"bits"` | the state's fluent atom slots as int8 0/1 | `MultiBinary(n)`; numeric tasks: `Dict(atoms=..., numeric=Box)` |
 
-A symbolic observation holds the state's true fluent atoms as a frozenset of mymyr `GroundAtom`s
-(`derived=True` adds the derived atoms). The other fields are optional: the instance's object names
-(`objects=True`, the default), its `GroundCondition` goal (`goal=True`, the default), its static atoms, types included
-(`static=True`), and the numeric fluent values as a tuple of floats (`numeric=`, by default on for numeric tasks).
-A field that is turned off is `None`. Observations are immutable and hashable. `SymbolicSpace` is a custom space
-because no standard Gymnasium space holds sets of atoms. `Text` would reduce the atoms to strings, and `Graph` holds
-binary edges, not atoms of any arity. Its `contains` checks the fields and that the atoms are fluent atoms. Its
-`sample` returns the initial observation of a random instance.
+A symbolic observation holds the state's true fluent atoms as a frozenset of mymyr `GroundAtom`s (`derived=True` adds
+the derived atoms). The other fields are optional: the instance's object names (`objects=True`, the default), its
+`GroundCondition` goal (`goal=True`, the default), its static atoms, types included (`static=True`), and the numeric
+fluent values as a tuple of floats (`numeric=`, by default on for numeric tasks). A field that is turned off is
+`None`. Observations are immutable and hashable, and they pickle together with their task. Atoms compare equal within
+one `Task` object, so an observation that crossed a process boundary (as in Gymnasium's `AsyncVectorEnv`) belongs to a
+restored copy of the task; compare such observations by the atoms' text. `SymbolicSpace` is a custom space because no
+standard Gymnasium space holds sets of atoms. `Text` would reduce the atoms to strings, and `Graph` holds binary
+edges, not atoms of any arity. Its `contains` checks the fields and that the atoms are fluent atoms. Its `sample`
+returns the initial observation of a random instance.
 
 The graph mode builds observations with the native encoder (with `goal_derivations=()`, `include_actions=False`,
 `emit_counts=False` and `entity_arrays="auto"` by default; `graph_options=` passes other encoder options), so the
