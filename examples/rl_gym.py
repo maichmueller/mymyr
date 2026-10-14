@@ -7,15 +7,17 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 
+from mymyr import rl
 from mymyr.rl import gym as mg  # registers mymyr/PDDL-v0
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "tests/data/pddl/gripper"
+# the domain's problems, parsed once for both environments (domain= and problems= would parse them per environment)
+table = rl.TaskTable.from_pddl(DATA / "domain.pddl", DATA)
 
 # One environment: the observation is a frozenset of ground atoms with the instance's objects and goal; an action is
 # an index into the state's applicable actions, info["action_mask"] marks the valid ones.
-env = gym.make("mymyr/PDDL-v0", domain=DATA / "domain.pddl", problems=DATA, max_steps=40, step_reward=-1.0,
-               render_mode="ansi")
+env = gym.make("mymyr/PDDL-v0", table=table, max_steps=40, step_reward=-1.0, render_mode="ansi")
 rng = np.random.default_rng(0)
 obs, info = env.reset(seed=0)
 print(env.render())
@@ -37,8 +39,7 @@ print(f"greedy: {solved} of {episodes} episodes reach the goal")
 # A vector env: 8 environments stepped by one native pool, observations as 0/1 atom vectors of a fixed size, a
 # random policy over the masked actions in place of a learned one. With same-step autoreset every step is a
 # transition of the policy: an ending step returns the next episode's first observation.
-envs = mg.VectorEnv(domain=DATA / "domain.pddl", problems=DATA, num_envs=8, observation="bits", max_steps=40,
-                    step_reward=-1.0, autoreset_mode="same_step")
+envs = mg.VectorEnv(table, num_envs=8, observation="bits", max_steps=40, step_reward=-1.0, autoreset_mode="same_step")
 T, N = 32, envs.num_envs
 batch = dict(obs=np.zeros((T, *envs.observation_space.shape), np.int8), actions=np.zeros((T, N), np.int64),
              masks=np.zeros((T, N, envs.single_action_space.n), bool), rewards=np.zeros((T, N)),
