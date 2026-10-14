@@ -51,8 +51,9 @@ class VectorEnv(gymnasium.vector.VectorEnv):
       a sequence of N Actions (each env's GroundActionSpace in ``action_space``, a Tuple, samples its own state's).
 
     Env i is env ``first_env + i`` of the RL contract's RNG and instance streams: ``reset(seed=s)`` gives every env
-    the seed s (a list gives one seed per env), so the instances equal those of ``CpuEnvPool(seed=s)``'s envs and of
-    single :class:`Env` with ``env_id = first_env + i`` reset with s.
+    the seed s (a list gives one seed per env), so its episodes start in the instances of the episodes that
+    ``CpuEnvPool(seed=s)`` and the torch ``BatchedEnv(seed=s)`` start at their construction and at their later resets
+    and autoresets, and in those of single :class:`Env` with ``env_id = first_env + i`` reset with s.
 
     Autoreset (``autoreset_mode``, ``metadata["autoreset_mode"]``), as Gymnasium defines it:
 
@@ -332,7 +333,8 @@ class VectorEnv(gymnasium.vector.VectorEnv):
             return None
         self._require_reset()
         return tuple(
-            render_text(self._problems, int(self._task_ids[i]), self._state(i), int(self._steps[i]), int(self._count[i]))
+            render_text(self._problems, int(self._task_ids[i]), self._state(i), int(self._steps[i]),
+                        int(self._count[i]))
             for i in range(self.num_envs)
         )
 

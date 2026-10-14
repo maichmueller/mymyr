@@ -73,9 +73,9 @@ class Env(gymnasium.Env):
     such an absorbing step.
 
     Seeding: ``reset(seed=s)`` seeds ``np_random`` and the instance draws: episode k after it starts in the sampler's
-    draw for (s, ``env_id``, k), as env ``env_id`` of a ``CpuEnvPool(seed=s)`` that counts its episodes from its
-    construction. The transitions themselves are deterministic, so a seed fixes the trajectory of a sequence of
-    actions in every process.
+    draw for (s, ``env_id``, k), as env ``env_id`` of a ``CpuEnvPool(seed=s)`` or a torch ``BatchedEnv(seed=s)``,
+    whose construction starts episode 0. The transitions themselves are deterministic, so a seed fixes the
+    trajectory of a sequence of actions in every process.
 
     ``info``: ``task_id`` (the instance), ``num_actions`` (applicable actions of the observed state), ``is_goal``
     (the observed state is a goal), ``steps`` (the episode's steps), ``action_mask`` (index actions), ``invalid``

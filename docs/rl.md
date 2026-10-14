@@ -222,8 +222,9 @@ generator (`action_space.seed(s)`).
 It does not step N Python environments. Its observations are batched: a tuple of N symbolic observations, an int8
 `[N, n]` array, or one encoder batch of the N graphs (entity ids global over the batch, the input of a message-passing
 model). Index actions are an int array `[N]` with `info["action_mask"]` `[N, max_actions]`. Env `i` is environment
-`first_env + i` of the RL contract's streams, so `reset(seed=s)` draws the instances of `CpuEnvPool(seed=s)`; a
-list of N seeds seeds the environments one by one.
+`first_env + i` of the RL contract's streams, so after `reset(seed=s)` its episodes start in the instances of the
+episodes of `CpuEnvPool(seed=s)` and of the torch `BatchedEnv(seed=s)`, whose construction starts episode 0; a list
+of N seeds seeds the environments one by one.
 
 `autoreset_mode=` follows Gymnasium's definitions. In `"next_step"`, the default, a step that ends an episode returns
 its final observation, and the next step resets that environment, ignores its action and returns reward 0. In

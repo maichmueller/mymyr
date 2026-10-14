@@ -308,6 +308,39 @@ def test_vector_env_same_step_equals_the_cpu_pool(name):
 
 @needs_gym
 @needs_frontend
+@pytest.mark.parametrize(("name", "terminal"), [("gripper", True), ("deadend", True), ("deadend", False),
+                                              ("counters", True)])
+def test_vector_env_same_step_equals_the_torch_batched_env(name, terminal):
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    from mymyr.rl import gym as mg
+
+    t = table(name)
+    n, seed, config = 6, 31, contract(dead_end_terminal=terminal)  # not terminal: stuck states until truncation
+    venv = mg.VectorEnv(t, n, autoreset_mode="same_step", observation="bits", threads=1, **config)
+    env = rt.BatchedEnv(t, n, seed=seed, autoreset=True, **config)  # its construction starts episode 0
+    _, info = venv.reset(seed=seed)
+    rng = np.random.default_rng(4)
+    done_total = 0
+    for _ in range(1000 // n + 1):
+        np.testing.assert_array_equal(info["task_id"], env.task_ids.numpy())
+        np.testing.assert_array_equal(info["num_actions"], env.count.numpy())
+        np.testing.assert_array_equal(info["is_goal"], env.at_goal.numpy())
+        assert venv.states() == rl.decode(t, env.states.numpy(), env.task_ids.numpy())
+        actions = rng.integers(-1, info["num_actions"] + 2)
+        _, reward, terminated, truncated, info = venv.step(actions)
+        step = env.step(torch.from_numpy(actions.astype(np.int64)))
+        np.testing.assert_array_equal(reward.astype(np.float32), step.reward.numpy())  # torch's rewards are float32
+        np.testing.assert_array_equal(terminated, step.terminated.numpy())
+        np.testing.assert_array_equal(truncated, step.truncated.numpy())
+        np.testing.assert_array_equal(info["invalid"], step.invalid.numpy())
+        done_total += int((terminated | truncated).sum())
+    assert done_total > 0
+    venv.close()
+
+
+@needs_gym
+@needs_frontend
 @pytest.mark.parametrize("observation", OBSERVATIONS)
 @pytest.mark.parametrize("name", ["blocks", "gripper", "logistics"])
 def test_vector_env_equals_sync_vector_env(name, observation):
