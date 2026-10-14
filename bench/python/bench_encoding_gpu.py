@@ -26,6 +26,8 @@ mode that the gate needs ran); the device gates are soft: a failure on a contend
         [--rounds 20] [--modes cpu,env,device | mode names] [--json PATH] [--device 0] [--data DIR] [--quick]
 
 Task PDDL is read from tests/data/ipc, or from DIR/<domain>-ipc/test with --data DIR; a task without data is skipped.
+The vendored tests/data/ipc holds a few problems per domain: the benchmark set's larger problems (p16, p30, ...) need
+--data to point at a full copy of the IPC learning-track domains.
 The task `blocks-8` (tests/data/tasks, no PDDL front end needed) is not part of the default set.
 """
 
