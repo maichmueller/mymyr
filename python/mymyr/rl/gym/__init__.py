@@ -19,7 +19,7 @@
   domain's problems as ``mymyr/<name>-v0``.
 
 Transitions follow the RL contract of ``mymyr.rl`` exactly (they are the CpuEnvPool's steps): rewards, terminations,
-truncation, absorbing goals and dead ends, solved resets, instance sampling. See docs/rl.md, "Gymnasium".
+truncation, absorbing goals and dead ends, solved resets, instance sampling.
 """
 
 try:

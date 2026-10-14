@@ -149,7 +149,7 @@ jobs:
           xla_include="$(.venv/bin/python -c 'import pathlib, jaxlib; print(pathlib.Path(jaxlib.__file__).parent / "include")')"
           CMAKE_ARGS="-DMYMYR_DEPS_PREFIX=$GITHUB_WORKSPACE/.ci-deps/release -DMYMYR_XLA_FFI_INCLUDE=$xla_include" \
             uv pip install --python .venv/bin/python -v ".[test]" 2>&1 | tee build.log
-          .venv/bin/python -c "import torch, torchrl, tensordict, jax, flashbax, mctx; from mymyr._core import _rl_jax; assert _rl_jax.has_ffi(), 'RL runtime coverage requires XLA FFI'"
+          .venv/bin/python -c "import torch, torchrl, tensordict, jax, flashbax, mctx, gymnasium; from mymyr._core import _rl_jax; assert _rl_jax.has_ffi(), 'RL runtime coverage requires XLA FFI'"
       - name: Check for warnings
         run: ci/check_no_warnings.sh build.log
       - name: Test

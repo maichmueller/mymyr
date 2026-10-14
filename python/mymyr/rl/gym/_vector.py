@@ -68,8 +68,9 @@ class VectorEnv(gymnasium.vector.VectorEnv):
     these envs; the others keep their episodes). :meth:`set_next_task_ids` names the instances of the next
     autoresets (a curriculum); :meth:`fix_problem_index` fixes the instance of every episode. ``info``: per-env arrays
     ``task_id``, ``num_actions``, ``is_goal``, ``steps``, ``action_mask`` (index actions), ``invalid`` (steps) and
-    ``terminated`` (resets: the reset envs' initial states are terminal), each with its ``_key`` mask. ``max_episode_steps`` (what ``gymnasium.make_vec`` passes for a registered time limit)
-    truncates natively, like ``max_steps`` (the smaller one when both are given).
+    ``terminated`` (resets: the reset envs' initial states are terminal), each with its ``_key`` mask.
+    ``max_episode_steps`` (what ``gymnasium.make_vec`` passes for a registered time limit) truncates natively, like
+    ``max_steps`` (the smaller one when both are given).
     """
 
     metadata = {"render_modes": ["ansi"], "render_fps": 4, "autoreset_mode": AutoresetMode.NEXT_STEP}

@@ -149,6 +149,49 @@ def test_table_errors(sets):
         rl.is_goal(t, states, bad)
 
 
+def table_rows(t, width, walks):
+    """Rows in the table layout [width + NN] of the given per-instance states, with their task ids."""
+    rows, ids = [], []
+    for k, (task, states) in enumerate(zip(t.tasks, walks)):
+        enc = np.asarray(task.encode(states))
+        row = np.zeros((len(states), width + t.numeric_words), np.uint64)
+        row[:, : task.words] = enc[:, : task.words]
+        row[:, width : width + task.numeric_words] = enc[:, task.words :]
+        rows.append(row)
+        ids += [k] * len(states)
+    return np.concatenate(rows), np.asarray(ids, np.int32)
+
+
+@pytest.mark.parametrize("extra", [0, 3])
+def test_decode_reads_table_rows(sets, extra):
+    counters = ROOT / "tests/data/pddl/counters"
+    numeric = rl.TaskTable.from_pddl(counters / "domain.pddl", counters)
+    assert len({task.numeric_words for task in numeric.tasks}) > 1  # numeric rows of different widths
+    for t in (numeric, table_of(sets, "gripper")):
+        walks = [walk(task, steps=12, seed=k) for k, task in enumerate(t.tasks)]
+        rows, ids = table_rows(t, t.words + extra, walks)
+        states = [s for w in walks for s in w]
+        perm = np.random.default_rng(extra).permutation(len(ids))
+        assert rl.decode(t, rows[perm], ids[perm]) == [states[i] for i in perm]
+        assert rl.decode(t, rows.view(np.int64), ids) == states
+        pool = rl.CpuEnvPool(t, len(t), threads=1, sampler=None, autoreset=False, words=t.words + extra)
+        batch = pool.reset(task_ids=np.arange(len(t), dtype=np.int32))
+        assert rl.decode(t, batch.states, batch.task_ids) == [task.initial_state for task in t.tasks]
+    t = rl.TaskTable(numeric.tasks[:1])
+    rows, _ = table_rows(t, t.words, [walk(t.tasks[0], steps=3)])
+    assert rl.decode(t, rows) == rl.decode(t.tasks[0], rows) == walk(t.tasks[0], steps=3)
+    with pytest.raises(ValueError, match="task_ids are needed"):
+        rl.decode(numeric, rows)
+    with pytest.raises(ValueError, match="outside"):
+        rl.decode(numeric, rows, np.full(len(rows), 3))
+    with pytest.raises(ValueError, match="one entry per row"):
+        rl.decode(numeric, rows, [0])
+    with pytest.raises(ValueError, match="narrower"):
+        rl.decode(numeric, rows[:, 1:], np.full(len(rows), 2))
+    with pytest.raises(TypeError, match="TaskTable"):
+        rl.decode([t.tasks[0]], rows)
+
+
 # ------------------------------------------------------------------------------------------------ expand
 
 

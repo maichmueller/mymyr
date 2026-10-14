@@ -463,7 +463,7 @@ def check_action_mode(mode: str) -> str:
 
 def env_config(max_steps: int, step_reward: float, goal_reward: float, dead_end: str, dead_end_reward: float,
                dead_end_terminal: bool) -> dict:
-    """The CpuEnvPool keywords of the RL contract (docs/rl.md)."""
+    """The CpuEnvPool keywords of the RL contract."""
     return dict(max_steps=max_steps, step_reward=step_reward, goal_reward=goal_reward, dead_end=dead_end,
                 dead_end_reward=dead_end_reward, dead_end_terminal=dead_end_terminal)
 
