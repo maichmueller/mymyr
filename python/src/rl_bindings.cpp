@@ -6,7 +6,8 @@
 //   expand_into(table, states, task_ids, succ=..., ...)   destination-passing into caller arrays
 //   is_goal / goal_test / goal_count           bulk goal tests
 //   random_walks                              the native rollout reference loop
-//   ThreadPool                                a user-held pool for splitting one batch over threads
+//   successor_bounds                          per instance, a bound of every reachable state's successor count
+//   ThreadPool                               a user-held pool for splitting one batch over threads
 //   CpuEnvPool                                EnvPool-style asynchronous environments on the CPU
 // A Task or TaskHandle is accepted wherever a TaskTable is: its table of one (cached on the task core); task_ids may
 // then be None. Task ids are global over a suite (rl/task_suite.hpp). expand / expand_into take CUDA device arrays in
@@ -26,6 +27,7 @@
 
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/core/threads.hpp"
+#include "mymyr/heuristics/relaxed_task.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/pool.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -1819,6 +1821,30 @@ void bind_rl(nb::module_& parent)
         "task"_a, "steps"_a, "episode"_a = 50, "seed"_a = 0, nb::kw_only(), "canonical"_a = true, "witness"_a = false,
         "Native random walks (one call): expand, move to a uniformly random successor, restart at a dead end and after "
         "`episode` steps (0: only at a dead end).");
+    m.def(
+        "successor_bounds",
+        [](SuiteArg table) {
+            const SuiteRef ref = suite_of(table);
+            const u32 n = ref.suite->size();
+            std::vector<u64> out(n);
+            {
+                nb::gil_scoped_release release;
+                for (u32 g = 0; g < n; ++g)
+                {
+                    heuristics::GroundingStats stats;
+                    if (!heuristics::RelaxedTask::build(*ref.suite->task(g), {}, &stats))
+                        throw std::invalid_argument("mymyr: the successor bound of instance " + std::to_string(g) +
+                                                    " needs a grounding beyond the budget (" + stats.reason + ")");
+                    out[g] = stats.ground_actions;
+                }
+            }
+            return out;
+        },
+        "table"_a,
+        "Per instance, an upper bound of the successor count of every state reachable from its initial state: the "
+        "number of its delete-relaxed reachable ground actions (every applicable ground action of a reachable state is "
+        "one of them; negative literals, deletes and numeric conditions are relaxed, static literals are exact). "
+        "Grounds each instance once; raises ValueError when an instance's grounding exceeds the relaxation budget.");
 
     // --- CpuEnvPool
     using OptArray = Arg<std::optional<ann::Any>>;

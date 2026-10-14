@@ -106,6 +106,7 @@ from mymyr._core._rl import (
     is_goal,
     numeric_values,
     random_walks,
+    successor_bounds,
 )
 from mymyr.rl._ops import HerBatch, her_relabel, novelty_update, prefix_masks, schema_masks
 from mymyr.rl._sampling import InstanceSampler
@@ -134,6 +135,7 @@ __all__ = [
     "prefix_masks",
     "random_walks",
     "schema_masks",
+    "successor_bounds",
     "task_domains",
 ]
 
