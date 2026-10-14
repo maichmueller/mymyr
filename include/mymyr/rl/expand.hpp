@@ -145,8 +145,9 @@ struct PaddedExpansion
     u64* derived = nullptr;  // [rows, K, derived_words], zero padding
 };
 
-/// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null, or
-/// whose flat source is null, are not written.
+/// Scatters a flat expansion of `rows` states (it must carry offsets) into `out`. Arrays of `out` that are null are not
+/// written; an array whose flat source is null is filled with its padding (-1 for schema and binding, 0 for succ,
+/// goal and derived).
 void pad(const Expansion& flat, u64 rows, PaddedExpansion& out);
 
 /// Goal flags of a batch (evaluates axioms when the goal mentions derived predicates): out[i] = the goal test of

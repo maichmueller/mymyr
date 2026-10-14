@@ -553,8 +553,10 @@ T* dest_ptr(const Dest& d, const char* name, rl::DType want, rl::DType also, usi
         throw nb::type_error((std::string("mymyr: '") + name + "' has the wrong dtype").c_str());
     if (d.shape.size() != ndim)
         throw nb::type_error((std::string("mymyr: '") + name + "' has the wrong number of dimensions").c_str());
+    // An array without elements is contiguous whatever its strides (torch gives a (N, 0) tensor strides (1, 1)).
+    const bool empty = std::find(d.shape.begin(), d.shape.end(), 0) != d.shape.end();
     i64 expect = 1;
-    for (usize k = ndim; k-- > 0;)
+    for (usize k = ndim; !empty && k-- > 0;)
     {
         if (d.shape[k] > 1 && d.strides[k] != expect)
             throw nb::type_error((std::string("mymyr: '") + name + "' must be C-contiguous").c_str());
@@ -651,6 +653,11 @@ ResultDict expand_into(SuiteArg table, StatesLike states, TaskIdsArg task_ids, A
         }
         else
             throw nb::type_error("mymyr: 'derived' must hold 64-bit or 32-bit integers");
+        // an array without elements may carry no data pointer: the width is checked here, not by the expansion
+        if (x.derived_words < tt.derived_words())
+            throw nb::value_error(("mymyr: expand_into: 'derived' rows of " + std::to_string(x.derived_words) +
+                                   " words; the table has instances of " + std::to_string(tt.derived_words()))
+                                      .c_str());
         take_cap(d.shape[0]);
         keep.push_back(std::move(d));
     }

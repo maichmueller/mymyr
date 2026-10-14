@@ -28,8 +28,8 @@
 //
 // Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
 // successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
-// words are zero; PerInstance parts are scattered at the caller's width. A mapped write leaves the larger batch's
-// derived rows to the caller to zero first.
+// words are zero; PerInstance parts are scattered at the caller's width. A mapped write in Multi mode does not write
+// out.derived: the caller zeroes those rows first.
 //
 // Destination-passing: every array of `out` is device memory the caller owns (null: not written); nothing of the
 // caller's is allocated. The work runs on one stream (set_stream; null: the context's stream) in stream order after
@@ -103,7 +103,8 @@ public:
     /// write() into the larger batch's outputs `out` (its capacity, widths; out.offsets is not written): successor k of
     /// counted row q goes to row map.batch_offsets[map.rows[q]] + k, its parent label is map.rows[q]. Multi mode puts
     /// the rows there itself (the successor kernel's destination map: no copy of the expansion); Single and PerInstance
-    /// write into scratch and scatter it.
+    /// write into scratch and scatter it (their derived rows are scattered zero-padded to out.derived_words). Multi mode
+    /// does not write out.derived (its instances have no axioms): the caller zeroes those rows first, as SuiteExpander does.
     void write(rl::Expansion& out, const RowMap& map);
 
     /// rl::pad on the device: the padded [rows, K] view of a flat device expansion (it must carry offsets).

@@ -260,11 +260,31 @@ struct DeviceExpander::Impl
                 check(lifted::launch_state_offsets(gen->seg_offsets(), S, c.rows, base, out.offsets + c.first, s),
                       "launch_state_offsets");
         }
-        // goal flags of the written successors
         const u64 n = std::min(total, out.capacity);
+        if (out.derived && n)
+            gen->derived_rows(successor_rows, W, W, n, out.derived, out.derived_words);
+        // goal flags of the written successors; a goal over derived atoms reads the derived words just computed
+        const bool goal_from_words = out.derived && out.derived_words && task.compiled().goal.uses_derived;
         if (out.goal && n)
         {
-            if (slots && (!task.compiled().goal.uses_derived || gen->device_axioms()))
+            if (goal_from_words)
+            {
+                for (u64 b = 0; b < n; b += 0x7FFFFFFFull)
+                {
+                    const u64 c = std::min<u64>(n - b, 0x7FFFFFFFull);
+                    const u64* rows = successor_rows + b * W;
+                    const u64* der = out.derived + b * out.derived_words;
+                    if (slots)
+                    {
+                        const lifted::Parents p{rows, W, out.words, static_cast<u32>(c), der, out.derived_words};
+                        check(numeric::launch_goals(gen->view(), p, nullptr, nullptr, c, out.goal + b, s), "numeric goals");
+                    }
+                    else
+                        check(lifted::launch_goal_rows_derived(gen->view(), rows, W, c, der, out.derived_words, out.goal + b, s),
+                              "launch_goal_rows_derived");
+                }
+            }
+            else if (slots && (!task.compiled().goal.uses_derived || gen->device_axioms()))
                 gen->goal_flags(successor_rows, W, W, n, nullptr, n, out.goal);
             else if (!task.compiled().goal.uses_derived)
                 check(lifted::launch_goal_rows(gen->view(), out.succ, W, n, nullptr, out.goal, s), "launch_goal_rows");
@@ -289,8 +309,6 @@ struct DeviceExpander::Impl
                 check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // pageable source
             }
         }
-        if (out.derived && n)
-            gen->derived_rows(successor_rows, W, W, n, out.derived, out.derived_words);
         if (slots && out.succ)
             check(numeric::launch_convert(gen->view(), successor_rows, W, out.words, out.succ,
                                            out.words + out.numeric_words, out.words, n, false, s), "numeric output");
@@ -1005,6 +1023,8 @@ void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansio
         throw std::invalid_argument("mymyr: pad: numeric widths differ");
     if (out.binding && flat.binding && out.label_width < flat.label_width)
         throw std::invalid_argument("mymyr: pad: padded label width below the flat label width");
+    if (out.derived && flat.derived && out.derived_words < flat.derived_words)
+        throw std::invalid_argument("mymyr: pad: padded derived rows narrower than the flat rows");
     DeviceGuard guard(I.ctx->device());
     const cudaStream_t s = I.s;
     u32* d = I.dctl();

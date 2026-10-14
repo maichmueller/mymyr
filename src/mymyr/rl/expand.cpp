@@ -283,20 +283,20 @@ inline u8 goal_of(const Task& task, const u64* s, u32 W, u32 NN)
 /// past the instance's own) is null when not wanted; `goal` likewise.
 inline void row_info(const Task& task, const u64* s, u32 W, u32 NN, u8* goal, u64* derived, u32 dw)
 {
-    if (!derived)
+    const u32 own = derived ? bits::words_for(task.atoms().derived_slots()) : 0;
+    if (derived)
+        std::fill_n(derived, dw, u64{0});
+    if (!own)  // no derived atoms to write: the goal test alone
     {
         if (goal)
             *goal = goal_of(task, s, W, NN);
         return;
     }
-    const u32 own = bits::words_for(task.atoms().derived_slots());
-    std::fill_n(derived, dw, u64{0});
     const StateView view{s, std::min(W, task.words()), NN ? s + W : nullptr, task.numeric_words()};
     const WorkspaceLease ws = task.workspace();
     Successors& succ = ws->successors();
     succ.prepare(view);
-    if (own)
-        std::copy_n(ws->engine().derived(), own, derived);
+    std::copy_n(ws->engine().derived(), own, derived);
     if (goal)
         *goal = static_cast<u8>(succ.goal_holds());
 }

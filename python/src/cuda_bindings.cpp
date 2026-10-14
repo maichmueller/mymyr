@@ -803,8 +803,10 @@ T* device_dest(const DeviceInput& d, const char* name, std::initializer_list<std
         throw nb::type_error((std::string("mymyr: '") + name + "' has the wrong dtype").c_str());
     if (im.shape.size() != ndim)
         throw nb::type_error((std::string("mymyr: '") + name + "' has the wrong number of dimensions").c_str());
+    // An array without elements is contiguous whatever its strides (torch gives a (N, 0) tensor strides (1, 1)).
+    const bool empty = std::find(im.shape.begin(), im.shape.end(), 0) != im.shape.end();
     i64 expect = 1;
-    for (usize k = ndim; k-- > 0;)
+    for (usize k = ndim; !empty && k-- > 0;)
     {
         if (im.shape[k] > 1 && im.strides[k] != expect)
             throw nb::type_error((std::string("mymyr: '") + name + "' must be C-contiguous").c_str());
@@ -915,6 +917,11 @@ nb::dict device_expand_into(const ExpandIntoArgs& a)
         }
         else
             throw nb::type_error("mymyr: 'derived' must hold 64-bit or 32-bit integers");
+        // an array without elements may carry no data pointer: the width is checked here, not by the expansion
+        if (x.derived_words < ref.suite->derived_words())
+            throw nb::value_error(("mymyr: expand_into: 'derived' rows of " + std::to_string(x.derived_words) +
+                                   " words; the table has instances of " + std::to_string(ref.suite->derived_words()))
+                                      .c_str());
         take_cap(d.im.shape[0]);
     }
     if (!a.offsets.is_none())
@@ -1486,7 +1493,8 @@ void bind_cuda(nb::module_& parent)
                 return nb::none();
             return e.array(e.flat.off_derived, rl::DType::U64, {static_cast<i64>(e.flat.valid()), static_cast<i64>(e.flat.derived_words)}, true);
         }, "[M, D] derived words of the successors (expand(..., derived=True))")
-        .def_prop_ro("derived_words", [](const PyDeviceExpansion& e) { return e.flat.derived_words; })
+        .def_prop_ro("derived_words", [](const PyDeviceExpansion& e) { return e.flat.derived_words; },
+                     "Derived words per row (D) of the derived array (0 if not requested).")
         .def_prop_ro("counts", [](const PyDeviceExpansion& e) -> ArrayOut {
             const std::vector<i32> off = e.flat.host_offsets();
             std::vector<i32> c(e.flat.rows);
