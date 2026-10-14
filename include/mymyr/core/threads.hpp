@@ -15,8 +15,13 @@
 
 namespace mymyr
 {
-/// std::thread::hardware_concurrency(), at least 1.
-[[nodiscard]] inline u32 hardware_threads() noexcept { return std::max<u32>(1, std::thread::hardware_concurrency()); }
+/// std::thread::hardware_concurrency(), at least 1. Queried once per process: the query reads system files, which
+/// costs microseconds, and every thread-count argument is checked against it.
+[[nodiscard]] inline u32 hardware_threads() noexcept
+{
+    static const u32 count = std::max<u32>(1, std::thread::hardware_concurrency());
+    return count;
+}
 
 /// The largest thread count a parallel call accepts: max(64, 4 * hardware_threads()).
 [[nodiscard]] inline u32 max_threads() noexcept { return std::max<u32>(64, 4 * hardware_threads()); }

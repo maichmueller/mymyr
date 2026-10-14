@@ -80,6 +80,15 @@ enum class Layout : u8
     Relation,
 };
 
+/// Whether a batch stores `entity_role` and `entity_ref`. Auto omits them when the options leave every entity of every
+/// graph an object or the auxiliary entity (EncodingSchema::implicit_entity_arrays has the exact rule and the implicit
+/// values); Always stores them.
+enum class EntityArrays : u8
+{
+    Auto,
+    Always,
+};
+
 /// The integer type of every index, count and offset array.
 enum class IndexType : u8
 {
@@ -144,6 +153,12 @@ struct FlatOptions
     TargetSources targets{};
     Layout layout = Layout::Graph;
     IndexType index = IndexType::I32;
+    /// Stores `relation_counts`. Without it, the tuples of a cell are the difference of two consecutive
+    /// `relation_offsets` (in layout order).
+    bool emit_counts = true;
+    /// Always stores the entity arrays; Auto omits them when the schema allows it
+    /// (EncodingSchema::implicit_entity_arrays).
+    EntityArrays entity_arrays = EntityArrays::Always;
     HorizonOptions horizon{};
 
     [[nodiscard]] friend bool operator==(const FlatOptions&, const FlatOptions&) noexcept = default;
@@ -160,17 +175,19 @@ struct FlatOptions
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
-/// "subgoal", "action", "history"; "graph", "relation"; "int32", "int64"; "none", "full", "delta", "action";
-/// "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no enumerator.
+/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "none", "full", "delta",
+/// "action"; "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
 [[nodiscard]] std::string_view to_string(Layout value) noexcept;
+[[nodiscard]] std::string_view to_string(EntityArrays value) noexcept;
 [[nodiscard]] std::string_view to_string(IndexType value) noexcept;
 [[nodiscard]] std::string_view to_string(HorizonMode value) noexcept;
 [[nodiscard]] std::string_view to_string(RootPolicy value) noexcept;
 [[nodiscard]] std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept;
 [[nodiscard]] std::optional<TargetSource> parse_target_source(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
+[[nodiscard]] std::optional<EntityArrays> parse_entity_arrays(std::string_view text) noexcept;
 [[nodiscard]] std::optional<IndexType> parse_index_type(std::string_view text) noexcept;
 [[nodiscard]] std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept;
 [[nodiscard]] std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept;

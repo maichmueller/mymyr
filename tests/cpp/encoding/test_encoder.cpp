@@ -488,7 +488,6 @@ TEST(EncoderRefusals, OptionsThatAreNotEncodedYet)
     refused([](FlatOptions& o) { o.targets = {TargetSource::Action}; });
     refused([](FlatOptions& o) { o.predicate_virtual_nodes = true; });
     refused([](FlatOptions& o) { o.horizon.mode = HorizonMode::Full; });
-    refused([](FlatOptions& o) { o.layout = Layout::Relation; });
     // an invalid combination is reported as such, whether or not the encoder would encode its parts
     try
     {

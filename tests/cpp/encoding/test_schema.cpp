@@ -387,3 +387,32 @@ TEST(EncodingSchema, DomainOfATableKeepsHelperPredicatesAndFullActionArities)
         EXPECT_EQ(domain.schemas[s].arity, table->schema_arities()[s]);
 }
 }
+
+TEST(EncodingSchema, TheStoredArraysAreOptionsOfTheFingerprint)
+{
+    const DomainSignature d = blocks();
+    FlatOptions options;
+    options.include_actions = false;
+    const u64 reference = EncodingSchema::create(d, options)->fingerprint();
+    EXPECT_TRUE(EncodingSchema::create(d, options)->emits_counts());
+    EXPECT_FALSE(EncodingSchema::create(d, options)->implicit_entity_arrays());
+    FlatOptions no_counts = options;
+    no_counts.emit_counts = false;
+    EXPECT_FALSE(EncodingSchema::create(d, no_counts)->emits_counts());
+    EXPECT_NE(EncodingSchema::create(d, no_counts)->fingerprint(), reference);
+    FlatOptions automatic = options;
+    automatic.entity_arrays = EntityArrays::Auto;
+    EXPECT_TRUE(EncodingSchema::create(d, automatic)->implicit_entity_arrays());
+    EXPECT_NE(EncodingSchema::create(d, automatic)->fingerprint(), reference);
+    // Auto that cannot be implicit is the same encoding as Always: same arrays, same fingerprint
+    FlatOptions with_actions;
+    FlatOptions with_actions_auto;
+    with_actions_auto.entity_arrays = EntityArrays::Auto;
+    EXPECT_FALSE(EncodingSchema::create(d, with_actions_auto)->implicit_entity_arrays());
+    EXPECT_EQ(EncodingSchema::create(d, with_actions_auto)->fingerprint(),
+              EncodingSchema::create(d, with_actions)->fingerprint());
+    EXPECT_EQ(parse_entity_arrays("auto"), EntityArrays::Auto);
+    EXPECT_EQ(parse_entity_arrays("always"), EntityArrays::Always);
+    EXPECT_FALSE(parse_entity_arrays("never"));
+    EXPECT_EQ(to_string(EntityArrays::Auto), "auto");
+}

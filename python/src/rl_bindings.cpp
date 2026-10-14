@@ -18,6 +18,7 @@
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
 #include "py_domain.hpp"
+#include "py_pool.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 #include "rl_imports.hpp"
@@ -196,14 +197,6 @@ const char* dead_end_name(rl::DeadEnd d) noexcept { return d == rl::DeadEnd::Non
 
 namespace
 {
-struct PyPool
-{
-    explicit PyPool(u32 threads) : pool(std::make_unique<ThreadPool>(threads)) {}
-    std::unique_ptr<ThreadPool> pool;
-    rl::ExpandScratch scratch;
-    std::mutex mutex;  // one batch at a time (the scratch is shared by the pool's members)
-};
-
 /// The flat result of one expand call: one block holding every array.
 struct FlatResult
 {
@@ -453,15 +446,6 @@ using ArrayOut = Arg<ann::Any>;
 using ExpansionOut = Arg<std::variant<PyExpansion, ann::Any>>;
 using ResultDict = nb::typed<nb::dict, std::string, ann::Any>;
 using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
-
-PyPool* pool_arg(nb::handle pool)
-{
-    if (pool.is_none())
-        return nullptr;
-    if (!nb::isinstance<PyPool>(pool))
-        throw nb::type_error("mymyr: pool must be a mymyr.rl.ThreadPool");
-    return nb::inst_ptr<PyPool>(pool);
-}
 
 ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, SizeArg capacity, SizeArg words, SizeArg K,
                     bool goal, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
