@@ -6,6 +6,7 @@ of the CPU searches and writes the plan in the IPC plan format, or summarizes a 
 ```bash
 mymyr plan tests/data/pddl/logistics00/domain.pddl tests/data/pddl/logistics00/probLOGISTICS-6-1.pddl
 mymyr plan domain.pddl problem.pddl --search gbfs --heuristic ff -o plan.txt -v
+mymyr plan domain.pddl problem.pddl --search anytime --weights 5,3,2,1 --max-seconds 60
 mymyr info domain.pddl problem.pddl
 mymyr --version
 ```
@@ -18,23 +19,28 @@ states, search and parse time, plan length and cost.
 
 | Option | Meaning |
 | --- | --- |
-| `--search` | `astar` (default), `gbfs`, `brfs`, `iw`, `siw` or `astar_iw` |
-| `--heuristic` | `blind`, `max`, `add`, `ff`, `h2`, `set_additive`, `lmcut`, `lmcount` or `perfect`, for `astar`, `gbfs` and `astar_iw` (default: `max` for A*, `ff` for GBFS) |
+| `--search` | `astar` (default), `gbfs`, `ehc`, `anytime`, `brfs`, `iw`, `siw` or `astar_iw` |
+| `--heuristic` | `blind`, `max`, `add`, `ff`, `h2`, `set_additive`, `lmcut`, `lmcount` or `perfect`, for `astar`, `gbfs`, `ehc`, `anytime` and `astar_iw` (default: `max` for A* and AStarIW, `ff` for the others) |
+| `--weight` | the weight of `astar` (weighted A*, f = g + w·h; default 1) |
+| `--weights` | the weight schedule of `anytime`, for example `5,3,2,1` (the default) |
 | `--width` | the largest novelty arity of `iw` and `siw` (default 2), the width of `astar_iw` (default 1) |
 | `--threads` | threads of `brfs`; the other searches run on one thread |
 | `--atoms` | the task's atom slots: `lazy` (default), `auto`, `reachable` or `dense` ([State encodings](parsing-and-tasks.md#state-encodings)) |
 | `--max-seconds`, `--max-states` | budgets |
 | `--debug` | show the traceback of an error |
 
-A* finds an optimal plan with an admissible heuristic: `blind`, `max`, `h2`, `lmcut` or `perfect`. It and GBFS use the task's
-action costs. BrFS finds a shortest plan. IW, SIW and AStarIW prune by novelty and can miss plans of a task whose width
+A* finds an optimal plan with an admissible heuristic: `blind`, `max`, `h2`, `lmcut` or `perfect`; with `--weight w` the
+plan costs at most w times the optimum. It, GBFS, EHC and the anytime search use the task's action costs. EHC (enforced
+hill-climbing) climbs with h_FF's helpful actions and runs GBFS when hill-climbing fails. The anytime search
+(restarting weighted A*) finds cheaper and cheaper plans with the weights of `--weights` and writes the best one when
+it proves it optimal, exhausts its search space or a budget stops it; `-v` lists each plan's cost and time. BrFS finds a shortest plan. IW, SIW and AStarIW prune by novelty and can miss plans of a task whose width
 is larger than the one given. Numeric tasks run in every search but AStarIW, which refuses them with an error.
 
 The exit code tells what happened:
 
 | Code | Meaning |
 | --- | --- |
-| 0 | a plan was found |
+| 0 | a plan was found (by `anytime` also when a budget stopped it after a plan) |
 | 1 | the task is unsolvable, or the search exhausted its space without a plan |
 | 2 | invalid options, an unreadable file, PDDL mymyr cannot read, or another error |
 | 3 | `--max-seconds` or `--max-states` stopped the search |

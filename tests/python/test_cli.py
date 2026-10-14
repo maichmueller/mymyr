@@ -10,6 +10,7 @@ import pytest
 
 import mymyr
 from mymyr import search
+from mymyr.search import Status
 
 if not hasattr(mymyr, "Domain"):
     pytest.skip("built without the loki front end", allow_module_level=True)
@@ -33,7 +34,7 @@ OPTIMAL = {
 OPTIMAL_COST = {"logistics00__probLOGISTICS-6-1": 14, "philosophers__p03-phil4": 36, "blocks__probBLOCKS-8-0": 18}
 # A* with h_max expands this many states on each (the larger ones are only run with h_max)
 EXPANDED = {"logistics00__probLOGISTICS-6-1": 5802, "philosophers__p03-phil4": 28225, "blocks__probBLOCKS-8-0": 139798}
-SEARCHES = ["astar", "gbfs", "brfs", "iw", "siw", "astar_iw"]
+SEARCHES = ["astar", "gbfs", "ehc", "anytime", "brfs", "iw", "siw", "astar_iw"]
 
 
 def script():
@@ -95,7 +96,7 @@ def test_every_search_on_a_numeric_task(search_name):
     assert r.returncode == 0, r.stderr
     plan, goal, cost = replay_cost(task, r.stdout)
     assert goal
-    if search_name == "astar":  # h_max is admissible: the optimal metric value (uniform-cost search's)
+    if search_name in ("astar", "anytime"):  # the optimal metric value (uniform-cost search's)
         assert cost == search.astar(task, heuristic="blind", costs="real").cost == 6
 
 
@@ -152,6 +153,13 @@ def test_exit_codes(tmp_path):
         (["info", bad], "durative actions are not supported"),
         (["plan", p, d], "this is a PDDL problem, where a domain belongs"),
         (["plan", d, p, "--search", "brfs", "--threads", "100000"], "threads must be an int in [0, "),
+        (["plan", d, p, "--search", "gbfs", "--weight", "2"], "--weight applies to astar"),
+        (["plan", d, p, "--weight", "0.5"], "--weight must be a finite number of at least 1"),
+        (["plan", d, p, "--weight", "inf"], "--weight must be a finite number of at least 1"),
+        (["plan", d, p, "--weights", "5,3"], "--weights applies to anytime"),
+        (["plan", d, p, "--search", "anytime", "--weights", "1,2"], "--weights must not increase"),
+        (["plan", d, p, "--search", "anytime", "--weights", "3,0.5"], "--weights must be finite numbers"),
+        (["plan", d, p, "--search", "anytime", "--weights", "5,x"], "not a comma-separated list of numbers"),
     ]
     for args, words in cases:
         r = run(*args)
@@ -162,6 +170,47 @@ def test_exit_codes(tmp_path):
     assert r.returncode == 2 and "Traceback" in r.stderr and "PddlError" in r.stderr
     # 0
     assert run("plan", d, p, "--search", "gbfs").returncode == 0
+
+
+@pytest.mark.parametrize("weight", ["1.5", "2", "5"])
+def test_weighted_astar_stays_within_the_bound(weight):
+    name = "logistics00__probLOGISTICS-6-1"
+    d, p = OPTIMAL[name]
+    r = run("plan", d, p, "--heuristic", "lmcut", "--weight", weight, "-v")
+    assert r.returncode == 0, r.stderr
+    _, goal, cost = replay_cost(mymyr.Task.from_pddl(d, p), r.stdout)
+    assert goal and OPTIMAL_COST[name] <= cost <= float(weight) * OPTIMAL_COST[name]
+    assert f"search: astar with heuristic lmcut, weight {float(weight):g}" in r.stderr
+
+
+def test_ehc_and_anytime_statistics():
+    name = "logistics00__probLOGISTICS-6-1"
+    d, p = OPTIMAL[name]
+    r = run("plan", d, p, "--search", "ehc", "-v")
+    assert r.returncode == 0, r.stderr
+    assert "search: ehc with heuristic ff" in r.stderr and "hill-climbing: " in r.stderr
+    r = run("plan", d, p, "--search", "anytime", "--heuristic", "lmcut", "--weights", "3,1", "-v")
+    assert r.returncode == 0, r.stderr
+    _, goal, cost = replay_cost(mymyr.Task.from_pddl(d, p), r.stdout)
+    assert goal and cost == OPTIMAL_COST[name]
+    plans = [line for line in r.stderr.splitlines() if line.startswith("plan: cost ")]
+    costs = [float(line.split()[2]) for line in plans]
+    assert plans and costs == sorted(costs, reverse=True) and costs[-1] == cost
+    assert "weight 3" in plans[0] and "optimal: yes" in r.stderr
+
+
+def test_anytime_writes_its_best_plan_when_a_budget_stops_it():
+    d, p = OPTIMAL["blocks__probBLOCKS-8-0"]
+    task = mymyr.Task.from_pddl(d, p)
+    # room for the first iteration (weighted A* with weight 5) only
+    cap = search.astar(task, heuristic="ff", weight=5).stats.states + 1
+    capped = search.anytime_astar(task, heuristic="ff", max_states=cap)
+    assert capped.status == Status.SOLVED and capped.iterations[-1].status == Status.OUT_OF_STATES
+    r = run("plan", d, p, "--search", "anytime", "--max-states", cap, "-v")
+    assert r.returncode == 0, r.stderr
+    _, goal, cost = replay_cost(task, r.stdout)
+    assert goal and cost == capped.cost
+    assert "status: solved" in r.stderr and "optimal: not proven" in r.stderr
 
 
 @pytest.mark.parametrize("search_name", ["astar", "gbfs", "brfs", "siw"])

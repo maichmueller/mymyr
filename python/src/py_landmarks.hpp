@@ -55,6 +55,12 @@ struct BeamNovelty  // LayerOrdering::BeamNovelty
 struct WidthZero  // the IW family's arity-0 pass
 {
 };
+struct HelpfulActions  // EhcOptions::Helpful
+{
+};
+struct EhcFallback  // EhcOptions::Fallback
+{
+};
 /// A search observer (mymyr.search.Observer, or any object with some of its methods).
 struct Observer
 {
@@ -158,6 +164,16 @@ template<>
 struct type_caster<mymyr::python::ann::WidthZero>
 {
     static constexpr auto Name = const_name("typing.Literal['expand_depth_one', 'root_only']");
+};
+template<>
+struct type_caster<mymyr::python::ann::HelpfulActions>
+{
+    static constexpr auto Name = const_name("typing.Literal['auto', 'off', 'only', 'first']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EhcFallback>
+{
+    static constexpr auto Name = const_name("typing.Literal['gbfs', 'none']");
 };
 template<>
 struct type_caster<mymyr::python::ann::Observer>

@@ -151,7 +151,8 @@ public:
     virtual void on_expand(u64 /*id*/, StateView /*state*/) {}
     virtual void on_generate(u64 /*parent*/, const Action& /*action*/, u64 /*child*/, StateView /*child_state*/, bool /*is_new*/) {}
     virtual void on_prune(u64 /*parent*/, const Action& /*action*/, StateView /*child_state*/) {}
-    virtual void on_pass(u32 /*arity_or_layer*/, const SearchStatistics& /*pass*/) {}  // end of an IW pass / BrFS layer
+    /// The end of an IW pass, a BrFS layer, an EHC lookahead or an anytime iteration, with its statistics.
+    virtual void on_pass(u32 /*arity_or_layer*/, const SearchStatistics& /*pass*/) {}
     virtual void on_solution(std::span<const Action> /*plan*/, double /*cost*/) {}
     virtual bool on_progress(const SearchStatistics& /*so_far*/) { return true; }
     virtual void on_end(SearchStatus /*status*/, const SearchStatistics& /*total*/) {}

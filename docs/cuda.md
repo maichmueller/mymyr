@@ -19,7 +19,9 @@ Relaxation ignores numeric values and constraints as on the CPU, and the heurist
 (`costs="auto"` by default: the task's objective); real costs must stay below 2^31 units of their cost scale. Numeric
 searches support fractional and state-dependent action costs. Cost-only classical searches require integral,
 state-independent costs. Numeric A*/GBFS use
-a host double-priority heap for CPU eager ordering, with device successor, cost and heuristic evaluation.
+a host double-priority heap for CPU eager ordering, with device successor, cost and heuristic evaluation. Weighted A*
+(`BestFirstOptions::weight` other than 1), a cost bound, enforced hill-climbing and the anytime search run on the CPU
+only: the device searches refuse a weight or a bound with `std::invalid_argument`.
 
 Multi-IW, batched IW(1) and rollouts accept `(positive_slots, negative_slots)` tuples or `GroundCondition` goals with
 fluent and derived literals and numeric constraints. Multi-IW/batched IW lists select one conjunction per start;

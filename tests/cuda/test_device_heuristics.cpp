@@ -771,6 +771,19 @@ TEST(CudaBestFirst, BudgetsStartsAndRefusals)
     o = device_search(heuristics::Kind::Max, 10);
     o.search.heuristic.budget.max_operators = 10;
     EXPECT_THROW((void)cuda::astar(ctx, task, o), std::invalid_argument);
+    // weighted A* and a cost bound are CPU searches
+    for (const bool greedy : {false, true})
+    {
+        auto run = [&](const cuda::DeviceBestFirstOptions& x) { return greedy ? cuda::gbfs(ctx, task, x) : cuda::astar(ctx, task, x); };
+        o = device_search(heuristics::Kind::Max, 10);
+        o.search.weight = 2;
+        EXPECT_NE(cuda::best_first_unsupported(*task, o).find("weighted A*"), std::string::npos);
+        EXPECT_THROW((void)run(o), std::invalid_argument);
+        o = device_search(heuristics::Kind::Max, 10);
+        o.search.cost_bound = 100;
+        EXPECT_NE(cuda::best_first_unsupported(*task, o).find("cost bound"), std::string::npos);
+        EXPECT_THROW((void)run(o), std::invalid_argument);
+    }
 }
 #if defined(MYMYR_DEVICE_HEURISTICS_FRONTEND)
 // ------------------------------------------------------------------------------------------------ PDDL tasks
