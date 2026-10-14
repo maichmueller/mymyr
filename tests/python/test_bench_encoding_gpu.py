@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -44,13 +45,20 @@ def test_quick_cpu_run_writes_the_documented_json_and_a_gate_table(tmp_path, ben
         assert 0 < record["min"] <= record["median"] and record["rounds"] == 2
         assert record["bytes_per_state"] > 0 and record["ints_per_state"] > 0
     assert records["cpu_batch256"]["bytes_per_state"] == records["cpu_batch_all"]["bytes_per_state"]
+    # native threads, a held pool, capacity-sized arrays and the relation-major layout run as modes of their own
+    for mode, fields in (("cpu_batch_all_t8", dict(threads=8)), ("cpu_batch_all_pool8", dict(threads=8)),
+                         ("cpu_batch_all_cap", dict(threads=1)), ("cpu_batch_all_rel", dict(layout="relation")),
+                         ("cpu_batch_all_rel_t8", dict(layout="relation", threads=8))):
+        assert records[mode]["status"] == "ok", mode
+        assert all(records[mode][k] == v for k, v in fields.items()), mode
+    assert not any(r["mode"] == "cpu_batch256_t8" for r in result["records"])
     # modes outside the selection do not appear; every gate is listed, and the ones without data are n/a
     assert not any(r["group"] in ("env", "device") for r in result["records"])
     gates = {g["id"]: g for g in result["gates"]}
     assert {t["id"] for t in result["targets"]} == set(gates)
     for gate in ("T-G1", "T-G2", "T-G3", "T-G5", "ENV"):
         assert gates[gate]["status"] == "n/a"
-    assert gates["T1"]["status"] in ("pass", "fail")
+    assert gates["T1"]["status"] in ("pass", "fail") and gates["T7"]["status"] in ("pass", "fail")
     assert "T-G1" in stdout and "n/a" in stdout
 
 
@@ -64,12 +72,16 @@ def test_modes_without_a_device_encoder_are_skipped_with_a_reason(tmp_path, benc
     assert not any(r["status"] == "ok" for r in result["records"])
 
 
-def test_unknown_and_absent_tasks_are_reported_not_fatal(tmp_path, monkeypatch):
-    monkeypatch.setenv("MYMYR_IPC", str(tmp_path / "none"))
-    monkeypatch.setenv("MYMYR_FORK_DATA_DIR", str(tmp_path / "none"))
-    result, _ = run_script(tmp_path, "--tasks", "no-such-task,blocks-8", "--modes", "cpu_batch256", "--rounds", "1")
-    first = result["records"][0]
+def test_unknown_and_absent_tasks_are_reported_not_fatal(tmp_path, bench):
+    result, _ = run_script(
+        tmp_path, "--tasks", "no-such-task,rovers-p16e,blocks-8", "--modes", "cpu_batch256", "--rounds", "1",
+        "--data", str(tmp_path / "none"),
+    )
+    first, second = result["records"][:2]
     assert first["task"] == "no-such-task" and first["status"] == "skipped" and "unknown task" in first["reason"]
+    assert second["task"] == "rovers-p16e" and second["status"] == "skipped"
+    if hasattr(bench.mymyr, "Domain"):
+        assert str(tmp_path / "none") in second["reason"]
     assert any(r["task"] == "blocks-8" and r["status"] == "ok" for r in result["records"])
 
 
@@ -83,6 +95,51 @@ def test_walk_rows_are_deterministic_distinct_and_reachable(bench):
     assert np.array_equal(rows[0], task.encode([task.initial_state])[0])
     tiled = bench.tile(rows, 150)
     assert tiled.shape[0] == 150 and np.array_equal(tiled[64:128], rows)
+
+
+class FakeDeviceEncoder:
+    """Records the calls a device encoder receives: reserve before the output is sized, one acquisition held, and the
+    caller-owned output passed to every encode."""
+
+    calls = []
+
+    def __init__(self, flat):
+        self.flat, self.reserved = flat, None
+        FakeDeviceEncoder.calls.append("init")
+
+    def reserve(self, graphs):
+        self.reserved = graphs
+        FakeDeviceEncoder.calls.append("reserve")
+
+    def reserved_layout(self):
+        assert self.reserved is not None, "the output is sized after reserve"
+        return types.SimpleNamespace(bytes=64 * self.reserved)
+
+    def reserved_bytes(self):
+        return 16 * self.reserved
+
+    def acquire(self):
+        FakeDeviceEncoder.calls.append("acquire")
+        return object()
+
+    def encode(self, states, output):
+        assert output.size == 64 * self.reserved
+        FakeDeviceEncoder.calls.append("encode")
+
+
+def test_device_runs_reserve_hold_an_acquisition_and_pass_a_caller_output(bench, monkeypatch):
+    task = text_task("blocks__probBLOCKS-8-0")
+    gpu = types.SimpleNamespace(torch=types.SimpleNamespace(empty=lambda n, dtype, device: np.empty(n), uint8=None),
+                                device=None)
+    FakeDeviceEncoder.calls = []
+    for layout in ("graph", "relation"):
+        run = bench.DeviceRun(FakeDeviceEncoder, task, gpu, 100, layout)
+        run.encode(None)
+        assert run.sizes() == dict(scratch_bytes=1600, output_bytes=6400)
+    assert FakeDeviceEncoder.calls == ["init", "reserve", "acquire", "encode"] * 2
+    graphs, holds = ["graph"], ["hold"]
+    bench.release(graphs, holds)
+    assert graphs == [] and holds == []
 
 
 def record(task, mode, value, **fields):
