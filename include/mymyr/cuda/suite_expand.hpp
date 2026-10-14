@@ -39,15 +39,10 @@ namespace mymyr::cuda
 class SuiteExpander
 {
 public:
-    /// Throws std::invalid_argument for suites the device cannot run (a domain's DeviceTaskTable::unsupported, rows
-    /// wider than the kernels take).
     SuiteExpander(ContextPtr ctx, rl::TaskSuitePtr suite, cudaStream_t stream = nullptr);
     ~SuiteExpander();
     SuiteExpander(const SuiteExpander&) = delete;
     SuiteExpander& operator=(const SuiteExpander&) = delete;
-
-    /// Empty if the device runs every domain of the suite, else why not ("domain d: ...").
-    [[nodiscard]] static std::string unsupported(const rl::TaskSuite& suite);
 
     [[nodiscard]] const ContextPtr& context() const noexcept;
     [[nodiscard]] const rl::TaskSuitePtr& suite() const noexcept;

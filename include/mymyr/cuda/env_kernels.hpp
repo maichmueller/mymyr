@@ -45,7 +45,7 @@ struct Select
     u32* pick_rank = nullptr;    // [rows] (cache): the index in the (row, schema) segment
     i64* pick_row = nullptr;     // [rows] (flat): the flat row of the pick, -1 for no move
     u8* status = nullptr;        // [rows]
-    const u8* goal = nullptr;
+    const u8* goal = nullptr;    // [rows] whether the current state is a goal (rl::EnvBatch::at_goal): no move
     // multi-instance tables: the cached row order (columns order_col, order_col + 1 of the count cache: the row at
     // position i, the position of row i); *order_bad is set when it is not a permutation of the rows (a batch
     // rearranged since the order was computed: the launches then take the rows in batch order)
@@ -97,6 +97,7 @@ struct Instances
     u64 view_words = 0;
     const u64* goal_pos = nullptr;
     const u64* goal_neg = nullptr;
+    const u8* init_goal = nullptr;  // [I] whether the initial state passes the instance's goal test
     // the fast path: per instance its view words (an autoreset copies the instance's own view) and, without derived
     // goal literals, its goal as the words of its masks that are not zero (CSR: instance k's are [goal_off[k],
     // goal_off[k + 1]); word goal_word[j] must hold goal_wpos[j] and none of goal_wneg[j]) and whether it is statically
@@ -137,8 +138,8 @@ struct Finish
     u32 dead_end_terminal = 1;  // a dead end terminates
     Instances in;
     const i32* next_task_ids = nullptr;  // [rows]: the instance an autoresetting row restarts in (null: its own)
-    u32* error = nullptr;                // value 4: a task id outside the table (a next id: the row kept its
-                                         // instance; the row's own: tested as instance 0)
+    u32* error = nullptr;                // value 4: a task id outside the table (a next id of any row, used or not;
+                                         // an autoresetting row keeps its instance; the row's own: instance 0)
     u32* order_bad = nullptr;            // reset to 0 for the next step (Select sets it)
     // outputs (null: not written)
     f32* reward = nullptr;
@@ -148,6 +149,7 @@ struct Finish
     u8* invalid = nullptr;
     i32* count = nullptr;
     u64* final_states = nullptr;
+    u8* at_goal = nullptr;   // [rows]: whether the state after the step (and the autoreset) is a goal
     i32* schema = nullptr;   // written for non-moves only (-1)
     i32* binding = nullptr;  // idem
     u32 label_width = 0;
@@ -159,7 +161,8 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
 cudaError_t launch_goal(const rl::dev::TaskView& t, const Finish& p, u8* goal, cudaStream_t s);
 
 /// Resets rows with mask[i] != 0 (all without a mask) to the initial state of their instance: the initial row, step 0,
-/// the initial count and cache, and (unless keep_goals) the instance's goal masks.
+/// the initial count and cache, (unless keep_goals) the instance's goal masks, and whether the row is at a goal (its
+/// goal masks' test with per-env goals, else the instance's init_goal).
 struct Reset
 {
     u64 rows = 0;
@@ -176,6 +179,7 @@ struct Reset
     u64* goal_pos = nullptr;  // [rows, words] (null: no per-env goals)
     u64* goal_neg = nullptr;
     u32 keep_goals = 0;
+    u8* at_goal = nullptr;  // [rows] (null: not written)
     u32* error = nullptr;  // value 4: a task id outside the table (the row is reset into instance 0)
 };
 cudaError_t launch_reset(const Reset& p, cudaStream_t s);

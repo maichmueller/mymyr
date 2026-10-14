@@ -119,8 +119,12 @@ public:
     ~ChunkGenerator();
 
     /// Empty if the device can run the task (with CPU fallback for some schemas), otherwise the reason: object
-    /// bitsets wider than lifted::k_max_ow words, or states wider than lifted::k_max_words words.
+    /// bitsets wider than lifted::k_max_ow words, numeric conditions or effects without numeric state values, or
+    /// numeric states wider than lifted::k_max_words words.
     [[nodiscard]] static std::string unsupported(const Task& task);
+    /// unsupported(task), or the device searches' limit (BrFS, IW, A*, state spaces: they hold whole state rows):
+    /// states wider than lifted::k_max_words words.
+    [[nodiscard]] static std::string search_unsupported(const Task& task);
 
     [[nodiscard]] const ContextPtr& context() const noexcept { return m_ctx; }
     [[nodiscard]] const TaskPtr& task() const noexcept { return m_task; }

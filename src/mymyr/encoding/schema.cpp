@@ -419,11 +419,20 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
             schema->m_schema_relation.push_back(static_cast<i32>(*schema->find(action_relation_name(action, split))));
         }
     const FlatOptions& o = schema->m_options;
+    schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
+                                  !o.predicate_virtual_nodes && !o.include_actions &&
+                                  o.horizon.mode == HorizonMode::None;
     Hasher hasher;
     hasher.text("mymyr.encoding.schema");
     hasher.integer(k_schema_version);
     hasher.integer(static_cast<u64>(o.layout));
     hasher.integer(static_cast<u64>(o.index));
+    // the options of the stored arrays are hashed only when they omit an array, so that an encoding that stores every
+    // array keeps one fingerprint however it was asked for
+    if (!o.emit_counts)
+        hasher.text("omit relation_counts");
+    if (schema->m_implicit_entities)
+        hasher.text("omit entity_role, entity_ref");
     hasher.integer(o.targets.bits());
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));

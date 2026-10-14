@@ -1,18 +1,19 @@
 // The device expand (include/mymyr/cuda/expand.hpp): the single-instance path (ChunkGenerator), the one-pass
-// multi-instance path (the multi-instance kernels, table_launch.hpp) and the per-instance path (parts expanded apart by
-// single-instance expanders and scattered back).
+// multi-instance path (the multi-instance kernels, table_launch.hpp), the per-instance path (parts expanded apart by
+// single-instance expanders and scattered back) and the host path (rl::expand on the host's threads).
 
 #include "mymyr/cuda/expand.hpp"
 
 #include "numeric_pad.hpp"
 
 #include "mymyr/core/bitset.hpp"
-
+#include "mymyr/core/thread_pool.hpp"
 #include "mymyr/cuda/generator.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
 #include "table_launch.hpp"
 
 #include <algorithm>
+#include <thread>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -85,6 +86,12 @@ struct DeviceExpander::Impl
     std::vector<Part> parts;
     std::vector<i32> host_ids;
     Scratch part_limits, index, gathered, row_counts, batch_offsets;
+    // Host (and Single batches of numeric rows wider than the numeric kernels hold): rl::expand on the host's threads
+    bool on_host = false;  // the counted batch is expanded on the host
+    std::unique_ptr<ThreadPool> pool;
+    rl::ExpandScratch pool_scratch;
+    std::vector<u64> h_rows;
+    std::vector<i32> h_ids, h_offsets;
 
     [[nodiscard]] u32* dctl() { return scratch_of<u32>(ctl, ctx, k_ctl_words, s); }
     [[nodiscard]] u32* hctl() const { return static_cast<u32*>(host_ctl.data()); }
@@ -541,6 +548,99 @@ struct DeviceExpander::Impl
         segs_kept = true;
     }
 
+    // ------------------------------------------------------------------------------------------ Host
+    /// Whether the batch in `in` is expanded on the host: an instance the device kernels cannot run, or numeric rows
+    /// wider than the numeric kernels hold.
+    [[nodiscard]] bool host_batch() const
+    {
+        if (mode == Mode::Host)
+            return true;
+        const u32 slots = mode == Mode::Single ? table->task(0)->numeric_slots() : 0;
+        return slots && in.words + slots > lifted::k_max_words;
+    }
+
+    /// rl::expand of the host's copy of the batch on the host's threads (bit for bit the single-threaded call's).
+    void expand_host(rl::Expansion& e)
+    {
+        if (!pool)
+            pool = std::make_unique<ThreadPool>(std::max<u32>(1, std::thread::hardware_concurrency()));
+        const u32 RW = in.words + in.numeric_words;
+        rl::expand(*table, rl::StateBatchView{h_rows.data(), in.rows, in.words, RW, in.numeric_words},
+                   ids ? h_ids.data() : nullptr, e, opt, *pool, pool_scratch);
+    }
+
+    u64 count_host()
+    {
+        const u64 n = in.rows;
+        const u32 RW = in.words + in.numeric_words;
+        h_rows.resize(n * RW);
+        h_ids.resize(ids ? n : 0);
+        if (n && RW)
+            check(cudaMemcpy2DAsync(h_rows.data(), RW * sizeof(u64), in.data, stride * sizeof(u64), RW * sizeof(u64), n,
+                                    cudaMemcpyDeviceToHost, s),
+                  "cudaMemcpy2DAsync (host batch)");
+        if (ids && n)
+            check(cudaMemcpyAsync(h_ids.data(), ids, n * sizeof(i32), cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+        rl::Expansion e;
+        e.words = std::max<u32>(1, in.words);
+        e.numeric_words = in.numeric_words;
+        e.label_width = std::max<u32>(1, table->label_width());
+        h_offsets.resize(n + 1);
+        e.offsets = h_offsets.data();
+        expand_host(e);
+        total = e.total;
+        chunks.clear();
+        return total;
+    }
+
+    void offsets_host(i32* out)
+    {
+        check(cudaMemcpyAsync(out, h_offsets.data(), h_offsets.size() * sizeof(i32), cudaMemcpyHostToDevice, s),
+              "cudaMemcpyAsync");
+        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // the pageable source
+    }
+
+    /// The host expansion at out's widths, copied up to out's arrays.
+    void write_host(rl::Expansion& out)
+    {
+        const u64 n = std::min(total, out.capacity);
+        const u32 RW = out.words + out.numeric_words, L = label_columns(out);
+        std::vector<u64> succ(out.succ ? n * RW : 0);
+        std::vector<i32> parent(out.parent ? n : 0), schema(out.schema ? n : 0), binding(out.binding ? n * L : 0);
+        std::vector<u8> goal(out.goal ? n : 0);
+        std::vector<u64> derived(out.derived ? n * out.derived_words : 0);
+        rl::Expansion e;
+        e.capacity = n;
+        e.words = out.words;
+        e.numeric_words = out.numeric_words;
+        e.label_width = L;
+        e.succ = out.succ ? succ.data() : nullptr;
+        e.parent = out.parent ? parent.data() : nullptr;
+        e.schema = out.schema ? schema.data() : nullptr;
+        e.binding = out.binding ? binding.data() : nullptr;
+        e.goal = out.goal ? goal.data() : nullptr;
+        e.derived = out.derived ? derived.data() : nullptr;
+        e.derived_words = out.derived_words;
+        e.offsets = out.offsets ? h_offsets.data() : nullptr;
+        expand_host(e);
+        auto up = [&](void* dst, const void* src, u64 bytes)
+        {
+            if (dst && bytes)
+                check(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, s), "cudaMemcpyAsync (host expansion)");
+        };
+        up(out.succ, succ.data(), succ.size() * sizeof(u64));
+        up(out.parent, parent.data(), parent.size() * sizeof(i32));
+        up(out.schema, schema.data(), schema.size() * sizeof(i32));
+        up(out.binding, binding.data(), binding.size() * sizeof(i32));
+        up(out.goal, goal.data(), goal.size());
+        up(out.derived, derived.data(), derived.size() * sizeof(u64));
+        up(out.offsets, h_offsets.data(), h_offsets.size() * sizeof(i32));
+        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");  // the pageable sources
+        out.total = e.total;
+        out.words_needed = e.words_needed;
+    }
+
     // ------------------------------------------------------------------------------------------ PerInstance
     DeviceExpander& sub(u32 i)
     {
@@ -752,7 +852,10 @@ struct DeviceExpander::Impl
         e.derived_words = out.derived ? own_derived_words(0) : 0;
         e.derived = e.derived_words ? scratch_of<u64>(t_derived, ctx, T * e.derived_words, s) : nullptr;
         e.offsets = scratch_of<i32>(t_offsets, ctx, in.rows + 1, s);
-        write_single(e);
+        if (on_host)
+            write_host(e);
+        else
+            write_single(e);
         out.total = e.total;
         out.words_needed = e.words_needed;
         if (!any)
@@ -817,10 +920,6 @@ struct DeviceExpander::Impl
         if (out.derived && out.derived_words < table->derived_words())
             throw std::invalid_argument("mymyr: expand: derived rows of " + std::to_string(out.derived_words) +
                                         " words; the table has instances of " + std::to_string(table->derived_words()));
-        if (out.succ && out.words + max_numeric_slots() > lifted::k_max_words)
-            throw std::invalid_argument("mymyr: device expand: successor rows of " + std::to_string(out.words) +
-                                        " words (the device kernels take at most " + std::to_string(lifted::k_max_words) +
-                                        ")");
         if (mapped ? out.numeric_words < table->numeric_words() : out.numeric_words != table->numeric_words())
             throw std::invalid_argument("mymyr: device expand: output numeric width differs from the table");
         if (out.offsets && total > rl::k_max_rows)
@@ -832,15 +931,14 @@ DeviceExpander::DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStrea
 {
     if (!ctx || !table)
         throw std::invalid_argument("mymyr: DeviceExpander: null context or table");
-    if (const std::string why = table->size() == 1 ? ChunkGenerator::unsupported(*table->task(0))
-                                                  : DeviceTaskTable::unsupported(*table); !why.empty())
-        throw std::invalid_argument("mymyr: the CUDA backend cannot run " + why);
     Impl& I = *m;
     I.ctx = std::move(ctx);
     I.table = std::move(table);
     I.s = stream ? stream : I.ctx->stream();
     DeviceGuard g(I.ctx->device());
-    if (I.table->size() == 1)
+    if (I.table->size() == 1 && !ChunkGenerator::unsupported(*I.table->task(0)).empty())
+        I.mode = Mode::Host;
+    else if (I.table->size() == 1)
     {
         I.mode = Mode::Single;
         I.gen = std::make_unique<ChunkGenerator>(I.ctx, I.table->task(0), I.s);
@@ -939,9 +1037,6 @@ u64 DeviceExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::
         throw std::invalid_argument("mymyr: device expand: input numeric width differs from the table");
     if (in.rows > rl::k_max_rows)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
-    if (in.words + I.max_numeric_slots() > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device expand: state rows of " + std::to_string(in.words) +
-                                    " words (the device kernels take at most " + std::to_string(lifted::k_max_words) + ")");
     if (!task_ids && in.rows && I.table->size() > 1)
         throw std::invalid_argument("mymyr: expand: a batch over a table of " + std::to_string(I.table->size()) +
                                     " instances needs task ids");
@@ -949,12 +1044,17 @@ u64 DeviceExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::
     I.opt = opt;
     I.ids = task_ids;
     I.stride = in.stride ? in.stride : in.words + in.numeric_words;
-    switch (I.mode)
-    {
-        case Mode::Single: I.count_single(); break;
-        case Mode::Multi: I.count_multi(); break;
-        case Mode::PerInstance: I.count_parts(); break;
-    }
+    I.on_host = I.host_batch();
+    if (I.on_host)
+        I.count_host();
+    else
+        switch (I.mode)
+        {
+            case Mode::Single: I.count_single(); break;
+            case Mode::Multi: I.count_multi(); break;
+            case Mode::PerInstance: I.count_parts(); break;
+            case Mode::Host: break;
+        }
     I.counted = true;
     I.kept = I.mode != Mode::PerInstance && I.chunks.size() == 1;
     return I.total;
@@ -965,11 +1065,17 @@ void DeviceExpander::write(rl::Expansion& out)
     Impl& I = *m;
     I.check_write(out);
     DeviceGuard guard(I.ctx->device());
+    if (I.on_host)
+    {
+        I.write_host(out);
+        return;
+    }
     switch (I.mode)
     {
         case Mode::Single: I.write_single(out); break;
         case Mode::Multi: I.write_multi(out, nullptr); break;
         case Mode::PerInstance: I.write_parts(out, nullptr); break;
+        case Mode::Host: break;
     }
 }
 
@@ -983,11 +1089,17 @@ void DeviceExpander::offsets(i32* out)
     if (I.total > rl::k_max_rows)
         throw std::length_error("mymyr: expand: more than 2^31 - 1 successors in one batch");
     DeviceGuard guard(I.ctx->device());
+    if (I.on_host)
+    {
+        I.offsets_host(out);
+        return;
+    }
     switch (I.mode)
     {
         case Mode::Single: I.offsets_single(out); break;
         case Mode::Multi: I.offsets_multi(out); break;
         case Mode::PerInstance: I.offsets_parts(out); break;
+        case Mode::Host: break;
     }
 }
 
@@ -998,9 +1110,10 @@ void DeviceExpander::write(rl::Expansion& out, const RowMap& map)
     if (I.in.rows && (!map.rows || !map.batch_offsets))
         throw std::invalid_argument("mymyr: DeviceExpander::write: a row map without rows or batch offsets");
     DeviceGuard guard(I.ctx->device());
-    switch (I.mode)
+    switch (I.on_host ? Mode::Host : I.mode)
     {
-        case Mode::Single: I.write_single_mapped(out, map); break;
+        case Mode::Single:
+        case Mode::Host: I.write_single_mapped(out, map); break;
         case Mode::Multi: I.write_multi(out, &map); break;
         case Mode::PerInstance: I.write_parts(out, &map); break;
     }

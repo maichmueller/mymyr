@@ -28,8 +28,12 @@
 //      bootstrap state), count is the initial state's. Without autoreset the caller resets finished environments with
 //      reset(mask) (TorchRL's convention).
 // Special cases: goals and terminal dead ends are absorbing until reset: no move, reward zero and no step-counter
-// advance; draw counters still advance. An action outside [0, count) in a nonterminal state does not move (s' = s,
-// reward step_reward, not a goal, not a dead end; flagged in `invalid`); a stuck environment does not move either.
+// advance; draw counters still advance. Whether the current state is a goal (the start of an absorbing step) is the
+// batch's at_goal flag where it has one: reset, step and refresh keep it (a reset into a goal state, a relabelled goal
+// mask that already holds), so a step reads it instead of testing the state again. With goal masks the goal test is
+// the masks' test throughout (resets included). An action outside [0, count) in a nonterminal state does not move
+// (s' = s, reward step_reward, not a goal, not a dead end; flagged in `invalid`); a stuck environment does not move
+// either.
 //
 // Rows are `words` atom words wide (at least the suite's words(), so a reset into any instance fits), plus the suite's
 // numeric words ([bits | slots]; the numeric encoding follows each instance's storage mode). A step reads and writes
@@ -92,6 +96,10 @@ struct EnvBatch
     // per-row RNG streams (e.g. the JAX env's keys and env ids)
     const u64* seeds = nullptr;    // [rows] per-row RNG keys (null: EnvConfig::seed)
     const u32* env_ids = nullptr;  // [rows] per-row env ids (null: first_env + row)
+    /// [rows] whether each row's state is a goal (by its goal masks, else its instance's goal test): written by reset,
+    /// step and refresh, read by step instead of testing the state (null: the host env tests it; the device env
+    /// requires it). Writing states or goal masks directly needs refresh().
+    u8* at_goal = nullptr;
 
     [[nodiscard]] u32 row_words() const noexcept { return words + numeric_words; }
     [[nodiscard]] bool goals() const noexcept { return goal_pos != nullptr; }
@@ -147,13 +155,14 @@ public:
     [[nodiscard]] u32 numeric_words() const noexcept { return m_suite->numeric_words(); }
     /// Successors of an instance's initial state.
     [[nodiscard]] u32 initial_count(u32 instance) const { return m_init_count.at(instance); }
+    /// Whether an instance's initial state passes its goal test.
+    [[nodiscard]] bool initial_goal(u32 instance) const { return m_init_goal.at(instance) != 0; }
 
     /// Resets the rows with mask[i] != 0 (every row if mask is null) to the initial states of their instances
     /// (task_ids, which the caller sets first): steps 0, goal masks (if the batch has them and keep_goals is false)
-    /// the instances' goals, count (if set) the initial states' successors. Draw counters are kept (set_seed and the
-    /// caller decide when streams restart). goal, if set, reports the reset states' actual goal tests.
-    void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false,
-               u8* goal = nullptr) const;
+    /// the instances' goals, count (if set) the initial states' successors, at_goal (if set) their goal tests (kept
+    /// goal masks included). Draw counters are kept (set_seed and the caller decide when streams restart).
+    void reset(EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false) const;
     /// One step of every row (see the file comment); `action` [rows] indexes the canonical successor order (none: the
     /// random policy); `next_task_ids` [rows] (optional) names the instance an autoresetting row restarts in.
     void step(EnvBatch& b, const StepOutputs& out, Actions action = {}, const i32* next_task_ids = nullptr,
@@ -161,7 +170,10 @@ public:
 
     /// Successors of rows (count[i] for i < b.rows).
     void count(const EnvBatch& b, i32* count, ThreadPool* pool = nullptr);
+    /// The goal tests of the rows' states (goal[i] for i < b.rows); at_goal is not read.
     void goal(const EnvBatch& b, u8* goal) const;
+    /// After the caller wrote states, task ids or goal masks: count (if set) and at_goal (if the batch has it).
+    void refresh(EnvBatch& b, i32* count, ThreadPool* pool = nullptr);
 
     /// Scratch of one thread's row steps (grown as needed).
     struct Scratch
@@ -182,6 +194,9 @@ public:
     /// Successors of one row.
     [[nodiscard]] u32 count_row(const EnvBatch& b, u64 row) const;
     [[nodiscard]] bool goal_row(const EnvBatch& b, u64 row) const;
+    /// goal_row of a row that reset_row just put into `instance`: its goal masks' test (with masks), else the
+    /// instance's initial_goal.
+    [[nodiscard]] bool reset_goal(const EnvBatch& b, u64 row, u32 instance) const;
 
 private:
     void check_step(const EnvBatch& b, const StepOutputs& out, Actions action, const i32* next_task_ids) const;
@@ -189,6 +204,7 @@ private:
     TaskSuitePtr m_suite;
     EnvConfig m_config;
     std::vector<u32> m_init_count;       // per instance
+    std::vector<u8> m_init_goal;         // per instance
     std::vector<const Task*> m_tasks;    // per instance: its task (the rows' lookup without the suite's indirections)
     u32 m_label_width = 1;               // max(1, the suite's label width)
     std::vector<Scratch> m_scratch;      // per pool member

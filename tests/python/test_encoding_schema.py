@@ -5,8 +5,6 @@ Catalogs, fingerprints, option handling and the helper predicates of quantified 
 
 import os
 import re
-import subprocess
-import sys
 
 import pytest
 
@@ -15,6 +13,7 @@ from mymyr import rl
 from mymyr.encoding import EncodingSchema
 
 from conftest import ROOT, text_task
+from python_children import run_code
 
 DATA = ROOT / "tests/data"
 PDDL = hasattr(mymyr, "Domain")
@@ -278,8 +277,7 @@ def test_fingerprint_is_stable_across_processes():
     outputs = set()
     for seed in ("0", "1", "12345"):
         env = dict(os.environ, PYTHONHASHSEED=seed)
-        outputs.add(subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True, text=True,
-                                   timeout=120).stdout)  # fmt: skip
+        outputs.add(run_code(code, env=env, capture_output=True).stdout)
     assert len(outputs) == 1
     task = text_task("philosophers__p03-phil4")
     assert outputs.pop().split()[0] == str(EncodingSchema(task).schema_fingerprint)

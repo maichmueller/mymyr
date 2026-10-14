@@ -46,6 +46,36 @@ def devices():
     return out
 
 
+def test_task_ids_outside_the_table_are_reported():
+    """Host ids are checked at the call; JAX ids by the native environment: on the CPU in the call, on a device by
+    check_errors() and by the general path's next step."""
+    table = rl.TaskTable([text_task("gripper__prob05"), text_task("gripper__prob05")])
+    for device in devices():
+        for path in ("auto", "general") if device == "cuda" else ("auto",):
+            env = rj.Env(table, device=device, path=path)
+            with pytest.raises(ValueError, match=r"^mymyr: task_ids: task id 99 of row 3 is outside the table's 2"):
+                env.reset(None, np.array([0, 1, 0, 99], np.int32))
+            state, _ = env.reset(None, np.array([0, 1, 0, 1], np.int32))
+            with pytest.raises(ValueError, match=r"^mymyr: next_task_ids: task id 5 of row 0 is outside"):
+                env.step(0, state, next_task_ids=[5, 0, 0, 0])
+            with pytest.raises(ValueError, match=r"^mymyr: task_ids: task id -1 of row 2"):
+                env.reset_where(state, np.array([False, False, True, False]), np.array([7, 7, -1, 0], np.int32))
+            env.reset_where(state, np.array([True, False, False, False]), np.array([1, 7, -1, 0], np.int32))
+            bad = jax.device_put(jnp.asarray([0, 1, 0, 99], jnp.int32), on(device))
+            if device == "cpu":
+                with pytest.raises(jax.errors.JaxRuntimeError, match="outside the table's 2 instances"):
+                    jax.block_until_ready(env.reset(None, bad)[0].states)
+                continue
+            state, _ = env.reset(None, bad)
+            if path == "general":  # the step's FFI call raises
+                with pytest.raises(jax.errors.JaxRuntimeError, match="a task id outside the table's 2 instances"):
+                    jax.block_until_ready(env.step(0, state)[0].states)
+            else:
+                with pytest.raises(ValueError, match="a task id outside the table's 2 instances"):
+                    env.check_errors()
+            env.check_errors()
+
+
 def need_gpu():
     if "cuda" not in devices():
         pytest.skip("no visible CUDA device for JAX (set CUDA_VISIBLE_DEVICES and JAX_PLATFORMS)")
@@ -434,6 +464,12 @@ def jwindow(task, n, steps, seed=3):
     return window(task, n=n, steps=steps, seed=seed)
 
 
+def jtrajectory(task, n, steps, seed=3):
+    from test_rl_ops import trajectory
+
+    return trajectory(task, n=n, steps=steps, seed=seed)
+
+
 def on(device):
     return jax.devices("gpu")[0] if device == "cuda" else jax.devices("cpu")[0]
 
@@ -482,20 +518,23 @@ def test_jnp_novelty_equals_native():
 @pytest.mark.parametrize("strategy", ["future", "final", "episode"])
 def test_jnp_her_equals_native(strategy):
     task = text_task("sokoban-opt08-strips__p14")
-    states, done = jwindow(task, 12, 24)
+    prev, states, done = jtrajectory(task, 12, 24)
     atoms = np.full(states.shape[-1], 0x0F0F0F0F0F0F0F0F, np.uint64)
     for device in devices():
         for subset in (None, 2, 5):
             for extras in (False, True):
                 kw = dict(strategy=strategy, k=3, subset=subset, step_reward=-0.5, goal_reward=4.0)
                 if extras:
-                    kw.update(goal_atoms=atoms, env_ids=np.arange(100, 112, dtype=np.uint32))
+                    kw.update(goal_atoms=atoms, env_ids=np.arange(100, 112, dtype=np.uint32), prev_states=prev)
                 want = rl.her_relabel(states, done, seed=0xABCDEF123, **kw)
                 js = jax.device_put(jnp.asarray(states.view(np.uint32)), on(device))
                 jd = jax.device_put(jnp.asarray(done), on(device))
                 jkw = dict(kw)
                 if extras:
-                    jkw.update(goal_atoms=jnp.asarray(atoms.view(np.uint32)), env_ids=jnp.asarray(kw["env_ids"]))
+                    jkw.update(
+                        goal_atoms=jnp.asarray(atoms.view(np.uint32)), env_ids=jnp.asarray(kw["env_ids"]),
+                        prev_states=jax.device_put(jnp.asarray(prev.view(np.uint32)), on(device)),
+                    )
                 f = jax.jit(lambda s, d: rj.her_relabel(s, d, 0xABCDEF123, **jkw))
                 got = f(js, jd)
                 assert np.array_equal(rj.as_words(got.goal), want.goal), (device, subset, extras)
@@ -504,6 +543,7 @@ def test_jnp_her_equals_native(strategy):
                 # rl.her_relabel dispatches JAX arrays to the jnp version
                 g2 = rl.her_relabel(js, jd, seed=0xABCDEF123, **jkw)
                 assert np.array_equal(np.asarray(g2.source), want.source)
+                assert np.array_equal(np.asarray(g2.valid), want.valid)
 
 
 @pytest.mark.parametrize("name", ["gripper__prob05", "logistics00__probLOGISTICS-6-1"])

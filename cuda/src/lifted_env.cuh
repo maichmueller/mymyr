@@ -352,6 +352,10 @@ cudaError_t dispatch_count_keys(const GenArgs& a, const CountCache& c, bool firs
         case 6: return launch_count_keys_ow<6, false, M>(a, c, first, s);
         case 7: return launch_count_keys_ow<7, false, M>(a, c, first, s);
         case 8: return launch_count_keys_ow<8, false, M>(a, c, first, s);
+        case 12: return launch_count_keys_ow<12, false, M>(a, c, first, s);
+        case 16: return launch_count_keys_ow<16, false, M>(a, c, first, s);
+        case 24: return launch_count_keys_ow<24, false, M>(a, c, first, s);
+        case 32: return launch_count_keys_ow<32, false, M>(a, c, first, s);
         default: return cudaErrorInvalidValue;
     }
 }
@@ -636,8 +640,20 @@ cudaError_t dispatch_pick(const GenArgs& a, const Picks& pk, cudaStream_t s)
         case 6: return launch_pick_ow<6, false, WB, M>(a, pk, s);
         case 7: return launch_pick_ow<7, false, WB, M>(a, pk, s);
         case 8: return launch_pick_ow<8, false, WB, M>(a, pk, s);
-        default: return cudaErrorInvalidValue;
+        default: break;
     }
+    if constexpr (WB >= k_max_words)
+    {
+        switch (ow)
+        {
+            case 12: return launch_pick_ow<12, false, WB, M>(a, pk, s);
+            case 16: return launch_pick_ow<16, false, WB, M>(a, pk, s);
+            case 24: return launch_pick_ow<24, false, WB, M>(a, pk, s);
+            case 32: return launch_pick_ow<32, false, WB, M>(a, pk, s);
+            default: break;
+        }
+    }
+    return cudaErrorInvalidValue;
 }
 
 /// launch_pick's argument checks.

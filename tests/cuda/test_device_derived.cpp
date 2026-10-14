@@ -145,6 +145,7 @@ void expect_equal(const rl::TaskSuitePtr& suite, u64 cap_divisor, u32 extra_word
     const Batch b = walks(*suite, 24, 7);
     const u32 dw = suite->derived_words() + extra_words;
     const Flat full = host_run(*suite, b, 1 << 16, dw);
+    ASSERT_GT(full.total, 0u);
     const u64 cap = cap_divisor ? std::max<u64>(1, full.total / cap_divisor) : full.total;
     const Flat h = host_run(*suite, b, cap, dw);
     for (auto launch : {cuda::BucketLaunch::PerBucket, cuda::BucketLaunch::Widest})
@@ -254,4 +255,92 @@ TEST(DeviceExpandDerived, PaddedViewEqualsHost)
     p.derived = static_cast<u64*>(out.data());
     ex.pad(x, N, p);
     EXPECT_EQ(test::to_host<u64>(out.data(), hp.size(), s), hp);
+}
+
+// ------------------------------------------------------------------------------------------------ wide tasks
+
+namespace
+{
+/// A chain of n lights (with a few cross links) whose derived predicates bright and glow follow the lit lights: rows
+/// past 64 words and object bitsets past 8 words for the larger n, instances past the device kernels' 2048 objects.
+/// Goal: light 1 is bright (a goal over derived atoms).
+TaskPtr lit_lights(u32 n, u32 colors)
+{
+    std::string d = "(define (domain lights) (:requirements :strips :typing :derived-predicates) (:types light) "
+                    "(:predicates (on ?x - light) (off ?x - light) (linked ?x ?y - light) (bright ?x - light) (glow ?x - light)";
+    for (u32 k = 0; k < colors; ++k)
+        d += " (c" + std::to_string(k) + " ?x - light)";
+    d += ") (:derived (bright ?x - light) (on ?x)) (:derived (glow ?x - light) (bright ?x))"
+         " (:action spread :parameters (?x ?y - light) :precondition (and (on ?x) (linked ?x ?y) (off ?y)) :effect "
+         "(and (on ?y) (not (off ?y)))) (:action dim :parameters (?x - light) :precondition (on ?x) :effect (and (off ?x) "
+         "(not (on ?x))))";
+    for (u32 k = 0; k < colors; ++k)
+        d += " (:action paint-" + std::to_string(k) + " :parameters (?x - light) :precondition (on ?x) :effect (c" +
+             std::to_string(k) + " ?x))";
+    d += ")";
+    std::string p = "(define (problem p) (:domain lights) (:objects";
+    for (u32 i = 0; i < n; ++i)
+        p += " l" + std::to_string(i);
+    p += " - light) (:init (on l0)";
+    for (u32 i = 1; i < n; ++i)
+        p += " (off l" + std::to_string(i) + ")";
+    for (u32 i = 0; i + 1 < n; ++i)
+        p += " (linked l" + std::to_string(i) + " l" + std::to_string(i + 1) + ")";
+    for (u32 i = 0; i < n; i += 5)
+        p += " (linked l" + std::to_string(i) + " l" + std::to_string((i * 7 + 3) % n) + ")";
+    p += ") (:goal (and (bright l1))))";
+    TaskOptions o;
+    o.atoms = TaskOptions::Atoms::Reachable;
+    return Task::create(*frontend::Domain::from_string(d, "lights.pddl")->instantiate_string(p, "p.pddl"), o);
+}
+
+rl::TaskSuitePtr lights_suite(std::initializer_list<std::pair<u32, u32>> sizes)
+{
+    std::vector<TaskPtr> tasks;
+    for (const auto& [n, colors] : sizes)
+        tasks.push_back(lit_lights(n, colors));
+    return rl::TaskSuite::group(std::move(tasks));
+}
+}  // namespace
+
+TEST(DeviceExpandDerived, RowsPastSixtyFourWordsEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    for (const auto& sizes : {std::pair{300u, 14u}, std::pair{1100u, 4u}})
+    {
+        SCOPED_TRACE("lights " + std::to_string(sizes.first));
+        const auto suite = lights_suite({sizes});
+        ASSERT_GT(suite->words(), 64u);
+        ASSERT_GT(suite->derived_words(), 0u);
+        expect_equal(suite, 0);
+        expect_equal(suite, 3);
+        expect_equal(suite, 0, 2);
+    }
+}
+
+TEST(DeviceExpandDerived, InstancesOnTheHostInADeviceTableEqualHost)
+{
+    SKIP_WITHOUT_GPU();
+    {
+        // one instance beyond the device kernels' objects: its rows are expanded on the host, per instance
+        const auto suite = lights_suite({{40, 4}, {700, 4}, {2200, 4}, {300, 4}});
+        ASSERT_EQ(suite->num_domains(), 1u);
+        {
+            cuda::SuiteExpander ex(test::context(), suite);
+            EXPECT_EQ(ex.domain(0).mode(), cuda::DeviceExpander::Mode::PerInstance);
+        }
+        expect_equal(suite, 0);
+        expect_equal(suite, 4);
+        expect_equal(suite, 0, 2);
+    }
+    {
+        const auto suite = lights_suite({{2200, 0}});
+        {
+            cuda::SuiteExpander ex(test::context(), suite);
+            EXPECT_EQ(ex.domain(0).mode(), cuda::DeviceExpander::Mode::Host);
+        }
+        expect_equal(suite, 0);
+        expect_equal(suite, 3);
+        expect_equal(suite, 0, 2);
+    }
 }

@@ -29,6 +29,8 @@ std::string multi_unsupported(const rl::TaskTable& table)
     {
         const Task& task = *table.task(i);
         const std::string at = "instance " + std::to_string(i) + ": ";
+        if (const std::string why = ChunkGenerator::unsupported(task); !why.empty())
+            return at + why;
         if (task.numeric_slots())
             return at + "numeric states require per-instance kernels";
         if (task.has_axioms())
@@ -89,7 +91,7 @@ TableLaunch plan_launches(const ContextPtr& ctx, const DeviceTaskTable& dt, cuda
     {
         const rl::dev::TaskView& v = dt.view(i);
         ow[i] = v.ow;
-        wb[i] = bucket_of(std::max<u32>(1, v.state_words));
+        wb[i] = lifted::row_class(std::max<u32>(1, v.state_words), v.ow);  // the row-width bucket
         p.view_words = std::max<u64>(p.view_words, u64{v.view_rows} * v.ow);
     }
     // launch order: instances ranked by (OW, bucket, id)
@@ -124,8 +126,13 @@ TableLaunch plan_launches(const ContextPtr& ctx, const DeviceTaskTable& dt, cuda
         p.ows.push_back(o);
         p.ow_keys.push_back(keys(o, 0, widest));
         p.widest.push_back({o, 0, widest, widest, p.ow_keys.back()});
+        // a bucket's rows have more state words than the group's bucket below it
+        u32 below = 0;
         for (const u32 b : buckets)
-            p.per_bucket.push_back({o, bucket_floor(b), b, b, keys(o, bucket_floor(b), b)});
+        {
+            p.per_bucket.push_back({o, below, b, b, keys(o, below, b)});
+            below = b;
+        }
     }
     // the device's matcher kinds per instance (rl::dev::device_fc; the env and the expander write binding labels:
     // under witness pruning with the CPU's witnesses), and the union sets

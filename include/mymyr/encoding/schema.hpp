@@ -194,10 +194,20 @@ public:
     [[nodiscard]] static std::span<const std::string_view> entity_role_names() noexcept { return k_entity_role_names; }
     [[nodiscard]] static std::span<const std::string_view> slot_role_names() noexcept { return k_slot_role_names; }
 
+    /// Whether a batch of this schema omits `entity_role` and `entity_ref`: the options say `entity_arrays = auto` and
+    /// configure nothing that makes an entity of another role than object or auxiliary: no target sources, no predicate
+    /// virtual nodes, no action relations (their ground actions are entities) and no horizon mode. Every entity of
+    /// every graph is then an object or the auxiliary entity. The omitted arrays are then implicit: the entity with
+    /// local index j of graph g (entity id entity_offsets[g] + j) has role Object and ref j if j < num_objects[g], and
+    /// otherwise role Auxiliary and ref -1 (it is the graph's last and only entity past the objects).
+    [[nodiscard]] bool implicit_entity_arrays() const noexcept { return m_implicit_entities; }
+    /// Whether a batch stores `relation_counts` (FlatOptions::emit_counts).
+    [[nodiscard]] bool emits_counts() const noexcept { return m_options.emit_counts; }
+
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
-    /// the encoded arrays beyond the catalog: the layout, the index type, the target sources and the horizon mode and
-    /// root policy. It does not depend on the declaration order of the domain, on predicate or schema ids, or on the
-    /// process or the build.
+    /// the encoded arrays beyond the catalog: the layout, the index type, whether relation_counts and the entity arrays
+    /// are stored, the target sources and the horizon mode and root policy. It does not depend on the declaration order
+    /// of the domain, on predicate or schema ids, or on the process or the build.
     [[nodiscard]] u64 fingerprint() const noexcept { return m_fingerprint; }
 
 private:
@@ -208,6 +218,7 @@ private:
     std::vector<SlotRole> m_roles;
     std::vector<u32> m_role_offsets;
     std::vector<i32> m_schema_relation;
+    bool m_implicit_entities = false;
     u64 m_fingerprint = 0;
 };
 }

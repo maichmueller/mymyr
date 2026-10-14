@@ -225,22 +225,10 @@ struct SuiteExpander::Impl
     }
 };
 
-std::string SuiteExpander::unsupported(const rl::TaskSuite& suite)
-{
-    if (suite.single_domain() && suite.table(0)->size() == 1)
-        return ChunkGenerator::unsupported(*suite.table(0)->task(0));
-    for (u32 d = 0; d < suite.num_domains(); ++d)
-        if (const std::string why = DeviceTaskTable::unsupported(*suite.table(d)); !why.empty())
-            return suite.single_domain() ? why : "domain " + std::to_string(d) + " (" + suite.domain_name(d) + "): " + why;
-    return {};
-}
-
 SuiteExpander::SuiteExpander(ContextPtr ctx, rl::TaskSuitePtr suite, cudaStream_t stream) : m(std::make_unique<Impl>())
 {
     if (!ctx || !suite)
         throw std::invalid_argument("mymyr: SuiteExpander: null context or suite");
-    if (const std::string why = unsupported(*suite); !why.empty())
-        throw std::invalid_argument("mymyr: the CUDA backend cannot run " + why);
     Impl& I = *m;
     I.ctx = std::move(ctx);
     I.suite = std::move(suite);
@@ -322,9 +310,6 @@ u64 SuiteExpander::count(rl::StateBatchView in, const i32* task_ids, const rl::E
         throw std::invalid_argument("mymyr: device expand: input numeric width differs from the suite");
     if (in.rows > rl::k_max_rows)
         throw std::invalid_argument("mymyr: expand: more than 2^31 - 1 states in one batch");
-    if (in.words > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device expand: state rows of " + std::to_string(in.words) +
-                                    " words (the device kernels take at most " + std::to_string(lifted::k_max_words) + ")");
     if (!task_ids && in.rows)
         throw std::invalid_argument("mymyr: expand: a batch over a suite of " + std::to_string(I.suite->size()) +
                                     " instances needs task ids");
@@ -355,9 +340,6 @@ void SuiteExpander::write(rl::Expansion& out)
         throw std::invalid_argument("mymyr: expand: successor rows of zero words");
     if (out.goal && !out.succ)
         throw std::invalid_argument("mymyr: expand: goal flags need the successor rows");
-    if (out.succ && out.words > lifted::k_max_words)
-        throw std::invalid_argument("mymyr: device expand: successor rows of " + std::to_string(out.words) +
-                                    " words (the device kernels take at most " + std::to_string(lifted::k_max_words) + ")");
     if (out.derived && !out.succ)
         throw std::invalid_argument("mymyr: expand: derived words need the successor rows");
     if (out.derived && out.derived_words < I.suite->derived_words())

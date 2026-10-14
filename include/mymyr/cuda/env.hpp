@@ -28,10 +28,16 @@
 //     rows' positions only and run on a stream of their own (forked from the env's stream and joined back by events);
 //     select, the views (one launch over every domain's rows) and finish run once over the batch (the count cache is
 //     laid out with the suite's widest schema count, a domain's schemas past its own counting 0);
-//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms. A
-//     step expands the current states into internal flat buffers with SuiteExpander (a table's DeviceExpander, or one
-//     per domain; canonical order, goal flags; it synchronizes), moves every environment to its chosen row, and counts
-//     the reached states' successors with a second expansion. The cache arrays are not used.
+//   - general: tables with numeric fluents, CPU-fallback schemas, conditional effects or axioms, and instances the
+//     device kernels cannot run at all (ChunkGenerator::unsupported: their rows are expanded on the host, the
+//     DeviceExpander's Host parts; the other instances stay on the device). A step expands the current states into
+//     internal flat buffers with SuiteExpander (a table's DeviceExpander, or one per domain; canonical order, goal
+//     flags; it synchronizes), moves every environment to its chosen row, and counts the reached states'
+//     successors with a second expansion. The cache arrays are not used.
+// Both paths keep the batch's at_goal flags (rl::EnvBatch::at_goal, required): reset() writes them, a step reads them
+// for its absorbing rows instead of testing the current states, and writes those of the reached states (the goal test
+// of its finish, or the flat expansion's goal flags) and of autoresets (the initial state's), so no step tests a state
+// on the host; refresh() recomputes them.
 // The results do not depend on the path, the chunk sizes, the bucket launches or the launch configuration, and an
 // environment's trajectory does not depend on the batch it runs in (its RNG stream is its id, EnvBatch::first_env +
 // row, or env_ids[row]).
@@ -71,8 +77,6 @@ public:
         General,  // always the flat expand
     };
 
-    /// Throws std::invalid_argument for suites the device cannot run (a domain's
-    /// DeviceTaskTable::unsupported, rows wider than lifted::k_max_words).
     DeviceEnv(ContextPtr ctx, rl::TaskSuitePtr suite, const rl::EnvConfig& config, Path path = Path::Auto,
               cudaStream_t stream = nullptr);
     /// Over a table: the suite of its one domain (TaskSuite::of).
@@ -142,13 +146,15 @@ public:
     /// caller's (global ids of the suite); an id outside it resets the row into instance 0 and is reported by
     /// check_errors().
     void reset(rl::EnvBatch& b, const u8* mask = nullptr, i32* count = nullptr, bool keep_goals = false);
-    /// Recomputes the cache (fast path: counts, views, launch order) and the successor counts of the current states,
-    /// after the caller wrote states or task ids.
+    /// Recomputes the cache (fast path: counts, views, launch order), the successor counts of the current states and
+    /// the at_goal flags, after the caller wrote states, task ids or goal masks (the general path tests goals without
+    /// per-env masks on the host).
     void refresh(rl::EnvBatch& b, i32* count = nullptr);
     void goal(const rl::EnvBatch& b, u8* goal);
     /// rl::HostEnv::step on device arrays; action [rows] (device, none: the random policy); next_task_ids [rows]
-    /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it
-    /// keeps the row's instance and is reported by check_errors()).
+    /// (device, optional: the instance an autoresetting row restarts in, of any domain of the suite; an id outside it,
+    /// in any row, is reported by check_errors() and by the general path's next step or refresh, and an autoresetting
+    /// row keeps its instance).
     void step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions action = {}, const i32* next_task_ids = nullptr);
     /// The random policy's next choices without a step (TorchRL's rand_action): out[i] = the successor index step()
     /// would draw now for row i (draws, count [rows] device; the env's key, env id first_env + i), limited to
@@ -156,7 +162,8 @@ public:
     void random_actions(const u64* draws, const i32* count, u64 rows, u64 first_env, u32 max_actions, i64* out);
     /// Synchronizes the stream; throws std::logic_error if a fast-path step found a state whose cache did not match it
     /// (states written without refresh()), std::invalid_argument for task ids outside the suite (reset, next_task_ids).
-    /// Not during a capture (the flags of replayed graphs accumulate until the next check).
+    /// Not during a capture (the flags of replayed graphs accumulate until the next check). The general path's step()
+    /// and refresh() synchronize anyway: they raise the flagged task ids first.
     void check_errors();
 
     struct Impl;

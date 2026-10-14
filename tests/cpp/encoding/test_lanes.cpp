@@ -135,7 +135,8 @@ struct Arrays
 };
 
 template<class I>
-Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<u64>>>& rows, std::vector<GraphTotals>* totals_out)
+Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<u64>>>& rows,
+           std::vector<GraphTotals>* totals_out, bool relation_major = false)
 {
     const ContextView view = fixture.view();
     const u64 G = rows.size();
@@ -156,10 +157,51 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
     std::vector<I> num_objects(G), counts(G * Fixture::R), offsets(G * Fixture::R + 1), arg_offsets(G * Fixture::R + 1),
         arg(args), ref(entities);
     std::vector<u8> role(entities);
-    const GraphOut<I> out{num_objects.data(), counts.data(), offsets.data(), arg_offsets.data(), arg.data(), role.data(), ref.data()};
-    for (u64 g = 0; g < G; ++g)
-        fill_graph<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g, tuple_base[g], arg_base[g],
-                      entity_base[g], totals[g], out);
+    const GraphOut<I> out{G,         num_objects.data(), counts.data(), offsets.data(),
+                          arg_offsets.data(), arg.data(),   role.data(),   ref.data()};
+    if (relation_major)
+    {
+        // the scan: the first position of every relation, then the graphs in order
+        std::vector<std::vector<u32>> cell_counts(G);
+        std::vector<u64> relation_tuples(Fixture::R, 0), run_tuples(Fixture::R, 0), run_args(Fixture::R, 0);
+        for (u64 g = 0; g < G; ++g)
+        {
+            const InstanceView v = instance_view(view, rows[g].first);
+            cell_counts[g].resize(v.num_cells);
+            count_graph(v, {rows[g].second.data(), nullptr}, cell_counts[g].data());
+            for (u32 i = 0; i < v.num_cells; ++i)
+                relation_tuples[v.cells[i].relation] += cell_counts[g][i];
+        }
+        u64 tuple_position = 0, arg_position = 0;
+        for (u32 r = 0; r < Fixture::R; ++r)
+        {
+            run_tuples[r] = tuple_position;
+            run_args[r] = arg_position;
+            tuple_position += relation_tuples[r];
+            arg_position += relation_tuples[r] * (r == 0 ? 2 : 1);
+        }
+        for (u64 g = 0; g < G; ++g)
+        {
+            const InstanceView v = instance_view(view, rows[g].first);
+            std::vector<u32> by_relation(Fixture::R, 0);
+            for (u32 i = 0; i < v.num_cells; ++i)
+                by_relation[v.cells[i].relation] = cell_counts[g][i];
+            for (u32 r = 0; r < Fixture::R; ++r)
+            {
+                offsets[cell_segment(true, g, r, G, Fixture::R)] = static_cast<I>(run_tuples[r]);
+                arg_offsets[cell_segment(true, g, r, G, Fixture::R)] = static_cast<I>(run_args[r]);
+                run_tuples[r] += by_relation[r];
+                run_args[r] += by_relation[r] * (r == 0 ? 2 : 1);
+            }
+        }
+        for (u64 g = 0; g < G; ++g)
+            fill_graph_relation_major<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g,
+                                         entity_base[g], totals[g], out);
+    }
+    else
+        for (u64 g = 0; g < G; ++g)
+            fill_graph<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g, tuple_base[g],
+                          arg_base[g], entity_base[g], totals[g], out);
     offsets[G * Fixture::R] = static_cast<I>(tuples);
     arg_offsets[G * Fixture::R] = static_cast<I>(args);
     if (totals_out)
@@ -277,6 +319,100 @@ TEST(EncodingLanes, CountAndFillMatchAReferenceForBothIndexTypes)
         EXPECT_EQ(wide.offsets.back(), static_cast<i64>(tuple_base));
         EXPECT_EQ(wide.arg_offsets.back(), static_cast<i64>(arg_base));
     }
+}
+
+std::vector<std::pair<u32, std::vector<u64>>> random_rows(std::mt19937_64& rng, int graphs)
+{
+    std::vector<std::pair<u32, std::vector<u64>>> rows;
+    for (int g = 0; g < graphs; ++g)
+    {
+        const u32 instance = static_cast<u32>(rng() % 2);
+        std::vector<u64> atoms(2, 0);
+        const u32 slots = instance == 0 ? 67 : 5;
+        for (u32 s = 0; s < slots; ++s)
+            if (rng() % 3 == 0)
+                atoms[s >> 6] |= u64{1} << (s & 63);
+        rows.emplace_back(instance, atoms);
+    }
+    return rows;
+}
+
+TEST(EncodingLanes, RelationMajorIsThePermutationOfGraphMajor)
+{
+    const Fixture fixture;
+    std::mt19937_64 rng(5);
+    for (int round = 0; round < 40; ++round)
+    {
+        const auto rows = random_rows(rng, 1 + static_cast<int>(rng() % 7));
+        const u64 G = rows.size();
+        const u64 R = Fixture::R;
+        const Arrays graph_major = run<i32>(fixture, rows, nullptr, false);
+        const Arrays relation_major = run<i32>(fixture, rows, nullptr, true);
+        // everything but the cell order is equal
+        EXPECT_EQ(graph_major.num_objects, relation_major.num_objects);
+        EXPECT_EQ(graph_major.counts, relation_major.counts);
+        EXPECT_EQ(graph_major.role, relation_major.role);
+        EXPECT_EQ(graph_major.ref, relation_major.ref);
+        EXPECT_EQ(graph_major.offsets.back(), relation_major.offsets.back());
+        // the cell at relation-major segment r * G + g is the cell at graph-major segment g * R + r
+        std::vector<i64> permuted;
+        for (u64 r = 0; r < R; ++r)
+            for (u64 g = 0; g < G; ++g)
+            {
+                const u64 from = g * R + r;
+                permuted.insert(permuted.end(), graph_major.args.begin() + graph_major.arg_offsets[from],
+                                graph_major.args.begin() + graph_major.arg_offsets[from + 1]);
+                const u64 to = r * G + g;
+                EXPECT_EQ(relation_major.offsets[to + 1] - relation_major.offsets[to], graph_major.counts[from]);
+            }
+        EXPECT_EQ(permuted, relation_major.args);
+        // the offsets are the exclusive prefix sums of the cell sizes in segment order
+        i64 tuples = 0, args = 0;
+        for (u64 r = 0; r < R; ++r)
+            for (u64 g = 0; g < G; ++g)
+            {
+                EXPECT_EQ(relation_major.offsets[r * G + g], tuples);
+                EXPECT_EQ(relation_major.arg_offsets[r * G + g], args);
+                tuples += graph_major.counts[g * R + r];
+                args += graph_major.counts[g * R + r] * (r == 0 ? 2 : 1);
+            }
+        EXPECT_EQ(relation_major.offsets.back(), tuples);
+        EXPECT_EQ(relation_major.arg_offsets.back(), args);
+    }
+}
+
+TEST(EncodingLanes, SegmentOfACellFollowsTheLayout)
+{
+    EXPECT_EQ(cell_segment(false, 3, 2, 10, 7), 3u * 7u + 2u);
+    EXPECT_EQ(cell_segment(true, 3, 2, 10, 7), 2u * 10u + 3u);
+}
+
+TEST(EncodingLanes, OmittedCountsAndEntityArraysAreNotWritten)
+{
+    const Fixture fixture;
+    const ContextView view = fixture.view();
+    std::mt19937_64 rng(9);
+    const auto rows = random_rows(rng, 4);
+    const u64 G = rows.size();
+    const Arrays reference = run<i32>(fixture, rows, nullptr, false);
+    std::vector<i32> num_objects(G), offsets(G * Fixture::R + 1), arg_offsets(G * Fixture::R + 1),
+        args(reference.args.size());
+    GraphOut<i32> out{G,           num_objects.data(), nullptr, offsets.data(), arg_offsets.data(),
+                      args.data(), nullptr,            nullptr};
+    u64 entity = 0, tuple = 0, arg = 0;
+    for (u64 g = 0; g < G; ++g)
+    {
+        const InstanceView v = instance_view(view, rows[g].first);
+        const GraphTotals totals = count_graph(v, {rows[g].second.data(), nullptr}, nullptr);
+        fill_graph<i32>(v, {rows[g].second.data(), nullptr}, g, tuple, arg, entity, totals, out);
+        entity += totals.entities;
+        tuple += totals.tuples;
+        arg += totals.args;
+    }
+    offsets[G * Fixture::R] = static_cast<i32>(tuple);
+    arg_offsets[G * Fixture::R] = static_cast<i32>(arg);
+    EXPECT_EQ(std::vector<i64>(offsets.begin(), offsets.end()), reference.offsets);
+    EXPECT_EQ(std::vector<i64>(args.begin(), args.end()), reference.args);
 }
 
 TEST(EncodingLanes, AStaticTupleOfANullaryPredicateIsTheAuxiliaryTuple)

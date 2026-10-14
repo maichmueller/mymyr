@@ -95,11 +95,12 @@ struct Snapshot
     std::vector<u64> states, final_states, draws, gpos, gneg;
     std::vector<i32> task_ids, steps, count, schema, binding;
     std::vector<f32> reward;
-    std::vector<u8> terminated, truncated, invalid, goal;
+    std::vector<u8> terminated, truncated, invalid, goal, at_goal;
 };
 
 inline void expect_equal(const Snapshot& d, const Snapshot& h, int t)
 {
+    ASSERT_EQ(d.at_goal, h.at_goal) << "step " << t;
     ASSERT_EQ(d.task_ids, h.task_ids) << "step " << t;
     ASSERT_EQ(d.states, h.states) << "step " << t;
     ASSERT_EQ(d.final_states, h.final_states) << "step " << t;
@@ -144,6 +145,7 @@ struct HostEnvs
         v.truncated.assign(n, 0);
         v.invalid.assign(n, 0);
         v.goal.assign(n, 0);
+        v.at_goal.assign(n, 0);
         if (goals)
         {
             v.gpos.assign(n * W, 0);
@@ -166,6 +168,7 @@ struct HostEnvs
         b.goal_neg = v.gneg.empty() ? nullptr : v.gneg.data();
         b.steps = v.steps.data();
         b.draws = v.draws.data();
+        b.at_goal = v.at_goal.data();
     }
 };
 
@@ -177,7 +180,7 @@ struct DeviceEnvs
     u64 V;
     cudaStream_t s;
     cuda::DeviceBuffer states, final_states, draws, task_ids, steps, count, schema, binding, reward, terminated, truncated,
-        invalid, goal, counts, views, gpos, gneg, action, next;
+        invalid, goal, counts, views, gpos, gneg, action, next, at_goal;
     bool goals;
     rl::EnvBatch b;
     rl::StepOutputs out;
@@ -189,7 +192,7 @@ struct DeviceEnvs
           binding(ctx, N * L * 4, s), reward(ctx, N * 4, s), terminated(ctx, N, s), truncated(ctx, N, s),
           invalid(ctx, N, s), goal(ctx, N, s), counts(ctx, std::max<u64>(N * C, 1) * 4, s),
           views(ctx, std::max<u64>(N * V, 1) * 8, s), gpos(ctx, N * W * 8, s), gneg(ctx, N * W * 8, s),
-          action(ctx, N * 8, s), next(ctx, N * 4, s), goals(with_goals)
+          action(ctx, N * 8, s), next(ctx, N * 4, s), at_goal(ctx, std::max<u64>(N, 1), s), goals(with_goals)
     {
         cuda::check(cudaMemsetAsync(draws.data(), 0, N * 8, s), "memset");
         cuda::check(cudaMemsetAsync(steps.data(), 0, N * 4, s), "memset");
@@ -218,6 +221,7 @@ struct DeviceEnvs
         b.draws = static_cast<u64*>(draws.data());
         b.counts = C ? static_cast<u32*>(counts.data()) : nullptr;
         b.views = V ? static_cast<u64*>(views.data()) : nullptr;
+        b.at_goal = static_cast<u8*>(at_goal.data());
     }
 
     [[nodiscard]] Snapshot snapshot() const
@@ -236,6 +240,7 @@ struct DeviceEnvs
         v.truncated = to_host<u8>(truncated.data(), N, s);
         v.invalid = to_host<u8>(invalid.data(), N, s);
         v.goal = to_host<u8>(goal.data(), N, s);
+        v.at_goal = to_host<u8>(at_goal.data(), N, s);
         if (goals)
         {
             v.gpos = to_host<u64>(gpos.data(), N * W, s);

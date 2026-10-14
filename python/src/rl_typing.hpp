@@ -1,6 +1,7 @@
 #pragma once
-// Stub annotations of the RL bindings (rl_torch_bindings.cpp, rl_jax_bindings.cpp, rl_ops_bindings.cpp): string
-// arguments with a closed set of values render as typing.Literal (typing.hpp's Arg<T>; the functions check the values).
+// Stub annotations of the RL bindings (rl_bindings.cpp, rl_torch_bindings.cpp, rl_jax_bindings.cpp,
+// rl_ops_bindings.cpp): string arguments with a closed set of values render as typing.Literal (typing.hpp's Arg<T>; the
+// functions check the values).
 
 #include <nanobind/nanobind.h>
 
@@ -18,6 +19,14 @@ struct HerStrategy
 struct DeadEnd
 {
 };
+/// An instance sampler argument: "auto" or "uniform" (uniform sampling) or a mymyr.rl.InstanceSampler.
+struct SamplerArg
+{
+};
+/// A mymyr.rl.InstanceSampler, or None.
+struct Sampler
+{
+};
 }  // namespace mymyr::python::ann
 
 namespace nanobind::detail
@@ -31,6 +40,16 @@ template<>
 struct type_caster<mymyr::python::ann::DeadEnd>
 {
     static constexpr auto Name = const_name("typing.Literal['no_successors', 'none']");
+};
+template<>
+struct type_caster<mymyr::python::ann::SamplerArg>
+{
+    static constexpr auto Name = const_name("typing.Literal['auto', 'uniform'] | mymyr._typing.InstanceSampler");
+};
+template<>
+struct type_caster<mymyr::python::ann::Sampler>
+{
+    static constexpr auto Name = const_name("mymyr._typing.InstanceSampler | None");
 };
 template<>
 struct type_caster<mymyr::python::ann::HerStrategy>

@@ -745,7 +745,7 @@ nb::object device_expand(const ExpandArgs& a)
     const auto [fw, enc] = output_kind(in, w, a.framework);
     const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
     const std::optional<u64> fixed_cap = opt_int_arg<u64>(a.capacity, "capacity", 0, rl::k_max_rows);
-    const std::optional<u32> fixed_words = opt_int_arg<u32>(a.words, "words", 0, cuda::lifted::k_max_words);
+    const std::optional<u32> fixed_words = opt_int_arg<u32>(a.words, "words", 0);
     const std::optional<u32> K = opt_int_arg<u32>(a.K, "K");
     const u32 L = tt.label_width();
     DeviceFlat f;

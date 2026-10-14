@@ -154,6 +154,15 @@ __global__ void k_move(Move p)
     }
 }
 
+/// Whether `row` holds goal_pos and none of goal_neg ([words] each).
+__device__ __forceinline__ bool masks_hold(const u64* row, const u64* goal_pos, const u64* goal_neg, u32 words)
+{
+    for (u32 word = 0; word < words; ++word)
+        if ((row[word] & goal_pos[word]) != goal_pos[word] || (row[word] & goal_neg[word]) != 0)
+            return false;
+    return true;
+}
+
 /// The instance of row i (inst null: 0).
 __device__ __forceinline__ u32 instance_of(const Instances& in, u64 i) { return in.inst ? static_cast<u32>(in.inst[i]) : 0u; }
 
@@ -161,13 +170,7 @@ __device__ __forceinline__ bool goal_row(rl::dev::TaskView task, const Finish& p
 {
     const u64* row = p.states + row_id * p.row_words;
     if (p.goal_pos)
-    {
-        for (u32 word = 0; word < p.words; ++word)
-            if ((row[word] & p.goal_pos[row_id * p.words + word]) != p.goal_pos[row_id * p.words + word] ||
-                (row[word] & p.goal_neg[row_id * p.words + word]) != 0)
-                return false;
-        return true;
-    }
+        return masks_hold(row, p.goal_pos + row_id * p.words, p.goal_neg + row_id * p.words, p.words);
     if (p.goal_flag)
         return p.goal_flag[row_id] != 0;
     if (p.in.goal_off)
@@ -259,6 +262,10 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 atomicOr(p.error, 4u);
             k = 0;
         }
+        // every row's next task id is checked, autoresetting or not (as the host checks them)
+        if (p.next_task_ids && p.error &&
+            (p.next_task_ids[i] < 0 || static_cast<u32>(p.next_task_ids[i]) >= p.in.count))
+            atomicOr(p.error, 4u);
         bool g = st == k_goal;
         if (st == k_ok)
             g = goal_row(t, p, i, k);
@@ -293,8 +300,6 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 const i32 x = p.next_task_ids[i];
                 if (x >= 0 && static_cast<u32>(x) < p.in.count)
                     next = static_cast<u32>(x);
-                else if (p.error)
-                    atomicOr(p.error, 4u);
             }
             const u32 n0 = reset_row(p.in, next, i, p.states, p.words, p.row_words, p.cache_counts,
                                      stride_of(p.count_stride, p.num_schemas), p.views, p.goal_pos, p.goal_neg, false);
@@ -302,6 +307,12 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 p.steps[i] = 0;
             if (p.count)
                 p.count[i] = static_cast<i32>(n0);
+            if (p.at_goal)
+                p.at_goal[i] = p.goal_pos ? (masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
+                                                        p.goal_neg + i * p.words, p.words)
+                                                 ? 1
+                                                 : 0)
+                                          : p.in.init_goal[next];
         }
         else
         {
@@ -309,6 +320,8 @@ __global__ void k_finish(rl::dev::TaskView t, Finish p)
                 p.steps[i] = t2;
             if (p.count)
                 p.count[i] = c2;
+            if (p.at_goal)
+                p.at_goal[i] = g ? 1 : 0;
         }
     }
 }
@@ -332,6 +345,12 @@ __global__ void k_reset(Reset p)
             p.steps[i] = 0;
         if (p.count)
             p.count[i] = static_cast<i32>(n0);
+        if (p.at_goal)
+            p.at_goal[i] = p.goal_pos ? (masks_hold(p.states + i * p.row_words, p.goal_pos + i * p.words,
+                                                    p.goal_neg + i * p.words, p.words)
+                                             ? 1
+                                             : 0)
+                                      : p.in.init_goal[k];
     }
 }
 
@@ -405,7 +424,7 @@ cudaError_t launch_finish(const rl::dev::TaskView& t, const Finish& p, cudaStrea
         return cudaSuccess;
     if (!p.states || !p.status || (!p.counts && !p.offsets) || !p.in.init_row || !p.in.init_count ||
         (p.goal_pos && !p.goal_neg) || (p.goal_pos && !p.in.goal_pos) || (p.cache_counts && !p.in.init_cache) ||
-        (p.views && !p.in.init_view))
+        (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal))
         return cudaErrorInvalidValue;
     k_finish<<<grid_for(p.rows), k_block, 0, s>>>(t, p);
     return cudaGetLastError();
@@ -423,7 +442,7 @@ cudaError_t launch_reset(const Reset& p, cudaStream_t s)
     if (p.rows == 0)
         return cudaSuccess;
     if (!p.states || !p.in.init_row || !p.in.init_count || (p.goal_pos && (!p.goal_neg || !p.in.goal_pos)) ||
-        (p.cache_counts && !p.in.init_cache) || (p.views && !p.in.init_view))
+        (p.cache_counts && !p.in.init_cache) || (p.views && !p.in.init_view) || (p.at_goal && !p.in.init_goal))
         return cudaErrorInvalidValue;
     k_reset<<<grid_for(p.rows), k_block, 0, s>>>(p);
     return cudaGetLastError();

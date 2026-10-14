@@ -19,14 +19,6 @@
 
 namespace mymyr::cuda::detail
 {
-/// The successor kernels' row-width bucket of an instance with `words` state words (at least 1).
-[[nodiscard]] constexpr u32 bucket_of(u32 words)
-{
-    return words <= 2 ? 2u : words <= 4 ? 4u : words <= 16 ? 16u : lifted::k_max_words;
-}
-/// The words of the bucket below `wb` (its rows have more state words than that).
-[[nodiscard]] constexpr u32 bucket_floor(u32 wb) { return wb == 2 ? 0u : wb == 4 ? 2u : wb == 16 ? 4u : 16u; }
-
 /// Empty if the multi-instance kernels run every instance of the table completely under both witness settings (every
 /// schema on the device without conditional effects, no axioms, frozen slots); else why not, for the first instance
 /// that does not ("instance i: ...").

@@ -24,7 +24,11 @@
 // A table of one instance (Single) runs the single-instance path: the task's kernels, conditional effects and axioms on
 // the device, goals over derived predicates too; schemas the kernels cannot run need the parents on the host
 // (the batch is copied down first: ChunkGenerator's per-schema CPU fallback), and so do axioms whose body matchers are
-// beyond the kernels.
+// beyond the kernels. An instance the kernels cannot run at all (ChunkGenerator::unsupported: more than 2048 objects,
+// numeric states wider than 64 words) is expanded on the host (Host; in a table of several instances, a part of
+// PerInstance): its rows are copied down, rl::expand runs on the host's threads and the results are copied up (count()
+// and write() synchronize). So are a numeric instance's batches whose rows (the batch's atom words and the numeric
+// slots) are wider than 64 words.
 //
 // Derived words (rl::Expansion::derived): every mode fills them as rl::expand does. A Single task evaluates the
 // successors' axioms on the device (on the CPU for axioms beyond the kernels); a Multi table has no axioms, so its
@@ -56,10 +60,10 @@ public:
         Single,       // a table of one instance
         Multi,        // one pass of the multi-instance kernels
         PerInstance,  // each instance's rows apart
+        Host,         // a table of one instance the device kernels cannot run: rl::expand on the host's threads
     };
 
-    /// Throws std::invalid_argument for tasks beyond ChunkGenerator::unsupported limits. Numeric rows use each
-    /// instance's CPU encoding, padded to the table's numeric width at the public boundary.
+    /// Numeric rows use each instance's CPU encoding, padded to the table's numeric width at the public boundary.
     DeviceExpander(ContextPtr ctx, rl::TaskTablePtr table, cudaStream_t stream = nullptr);
     ~DeviceExpander();
     DeviceExpander(const DeviceExpander&) = delete;
