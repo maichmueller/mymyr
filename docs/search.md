@@ -1,7 +1,8 @@
 # Search
 
-`mymyr.search` provides layer-based searches, best-first searches and an optional heuristic beam. Results expose a
-status and a plan; best-first results also expose the path cost and goal state.
+`mymyr.search` provides layer-based searches, best-first searches (A*, weighted A*, GBFS and a heuristic beam),
+enforced hill-climbing and an anytime search. Results expose a status and a plan; best-first results also expose the
+path cost and goal state.
 
 ```python
 from pathlib import Path
@@ -60,6 +61,132 @@ print(relaxed.status, len(relaxed.plan))
 default: the task's objective), `"unit"` or `"real"` (see the heuristics guide). The
 best-first `beam` also takes a heuristic and `width=`. IW and SIW support numeric tasks; the other best-first
 algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
+
+## Weighted A*, enforced hill-climbing and the anytime search
+
+```python
+weighted = search.astar(task, heuristic="ff", weight=2)
+climbed = search.ehc(task)                       # h_FF, helpful actions first, GBFS when hill-climbing fails
+print(weighted.status, weighted.cost, climbed.status, climbed.ehc.lookaheads)
+
+anytime = search.anytime_astar(task, heuristic="ff", max_seconds=10)
+print([(s.cost, s.weight) for s in anytime.solutions], anytime.optimal)
+```
+
+### Weighted A*
+
+`astar(task, weight=w)` is A* with f = g + w·h in place of g + h, eager or lazy (`lazy=True`); it is the same search as
+A*, and `weight=1` (the default) is A* with the same expansions. The weight is finite and at least 1; it need not be an
+integer (`queue="auto"` then uses a heap; `queue="bucket"` refuses a fractional weight). Ties are broken as in A*:
+lower h first, then first in, first out, and goal states first among equal f, so the search is deterministic.
+
+The plan costs at most w times the optimal cost C\* when the heuristic is admissible (`blind`, `max`, `h2`, `lmcut`,
+`perfect`, with `costs="auto"`), the goal is the task's (or a list of alternatives; not a callable) and action costs
+are non-negative:
+
+- eager weighted A* with reopening (`reopen=True`, the default) for every admissible heuristic;
+- eager weighted A* without reopening for a consistent heuristic (`blind`, `max`): a state is then expanded at most
+  once and the bound still holds;
+- lazy weighted A* with `lazy_requeue=True` (the default) for a consistent heuristic.
+
+Real and unit costs, zero-cost actions and numeric metrics behave as in A*. A path-dependent heuristic (`lmcount`)
+gets the status of each node as in A*: a state reached on several paths keeps the merge of their statuses, and eager
+search evaluates a state again when a cheaper path reaches it.
+
+`cost_bound=c` restricts the search to plans cheaper than `c`: a state whose g is at least `c` is not opened, and with
+an admissible heuristic of the task's goal neither is a state whose g + h is. `EXHAUSTED` then means that the search
+space holds no plan cheaper than `c`. The bound needs non-negative action costs: a transition that lowers g makes the
+search fail (`FAILED`). The weight and the bound are A*'s: `gbfs` and `beam` do not take them.
+
+### Enforced hill-climbing
+
+`ehc(task)` is enforced hill-climbing (Hoffmann and Nebel 2001). From the current state, the start state first, a
+breadth-first lookahead looks for a state with a strictly smaller h; the search commits to the first one it finds,
+appends the path to it to the plan and continues from there. The lookahead evaluates a state when it pops it: a state
+with h = ∞ is a dead end and is dropped, a state with a smaller h ends the lookahead, any other state is expanded. A
+goal state ends the search as soon as it is generated. Within one lookahead every state is entered once, by the first
+path that reaches it; a later lookahead may enter it again. The lookahead counts actions (it is breadth-first, also
+with action costs), while g and the plan cost are the task's metric.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `heuristic` | `"ff"` | any heuristic of `astar`, also one written in Python |
+| `helpful_actions` | `"auto"` | `"first"`: expand with the heuristic's preferred operators only, and repeat a lookahead that finds no better state with every action; `"only"`: preferred operators only; `"off"`: every action; `"auto"`: `"first"` when the heuristic gives preferred operators, `"off"` otherwise |
+| `fallback` | `"gbfs"` | when hill-climbing fails, eager greedy best-first search from the start state with the same heuristic and the rest of the budget; `"none"`: return `EXHAUSTED` (hill-climbing failed, which does not prove the task unsolvable) |
+
+The preferred operators (FF's helpful actions) are the applicable actions of h_FF's relaxed plan (and of
+set-additive's), evaluated grounded; the landmark count's are the actions that add an atom of a landmark the state
+still needs; a heuristic written in Python gives them with `preferred_actions()`. `"first"` and `"only"` with a heuristic that
+has none return `FAILED` with a message.
+
+Hill-climbing is incomplete: it fails in a dead end it commits to, and with helpful actions also on a plateau whose
+exits are not helpful. With the default fallback the search is complete on finite state spaces (GBFS is). `result.ehc`
+counts the lookaheads, the improvements, the retries with every action, the longest lookahead, and tells whether
+hill-climbing failed and the fallback ran; `stats`, `evaluations` and `dead_ends` count both phases.
+
+A path-dependent heuristic (`lmcount`) gets, for every state of a lookahead, the status progressed along the path the
+lookahead took from the current state, without merging other paths: the committed state's status is the status of
+the plan up to it.
+
+### Anytime search
+
+`anytime_astar(task)` is restarting weighted A* (Richter, Thayer and Ruml 2010; the iterated searches of LAMA).
+Iteration k runs weighted A* from the start state with the weight `weights[min(k, len(weights) - 1)]` and the cost
+bound of the best plan found so far, so every plan it finds is cheaper than the one before. Every iteration starts
+afresh; the heuristic is built once and shared.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `weights` | `(5, 3, 2, 1)` | the weight schedule: non-empty, finite, at least 1 and non-increasing; the last weight repeats |
+| `heuristic` | `"ff"` | any heuristic of `astar` |
+| `lazy` | `False` | lazy weighted A* iterations (with `lazy_requeue`, `preferred_operators` and the list weights of `astar`) |
+| `cost_bound` | `None` | the bound of the first iteration |
+
+The other options are those of `astar` and apply to every iteration. `max_seconds` and `max_expanded` bound the whole
+search, `max_states` and `max_depth` each iteration. The search ends when
+
+- an iteration exhausts its search space: no plan is cheaper than the best one. With `reopen=True` (the default) and
+  no `max_depth` this proves the plan optimal (`result.optimal`);
+- an eager iteration with weight 1 and an admissible heuristic of the task's goal finds a plan with reopening: A*'s
+  plan is optimal (`result.optimal`);
+- a budget, the cancellation or an observer stops an iteration.
+
+The status is `SOLVED` when any iteration found a plan, also when a budget stopped the search later; `plan` and `cost`
+are the best plan's. `result.solutions` lists every improved plan in the order found with its cost, time, weight and
+iteration, and `result.iterations` every iteration with its weight, bound, status and statistics. An observer gets
+`on_solution(plan, cost)` for every improved plan as it is found and `on_pass(iteration, stats)` after every iteration,
+besides the events of the iterations themselves (with each iteration's own state ids).
+
+A cost bound prunes by g, and with an admissible heuristic also by g + h, so an iteration that cannot improve ends
+when its open list runs dry; with an inadmissible heuristic such as h_FF the last iteration expands every state
+cheaper than the best plan before it proves the plan optimal, and a time budget usually ends the search first.
+
+### Differences from Fast Downward and FF
+
+- Weighted A*: Fast Downward's `eager_wastar(..., w=...)` orders by f = g + w·h, then h, first in first out, as
+  mymyr does, and reopens closed states by default, but its weight is an integer. It tests the goal when it expands a
+  state; mymyr recognizes a goal state when it is generated and returns it when it is the minimum, goal states first
+  among equal f, so on the last f-layer it can stop earlier. Fast Downward searches the task its translator produces:
+  facts and operators that cannot matter are gone, so states that differ only in them are one state there (see the
+  LM-cut differences above), and the expansions differ also with the same heuristic values.
+- Enforced hill-climbing: Fast Downward's `ehc(h, preferred=[h])` orders the lookahead by g, so with action costs it
+  is a uniform-cost lookahead, not a breadth-first one. It keeps one search space for the whole run: a state seen in an
+  earlier lookahead is never entered again, while every mymyr lookahead starts afresh. It tests the goal when it
+  commits to a state, mymyr when it generates one. Its `preferred_usage=PRUNE_BY_PREFERRED` (the default) is
+  `helpful_actions="only"`; `RANK_PREFERRED_FIRST` expands every action and orders the preferred successors first, which
+  mymyr does not offer. When hill-climbing fails Fast Downward stops (`fallback="none"`).
+- FF's helpful actions are the applicable actions that add a goal of the relaxed plan's first layer, also those the
+  relaxed plan did not choose; mymyr's are the actions of the relaxed plan itself, as Fast Downward's preferred
+  operators of h_FF. FF restricts the lookahead to helpful actions and, when hill-climbing fails, starts a complete
+  best-first search from the initial state; `helpful_actions="only"` with the default fallback is the closest mode,
+  and the default `"first"` retries a failed lookahead with every action before it gives up.
+- Anytime search: LAMA runs Fast Downward's `iterated` search over lazy GBFS and lazy weighted A* with the weights 5,
+  3, 2, 1, repeating the last, with h_FF and the landmark count together, preferred operators and action costs plus
+  one in the heuristics. mymyr's anytime search is the restarting weighted A* core with one heuristic: eager by
+  default, `lazy=True, lazy_requeue=False` keys successors as Fast Downward's lazy search does. Fast Downward prunes a
+  successor whose g reaches the bound; mymyr also prunes by g + h with an admissible heuristic. A Fast Downward
+  iteration that finds no plan passes on to the next weight; in mymyr an exhausted iteration ends the search, since no
+  cheaper plan exists.
 
 ## LM-cut and the landmark count
 
@@ -204,9 +331,10 @@ layer-synchronously and still returns a shortest plan. `stop_at_goal=False` goes
 ## Observers
 
 `search.Observer` is the base class of search observers: subclass it, override the events you need and pass an instance
-as `observer=` to `brfs`, `iw`, `siw`, `astar`, `gbfs`, `beam`, `astar_iw` or the IW family variants. The events are
-`on_start(state)`, `on_expand(id, state)`, `on_generate(parent, action, child, state, is_new)`,
-`on_prune(parent, action, state)`, `on_pass(arity, stats)` (after an IW pass, or a BrFS layer with its depth),
+as `observer=` to `brfs`, `iw`, `siw`, `astar`, `gbfs`, `beam`, `ehc`, `anytime_astar`, `astar_iw` or the IW family
+variants. The events are `on_start(state)`, `on_expand(id, state)`, `on_generate(parent, action, child, state, is_new)`,
+`on_prune(parent, action, state)`, `on_pass(arity, stats)` (after an IW pass, a BrFS layer with its depth, an EHC
+lookahead or an anytime iteration with its index),
 `on_solution(plan, cost)`, `on_progress(stats)` (every `progress_interval` expansions; returning False stops the search
 with status `CANCELLED`) and `on_end(status, stats)`; the IW family variants also send
 `on_transition(parent, action, child, state, outcome)`. A search never calls an event the subclass does not override,

@@ -1,4 +1,4 @@
-// A*, eager and lazy (best_first.hpp): eager and lazy A* on SoA nodes, shared
+// A* and weighted A*, eager and lazy (best_first.hpp): eager and lazy A* on SoA nodes, shared
 // stores and bucket or heap open lists (best_first_detail.hpp).
 
 #include "best_first_detail.hpp"
@@ -12,8 +12,55 @@ namespace
 using namespace bf;
 constexpr f64 k_inf = std::numeric_limits<f64>::infinity();
 
-/// f - g0 of a node (the open-list key; computed the same way on push and pop, so stale entries are recognized).
-[[nodiscard]] inline f64 fval(const Nodes& nodes, u32 id, f64 g0) { return (nodes.g[id] - g0) + nodes.h[id]; }
+/// f - g0 = (g - g0) + weight * h of a node (the open-list key; computed the same way on push and pop, so stale entries
+/// are recognized). Weight 1 multiplies exactly: the keys of A*.
+[[nodiscard]] inline f64 fval(const Nodes& nodes, u32 id, f64 g0, f64 weight)
+{
+    return (nodes.g[id] - g0) + weight * nodes.h[id];
+}
+
+/// The start of both A*s: the static goal, the cost bound, the start goal test and h(start), which opens the root.
+/// False when the search is over already (the status is set).
+bool start(Context& c, Nodes& nodes, u32 root, StateView s0)
+{
+    BestFirstResult& r = c.r;
+    if (c.unsolvable())
+    {
+        c.begin_search();
+        r.status = SearchStatus::Unsolvable;
+        return false;
+    }
+    if (c.beyond_bound(c.g0, 0))
+    {
+        c.begin_search();
+        r.status = SearchStatus::Exhausted;  // no plan is cheaper than the bound
+        return false;
+    }
+    if (c.is_goal(s0))
+    {
+        c.begin_search();
+        c.solved(nodes, root, s0, false);
+        return false;
+    }
+    const f64 h0 = c.evaluate(s0, nodes, root);
+    r.initial_h = h0;
+    c.begin_search();
+    if (h0 == k_inf)
+    {
+        ++r.dead_ends;
+        r.status = SearchStatus::Unsolvable;
+        return false;
+    }
+    nodes.h[root] = h0;
+    nodes.set(root, Nodes::Evaluated);
+    if (c.beyond_bound(c.g0, h0))
+    {
+        r.status = SearchStatus::Exhausted;
+        return false;
+    }
+    nodes.set_status(root, Nodes::Open);
+    return true;
+}
 
 template<class S, class Q>
 struct AStarEager
@@ -37,35 +84,14 @@ struct AStarEager
         const u32 root = store.insert(s0).first;
         nodes.add(k_none, k_none, nullptr, 0, c.g0);
         c.start_status(nodes, root, s0);
-        if (c.unsolvable())
-        {
-            c.begin_search();
-            r.status = SearchStatus::Unsolvable;
+        if (!start(c, nodes, root, s0))
             return finish();
-        }
-        if (c.is_goal(s0))
-        {
-            c.begin_search();
-            c.solved(nodes, root, s0, false);
-            return finish();
-        }
-        const f64 h0 = c.evaluate(s0, nodes, root);
-        r.initial_h = h0;
-        c.begin_search();
-        if (h0 == k_inf)
-        {
-            ++r.dead_ends;
-            r.status = SearchStatus::Unsolvable;
-            return finish();
-        }
-        nodes.h[root] = h0;
-        nodes.set(root, Nodes::Evaluated);
-        nodes.set_status(root, Nodes::Open);
-        open.push(Q::key(fval(nodes, root, c.g0)), Q::key(h0), store.make_ref(root, s0));
+        const f64 h0 = nodes.h[root];
+        open.push(Q::key(fval(nodes, root, c.g0, c.weight)), Q::key(h0), store.make_ref(root, s0));
 
         auto push = [&](u32 id, StateView v)
         {
-            const u64 f = Q::key(fval(nodes, id, c.g0));
+            const u64 f = Q::key(fval(nodes, id, c.g0, c.weight));
             if (nodes.has(id, Nodes::Goal))
                 goals.push(f, 0, store.make_ref(id, v));
             else
@@ -74,7 +100,7 @@ struct AStarEager
         f64 last_f = -k_inf;
         auto layer = [&](u32 id)
         {
-            if (const f64 f = fval(nodes, id, c.g0); f > last_f)
+            if (const f64 f = fval(nodes, id, c.g0, c.weight); f > last_f)
             {
                 last_f = f;
                 r.expanded_until_last_jump = r.stats.expanded;
@@ -88,7 +114,7 @@ struct AStarEager
                 u64 k;
                 const u32 ref = goals.pop(k);
                 const u32 id = store.id_of(ref);
-                if (nodes.status(id) != Nodes::Open || Q::key(fval(nodes, id, c.g0)) != k)
+                if (nodes.status(id) != Nodes::Open || Q::key(fval(nodes, id, c.g0, c.weight)) != k)
                 {
                     store.release(ref);  // reached more cheaply later: a newer entry exists
                     continue;
@@ -109,7 +135,7 @@ struct AStarEager
             u64 k;
             const u32 ref = open.pop(k);
             const u32 id = store.id_of(ref);
-            if (nodes.status(id) != Nodes::Open || Q::key(fval(nodes, id, c.g0)) != k)
+            if (nodes.status(id) != Nodes::Open || Q::key(fval(nodes, id, c.g0, c.weight)) != k)
             {
                 store.release(ref);  // closed, or reopened with a smaller f
                 continue;
@@ -140,6 +166,11 @@ struct AStarEager
                     const StateView v = tr.view(t);
                     if (c.batched ? c.fresh_goal[tr.index(t)] != 0 : c.is_goal(v))
                         nodes.set(cid, Nodes::Goal);
+                    if (c.bounded && c.beyond_bound(t.g, 0))
+                    {
+                        ++r.stats.pruned;  // stays New: a cheaper path may reach it again
+                        continue;
+                    }
                     const f64 hv = c.batched ? c.fresh_h[tr.index(t)] : c.evaluate(v, nodes, cid);
                     if (hv == k_inf)
                     {
@@ -150,12 +181,49 @@ struct AStarEager
                     }
                     nodes.h[cid] = hv;
                     nodes.set(cid, Nodes::Evaluated);
+                    if (c.bounded && c.beyond_bound(t.g, hv))
+                    {
+                        ++r.stats.pruned;
+                        continue;
+                    }
                     nodes.set_status(cid, Nodes::Open);
                     push(cid, v);
                     continue;
                 }
                 const f64 gc = t.g;
                 const u8 st = nodes.status(cid);
+                if (st == Nodes::New)  // pruned by the cost bound when reached before
+                {
+                    if (!(gc < nodes.g[cid]))
+                        continue;
+                    nodes.relink(cid, id, t.schema, tr.binding(t), c.succ.arity(t.schema), gc);
+                    if (c.beyond_bound(gc, 0))
+                    {
+                        ++r.stats.pruned;
+                        continue;
+                    }
+                    if (!nodes.has(cid, Nodes::Evaluated) || c.path_dependent)
+                    {
+                        const f64 hv = c.evaluate(tr.view(t), nodes, cid);
+                        if (hv == k_inf)
+                        {
+                            nodes.set_status(cid, Nodes::DeadEnd);
+                            ++r.dead_ends;
+                            ++r.stats.pruned;
+                            continue;
+                        }
+                        nodes.h[cid] = hv;
+                        nodes.set(cid, Nodes::Evaluated);
+                    }
+                    if (c.beyond_bound(gc, nodes.h[cid]))
+                    {
+                        ++r.stats.pruned;
+                        continue;
+                    }
+                    nodes.set_status(cid, Nodes::Open);
+                    push(cid, tr.view(t));
+                    continue;
+                }
                 if (gc < nodes.g[cid] && (st == Nodes::Open || (st == Nodes::Closed && c.o.reopen)))
                 {
                     r.reopened += st == Nodes::Closed;
@@ -205,31 +273,10 @@ struct AStarLazy
         const u32 root = store.insert(s0).first;
         nodes.add(k_none, k_none, nullptr, 0, c.g0);
         c.start_status(nodes, root, s0);
-        if (c.unsolvable())
-        {
-            c.begin_search();
-            r.status = SearchStatus::Unsolvable;
+        if (!start(c, nodes, root, s0))
             return finish();
-        }
-        if (c.is_goal(s0))
-        {
-            c.begin_search();
-            c.solved(nodes, root, s0, false);
-            return finish();
-        }
-        const f64 h0 = c.evaluate(s0, nodes, root);
-        r.initial_h = h0;
-        c.begin_search();
-        if (h0 == k_inf)
-        {
-            ++r.dead_ends;
-            r.status = SearchStatus::Unsolvable;
-            return finish();
-        }
-        nodes.h[root] = h0;
-        nodes.set(root, Nodes::Evaluated);
-        nodes.set_status(root, Nodes::Open);
-        open.list(0).push(Q::key(fval(nodes, root, c.g0)), Q::key(h0), store.make_ref(root, s0));
+        const f64 h0 = nodes.h[root];
+        open.list(0).push(Q::key(fval(nodes, root, c.g0, c.weight)), Q::key(h0), store.make_ref(root, s0));
 
         const bool use_preferred = c.o.preferred_operators && c.h->provides_preferred();
         const u32 max_depth = c.o.control.budget.max_depth;
@@ -237,7 +284,7 @@ struct AStarLazy
         f64 last_f = -k_inf;
         auto layer = [&](u32 id)
         {
-            if (const f64 f = fval(nodes, id, c.g0); f > last_f)
+            if (const f64 f = fval(nodes, id, c.g0, c.weight); f > last_f)
             {
                 last_f = f;
                 r.expanded_until_last_jump = r.stats.expanded;
@@ -250,7 +297,7 @@ struct AStarLazy
                 u64 k;
                 const u32 ref = goals.pop(k);
                 const u32 id = store.id_of(ref);
-                if (nodes.status(id) != Nodes::Open || Q::key(fval(nodes, id, c.g0)) != k)
+                if (nodes.status(id) != Nodes::Open || Q::key(fval(nodes, id, c.g0, c.weight)) != k)
                 {
                     store.release(ref);
                     continue;
@@ -296,9 +343,16 @@ struct AStarLazy
                 }
             }
             const f64 hp = nodes.h[id];
+            if (c.bounded && c.beyond_bound(nodes.g[id], hp))
+            {
+                store.release(ref);
+                nodes.set_status(id, Nodes::New);  // a cheaper path may reach it again
+                ++r.stats.pruned;
+                continue;
+            }
             if (requeue)
             {
-                const u64 fk = Q::key(fval(nodes, id, c.g0));
+                const u64 fk = Q::key(fval(nodes, id, c.g0, c.weight));
                 if (fk > k)
                 {
                     open.list(from).push(fk, Q::key(hp), ref);  // the key was a lower bound: wait for the true f
@@ -345,16 +399,23 @@ struct AStarLazy
                 if (!t.fresh)
                 {
                     const u8 cs = nodes.status(cid);
-                    if (!(gc < nodes.g[cid] && (cs == Nodes::Open || (cs == Nodes::Closed && c.o.reopen))))
-                        continue;
+                    if (!(gc < nodes.g[cid] &&
+                          (cs == Nodes::Open || cs == Nodes::New || (cs == Nodes::Closed && c.o.reopen))))
+                        continue;  // New: pruned by the cost bound when reached before
                     r.reopened += cs == Nodes::Closed;
                     nodes.relink(cid, id, t.schema, tr.binding(t), c.succ.arity(t.schema), gc);
                 }
                 else if (c.is_goal(tr.view(t)))
                     nodes.set(cid, Nodes::Goal);
+                if (c.bounded && c.beyond_bound(gc, 0))
+                {
+                    ++r.stats.pruned;
+                    continue;
+                }
                 nodes.set_status(cid, Nodes::Open);
                 // lower bound on f(child) for consistent h: h(child) >= h(parent) - cost
-                const f64 key = (gc - c.g0) + (requeue ? std::max(0.0, hp - (gc - nodes.g[id])) : hp);
+                const f64 key =
+                    (gc - c.g0) + c.weight * (requeue ? std::max(0.0, hp - (gc - nodes.g[id])) : hp);
                 const StateView v = tr.view(t);
                 open.list(pref && t.preferred ? 0 : 1).push(Q::key(key), Q::key(hp), store.make_ref(cid, v));
             }
@@ -367,11 +428,11 @@ struct AStarLazy
 
 BestFirstResult astar_eager(const Task& task, const BestFirstOptions& options)
 {
-    return bf::run<AStarEager>(task, options, "astar_eager");
+    return bf::run<AStarEager>(task, options, "astar_eager", true);
 }
 
 BestFirstResult astar_lazy(const Task& task, const BestFirstOptions& options)
 {
-    return bf::run<AStarLazy>(task, options, "astar_lazy");
+    return bf::run<AStarLazy>(task, options, "astar_lazy", true);
 }
 }  // namespace mymyr::search

@@ -20,10 +20,12 @@
 #include "mymyr/heuristics/heuristic.hpp"
 #include "mymyr/heuristics/perfect.hpp"
 #include "mymyr/search/aiw.hpp"
+#include "mymyr/search/anytime.hpp"
 #include "mymyr/search/astar_iw.hpp"
 #include "mymyr/search/best_first.hpp"
 #include "mymyr/search/brfs.hpp"
 #include "mymyr/search/control.hpp"
+#include "mymyr/search/ehc.hpp"
 #include "mymyr/search/goal.hpp"
 #include "mymyr/search/iw.hpp"
 #include "mymyr/search/iw_family.hpp"
@@ -579,6 +581,16 @@ struct PyAStarIwResult : PyBestFirstResult
 {
     search::AStarIwNoveltyStatistics novelty;
 };
+struct PyEhcResult : PyBestFirstResult
+{
+    search::EhcStatistics ehc;
+};
+struct PyAnytimeResult : PyBestFirstResult
+{
+    std::vector<search::AnytimeSolution> solutions;
+    std::vector<search::AnytimeIteration> iterations;
+    bool optimal = false;
+};
 struct PyBrfsResult
 {
     BrfsResult r;
@@ -910,6 +922,63 @@ search::AStarIwNoveltyStatistics dec_novelty(nb::handle h)
     return s;
 }
 
+nb::tuple enc(const search::EhcStatistics& s)
+{
+    return nb::make_tuple(s.lookaheads, s.improvements, s.retries, s.max_depth, s.expanded, s.evaluations, s.failed,
+                          s.fallback);
+}
+search::EhcStatistics dec_ehc(nb::handle h)
+{
+    Fields f(h, "EHC statistics");
+    search::EhcStatistics s;
+    s.lookaheads = f.get<u64>();
+    s.improvements = f.get<u64>();
+    s.retries = f.get<u64>();
+    s.max_depth = f.get<u64>();
+    s.expanded = f.get<u64>();
+    s.evaluations = f.get<u64>();
+    s.failed = f.get<bool>();
+    s.fallback = f.get<bool>();
+    f.done();
+    return s;
+}
+
+nb::tuple enc(const search::AnytimeSolution& s)
+{
+    return nb::make_tuple(s.cost, s.seconds, s.weight, s.iteration, s.expanded, s.length);
+}
+search::AnytimeSolution dec_anytime_solution(nb::handle h)
+{
+    Fields f(h, "anytime solution");
+    search::AnytimeSolution s;
+    s.cost = f.get<double>();
+    s.seconds = f.get<double>();
+    s.weight = f.get<double>();
+    s.iteration = f.get<u32>();
+    s.expanded = f.get<u64>();
+    s.length = f.get<u64>();
+    f.done();
+    return s;
+}
+
+nb::tuple enc(const search::AnytimeIteration& s)
+{
+    return nb::make_tuple(s.weight, s.cost_bound, status_int(s.status), enc(s.stats), s.evaluations, s.cost);
+}
+search::AnytimeIteration dec_anytime_iteration(nb::handle h)
+{
+    Fields f(h, "anytime iteration");
+    search::AnytimeIteration s;
+    s.weight = f.get<double>();
+    s.cost_bound = f.get<double>();
+    s.status = f.status();
+    s.stats = dec_stats(f.next());
+    s.evaluations = f.get<u64>();
+    s.cost = f.get<double>();
+    f.done();
+    return s;
+}
+
 nb::tuple enc(const search::RolloutIwStatistics& s)
 {
     return nb::make_tuple(s.rollouts, s.generated, s.expanded, s.feature_depth_improvements, s.case1, s.case2, s.case3, s.case4,
@@ -1229,9 +1298,12 @@ nb::object restore_result(std::string_view kind, nb::handle task, u64 fingerprin
         return nb::cast(PyIwResult{dec_iw(o, fields), o});
     if (kind == "siw")
         return nb::cast(PySiwResult{dec_siw(o, fields), o});
-    if (kind == "best_first" || kind == "astar_iw")
+    if (kind == "best_first" || kind == "astar_iw" || kind == "ehc" || kind == "anytime")
     {
-        const char* what = kind == "best_first" ? "best-first result" : "A*-IW result";
+        const char* what = kind == "best_first" ? "best-first result"
+                           : kind == "astar_iw" ? "A*-IW result"
+                           : kind == "ehc"      ? "EHC result"
+                                                : "anytime result";
         Fields f(fields, what);
         search::BestFirstResult r;
         dec_best_first(o, f, r, what);
@@ -1239,6 +1311,26 @@ nb::object restore_result(std::string_view kind, nb::handle task, u64 fingerprin
         {
             f.done();
             return nb::cast(PyBestFirstResult{std::move(r), o});
+        }
+        if (kind == "ehc")
+        {
+            PyEhcResult e;
+            e.r = std::move(r);
+            e.o = o;
+            e.ehc = dec_ehc(f.next());
+            f.done();
+            return nb::cast(std::move(e));
+        }
+        if (kind == "anytime")
+        {
+            PyAnytimeResult a;
+            a.r = std::move(r);
+            a.o = o;
+            a.solutions = dec_list<search::AnytimeSolution>(f.next(), what, dec_anytime_solution);
+            a.iterations = dec_list<search::AnytimeIteration>(f.next(), what, dec_anytime_iteration);
+            a.optimal = f.get<bool>();
+            f.done();
+            return nb::cast(std::move(a));
         }
         PyAStarIwResult a;
         a.r = std::move(r);
@@ -1699,6 +1791,9 @@ using TransitionArg = Arg<PyLandmarkOrdering>;
 using LandmarksArg = Arg<std::variant<PyFactLandmarkGraph, ann::LandmarkSource>>;
 using FluentAtomsArg = Arg<nb::typed<nb::iterable, AtomLike>>;
 using LayerArg = Arg<ann::LayerOrder>;
+using WeightsArg = Arg<nb::typed<nb::sequence, double>>;
+using HelpfulArg = Arg<ann::HelpfulActions>;
+using FallbackArg = Arg<ann::EhcFallback>;
 using BeamNoveltyArg = Arg<ann::BeamNovelty>;
 using OrderingArg = Arg<std::variant<search::ActionOrdering, std::string>>;
 using OrderingsArg =
@@ -1841,6 +1936,18 @@ auto best_first(Search search_fn, nb::handle task, nb::handle heuristic, nb::han
     {
         const auto novelty = r.novelty;
         return PyAStarIwResult{{std::move(r), o}, novelty};
+    }
+    else if constexpr (std::is_same_v<decltype(r), search::EhcResult>)
+    {
+        const auto ehc = r.ehc;
+        return PyEhcResult{{std::move(r), o}, ehc};
+    }
+    else if constexpr (std::is_same_v<decltype(r), search::AnytimeResult>)
+    {
+        auto solutions = std::move(r.solutions);
+        auto iterations = std::move(r.iterations);
+        const bool optimal = r.optimal;
+        return PyAnytimeResult{{std::move(r), o}, std::move(solutions), std::move(iterations), optimal};
     }
     else
         return PyBestFirstResult{std::move(r), o};
@@ -2164,8 +2271,10 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("store_bytes", [](const PyBestFirstResult& x) { return x.r.store_bytes; })
         .def("__reduce__",
              [](const PyBestFirstResult& x) { return result_reduce("best_first", x.o, enc(x.o, x.r)); })
-        .def("__repr__", [](const PyBestFirstResult& x) {
-            return "BestFirstResult(algorithm=" + x.r.algorithm + ", status=" + search::to_string(x.r.status) +
+        .def("__repr__", [](nb::handle self) {
+            const PyBestFirstResult& x = nb::cast<const PyBestFirstResult&>(self);
+            return nb::cast<std::string>(self.type().attr("__name__")) + "(algorithm=" + x.r.algorithm +
+                   ", status=" + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) + ", " +
                    stats_repr(x.r.stats) + ")";
         });
@@ -2637,7 +2746,21 @@ void bind_search(nb::module_& parent)
                 g = self.h->relaxed() != nullptr;
             }
             return g;
-        });
+        })
+        .def_prop_ro(
+            "admissible",
+            [](PyHeuristic& self) {
+                bool a = false;
+                {
+                    nb::gil_scoped_release release;
+                    std::lock_guard lock(self.m);
+                    a = self.h->admissible();
+                }
+                return a;
+            },
+            "Whether h never exceeds the optimal cost of the task's objective: 'blind', 'max', 'h2', 'lmcut' and "
+            "'perfect' with the costs of the objective (costs 'auto' or 'real', or 'unit' on a unit-cost task). "
+            "A cost bound (astar, anytime_astar) prunes by g + h only with an admissible heuristic.");
 
     nb::class_<PyAStarIwResult, PyBestFirstResult>(m, "AStarIwResult")
         .def_prop_ro("novelty", [](const PyAStarIwResult& r) { return r.novelty; })
@@ -2648,6 +2771,89 @@ void bind_search(nb::module_& parent)
                 fields.append(h);
             fields.append(enc(x.novelty));
             return result_reduce("astar_iw", x.o, nb::tuple(fields));
+        });
+
+    auto ehc_stats = nb::class_<search::EhcStatistics>(m, "EhcStatistics",
+                                                       "Counters of enforced hill-climbing (search/ehc.hpp).");
+    bind_stats_pickle(ehc_stats, [](const search::EhcStatistics& x) { return enc(x); }, dec_ehc);
+    ehc_stats.def_ro("lookaheads", &search::EhcStatistics::lookaheads, "Breadth-first lookaheads, retries included.")
+        .def_ro("improvements", &search::EhcStatistics::improvements, "Lookaheads that reached a state with a smaller h.")
+        .def_ro("retries", &search::EhcStatistics::retries,
+                "Lookaheads repeated with every action after the helpful actions found no better state.")
+        .def_ro("max_depth", &search::EhcStatistics::max_depth,
+                "The longest path from a lookahead's start to its better state or the goal, in actions.")
+        .def_ro("expanded", &search::EhcStatistics::expanded,
+                "Expansions of hill-climbing (the result's stats add the fallback's).")
+        .def_ro("evaluations", &search::EhcStatistics::evaluations, "Heuristic evaluations of hill-climbing.")
+        .def_ro("failed", &search::EhcStatistics::failed, "Hill-climbing found no better state from some state.")
+        .def_ro("fallback", &search::EhcStatistics::fallback, "The fallback search ran.")
+        .def("__repr__", [](const search::EhcStatistics& s) {
+            return "EhcStatistics(lookaheads=" + std::to_string(s.lookaheads) + ", improvements=" +
+                   std::to_string(s.improvements) + ", retries=" + std::to_string(s.retries) +
+                   ", max_depth=" + std::to_string(s.max_depth) + ", failed=" + (s.failed ? "True" : "False") +
+                   ", fallback=" + (s.fallback ? "True" : "False") + ")";
+        });
+
+    nb::class_<PyEhcResult, PyBestFirstResult>(
+        m, "EhcResult",
+        "The result of ehc: the best-first result fields (stats, evaluations and dead_ends count hill-climbing and the "
+        "fallback; store and queue are the fallback's when it ran) and the hill-climbing counters in `ehc`.")
+        .def_prop_ro("ehc", [](const PyEhcResult& x) { return x.ehc; })
+        .def("__reduce__", [](const PyEhcResult& x) {
+            nb::list fields;
+            for (nb::handle h : enc(x.o, x.r))
+                fields.append(h);
+            fields.append(enc(x.ehc));
+            return result_reduce("ehc", x.o, nb::tuple(fields));
+        });
+
+    auto anytime_solution = nb::class_<search::AnytimeSolution>(
+        m, "AnytimeSolution", "An improved plan of anytime_astar, in the order found (its cost, not the plan).");
+    bind_stats_pickle(anytime_solution, [](const search::AnytimeSolution& x) { return enc(x); }, dec_anytime_solution);
+    anytime_solution.def_ro("cost", &search::AnytimeSolution::cost)
+        .def_ro("seconds", &search::AnytimeSolution::seconds,
+                "Seconds since the search started (after building the heuristic).")
+        .def_ro("weight", &search::AnytimeSolution::weight, "The weight of the iteration that found it.")
+        .def_ro("iteration", &search::AnytimeSolution::iteration)
+        .def_ro("expanded", &search::AnytimeSolution::expanded, "Expansions of the whole search until it was found.")
+        .def_ro("length", &search::AnytimeSolution::length, "Actions.")
+        .def("__repr__", [](const search::AnytimeSolution& s) {
+            return "AnytimeSolution(cost=" + cost_repr(s.cost) + ", seconds=" + std::to_string(s.seconds) +
+                   ", weight=" + cost_repr(s.weight) + ", iteration=" + std::to_string(s.iteration) +
+                   ", length=" + std::to_string(s.length) + ")";
+        });
+
+    auto anytime_iteration =
+        nb::class_<search::AnytimeIteration>(m, "AnytimeIteration", "One weighted A* iteration of anytime_astar.");
+    bind_stats_pickle(anytime_iteration, [](const search::AnytimeIteration& x) { return enc(x); }, dec_anytime_iteration);
+    anytime_iteration.def_ro("weight", &search::AnytimeIteration::weight)
+        .def_ro("cost_bound", &search::AnytimeIteration::cost_bound,
+                "Plans of the iteration cost less (math.inf: no bound).")
+        .def_ro("status", &search::AnytimeIteration::status)
+        .def_ro("stats", &search::AnytimeIteration::stats)
+        .def_ro("evaluations", &search::AnytimeIteration::evaluations)
+        .def_ro("cost", &search::AnytimeIteration::cost, "The cost of the iteration's plan when it found one.")
+        .def("__repr__", [](const search::AnytimeIteration& s) {
+            return "AnytimeIteration(weight=" + cost_repr(s.weight) + ", cost_bound=" + cost_repr(s.cost_bound) +
+                   ", status=" + search::to_string(s.status) + ", " + stats_repr(s.stats) + ")";
+        });
+
+    nb::class_<PyAnytimeResult, PyBestFirstResult>(
+        m, "AnytimeResult",
+        "The result of anytime_astar: the best plan in the best-first result fields (status SOLVED when a plan was "
+        "found; stats, evaluations, dead_ends and reopened add up the iterations), every improved plan in "
+        "`solutions`, every iteration in `iterations`, and `optimal` when the search proved the plan optimal.")
+        .def_prop_ro("solutions", [](const PyAnytimeResult& x) { return x.solutions; })
+        .def_prop_ro("iterations", [](const PyAnytimeResult& x) { return x.iterations; })
+        .def_prop_ro("optimal", [](const PyAnytimeResult& x) { return x.optimal; })
+        .def("__reduce__", [](const PyAnytimeResult& x) {
+            nb::list fields;
+            for (nb::handle h : enc(x.o, x.r))
+                fields.append(h);
+            fields.append(enc_list(x.solutions, [](const auto& v) { return enc(v); }));
+            fields.append(enc_list(x.iterations, [](const auto& v) { return enc(v); }));
+            fields.append(x.optimal);
+            return result_reduce("anytime", x.o, nb::tuple(fields));
         });
 
     using RestoredResult =
@@ -2821,20 +3027,27 @@ void bind_search(nb::module_& parent)
 
     m.def(
         "astar",
-        [](TaskArg task, bool lazy, HeuristicArg heuristic, StrArg costs, StrArg evaluation, StrArg store,
-           StrArg queue, StateArg start, bool reopen, bool lazy_requeue, bool preferred_operators,
-           IntArg preferred_weight, IntArg standard_weight, bool witness_pruning, IntArg max_states,
-           IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel, GoalArg goal,
-           StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
-            return bf_call(lazy ? &search::astar_lazy : &search::astar_eager, task, heuristic, costs, evaluation, store,
-                           queue, start, reopen, lazy_requeue, preferred_operators,
-                           int_arg<u32>(preferred_weight, "preferred_weight"),
-                           int_arg<u32>(standard_weight, "standard_weight", 1),
-                           1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds,
-                           cancel, goal,
-                           blocked_states, observer, progress_interval);
+        [](TaskArg task, bool lazy, HeuristicArg heuristic, FloatArg weight, FloatArg cost_bound, StrArg costs,
+           StrArg evaluation, StrArg store, StrArg queue, StateArg start, bool reopen, bool lazy_requeue,
+           bool preferred_operators, IntArg preferred_weight, IntArg standard_weight, bool witness_pruning,
+           IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+            const double w = float_arg(weight, "weight", 1.0);
+            const double bound =
+                opt_float_arg(cost_bound, "cost_bound").value_or(std::numeric_limits<double>::infinity());
+            const BfFn fn = lazy ? &search::astar_lazy : &search::astar_eager;
+            return best_first([&](const Task& t, const search::BestFirstOptions& base) {
+                search::BestFirstOptions options = base;
+                options.weight = w;
+                options.cost_bound = bound;
+                return fn(t, options);
+            }, task, heuristic, costs, evaluation, store, queue, start, reopen, lazy_requeue, preferred_operators,
+                int_arg<u32>(preferred_weight, "preferred_weight"), int_arg<u32>(standard_weight, "standard_weight", 1),
+                1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                blocked_states, observer, progress_interval);
         },
-        "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "max", "costs"_a = "auto", "evaluation"_a = "auto",
+        "task"_a, nb::kw_only(), "lazy"_a = false, "heuristic"_a = "max", "weight"_a = 1.0, "cost_bound"_a = nb::none(),
+        "costs"_a = "auto", "evaluation"_a = "auto",
         "store"_a = "auto", "queue"_a = "auto", "start"_a = nb::none(), "reopen"_a = true, "lazy_requeue"_a = true,
         "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false,
         "max_states"_a = nb::none(), "max_expanded"_a = nb::none(), "max_depth"_a = nb::none(),
@@ -2849,7 +3062,16 @@ void bind_search(nb::module_& parent)
                      "'perfect'), the plan is optimal for the task's objective (its total-cost or metric). A "
                      "path-dependent heuristic ('lmcount') gets each node's status: a state reached on several paths "
                      "keeps the merge of their statuses, and eager A* evaluates a state again when a cheaper path "
-                     "reaches it; it cannot evaluate in batches, nor estimate a goal of several alternatives. ") +
+                     "reaches it; it cannot evaluate in batches, nor estimate a goal of several alternatives. "
+                     "weight: weighted A*, f = g + weight * h (finite, >= 1; 1 is A* with the same expansions); ties "
+                     "by lower h, then first in, first out. With an admissible heuristic of the task's goal (not a "
+                     "callable goal) the plan costs at most weight times the optimum when the search reopens states "
+                     "(reopen=True), and with a consistent heuristic ('blind', 'max') also without reopening; lazy "
+                     "A* keeps the bound with lazy_requeue for consistent heuristics. A non-integral weight needs "
+                     "queue 'auto' or 'heap'. cost_bound: plans cost less than it; states with g >= cost_bound, and "
+                     "with an admissible heuristic of the task's goal those with g + h >= cost_bound, are not "
+                     "opened, so EXHAUSTED means that no plan is cheaper than the bound (a transition that lowers g "
+                     "then gives FAILED). Invalid values raise ValueError. ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
 
@@ -2931,6 +3153,113 @@ void bind_search(nb::module_& parent)
         "progress_interval"_a = nb::none(),
         (std::string("Greedy best-first search (search/best_first.hpp), eager or lazy (preferred and standard lists "
                      "alternating, 64:1 by default). heuristic: as for astar. ") +
+         k_heuristic_doc + k_control_doc)
+            .c_str());
+
+    m.def(
+        "ehc",
+        [](TaskArg task, HeuristicArg heuristic, HelpfulArg helpful_actions, FallbackArg fallback, StrArg costs,
+           StrArg evaluation, StrArg store, StateArg start, bool witness_pruning, bool canonical_order,
+           IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+            search::EhcOptions options;
+            const std::string helpful = str_arg(helpful_actions, "helpful_actions");
+            if (helpful == "auto")
+                options.helpful_actions = search::EhcOptions::Helpful::Auto;
+            else if (helpful == "off")
+                options.helpful_actions = search::EhcOptions::Helpful::Off;
+            else if (helpful == "only")
+                options.helpful_actions = search::EhcOptions::Helpful::Only;
+            else if (helpful == "first")
+                options.helpful_actions = search::EhcOptions::Helpful::First;
+            else
+                throw nb::value_error("mymyr: helpful_actions must be 'auto', 'off', 'only' or 'first'");
+            const std::string fb = str_arg(fallback, "fallback");
+            if (fb == "gbfs")
+                options.fallback = search::EhcOptions::Fallback::Gbfs;
+            else if (fb == "none")
+                options.fallback = search::EhcOptions::Fallback::None;
+            else
+                throw nb::value_error("mymyr: fallback must be 'gbfs' or 'none'");
+            options.canonical_order = canonical_order;
+            return best_first([&](const Task& t, const search::BestFirstOptions& base) {
+                options.control = base.control;
+                options.heuristic = base.heuristic;
+                options.evaluator = base.evaluator;
+                options.store = base.store;
+                options.start = base.start;
+                options.witness_pruning = base.witness_pruning;
+                return search::ehc(t, options);
+            }, task, heuristic, costs, evaluation, store, nb::str("auto"), start, true, true, true, 0, 1, 1000,
+                witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal, blocked_states,
+                observer, progress_interval);
+        },
+        "task"_a, nb::kw_only(), "heuristic"_a = "ff", "helpful_actions"_a = "auto", "fallback"_a = "gbfs",
+        "costs"_a = "auto", "evaluation"_a = "auto", "store"_a = "auto", "start"_a = nb::none(),
+        "witness_pruning"_a = false, "canonical_order"_a = true, MYMYR_CONTROL_ARGS,
+        (std::string("Enforced hill-climbing (search/ehc.hpp; Hoffmann and Nebel 2001). From the current state a "
+                     "breadth-first lookahead looks for a state with a strictly smaller h, commits to the first one "
+                     "and repeats from it. A state is evaluated when the lookahead pops it (h = math.inf: a dead "
+                     "end, dropped); a goal state ends the search when generated; within a lookahead each state is "
+                     "entered once. helpful_actions: 'first' (expand with the preferred operators of the state's "
+                     "evaluation only, and repeat a lookahead that finds no better state with every action), 'only' "
+                     "(preferred operators only, no repetition), 'off' (every action), 'auto' (the default: 'first' "
+                     "when the heuristic gives preferred operators: 'ff' and 'set_additive' evaluated grounded, "
+                     "'lmcount', or a heuristic with preferred_actions(); 'off' otherwise). 'first' and 'only' with a "
+                     "heuristic without preferred operators give FAILED with a message. fallback: 'gbfs' (the "
+                     "default) runs eager greedy best-first search from the start state with the same heuristic and "
+                     "the rest of the budget when hill-climbing fails; 'none' returns EXHAUSTED then (hill-climbing "
+                     "failed, which does not mean that the task is unsolvable). The lookahead counts actions; g and "
+                     "the plan cost are the task's metric. A path-dependent heuristic ('lmcount') gets the status of "
+                     "the path the lookahead took, from the committed state, without merging. Observer: on_pass("
+                     "lookahead, stats) after each lookahead; the fallback's on_expand, on_generate, on_prune and "
+                     "on_progress follow. heuristic: as for astar. ") +
+         k_heuristic_doc + k_control_doc)
+            .c_str());
+
+    m.def(
+        "anytime_astar",
+        [](TaskArg task, WeightsArg weights, bool lazy, HeuristicArg heuristic, FloatArg cost_bound, StrArg costs,
+           StrArg evaluation, StrArg store, StrArg queue, StateArg start, bool reopen, bool lazy_requeue,
+           bool preferred_operators, IntArg preferred_weight, IntArg standard_weight, bool witness_pruning,
+           IntArg max_states, IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, CancelArg cancel,
+           GoalArg goal, StatesArg blocked_states, ObserverArg observer, IntArg progress_interval) {
+            search::AnytimeOptions options;
+            options.weights.clear();
+            for (nb::handle x : nb::iter(weights))
+                options.weights.push_back(float_arg(x, "weights", 1.0));
+            options.lazy = lazy;
+            const double bound =
+                opt_float_arg(cost_bound, "cost_bound").value_or(std::numeric_limits<double>::infinity());
+            return best_first([&](const Task& t, const search::BestFirstOptions& base) {
+                static_cast<search::BestFirstOptions&>(options) = base;
+                options.cost_bound = bound;
+                return search::anytime_astar(t, options);
+            }, task, heuristic, costs, evaluation, store, queue, start, reopen, lazy_requeue, preferred_operators,
+                int_arg<u32>(preferred_weight, "preferred_weight"), int_arg<u32>(standard_weight, "standard_weight", 1),
+                1000, witness_pruning, max_states, max_expanded, max_depth, max_seconds, cancel, goal,
+                blocked_states, observer, progress_interval);
+        },
+        "task"_a, nb::kw_only(), "weights"_a = nb::make_tuple(5, 3, 2, 1), "lazy"_a = false, "heuristic"_a = "ff",
+        "cost_bound"_a = nb::none(), "costs"_a = "auto", "evaluation"_a = "auto", "store"_a = "auto",
+        "queue"_a = "auto", "start"_a = nb::none(), "reopen"_a = true, "lazy_requeue"_a = true,
+        "preferred_operators"_a = true, "preferred_weight"_a = 0, "standard_weight"_a = 1, "witness_pruning"_a = false,
+        MYMYR_CONTROL_ARGS,
+        (std::string("Anytime search: restarting weighted A* (search/anytime.hpp; Richter, Thayer and Ruml 2010, the "
+                     "iterated searches of LAMA). Iteration k runs weighted A* (as astar with weight; lazy=True: "
+                     "lazy A*) from the start state with the weight weights[min(k, len(weights) - 1)] and the cost "
+                     "bound of the best plan so far (before the first plan: cost_bound), so each plan it finds is "
+                     "cheaper than the one before. weights: non-empty, finite, >= 1 and non-increasing (5, 3, 2, 1 "
+                     "by default). Every iteration starts afresh and shares the heuristic, which is built once. The "
+                     "search ends when an iteration exhausts its space (no cheaper plan; with reopen=True and no "
+                     "max_depth the plan is then proven optimal: `optimal`), when an eager iteration with weight 1 "
+                     "and an admissible heuristic of the task's goal finds a plan with reopening (A*: `optimal`), or "
+                     "when a budget, cancel or an observer stops an iteration. status is SOLVED when a plan was "
+                     "found (also when a budget ended the search later). max_seconds and max_expanded bound the "
+                     "whole search, max_states and max_depth each iteration. Observer: on_start once; the events of "
+                     "every iteration (ids are the iteration's own); on_solution(plan, cost) for each improved plan "
+                     "as it is found; on_pass(iteration, stats) after each iteration; on_end once. Invalid weights "
+                     "raise ValueError. heuristic and the other options: as for astar. ") +
          k_heuristic_doc + k_control_doc)
             .c_str());
 

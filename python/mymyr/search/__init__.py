@@ -5,7 +5,10 @@ reachability/*.hpp in the C++ core).
     r = mymyr.search.siw(task, max_arity=2)             # serialized IW
     r = mymyr.search.astar_iw(task, heuristic="max", width=2, features="classical")
     r = mymyr.search.astar(task, heuristic="max")       # A* (eager; lazy=True for lazy)
+    r = mymyr.search.astar(task, heuristic="ff", weight=2)   # weighted A*: f = g + 2 h
     r = mymyr.search.gbfs(task, heuristic="ff", lazy=True)
+    r = mymyr.search.ehc(task)                          # enforced hill-climbing, h_FF with helpful actions
+    r = mymyr.search.anytime_astar(task, max_seconds=60)    # restarting weighted A*, weights 5, 3, 2, 1
     r = mymyr.search.beam(task, width=100)
     r = mymyr.search.brfs(task, threads=8)              # breadth-first search to a shortest plan, deterministic ids
     r.status, r.plan, r.cost, r.goal_state              # Status.SOLVED, [Action], float, State
@@ -22,6 +25,14 @@ search written in Python: ``status = h.initial_status(start)``, ``h.progress(sta
 ``h.merge(status, other)`` and ``h(state, status)``; ``h(state)`` takes the state as the start of a path, with the
 status ``h.initial_status(state)`` infers from it (as a search with ``start=`` does).
 
+``astar(weight=w)`` is weighted A* (f = g + w h; with an admissible heuristic the plan costs at most w times the
+optimum) and ``astar(cost_bound=c)`` searches for a plan cheaper than ``c`` only. ``ehc`` is enforced hill-climbing:
+breadth-first lookaheads for a state with a smaller h, with the heuristic's preferred operators first
+(``helpful_actions``) and greedy best-first search when hill-climbing fails (``fallback``); ``result.ehc`` holds its
+counters. ``anytime_astar`` restarts weighted A* with decreasing ``weights``, each iteration bounded by the best plan
+so far; ``result.solutions`` lists the improved plans in the order found (the observer's ``on_solution`` reports them
+as they are found), ``result.optimal`` says whether the search proved the plan optimal.
+
 ``astar_iw`` runs weighted A* with minimum-g novelty pruning. It requires unit-cost actions and no numeric
 fluents. ``features='classical'`` supports widths 1..5; ``'abstracted'`` and ``'base_abstracted'`` support 1..3.
 ``landmarks=`` restricts novelty to concrete landmark coordinates, and abstracted modes preserve goal and landmark
@@ -29,13 +40,14 @@ atom identities by default. ``weight`` is finite and nonnegative. A successor mu
 popped state must still own one at its g; root goals may bypass novelty. The result extends ``BestFirstResult``
 with ``novelty`` statistics. Novelty pruning does not guarantee optimality.
 
-A heuristic written in Python (``heuristic=`` of astar, gbfs and beam) is a callable ``state -> float`` or an object
-(:class:`mymyr._typing.HeuristicObject`) with ``evaluate(state)``; ``math.inf`` marks a dead end. Optionally the object
-has ``evaluate_batch(states)`` returning one float per state (a list or an array; eager A* and eager GBFS then evaluate
-the new successors of an expansion in one call, beam search those of a layer) and ``preferred_actions()``, the
-preferred actions of the state of the last ``evaluate`` call (the lazy searches' preferred list). It is called on the
-searching thread like the other callbacks below. Numeric tasks run in A*, GBFS and beam search; h_max, h_add and
-h_FF ignore their numeric conditions and effects (the delete relaxation), and g is the metric value.
+A heuristic written in Python (``heuristic=`` of astar, gbfs, beam, ehc and anytime_astar) is a callable
+``state -> float`` or an object (:class:`mymyr._typing.HeuristicObject`) with ``evaluate(state)``; ``math.inf`` marks a
+dead end. Optionally the object has ``evaluate_batch(states)`` returning one float per state (a list or an array; eager
+A* and eager GBFS then evaluate the new successors of an expansion in one call, beam search those of a layer) and
+``preferred_actions()``, the preferred actions of the state of the last ``evaluate`` call (the lazy searches' preferred
+list, EHC's helpful actions). It is called on the searching thread like the other callbacks below. Numeric tasks run
+in A*, GBFS, beam search, EHC and the anytime search; h_max, h_add and h_FF ignore their numeric conditions and effects
+(the delete relaxation), and g is the metric value.
 
 IW, SIW, iw_pass, brfs and the IW family variants expand layer by layer in a chosen order (layer ordering
 strategies): ``layer_order`` is ``"queue"`` (plain breadth-first, the default), ``"in_order"``, ``"reverse"``,
@@ -125,12 +137,17 @@ alone.
 
 from mymyr._core._search import (
     ActionOrdering,
+    AnytimeIteration,
+    AnytimeResult,
+    AnytimeSolution,
     BestFirstResult,
     AStarIwResult,
     AStarIwNoveltyStatistics,
     BrfsResult,
     CancelToken,
     CompleteFactLandmarks,
+    EhcResult,
+    EhcStatistics,
     FactLandmarkGraph,
     FirstAchievers,
     Heuristic,
@@ -159,12 +176,14 @@ from mymyr._core._search import (
     WitnessQuery,
     WitnessVerdict,
     abstracted_iw,
+    anytime_astar,
     approximate_fact_landmarks,
     astar,
     astar_iw,
     atomic_goal_portfolio,
     beam,
     brfs,
+    ehc,
     find_rollouts_parallel,
     format_plan,
     gbfs,
@@ -184,12 +203,17 @@ from mymyr.search._observer import Observer
 
 __all__ = [
     "ActionOrdering",
+    "AnytimeIteration",
+    "AnytimeResult",
+    "AnytimeSolution",
     "BestFirstResult",
     "AStarIwResult",
     "AStarIwNoveltyStatistics",
     "BrfsResult",
     "CancelToken",
     "CompleteFactLandmarks",
+    "EhcResult",
+    "EhcStatistics",
     "FactLandmarkGraph",
     "FirstAchievers",
     "Heuristic",
@@ -219,12 +243,14 @@ __all__ = [
     "WitnessQuery",
     "WitnessVerdict",
     "abstracted_iw",
+    "anytime_astar",
     "approximate_fact_landmarks",
     "astar",
     "astar_iw",
     "atomic_goal_portfolio",
     "beam",
     "brfs",
+    "ehc",
     "find_rollouts_parallel",
     "format_plan",
     "gbfs",

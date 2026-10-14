@@ -32,6 +32,7 @@ add_executable(mymyr_tests
     rl/test_expand.cpp
     search/test_astar_iw.cpp
     search/test_best_first.cpp
+    search/test_wastar_ehc_anytime.cpp
     heuristics/test_heuristics.cpp
     heuristics/test_landmark_heuristics.cpp
     search/test_plan_file.cpp
@@ -76,7 +77,8 @@ gtest_discover_tests(mymyr_thread_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 
 # ------------------------------------------------------------------------------------------------ PDDL front end
 if(TARGET mymyr_frontend)
     # The benchmark PDDL of the tests is vendored under tests/data (benchmarks/, ipc/, pddl/).
-    add_executable(mymyr_frontend_tests frontend/test_frontend.cpp frontend/test_encoding_goal.cpp search/test_astar_iw_pddl.cpp)
+    add_executable(mymyr_frontend_tests frontend/test_frontend.cpp frontend/test_encoding_goal.cpp search/test_astar_iw_pddl.cpp
+        search/test_wastar_ehc_anytime_pddl.cpp)
     target_link_libraries(mymyr_frontend_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_frontend_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
