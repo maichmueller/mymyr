@@ -1,5 +1,5 @@
 // Device RL environment tests (GPU 0: CUDA_VISIBLE_DEVICES=0; they skip without a device):
-//   - the device RNG: rl::rng's Philox-4x32-10 on the device equals the host and cuRAND's curand_Philox4x32_10;
+//   - the device RNG: rl::rng's Philox-4x32-10 on the device equals the host (and cuRAND's, in test_curand_philox.cpp);
 //   - the device step (cuda::DeviceEnv, the fast and the general path) equals the host step (rl::HostEnv) bit
 //     for bit on every suite task, dense and reachable slots: states, step and draw counters, rewards, terminated, truncated, goal
 //     and invalid flags, counts, final states and labels, over steps of the random policy and of given actions
@@ -250,7 +250,7 @@ std::string param_name(const ::testing::TestParamInfo<std::tuple<std::string, bo
 
 // ------------------------------------------------------------------------------------------------ RNG
 
-TEST(DevicePhiloxRng, DeviceEqualsHostAndCurand)
+TEST(DevicePhiloxRng, DeviceEqualsHost)
 {
     SKIP_WITHOUT_GPU();
     auto ctx = context();
@@ -264,13 +264,11 @@ TEST(DevicePhiloxRng, DeviceEqualsHostAndCurand)
         for (u32 j = 0; j < 2; ++j)
             key[i * 2 + j] = static_cast<u32>(hash::mix64(i * 8 + 4 + j) >> 7);
     }
-    cuda::DeviceBuffer dc(ctx, n * 16, s), dk(ctx, n * 8, s), d0(ctx, n * 16, s), d1(ctx, n * 16, s);
+    cuda::DeviceBuffer dc(ctx, n * 16, s), dk(ctx, n * 8, s), d0(ctx, n * 16, s);
     to_device(dc, ctr, s);
     to_device(dk, key, s);
-    cuda::check(cuda::envk::launch_philox(static_cast<u32*>(dc.data()), static_cast<u32*>(dk.data()), n, static_cast<u32*>(d0.data()), 0, s), "philox");
-    cuda::check(cuda::envk::launch_philox(static_cast<u32*>(dc.data()), static_cast<u32*>(dk.data()), n, static_cast<u32*>(d1.data()), 1, s), "curand");
-    const std::vector<u32> ours = to_host<u32>(d0, n * 4, s), cur = to_host<u32>(d1, n * 4, s);
-    EXPECT_EQ(ours, cur) << "rl::rng differs from curand_Philox4x32_10";
+    cuda::check(cuda::envk::launch_philox(static_cast<u32*>(dc.data()), static_cast<u32*>(dk.data()), n, static_cast<u32*>(d0.data()), s), "philox");
+    const std::vector<u32> ours = to_host<u32>(d0, n * 4, s);
     for (u64 i = 0; i < n; ++i)
     {
         const rl::rng::Block4 h =

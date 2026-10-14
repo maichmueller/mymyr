@@ -122,6 +122,20 @@ if(TARGET mymyr_cuda)
     target_compile_definitions(mymyr_device_env_tests PRIVATE MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     gtest_discover_tests(mymyr_device_env_tests DISCOVERY_TIMEOUT 60
         PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+    # the device Philox against cuRAND's: needs the toolkit's cuRAND headers (a separate package in some distributions)
+    find_path(MYMYR_CURAND_INCLUDE_DIR curand_philox4x32_x.h HINTS ${CUDAToolkit_INCLUDE_DIRS})
+    if(MYMYR_CURAND_INCLUDE_DIR)
+        add_executable(mymyr_device_curand_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_curand_philox.cpp
+                                                 ${PROJECT_SOURCE_DIR}/tests/cuda/curand_philox.cu)
+        target_link_libraries(mymyr_device_curand_tests PRIVATE mymyr::cuda mymyr_warnings GTest::gtest_main)
+        target_include_directories(mymyr_device_curand_tests PRIVATE ${MYMYR_CURAND_INCLUDE_DIR})
+        set_target_properties(mymyr_device_curand_tests PROPERTIES CUDA_STANDARD 23 CUDA_STANDARD_REQUIRED ON
+                                                                    CUDA_EXTENSIONS OFF)
+        gtest_discover_tests(mymyr_device_curand_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+    else()
+        message(STATUS "mymyr: cuRAND headers not found; the Philox-against-cuRAND test is not built")
+    endif()
     # the device kernels of novelty rewards, prefix masks and hindsight relabels against the host loops; the
     # count cache's recorded keys (sokoban's deep segments without a second search)
     add_executable(mymyr_device_rl_ops_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_rl_ops.cpp)

@@ -35,7 +35,8 @@ struct ActionWriter
     bool valid = true;
     bool missing_atom = false;
 
-    __device__ bool group(u32 id, const u32* bind)
+    // out of line: CUDA 13.4's cicc crashes when this is inlined into the 4-word instantiations of ground_labels and costs
+    __noinline__ __device__ bool group(u32 id, const u32* bind)
     {
         const auto& n = t.numeric;
         const u32* g = n.groups + u64{id} * 5;

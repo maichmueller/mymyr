@@ -9,7 +9,7 @@ The device code is C++23, compiled by nvcc with the project's GCC 16 as its host
 The configure step refuses an older setup with a message:
 
 - CUDA Toolkit 13.4 or newer (nvcc 13.4 is the first to accept GCC 16 and `-std=c++23` in both compilation passes),
-  with the cuRAND headers (`libcurand-dev-13-4` on Debian and Ubuntu) next to nvcc, the CUDA runtime and CCCL;
+  with the CUDA runtime and CCCL headers;
 - CMake 4.4 or newer (the first to map CUDA C++23 to nvcc's flag; `pip install "cmake>=4.4"` provides it).
 
 nvcc's host compiler is the C++ compiler when that is GCC; `CMAKE_CUDA_HOST_COMPILER` or the `CUDAHOSTCXX` environment
@@ -17,6 +17,9 @@ variable choose another. Its standard library must be the one the C++ side uses,
 `CMAKE_CUDA_ARCHITECTURES` defaults to `native` (SASS for the visible GPU). For a build that runs on several GPU
 generations, list real architectures, and a virtual one only for the newest, e.g.
 `-DCMAKE_CUDA_ARCHITECTURES="80-real;86-real;89-real;90-real;100-real;120"`: `120` adds SASS and PTX for sm_120.
+
+The test that checks the device Philox generator against cuRAND's is built when the toolkit provides cuRAND's headers
+(`libcurand-dev-13-4` on Debian and Ubuntu); without them it is not built, and the library does not need them.
 
 ## Driver
 
