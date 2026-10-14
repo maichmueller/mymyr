@@ -229,8 +229,9 @@ list of N seeds seeds the environments one by one.
 its final observation, and the next step resets that environment, ignores its action and returns reward 0. In
 `"same_step"`, the native autoreset, an ending step returns the next episode's first observation, with the final ones
 in `info["final_obs"]` and `info["final_info"]`. In `"disabled"`, finished environments stay absorbing until
-`reset(options={"reset_mask": mask})`. `set_next_task_ids(ids)` chooses the instances of the next autoresets, for
-curricula, and `reset(options={"task_ids": ids})` chooses the instances of a reset.
+`reset(options={"reset_mask": mask})`. For curricula, `set_next_task_ids(ids)` chooses the instance of each
+environment's next autoreset, in whichever step it comes (-1 keeps an environment's draw), and
+`reset(options={"task_ids": ids})` chooses the instances of a reset.
 
 ### Registration
 

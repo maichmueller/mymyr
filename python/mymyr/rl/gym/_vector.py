@@ -65,8 +65,8 @@ class VectorEnv(gymnasium.vector.VectorEnv):
       ``reset(options={"reset_mask": mask})``.
 
     ``reset(options=...)``: ``"task_ids"`` (the instances of the reset envs) and ``"reset_mask"`` (bool [N]: reset only
-    these envs; the others keep their episodes). :meth:`set_next_task_ids` names the instances of the next
-    autoresets (a curriculum); :meth:`fix_problem_index` fixes the instance of every episode. ``info``: per-env arrays
+    these envs; the others keep their episodes). :meth:`set_next_task_ids` names the instance of each env's next
+    autoreset (a curriculum); :meth:`fix_problem_index` fixes the instance of every episode. ``info``: per-env arrays
     ``task_id``, ``num_actions``, ``is_goal``, ``steps``, ``action_mask`` (index actions), ``invalid`` (steps) and
     ``terminated`` (resets: the reset envs' initial states are terminal), each with its ``_key`` mask.
     ``max_episode_steps`` (what ``gymnasium.make_vec`` passes for a registered time limit) truncates natively, like
@@ -171,7 +171,7 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         self._steps = np.zeros(n, np.int32)
         self._at_goal = np.zeros(n, np.bool_)
         self._autoreset = np.zeros(n, np.bool_)
-        self._next_task_ids: Optional[np.ndarray] = None
+        self._next_task_ids = np.full(n, -1, np.int32)  # per env: the instance of its next autoreset, -1: drawn
         self._states: list[Optional[State]] = [None] * n
         self._actions: list[Optional[list[Action]]] = [None] * n
         self._started = False
@@ -212,10 +212,18 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         self._draws.fixed = None if task_id is None else self._problems.check_task_id(task_id)
 
     def set_next_task_ids(self, task_ids: Optional[Any]) -> None:
-        """The instances [N] the envs' next autoresets start in (a curriculum; used once, then drawn again)."""
-        self._next_task_ids = (
-            None if task_ids is None else as_int_ids(task_ids, self.num_envs, self._problems, "next task ids")
-        )
+        """The instances [N] the envs' next autoresets start in (a curriculum): env i's next autoreset, in whichever
+        step it happens, starts in ``task_ids[i]``, and its later ones are drawn again; -1 leaves env i's draw as it
+        is, and None clears every pending instance. Resets take ``reset(options={"task_ids": ...})`` instead."""
+        if task_ids is None:
+            self._next_task_ids[:] = -1
+            return
+        ids = np.asarray(task_ids)
+        if ids.shape != (self.num_envs,) or not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError(f"mymyr: next task ids must be {self.num_envs} ints")
+        if ((ids < -1) | (ids >= len(self._problems))).any():
+            raise ValueError(f"mymyr: next task ids has an instance outside the {len(self._problems)} instances")
+        self._next_task_ids[:] = ids
 
     # ------------------------------------------------------------------------------------------ gymnasium API
 
@@ -274,8 +282,7 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         final = None
         if self._mode == AutoresetMode.SAME_STEP:
             everyone = np.arange(n)
-            nxt = self._draws.peek(everyone) if self._next_task_ids is None else self._next_task_ids
-            self._next_task_ids = None
+            nxt = self._autoreset_ids(everyone)
             old_ids = self._task_ids.copy()
             batch = pool.step(actions=index, next_task_ids=nxt)
             rewards[:] = batch.reward
@@ -285,6 +292,7 @@ class VectorEnv(gymnasium.vector.VectorEnv):
             done = np.flatnonzero(terminated | truncated)
             if len(done):
                 self._draws.start(done, nxt[done])
+                self._next_task_ids[done] = -1
                 final = (done, np.array(batch.final_states)[done], old_ids[done], np.array(batch.goal)[done])
             self._capture(everyone, batch)
         else:
@@ -306,10 +314,8 @@ class VectorEnv(gymnasium.vector.VectorEnv):
                 self._capture(active, batch)
             restart = np.flatnonzero(resetting)
             if len(restart):
-                ids = self._draws.peek(restart)
-                if self._next_task_ids is not None:
-                    ids = self._next_task_ids[restart]
-                self._next_task_ids = None
+                ids = self._autoreset_ids(restart)
+                self._next_task_ids[restart] = -1
                 self._draws.start(restart, ids)
                 self._capture(restart, pool.reset(env_ids=restart.astype(np.int32), task_ids=ids))
             if self._mode == AutoresetMode.NEXT_STEP:
@@ -357,6 +363,12 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         for e in envs.tolist():
             self._states[e] = None
             self._actions[e] = None
+
+    def _autoreset_ids(self, envs: np.ndarray) -> np.ndarray:
+        """The instances the next episodes of envs start in at an autoreset: the pending ones, else the draws."""
+        ids = self._draws.peek(envs)
+        pending = self._next_task_ids[envs]
+        return np.where(pending >= 0, pending, ids).astype(np.int32)
 
     def _state(self, i: int) -> State:
         state = self._states[i]

@@ -47,7 +47,7 @@ class Env(gymnasium.Env):
     - ``"graph"``: the state's relational graph from ``mymyr.encoding.FlatRelationEncoder`` (its arrays for one graph as
       a dict; ``graph_options`` are the encoder's options, by default ``goal_derivations=()``,
       ``include_actions=False``, ``emit_counts=False``, ``entity_arrays="auto"``); space: a ``Dict`` of ``Box`` for the
-      per-graph arrays and of ``Sequence(Box, stack=True)`` for the variable ones. Classical tasks of one domain.
+      per-graph arrays and of ``Sequence(Discrete, stack=True)`` for the variable ones. Classical tasks of one domain.
     - ``"bits"``: the fluent atom slots of the state as int8 0/1 ``MultiBinary(n)`` (n: the most slots of an
       instance); numeric tasks add the values (``Dict(atoms=..., numeric=Box)``).
 
@@ -64,12 +64,13 @@ class Env(gymnasium.Env):
       space: ``sample()`` draws an applicable action).
 
     An action that is not applicable (or outside the space) does not move: ``info["invalid"]`` is set and the reward
-    is ``step_reward``. In a state without applicable actions no action moves, and ``invalid`` stays unset. Rewards, terminations and truncations are those of ``mymyr.rl.CpuEnvPool`` (the RL contract,
-    with the same keywords): ``reward = step_reward``, plus ``goal_reward`` on reaching a goal, plus
-    ``dead_end_reward`` on reaching (or being stuck in) a dead end; ``terminated`` at a goal or a terminal dead end;
-    ``truncated`` after ``max_steps`` steps of an episode (0: never). Goals and terminal dead ends are absorbing: a step
-    there does not move, pays nothing and stays terminated. A reset into a goal state (a solved instance) reports
-    ``info["is_goal"]``, and its first step is such an absorbing step.
+    is ``step_reward``. In a state without applicable actions no action moves, and ``invalid`` stays unset. Rewards,
+    terminations and truncations are those of ``mymyr.rl.CpuEnvPool`` (the RL contract, with the same keywords):
+    ``reward = step_reward``, plus ``goal_reward`` on reaching a goal, plus ``dead_end_reward`` on reaching (or being
+    stuck in) a dead end; ``terminated`` at a goal or a terminal dead end; ``truncated`` after ``max_steps`` steps of
+    an episode (0: never). Goals and terminal dead ends are absorbing: a step there does not move, pays nothing and
+    stays terminated. A reset into a goal state (a solved instance) reports ``info["is_goal"]``, and its first step is
+    such an absorbing step.
 
     Seeding: ``reset(seed=s)`` seeds ``np_random`` and the instance draws: episode k after it starts in the sampler's
     draw for (s, ``env_id``, k), as env ``env_id`` of a ``CpuEnvPool(seed=s)`` that counts its episodes from its

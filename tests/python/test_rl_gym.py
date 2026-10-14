@@ -423,6 +423,33 @@ def test_vector_env_next_step_and_disabled_autoreset():
     assert info["task_id"].tolist() == [0, 0] and info["steps"].tolist() == [0, 3]
 
 
+@needs_gym
+@needs_frontend
+@pytest.mark.parametrize("mode", ["same_step", "next_step"])
+def test_vector_env_next_task_ids_wait_for_each_envs_autoreset(mode):
+    from mymyr.rl import gym as mg
+
+    # instance 0: "up" then "finish" reach the goal; 1: solved at the start; 2: starts with (p)
+    t = rl.TaskTable([toggle_task(), toggle_task(init="(q)"), toggle_task(init="(p)")])
+    venv = mg.VectorEnv(t, 2, max_steps=10, autoreset_mode=mode, sampler=None)
+    venv.reset(options={"task_ids": [1, 0]})
+    venv.set_next_task_ids([2, 2])
+    seen = []
+    for actions in ([0, 0], [0, 1], [0, 0], [0, 0]):  # env 0 ends at the first step, env 1 at the second
+        _, _, terminated, _, info = venv.step(np.array(actions))
+        seen.append((info["task_id"].tolist(), terminated.tolist()))
+    if mode == "same_step":  # the ending step starts the next episode
+        assert [ids for ids, _ in seen[:2]] == [[2, 0], [2, 2]]
+    else:  # the step after the ending one starts it
+        assert [ids for ids, _ in seen[:3]] == [[1, 0], [2, 0], [2, 2]]
+    assert seen[0][1][0] and seen[1][1][1]
+    venv.set_next_task_ids([-1, 0])
+    with pytest.raises(ValueError, match="next task ids"):
+        venv.set_next_task_ids([3, 0])
+    venv.set_next_task_ids(None)
+    np.testing.assert_array_equal(venv._next_task_ids, [-1, -1])
+
+
 # ------------------------------------------------------------------------------------------------ seeding and draws
 
 
