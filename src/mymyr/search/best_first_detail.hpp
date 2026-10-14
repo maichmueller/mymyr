@@ -18,9 +18,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -719,6 +721,15 @@ public:
     u32 status_words = 0;         // words of a node's status
     u32 nn = 0;                   // numeric words per state
     u64 max_states = ~u64{0};
+    f64 weight = 1;               // f = g + weight * h (A*)
+    f64 bound = std::numeric_limits<f64>::infinity();  // plans cost less (A*)
+    bool bounded = false;         // the bound is finite
+    bool bound_with_h = false;    // the bound prunes by g + h (an admissible heuristic of the task's goal)
+    bool lowered_g = false;       // a transition lowered g under a finite bound (expand stops; the search fails)
+
+    /// Whether a state with metric value g and heuristic value h (0 when not evaluated) cannot lie on a plan cheaper
+    /// than the cost bound.
+    [[nodiscard]] bool beyond_bound(f64 g, f64 h) const noexcept { return g >= bound || (bound_with_h && g + h >= bound); }
 
     /// g of the successor under delta d of a state whose g is gp: the metric value of the successor (total-cost
     /// effects applied to gp, or the metric of the successor's numeric values).
@@ -779,6 +790,8 @@ public:
     /// Status Solved with the plan to `id` (nodes) and the goal state. `cheapest`: rewrite each step to the
     /// cheapest action between its two states.
     void solved(const Nodes& nodes, u32 id, StateView goal, bool cheapest);
+    /// Status Solved with `plan`, whose goal state `goal` has metric value g.
+    void solved(std::vector<Action> plan, f64 g, StateView goal, bool cheapest);
     /// Final bookkeeping: statistics, heuristic statistics, observer on_end.
     void finish(u64 states, u64 bytes);
     /// The status of a search whose heuristic was interrupted (deadline or cancellation).
@@ -821,9 +834,10 @@ private:
 /// (pruned, on_prune), the others are inserted into the store; a new state gets its search node (parent id, g through
 /// this transition), and a path-dependent heuristic's status is progressed along every transition (merged into the
 /// status of a state reached before). Words are kept for new states, and for all when the store needs them (Compact),
-/// an observer is set or the heuristic is path-dependent. `preferred`: record whether each action is a preferred
-/// operator of the last evaluation. False (and r.status set) when the search stops inside the expansion: a new state
-/// filled the store (max_states: OutOfStates), or the time or the cancellation.
+/// an observer is set, the heuristic is path-dependent or a cost bound is set. `preferred`: record whether each action
+/// is a preferred operator of the last evaluation. False (and r.status set) when the search stops inside the
+/// expansion: a new state filled the store (max_states: OutOfStates), or the time or the cancellation. Throws
+/// std::invalid_argument when a transition lowers g under a cost bound.
 template<class S>
 bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u64>& next, Transitions& tr, bool preferred)
 {
@@ -836,7 +850,8 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
     }
     c.succ.prepare(cur.view());
     const f64 gp = nodes.g[id];
-    const bool keep_all = S::k_needs_words || c.obs != nullptr || c.path_dependent;  // path-dependent: A* re-evaluates on reopening
+    // path-dependent: A* re-evaluates on reopening; a cost bound: A* evaluates a state it pruned when it reaches it again
+    const bool keep_all = S::k_needs_words || c.obs != nullptr || c.path_dependent || c.bounded;
     bool stop = false;
     c.generate(
         [&](u32 s, const ObjectId* b, const Delta& d) -> bool
@@ -855,9 +870,15 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
                     c.obs->on_prune(id, c.action(s, b), {next.data(), nn, d.num, c.nn});
                 return true;
             }
+            const f64 g = c.g_next(gp, d);
+            if (c.bounded && g < gp)  // the bound prunes by g: sound for non-decreasing g only
+            {
+                c.lowered_g = true;
+                stop = true;
+                return false;
+            }
             const auto [cid, fresh] = store.insert_successor(id, cur, next.data(), nn, d);
             const u32 arity = c.succ.arity(s);
-            const f64 g = c.g_next(gp, d);
             if (fresh)
                 nodes.add(id, s, b, arity, g);
             c.progress(nodes, id, cur.view(), s, b, cid, {next.data(), nn, d.num, c.nn}, fresh);
@@ -881,8 +902,34 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
             }
             return true;
         });
+    if (c.lowered_g)
+        throw std::invalid_argument("mymyr " + c.r.algorithm +
+                                    ": a cost bound needs non-negative action costs, and a transition lowered the metric value");
     return !stop;
 }
+
+/// The observer of a search that runs inside another one (the fallback of enforced hill-climbing, the iterations of the
+/// anytime search): forwards the per-state events and on_progress to the outer search's observer, which sends
+/// on_start, on_pass, on_solution and on_end itself.
+class InnerObserver final : public SearchObserver
+{
+public:
+    explicit InnerObserver(SearchObserver& outer) : m_outer(outer) {}
+    void on_expand(u64 id, StateView s) override { m_outer.on_expand(id, s); }
+    void on_generate(u64 parent, const Action& a, u64 child, StateView s, bool is_new) override
+    {
+        m_outer.on_generate(parent, a, child, s, is_new);
+    }
+    void on_prune(u64 parent, const Action& a, StateView s) override { m_outer.on_prune(parent, a, s); }
+    bool on_progress(const SearchStatistics& so_far) override { return m_outer.on_progress(so_far); }
+    void on_transition(u64 parent, const Action& a, u64 child, StateView s, TransitionOutcome outcome) override
+    {
+        m_outer.on_transition(parent, a, child, s, outcome);
+    }
+
+private:
+    SearchObserver& m_outer;
+};
 
 /// The queue kind for the options (Auto: buckets for small integral costs).
 [[nodiscard]] bool use_buckets(const Context& c);
@@ -906,10 +953,16 @@ void dispatch(Context& c)
     }
 }
 
-/// Runs a search: builds the context, checks for an unsolvable goal, dispatches, catches errors (status Failed).
+/// Throws std::invalid_argument for option values the search does not take (`astar`: A*, which takes a weight and a
+/// cost bound).
+void check_options(const BestFirstOptions& o, const char* algorithm, bool astar);
+
+/// Runs a search: checks the options (std::invalid_argument), builds the context, checks for an unsolvable goal,
+/// dispatches, catches errors (status Failed).
 template<template<class, class> class Run>
-BestFirstResult run(const Task& task, const BestFirstOptions& o, const char* algorithm)
+BestFirstResult run(const Task& task, const BestFirstOptions& o, const char* algorithm, bool astar = false)
 {
+    check_options(o, algorithm, astar);
     BestFirstResult r;
     std::unique_ptr<Context> c;
     try

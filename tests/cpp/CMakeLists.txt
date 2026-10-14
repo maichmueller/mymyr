@@ -32,6 +32,7 @@ add_executable(mymyr_tests
     rl/test_expand.cpp
     search/test_astar_iw.cpp
     search/test_best_first.cpp
+    search/test_wastar_ehc_anytime.cpp
     heuristics/test_heuristics.cpp
     heuristics/test_landmark_heuristics.cpp
     search/test_plan_file.cpp

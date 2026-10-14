@@ -91,6 +91,7 @@ class BlindHeuristic final : public Heuristic
 {
 public:
     [[nodiscard]] Kind kind() const noexcept override { return Kind::Blind; }
+    [[nodiscard]] bool admissible() const noexcept override { return true; }
     Value evaluate(StateView) override
     {
         ++m_stats.evaluations;
@@ -165,7 +166,8 @@ class RelaxationHeuristic final : public Heuristic
 public:
     RelaxationHeuristic(const Task& task, const Options& o)
         : m_task(task), m_kind(o.kind), m_real(resolve_costs(task, o.costs) == Costs::Real),
-          m_grounded_only(o.evaluation == Evaluation::Grounded || o.kind == Kind::SetAdditive)
+          m_grounded_only(o.evaluation == Evaluation::Grounded || o.kind == Kind::SetAdditive),
+          m_admissible(o.kind == Kind::Max && objective_costs(task, o.costs))
     {
         if (m_kind == Kind::SetAdditive && o.evaluation == Evaluation::Lifted)
             throw std::invalid_argument("mymyr: the set-additive heuristic has no lifted evaluation (use Evaluation::Auto or Grounded)");
@@ -192,6 +194,7 @@ public:
     }
 
     [[nodiscard]] Kind kind() const noexcept override { return m_kind; }
+    [[nodiscard]] bool admissible() const noexcept override { return m_admissible; }
     [[nodiscard]] std::shared_ptr<const RelaxedTask> relaxed() const override { return m_R; }
     [[nodiscard]] bool provides_preferred() const noexcept override
     {
@@ -532,6 +535,7 @@ private:
     Kind m_kind;
     bool m_real;
     bool m_grounded_only;
+    bool m_admissible;
     f64 m_scale = 1;  // real costs: the unit of the integer costs is 1 / m_scale
     std::shared_ptr<const RelaxedTask> m_R;
     // grounded scratch
@@ -555,6 +559,11 @@ Costs resolve_costs(const Task& task, Costs costs)
     if (costs != Costs::Auto)
         return costs;
     return ActionCosts(task).unit() ? Costs::Unit : Costs::Real;
+}
+
+bool objective_costs(const Task& task, Costs costs)
+{
+    return costs != Costs::Unit || ActionCosts(task).unit();
 }
 
 std::unique_ptr<Heuristic> make_heuristic(const Task& task, const Options& options)
