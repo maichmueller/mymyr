@@ -24,6 +24,9 @@ struct Problem
 };
 const std::vector<Problem> k_derived = {{"philosophers", "p03-phil4"}, {"features", "p01"}, {"features", "p03"}};
 
+/// Rows of `derived` past the capacity: they must stay untouched.
+constexpr u64 k_guard_rows = 2;
+
 struct Result
 {
     u64 total = 0, capacity = 0;
@@ -46,7 +49,7 @@ Result run(const rl::TaskTable& table, const test::Rows& rows, bool derived, u64
     r.schema.assign(capacity, -1);
     r.binding.assign(capacity * L, -1);
     r.goal.assign(capacity, 0);
-    r.derived.assign(capacity * r.derived_words, 0xDEADBEEFDEADBEEFULL);
+    r.derived.assign((capacity + k_guard_rows) * r.derived_words, 0xDEADBEEFDEADBEEFULL);
     r.offsets.assign(rows.size() + 1, 0);
     rl::Expansion x;
     x.capacity = capacity;

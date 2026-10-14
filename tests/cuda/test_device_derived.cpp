@@ -188,6 +188,7 @@ TEST(DeviceExpandDerived, TableOfInstancesWithAxiomsEqualsHost)
     }
     expect_equal(suite, 0);
     expect_equal(suite, 4);
+    expect_equal(suite, 0, 2);  // wider derived rows: each part scatters zero padded
 }
 
 TEST(DeviceExpandDerived, TableWithoutAxiomsHasZeroWords)
@@ -207,6 +208,7 @@ TEST(DeviceExpandDerived, SuiteOfSeveralDomainsEqualsHost)
     ASSERT_GT(suite->num_domains(), 1u);
     expect_equal(suite, 0);
     expect_equal(suite, 5);
+    expect_equal(suite, 0, 2);  // wider derived rows than any instance needs
 }
 
 TEST(DeviceExpandDerived, PaddedViewEqualsHost)

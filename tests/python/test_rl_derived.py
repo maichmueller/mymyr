@@ -2,7 +2,7 @@
 
 Checked against the meaning of the words (a small domain with one derived predicate), against the expansion without
 them (every other output is unchanged), across the call forms (capacity, threads, pools, expand_into, the padded view),
-tasks without derived atoms (zero-width words), and the torch ops and JAX FFI variants.
+tasks without derived atoms (zero-width words), the torch ops and JAX FFI variants, and the device paths (CUDA builds).
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ import pytest
 
 import mymyr
 from mymyr import rl
-from conftest import SMALL_TASKS, text_task
+from conftest import text_task, walk
 
 DOMAIN = """(define (domain features)
  (:requirements :strips :negative-preconditions :derived-predicates)
@@ -21,6 +21,14 @@ DOMAIN = """(define (domain features)
 
 PROBLEM = """(define (problem p) (:domain features) (:objects a b c)
   (:init (flag a)) (:goal (available c)))"""
+
+
+def torch_cuda():
+    torch = pytest.importorskip("torch")
+    mc = pytest.importorskip("mymyr.cuda", reason="mymyr was built without the CUDA backend", exc_type=ImportError)
+    if not mc.available() or not torch.cuda.is_available():
+        pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
+    return torch
 
 
 def feature_task():
@@ -51,7 +59,7 @@ def test_words_are_the_successors_derived_atoms():
             flag_slot[int(meta["atom_args_padded"][slot][0])] = slot
     states = walk_rows(task)
     x = rl.expand(task, states, derived=True)
-    assert x.derived.dtype == np.uint64 and x.derived.shape == (x.total, task.derived_words if hasattr(task, "derived_words") else 1)
+    assert x.derived.dtype == np.uint64 and x.derived.shape == (x.total, task.derived_words)
     dpred = meta["derived_pred"]
     dargs = meta["derived_args_padded"]
     assert len(dpred) == 3
@@ -122,7 +130,7 @@ def test_expand_into_destination():
     with pytest.raises(ValueError):
         rl.expand_into(task, states, derived=derived)  # needs the successor rows
     with pytest.raises(ValueError):
-        rl.expand_into(task, states, succ=succ, derived=np.zeros((cap, D + 1 - 2), np.uint64) if D > 1 else np.zeros((cap, 0), np.uint64))
+        rl.expand_into(task, states, succ=succ, derived=np.zeros((cap, D - 1), np.uint64))
 
 
 def test_suite_width_is_the_widest_domain():
@@ -142,6 +150,7 @@ def test_suite_width_is_the_widest_domain():
 
 @pytest.mark.needs_gil
 def test_torch_ops_equal_rl_expand():
+    """The torch ops on CPU tensors (BatchedEnv's default device); test_torch_ops_on_cuda covers CUDA tensors."""
     torch = pytest.importorskip("torch")
     rt = pytest.importorskip("mymyr.rl.torch")
     task = text_task("philosophers__p03-phil4", atoms="dense")
@@ -196,3 +205,173 @@ def test_jax_expansions_carry_the_derived_words():
     p = x.pad(16)
     pad = env.expand(state.states, 16, derived=True)
     assert np.array_equal(np.asarray(pad.derived).view(np.uint64).reshape(p.derived.shape), p.derived)
+
+
+def narrow_destination(kind, shape):
+    if kind == "numpy":
+        return np.zeros(shape, np.uint64)
+    torch = pytest.importorskip("torch")
+    return torch.zeros(shape, dtype=torch.int64)
+
+
+@pytest.mark.parametrize("kind", ["numpy", "torch"])
+def test_zero_width_destination(kind):
+    """A destination without elements is accepted whatever its strides (torch gives an (N, 0) tensor strides (1, 1))."""
+    task = text_task("blocks__probBLOCKS-8-0")
+    states = walk_rows(task)
+    full = rl.expand(task, states)
+    cap = full.total + 3
+    succ = narrow_destination(kind, (cap, full.words))
+    derived = narrow_destination(kind, (cap, 0))
+    assert rl.expand_into(task, states, succ=succ, derived=derived)["total"] == full.total
+
+
+@pytest.mark.parametrize("kind", ["numpy", "torch"])
+def test_destination_too_narrow_by_the_last_word_is_a_value_error(kind):
+    task = feature_task()
+    states = walk_rows(task)
+    full = rl.expand(task, states, derived=True)
+    assert full.derived_words == 1
+    succ = narrow_destination(kind, (full.total + 3, full.words))
+    with pytest.raises(ValueError):
+        rl.expand_into(task, states, succ=succ, derived=narrow_destination(kind, (full.total + 3, 0)))
+
+
+@pytest.mark.needs_gil
+def test_torch_ops_without_derived_atoms_have_zero_width_words():
+    torch = pytest.importorskip("torch")
+    rt = pytest.importorskip("mymyr.rl.torch")
+    task = text_task("blocks__probBLOCKS-8-0", atoms="dense")
+    env = rt.BatchedEnv(task, 4)
+    h = rt.register(task)
+    s = env.states.clone()
+    flat = torch.ops.mymyr.expand_flat_derived(h, s, None, 64, False)
+    assert flat[6].shape == (64, 0)
+    uncapped = torch.ops.mymyr.expand_flat_derived(h, s, None, None, False)
+    assert uncapped[6].shape[1] == 0 and uncapped[6].shape[0] == uncapped[0].shape[0]
+    padded = torch.ops.mymyr.expand_derived(h, s, None, 8, False)
+    assert padded[6].shape == (s.shape[0], 8, 0)
+
+
+# ------------------------------------------------------------------------------------------------ on the device
+# These tests need a CUDA build of mymyr and a visible device (GPU 0); they skip otherwise.
+
+
+def encode_rows(tasks, per_task=10, seed=0):
+    """Rows of seeded random-walk states of `tasks` at their suite's width, in a shuffled order, and their task ids."""
+    suite = rl.TaskSuite.group(tasks) if len(tasks) > 1 else None
+    width = suite.row_words if suite else tasks[0].words
+    rows, ids = [], []
+    for g, task in enumerate(tasks):
+        for state in walk(task, steps=per_task, seed=seed + g, walks=1):
+            row = np.zeros(width, np.uint64)
+            enc = np.asarray(task.encode([state]))[0]
+            row[: enc.shape[0]] = enc
+            rows.append(row)
+            ids.append(g)
+    order = np.random.default_rng(seed).permutation(len(rows))
+    rows = np.stack([rows[i] for i in order])
+    ids = np.asarray([ids[i] for i in order], np.int32)
+    return (suite or tasks[0]), rows, (ids if suite else None)
+
+
+def device_cases():
+    phil = text_task("philosophers__p03-phil4")
+    blocks = text_task("blocks__probBLOCKS-8-0")
+    stores = text_task("openstacks-opt08-adl__p03")
+    return {"philosophers": [phil], "mixed suite": [phil, blocks, stores]}
+
+
+def same(device_array, host_array):
+    got = device_array.cpu().numpy()
+    return got.shape == host_array.shape and np.array_equal(got.astype(np.int64), host_array.astype(np.int64))
+
+
+@pytest.mark.parametrize("case", ["philosophers", "mixed suite"])
+def test_device_words_equal_the_host(case):
+    torch = torch_cuda()
+    table, rows, ids = encode_rows(device_cases()[case])
+    host = rl.expand(table, rows, ids, goal=True, derived=True, K=48)
+    dev = torch.from_numpy(rows.view(np.int64)).cuda()
+    dev_ids = torch.from_numpy(ids).cuda() if ids is not None else None
+    D = host.derived_words
+    assert D > 0 and host.total > 0
+
+    x = rl.expand(table, dev, dev_ids, goal=True, derived=True, K=48)
+    assert x.derived.device.type == "cuda" and x.derived_words == D
+    assert same(x.derived, host.derived)
+    for field in ("succ", "goal", "parent", "schema", "binding", "offsets"):
+        assert same(getattr(x, field), np.asarray(getattr(host, field))), field
+    assert same(x.padded.derived, host.padded.derived)
+    assert same(x.pad(3).derived, host.pad(3).derived)
+
+    # every other output is unchanged by asking for the words, and none are returned unasked
+    plain = rl.expand(table, dev, dev_ids, goal=True, K=48)
+    assert plain.derived is None and plain.padded.derived is None
+    assert torch.equal(plain.goal, x.goal) and torch.equal(plain.succ, x.succ)
+
+    # the capacity clips the words as it clips the successors
+    cap = max(1, host.total // 2)
+    clipped = rl.expand(table, dev, dev_ids, derived=True, capacity=cap)
+    assert same(clipped.derived, host.derived[:cap])
+
+    # destinations of 64 and 32 bits; rows past the total are left alone
+    M = host.total + 5
+    succ = torch.zeros((M, dev.shape[1]), dtype=torch.int64, device="cuda")
+    d64 = torch.full((M, D), 7, dtype=torch.int64, device="cuda")
+    assert rl.expand_into(table, dev, dev_ids, succ=succ, derived=d64)["total"] == host.total
+    got = d64.cpu().numpy()
+    assert np.array_equal(got[: host.total].view(np.uint64), host.derived) and (got[host.total :] == 7).all()
+    d32 = torch.zeros((M, 2 * D), dtype=torch.int32, device="cuda")
+    rl.expand_into(table, dev, dev_ids, succ=succ, derived=d32)
+    assert np.array_equal(np.ascontiguousarray(d32.cpu().numpy()[: host.total]).view(np.uint64), host.derived)
+    with pytest.raises(ValueError):
+        rl.expand_into(table, dev, dev_ids, derived=d64)  # needs the successor rows
+    if D > 1:
+        with pytest.raises(ValueError):
+            rl.expand_into(table, dev, dev_ids, succ=succ, derived=torch.zeros((M, D - 1), dtype=torch.int64, device="cuda"))
+
+
+def test_device_zero_width_destination():
+    torch = torch_cuda()
+    task = text_task("blocks__probBLOCKS-8-0")
+    table, rows, ids = encode_rows([task])
+    dev = torch.from_numpy(rows.view(np.int64)).cuda()
+    host = rl.expand(table, rows)
+    succ = torch.zeros((host.total + 3, dev.shape[1]), dtype=torch.int64, device="cuda")
+    derived = torch.zeros((host.total + 3, 0), dtype=torch.int64, device="cuda")
+    assert rl.expand_into(table, dev, None, succ=succ, derived=derived)["total"] == host.total
+    assert rl.expand(table, dev, derived=True).derived.shape == (host.total, 0)
+
+
+@pytest.mark.needs_gil
+def test_torch_ops_on_cuda():
+    torch = torch_cuda()
+    rt = pytest.importorskip("mymyr.rl.torch")
+    task = text_task("philosophers__p03-phil4")
+    _, rows, _ = encode_rows([task], per_task=16)
+    dev = torch.from_numpy(rows.view(np.int64)).cuda()
+    host = rl.expand(task, rows, goal=True, derived=True)
+    h = rt.register(task)
+    flat = torch.ops.mymyr.expand_flat_derived(h, dev, None, None, False)
+    assert flat[6].device.type == "cuda" and same(flat[6], host.derived) and same(flat[0], host.succ)
+    capped = torch.ops.mymyr.expand_flat_derived(h, dev, None, host.total + 4, False)
+    assert capped[6].shape == (host.total + 4, host.derived_words) and same(capped[6][: host.total], host.derived)
+    assert (capped[6][host.total :] == 0).all()
+    K = int(np.diff(host.offsets).max())
+    padded = torch.ops.mymyr.expand_derived(h, dev, None, K, False)
+    assert same(padded[6], host.pad(K).derived) and same(padded[0], host.pad(K).succ)
+
+    capacity = host.total + 4
+
+    @torch.compile(fullgraph=True, backend="aot_eager")
+    def compiled(states):
+        return torch.ops.mymyr.expand_flat_derived(h, states, None, capacity, False)
+
+    assert torch.equal(compiled(dev)[6], capped[6])
+    # a task without derived atoms: zero-width words on the device
+    blocks = text_task("blocks__probBLOCKS-8-0")
+    _, brows, _ = encode_rows([blocks], per_task=6)
+    bh = rt.register(blocks)
+    zero = torch.ops.mymyr.expand_flat_derived(bh, torch.from_numpy(brows.view(np.int64)).cuda(), None, 64, False)
+    assert zero[6].shape == (64, 0) and zero[6].device.type == "cuda"
