@@ -44,6 +44,9 @@ class Problems:
             raise TypeError(f"mymyr: expected a Task, a TaskTable or a TaskSuite, not {type(table).__name__}")
         self.table = table
         self.uids = tuple(int(task.uid) for task in self.tasks)
+        # content hashes, equal for the same problems in every process: spaces compare by them, so the spaces of
+        # environments in worker processes equal the parent's
+        self.fingerprints = tuple(int(task.fingerprint) for task in self.tasks)
         self.numeric = self.numeric_words > 0
 
     def __len__(self) -> int:
@@ -251,12 +254,12 @@ class SymbolicSpace(gymnasium.Space):
     def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, SymbolicSpace)
-            and other._observer.problems.uids == self._observer.problems.uids
+            and other._observer.problems.fingerprints == self._observer.problems.fingerprints
             and other._fields == self._fields
         )
 
     def __hash__(self) -> int:
-        return hash((self._observer.problems.uids, self._fields))
+        return hash((self._observer.problems.fingerprints, self._fields))
 
     def __deepcopy__(self, memo: dict) -> "SymbolicSpace":
         # the copies (e.g. gymnasium's batch_space) share the instances; only the random generator is copied
@@ -312,10 +315,10 @@ class GroundActionSpace(gymnasium.Space):
         return int(x.task.uid) == self._problems.uids[t]
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, GroundActionSpace) and other._problems.uids == self._problems.uids
+        return isinstance(other, GroundActionSpace) and other._problems.fingerprints == self._problems.fingerprints
 
     def __hash__(self) -> int:
-        return hash(("GroundActionSpace", self._problems.uids))
+        return hash(("GroundActionSpace", self._problems.fingerprints))
 
     def __deepcopy__(self, memo: dict) -> "GroundActionSpace":
         out = copy.copy(self)

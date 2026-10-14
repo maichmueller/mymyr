@@ -4,6 +4,7 @@ instance draws, spaces, registration and the optional dependency."""
 import copy
 import importlib.util
 import pathlib
+import pickle
 
 import numpy as np
 import pytest
@@ -343,6 +344,39 @@ def test_vector_env_equals_sync_vector_env(name, observation):
     sync.close()
 
 
+@needs_gym
+@needs_frontend
+@pytest.mark.parametrize("observation", ["symbolic", "bits"])
+def test_async_vector_env_runs_the_envs_in_worker_processes(observation):
+    import gymnasium as gym
+    from mymyr.rl import gym as mg
+
+    domain, problems = paths("gripper")
+    fns = [lambda i=i: mg.Env(domain=domain, problems=problems, observation=observation, env_id=i, max_steps=4)
+           for i in range(2)]
+    workers = gym.vector.AsyncVectorEnv(fns, shared_memory=observation == "bits")  # symbolic: pickled observations
+    local = gym.vector.SyncVectorEnv(fns)
+
+    def same(a, b):
+        if observation == "symbolic":  # atoms of restored copies of the tasks: compared by their text
+            assert [sorted(map(str, o.atoms)) for o in a] == [sorted(map(str, o.atoms)) for o in b]
+        else:
+            np.testing.assert_array_equal(a, b)
+
+    try:
+        aobs, _ = workers.reset(seed=[3, 3])
+        sobs, _ = local.reset(seed=[3, 3])
+        for k in range(10):
+            same(aobs, sobs)
+            actions = np.array([k % 3, (k + 1) % 3])
+            aobs, ar, ate, atr, _ = workers.step(actions)
+            sobs, sr, ste, st, _ = local.step(actions)
+            assert ar.tolist() == sr.tolist() and ate.tolist() == ste.tolist() and atr.tolist() == st.tolist()
+    finally:
+        workers.close()
+        local.close()
+
+
 def _split_graphs(obs, n):
     """The single-graph dicts of a batch of n graphs (entity ids made local)."""
     out = []
@@ -499,6 +533,9 @@ def test_symbolic_observation_fields_and_space():
     assert plain.objects is None and plain.goal is None and plain not in space
     copied = copy.deepcopy(space)
     assert copied == space and copied._observer is space._observer
+    restored = pickle.loads(pickle.dumps(space))  # equal by content: the spaces of worker processes
+    assert restored == space and hash(restored) == hash(space) and restored._observer is not space._observer
+    assert sorted(map(str, pickle.loads(pickle.dumps(obs)).atoms)) == sorted(map(str, obs.atoms))
     batched = gym.vector.utils.batch_space(space, 3)
     assert isinstance(batched, gym.spaces.Tuple) and all(s == space for s in batched)
 
