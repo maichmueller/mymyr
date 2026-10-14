@@ -74,7 +74,10 @@ class Problems:
 
     def max_actions(self) -> int:
         """The default action count of the index action mode: the largest successor bound of an instance."""
-        return max(1, max(successor_bounds(self.table)))
+        try:
+            return max(1, max(successor_bounds(self.table)))
+        except ValueError as error:
+            raise ValueError(f"{error}; pass max_actions= to bound the index actions instead") from error
 
     def decode(self, rows: np.ndarray, task_ids: np.ndarray) -> list[State]:
         """The States of rows [N, row_words] of instances task_ids [N]."""
