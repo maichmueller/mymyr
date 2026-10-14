@@ -63,7 +63,8 @@ struct Lists
 class H2Heuristic final : public Heuristic
 {
 public:
-    H2Heuristic(const Task& task, const Options& o) : m_task(task), m_real(resolve_costs(task, o.costs) == Costs::Real)
+    H2Heuristic(const Task& task, const Options& o)
+        : m_task(task), m_real(resolve_costs(task, o.costs) == Costs::Real), m_admissible(objective_costs(task, o.costs))
     {
         if (o.evaluation == Evaluation::Lifted)
             throw std::invalid_argument("mymyr: h2 has no lifted evaluation (use Evaluation::Auto or Grounded)");
@@ -91,6 +92,7 @@ public:
     }
 
     [[nodiscard]] Kind kind() const noexcept override { return Kind::H2; }
+    [[nodiscard]] bool admissible() const noexcept override { return m_admissible; }
     [[nodiscard]] std::shared_ptr<const RelaxedTask> relaxed() const override { return m_R; }
 
     Value evaluate(StateView s) override
@@ -425,6 +427,7 @@ private:
 
     const Task& m_task;
     bool m_real;
+    bool m_admissible;
     f64 m_scale = 1;  // real costs: the unit of the integer costs is 1 / m_scale
     std::shared_ptr<const RelaxedTask> m_R;
     u32 m_P = 0;

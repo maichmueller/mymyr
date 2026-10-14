@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace mymyr::search::bf
 {
@@ -16,6 +17,9 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     m_t0 = Clock::now();
     m_search_t0 = m_t0;
     r.algorithm = algorithm;
+    weight = o.weight;
+    bound = o.cost_bound;
+    bounded = bound != std::numeric_limits<double>::infinity();
     const Budget& b = o.control.budget;
     m_timed = std::isfinite(b.max_seconds);
     if (m_timed)
@@ -55,6 +59,7 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
     h->set_interrupt([this] { return (m_timed && Clock::now() >= m_deadline) || o.control.cancel.requested(); });
     batched = h->batched();
     path_dependent = h->path_dependent();
+    bound_with_h = bounded && h->admissible() && o.control.goal.kind != GoalSpec::Kind::Custom;
     status_words = path_dependent ? h->status_words() : 0;
     if (path_dependent && batched)
         throw std::invalid_argument("mymyr best-first search: a path-dependent heuristic cannot evaluate in batches");
@@ -69,6 +74,21 @@ Context::Context(const Task& t, const BestFirstOptions& opt, BestFirstResult& re
         m_blocked.insert(s.view());
     }
     m_has_blocked = !o.control.blocked_states.empty();
+}
+
+void check_options(const BestFirstOptions& o, const char* algorithm, bool astar)
+{
+    const std::string who = std::string("mymyr ") + algorithm + ": ";
+    if (!(std::isfinite(o.weight) && o.weight >= 1))
+        throw std::invalid_argument(who + "BestFirstOptions::weight must be finite and at least 1 (got " + std::to_string(o.weight) + ")");
+    if (std::isnan(o.cost_bound))
+        throw std::invalid_argument(who + "BestFirstOptions::cost_bound is NaN");
+    if (!astar && o.weight != 1)
+        throw std::invalid_argument(who + "BestFirstOptions::weight applies to A* (astar_eager, astar_lazy)");
+    if (!astar && o.cost_bound != std::numeric_limits<double>::infinity())
+        throw std::invalid_argument(who + "BestFirstOptions::cost_bound applies to A* (astar_eager, astar_lazy)");
+    if (o.queue == BestFirstOptions::Queue::Bucket && o.weight != std::floor(o.weight))
+        throw std::invalid_argument(who + "a bucket queue needs an integral weight (use Queue::Heap or Queue::Auto)");
 }
 
 Context::~Context()
@@ -207,9 +227,14 @@ bool Context::check_time_and_token()
 
 void Context::solved(const Nodes& nodes, u32 id, StateView goal, bool cheapest)
 {
+    solved(nodes.plan(id, succ), nodes.g[id], goal, cheapest);
+}
+
+void Context::solved(std::vector<Action> plan, f64 g, StateView goal, bool cheapest)
+{
     r.status = SearchStatus::Solved;
-    r.plan = nodes.plan(id, succ);
-    r.cost = nodes.g[id];
+    r.plan = std::move(plan);
+    r.cost = g;
     r.goal_state = State(goal);
     if (!cheapest || costs->unit())
         return;
@@ -249,8 +274,10 @@ bool use_buckets(const Context& c)
     }
     // g - g0 and h must be small integers: integral constant action costs of at most 64 (the heuristics then produce
     // integers too: unit costs count actions, real costs sum the same integral costs). A caller's evaluator may not.
+    // An integral weight keeps g + weight * h integral.
     const heuristics::ActionCosts& k = *c.costs;
-    return c.o.evaluator == nullptr && k.integral() && k.max_constant() >= 0 && k.max_constant() <= 64;
+    return c.o.evaluator == nullptr && k.integral() && k.max_constant() >= 0 && k.max_constant() <= 64 &&
+           c.weight == std::floor(c.weight);
 }
 
 BestFirstOptions::Store store_kind(const Context& c)

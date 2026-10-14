@@ -1,5 +1,5 @@
 #pragma once
-// Heuristic best-first searches: A* and GBFS, each eager and lazy, and beam search.
+// Heuristic best-first searches: A* (weighted A* with a weight) and GBFS, each eager and lazy, and beam search.
 //
 //   auto task = mymyr::Task::from_text_file("p.txt");
 //   mymyr::search::BestFirstOptions o;
@@ -12,6 +12,13 @@
 //     more cheaply are reopened; h = +inf marks a dead end. Ties among equal f: lower h first, then first in, first
 //     out. A goal state that is reopened stays a goal
 //     state, and h is cached per state instead of being recomputed on reopening.
+//   - weighted A* (BestFirstOptions::weight = w > 1, eager and lazy): the same searches with f = g + w * h in place of
+//     g + h (w = 1 is A*, with the same expansions). Ties as A*: lower h first, then first in, first out; goal states
+//     first among equal f. Suboptimality bound, for non-negative action costs and plan costs counted from the start
+//     state's metric value: eager weighted A* returns a plan of cost <= w * C* (C*: the optimal cost) with an
+//     admissible heuristic when it reopens states (`reopen`, the default), and with a consistent heuristic (blind,
+//     h_max) also without reopening; lazy weighted A* with `lazy_requeue` for consistent heuristics. The bound needs
+//     a heuristic of the task's goal (not GoalSpec::Custom) and h = +inf only for dead ends.
 //   - astar_lazy: children enter the open list unevaluated; a state is evaluated when popped. With `lazy_requeue`
 //     (default) an unevaluated child is keyed by the lower bound g(child) + max(0, h(parent) - cost) and, once
 //     evaluated, re-queued under its true f when that is larger; a goal is accepted only when no open entry has a
@@ -39,6 +46,12 @@
 // evaluate them in one call (GBFS up to the first goal state); beam search evaluates the new successors of a whole
 // layer in one call. The searches are otherwise unchanged.
 //
+// Cost bound (BestFirstOptions::cost_bound, A* only): a plan costs less than the bound. A state whose g is at least
+// the bound is not opened, and with an admissible heuristic (Heuristic::admissible) and a goal of the task or AnyOf, a
+// state whose g + h is at least the bound neither (the lazy searches test g + h when they evaluate a state); a start
+// state beyond the bound ends the search at once. Exhausted then means that the search space holds no plan cheaper
+// than the bound. Sound for non-negative action costs: a transition that lowers g makes the search fail.
+//
 // SearchControl: budget.max_states bounds the stored states, max_expanded the expansions (both OutOfStates),
 // max_depth the depth (in actions) of expanded states (deeper states are not expanded), max_seconds the wall time
 // (OutOfTime); cancel and on_progress returning false give Cancelled. blocked_states are never entered (the start
@@ -58,6 +71,7 @@
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
 
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -101,9 +115,14 @@ struct BestFirstOptions
     // A*
     bool reopen = true;               // reopen states reached with a smaller g
     bool lazy_requeue = true;         // astar_lazy: lower-bound keys and re-queueing (optimal); false: parent-keyed
+    double weight = 1;                // f = g + weight * h: finite and at least 1 (1: A*); the other searches take 1 only
+    double cost_bound = std::numeric_limits<double>::infinity();  // plans cost less (see above); not NaN; A* only
     // beam
     u32 beam_width = 1000;  // positive (std::invalid_argument otherwise)
 };
+// Option values a search does not take (a weight below 1 or not finite, a weight other than 1 or a finite cost bound
+// in GBFS or beam search, a NaN cost bound, a bucket queue with a weight that is not integral) throw
+// std::invalid_argument before the search starts.
 
 struct BestFirstResult
 {

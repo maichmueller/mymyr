@@ -102,6 +102,10 @@ std::string best_first_unsupported(const Task& task, const DeviceBestFirstOption
         return "search observers";
     if (so.evaluator)
         return "a caller-owned evaluator (the device builds its heuristic from search.heuristic)";
+    if (so.weight != 1)
+        return "weighted A* (BestFirstOptions::weight other than 1)";
+    if (so.cost_bound != std::numeric_limits<double>::infinity())
+        return "a cost bound (BestFirstOptions::cost_bound)";
     if (o.batch == 0)
         return "a batch of 0 states";
     const heuristics::Kind k = so.heuristic.kind;

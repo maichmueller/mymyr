@@ -44,7 +44,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(mymyr_warnings INTERFACE)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(mymyr_warnings INTERFACE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    target_compile_options(mymyr_warnings INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra --Werror=all-warnings>)
 endif()
 
 # A GCC outside the system prefix ships a newer libstdc++ than the loader finds by default. Test and tool
@@ -128,6 +130,8 @@ add_library(mymyr_core STATIC
     src/mymyr/search/astar.cpp
     src/mymyr/search/gbfs.cpp
     src/mymyr/search/beam.cpp
+    src/mymyr/search/ehc.cpp
+    src/mymyr/search/anytime.cpp
     src/mymyr/search/plan_file.cpp
     # relaxed reachability and landmarks
     src/mymyr/reachability/join.cpp

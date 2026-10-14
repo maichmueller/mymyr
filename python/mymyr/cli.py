@@ -3,13 +3,15 @@ a domain and problem.
 
     mymyr plan domain.pddl problem.pddl                      # A* with h_max; the plan to stdout
     mymyr plan domain.pddl problem.pddl --search gbfs -o plan.txt -v
+    mymyr plan domain.pddl problem.pddl --search astar --heuristic ff --weight 2
+    mymyr plan domain.pddl problem.pddl --search anytime --weights 5,3,2,1 --max-seconds 60
     mymyr info domain.pddl problem.pddl
     mymyr --version
 
-Exit codes of ``mymyr plan``: 0 a plan was found, 1 the search proved the task unsolvable or exhausted its search
-space without a plan, 2 invalid usage, an unreadable file or PDDL mymyr cannot read (and any other error), 3 a budget
-(``--max-states``, ``--max-seconds``) stopped the search. Errors are one line on stderr; ``--debug`` adds the
-traceback.
+Exit codes of ``mymyr plan``: 0 a plan was found (by the anytime search also when a budget stopped it later), 1 the
+search proved the task unsolvable or exhausted its search space without a plan, 2 invalid usage, an unreadable file or
+PDDL mymyr cannot read (and any other error), 3 a budget (``--max-states``, ``--max-seconds``) stopped the search.
+Errors are one line on stderr; ``--debug`` adds the traceback.
 """
 
 from __future__ import annotations
@@ -33,10 +35,10 @@ EXIT_ERROR = 2
 EXIT_BUDGET = 3
 EXIT_INTERRUPTED = 130
 
-SEARCHES = ("astar", "gbfs", "brfs", "iw", "siw", "astar_iw")
+SEARCHES = ("astar", "gbfs", "ehc", "anytime", "brfs", "iw", "siw", "astar_iw")
 HEURISTICS = ("blind", "max", "add", "ff", "h2", "set_additive", "lmcut", "lmcount", "perfect")
 ADMISSIBLE = ("blind", "max", "h2", "lmcut", "perfect")
-DEFAULT_HEURISTIC = {"astar": "max", "gbfs": "ff", "astar_iw": "max"}
+DEFAULT_HEURISTIC = {"astar": "max", "gbfs": "ff", "ehc": "ff", "anytime": "ff", "astar_iw": "max"}
 WIDTH_SEARCHES = ("iw", "siw", "astar_iw")
 
 
@@ -72,18 +74,32 @@ def _parser() -> argparse.ArgumentParser:
         "--search",
         choices=SEARCHES,
         default="astar",
-        help="astar (A*, optimal with an admissible heuristic), gbfs (greedy best-first), brfs (breadth-first: "
-        "shortest plans), iw (iterated width), siw (serialized IW), astar_iw (A* with novelty pruning) "
-        "(default: astar)",
+        help="astar (A*, optimal with an admissible heuristic; weighted with --weight), gbfs (greedy best-first), "
+        "ehc (enforced hill-climbing with helpful actions, greedy best-first when it fails), anytime (restarting "
+        "weighted A*: better plans until the budget ends or the plan is proven optimal; the best is written), brfs "
+        "(breadth-first: shortest plans), iw (iterated width), siw (serialized IW), astar_iw (A* with novelty "
+        "pruning) (default: astar)",
     )
     plan.add_argument(
         "-H",
         "--heuristic",
         choices=HEURISTICS,
-        help="the heuristic of astar, gbfs and astar_iw (default: max for astar and astar_iw, ff for gbfs). A* finds "
-        f"optimal plans with an admissible one: {', '.join(ADMISSIBLE)}; add, ff, set_additive and lmcount are not "
-        "admissible. "
-        "perfect computes the state space first.",
+        help="the heuristic of astar, gbfs, ehc, anytime and astar_iw (default: max for astar and astar_iw, ff for "
+        f"the others). A* finds optimal plans with an admissible one: {', '.join(ADMISSIBLE)}; add, ff, set_additive "
+        "and lmcount are not admissible. perfect computes the state space first.",
+    )
+    plan.add_argument(
+        "--weight",
+        type=float,
+        help="the weight w of astar: f = g + w * h, at least 1; with an admissible heuristic the plan costs at most "
+        "w times the optimum (default: 1, A*)",
+    )
+    plan.add_argument(
+        "--weights",
+        type=_weights,
+        metavar="W1,W2,...",
+        help="the weights of the anytime search's iterations, non-increasing and at least 1; the last one repeats "
+        "(default: 5,3,2,1)",
     )
     plan.add_argument(
         "-w",
@@ -129,9 +145,27 @@ def _parser() -> argparse.ArgumentParser:
 # ----------------------------------------------------------------------------------------------------------- plan
 
 
+def _weights(text: str) -> tuple[float, ...]:
+    """The --weights list: comma-separated numbers."""
+    try:
+        return tuple(float(w) for w in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a comma-separated list of numbers: {text!r}") from None
+
+
 def _check_options(a: argparse.Namespace) -> None:
     if a.heuristic is not None and a.search not in DEFAULT_HEURISTIC:
-        raise UsageError(f"--heuristic applies to astar, gbfs and astar_iw, not to {a.search}")
+        raise UsageError(f"--heuristic applies to astar, gbfs, ehc, anytime and astar_iw, not to {a.search}")
+    if a.weight is not None and a.search != "astar":
+        raise UsageError(f"--weight applies to astar, not to {a.search} (the anytime search takes --weights)")
+    if a.weight is not None and not 1 <= a.weight < float("inf"):
+        raise UsageError("--weight must be a finite number of at least 1")
+    if a.weights is not None and a.search != "anytime":
+        raise UsageError(f"--weights applies to anytime, not to {a.search}")
+    if a.weights is not None and not all(1 <= w < float("inf") for w in a.weights):
+        raise UsageError("--weights must be finite numbers of at least 1")
+    if a.weights is not None and any(x < y for x, y in zip(a.weights, a.weights[1:])):
+        raise UsageError("--weights must not increase")
     if a.width is not None and a.search not in WIDTH_SEARCHES:
         raise UsageError(f"--width applies to iw, siw and astar_iw, not to {a.search}")
     if a.width is not None and a.width < 0:
@@ -150,9 +184,13 @@ def _search(task: mymyr.Task, a: argparse.Namespace, cancel: search.CancelToken)
     budget = {"max_states": a.max_states, "max_seconds": a.max_seconds, "cancel": cancel}
     h = a.heuristic or DEFAULT_HEURISTIC.get(a.search)
     if a.search == "astar":
-        return search.astar(task, heuristic=h, **budget)
+        return search.astar(task, heuristic=h, weight=1.0 if a.weight is None else a.weight, **budget)
     if a.search == "gbfs":
         return search.gbfs(task, heuristic=h, **budget)
+    if a.search == "ehc":
+        return search.ehc(task, heuristic=h, **budget)
+    if a.search == "anytime":
+        return search.anytime_astar(task, heuristic=h, weights=a.weights or (5, 3, 2, 1), **budget)
     if a.search == "brfs":
         return search.brfs(task, threads=a.threads, **budget)
     width = {} if a.width is None else ({"width": a.width} if a.search == "astar_iw" else {"max_arity": a.width})
@@ -215,14 +253,25 @@ def _plan(a: argparse.Namespace) -> int:
     if a.verbose:
         expanded, generated, states, seconds = _statistics(r)
         h = a.heuristic or DEFAULT_HEURISTIC.get(a.search)
+        weight = f", weight {a.weight:g}" if a.weight is not None else ""
         lines = [
-            f"search: {a.search}" + (f" with heuristic {h}" if h else ""),
+            f"search: {a.search}" + (f" with heuristic {h}" if h else "") + weight,
             f"status: {status}",
             f"expanded: {expanded}",
             f"generated: {generated}",
             f"states: {states}",
             f"time: {seconds:.3f} s search, {parse_s:.3f} s parse",
         ]
+        if isinstance(r, search.EhcResult):
+            e = r.ehc
+            lines.append(
+                f"hill-climbing: {e.lookaheads} lookaheads, {e.improvements} improvements, {e.retries} retries"
+                + (", failed; greedy best-first search ran" if e.fallback else (", failed" if e.failed else ""))
+            )
+        if isinstance(r, search.AnytimeResult):
+            for x in r.solutions:
+                lines.append(f"plan: cost {x.cost:g} at {x.seconds:.3f} s (weight {x.weight:g}, length {x.length})")
+            lines.append(f"iterations: {len(r.iterations)}, optimal: {'yes' if r.optimal else 'not proven'}")
         if text is not None:
             lines.append(f"plan length: {len(r.plan)}")
             lines.append(f"cost: {_plan_cost(text)}")

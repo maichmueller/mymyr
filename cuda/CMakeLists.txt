@@ -46,6 +46,8 @@ target_sources(mymyr_cuda PRIVATE src/state_space.cu src/state_space.cpp)
 target_sources(mymyr_cuda PRIVATE src/multi_iw_table.cpp)
 # the per-graph functions of the relational encoding (encoding/detail/lanes.hpp) compiled as device code
 target_sources(mymyr_cuda PRIVATE src/encoding_lanes.cu)
+# the context of the relational encoder and the encoder's memory on the device (cuda/encoding.hpp)
+target_sources(mymyr_cuda PRIVATE src/encoding.cpp src/encoding.cu)
 # task suites (several domains) on the device: the suite expand and the domain split of a batch
 target_sources(mymyr_cuda PRIVATE src/suite.cu src/suite_expand.cpp)
 # device action costs (cuda/cost_program.hpp: programs over static functions, the state spaces and A*)
@@ -59,10 +61,9 @@ set_target_properties(mymyr_cuda PROPERTIES
     CUDA_EXTENSIONS OFF
     CUDA_RUNTIME_LIBRARY Static
     POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(mymyr_cuda PUBLIC mymyr::core CUDA::cudart_static)
-target_compile_options(mymyr_cuda PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wno-unused-parameter>
-    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo -Xcompiler=-Wall,-Wextra --Werror=all-warnings>)
+target_link_libraries(mymyr_cuda PUBLIC mymyr::core mymyr::encoding CUDA::cudart_static
+    PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
+target_compile_options(mymyr_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 target_compile_definitions(mymyr_cuda PUBLIC MYMYR_HAS_CUDA=1)
 
 # The gtests (tests/cuda/test_cuda.cpp) are declared in tests/cpp/CMakeLists.txt, where GTest is found.

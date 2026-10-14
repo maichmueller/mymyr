@@ -18,6 +18,8 @@ public:
     }
 
     [[nodiscard]] Kind kind() const noexcept override { return Kind::Perfect; }
+    /// h* of the objective's costs (real costs, or unit costs of a task without costs) is admissible.
+    [[nodiscard]] bool admissible() const noexcept override { return m_real || m_space->unit_costs(); }
 
     Value evaluate(StateView s) override
     {

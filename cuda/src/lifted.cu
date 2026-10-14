@@ -137,6 +137,12 @@ __global__ void k_pad(Flat f, u64 rows, Padded o)
         }
         if (o.goal)
             o.goal[at] = valid && f.goal ? f.goal[j] : 0;
+        if (o.derived)
+        {
+            u64* dst = o.derived + at * o.derived_words;
+            for (u32 w = 0; w < o.derived_words; ++w)
+                dst[w] = valid && f.derived && w < f.derived_words ? f.derived[j * f.derived_words + w] : 0;
+        }
     }
 }
 }  // namespace

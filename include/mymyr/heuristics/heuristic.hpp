@@ -132,6 +132,10 @@ enum class Costs : u8
 /// Costs::Auto resolved for `task` (Unit or Real); Unit and Real as they are. Throws std::invalid_argument for a
 /// metric mymyr refuses (ActionCosts).
 [[nodiscard]] Costs resolve_costs(const Task& task, Costs costs);
+/// Whether heuristic values with `costs` are lower bounds in the units of the task's objective: Real and Auto, and
+/// Unit on a task whose objective counts actions (no action costs and no metric). Unit costs on a task whose actions
+/// cost less than 1 can overestimate.
+[[nodiscard]] bool objective_costs(const Task& task, Costs costs);
 
 enum class Evaluation : u8
 {
@@ -230,6 +234,13 @@ public:
     }
     /// h of s reached on a path with the given status (heuristics that are not path-dependent: evaluate(s)).
     virtual Value evaluate(StateView s, std::span<const u64> /*status*/) { return evaluate(s); }
+
+    /// Whether h is admissible for the task's goal and objective: h(s) <= h*(s), the cost of a cheapest plan from s,
+    /// in every state s, when action costs are non-negative. True for blind, h_max, h² and LM-cut with objective costs
+    /// (objective_costs), and for the perfect heuristic with them; false for the others and for a caller's heuristic.
+    /// h = +inf is then a dead end on every path. Searches prune by g + h against a cost bound only with an admissible
+    /// heuristic (search/best_first.hpp).
+    [[nodiscard]] virtual bool admissible() const noexcept { return false; }
 
     [[nodiscard]] const HeuristicStats& stats() const noexcept { return m_stats; }
     /// Long evaluations (the lifted fallback's enumeration) poll `stop` and throw Interrupted once it returns true.

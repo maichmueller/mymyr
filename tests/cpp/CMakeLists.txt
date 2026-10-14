@@ -32,6 +32,7 @@ add_executable(mymyr_tests
     rl/test_expand.cpp
     search/test_astar_iw.cpp
     search/test_best_first.cpp
+    search/test_wastar_ehc_anytime.cpp
     heuristics/test_heuristics.cpp
     heuristics/test_landmark_heuristics.cpp
     search/test_plan_file.cpp
@@ -62,7 +63,7 @@ gtest_discover_tests(mymyr_encoding_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOU
 # The encoder over PDDL tasks (tests/data/pddl) through the front end.
 if(TARGET mymyr_frontend)
     add_executable(mymyr_encoder_tests encoding/test_context.cpp encoding/test_encoder.cpp
-        encoding/test_encoder_modes.cpp)
+        encoding/test_encoder_modes.cpp encoding/test_expand_derived.cpp)
     target_link_libraries(mymyr_encoder_tests PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
     gtest_discover_tests(mymyr_encoder_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800 LABELS encoding)
 endif()
@@ -76,7 +77,8 @@ gtest_discover_tests(mymyr_thread_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 
 # ------------------------------------------------------------------------------------------------ PDDL front end
 if(TARGET mymyr_frontend)
     # The benchmark PDDL of the tests is vendored under tests/data (benchmarks/, ipc/, pddl/).
-    add_executable(mymyr_frontend_tests frontend/test_frontend.cpp frontend/test_encoding_goal.cpp search/test_astar_iw_pddl.cpp)
+    add_executable(mymyr_frontend_tests frontend/test_frontend.cpp frontend/test_encoding_goal.cpp search/test_astar_iw_pddl.cpp
+        search/test_wastar_ehc_anytime_pddl.cpp)
     target_link_libraries(mymyr_frontend_tests PRIVATE mymyr::frontend mymyr_warnings GTest::gtest_main)
     target_compile_definitions(mymyr_frontend_tests PRIVATE
         MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
@@ -173,6 +175,21 @@ if(TARGET mymyr_cuda)
         target_compile_definitions(mymyr_device_table_tests PRIVATE
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
         gtest_discover_tests(mymyr_device_table_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+        # the derived words of the device expand against rl::expand
+        add_executable(mymyr_device_derived_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_derived.cpp)
+        target_link_libraries(mymyr_device_derived_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
+        gtest_discover_tests(mymyr_device_derived_tests DISCOVERY_TIMEOUT 60
+            PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+        # the relational encoder's context and memory on the device (cuda/encoding.hpp) against the host
+        add_executable(mymyr_device_encoding_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encoding.cpp
+                                                   ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu)
+        target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend GTest::gtest_main)
+        target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr_warnings)
+        set_target_properties(mymyr_device_encoding_tests PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
+        target_compile_definitions(mymyr_device_encoding_tests PRIVATE
+            MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+        gtest_discover_tests(mymyr_device_encoding_tests DISCOVERY_TIMEOUT 60
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
         # the device env's calls captured into CUDA graphs and replayed, against eager calls and the host
         add_executable(mymyr_device_graphs_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_graphs.cpp)

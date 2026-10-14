@@ -35,6 +35,9 @@ __global__ void pad(lifted::Flat f, u64 rows, lifted::Padded o, u32 nn)
         for (u32 w = 0; w < o.label_width; ++w)
             o.binding[at * o.label_width + w] = valid && f.binding && w < f.label_width ? f.binding[j * f.label_width + w] : -1;
     if (o.goal) o.goal[at] = valid && f.goal ? f.goal[j] : 0;
+    if (o.derived)
+        for (u32 w = 0; w < o.derived_words; ++w)
+            o.derived[at * o.derived_words + w] = valid && f.derived && w < f.derived_words ? f.derived[j * f.derived_words + w] : 0;
 }
 }  // namespace
 
