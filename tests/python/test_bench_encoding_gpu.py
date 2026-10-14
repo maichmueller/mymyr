@@ -1,5 +1,5 @@
 """bench/python/bench_encoding_gpu.py: the command line runs and writes the documented JSON without CUDA, the walk rows
-are deterministic and distinct, and the gate table reports a gate whose modes were skipped as n/a, never as a pass."""
+are deterministic and distinct, and a gate with a skipped or errored task or mode is reported as incomplete, error or n/a, never as a pass."""
 
 import contextlib
 import gc
