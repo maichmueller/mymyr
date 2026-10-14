@@ -289,8 +289,15 @@ class VectorEnv(gymnasium.vector.VectorEnv):
             self._capture(everyone, batch)
         else:
             resetting = self._autoreset if self._mode == AutoresetMode.NEXT_STEP else np.zeros(n, np.bool_)
-            active = np.flatnonzero(~resetting)
-            if len(active):
+            if not resetting.any():  # every env steps: one call over the whole pool
+                batch = pool.step(actions=index)
+                rewards[:] = batch.reward
+                terminated[:] = batch.terminated
+                truncated[:] = batch.truncated
+                invalid[:] = batch.invalid
+                self._capture(slice(None), batch)
+            elif not resetting.all():
+                active = np.flatnonzero(~resetting)
                 batch = pool.step(env_ids=active.astype(np.int32), actions=index[active])
                 rewards[active] = batch.reward
                 terminated[active] = batch.terminated
@@ -337,12 +344,16 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         if not self._started:
             raise RuntimeError("mymyr: call reset() before step()")
 
-    def _capture(self, envs: np.ndarray, batch: Any) -> None:
+    def _capture(self, envs: Union[np.ndarray, slice], batch: Any) -> None:
         self._rows[envs] = batch.states
         self._task_ids[envs] = batch.task_ids
         self._count[envs] = batch.count
         self._steps[envs] = batch.steps
         self._at_goal[envs] = batch.at_goal
+        if isinstance(envs, slice):
+            self._states = [None] * self.num_envs
+            self._actions = [None] * self.num_envs
+            return
         for e in envs.tolist():
             self._states[e] = None
             self._actions[e] = None
