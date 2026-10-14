@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <cstring>
 #include <limits>
+#include <numeric>
+#include <random>
 #include <thread>
 #include <filesystem>
 #include <iostream>
@@ -145,13 +147,13 @@ TEST(DeviceEncodingContext, DownloadedBlockEqualsTheHostBlock)
         const auto table = rl::TaskTable::create(tasks);
         const auto host = host_context(table);
         const auto device = cuda::DeviceEncodingContext::upload(ctx, host);
-        EXPECT_EQ(device->uploads(), 1u);
+        EXPECT_EQ(device->generation(), 1u);
         EXPECT_EQ(device->bytes(), host->arrays().bytes());
         EXPECT_EQ(device->num_instances(), table->size());
         EXPECT_TRUE(device->download() == host_bytes(*host));
         // a second stream sees the block after acquire()
         EXPECT_TRUE(device->download(other) == host_bytes(*host));
-        EXPECT_EQ(device->uploads(), 1u);
+        EXPECT_EQ(device->generation(), 1u);
         ++checked;
     }
     EXPECT_EQ(checked, groups().size());
@@ -201,10 +203,10 @@ TEST(DeviceEncodingContext, AppendingInstancesKeepsTheOffsetsAndBytesOfTheExisti
     const std::vector<std::byte> first = device->download();
     const auto first_view = g->before->view();
     ASSERT_TRUE(first == host_bytes(*g->before));
-    EXPECT_EQ(device->uploads(), 1u);
+    EXPECT_EQ(device->generation(), 1u);
 
     EXPECT_TRUE(device->refresh(g->after));
-    EXPECT_EQ(device->uploads(), 2u);
+    EXPECT_EQ(device->generation(), 2u);
     EXPECT_EQ(device->num_instances(), 3u);
     const std::vector<std::byte> second = device->download();
     EXPECT_TRUE(second == host_bytes(*g->after));
@@ -235,7 +237,7 @@ TEST(DeviceEncodingContext, ARefreshWithoutNewInstancesUploadsNothing)
     const auto device = cuda::DeviceEncodingContext::upload(device_context(), g->after);
     EXPECT_FALSE(device->refresh(g->after));
     EXPECT_FALSE(device->refresh(host_context(g->grown)));  // equal bytes, another object
-    EXPECT_EQ(device->uploads(), 1u);
+    EXPECT_EQ(device->generation(), 1u);
 }
 
 TEST(DeviceEncodingContext, OneUploadPerRefresh)
@@ -248,11 +250,11 @@ TEST(DeviceEncodingContext, OneUploadPerRefresh)
     auto context_of = [&](u32 n)
     { return encoding::EncodingContext::create(rl::TaskTable::create({tasks.begin(), tasks.begin() + n}), schema); };
     const auto device = cuda::DeviceEncodingContext::upload(device_context(), context_of(1));
-    EXPECT_EQ(device->uploads(), 1u);
+    EXPECT_EQ(device->generation(), 1u);
     for (u32 n = 2; n <= 4; ++n)
     {
         EXPECT_TRUE(device->refresh(context_of(n)));
-        EXPECT_EQ(device->uploads(), n);
+        EXPECT_EQ(device->generation(), n);
         EXPECT_EQ(device->num_instances(), n);
     }
     EXPECT_TRUE(device->download() == host_bytes(*device->host()));
@@ -276,7 +278,7 @@ TEST(DeviceEncodingContext, OnlyAnExtensionIsAppended)
     other.nullary = false;
     const auto table = rl::TaskTable::create({tasks[0], tasks[1], tasks[0]});
     EXPECT_THROW(device->refresh(host_context(table, other)), std::invalid_argument);
-    EXPECT_EQ(device->uploads(), 1u);
+    EXPECT_EQ(device->generation(), 1u);
     EXPECT_TRUE(device->download() == host_bytes(*device->host()));
 }
 
@@ -309,25 +311,6 @@ TEST(DeviceEncodingContext, DeviceViewsReadTheValuesOfTheHostViews)
         ++checked;
     }
     EXPECT_EQ(checked, groups().size());
-}
-
-TEST(DeviceEncodingContext, AViewTakenBeforeARefreshReadsOnForTheWorkEnqueuedBefore)
-{
-    SKIP_WITHOUT_GPU();
-    const auto g = blocks_grown();
-    if (!g)
-        GTEST_SKIP() << "no PDDL data";
-    const auto ctx = device_context();
-    const auto device = cuda::DeviceEncodingContext::upload(ctx, g->before);
-    const cudaStream_t s = ctx->stream();
-    const auto lease = device->acquire(s);
-    cuda::DeviceBuffer out(ctx, test::k_probe_width * 8, s);
-    test::launch_context_probe(lease.view, 1, static_cast<u64*>(out.data()), s);
-    EXPECT_TRUE(device->refresh(g->after, s));  // the old block frees after the probe
-    std::vector<u64> probe(test::k_probe_width);
-    cuda::check(cudaMemcpyAsync(probe.data(), out.data(), probe.size() * 8, cudaMemcpyDeviceToHost, s), "D2H");
-    cuda::check(cudaStreamSynchronize(s), "sync");
-    EXPECT_EQ(probe, host_probe(g->before->view(), 1));
 }
 
 // ------------------------------------------------------------------------------------------------ lifetime
@@ -415,6 +398,43 @@ TEST(DeviceEncodingContext, FreeWaitsForTheAcquiredStream)
     ctx->synchronize();
 }
 
+TEST(DeviceEncodingContext, RefreshFreesTheOldGenerationAfterTheAcquiredStream)
+{
+    SKIP_WITHOUT_GPU();
+    const auto g = blocks_grown();
+    ASSERT_TRUE(g);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto device = cuda::DeviceEncodingContext::upload(ctx, g->before);
+    ctx->synchronize();
+    {
+        StreamGate gate(stream);
+        { auto lease = device->acquire(stream); }
+        EXPECT_TRUE(device->refresh(g->after));  // nothing holds the old generation: its free is enqueued here
+        expect_blocked(ctx);
+    }
+    ctx->synchronize();
+}
+
+TEST(DeviceEncodingContext, ReleasingAStreamKeepsTheGenerationFreeOrdered)
+{
+    SKIP_WITHOUT_GPU();
+    const auto g = blocks_grown();
+    ASSERT_TRUE(g);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    auto device = cuda::DeviceEncodingContext::upload(ctx, g->after);
+    ctx->synchronize();
+    {
+        StreamGate gate(stream);
+        { auto lease = device->acquire(stream); }
+        device->release(stream);
+        device.reset();
+        expect_blocked(ctx);
+    }
+    ctx->synchronize();
+}
+
 TEST(DeviceEncodingContext, CallerUploadAndRefreshStreamsMayBeDestroyedFirst)
 {
     SKIP_WITHOUT_GPU();
@@ -442,6 +462,88 @@ TEST(DeviceEncodingContext, DestroyedRightAfterTheUpload)
     for (int i = 0; i < 20; ++i)
         cuda::DeviceEncodingContext::upload(ctx, g->after);
     ctx->synchronize();
+}
+
+// ------------------------------------------------------------------------------------------------ capture
+
+u32 kernel_nodes(cudaGraph_t graph)
+{
+    size_t count = 0;
+    cuda::check(cudaGraphGetNodes(graph, nullptr, &count), "cudaGraphGetNodes");
+    std::vector<cudaGraphNode_t> nodes(count);
+    cuda::check(cudaGraphGetNodes(graph, nodes.data(), &count), "cudaGraphGetNodes");
+    u32 kernels = 0;
+    for (const cudaGraphNode_t node : nodes)
+    {
+        cudaGraphNodeType type;
+        cuda::check(cudaGraphNodeGetType(node, &type), "cudaGraphNodeGetType");
+        kernels += type == cudaGraphNodeTypeKernel;
+    }
+    return kernels;
+}
+
+/// Captures what `enqueue` launches on `stream` and returns the graph's kernel nodes. The graph is never launched.
+template <class Enqueue>
+u32 captured_kernels(cudaStream_t stream, Enqueue&& enqueue)
+{
+    cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "cudaStreamBeginCapture");
+    std::exception_ptr error;
+    try { enqueue(); }
+    catch (...) { error = std::current_exception(); }
+    cudaGraph_t graph = nullptr;
+    cuda::check(cudaStreamEndCapture(stream, &graph), "cudaStreamEndCapture");
+    if (error)
+    {
+        (void)cudaGraphDestroy(graph);
+        std::rethrow_exception(error);
+    }
+    const u32 kernels = kernel_nodes(graph);
+    cuda::check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+    return kernels;
+}
+
+std::shared_ptr<const encoding::FlatEncoder> blocks_encoder(encoding::IndexType index = encoding::IndexType::I32);
+
+TEST(DeviceEncoder, AHeldAcquisitionIsEnoughToLaunchInsideACapture)
+{
+    SKIP_WITHOUT_GPU();
+    const auto encoder = blocks_encoder();
+    ASSERT_TRUE(encoder);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(64, stream);
+    const auto work = device.acquire(stream);
+    cuda::DeviceBuffer out(ctx, test::k_probe_width * 8, stream);
+    const u32 kernels = captured_kernels(stream, [&]
+    {
+        const cuda::ScratchView scratch = work.scratch_view();
+        EXPECT_EQ(scratch.totals_stride, 65u);
+        EXPECT_EQ(scratch.scan_length, 3u * 65);
+        cuda::check(cudaMemsetAsync(scratch.cell_counts, 0, scratch.cell_entries * 4, work.stream()), "memset counts");
+        cuda::check(work.scan_totals(), "scan totals");
+        test::launch_context_probe(work.view(), 1, static_cast<u64*>(out.data()), work.stream());
+    });
+    EXPECT_EQ(kernels, 3u);  // the scan's two and the probe
+}
+
+TEST(DeviceEncoder, AcquireRefusesACapturingStream)
+{
+    SKIP_WITHOUT_GPU();
+    const auto encoder = blocks_encoder();
+    ASSERT_TRUE(encoder);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(64, stream);
+    cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "cudaStreamBeginCapture");
+    EXPECT_THROW((void)device.acquire(stream), std::invalid_argument);
+    EXPECT_THROW((void)device.context().acquire(stream), std::invalid_argument);
+    cudaGraph_t graph = nullptr;
+    EXPECT_EQ(cudaStreamEndCapture(stream, &graph), cudaSuccess);  // the refusals left the capture valid
+    if (graph)
+        cuda::check(cudaGraphDestroy(graph), "cudaGraphDestroy");
+    EXPECT_NO_THROW((void)device.acquire(stream));
 }
 
 // ------------------------------------------------------------------------------------------------ sizes
@@ -478,7 +580,7 @@ TEST(DeviceEncoder, OutputLayoutPinsTheBytesOfEveryArray)
     EXPECT_EQ(cuda::output_layout({}, encoding::IndexType::I32, 7).bytes, 64u * 3);
 }
 
-TEST(DeviceEncoder, ScratchUsesThreeInPlaceScans)
+TEST(DeviceEncoder, ScratchHoldsOneScanOfTheThreeTotals)
 {
     SKIP_WITHOUT_GPU();
     for (const u64 graphs : {u64{1}, u64{10}, u64{1000}, u64{16384}})
@@ -487,20 +589,102 @@ TEST(DeviceEncoder, ScratchUsesThreeInPlaceScans)
             const cuda::GraphBounds bounds{9, 97, 161, cells};
             const auto narrow = cuda::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Graph);
             EXPECT_FALSE(narrow.wide);
+            EXPECT_EQ(narrow.entities, 0u);
             EXPECT_EQ(narrow.tuples, 4 * (graphs + 1));
             EXPECT_EQ(narrow.args, 8 * (graphs + 1));
+            EXPECT_EQ(narrow.scan_length, 3 * (graphs + 1));
             EXPECT_EQ(narrow.cell_counts, round_up(12 * (graphs + 1)));
+            EXPECT_EQ(narrow.cell_entries, graphs * cells);
             EXPECT_EQ(narrow.scan_temp - narrow.cell_counts, round_up(4 * graphs * cells));
+            EXPECT_EQ(narrow.scan_temp_bytes, cuda::totals_scan_temp_bytes(3 * (graphs + 1), false));
             EXPECT_EQ(narrow.bytes - narrow.scan_temp, round_up(narrow.scan_temp_bytes));
             if (graphs >= 64)
             {
                 EXPECT_LE(narrow.scan_temp, 16 * graphs + round_up(4 * graphs * cells));
             }
-            const auto wide = cuda::scratch_layout({graphs, u64{1} << 32, 0}, bounds, encoding::Layout::Graph);
+            // the width follows the bounds: larger output capacities never switch to u64
+            const auto roomy = cuda::scratch_layout({graphs, u64{1} << 40, u64{1} << 40}, bounds, encoding::Layout::Graph);
+            EXPECT_FALSE(roomy.wide);
+            EXPECT_EQ(roomy.bytes, narrow.bytes);
+            // entities, tuples and arguments together decide it
+            const cuda::GraphBounds big{u64{1} << 32, 1, 1, cells};
+            const auto wide = cuda::scratch_layout({graphs, 0, 0}, big, encoding::Layout::Graph);
             EXPECT_TRUE(wide.wide);
             EXPECT_EQ(wide.tuples, 8 * (graphs + 1));
             EXPECT_EQ(wide.args, 16 * (graphs + 1));
             EXPECT_EQ(wide.cell_counts, round_up(24 * (graphs + 1)));
+            EXPECT_EQ(wide.scan_temp_bytes, cuda::totals_scan_temp_bytes(3 * (graphs + 1), true));
+        }
+    const u64 third = std::numeric_limits<u32>::max() / 3;
+    EXPECT_FALSE(cuda::scratch_layout({1, 0, 0}, {third, third, third, 0}, encoding::Layout::Graph).wide);
+    EXPECT_TRUE(cuda::scratch_layout({1, 0, 0}, {third + 1, third + 1, third + 1, 0}, encoding::Layout::Graph).wide);
+}
+
+/// The totals [3, G+1] with a zero entry closing every row, as the device scan receives them.
+template <class T>
+std::vector<T> random_totals(u64 graphs, u64 limit, std::mt19937_64& rng)
+{
+    std::vector<T> totals(3 * (graphs + 1));
+    for (u64 row = 0; row < 3; ++row)
+        for (u64 g = 0; g < graphs; ++g)
+            totals[row * (graphs + 1) + g] = static_cast<T>(rng() % (limit + 1));
+    return totals;
+}
+
+template <class T>
+void expect_one_scan_equals_three(const cuda::ContextPtr& ctx, cudaStream_t stream, u64 graphs, u64 limit, std::mt19937_64& rng)
+{
+    const bool wide = sizeof(T) == 8;
+    const u64 row = graphs + 1, length = 3 * row;
+    const std::vector<T> totals = random_totals<T>(graphs, limit, rng);
+    cuda::DeviceBuffer device(ctx, length * sizeof(T), stream);
+    cuda::DeviceBuffer temp(ctx, std::max<u64>(cuda::totals_scan_temp_bytes(length, wide), 1), stream);
+    cuda::check(cudaMemcpyAsync(device.data(), totals.data(), length * sizeof(T), cudaMemcpyHostToDevice, stream), "H2D");
+    cuda::check(cuda::launch_totals_scan(device.data(), length, wide, temp.data(), temp.size(), stream), "scan");
+    std::vector<T> scanned(length);
+    cuda::check(cudaMemcpyAsync(scanned.data(), device.data(), length * sizeof(T), cudaMemcpyDeviceToHost, stream), "D2H");
+    cuda::check(cudaStreamSynchronize(stream), "sync");
+    // three separate scans, with the bases of the earlier rows added back
+    T base = 0;
+    for (u64 r = 0; r < 3; ++r)
+    {
+        std::vector<T> separate(totals.begin() + r * row, totals.begin() + (r + 1) * row);
+        std::inclusive_scan(separate.begin(), separate.end(), separate.begin());
+        for (u64 g = 0; g < row; ++g)
+            ASSERT_EQ(scanned[r * row + g] - base, separate[g]) << "row " << r << " graph " << g;
+        base = scanned[r * row + graphs];
+    }
+}
+
+TEST(DeviceEncoder, OneScanOfTheTotalsGivesTheOffsetsOfThreeScans)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    std::mt19937_64 rng(7);
+    for (const u64 graphs : {u64{1}, u64{5}, u64{999}, u64{70000}})
+    {
+        SCOPED_TRACE(graphs);
+        expect_one_scan_equals_three<u32>(ctx, stream, graphs, std::numeric_limits<u32>::max() / (3 * (graphs + 1)), rng);
+        expect_one_scan_equals_three<u64>(ctx, stream, graphs, u64{1} << 36, rng);
+    }
+}
+
+TEST(DeviceEncoder, TheTotalsScanIsTwoKernels)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const u64 graphs : {u64{1}, u64{64}, u64{1000}, u64{100000}})
+        for (const bool wide : {false, true})
+        {
+            const u64 length = 3 * (graphs + 1);
+            cuda::DeviceBuffer totals(ctx, length * (wide ? 8 : 4), stream);
+            cuda::DeviceBuffer temp(ctx, std::max<u64>(cuda::totals_scan_temp_bytes(length, wide), 1), stream);
+            EXPECT_EQ(captured_kernels(stream, [&]
+                      { cuda::check(cuda::launch_totals_scan(totals.data(), length, wide, temp.data(), temp.size(), stream), "scan"); }),
+                      2u)
+                << graphs << (wide ? " wide" : " narrow");
         }
 }
 
@@ -516,7 +700,7 @@ TEST(DeviceEncoder, OverflowAndUnsupportedLayoutsAreRejectedBeforeAllocation)
     EXPECT_THROW((void)cuda::scratch_layout({2, 0, 0}, {0, 0, 0, huge}, encoding::Layout::Graph), std::overflow_error);
 }
 
-std::shared_ptr<const encoding::FlatEncoder> blocks_encoder(encoding::IndexType index = encoding::IndexType::I32)
+std::shared_ptr<const encoding::FlatEncoder> blocks_encoder(encoding::IndexType index)
 {
     const std::vector<TaskPtr> tasks = load_tasks("pddl/blocks", {"smedium", "probBLOCKS-8-0"});
     if (tasks.empty())
@@ -800,6 +984,84 @@ TEST(DeviceEncoder, ScratchFreeWaitsForTheAcquiredStream)
     ctx->synchronize();
 }
 
+TEST(DeviceEncoder, AFailedFirstReserveLeavesTheStreamUnreserved)
+{
+    SKIP_WITHOUT_GPU();
+    const std::vector<TaskPtr> tasks = load_tasks("pddl/blocks", {"smedium", "probBLOCKS-8-0"});
+    if (tasks.empty())
+        GTEST_SKIP() << "no PDDL data";
+    const auto options = test::encoder_options();
+    const auto small = encoding::FlatEncoder::create(rl::TaskTable::create({tasks[0]}), options);
+    const auto grown = encoding::FlatEncoder::create(rl::TaskTable::create(tasks), options);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, small);
+    // far beyond the pool of the context
+    EXPECT_THROW(device.reserve(u64{1} << 28, stream), std::exception);
+    EXPECT_EQ(device.reserved(stream), cuda::BatchShape{});
+    EXPECT_EQ(device.reserved_bytes(stream), 0u);
+    EXPECT_TRUE(device.refresh(grown));
+    EXPECT_EQ(device.reserved_bytes(stream), 0u);
+    try
+    {
+        (void)device.acquire(stream);
+        ADD_FAILURE() << "acquire succeeded without a reservation";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("reserve scratch on this stream before acquire"), std::string::npos) << e.what();
+    }
+    device.reserve(10, stream);
+    EXPECT_NO_THROW((void)device.acquire(stream));
+}
+
+TEST(DeviceEncoder, ReleasingAStreamFreesItsScratchAfterItsLastWork)
+{
+    SKIP_WITHOUT_GPU();
+    const auto encoder = blocks_encoder();
+    ASSERT_TRUE(encoder);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(1000, stream);
+    ctx->synchronize();
+    {
+        StreamGate gate(stream);
+        { auto work = device.acquire(stream); }
+        device.release(stream);
+        expect_blocked(ctx);
+        EXPECT_EQ(device.reserved_bytes(stream), 0u);
+        EXPECT_THROW((void)device.acquire(stream), std::invalid_argument);
+    }
+    ctx->synchronize();
+    device.reserve(10, stream);  // the stream reserves again
+    EXPECT_NO_THROW((void)device.acquire(stream));
+}
+
+TEST(DeviceEncoder, WorkOnAnotherStreamIsOrderedIntoTheAcquiredStream)
+{
+    SKIP_WITHOUT_GPU();
+    const auto encoder = blocks_encoder();
+    ASSERT_TRUE(encoder);
+    const auto ctx = device_context();
+    cuda::Stream stream, other;
+    auto device = std::make_unique<cuda::DeviceEncoder>(ctx, encoder);
+    device->reserve(1000, stream);
+    ctx->synchronize();
+    {
+        StreamGate gate(other);  // the replays run here
+        cuda::Event replayed;
+        replayed.record(other);
+        {
+            auto work = device->acquire(stream);
+            replayed.wait_on(work.stream());  // the acquisition's stream waits before the release
+        }
+        device.reset();
+        expect_blocked(ctx);
+    }
+    ctx->synchronize();
+}
+
 // ------------------------------------------------------------------------------------------------ encoder
 
 TEST(DeviceEncoder, GrowsWithItsTable)
@@ -814,7 +1076,7 @@ TEST(DeviceEncoder, GrowsWithItsTable)
     cuda::DeviceEncoder device(device_context(), small);
     const u64 entities = device.bounds().entities;
     EXPECT_TRUE(device.refresh(grown));
-    EXPECT_EQ(device.context().uploads(), 2u);
+    EXPECT_EQ(device.context().generation(), 2u);
     EXPECT_EQ(device.context().num_instances(), 2u);
     EXPECT_GE(device.bounds().entities, entities);
     EXPECT_FALSE(device.refresh(grown));
