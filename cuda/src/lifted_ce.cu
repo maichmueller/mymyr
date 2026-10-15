@@ -2,7 +2,7 @@
 // write kernels of lifted.cu instantiated with the conditional-effect sub-plans at the leaf (RowWriter<WB, OW>). The
 // instantiations are spread over units of their own by row width (this one: WB = 4; lifted_ce16.cu, lifted_ce64.cu, lifted_wide_ce.cu),
 // so that nvcc builds them in parallel with each other and with lifted.cu.
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

@@ -2,7 +2,7 @@
 // warp) per state; the costs by Jacobi sweeps of the relaxed Bellman-Ford update or by the bucketed frontier (a
 // generalized Dijkstra: precondition counters, the cheapest unsettled propositions settled per round), then h_FF's
 // supporter levels (none for uniform costs: the smallest tight achievers) and the relaxed plan. Compiled by nvcc as
-// C++20; includes only the device-code subset.
+// C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/heuristics_kernels.hpp"
 

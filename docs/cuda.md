@@ -1,8 +1,33 @@
 # CUDA
 
-The optional CUDA backend builds with CUDA Toolkit 13.0 and needs an NVIDIA GPU at runtime. Python wheels
-contain the CPU backend only. For a source build, set `MYMYR_CUDA=ON` and `CMAKE_CUDA_COMPILER` during the CMake
-configure or Python package build.
+The optional CUDA backend needs an NVIDIA GPU at runtime. Python wheels contain the CPU backend only. For a source
+build, set `MYMYR_CUDA=ON` and `CMAKE_CUDA_COMPILER` during the CMake configure or Python package build.
+
+## Building
+
+The device code is C++23, compiled by nvcc with the project's GCC 16 as its host compiler (the host code stays C++26).
+The configure step refuses an older setup with a message:
+
+- CUDA Toolkit 13.4 or newer (nvcc 13.4 is the first to accept GCC 16 and `-std=c++23` in both compilation passes),
+  with the CUDA runtime and CCCL headers;
+- CMake 4.4 or newer (the first to map CUDA C++23 to nvcc's flag; `pip install "cmake>=4.4"` provides it).
+
+nvcc's host compiler is the C++ compiler when that is GCC; `CMAKE_CUDA_HOST_COMPILER` or the `CUDAHOSTCXX` environment
+variable choose another. Its standard library must be the one the C++ side uses, because both link into one binary.
+`CMAKE_CUDA_ARCHITECTURES` defaults to `native` (SASS for the visible GPU). For a build that runs on several GPU
+generations, list real architectures, and a virtual one only for the newest, e.g.
+`-DCMAKE_CUDA_ARCHITECTURES="80-real;86-real;89-real;90-real;100-real;120"`: `120` adds SASS and PTX for sm_120.
+
+The test that checks the device Philox generator against cuRAND's is built when the toolkit provides cuRAND's headers
+(`libcurand-dev-13-4` on Debian and Ubuntu); without them it is not built, and the library does not need them.
+
+## Driver
+
+Device code built with a CUDA 13.x toolkit runs on NVIDIA drivers 580 or newer through CUDA minor-version
+compatibility, as SASS for the GPU's own architecture. PTX is compiled by the driver at load time and needs a driver
+that knows the toolkit's PTX version (newer than the minimum for SASS), so build SASS for every GPU generation you
+run on and keep PTX only as the forward-compatible fallback for GPUs newer than the build. A GPU that has neither
+matching SASS nor loadable PTX fails at the first device call.
 
 Device operations include task upload and smoke kernels, BrFS, multi-IW and rollouts; batched grounded h-max, h-add,
 h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for `mymyr.rl.expand`. Device arrays can exchange

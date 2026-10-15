@@ -34,7 +34,7 @@
 // The kernels live in lifted.cu, lifted_ce*.cu (per row width), lifted_deep*.cu and axioms.cu (cuda/src; shared device
 // code in lifted_device.cuh).
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20; POD, raw pointers and cudaStream_t.
+// Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/rl/task_arrays_view.hpp"
 

@@ -4,7 +4,7 @@
 // thread emits the bindings of one (state, schema) in exactly the CPU engine's order, witnesses included. This unit holds
 // the views, the counts, the rows of schemas without conditional effects (their rows: lifted_ce.cu), the goal tests,
 // the host-row placement, the scans, the padding and the picks.
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_env.cuh"
 

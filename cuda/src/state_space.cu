@@ -1,4 +1,4 @@
-// The kernels of the device state spaces (state_space_kernels.hpp). Compiled by nvcc as C++20; device-code subset.
+// The kernels of the device state spaces (state_space_kernels.hpp). Compiled by nvcc as C++23; device-code subset.
 
 #include "state_space_kernels.hpp"
 

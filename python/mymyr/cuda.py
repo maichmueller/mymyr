@@ -66,7 +66,7 @@ try:
 except ImportError as e:  # pragma: no cover - depends on the build
     raise ImportError(
         "mymyr.cuda: this mymyr was built without the CUDA backend (rebuild with CMAKE_ARGS=\"-DMYMYR_CUDA=ON "
-        "-DCMAKE_CUDA_COMPILER=/path/to/nvcc\")"
+        "-DCMAKE_CUDA_COMPILER=/path/to/nvcc\", CUDA 13.4 or newer)"
     ) from e
 
 Context = _impl.Context

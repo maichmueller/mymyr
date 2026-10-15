@@ -3,7 +3,7 @@
 // launch_count_keys, launch_pick and their multi-instance forms), shared by lifted.cu (one instance: the task view is a
 // kernel parameter) and lifted_multi*.cu (several instances: each thread resolves its row's instance view). The
 // template flag M selects the form; everything else is the same code. Internal: included by .cu files only (nvcc,
-// C++20; the device-code subset).
+// C++23; the device-code subset).
 
 #include "lifted_device.cuh"
 

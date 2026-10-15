@@ -10,7 +10,7 @@
 //
 // Host and device run the same code (MYMYR_HD; a POD header of the device-code subset): the host reference
 // is the device result. No <random> engine or distribution is involved. Known-answer tests against Random123's
-// vectors and cuRAND's curand_Philox4x32_10 are in tests/cpp/rl/test_env.cpp and tests/cuda/test_device_env.cpp.
+// vectors and cuRAND's curand_Philox4x32_10 are in tests/cpp/rl/test_env.cpp and tests/cuda/test_device_env.cpp and tests/cuda/test_curand_philox.cpp.
 //
 // A uniform index below n is the high word of the 64-bit draw times n (Lemire's multiply-shift without the rejection
 // step): P(j) differs from 1/n by less than n / 2^64, and the choice needs no loop.

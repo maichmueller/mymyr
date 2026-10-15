@@ -1,4 +1,4 @@
-// The kernels of the multi-search IW driver (include/mymyr/cuda/multi_iw_kernels.hpp). Compiled by nvcc as C++20;
+// The kernels of the multi-search IW driver (include/mymyr/cuda/multi_iw_kernels.hpp). Compiled by nvcc as C++23;
 // includes only the device-code subset.
 //
 // Determinism: every decision is a function of the candidate order. Atomics pick hash slots and compute minima and

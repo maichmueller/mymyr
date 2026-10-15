@@ -4,8 +4,8 @@
 // and the tests) and on the device (MYMYR_HD): a view holds typed pointers into one block, which is either the host
 // ArrayBundle or its uploaded copy (cuda::DeviceTask), so nothing in the layout is a pointer.
 //
-// This header is part of the device-code subset: it must compile as C++20 under nvcc, so it includes only
-// core/types.hpp and the numeric program primitives (C++20 scalar math and bit casts).
+// This header is part of the device-code subset: it must compile as C++23 under nvcc, so it includes only
+// core/types.hpp and the numeric program primitives (C++23 scalar math and bit casts).
 //
 // Section "plan" (version 1) of the export, i.e. what version 2 adds to version 1 (all arrays are prefixed plan_):
 //   plan_slot_of        u32 [atom_total + 1]  the slot table snapshot (cid -> slot; k_none: no slot; entry atom_total

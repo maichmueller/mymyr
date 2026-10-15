@@ -1,5 +1,5 @@
 #pragma once
-// A single-pass exclusive scan over a count read on the device (cuda/src only, compiled by nvcc as C++20).
+// A single-pass exclusive scan over a count read on the device (cuda/src only, compiled by nvcc as C++23).
 //
 // One block per tile of k_tile items; the tiles chain by decoupled look-back: a tile publishes its aggregate, sums its
 // predecessors' (a warp reads 32 at a time) until it meets an inclusive prefix, then publishes its own prefix. Tiles

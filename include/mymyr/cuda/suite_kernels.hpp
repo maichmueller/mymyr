@@ -4,7 +4,7 @@
 // its batch positions (a gathered domain writes at its batch positions itself: cuda::DeviceExpander::RowMap).
 // Destination-passing launchers over POD parameters.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20; POD, raw pointers and cudaStream_t.
+// Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/core/types.hpp"
 

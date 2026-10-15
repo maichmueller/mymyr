@@ -1,4 +1,4 @@
-// The device-side scan of the relational encoder's totals (include/mymyr/cuda/encoding.hpp). Compiled by nvcc as C++20.
+// The device-side scan of the relational encoder's totals (include/mymyr/cuda/encoding.hpp). Compiled by nvcc as C++23.
 
 #include "mymyr/cuda/encoding_scan.hpp"
 #include <cuda_runtime_api.h>
