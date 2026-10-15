@@ -13,9 +13,9 @@ import pytest
 import mymyr
 from mymyr import encoding, rl
 from encoding_parity import (
-    COMPARED_LANES, COMPARED_SOURCES, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
-    HELPER, Context, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    native_graph, random_walk_batch, random_walk_rows, read, replay, run_case,
+    COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
+    HELPER, Context, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
+    native_graph, parse_literal, random_walk_batch, random_walk_rows, read, replay, run_case,
 )
 
 IDS = [p.stem[:3] for p in FIXTURES]
@@ -46,11 +46,13 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
     for path in FIXTURES:
         fixture = read(path)
         for config in SUPPORTED:
+            if config not in fixture["configs"]:
+                continue
             catalog = fixture["catalogs"][fixture["configs"][config]["catalog"]]
             found |= set(catalog["sources"]) - set(COMPARED_SOURCES)
     assert found == set(PENDING_SOURCES)
     assert set(COMPARED_SOURCES) & set(PENDING_SOURCES) == set()
-    assert COMPARED_LANES == ("fluent", "static", "derived")
+    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation")
 
 
 # ------------------------------------------------------------------------------------------------ parity
@@ -97,8 +99,10 @@ def test_without_the_registry_the_exact_comparison_finds_the_differences():
     assert compare(expected, actual, context) == []
     kinds = {m.kind for m in compare(expected, actual, context, allowed=())}
     assert kinds == {"catalog", "entity", "tuple"}
-    for name in NAMES:
-        assert compare(expected, actual, context, [n for n in NAMES if n != name]), name
+    for difference in REGISTRY:
+        if any(config == "C1" for _, config in difference.cases):
+            others = [n for n in NAMES if n != difference.name]
+            assert compare(expected, actual, context, others), difference.name
 
 
 # ------------------------------------------------------------------------------------------------ the harness itself
@@ -237,6 +241,50 @@ def test_registered_differences_do_not_hide_mutations_of_the_native_graph(path):
     assert {m.kind for m in compare(expected, lost, context)} == {"catalog", "tuple"}
 
 
+def goal_case(config, state="s1"):
+    fixture, task = load(prefix_path("f03"))
+    records = [r for r in fixture["encodings"] if r["config"] == config]
+    states = {s["id"]: s for s in fixture["states"]}
+    rows = [replay(task, states[r["state"]]["path"]) for r in records]
+    encoder, placed = encode_records(task, config, rows, records)
+    index = [r["state"] for r in records].index(state)
+    batch, row = placed[index]
+    goals = records[index]["inputs"].get("goals")
+    context = Context(fixture, task, states[state], config, None if goals is None else tuple(goals))
+    expected = fixture_graph(fixture, records[index], COMPARED_SOURCES)
+    return expected, native_graph(encoder, batch, row, [task], COMPARED_LANES), context
+
+
+@pytest.mark.parametrize("config", ["C1", "C2", "C3"])
+def test_goal_tuples_and_goal_entities_are_compared(config):
+    expected, actual, context = goal_case(config)
+    assert compare(expected, actual, context) == []
+    goal_relations = [n for n in actual.tuples if n.endswith(("[g]", "[sat]", "[unsat]"))]
+    assert any(n.endswith("[g]") for n in goal_relations) and any(n.endswith("[g][sat]") for n in goal_relations)
+    assert (config == "C2") == any(n.endswith("[unsat]") for n in goal_relations)
+    for name in goal_relations:
+        dropped = copy(actual)
+        dropped.tuples[name] = dropped.tuples[name][1:]
+        assert {(m.kind, m.where) for m in compare(expected, dropped, context)} == {("tuple", name)}
+    goals = [e for e in actual.entities if e[0] == "goal"]
+    assert bool(goals) == (config == "C3")
+    for i, (role, name) in enumerate(actual.entities):
+        if role == "goal":
+            renamed = copy(actual)
+            renamed.entities[i] = (role, name + "_renamed")
+            assert {m.kind for m in compare(expected, renamed, context)} >= {"entity"}
+            break
+
+
+def test_the_goal_given_with_a_record_is_the_goal_of_its_graph():
+    expected, actual, context = goal_case("C3", "s1")
+    assert context.goals is not None
+    named = {name for role, name in actual.entities if role == "goal"}
+    assert named == {f"[{'+' if p else '-'}]({n} {' '.join(a)})[g]" for p, n, a in map(parse_literal, context.goals)}
+    expected, actual, context = goal_case("C3", "s0")
+    assert context.goals is None
+
+
 def nullary_cases():
     for path in FIXTURES:
         if not hasattr(mymyr, "Domain"):
@@ -365,8 +413,10 @@ def test_equality_is_excused_only_while_the_config_does_not_ask_for_it(monkeypat
     monkeypatch.setitem(SUPPORTED, "C1", {**SUPPORTED["C1"], "equality": True})
     assert {(m.kind, m.where) for m in compare(expected, actual, context)} >= {("catalog", None), ("tuple", "=")}
     with_equality = copy(actual)
-    with_equality.catalog = sorted(actual.catalog + [("=", 2)], key=lambda c: c[0].encode())
-    with_equality.tuples["="] = list(expected.tuples["="])
+    equality = [c for c in expected.catalog if base_predicate(c[0]) == "="]
+    assert ("=", 2) in equality and len(equality) > 1
+    with_equality.catalog = sorted(actual.catalog + equality, key=lambda c: c[0].encode())
+    with_equality.tuples.update({n: list(ts) for n, ts in expected.tuples.items() if base_predicate(n) == "="})
     assert compare(expected, with_equality, context) == []
 
 

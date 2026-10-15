@@ -162,7 +162,7 @@ def test_a_forall_goal_is_expanded_and_goal_complete_is_per_instance():
 def test_the_constant_part_is_emitted_for_a_statically_false_goal():
     task = goals_task("static_false")
     assert task.encoding_goal_unsatisfiable
-    encoder = encoding.FlatRelationEncoder(task)
+    encoder = encoding.FlatRelationEncoder(task, goal_derivations=("plain", "satisfied", "unsatisfied"))
     batch = encoder.encode([task.initial_state])
     heavy = encoder.relation_id
     assert batch.relation_counts[0, heavy("[+]heavy[g]")] == 1
@@ -206,7 +206,7 @@ def masks_to_literals(task, metadata, pos, neg):
     for mask, positive in ((pos, True), (neg, False)):
         for slot in range(len(metadata["atom_pred"])):
             if (int(mask[slot // 64]) >> (slot % 64)) & 1:
-                args = tuple(int(a) for a in metadata["atom_args_padded"][slot] if a >= 0)
+                args = tuple(int(a) for a in metadata["atom_args"][slot] if a >= 0)
                 out.append((positive, predicates[int(metadata["atom_pred"][slot])].name, args))
     return out
 
@@ -259,7 +259,7 @@ def test_goals_of_the_rows_over_derived_slots():
     dpos = np.zeros((len(states), max(1, (derived + 63) // 64)), np.uint64)
     dpos[:, 0] = 1
     dneg = np.zeros_like(dpos)
-    encoder = encoding.FlatRelationEncoder(task)
+    encoder = encoding.FlatRelationEncoder(task, goal_derivations=("plain", "satisfied", "unsatisfied"))
     batch = encoder.encode(states, goals=(zeros, zeros, dpos, dneg))
     name = task.formalism.predicates[int(metadata["derived_pred"][0])].name
     plain = encoder.relation_id(f"[+]{name}[g]")
