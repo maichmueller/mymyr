@@ -32,8 +32,9 @@
 //
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
-// layouts are a permutation of each other: task_ids, num_objects, entity_offsets, the entity arrays, relation_counts
-// and every cell's tuples (their order and their entity ids) are equal; relation_offsets and relation_arg_offsets are
+// layouts are a permutation of each other: task_ids, num_objects, entity_offsets, entity_role, relation_counts, the
+// target arrays, goal_complete and every cell's tuples (their order and their entity ids) are equal, and so is
+// entity_ref except the references of goal entities, which index the tuples in layout order; relation_offsets and relation_arg_offsets are
 // the exclusive prefix sums of the cells' tuple and argument counts in segment order, and relation_args is the
 // concatenation of the cells' arguments in segment order. So the cell at relation-major segment r * G + g is the cell
 // at graph-major segment g * R + r.

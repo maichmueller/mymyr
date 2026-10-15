@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <random>
@@ -752,5 +753,51 @@ TEST(EncoderGoals, TheFingerprintSeparatesTargets)
     EXPECT_TRUE(with->has_goal_complete());
     EXPECT_TRUE(with->has_targets());
     EXPECT_FALSE(without->has_targets());
+}
+
+/// A copy of `bundle` whose array `name` has `delta` added to the entry at `index`.
+rl::ArrayBundle with_change(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 delta)
+{
+    rl::ArrayBundle::Builder out;
+    for (const rl::ArrayInfo& info : bundle.arrays())
+    {
+        const auto* first = static_cast<const std::byte*>(bundle.data(info));
+        std::vector<std::byte> bytes(first, first + info.elements() * rl::dtype_bytes(info.dtype));
+        if (info.name == name)
+        {
+            std::byte* at = bytes.data() + index * rl::dtype_bytes(info.dtype);
+            switch (info.dtype)
+            {
+                case rl::DType::U8: at[0] = static_cast<std::byte>(std::to_integer<i64>(at[0]) + delta); break;
+                case rl::DType::I32: { i32 v; std::memcpy(&v, at, 4); v += static_cast<i32>(delta); std::memcpy(at, &v, 4); break; }
+                case rl::DType::I64: { i64 v; std::memcpy(&v, at, 8); v += delta; std::memcpy(at, &v, 8); break; }
+                default: ADD_FAILURE() << "unexpected dtype of " << name;
+            }
+        }
+        out.add_bytes(info.name, info.dtype, info.shape, std::move(bytes), info.words);
+    }
+    for (const auto& [scalar, value] : bundle.scalars())
+        out.scalar(scalar, value);
+    return out.build();
+}
+
+TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
+{
+    const auto table = goals_table();
+    const test::Rows rows = mixed_rows(*table, 2, 5);
+    const auto encoder = FlatEncoder::create(table, goal_options());
+    const auto batch = encoder->encode(input_of(rows));
+    EXPECT_NO_THROW(validate(*batch, encoder->schema()));
+    const std::vector<i64> roles = ints(*batch, "entity_role");
+    const auto goal = static_cast<u64>(std::find(roles.begin(), roles.end(), 2) - roles.begin());
+    ASSERT_LT(goal, roles.size());
+    const auto rejected = [&](const char* array, u64 index, i64 delta)
+    { EXPECT_THROW(validate(with_change(*batch, array, index, delta), encoder->schema()), std::invalid_argument) << array; };
+    rejected("goal_complete", 0, 2);
+    rejected("entity_ref", goal, 1);
+    rejected("entity_role", goal, -2);
+    rejected("target_entity", 0, 1);
+    rejected("target_group", 0, 1);
+    rejected("target_offsets", 1, 1);
 }
 }  // namespace
