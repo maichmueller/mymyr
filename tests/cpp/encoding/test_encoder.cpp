@@ -483,9 +483,9 @@ TEST(EncoderRefusals, OptionsThatAreNotEncodedYet)
             EXPECT_NE(std::string(error.what()).find("is not supported by this encoder yet"), std::string::npos) << error.what();
         }
     };
-    refused([](FlatOptions& o) { o.goal_derivations = {GoalDerivation::Plain}; });
     refused([](FlatOptions& o) { o.max_goal_level = 1; });
     refused([](FlatOptions& o) { o.targets = {TargetSource::Action}; });
+    refused([](FlatOptions& o) { o.goal_derivations = {GoalDerivation::Plain}; o.targets = {TargetSource::Goal, TargetSource::History}; });
     refused([](FlatOptions& o) { o.predicate_virtual_nodes = true; });
     refused([](FlatOptions& o) { o.horizon.mode = HorizonMode::Full; });
     // an invalid combination is reported as such, whether or not the encoder would encode its parts

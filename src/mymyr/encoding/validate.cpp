@@ -147,6 +147,30 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     const u64 total_args = static_cast<u64>(arg_offsets[G * R]);
     const Ints args = ints(*padded_array(batch, "relation_args", itype, total_args, wide));
 
+    const bool stored_complete = schema.has_goal_complete();
+    if (stored_complete != (batch.find("goal_complete") != nullptr))
+        fail(stored_complete ? "goal_complete is missing" : "goal_complete must be omitted: the schema has no goal relations");
+    if (stored_complete)
+    {
+        const auto* info = array(batch, "goal_complete", rl::DType::U8, {g_i64});
+        for (u64 g = 0; g < G; ++g)
+            if (static_cast<const u8*>(batch.data(*info))[g] > 1)
+                fail("goal_complete of graph " + std::to_string(g) + " is neither 0 nor 1");
+    }
+    const bool stored_targets = schema.has_targets();
+    if (stored_targets != (batch.find("target_offsets") != nullptr) || stored_targets != (batch.find("target_entity") != nullptr) ||
+        stored_targets != (batch.find("target_group") != nullptr))
+        fail(stored_targets ? "a target array is missing" : "the target arrays must be omitted: the schema has no targets");
+    Ints target_offsets, target_entity;
+    const u8* target_group = nullptr;
+    if (stored_targets)
+    {
+        target_offsets = ints(*array(batch, "target_offsets", itype, {g_i64 + 1}));
+        const u64 T = static_cast<u64>(target_offsets[G]);
+        target_entity = ints(*padded_array(batch, "target_entity", itype, T, wide));
+        target_group = static_cast<const u8*>(batch.data(*padded_array(batch, "target_group", rl::DType::U8, T, wide)));
+        check_offsets(target_offsets, T, "target_offsets");
+    }
     check_offsets(entity_offsets, E, "entity_offsets");
     check_offsets(tuple_offsets, static_cast<u64>(tuple_offsets[G * R]), "relation_offsets");
     check_offsets(arg_offsets, total_args, "relation_arg_offsets");
@@ -174,6 +198,15 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             if (!is_object && entity_role[e] == k_object)
                 fail("graph " + std::to_string(g) + " has an object after its objects");
         }
+        u32 auxiliaries = 0;
+        for (i64 e = first; e < last; ++e)
+            auxiliaries += role_of(e) == k_auxiliary;
+        if (auxiliaries > 1)
+            fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
+        // The goal entities follow the objects and the auxiliary entity, one per tuple of the plain goal relations with a
+        // goal target, numbered in the order of those relations and of their tuples; each refers to its tuple.
+        const i64 goal_start = first + objects + auxiliaries;
+        i64 goals = 0;
         bool auxiliary_used = false;
         for (u64 r = 0; r < R; ++r)
         {
@@ -186,9 +219,23 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 fail("relation_offsets and relation_counts disagree in " + where);
             if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
+            const bool goal_target = roles.front() == SlotRole::GoalTarget;
             for (u64 t = 0; t < n; ++t)
             {
                 const u64 at = static_cast<u64>(arg_offsets[cell]) + t * arity;
+                if (goal_target)
+                {
+                    const i64 entity = args[at];
+                    if (entity != goal_start + goals)
+                        fail("a tuple of " + where + " does not have the next goal entity");
+                    if (entity_role && entity_ref[entity] != tuple_offsets[cell] + static_cast<i64>(t))
+                        fail("the goal entity of a tuple of " + where + " does not refer to the tuple");
+                    if (stored_targets && (target_offsets[g] + goals >= target_offsets[g + 1] ||
+                                           target_entity[static_cast<u64>(target_offsets[g] + goals)] != entity ||
+                                           target_group[target_offsets[g] + goals] != 0))
+                        fail("the targets of graph " + std::to_string(g) + " do not list its goal entities in order");
+                    ++goals;
+                }
                 for (u32 k = 0; k < arity; ++k)
                 {
                     const i64 id = args[at + k];
@@ -211,11 +258,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 }
             }
         }
-        u32 auxiliaries = 0;
-        for (i64 e = first; e < last; ++e)
-            auxiliaries += role_of(e) == k_auxiliary;
-        if (auxiliaries > 1)
-            fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
+        if (stored_targets && target_offsets[g] + goals != target_offsets[g + 1])
+            fail("graph " + std::to_string(g) + " has targets that are not goal entities");
+        if (schema.has_targets() && last - first != objects + auxiliaries + goals)
+            fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary nor goal entities");
         if ((auxiliaries == 1) != auxiliary_used)
             fail("graph " + std::to_string(g) + (auxiliary_used ? " uses an auxiliary entity it does not have"
                                                                 : " has an auxiliary entity no tuple uses"));

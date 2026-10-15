@@ -34,6 +34,9 @@ struct EncodingHorizonMode
 struct EncodingRootPolicy
 {
 };
+struct EncodingGoals
+{
+};
 struct EncodingEntityArrays
 {
 };
@@ -62,6 +65,13 @@ struct type_caster<mymyr::python::ann::EncodingHorizonMode>
     static constexpr auto Name = const_name("typing.Literal['full', 'delta', 'action']");
 };
 template<>
+struct type_caster<mymyr::python::ann::EncodingGoals>
+{
+    static constexpr auto Name = const_name(
+        "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, "
+        "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
+};
+template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
 {
     static constexpr auto Name = const_name("typing.Literal['include', 'exclude', 'encode_only']");
@@ -78,6 +88,7 @@ using ArrayOut = Arg<ann::Any>;
 using ResultDict = nb::typed<nb::dict, std::string, ann::Any>;
 using TextSequenceArg = Arg<std::vector<std::string>>;
 using DerivedArg = Arg<ann::ArrayLike>;
+using GoalsArg = Arg<ann::EncodingGoals>;
 
 struct PyEncodingSchema
 {
@@ -461,10 +472,10 @@ nb::object batch_array(const PyFlatBatch& batch, const char* name)
 using PoolArg = Arg<PyPool>;
 using CapacitiesArg = std::optional<nb::typed<nb::dict, std::string, std::uint64_t>>;
 
-encoding::FlatCapacities capacities_of(const nb::dict& value)
+encoding::FlatCapacities capacities_of(const nb::dict& value, bool has_targets)
 {
     encoding::FlatCapacities out;
-    bool entities = false, tuples = false, args = false;
+    bool entities = false, tuples = false, args = false, targets = false;
     for (auto [key, item] : value)
     {
         const std::string name = text_of(key, "capacities key");
@@ -474,22 +485,77 @@ encoding::FlatCapacities capacities_of(const nb::dict& value)
             out.tuples = int_arg<u64>(item, "capacities['tuples']"), tuples = true;
         else if (name == "args")
             out.args = int_arg<u64>(item, "capacities['args']"), args = true;
+        else if (name == "targets")
+            out.targets = int_arg<u64>(item, "capacities['targets']"), targets = true;
         else
             throw nb::value_error(("mymyr: encoding: capacities has the unknown key '" + name +
-                                   "'; the keys are 'entities', 'tuples' and 'args'")
+                                   "'; the keys are 'entities', 'tuples', 'args' and 'targets'")
                                       .c_str());
     }
     if (!(entities && tuples && args))
         throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'tuples' and 'args'");
+    if (!targets && has_targets)
+        throw nb::value_error("mymyr: encoding: the schema has targets: capacities needs the key 'targets' as well");
     return out;
 }
 
+/// The goal masks of the rows from `goals`, a pair (goal_pos, goal_neg) or a quadruple that adds the masks over the
+/// derived slots: arrays [N, W] or [1, W] (one goal for every row) of 64-bit words or 32-bit halves.
+void import_goals(rlimp::Imports& imports, nb::handle goals, u64 rows, encoding::EncodeInput& input)
+{
+    constexpr const char* k_shape = "mymyr: encoding: goals must be (goal_pos, goal_neg) or (goal_pos, goal_neg, "
+                                    "goal_derived_pos, goal_derived_neg)";
+    if (nb::isinstance<nb::str>(goals) || !PyObject_HasAttrString(goals.ptr(), "__len__"))
+        throw nb::type_error(k_shape);
+    const usize size = nb::len(goals);
+    if (size != 2 && size != 4)
+        throw nb::value_error(k_shape);
+    static constexpr const char* names[] = {"goals[0] (goal_pos)", "goals[1] (goal_neg)", "goals[2] (goal_derived_pos)",
+                                            "goals[3] (goal_derived_neg)"};
+    const u64* masks[4] = {};
+    u64 strides[2] = {};
+    u32 widths[2] = {};
+    i64 extents[2] = {};
+    for (usize k = 0; k < size; ++k)
+    {
+        std::vector<i64> lead;
+        u32 words = 0;
+        masks[k] = imports.words_nd(goals[k], names[k], {-1}, false, lead, words);
+        if (!masks[k])
+            throw nb::type_error((std::string("mymyr: encoding: ") + names[k] + " must be an array, not None").c_str());
+        if (lead[0] != 1 && static_cast<u64>(lead[0]) != rows)
+            throw nb::value_error((std::string("mymyr: encoding: ") + names[k] + " has " + std::to_string(lead[0]) +
+                                   " rows: one per state (" + std::to_string(rows) + ") or a single shared row")
+                                      .c_str());
+        const usize pair = k / 2;
+        if (k % 2 == 1 && (widths[pair] != words || extents[pair] != lead[0]))
+            throw nb::value_error(
+                (std::string("mymyr: encoding: ") + names[k] + " has another shape than " + names[k - 1]).c_str());
+        widths[pair] = words;
+        extents[pair] = lead[0];
+        strides[pair] = (lead[0] == 1 && rows != 1) ? 0 : words;
+    }
+    input.goal_pos = masks[0];
+    input.goal_neg = masks[1];
+    input.goal_words = widths[0];
+    input.goal_stride = strides[0];
+    if (size == 4)
+    {
+        input.goal_derived_pos = masks[2];
+        input.goal_derived_neg = masks[3];
+        input.goal_derived_words = widths[1];
+        input.goal_derived_stride = strides[1];
+    }
+}
+
 PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
-                   Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in, CapacitiesArg capacities_in)
+                   GoalsArg goals_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
+                   CapacitiesArg capacities_in)
 {
     const u32 threads = threads_arg(threads_in);
     const std::optional<encoding::FlatCapacities> capacities =
-        capacities_in ? std::optional(capacities_of(*capacities_in)) : std::nullopt;
+        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema().has_targets()))
+                      : std::nullopt;
 
     StateBatch states = import_states(state_arg, packed_words(state_arg));
     std::vector<i32> ids_copy;
@@ -522,6 +588,8 @@ PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_id
     input.derived =
         imports.words_nd(derived_arg, "derived", {static_cast<i64>(states.view.rows)}, false, rows, derived_words);
     input.derived_stride = derived_words;
+    if (!goals_arg.is_none())
+        import_goals(imports, goals_arg, states.view.rows, input);
 
     PyFlatBatch output;
     output.framework = parse_framework(framework, state_arg);
@@ -566,6 +634,16 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "'relation') and holds the tuples [relation_offsets[s], relation_offsets[s + 1])."},
     {"relation_arg_offsets", "index [G * R + 1]: the same offsets into relation_args."},
     {"relation_args", "index [A]: the entities of the tuples, tuple after tuple, `arity` per tuple of the relation."},
+    {"goal_complete",
+     "uint8 [G]: 1 iff the goal relations of the graph hold its whole goal: its instance's goal when every conjunct could "
+     "be expanded into literals (Task.encoding_goal_complete), always for a goal given with `goals`. Absent when the "
+     "schema has no goal relations."},
+    {"target_offsets",
+     "index [G + 1]: graph g's targets are [target_offsets[g], target_offsets[g + 1]). Absent without target_sources."},
+    {"target_entity",
+     "index [T]: the entity of each target, graph after graph in entity order. Absent like target_offsets."},
+    {"target_group",
+     "uint8 [T]: the group of each target, an index into target_group_names (0: goal). Absent like target_offsets."},
 };
 }  // namespace
 
@@ -612,6 +690,7 @@ void bind_encoding(nb::module_& parent)
                 out["entities"] = self.sizes->entities;
                 out["tuples"] = self.sizes->tuples;
                 out["args"] = self.sizes->args;
+                out["targets"] = self.sizes->targets;
                 out["overflow"] = self.sizes->overflowed();
                 out["capacity_overflow"] = (self.sizes->overflow & encoding::k_overflow_capacity) != 0;
                 out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
@@ -640,8 +719,8 @@ void bind_encoding(nb::module_& parent)
         "fluent, derived and static atoms. A graph holds nothing that its state and instance do not have.");
     static const std::string encoder_doc =
         std::string("The encoder of a Task, TaskHandle or one-domain TaskTable under the options of EncodingSchema. "
-                    "Options that this encoder does not encode raise ValueError (\"mymyr: encoding: ...\"); among them "
-                    "are goal derivations, whose default is therefore refused: pass `goal_derivations=()`. ") +
+                    "Options that this encoder does not encode (subgoal levels, subgoal, action and history targets, "
+                    "predicate virtual nodes, horizons) raise ValueError (\"mymyr: encoding: ...\"). ") +
         k_option_doc;
     define_init(
         encoder_class,
@@ -655,18 +734,24 @@ void bind_encoding(nb::module_& parent)
             "schema", [](const PyFlatEncoder& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
             "The EncodingSchema of the encoder.")
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
-             "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(), "capacities"_a = nb::none(),
+             "goals"_a = nb::none(), "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(),
+             "capacities"_a = nb::none(),
              "Encodes the rows `states` (an array of state words [N, W] of any DLPack framework, u64 words or u32 halves "
              "[N, 2W], or a State or list of States) into one graph each. task_ids: the instance of each row (required "
              "for a table of several instances). derived: the derived atom words of each row [N, D] (default: evaluated "
-             "here). The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
+             "here). goals: a goal for every row instead of its instance's goal, (goal_pos, goal_neg) or "
+             "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
+             "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
+             "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
              "one pool of that size, rebuilt when the count changes. pool: a mymyr.rl.ThreadPool to use instead (it "
              "takes precedence over threads; one batch at a time runs on it). The result does not depend on either. "
-             "capacities: a dict with the keys 'entities', 'tuples' and 'args'; the batch then has relation_args and "
-             "the entity arrays of exactly the capacities' sizes (the first sizes['entities'] / sizes['args'] entries "
-             "hold the encoding, the rest is zero) and `sizes` reports the true sizes. A batch that does not fit its "
+             "capacities: a dict with the keys 'entities', 'tuples', 'args' (and 'targets' with target_sources); the "
+             "batch then has relation_args, the entity arrays and the target arrays of exactly the capacities' sizes "
+             "(the first sizes['entities'] / sizes['args'] / sizes['targets'] entries hold the encoding, the rest is "
+             "zero) and `sizes` reports the true sizes. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
              "set; nothing raises.");
 }
