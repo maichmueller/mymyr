@@ -61,6 +61,12 @@ set_target_properties(mymyr_cuda PROPERTIES
     CUDA_EXTENSIONS OFF
     CUDA_RUNTIME_LIBRARY Static
     POSITION_INDEPENDENT_CODE ON)
+# The largest device translation units need several GB each in nvcc's front end and ptxas. With Ninja,
+# -DCMAKE_JOB_POOLS=cuda_compile=<n> runs at most n of the library's compiles at a time while the rest of the build
+# keeps its parallelism.
+if(CMAKE_JOB_POOLS MATCHES "(^|;)cuda_compile=[0-9]+")
+    set_target_properties(mymyr_cuda PROPERTIES JOB_POOL_COMPILE cuda_compile)
+endif()
 target_link_libraries(mymyr_cuda PUBLIC mymyr::core mymyr::encoding CUDA::cudart_static
     PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
 target_compile_options(mymyr_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)

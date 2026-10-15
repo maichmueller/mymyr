@@ -163,14 +163,15 @@ jobs:
   # The CUDA backend (C++23 device code, nvcc 13.4 with GCC 16 as its host compiler) compiles without a GPU to run it
   # on (about 35 minutes for PTX). Pull requests compile PTX for sm_80 (the front end and all template instantiations);
   # main and manual runs also assemble SASS, one job per architecture (sm_80, sm_90), where ptxas needs about half an
-  # hour for the largest translation unit.
+  # hour for the largest translation unit. The largest units peak at 5 to 8 GB (nvcc's front end and ptxas), so with the
+  # 16 GB of a hosted runner the CUDA compiles run one at a time (a job pool; the C++ compiles stay parallel).
   cuda-build:
     name: Linux CUDA 13.4 compile-only, ${{ matrix.name }}
     needs: deps
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     container: gcc:16.1@sha256:d8dec2859f964120119abd1380563247bf02c5d64f5bcdea496dbace1f48c6f0
-    timeout-minutes: 150
+    timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON((github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && '{"include":[{"name":"PTX sm_80","archs":"80-virtual"},{"name":"SASS sm_80","archs":"80"},{"name":"SASS sm_90","archs":"90"}]}' || '{"include":[{"name":"PTX sm_80","archs":"80-virtual"}]}') }}
@@ -201,6 +202,7 @@ jobs:
             -DMYMYR_DEPS_PREFIX="$GITHUB_WORKSPACE/.ci-deps/release" \
             -DMYMYR_CUDA=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.4/bin/nvcc \
             -DCMAKE_CUDA_HOST_COMPILER="$(command -v g++)" \
+            -DCMAKE_JOB_POOLS=cuda_compile=1 \
             -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.archs }}"
       - name: Build
         run: cmake --build build/cuda 2>&1 | tee build/cuda/build.log
