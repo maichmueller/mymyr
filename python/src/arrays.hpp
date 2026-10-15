@@ -23,6 +23,7 @@
 // after the producer's stream handoff (CUDA builds); device memory raises a TypeError, since these operations run on
 // the CPU until the device expand.
 
+#include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/checked.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/expand.hpp"
@@ -61,7 +62,7 @@ struct WordEncoding
 [[nodiscard]] const char* framework_name(Framework fw);
 
 /// A shared, 64-byte aligned block of bytes. The contents start unspecified: the memory is recycled through a small
-/// per-thread cache (fresh memory costs a kernel page fault per 4 KB page), so writers fill everything they export.
+/// block cache (fresh memory costs a kernel page fault per 4 KB page), so writers fill everything they export.
 class Block
 {
 public:
@@ -69,13 +70,11 @@ public:
     Block() = default;
     Block(const Block&) = delete;
     Block& operator=(const Block&) = delete;
-    ~Block();
     [[nodiscard]] std::byte* data() noexcept { return m_base; }
     [[nodiscard]] u64 size() const noexcept { return m_size; }
 
 private:
-    std::unique_ptr<std::byte[]> m_raw;
-    u64 m_capacity = 0;  // bytes in m_raw
+    HostBlock m_block;
     std::byte* m_base = nullptr;
     u64 m_size = 0;
 };

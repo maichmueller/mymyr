@@ -453,7 +453,7 @@ nb::object batch_array(const PyFlatBatch& batch, const char* name)
     spec.owner = std::shared_ptr<const void>(batch.arrays, batch.arrays->data(*info));
     spec.data = batch.arrays->data(*info);
     spec.dtype = info->dtype;
-    spec.shape = info->shape;
+    spec.shape = info->shape.vec();
     spec.readonly = true;
     return export_array(std::move(spec), batch.framework, default_words(batch.framework));
 }

@@ -20,6 +20,7 @@ add_executable(mymyr_tests
     core/test_arena.cpp
     core/test_per_thread.cpp
     core/test_once.cpp
+    core/test_block_cache.cpp
     core/test_version.cpp
     formalism/test_text_format.cpp
     task/test_task.cpp

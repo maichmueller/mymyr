@@ -321,6 +321,31 @@ def test_encoding_is_reentrant():
     assert all(np.array_equal(value, expected) for value in results)
 
 
+def test_large_batches_are_recycled_across_threads():
+    """Batches of several MiB, released on the thread that drops them, reuse memory: every result is intact."""
+    task = text_task("philosophers__p03-phil4")
+    encoder = encoder_of(task)
+    base = task.encode(walk(task, steps=5, walks=1))
+    expected = encoder.encode(base)
+    per_graph = [unpack(expected, g) for g in range(len(base))]
+    graph_bytes = sum(a.nbytes for a in expected.as_dict().values() if isinstance(a, np.ndarray)) // len(base)
+    repeats = max(1, (6 << 20) // (graph_bytes * len(base))) + 1
+
+    def work(index):
+        count = repeats + index % 3
+        rows = np.tile(base, (count, 1))
+        for _ in range(6):
+            batch = encoder.encode(rows)
+            assert batch.num_graphs == len(rows)
+            for g in {0, len(rows) // 2, len(rows) - 1}:
+                assert unpack(batch, g) == per_graph[g % len(base)]
+            del batch
+        return count
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert len(list(pool.map(work, range(24)))) == 24
+
+
 # ------------------------------------------------------------------------------------------------ derived words
 def test_given_derived_words_equal_the_evaluated_ones():
     task = text_task("philosophers__p03-phil4")

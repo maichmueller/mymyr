@@ -31,27 +31,27 @@ i64 ArrayBundle::scalar(std::string_view name, i64 fallback) const noexcept
     return fallback;
 }
 
-void ArrayBundle::Builder::add_bytes(std::string name, DType dtype, std::vector<i64> shape, std::vector<std::byte> bytes,
+void ArrayBundle::Builder::add_bytes(ArrayName name, DType dtype, ArrayShape shape, std::vector<std::byte> bytes,
                                      bool words)
 {
     Item item;
-    item.info.name = std::move(name);
+    item.info.name = name;
     item.info.dtype = dtype;
-    item.info.shape = std::move(shape);
+    item.info.shape = shape;
     item.info.words = words;
     if (item.info.elements() * dtype_bytes(dtype) != bytes.size())
-        throw std::logic_error("ArrayBundle: array '" + item.info.name + "' has a size that does not match its shape");
+        throw std::logic_error("ArrayBundle: array '" + item.info.name.str() + "' has a size that does not match its shape");
     item.size = bytes.size();
     item.bytes = std::move(bytes);
     m_items.push_back(std::move(item));
 }
 
-void ArrayBundle::Builder::add_uninitialized(std::string name, DType dtype, std::vector<i64> shape, bool words)
+void ArrayBundle::Builder::add_uninitialized(ArrayName name, DType dtype, ArrayShape shape, bool words)
 {
     Item item;
-    item.info.name = std::move(name);
+    item.info.name = name;
     item.info.dtype = dtype;
-    item.info.shape = std::move(shape);
+    item.info.shape = shape;
     item.info.words = words;
     item.size = item.info.elements() * dtype_bytes(dtype);
     item.uninitialized = true;
@@ -68,12 +68,12 @@ ArrayBundle ArrayBundle::Builder::build()
         off += (item.size + 63) & ~u64{63};
     }
     b.m_bytes = std::max<u64>(off, 64);
-    // 64-byte aligned block (zero-copy importers such as XLA's CPU client want aligned buffers): over-allocate and
-    // align by hand. Only the padding is zeroed here, so that equal inputs give equal bytes; a reserved array is left
+    // the block is 64-byte aligned (zero-copy importers such as XLA's CPU client want aligned buffers) and recycled
+    // when large. Only the padding is zeroed here, so that equal inputs give equal bytes; a reserved array is left
     // for its writer.
-    b.m_block = std::make_unique_for_overwrite<std::byte[]>(b.m_bytes + 64);
-    const auto addr = reinterpret_cast<std::uintptr_t>(b.m_block.get());
-    b.m_base = b.m_block.get() + ((64 - addr % 64) % 64);
+    b.m_arrays.reserve(m_items.size());
+    b.m_block = acquire_host_block(b.m_bytes);
+    b.m_base = b.m_block.get();
     u64 end = 0;
     for (Item& item : m_items)
     {

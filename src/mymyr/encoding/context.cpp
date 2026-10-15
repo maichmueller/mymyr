@@ -231,14 +231,16 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
 detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
-    auto at = [&](const char* name) { return base + m_arrays.find(name)->offset; };
+    // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args
+    const auto& arrays = m_arrays.arrays();
+    auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
-    v.inst = reinterpret_cast<const u64*>(at("inst"));
+    v.inst = reinterpret_cast<const u64*>(at(0));
     v.num_instances = m_table->size();
-    v.cells = reinterpret_cast<const Cell*>(at("cell"));
-    v.slot_args = reinterpret_cast<const i32*>(at("slot_args"));
-    v.derived_args = reinterpret_cast<const i32*>(at("derived_args"));
-    v.static_args = reinterpret_cast<const i32*>(at("static_args"));
+    v.cells = reinterpret_cast<const Cell*>(at(1));
+    v.slot_args = reinterpret_cast<const i32*>(at(2));
+    v.derived_args = reinterpret_cast<const i32*>(at(3));
+    v.static_args = reinterpret_cast<const i32*>(at(4));
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;
