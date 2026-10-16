@@ -7,7 +7,6 @@ reachability API against the searches and BrFS, and 8 Python threads running the
 
 import json
 import os
-import sys
 import threading
 
 import pytest
@@ -16,7 +15,7 @@ import mymyr
 from mymyr import search
 from mymyr.search import ActionOrdering, Status, TransitionOutcome
 
-from conftest import ROOT, text_task
+from conftest import ROOT, gil_stays_off, text_task
 
 NUMERIC = ROOT / "tests/data/numeric_tasks"
 
@@ -44,7 +43,7 @@ def replay(task, plan, start=None):
 
 def rollout_key(r):
     """Everything a rollout reports, comparable across runs."""
-    return (str(r.status), [(p.arity, p.expanded, p.generated, p.generated_in_tree) for p in r.passes],
+    return (str(r.status), [(p.width, p.expanded, p.generated, p.generated_in_tree) for p in r.passes],
             [str(a) for a in r.plan], r.num_states, [str(a) for a in r.reached_fluent_atoms],
             [str(a) for a in r.reached_derived_atoms],
             [(tuple(map(str, s.atoms)), s.direct_dead_end, tuple(sorted(map(str, s.state.atoms())))) for s in r.landing_states],
@@ -54,12 +53,12 @@ def rollout_key(r):
 
 def portfolio_key(r):
     return (str(r.status), [str(a) for a in r.plan], r.cost, r.certified_optimal, r.winning_worker,
-            r.iw_completed_depth, r.total_expansions, [rollout_stats(s) for s in r.rollout_statistics],
+            r.iw_completed_depth, r.stats.expanded, [rollout_stats(s) for s in r.rollout_statistics],
             r.rollout_statuses, r.rollout_rounds)
 
 
 def iw_key(r):
-    return (str(r.status), [(p.arity, p.expanded, p.generated, p.generated_in_tree) for p in r.passes],
+    return (str(r.status), [(p.width, p.expanded, p.generated, p.generated_in_tree) for p in r.passes],
             [str(a) for a in r.plan], r.cost)
 
 
@@ -70,11 +69,11 @@ def iw_key(r):
 def test_plans_replay(name):
     """Every solved variant's plan replays to a goal state from the start, the reported goal state."""
     task = text_task(name)
-    runs = [search.liw(task, max_arity=1, landmarks="lifted", max_seconds=20),
+    runs = [search.liw(task, max_width=1, landmarks="lifted", max_seconds=20),
             search.abstracted_iw(task, width=1), search.projective_iw(task, typed_projection=True),
             search.rollout_iw(task, ordering="dgaf", max_seconds=20),
-            search.atomic_goal_portfolio(task, num_threads=1, max_seconds=20)]
-    runs += list(search.find_rollouts_parallel(task, [1, 2, 3], max_arity=1, num_threads=2))
+            search.atomic_goal_portfolio(task, threads=1, max_seconds=20)]
+    runs += list(search.find_rollouts_parallel(task, [1, 2, 3], max_width=1, threads=2))
     for r in runs:
         if not r.solved:
             continue
@@ -87,13 +86,13 @@ def test_plans_replay(name):
 def test_liw_landmark_sources_agree(blocks):
     lifted = search.lifted_fact_landmarks(blocks)
     approx = search.approximate_fact_landmarks(blocks)
-    assert iw_key(search.liw(blocks, max_arity=1, landmarks="lifted")) == iw_key(
-        search.liw(blocks, max_arity=1, landmarks=lifted))
-    assert iw_key(search.liw(blocks, max_arity=1, landmarks="approximate")) == iw_key(
-        search.liw(blocks, max_arity=1, landmarks=approx))
+    assert iw_key(search.liw(blocks, max_width=1, landmarks="lifted")) == iw_key(
+        search.liw(blocks, max_width=1, landmarks=lifted))
+    assert iw_key(search.liw(blocks, max_width=1, landmarks="approximate")) == iw_key(
+        search.liw(blocks, max_width=1, landmarks=approx))
     # no landmarks: every state's coordinate is BOT (a valid, weaker LIW)
-    r = search.liw(blocks, max_arity=1)
-    assert [p.arity for p in r.passes] == [0, 1]
+    r = search.liw(blocks, max_width=1)
+    assert [p.width for p in r.passes] == [0, 1]
     # abstracted LIW with a graph differs from abstracted IW without one
     assert search.abstracted_iw(blocks, landmarks=lifted).passes[0].expanded != search.abstracted_iw(
         blocks).passes[0].expanded
@@ -113,7 +112,7 @@ def test_layer_orders(blocks):
     r1 = search.abstracted_iw(blocks, width=2, layer_order="randomized", seed=5)
     r2 = search.abstracted_iw(blocks, width=2, layer_order="randomized", seed=5)
     assert iw_key(r1) == iw_key(r2)
-    t = search.liw(blocks, max_arity=2, layer_order="in_order", max_next_layer_states=4)
+    t = search.liw(blocks, max_width=2, layer_order="in_order", max_next_layer_states=4)
     assert all(p.expanded <= q.passes[0].expanded for p in t.passes)
 
 
@@ -125,18 +124,18 @@ def test_rollout_iw_orderings(blocks):
                        ("mixed", ActionOrdering.MIXED_REGRESSION_RANDOM)):
         a = search.rollout_iw(blocks, ordering=kind, seed=3, goal=goal)
         b = search.rollout_iw(blocks, ordering=name, seed=3, goal=goal)
-        assert rollout_stats(a.statistics) == rollout_stats(b.statistics) and a.plan == b.plan, name
+        assert rollout_stats(a.rollout) == rollout_stats(b.rollout) and a.plan == b.plan, name
         assert not a.solved or "(on h c)" in {str(x) for x in a.goal_state.atoms()}
         assert str(kind) in ("in_order", "randomized", "direct_goal_achiever_first", "goal_regression_relevance",
                              "mixed_regression_random")
     # seeds matter for the randomized orderings only
-    s = [rollout_stats(search.rollout_iw(blocks, ordering="randomized", seed=k).statistics) for k in range(4)]
+    s = [rollout_stats(search.rollout_iw(blocks, ordering="randomized", seed=k).rollout) for k in range(4)]
     assert len({json.dumps(x, sort_keys=True) for x in s}) > 1
-    assert rollout_stats(search.rollout_iw(blocks, seed=1).statistics) == rollout_stats(
-        search.rollout_iw(blocks, seed=2).statistics)
+    assert rollout_stats(search.rollout_iw(blocks, seed=1).rollout) == rollout_stats(
+        search.rollout_iw(blocks, seed=2).rollout)
     # incumbent bound and max_rollouts
     r = search.rollout_iw(blocks, incumbent_bound=3)
-    assert r.statistics.incumbent_bound_prunings > 0
+    assert r.rollout.incumbent_bound_prunings > 0
     assert search.rollout_iw(blocks, max_rollouts=5).status == Status.FAILED
 
 
@@ -147,19 +146,19 @@ def test_rollout_iw_orderings(blocks):
 def test_rollouts_identical_across_threads_and_runs(name):
     task = text_task(name)
     seeds = list(range(1, 17))
-    kw = dict(max_arity=1, report_landing_states=True, report_co_occurrence=True, max_expanded=20_000)
-    ref = [rollout_key(r) for r in search.find_rollouts_parallel(task, seeds, num_threads=1, **kw)]
+    kw = dict(max_width=1, report_landing_states=True, report_co_occurrence=True, max_expanded=20_000)
+    ref = [rollout_key(r) for r in search.find_rollouts_parallel(task, seeds, threads=1, **kw)]
     for threads in (3, 8, 16):
-        b = search.find_rollouts_parallel(task, seeds, num_threads=threads, **kw)
+        b = search.find_rollouts_parallel(task, seeds, threads=threads, **kw)
         assert b.threads_used == min(threads, len(seeds))
         assert [rollout_key(r) for r in b] == ref, threads
     fresh = text_task(name)  # a fresh task: lazy slots assigned concurrently, canonical ids unchanged
-    assert [rollout_key(r) for r in search.find_rollouts_parallel(fresh, seeds, num_threads=8, **kw)] == ref
+    assert [rollout_key(r) for r in search.find_rollouts_parallel(fresh, seeds, threads=8, **kw)] == ref
     # a subset of seeds gives the same rollouts
-    sub = search.find_rollouts_parallel(task, seeds[3:7], num_threads=2, **kw)
+    sub = search.find_rollouts_parallel(task, seeds[3:7], threads=2, **kw)
     assert [rollout_key(r) for r in sub] == ref[3:7]
     # intersect and merge are functions of the batch
-    b = search.find_rollouts_parallel(task, seeds, num_threads=8, **kw)
+    b = search.find_rollouts_parallel(task, seeds, threads=8, **kw)
     rows = search.intersect_co_occurrence(b)
     assert {str(k): sorted(map(str, v)) for k, v in rows.items()} == \
         {str(k): sorted(map(str, v)) for k, v in search.intersect_co_occurrence(list(b)).items()}
@@ -174,16 +173,16 @@ def test_rollouts_identical_across_threads_and_runs(name):
 
 def test_portfolio_serial_reproducible(blocks):
     goal = [["(on h c)"]]
-    a = search.atomic_goal_portfolio(blocks, goal=goal, num_threads=1, base_seed=7)
-    b = search.atomic_goal_portfolio(blocks, goal=goal, num_threads=1, base_seed=7)
+    a = search.atomic_goal_portfolio(blocks, goal=goal, threads=1, seed=7)
+    b = search.atomic_goal_portfolio(blocks, goal=goal, threads=1, seed=7)
     assert portfolio_key(a) == portfolio_key(b)
     assert a.solved and a.certified_optimal and a.winning_worker == 0 and a.threads_used == 1
     # threaded: timing decides the winner, but every plan is valid and as short as the certified one
-    c = search.atomic_goal_portfolio(blocks, goal=goal, num_threads=4)
+    c = search.atomic_goal_portfolio(blocks, goal=goal, threads=4)
     assert c.solved and len(c.plan) == len(a.plan)
     assert "(on h c)" in {str(x) for x in replay(blocks, c.plan).atoms()}
     # the full goal, no plan within width 1: the certifier exhausts its space
-    d = search.atomic_goal_portfolio(blocks, num_threads=1, num_rollout_workers=2,
+    d = search.atomic_goal_portfolio(blocks, threads=1, num_rollout_workers=2,
                                      rollout_orderings=[ActionOrdering.IN_ORDER, ("randomized", 3)])
     assert d.status == Status.EXHAUSTED and d.plan_length is None and d.winning_worker is None
     assert len(d.rollout_statistics) == 2 and d.certifier_status == Status.EXHAUSTED
@@ -194,16 +193,16 @@ def test_portfolio_serial_reproducible(blocks):
 def test_budgets_and_cancel(blocks):
     token = search.CancelToken()
     token.request()
-    for fn in (lambda **k: search.liw(blocks, max_arity=2, **k), lambda **k: search.abstracted_iw(blocks, width=2, **k),
+    for fn in (lambda **k: search.liw(blocks, max_width=2, **k), lambda **k: search.abstracted_iw(blocks, width=2, **k),
                lambda **k: search.rollout_iw(blocks, **k)):
         assert fn(cancel=token).status == Status.CANCELLED
         assert fn(max_seconds=0.0).status == Status.OUT_OF_TIME
-    assert search.liw(blocks, max_arity=2, max_states=10).status == Status.OUT_OF_STATES
+    assert search.liw(blocks, max_width=2, max_states=10).status == Status.OUT_OF_STATES
     assert search.rollout_iw(blocks, max_states=10).status == Status.OUT_OF_STATES
-    b = search.find_rollouts_parallel(blocks, [1, 2], max_arity=2, cancel=token, num_threads=2)
+    b = search.find_rollouts_parallel(blocks, [1, 2], max_width=2, cancel=token, threads=2)
     assert all(r.status == Status.CANCELLED for r in b)
-    p = search.atomic_goal_portfolio(blocks, num_threads=1, max_expanded=10)
-    assert p.status != Status.SOLVED and p.total_expansions <= 12
+    p = search.atomic_goal_portfolio(blocks, threads=1, max_expanded=10)
+    assert p.status != Status.SOLVED and p.stats.expanded <= 12
 
 
 def test_cancel_from_another_thread(blocks):
@@ -216,7 +215,7 @@ def test_cancel_from_another_thread(blocks):
 
     t = threading.Thread(target=lambda: (started.wait(10), token.request()))
     t.start()
-    r = search.liw(blocks, max_arity=3, cancel=token, observer=Obs(), progress_interval=100)
+    r = search.liw(blocks, max_width=3, cancel=token, observer=Obs(), progress_interval=100)
     t.join()
     assert token.requested and r.status in (Status.CANCELLED, Status.SOLVED, Status.EXHAUSTED)
 
@@ -243,13 +242,13 @@ def test_observer_transition_events(blocks):
 
     o = Obs()
     r = search.abstracted_iw(blocks, width=1, observer=o)
-    assert o.expand == r.total.expanded and o.passes == 1
-    assert sum(o.outcomes.values()) == r.total.generated
+    assert o.expand == r.stats.expanded and o.passes == 1
+    assert sum(o.outcomes.values()) == r.stats.generated
     assert o.outcomes[TransitionOutcome.OPENED] == r.passes[0].generated_in_tree
     o = Obs()
     r = search.rollout_iw(blocks, ordering="dgaf", goal=[["(on h c)"]], observer=o)
     assert r.solved and o.outcomes.get(TransitionOutcome.GOAL) == 1
-    assert sum(o.outcomes.values()) == r.statistics.generated
+    assert sum(o.outcomes.values()) == r.rollout.generated
 
 
 def test_make_worker_protocol(blocks):
@@ -286,7 +285,7 @@ def test_make_worker_protocol(blocks):
 
     seeds = list(range(8))
     root = Root()
-    b = search.find_rollouts_parallel(blocks, seeds, max_arity=1, num_threads=4, observer=root)
+    b = search.find_rollouts_parallel(blocks, seeds, max_width=1, threads=4, observer=root)
     assert b.threads_used == 4 and sorted(root.workers) == seeds and root.expand == 0 and root.ended == 1
     for k, r in enumerate(b):
         assert root.workers[k].expand == sum(p.expanded for p in r.passes)
@@ -301,7 +300,7 @@ def test_make_worker_protocol(blocks):
             self.expand += 1
 
     p = Plain()
-    b2 = search.find_rollouts_parallel(blocks, seeds, max_arity=1, num_threads=4, observer=p)
+    b2 = search.find_rollouts_parallel(blocks, seeds, max_width=1, threads=4, observer=p)
     assert b2.threads_used == 1  # no make_worker: the calling thread alone
     assert p.expand == sum(pp.expanded for r in b2 for pp in r.passes)
     assert [rollout_key(r) for r in b2] == [rollout_key(r) for r in b]
@@ -316,14 +315,14 @@ def test_make_worker_protocol(blocks):
         def make_worker(self, k):
             return lambda s: s.holds(target)
 
-    g = search.find_rollouts_parallel(blocks, seeds, max_arity=1, num_threads=4, goal=Goal())
+    g = search.find_rollouts_parallel(blocks, seeds, max_width=1, threads=4, goal=Goal())
     assert g.threads_used == 4 and any(r.solved for r in g)
-    serial = search.find_rollouts_parallel(blocks, seeds, max_arity=1, num_threads=4, goal=lambda s: s.holds(target))
+    serial = search.find_rollouts_parallel(blocks, seeds, max_width=1, threads=4, goal=lambda s: s.holds(target))
     assert serial.threads_used == 1
     assert [rollout_key(r) for r in g] == [rollout_key(r) for r in serial]
     # the portfolio's workers: 0 is the certifier
     root = Root()
-    r = search.atomic_goal_portfolio(blocks, goal=Goal(), num_threads=1, num_rollout_workers=3, observer=root)
+    r = search.atomic_goal_portfolio(blocks, goal=Goal(), threads=1, num_rollout_workers=3, observer=root)
     assert sorted(root.workers) == [0, 1, 2, 3] and r.solved
 
 
@@ -334,8 +333,8 @@ def test_callback_errors_propagate(blocks):
 
     for fn in (lambda **k: search.liw(blocks, **k), lambda **k: search.abstracted_iw(blocks, **k),
                lambda **k: search.rollout_iw(blocks, **k),
-               lambda **k: search.find_rollouts_parallel(blocks, [1, 2], max_arity=1, **k),
-               lambda **k: search.atomic_goal_portfolio(blocks, num_threads=1, **k)):
+               lambda **k: search.find_rollouts_parallel(blocks, [1, 2], max_width=1, **k),
+               lambda **k: search.atomic_goal_portfolio(blocks, threads=1, **k)):
         with pytest.raises(KeyError, match="boom"):
             fn(observer=Boom())
         with pytest.raises(ZeroDivisionError):
@@ -346,7 +345,7 @@ def test_callback_errors_propagate(blocks):
             raise RuntimeError("no worker")
 
     with pytest.raises(RuntimeError, match="no worker"):
-        search.find_rollouts_parallel(blocks, [1, 2], max_arity=1, num_threads=2, observer=BadWorker())
+        search.find_rollouts_parallel(blocks, [1, 2], max_width=1, threads=2, observer=BadWorker())
 
 
 def test_numeric_tasks_refused():
@@ -359,7 +358,7 @@ def test_numeric_tasks_refused():
                lambda: search.find_rollouts_parallel(task, [1]), lambda: search.atomic_goal_portfolio(task)):
         with pytest.raises(ValueError, match="numeric"):
             fn()
-    assert search.iw(task, max_arity=1).status in (Status.SOLVED, Status.EXHAUSTED)  # IW supports them
+    assert search.iw(task, max_width=1).status in (Status.SOLVED, Status.EXHAUSTED)  # IW supports them
 
 
 def test_argument_errors(blocks, gripper):
@@ -386,8 +385,8 @@ def test_argument_errors(blocks, gripper):
     assert r.status == Status.FAILED and "all_private" in r.message
     r = search.abstracted_iw(blocks, max_next_layer_states=3)
     assert r.status == Status.FAILED and "max_next_layer_states" in r.message
-    b = search.find_rollouts_parallel(blocks, [1], max_arity=1)
-    b2 = search.find_rollouts_parallel(gripper, [1], max_arity=1)
+    b = search.find_rollouts_parallel(blocks, [1], max_width=1)
+    b2 = search.find_rollouts_parallel(gripper, [1], max_width=1)
     with pytest.raises(ValueError):
         search.intersect_co_occurrence([b[0], b2[0]])
     with pytest.raises(IndexError):
@@ -444,7 +443,7 @@ def test_relaxed_reachability(blocks, gripper):
         preds = {a.predicate for a in seen}
         n = sum(len(rr.table.atoms(p)) for p in preds)
         assert n <= rr.table.num_fluent_atoms + rr.table.num_derived_atoms
-        assert rr.statistics.fluent_atoms == rr.table.num_fluent_atoms
+        assert rr.stats.fluent_atoms == rr.table.num_fluent_atoms
         # the lifted landmarks block the relaxed goal once forbidden (pi+), unless initially true
         g = search.lifted_fact_landmarks(task, reachability=rr)
         s0 = task.initial_state
@@ -466,9 +465,9 @@ def test_transition_ordering(blocks):
     g = search.approximate_fact_landmarks(blocks)
     order = search.LandmarkTransitionOrdering(g)
     assert order.prefer_new_landmarks and order.graph.landmarks == g.landmarks
-    r = search.iw(blocks, max_arity=1, transition_ordering=order)
-    plain = search.iw(blocks, max_arity=1)
-    assert r.status == plain.status and [p.arity for p in r.passes] == [p.arity for p in plain.passes]
+    r = search.iw(blocks, max_width=1, transition_ordering=order)
+    plain = search.iw(blocks, max_width=1)
+    assert r.status == plain.status and [p.width for p in r.passes] == [p.width for p in plain.passes]
     if r.solved:
         assert blocks.is_goal(replay(blocks, r.plan))
     s0 = blocks.initial_state
@@ -477,7 +476,7 @@ def test_transition_ordering(blocks):
     assert sc.num_new_landmarks >= 0 and not order.prefer(sc, sc)
     with pytest.raises(ValueError):
         search.LandmarkTransitionOrdering(search.lifted_fact_landmarks(blocks))  # no achiever index
-    s = search.siw(blocks, max_arity=1, transition_ordering=order)
+    s = search.siw(blocks, max_width=1, transition_ordering=order)
     assert s.status in (Status.SOLVED, Status.EXHAUSTED)
 
 
@@ -486,7 +485,7 @@ def test_transition_ordering(blocks):
 def test_eight_threads_share_tasks():
     """Gate 2: 8 Python threads run the variants at once on shared tasks; every result equals the single-threaded one.
     The interpreter is free-threaded (the GIL stays disabled)."""
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()
     tasks = [text_task("gripper__prob05"), text_task("logistics00__probLOGISTICS-6-1"), text_task("driverlog__p03"),
              text_task("openstacks-opt08-adl__p03")]
     graphs = [search.lifted_fact_landmarks(t) for t in tasks]
@@ -494,19 +493,19 @@ def test_eight_threads_share_tasks():
     def run(i, task, graph, local):
         t = task.local() if local else task
         if i == 0:
-            return iw_key(search.liw(t, max_arity=3, landmarks=graph, max_states=300_000))  # 0.06-0.3 s each
+            return iw_key(search.liw(t, max_width=3, landmarks=graph, max_states=300_000))  # 0.06-0.3 s each
         if i == 1:
             return iw_key(search.abstracted_iw(t, width=3, max_states=300_000))
         if i == 2:
             return iw_key(search.projective_iw(t, layer_order="randomized", seed=11))
         if i == 3:
             r = search.rollout_iw(t, ordering="mixed", seed=5, max_states=20_000)
-            return (str(r.status), rollout_stats(r.statistics), [str(a) for a in r.plan])
+            return (str(r.status), rollout_stats(r.rollout), [str(a) for a in r.plan])
         if i == 4:
-            b = search.find_rollouts_parallel(t, list(range(32)), max_arity=2, num_threads=2,
+            b = search.find_rollouts_parallel(t, list(range(32)), max_width=2, threads=2,
                                               report_landing_states=True, report_co_occurrence=True)
             return [rollout_key(r) for r in b]
-        return portfolio_key(search.atomic_goal_portfolio(t, num_threads=1, num_rollout_workers=2,
+        return portfolio_key(search.atomic_goal_portfolio(t, threads=1, num_rollout_workers=2,
                                                           max_expanded=20_000))
 
     jobs = [(i, k) for i in range(6) for k in range(len(tasks))]
@@ -533,20 +532,20 @@ def test_eight_threads_share_tasks():
     assert len(results) == 8 * len(jobs)
     for (w, rep, i, k), v in results.items():
         assert v == ref[(i, k)], (w, rep, i, k)
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()
 
 
 def test_reprs_and_types(blocks):
     r = search.rollout_iw(blocks)
-    assert "RolloutIwResult(" in repr(r) and isinstance(r.statistics, search.RolloutIwStatistics)
-    assert isinstance(r.total, search.Statistics)
-    b = search.find_rollouts_parallel(blocks, [1, 2], max_arity=1, report_landing_states=True)
+    assert "RolloutIwResult(" in repr(r) and isinstance(r.rollout, search.RolloutIwStatistics)
+    assert isinstance(r.stats, search.Statistics)
+    b = search.find_rollouts_parallel(blocks, [1, 2], max_width=1, report_landing_states=True)
     assert "ParallelRolloutsResult(" in repr(b) and isinstance(b[0], search.RolloutResult)
-    assert isinstance(b.rollouts[1].search, search.IwResult) and b[-1].seed == 2
+    assert isinstance(b.rollouts[1].stats, search.Statistics) and b[-1].seed == 2
     assert isinstance(b[0].landing_states[0], search.LandingState) and "LandingState(" in repr(b[0].landing_states[0])
-    p = search.atomic_goal_portfolio(blocks, num_threads=1, goal=[["(on h c)"]])
+    p = search.atomic_goal_portfolio(blocks, threads=1, goal=[["(on h c)"]])
     assert "PortfolioResult(" in repr(p) and isinstance(p.certifier, search.IwResult)
     rr = search.RelaxedReachability(blocks)
-    assert "RelaxedReachability(" in repr(rr) and isinstance(rr.statistics, search.ReachabilityStatistics)
+    assert "RelaxedReachability(" in repr(rr) and isinstance(rr.stats, search.ReachabilityStatistics)
     assert isinstance(search.merge_landing_states(b), search.MergedLandingStates)
     assert isinstance(search.lifted_fact_landmarks(blocks).lifted[0], search.LiftedLandmark)

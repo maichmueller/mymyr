@@ -633,7 +633,7 @@ void bind_rl_torch(nb::module_& parent)
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
                bool canonical, bool witness, PathArg path, IntArg threads_in) {
                 const u64 seed = int_arg<u64>(seed_in, "seed");
-                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
+                const u32 max_steps = opt_int_arg<u32>(max_steps_in, "max_steps", 1).value_or(0);  // 0: no limit
                 const u32 threads = threads_arg(threads_in);
                 rl::EnvConfig c;
                 c.seed = seed;
@@ -648,12 +648,14 @@ void bind_rl_torch(nb::module_& parent)
                 c.witness_pruning = witness;
                 new (self) PyEnv(std::move(table), std::move(device), std::move(ctx), c, std::move(path), threads);
             },
-            "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "seed"_a = 0, "max_steps"_a = 0,
+            "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "seed"_a = 0, "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
-            "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
+            "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
             "path"_a = "auto", "threads"_a = 1)
-        .def_prop_ro("table", [](const PyEnv& e) { return SuiteArg(e.ref.obj); })
-        .def_prop_ro("num_instances", &PyEnv::num_instances)
+        .def_prop_ro("table", [](const PyEnv& e) { return SuiteArg(e.ref.obj); },
+                     "The Task, TaskTable or TaskSuite of the instances.")
+        .def_prop_ro("num_instances", &PyEnv::num_instances,
+                     "The number of instances an episode can start in (task ids 0 .. num_instances - 1).")
         .def_prop_ro("device", &PyEnv::device, "The CUDA device index, or None (the CPU).")
         .def_prop_ro("fast", &PyEnv::fast, "Whether a device Env takes the fast path (the per-environment cache).")
         .def_prop_ro("words", &PyEnv::words, "Atom words per state row (the table's words, at least 1).")
@@ -663,16 +665,25 @@ void bind_rl_torch(nb::module_& parent)
         .def_prop_ro("cache_schemas", &PyEnv::cache_schemas, "Columns of the fast path's counts cache (0 otherwise).")
         .def_prop_ro("cache_view_words", &PyEnv::cache_view_words, "Columns of the fast path's views cache (0 otherwise).")
         .def_prop_ro("initial_counts", &PyEnv::initial_counts, "Successors of each instance's initial state [I].")
-        .def_prop_ro("seed", [](const PyEnv& e) { return e.config().seed; })
-        .def_prop_ro("max_steps", [](const PyEnv& e) { return e.config().max_steps; })
-        .def_prop_ro("step_reward", [](const PyEnv& e) { return e.config().step_reward; })
-        .def_prop_ro("goal_reward", [](const PyEnv& e) { return e.config().goal_reward; })
-        .def_prop_ro("dead_end", [](const PyEnv& e) { return std::string(dead_end_name(e.config().dead_end)); })
-        .def_prop_ro("dead_end_reward", [](const PyEnv& e) { return e.config().dead_end_reward; })
-        .def_prop_ro("dead_end_terminal", [](const PyEnv& e) { return e.config().dead_end_terminal; })
-        .def_prop_ro("autoreset", [](const PyEnv& e) { return e.config().autoreset; })
-        .def_prop_ro("canonical", [](const PyEnv& e) { return e.config().canonical_order; })
-        .def_prop_ro("witness", [](const PyEnv& e) { return e.config().witness_pruning; })
+        .def_prop_ro("seed", [](const PyEnv& e) { return e.config().seed; },
+                     "The key of the successor draws (set_seed changes it).")
+        .def_prop_ro("max_steps", [](const PyEnv& e) { return steps_limit(e.config().max_steps); },
+                     "The steps after which an episode is truncated (None: never).")
+        .def_prop_ro("step_reward", [](const PyEnv& e) { return e.config().step_reward; }, "The reward of every step.")
+        .def_prop_ro("goal_reward", [](const PyEnv& e) { return e.config().goal_reward; },
+                     "The reward added on reaching a goal.")
+        .def_prop_ro("dead_end", [](const PyEnv& e) { return std::string(dead_end_name(e.config().dead_end)); },
+                     "Which states are dead ends: 'no_successors' or 'none'.")
+        .def_prop_ro("dead_end_reward", [](const PyEnv& e) { return e.config().dead_end_reward; },
+                     "The reward added on reaching (or being stuck in) a dead end.")
+        .def_prop_ro("dead_end_terminal", [](const PyEnv& e) { return e.config().dead_end_terminal; },
+                     "Whether a dead end terminates the episode.")
+        .def_prop_ro("autoreset", [](const PyEnv& e) { return e.config().autoreset; },
+                     "Whether an ending step resets its environment within the step.")
+        .def_prop_ro("canonical_order", [](const PyEnv& e) { return e.config().canonical_order; },
+                     "Whether successors come in canonical order (schema, then binding).")
+        .def_prop_ro("witness_pruning", [](const PyEnv& e) { return e.config().witness_pruning; },
+                     "Whether bindings are enumerated with witness pruning.")
         .def("set_seed", &PyEnv::set_seed, "seed"_a, nb::kw_only(), "stream"_a = nb::none(),
              "The key of the successor draws; the draw counters are the caller's (zero them to restart the streams). A "
              "device Env writes it on `stream` (None: the Env's context's stream) in stream order: steps enqueued "
@@ -741,7 +752,7 @@ void bind_rl_torch(nb::module_& parent)
             "terminated"_a = nb::none(), "truncated"_a = nb::none(), "count"_a = nb::none(),
             "final_states"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(), "invalid"_a = nb::none(),
             "goal"_a = nb::none(), "at_goal"_a = nb::none(), "first_env"_a = 0, "stream"_a = nb::none(),
-            "One step of every environment (rl/env.hpp): action [N] int64 indexes the canonical successor order "
+            "One step of every environment: action [N] int64 indexes the canonical successor order "
             "(None: the random policy, drawing from draws [N] (u)int64 with the env ids first_env + i); next_task_ids "
             "[N] int32 names the instances autoresetting rows restart in. In place: states, task_ids, steps, draws, "
             "the cache, the goal masks and at_goal [N] bool (the rows at a goal, which the step absorbs; required on a "
@@ -799,7 +810,7 @@ void bind_rl_torch(nb::module_& parent)
             return "a CPU build (no CUDA backend)";
 #endif
         },
-        "table"_a, nb::kw_only(), "canonical"_a = true, "witness"_a = false,
+        "table"_a, nb::kw_only(), "canonical_order"_a = true, "witness_pruning"_a = false,
         "Why the device fast path does not run the table ('' if it does).");
 
     m.def(
@@ -842,7 +853,7 @@ void bind_rl_torch(nb::module_& parent)
             return ArrayOut(export_array(std::move(s), Framework::Numpy, default_words(Framework::Numpy)));
         },
         "seed"_a, "envs"_a, "draws"_a, "counts"_a,
-        "The random policy's choices (rl/rng.hpp): for env ids [n] (u)int64, draw counters [n] (u)int64 and successor "
+        "The random policy's choices: for env ids [n] (u)int64, draw counters [n] (u)int64 and successor "
         "counts [n] int32, the uniform index in [0, count) of each draw (-1 for count 0), as NumPy int64 [n]. "
         "Env.step draws index successor_indices(seed, first_env + i, draws[i], count[i]) and then advances draws[i].");
 }

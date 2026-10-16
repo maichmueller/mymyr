@@ -18,15 +18,32 @@ arrays = space.arrays()
 print(space.num_states, space.num_transitions, arrays["goal"].sum())
 ```
 
-Use `max_states=` and `max_seconds=` to bound generation. `threads=` controls CPU generation workers.
+Use `max_states=` and `max_seconds=` to bound generation. `threads=` controls CPU generation workers (default 1, `0`:
+one per hardware thread); the options follow the [API conventions](conventions.md).
 
 `arrays()["state_words"]` holds the states as rows in the task's encoding, the same for every thread count and run
 ([State encodings](parsing-and-tasks.md#state-encodings)). A task with lazy atom slots has no such rows, so its arrays
 leave `state_words` out.
 
-`datasets.generate(task)` returns a `GenerationResult` with status and counts when you need to distinguish a completed
-generation from a limit. `generate_many(tasks)` processes a task collection. `StateSpaceSampler(space, seed=...)`
-samples states and goal-distance layers deterministically for a seed.
+`datasets.generate(task)` returns a `GenerationResult` when you need to distinguish a completed generation from a
+limit: its `status` is a `search.Status` (`EXHAUSTED` for a complete space, `OUT_OF_STATES` or `OUT_OF_TIME` for a
+budget, `UNSOLVABLE` when an unsolvable space was dropped), `stats` a `search.Statistics` (the stored states and the
+time) and `space` the space or None.
+
+```python
+from mymyr import search
+
+result = datasets.generate(task, max_states=100)
+print(result.status, result.stats.states, result.space is None)
+assert datasets.generate(task).status == search.Status.EXHAUSTED
+```
+
+A state is a goal state, an unsolvable state (no goal is reachable from it), or alive (neither): `is_goal`,
+`is_unsolvable` and `is_alive` and the `goal`, `unsolvable` and `alive` flags of `arrays()` say which.
+
+`generate_many(tasks)` processes a task collection. `StateSpaceSampler(space, seed=...)` samples states, goal-distance
+layers (`sample_state_n_steps_from_goal`) and unsolvable states (`sample_unsolvable_state`) deterministically for a
+seed; `num_solvable_states` counts the states that are not unsolvable, goal states included.
 
 `generalized_state_space(tasks)` builds each task's space, skips failed generations, sorts the spaces by size and
 joins them into one graph, their disjoint union; the tasks must come from one domain. State `s` of space `p` is vertex
@@ -42,7 +59,7 @@ and goal distances.
 
 A task set is many problems of one domain: a `mymyr.rl.TaskTable`, the same type the RL entry points take.
 `TaskTable.from_pddl(domain, problems)` parses the domain once and instantiates the problems in parallel
-(`threads=`, default all cores). `problems` is a list of files (kept in its order), a directory (its `*.pddl` files
+(`threads=`, default 1). `problems` is a list of files (kept in its order), a directory (its `*.pddl` files
 sorted by path), a glob pattern (its matches sorted by path; `**` spans directories) or one file. Domain files in a
 directory or among a pattern's matches are skipped. Instance `i` is the task `Task(domain.instantiate(files[i]))`
 with the same options. The table can be indexed (`table[i]`), pickled (it pickles its tasks), and passed wherever

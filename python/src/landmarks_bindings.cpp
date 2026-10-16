@@ -293,7 +293,7 @@ void bind_landmarks(nb::module_& m)
         .value("MEMBERS", lm::CompleteFactLandmarks::Members)
         .value("ALL", lm::CompleteFactLandmarks::All);
 
-    nb::enum_<rr::WitnessVerdict>(m, "WitnessVerdict", "Answer of a witness query (reachability/relaxed_reachability.hpp).")
+    nb::enum_<rr::WitnessVerdict>(m, "WitnessVerdict", "Answer of a witness query.")
         .value("REACHABLE_WITHOUT", rr::WitnessVerdict::ReachableWithout)
         .value("UNKNOWN", rr::WitnessVerdict::Unknown);
 
@@ -305,7 +305,8 @@ void bind_landmarks(nb::module_& m)
                      [](const PyLiftedLandmark& x) {
                          const formalism::TaskData& t = x.o.core->task->data();
                          return std::string(t.str(t.predicates[x.l.predicate.v].name));
-                     })
+                     },
+                     "The predicate name.")
         .def_prop_ro("objects",
                      [](const PyLiftedLandmark& x) {
                          std::vector<std::optional<std::string>> out;
@@ -313,25 +314,30 @@ void bind_landmarks(nb::module_& m)
                              out.push_back(b == lm::k_free ? std::nullopt
                                                            : std::optional<std::string>(object_name(*x.o.core->task, b)));
                          return out;
-                     })
-        .def_prop_ro("members", [](const PyLiftedLandmark& x) { return atom_list(x.o, x.l.members); })
+                     },
+                     "Per argument the object name, or None for a free position.")
+        .def_prop_ro("members", [](const PyLiftedLandmark& x) { return atom_list(x.o, x.l.members); },
+                     "The ground atoms it stands for; every plan makes one of them true.")
         .def_prop_ro("fact",
                      [](const PyLiftedLandmark& x) -> Arg<std::optional<PyGroundAtom>> {
                          if (!x.l.is_fact())
                              return nb::none();
                          return atom_object(x.o, x.l.fact);
-                     })
-        .def_prop_ro("is_fact", [](const PyLiftedLandmark& x) { return x.l.is_fact(); })
+                     },
+                     "The GroundAtom when the landmark has no free position, else None.")
+        .def_prop_ro("is_fact", [](const PyLiftedLandmark& x) { return x.l.is_fact(); },
+                     "Whether it has no free position (a fact landmark).")
         .def_prop_ro("parents", [](const PyLiftedLandmark& x) { return x.l.parents; },
                      "Indices into FactLandmarkGraph.lifted of the landmarks this one was back-chained from.")
-        .def_prop_ro("initially_true", [](const PyLiftedLandmark& x) { return x.l.initially_true; })
+        .def_prop_ro("initially_true", [](const PyLiftedLandmark& x) { return x.l.initially_true; },
+                     "Whether it holds in the initial state.")
         .def("__str__", [](const PyLiftedLandmark& x) { return lm::format_lifted(*x.o.core->task, x.l); })
         .def("__repr__", [](const PyLiftedLandmark& x) { return "LiftedLandmark(" + lm::format_lifted(*x.o.core->task, x.l) + ")"; });
 
     // the graph ------------------------------------------------------------------------------------------------------
     nb::class_<PyFactLandmarkGraph>(
         m, "FactLandmarkGraph",
-        "The fact landmarks of a task (landmarks/fact_landmark_graph.hpp): fact landmarks "
+        "The fact landmarks of a task: fact landmarks "
         "(every plan makes each true at some point) in discovery order, disjunctive landmarks (sets of which every plan "
         "makes one member true), greedy-necessary orderings, and, from approximate_fact_landmarks, the achiever index. "
         "Immutable; LIW and abstracted IW take it as landmarks=.")
@@ -364,7 +370,8 @@ void bind_landmarks(nb::module_& m)
             "A graph from given fluent atoms : fact landmarks, disjunctive sets and "
             "(before, after) orderings, normalized (duplicates dropped, sets holding a fact landmark "
             "dropped). Atoms outside the task's reachable domains are dropped (they can never hold). No achiever index.")
-        .def_prop_ro("task", [](const PyFactLandmarkGraph& g) -> Arg<std::variant<PyTask, PyHandle>> { return g.o.obj; })
+        .def_prop_ro("task", [](const PyFactLandmarkGraph& g) -> Arg<std::variant<PyTask, PyHandle>> { return g.o.obj; },
+                     "The Task (or TaskHandle) the graph was computed for.")
         .def_prop_ro("landmarks", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->landmarks()); },
                      "The fact landmarks in discovery order.")
         .def("__len__", [](const PyFactLandmarkGraph& g) { return g.g->size(); })
@@ -376,7 +383,8 @@ void bind_landmarks(nb::module_& m)
                          return out;
                      },
                      "The disjunctive landmarks (each ascending by canonical id; the list sorted).")
-        .def_prop_ro("disjunctive_atoms", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->disjunctive_atoms()); })
+        .def_prop_ro("disjunctive_atoms", [](const PyFactLandmarkGraph& g) { return atom_list(g.o, g.g->disjunctive_atoms()); },
+                     "Every atom of some disjunctive landmark, ascending and without duplicates.")
         .def_prop_ro("orderings",
                      [](const PyFactLandmarkGraph& g) {
                          nb::typed<nb::list, nb::typed<nb::tuple, PyGroundAtom, PyGroundAtom>> out{nb::list()};
@@ -391,7 +399,8 @@ void bind_landmarks(nb::module_& m)
                 const auto c = graph_atom(g, atom);
                 return c && g.g->is_landmark(*c);
             },
-            "atom"_a)
+            "atom"_a,
+            "Whether `atom` is a fact landmark.")
         .def(
             "predecessors",
             [](const PyFactLandmarkGraph& g, AtomLike atom) {
@@ -406,7 +415,9 @@ void bind_landmarks(nb::module_& m)
                 return atom_list(g.o, c ? g.g->successors(*c) : std::vector<CanonicalAtom>{});
             },
             "atom"_a, "The landmarks ordered directly after `atom`.")
-        .def_prop_ro("has_achiever_index", [](const PyFactLandmarkGraph& g) { return g.g->has_achiever_index(); })
+        .def_prop_ro("has_achiever_index", [](const PyFactLandmarkGraph& g) { return g.g->has_achiever_index(); },
+                     "Whether the graph has an achiever index (approximate_fact_landmarks builds one, "
+                     "lifted_fact_landmarks does not); the achiever methods need it.")
         .def(
             "achievers",
             [](const PyFactLandmarkGraph& g, AtomLike atom) {
@@ -464,21 +475,24 @@ void bind_landmarks(nb::module_& m)
                 const u32 a = achiever_id(g, action);
                 return a != lm::k_no_action && g.g->is_landmark_achiever(a);
             },
-            "action"_a)
+            "action"_a,
+            "Whether `action` adds some fact landmark.")
         .def(
             "is_first_landmark_achiever",
             [](const PyFactLandmarkGraph& g, ActionLike action) {
                 const u32 a = achiever_id(g, action);
                 return a != lm::k_no_action && g.g->is_first_landmark_achiever(a);
             },
-            "action"_a)
+            "action"_a,
+            "Whether `action` first-achieves some fact landmark (adds it at its h_max cost).")
         .def(
             "is_unique_landmark_achiever",
             [](const PyFactLandmarkGraph& g, ActionLike action) {
                 const u32 a = achiever_id(g, action);
                 return a != lm::k_no_action && g.g->is_unique_landmark_achiever(a);
             },
-            "action"_a)
+            "action"_a,
+            "Whether `action` is the only achiever of some fact landmark.")
         .def_prop_ro("lifted",
                      [](const PyFactLandmarkGraph& g) {
                          nb::typed<nb::list, PyLiftedLandmark> out{nb::list()};
@@ -507,7 +521,8 @@ void bind_landmarks(nb::module_& m)
                 const State s = state_arg(g.o, state, "state");
                 return g.g->achieved(*g.o.core->task, s.view()).size();
             },
-            "state"_a)
+            "state"_a,
+            "The number of fact landmarks true in `state`.")
         .def(
             "num_unachieved",
             [](const PyFactLandmarkGraph& g, StateArg state) {
@@ -553,7 +568,7 @@ void bind_landmarks(nb::module_& m)
         "max_disjunctive_landmark_size"_a = 0, "max_disjunctive_landmark_depth"_a = 0,
         "first_achievers"_a = lm::FirstAchievers::HMax, "include_derived_atoms"_a = false, "max_operators"_a = 5'000'000,
         "max_bindings"_a = 100'000'000, "max_seconds"_a = 60.0,
-        "Fact landmarks over the grounded delete relaxation (landmarks/approximate.hpp), with the achiever index. Grounds the task: max_operators, max_bindings and "
+        "Fact landmarks over the grounded delete relaxation, with the achiever index. Grounds the task: max_operators, max_bindings and "
         "max_seconds bound the grounding (RuntimeError beyond). max_disjunctive_landmark_size 0: no disjunctive "
         "landmarks; max_disjunctive_landmark_depth 0: unbounded. first_achievers: a FirstAchievers or 'hmax' / "
         "'possibly_before' (sound; the landmark count's). include_derived_atoms: derived goal atoms and derived "
@@ -607,7 +622,7 @@ void bind_landmarks(nb::module_& m)
         "max_disjunctive_members"_a = 0, "reachability_filter_members"_a = true,
         "reachability_disambiguation"_a = lm::ReachabilityDisambiguation::Joint, "first_achievers_restricted"_a = true,
         "verify_pi_plus"_a = true, "complete_fact_landmarks"_a = lm::CompleteFactLandmarks::Members,
-        "Lifted fact landmarks straight from the schemas (landmarks/lifted.hpp): "
+        "Lifted fact landmarks straight from the schemas: "
         "no grounding and no achiever index, but lifted landmarks (graph.lifted). reachability: a RelaxedReachability "
         "of the task (default options) to reuse; the enums also take their names ('joint', 'members', ...). Raises "
         "RuntimeError when verify_pi_plus finds a fact that is not a landmark.");
@@ -631,16 +646,26 @@ void bind_landmarks(nb::module_& m)
         "forbidden; RuntimeError naming the first that does not.");
 
     // relaxed reachability -------------------------------------------------------------------------------------------
-    nb::class_<rr::Statistics>(m, "ReachabilityStatistics")
-        .def_ro("rules", &rr::Statistics::rules)
-        .def_ro("dropped_rules", &rr::Statistics::dropped_rules)
-        .def_ro("plans", &rr::Statistics::plans)
-        .def_ro("rounds", &rr::Statistics::rounds)
-        .def_ro("fluent_atoms", &rr::Statistics::fluent_atoms)
-        .def_ro("derived_atoms", &rr::Statistics::derived_atoms)
-        .def_ro("bindings", &rr::Statistics::bindings)
-        .def_ro("compile_ms", &rr::Statistics::compile_ms)
-        .def_ro("fixpoint_ms", &rr::Statistics::fixpoint_ms)
+    nb::class_<rr::Statistics>(m, "ReachabilityStatistics",
+                               "The counters of a RelaxedReachability fixpoint.")
+        .def_ro("rules", &rr::Statistics::rules,
+                "Compiled rules: one per schema, conditional effect and positive effect literal, and one per axiom.")
+        .def_ro("dropped_rules", &rr::Statistics::dropped_rules,
+                "Rules dropped as statically unsatisfiable.")
+        .def_ro("plans", &rr::Statistics::plans,
+                "Compiled matchers (one per rule and one per relation literal).")
+        .def_ro("rounds", &rr::Statistics::rounds,
+                "Semi-naive rounds until the fixpoint.")
+        .def_ro("fluent_atoms", &rr::Statistics::fluent_atoms,
+                "Reachable fluent atoms.")
+        .def_ro("derived_atoms", &rr::Statistics::derived_atoms,
+                "Reachable derived atoms.")
+        .def_ro("bindings", &rr::Statistics::bindings,
+                "Rule bindings the fixpoint emitted.")
+        .def_ro("compile_ms", &rr::Statistics::compile_ms,
+                "Time to compile the rules, in milliseconds.")
+        .def_ro("fixpoint_ms", &rr::Statistics::fixpoint_ms,
+                "Time of the fixpoint, in milliseconds.")
         .def("__repr__", [](const rr::Statistics& s) {
             return "ReachabilityStatistics(rules=" + std::to_string(s.rules) + ", rounds=" + std::to_string(s.rounds) +
                    ", fluent_atoms=" + std::to_string(s.fluent_atoms) + ", derived_atoms=" + std::to_string(s.derived_atoms) + ")";
@@ -659,7 +684,9 @@ void bind_landmarks(nb::module_& m)
                 std::lock_guard lock(*q.m);
                 return q.q->avoids(*c);
             },
-            "atom"_a)
+            "atom"_a,
+            "Whether `atom` is reachable without the forbidden atoms: REACHABLE_WITHOUT (sound), or UNKNOWN (no "
+            "information).")
         .def_prop_ro("memoized", [](PyWitnessQuery& q) {
             u64 n = 0;
             {
@@ -668,7 +695,8 @@ void bind_landmarks(nb::module_& m)
                 n = q.q->memoized();
             }
             return n;
-        });
+        },
+                     "The atoms whose verdict is memoized.");
 
     nb::class_<PyReachabilityTable>(m, "ReachabilityTable",
                                     "The atoms one delete-relaxed fixpoint reached (RelaxedReachability.table, "
@@ -686,12 +714,19 @@ void bind_landmarks(nb::module_& m)
                 return atom_list(t.o, t.t->atoms(PredicateId{predicate_arg(t.o, predicate)}));
             },
             "predicate"_a, "The reachable atoms of a fluent or derived predicate (name, index or Predicate), in derivation order.")
-        .def_prop_ro("num_atoms", [](const PyReachabilityTable& t) { return t.t->num_atoms(); })
-        .def_prop_ro("num_fluent_atoms", [](const PyReachabilityTable& t) { return t.t->num_fluent_atoms(); })
-        .def_prop_ro("num_derived_atoms", [](const PyReachabilityTable& t) { return t.t->num_derived_atoms(); })
-        .def_prop_ro("goal_reachable", [](const PyReachabilityTable& t) { return t.t->goal_reachable(); })
-        .def_prop_ro("rounds", [](const PyReachabilityTable& t) { return t.t->rounds(); })
-        .def_prop_ro("has_witnesses", [](const PyReachabilityTable& t) { return t.t->has_witnesses(); })
+        .def_prop_ro("num_atoms", [](const PyReachabilityTable& t) { return t.t->num_atoms(); },
+                     "The reachable fluent and derived atoms.")
+        .def_prop_ro("num_fluent_atoms", [](const PyReachabilityTable& t) { return t.t->num_fluent_atoms(); },
+                     "The reachable fluent atoms.")
+        .def_prop_ro("num_derived_atoms", [](const PyReachabilityTable& t) { return t.t->num_derived_atoms(); },
+                     "The reachable derived atoms.")
+        .def_prop_ro("goal_reachable", [](const PyReachabilityTable& t) { return t.t->goal_reachable(); },
+                     "Whether the static goal holds and every positive fluent and derived goal atom is reachable.")
+        .def_prop_ro("rounds", [](const PyReachabilityTable& t) { return t.t->rounds(); },
+                     "Semi-naive rounds until the fixpoint.")
+        .def_prop_ro("has_witnesses", [](const PyReachabilityTable& t) { return t.t->has_witnesses(); },
+                     "Whether the first derivation of every atom was recorded (record_witnesses=True), which "
+                     "witness_query needs.")
         .def(
             "witness_query",
             [](const PyReachabilityTable& t, AtomsArg forbidden) -> Arg<PyWitnessQuery> {
@@ -702,7 +737,9 @@ void bind_landmarks(nb::module_& m)
                 auto q = std::make_unique<rr::WitnessQuery>(t.t->witness_query(f));
                 return nb::cast(PyWitnessQuery{t.t, std::move(q), t.o}, nb::rv_policy::move);
             },
-            "forbidden"_a)
+            "forbidden"_a,
+            "A WitnessQuery: is an atom reachable without the `forbidden` atoms?\n\nRaises:\n    ValueError: the "
+            "table has no witnesses.")
         .def(
             "project",
             [](const PyReachabilityTable& t, IntArg num_variables_in, nb::typed<nb::iterable, QueryLiteralArg> literals,
@@ -731,7 +768,7 @@ void bind_landmarks(nb::module_& m)
 
     nb::class_<PyRelaxedReachability>(
         m, "RelaxedReachability",
-        "Exact delete-relaxed reachability over ground atoms without grounding (reachability/relaxed_reachability.hpp): the unrestricted fixpoint at construction, restricted fixpoints and the "
+        "Exact delete-relaxed reachability over ground atoms without grounding: the unrestricted fixpoint at construction, restricted fixpoints and the "
         "complete landmark test on demand. Immutable and thread-safe; the fixpoints run with the thread state detached.")
         .def(
             "__init__",
@@ -749,19 +786,23 @@ void bind_landmarks(nb::module_& m)
                 new (self) PyRelaxedReachability{std::move(e), std::move(o)};
             },
             "task"_a, nb::kw_only(), "enforce_negative_static"_a = true, "record_witnesses"_a = true)
-        .def_prop_ro("task", [](const PyRelaxedReachability& e) -> Arg<std::variant<PyTask, PyHandle>> { return e.o.obj; })
+        .def_prop_ro("task", [](const PyRelaxedReachability& e) -> Arg<std::variant<PyTask, PyHandle>> { return e.o.obj; },
+                     "The Task (or TaskHandle) it was computed for.")
         .def_prop_ro("table",
                      [](const PyRelaxedReachability& e) {
                          return make_table(e.o, std::shared_ptr<const rr::Table>(e.rr, &e.rr->table()));
-                     })
+                     },
+                     "The ReachabilityTable of the reachable atoms.")
         .def(
             "is_reachable",
             [](const PyRelaxedReachability& e, AtomLike atom) {
                 const auto c = canonical_atom(e.o, atom, true);
                 return c && e.rr->is_reachable(*c);
             },
-            "atom"_a)
-        .def_prop_ro("goal_reachable", [](const PyRelaxedReachability& e) { return e.rr->goal_reachable(); })
+            "atom"_a,
+            "Whether `atom` (a GroundAtom or '(predicate o1 ... ok)') is reachable in the delete relaxation.")
+        .def_prop_ro("goal_reachable", [](const PyRelaxedReachability& e) { return e.rr->goal_reachable(); },
+                     "Whether the goal is reachable in the delete relaxation.")
         .def(
             "restricted",
             [](const PyRelaxedReachability& e, AtomsArg forbidden) {
@@ -782,9 +823,13 @@ void bind_landmarks(nb::module_& m)
                 return e.rr->goal_reachable_without(f);
             },
             "forbidden"_a, "The complete delete-relaxation landmark test: is the goal reachable without `forbidden`?")
-        .def_prop_ro("statistics", [](const PyRelaxedReachability& e) { return e.rr->statistics(); })
-        .def_prop_ro("enforce_negative_static", [](const PyRelaxedReachability& e) { return e.rr->options().enforce_negative_static; })
-        .def_prop_ro("record_witnesses", [](const PyRelaxedReachability& e) { return e.rr->options().record_witnesses; })
+        .def_prop_ro("stats", [](const PyRelaxedReachability& e) { return e.rr->statistics(); },
+                     "The fixpoint's ReachabilityStatistics.")
+        .def_prop_ro("enforce_negative_static", [](const PyRelaxedReachability& e) { return e.rr->options().enforce_negative_static; },
+                     "Whether negative static literals (including (not (= ?x ?y))) were evaluated; False drops "
+                     "them, as a grounded delete relaxation does.")
+        .def_prop_ro("record_witnesses", [](const PyRelaxedReachability& e) { return e.rr->options().record_witnesses; },
+                     "Whether the first derivation of every atom was recorded.")
         .def("__repr__", [](const PyRelaxedReachability& e) {
             const rr::Statistics& s = e.rr->statistics();
             return "RelaxedReachability(fluent_atoms=" + std::to_string(s.fluent_atoms) + ", derived_atoms=" +
@@ -792,12 +837,19 @@ void bind_landmarks(nb::module_& m)
         });
 
     // transition ordering --------------------------------------------------------------------------------------------
-    nb::class_<lm::LandmarkTransitionScore>(m, "LandmarkTransitionScore")
-        .def_ro("num_new_landmarks", &lm::LandmarkTransitionScore::num_new_landmarks)
-        .def_ro("num_new_unique_landmarks", &lm::LandmarkTransitionScore::num_new_unique_landmarks)
-        .def_ro("unique_achiever_action", &lm::LandmarkTransitionScore::unique_achiever_action)
-        .def_ro("deletes_achieved_landmark", &lm::LandmarkTransitionScore::deletes_achieved_landmark)
-        .def_ro("num_deleted_achieved_landmarks", &lm::LandmarkTransitionScore::num_deleted_achieved_landmarks)
+    nb::class_<lm::LandmarkTransitionScore>(m, "LandmarkTransitionScore",
+                                            "How a transition parent --action--> child scores against the fact "
+                                            "landmarks.")
+        .def_ro("num_new_landmarks", &lm::LandmarkTransitionScore::num_new_landmarks,
+                "Landmarks the child holds and the parent does not.")
+        .def_ro("num_new_unique_landmarks", &lm::LandmarkTransitionScore::num_new_unique_landmarks,
+                "New landmarks whose only achiever is the action.")
+        .def_ro("unique_achiever_action", &lm::LandmarkTransitionScore::unique_achiever_action,
+                "Whether the action is the only achiever of some landmark.")
+        .def_ro("deletes_achieved_landmark", &lm::LandmarkTransitionScore::deletes_achieved_landmark,
+                "Whether the parent holds a landmark the child does not.")
+        .def_ro("num_deleted_achieved_landmarks", &lm::LandmarkTransitionScore::num_deleted_achieved_landmarks,
+                "Landmarks the parent holds and the child does not.")
         .def("__eq__", [](const lm::LandmarkTransitionScore& a, const lm::LandmarkTransitionScore& b) { return a == b; })
         .def("__repr__", [](const lm::LandmarkTransitionScore& s) {
             return "LandmarkTransitionScore(new=" + std::to_string(s.num_new_landmarks) + ", new_unique=" +
@@ -808,8 +860,8 @@ void bind_landmarks(nb::module_& m)
 
     nb::class_<PyLandmarkOrdering>(
         m, "LandmarkTransitionOrdering",
-        "The landmark transition ordering (landmarks/transition_ordering.hpp), for IW's width-1 pass: "
-        "iw(task, max_arity=1, transition_ordering=...). Scores each transition against the fact landmarks (more new "
+        "The landmark transition ordering, for IW's width-1 pass: "
+        "iw(task, max_width=1, transition_ordering=...). Scores each transition against the fact landmarks (more new "
         "ones, more new unique ones, a unique achiever action first, fewer deleted ones) and stable-sorts the layer. "
         "Needs a graph with an achiever index (approximate_fact_landmarks).")
         .def(
@@ -828,7 +880,8 @@ void bind_landmarks(nb::module_& m)
             },
             "graph"_a, nb::kw_only(), "prefer_new_landmarks"_a = true, "prefer_unique_achievers"_a = true,
             "prefer_landmark_actions_when_deleting"_a = true, "prefer_fewer_deleted_landmarks"_a = true)
-        .def_prop_ro("graph", [](const PyLandmarkOrdering& x) { return x.graph; })
+        .def_prop_ro("graph", [](const PyLandmarkOrdering& x) { return x.graph; },
+                     "The FactLandmarkGraph it scores against.")
         .def(
             "score",
             [](const PyLandmarkOrdering& x, StateArg parent, ActionLike action, StateArg child) {
@@ -837,18 +890,23 @@ void bind_landmarks(nb::module_& m)
                 const Action a = action_of(x.graph.o, action);
                 return x.t->score(p.view(), a.label(), c.view());
             },
-            "parent"_a, "action"_a, "child"_a)
+            "parent"_a, "action"_a, "child"_a,
+            "The LandmarkTransitionScore of the transition parent --action--> child.")
         .def(
             "prefer",
             [](const PyLandmarkOrdering& x, const lm::LandmarkTransitionScore& a, const lm::LandmarkTransitionScore& b) {
                 return x.t->prefer(a, b);
             },
             "a"_a, "b"_a, "Whether a transition scored `a` comes strictly before one scored `b`.")
-        .def_prop_ro("prefer_new_landmarks", [](const PyLandmarkOrdering& x) { return x.t->options().prefer_new_landmarks; })
-        .def_prop_ro("prefer_unique_achievers", [](const PyLandmarkOrdering& x) { return x.t->options().prefer_unique_achievers; })
+        .def_prop_ro("prefer_new_landmarks", [](const PyLandmarkOrdering& x) { return x.t->options().prefer_new_landmarks; },
+                     "Whether more new landmarks rank first.")
+        .def_prop_ro("prefer_unique_achievers", [](const PyLandmarkOrdering& x) { return x.t->options().prefer_unique_achievers; },
+                     "Whether more new uniquely achieved landmarks rank first.")
         .def_prop_ro("prefer_landmark_actions_when_deleting",
-                     [](const PyLandmarkOrdering& x) { return x.t->options().prefer_landmark_actions_when_deleting; })
+                     [](const PyLandmarkOrdering& x) { return x.t->options().prefer_landmark_actions_when_deleting; },
+                     "Whether an action that is the only achiever of some landmark ranks first.")
         .def_prop_ro("prefer_fewer_deleted_landmarks",
-                     [](const PyLandmarkOrdering& x) { return x.t->options().prefer_fewer_deleted_landmarks; });
+                     [](const PyLandmarkOrdering& x) { return x.t->options().prefer_fewer_deleted_landmarks; },
+                     "Whether fewer deleted landmarks rank first.");
 }
 }  // namespace mymyr::python

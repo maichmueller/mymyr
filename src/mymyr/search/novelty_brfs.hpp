@@ -1162,6 +1162,7 @@ IwResult novelty_ladder(Env& env, u32 first, u32 top, bool placeholder, RunPass&
         }
         r.peak_table_bytes = std::max(r.peak_table_bytes, po.table_bytes);
         r.peak_node_bytes = std::max(r.peak_node_bytes, po.node_bytes);
+        r.total.memory_bytes = std::max(r.total.memory_bytes, po.table_bytes + po.node_bytes);
         push(po.st);
         if (po.st.status == SearchStatus::Solved)
         {
@@ -1188,7 +1189,6 @@ inline void finish_result(Env& env, const State& root, IwResult& r)
     {
         const PlanCost pc(env.task);
         r.cost = pc.apply(env.succ, root, r.plan);
-        r.cost_exact = pc.exact();
     }
     r.fluent_slots = env.task.atoms().fluent_slots();
     if (env.root)

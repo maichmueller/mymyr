@@ -607,12 +607,12 @@ TEST(DeviceStateSpace, SamplersOverDeviceDistances)
                 "cudaMemcpy");
     StateSpaceSampler a(r.host, 7), b(std::span<const i32>(unit), 7);
     EXPECT_EQ(a.num_states(), b.num_states());
-    EXPECT_EQ(a.num_dead_end_states(), b.num_dead_end_states());
+    EXPECT_EQ(a.num_unsolvable_states(), b.num_unsolvable_states());
     EXPECT_EQ(a.max_steps_to_goal(), b.max_steps_to_goal());
     for (int k = 0; k < 100; ++k)
     {
         EXPECT_EQ(a.sample_state(), b.sample_state());
-        EXPECT_EQ(a.sample_dead_end_state(), b.sample_dead_end_state());
+        EXPECT_EQ(a.sample_unsolvable_state(), b.sample_unsolvable_state());
         EXPECT_EQ(a.sample_state_n_steps_from_goal(3), b.sample_state_n_steps_from_goal(3));
     }
     EXPECT_FALSE(b.space());

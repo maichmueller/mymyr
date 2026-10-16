@@ -690,7 +690,7 @@ int main(int argc, char** argv)
                          ",\"iw_lower_bound\":" + std::to_string(r.iw_lower_bound) + ",\"iw_completed_depth\":" + std::to_string(r.iw_completed_depth) +
                          ",\"winning_worker\":" + std::to_string(r.winning_worker) + ",\"certifier_status\":\"" +
                          (r.certifier_ran ? parity::reference_status_name(r.certifier_status) : "in_progress") + "\",\"total_expansions\":" +
-                         std::to_string(r.total_expansions) + ",\"threads_used\":" + std::to_string(r.threads_used) + ",\"rollout_statistics\":[" + stats +
+                         std::to_string(r.stats.expanded) + ",\"threads_used\":" + std::to_string(r.threads_used) + ",\"rollout_statistics\":[" + stats +
                          "],\"rollout_statuses\":[" + statuses + "],\"rollout_rounds\":[";
                 for (usize i = 0; i < r.rollout_rounds.size(); ++i)
                     extra += (i ? "," : "") + std::to_string(r.rollout_rounds[i]);

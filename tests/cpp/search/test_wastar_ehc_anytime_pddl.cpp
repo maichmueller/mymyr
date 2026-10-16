@@ -338,7 +338,7 @@ TEST(WeightedAStarPddl, RealAndZeroCostsStayWithinTheBound)
     }
 }
 
-TEST(WeightedAStarPddl, ACostBoundNeedsCostsThatDoNotDecrease)
+TEST(WeightedAStarPddl, AStarRefusesATransitionThatLowersTheMetric)
 {
     const auto task = make(R"((define (domain d) (:requirements :strips :action-costs)
  (:predicates (a) (b) (goal)) (:functions (total-cost))
@@ -349,16 +349,62 @@ TEST(WeightedAStarPddl, ACostBoundNeedsCostsThatDoNotDecrease)
  (:metric minimize (total-cost))))");
     BestFirstOptions o;
     o.heuristic.kind = H::Kind::Blind;
-    const BestFirstResult free = astar_eager(*task, o);
-    ASSERT_EQ(free.status, SearchStatus::Solved) << free.message;
-    EXPECT_EQ(free.cost, 2);
-    o.cost_bound = 10;
+    for (const double bound : {std::numeric_limits<double>::infinity(), 10.0})
+    {
+        o.cost_bound = bound;
+        for (const auto fn : {&astar_eager, &astar_lazy})
+        {
+            const BestFirstResult r = fn(*task, o);
+            EXPECT_EQ(r.status, SearchStatus::Failed);
+            EXPECT_TRUE(r.plan.empty());
+            EXPECT_NE(r.message.find("non-negative"), std::string::npos) << r.message;
+            EXPECT_NE(r.message.find("from 2 to 1"), std::string::npos) << r.message;
+        }
+    }
+    o.cost_bound = std::numeric_limits<double>::infinity();
+    o.weight = 2.0;
+    EXPECT_EQ(astar_eager(*task, o).status, SearchStatus::Failed);
+    o.weight = 1.0;
+    AnytimeOptions any;
+    any.heuristic.kind = H::Kind::Blind;
+    const AnytimeResult a = anytime_astar(*task, any);
+    EXPECT_EQ(a.status, SearchStatus::Failed);
+    EXPECT_TRUE(a.plan.empty());
+    EXPECT_NE(a.message.find("non-negative"), std::string::npos) << a.message;
+    // Greedy searches close each state once, so they terminate and report the plan with its metric value.
+    const BestFirstResult g = gbfs_eager(*task, o);
+    ASSERT_EQ(g.status, SearchStatus::Solved) << g.message;
+    EXPECT_EQ(g.cost, 2);
+    EhcOptions e;
+    e.heuristic.kind = H::Kind::GoalCount;
+    const EhcResult h = ehc(*task, e);
+    ASSERT_EQ(h.status, SearchStatus::Solved) << h.message;
+    EXPECT_EQ(h.cost, 2);
+}
+
+TEST(WeightedAStarPddl, AStarStopsOnANegativeCostCycle)
+{
+    // Without the check, reopening would lower g around the on/off cycle forever: every lap is cheaper than finishing.
+    const auto task = make(R"((define (domain d) (:requirements :strips :negative-preconditions :action-costs)
+ (:predicates (a) (goal)) (:functions (total-cost))
+ (:action on :parameters () :precondition (not (a)) :effect (and (a) (decrease (total-cost) 1)))
+ (:action off :parameters () :precondition (a) :effect (and (not (a)) (decrease (total-cost) 1)))
+ (:action finish :parameters () :precondition (a) :effect (and (goal) (increase (total-cost) 100)))))",
+                           R"((define (problem p) (:domain d) (:init (= (total-cost) 0)) (:goal (goal))
+ (:metric minimize (total-cost))))");
+    BestFirstOptions o;
+    o.heuristic.kind = H::Kind::Blind;
     for (const auto fn : {&astar_eager, &astar_lazy})
     {
         const BestFirstResult r = fn(*task, o);
         EXPECT_EQ(r.status, SearchStatus::Failed);
         EXPECT_NE(r.message.find("non-negative"), std::string::npos) << r.message;
+        EXPECT_LE(r.stats.expanded, 2u);
     }
+    // A greedy search closes each state once.
+    const BestFirstResult g = gbfs_eager(*task, o);
+    ASSERT_EQ(g.status, SearchStatus::Solved) << g.message;
+    EXPECT_EQ(g.cost, 99);
 }
 
 // ------------------------------------------------------------------------------------------------------ anytime

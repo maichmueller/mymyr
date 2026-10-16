@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import sys
+import sysconfig
 import tempfile
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -112,7 +113,8 @@ def _run_isolated(config, path):
     for w in config.getoption("pythonwarnings") or []:
         args += ["-W", w]
     proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *_isolated_groups[path],
-                    env={**os.environ, ISOLATED_REPORT: report, "PYTHON_GIL": "1"}, timeout=None, capture_output=True, check=False)
+                    env={**os.environ, ISOLATED_REPORT: report, "PYTHON_GIL": "1"}, timeout=None,
+                    capture_output=True, check=False)
     try:
         for line in pathlib.Path(report).read_text().splitlines():
             entry = json.loads(line)
@@ -137,6 +139,15 @@ def pytest_pyfunc_call(pyfuncitem):
     if entry["outcome"] == "skipped":
         pytest.skip(entry["skip"])
     return True
+
+
+# A free-threaded interpreter. On the GIL build the threads of the concurrency tests take turns on the GIL.
+FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
+def gil_stays_off():
+    """Whether a free-threaded interpreter still runs without the GIL (always True on the GIL build)."""
+    return not FREE_THREADED or not sys._is_gil_enabled()
 
 
 @pytest.fixture(autouse=True)

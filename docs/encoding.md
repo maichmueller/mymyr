@@ -3,7 +3,7 @@
 `mymyr.encoding` encodes states of classical tasks into relational graphs: one graph per state, with the task's objects
 as entities and, for every relation of an `EncodingSchema`, the tuples of the state's atoms. It runs in C++, reads
 native state words directly, and needs no model framework. The result is a batch of flat integer
-arrays that every framework imports without a copy.
+arrays that every framework imports without a copy. Options follow the [API conventions](conventions.md).
 
 ```python
 import numpy as np
@@ -75,13 +75,14 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   bounds the total number of tuples. The batch fills the first entries of each array and the rest is zero, so batches
   of different sizes share array shapes (for example under `jax.jit`). A batch that does not fit (a capacity too small,
   or an index type too narrow) leaves every array zero and sets `batch.sizes['overflow']`; `sizes['capacity_overflow']`
-  and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']` `['args']` and `['targets']` are the true sizes.
+  and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']` and `['targets']` are the
+  true sizes.
 
 Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `max_goal_level`
-above 0, subgoal and history targets and `horizon_mode`. Numeric tasks raise as well. Every
-other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed `derived`
-array) raises `ValueError` too; a batch that needs more indices than the index type holds raises `OverflowError`
-(`index_dtype='int64'` lifts the limit).
+above 0, subgoal and history targets and `horizon_mode`. Numeric tasks raise as well.
+Every other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed
+`derived` array) raises `ValueError` too; a batch that needs more indices than the index type holds raises
+`OverflowError` (`index_dtype='int64'` lifts the limit).
 
 ## Lanes
 
@@ -156,7 +157,7 @@ extra argument right before the predicate's own arguments (after the goal entity
 action tuples have no predicate slot. A node exists only if some tuple uses it, so a predicate without tuples in the
 graph has no node, and the nodes are numbered by ascending `entity_ref`, which is the id of the predicate's key
 relation: its plain state relation, or for a predicate without one (a static or derived predicate whose state
-relation is dropped) its first relation in the catalog (`schema.virtual_key`). The nullary atoms of a predicate are
+relation is dropped) its first relation in the catalog (C++: `EncodingSchema::virtual_key`). The nullary atoms of a predicate are
 the tuple over its node and the auxiliary entity. Actions are not virtual-node predicates.
 
 ## The batch

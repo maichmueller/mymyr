@@ -69,6 +69,10 @@ struct Observer
 struct HeuristicObject
 {
 };
+/// A plan to validate: IPC plan text, the path of a plan file, or a sequence of Actions.
+struct PlanSource
+{
+};
 }  // namespace ann
 
 /// An Action (label) of `o`'s task.
@@ -184,5 +188,10 @@ template<>
 struct type_caster<mymyr::python::ann::HeuristicObject>
 {
     static constexpr auto Name = const_name("mymyr._typing.HeuristicObject");
+};
+template<>
+struct type_caster<mymyr::python::ann::PlanSource>
+{
+    static constexpr auto Name = const_name("str | os.PathLike[str] | collections.abc.Iterable[mymyr._core.Action]");
 };
 }  // namespace nanobind::detail

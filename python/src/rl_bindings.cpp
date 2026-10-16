@@ -873,14 +873,10 @@ std::vector<std::filesystem::path> problem_files(const std::variant<std::filesys
     return files;
 }
 
-/// The loader's default thread count: instantiating and compiling a problem is short, so a few threads saturate it,
-/// while every thread reserves about 72 MB of address space (its stack and its malloc arena).
-constexpr u32 k_loader_threads = 8;
-
 /// TaskTable.from_pddl: parses the domain once and instantiates and compiles the problems on `threads` threads
-/// (none: min(k_loader_threads, the hardware threads)).
+/// (0: one per hardware thread).
 nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-                           const TaskOptions& options, std::optional<u32> threads)
+                           const TaskOptions& options, u32 threads)
 {
     PyDomain dom;
     if (nb::isinstance<PyDomain>(domain))
@@ -900,7 +896,7 @@ nb::object table_from_pddl(nb::handle domain, const std::variant<std::filesystem
         nb::gil_scoped_release release;
         std::vector<std::exception_ptr> errors(n);
         std::atomic<usize> next{0};
-        const u32 T = threads ? resolve_threads(*threads) : std::min(k_loader_threads, hardware_threads());
+        const u32 T = resolve_threads(threads);
         ThreadPool pool(static_cast<u32>(std::min<usize>(T, n)));
         pool.run([&](u32) {
             for (usize i; (i = next.fetch_add(1, std::memory_order_relaxed)) < n;)
@@ -1334,7 +1330,8 @@ void bind_rl(nb::module_& parent)
                        "A pool of worker threads for splitting one batch over threads (rl.expand(..., pool=)). Workers "
                        "sleep between calls; one batch runs at a time. Hold it as long as you expand.")
         .def("__init__", [](PyPool* self, IntArg threads) { new (self) PyPool(threads_arg(threads)); }, "threads"_a)
-        .def_prop_ro("threads", [](const PyPool& p) { return p.pool->size(); })
+        .def_prop_ro("threads", [](const PyPool& p) { return p.pool->size(); },
+                     "The number of worker threads.")
         .def("__repr__", [](const PyPool& p) { return "ThreadPool(" + std::to_string(p.pool->size()) + ")"; });
 
     // --- TaskTable
@@ -1343,8 +1340,8 @@ void bind_rl(nb::module_& parent)
         "Many instances of one domain: the table the RL entry points take (rl.expand, "
         "rl.is_goal, the torch and JAX environments, CpuEnvPool; a TaskSuite mixes domains). A batch over a table says "
         "the instance of each row (task_ids, int32 [N]); a Task is accepted wherever a TaskTable is (its table of "
-        "one). The instances must have "
-        "the same action schemas and domain predicates (in the same order) and fixed atom slots (not atoms='lazy'). A "
+        "one).\n\nThe instances must have "
+        "the same action schemas and domain predicates (in the same order) and fixed atom slots (not atoms='lazy').\n\nA "
         "batch's rows have at least its widest instance's atom words (instance_words; at most words), plus "
         "numeric_words; a row's words past its own instance's are padding, never read and written zero, so an "
         "operation on a row costs its own instance's width. Immutable; picklable (it pickles its tasks).")
@@ -1371,19 +1368,17 @@ void bind_rl(nb::module_& parent)
             "from_pddl",
             [](Arg<std::variant<PyDomain, std::filesystem::path>> domain,
                const std::variant<std::filesystem::path, std::vector<std::filesystem::path>>& problems,
-               MYMYR_TASK_OPTION_PARAMS, IntArg threads_in) {
+               MYMYR_TASK_OPTION_PARAMS, IntArg threads) {
                 const TaskOptions options = make_options(MYMYR_TASK_OPTION_VALUES);
-                const std::optional<u32> threads =
-                    threads_in.is_none() ? std::nullopt : std::optional<u32>(threads_arg(threads_in));
-                return nb::typed<nb::object, PyTable>(table_from_pddl(domain, problems, options, threads));
+                return nb::typed<nb::object, PyTable>(
+                    table_from_pddl(domain, problems, options, threads_arg(threads)));
             },
-            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = nb::none(),
+            "domain"_a, "problems"_a, MYMYR_TASK_OPTION_ARGS, "threads"_a = 1,
             "The table of a domain's problems: a task set of one domain. domain is a path or a mymyr.Domain (parsed "
             "once). problems is a list of problem files (kept in its order), a directory (its *.pddl files sorted by "
             "path), a glob pattern (its matches sorted by path; ** spans directories) or one file; domain files in a "
             "directory or among the matches are skipped. The problems are instantiated and compiled on `threads` "
-            "threads (default: min(8, the hardware threads), as more threads gain little here while each reserves about 72 "
-            "MB of address space for its stack and malloc arena; 0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i])) "
+            "threads (0: one per hardware thread); instance i is the same task as Task(domain.instantiate(files[i])) "
             "with these options, except that under numeric_storage='auto' the numeric instances store their values "
             "as 'f64' when one of them needs it (a table has one numeric storage). Raises ValueError when a directory "
             "or pattern has no problem files.")
@@ -1418,7 +1413,8 @@ void bind_rl(nb::module_& parent)
                      "Words of a derived-atom row (rl.expand(..., derived=True)): the most any instance has; 0 without "
                      "derived atoms.")
         .def_prop_ro("label_width", [](const PyTable& t) { return t.table->label_width(); }, "The largest schema arity.")
-        .def_prop_ro("num_schemas", [](const PyTable& t) { return t.table->num_schemas(); })
+        .def_prop_ro("num_schemas", [](const PyTable& t) { return t.table->num_schemas(); },
+                     "The number of action schemas of the domain.")
         .def_prop_ro("max_objects", [](const PyTable& t) { return t.table->max_objects(); },
                      "The most objects of an instance (the columns of rl.prefix_masks over the table).")
         .def_prop_ro("numeric_storage", [](const PyTable& t) -> Arg<std::optional<std::string>> {
@@ -1449,11 +1445,14 @@ void bind_rl(nb::module_& parent)
                 return v;
             },
             "Atom words per instance [I] (each instance's words, at least 1; its rows' words past them are padding).")
-        .def_prop_ro("schema_names", [](const PyTable& t) { return t.table->schema_names(); })
-        .def_prop_ro("schema_arities", [](const PyTable& t) { return t.table->schema_arities(); })
+        .def_prop_ro("schema_names", [](const PyTable& t) { return t.table->schema_names(); },
+                     "The schema names, in schema order (the order of the schema ids of actions).")
+        .def_prop_ro("schema_arities", [](const PyTable& t) { return t.table->schema_arities(); },
+                     "The arity of each schema, in schema order.")
         .def_prop_ro("predicate_names", [](const PyTable& t) { return t.table->predicate_names(); },
                      "Table predicates: the domain's (ids [0, num_domain_predicates)), then the problem-local ones.")
-        .def_prop_ro("predicate_arities", [](const PyTable& t) { return t.table->predicate_arities(); })
+        .def_prop_ro("predicate_arities", [](const PyTable& t) { return t.table->predicate_arities(); },
+                     "The arity of each predicate, in the order of predicate_names.")
         .def_prop_ro(
             "predicate_kinds",
             [](const PyTable& t) {
@@ -1481,7 +1480,7 @@ void bind_rl(nb::module_& parent)
                 return nb::borrow<BundleDict>(export_bundle(b, fw, default_words(fw)));
             },
             "framework"_a = nb::none(),
-            "The instances' atom metadata concatenated (rl/task_table.hpp table_atom_metadata; zero-copy views of a "
+            "The instances' atom metadata concatenated (zero-copy views of a "
             "cached snapshot): atom_offsets [I + 1] (fluent slot j of instance i is row atom_offsets[i] + j), atom_pred "
             "(table predicate ids), atom_args [F, A] (instance-local objects, -1 padding), atom_cid, derived_* and "
             "static_* likewise, num_objects [I], object_offsets [I + 1], num_atoms [I], pred_arity / pred_kind / "
@@ -1575,7 +1574,8 @@ void bind_rl(nb::module_& parent)
                 return out;
             },
             "The domains' TaskTables (domain d's is tables[d]).")
-        .def_prop_ro("num_domains", [](const PySuite& t) { return t.suite->num_domains(); })
+        .def_prop_ro("num_domains", [](const PySuite& t) { return t.suite->num_domains(); },
+                     "The number of domains (TaskTables).")
         .def_prop_ro(
             "domain_names",
             [](const PySuite& t) {
@@ -1610,7 +1610,8 @@ void bind_rl(nb::module_& parent)
                      "[D + 1]: domain d's schemas are flat ids schema_offsets[d] + schema.")
         .def_prop_ro("max_objects", [](const PySuite& t) { return t.suite->max_objects(); },
                      "The most objects of an instance (the columns of rl.prefix_masks over the suite).")
-        .def_prop_ro("numeric", [](const PySuite& t) { return t.suite->numeric(); })
+        .def_prop_ro("numeric", [](const PySuite& t) { return t.suite->numeric(); },
+                     "Whether an instance of some domain has numeric fluents (numeric suites run on the CPU only).")
         .def_prop_ro("fingerprint", [](const PySuite& t) { return t.suite->fingerprint(); },
                      "A hash of the domains' table fingerprints and the global ids (a one-domain suite: its table's).")
         .def_prop_ro(
@@ -1633,7 +1634,7 @@ void bind_rl(nb::module_& parent)
                 return nb::borrow<BundleDict>(export_bundle(b, fw, default_words(fw)));
             },
             "framework"_a = nb::none(),
-            "The instances' atom metadata in global order (rl/task_suite.hpp suite_atom_metadata; zero-copy views of "
+            "The instances' atom metadata in global order (zero-copy views of "
             "a cached snapshot): TaskTable.atom_metadata()'s arrays with each domain's predicate ids (atom_pred, "
             "derived_pred, static_pred index domain[i]'s rows pred_offsets[d]:pred_offsets[d + 1] of pred_arity / "
             "pred_kind / pred_instance), plus domain [I], local_id [I], pred_offsets [D + 1], domain_predicates [D], "
@@ -1671,8 +1672,10 @@ void bind_rl(nb::module_& parent)
     nb::class_<PaddedResult>(m, "PaddedExpansion",
                              "The padded [N, K] view of an expansion: successor k of state i, with a validity mask and "
                              "the true counts (count > K is an overflow).")
-        .def_prop_ro("K", [](const PaddedResult& p) { return p.K; })
-        .def_prop_ro("overflow", [](const PaddedResult& p) { return p.overflow; })
+        .def_prop_ro("K", [](const PaddedResult& p) { return p.K; },
+                     "The padded successor count per state (the second dimension).")
+        .def_prop_ro("overflow", [](const PaddedResult& p) { return p.overflow; },
+                     "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.K}));
         }, "[N, K] int32: row of the flat arrays, -1 = none")
@@ -1750,14 +1753,20 @@ void bind_rl(nb::module_& parent)
             ArraySpec s{block, c, rl::DType::I32, {static_cast<i64>(e.flat.rows)}, {}, false, false};
             return ArrayOut(export_array(std::move(s), e.fw, e.enc));
         }, "[N] int32 successors per state (a fresh array)")
-        .def_prop_ro("total", [](const PyExpansion& e) { return e.flat.total; })
-        .def_prop_ro("capacity", [](const PyExpansion& e) { return e.flat.capacity; })
-        .def_prop_ro("num_states", [](const PyExpansion& e) { return e.flat.rows; })
+        .def_prop_ro("total", [](const PyExpansion& e) { return e.flat.total; },
+                     "The successor rows of the batch, those beyond the capacity included.")
+        .def_prop_ro("capacity", [](const PyExpansion& e) { return e.flat.capacity; },
+                     "The successor rows the outputs hold; total > capacity is an overflow.")
+        .def_prop_ro("num_states", [](const PyExpansion& e) { return e.flat.rows; },
+                     "The number of expanded states (the batch size).")
         .def_prop_ro("words", [](const PyExpansion& e) { return e.flat.words; }, "Atom words per row (W).")
         .def_prop_ro("numeric_words", [](const PyExpansion& e) { return e.flat.numeric_words; },
                      "Numeric words per row after the atom words (0 for classical tables).")
-        .def_prop_ro("words_needed", [](const PyExpansion& e) { return e.flat.words_needed; })
-        .def_prop_ro("label_width", [](const PyExpansion& e) { return e.flat.label_width; })
+        .def_prop_ro("words_needed", [](const PyExpansion& e) { return e.flat.words_needed; },
+                     "The atom words every successor row needs; more than words is an overflow (new atoms under "
+                     "lazy slots).")
+        .def_prop_ro("label_width", [](const PyExpansion& e) { return e.flat.label_width; },
+                     "Binding objects per successor (the largest schema arity).")
         .def_prop_ro("num_objects", [](const PyExpansion& e) { return e.ref.suite->max_objects(); },
                      "The most objects of an instance of the table or suite (the columns of rl.prefix_masks).")
         .def_prop_ro("num_schemas", [](const PyExpansion& e) { return e.ref.suite->max_schemas(); },
@@ -1772,8 +1781,11 @@ void bind_rl(nb::module_& parent)
         }, "Owned source instance IDs, one per expanded state, including rows without actions.")
         .def_prop_ro("overflow", [](const PyExpansion& e) {
             return e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words;
-        })
-        .def_prop_ro("framework", [](const PyExpansion& e) { return framework_name(e.fw); })
+        },
+                     "Whether some successor was not written: total > capacity or words_needed > words. Expand "
+                     "again with a larger capacity or wider rows.")
+        .def_prop_ro("framework", [](const PyExpansion& e) { return framework_name(e.fw); },
+                     "The framework of the arrays: 'numpy', 'torch' or 'jax'.")
         .def_prop_ro("padded", [](const PyExpansion& e) -> Arg<std::optional<PaddedResult>> {
             if (!e.padded)
                 return nb::none();
@@ -1811,12 +1823,12 @@ void bind_rl(nb::module_& parent)
         .def("__repr__", &words_repr);
 
     m.def("expand", &expand, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "capacity"_a = nb::none(),
-          "words"_a = nb::none(), "K"_a = nb::none(), "goal"_a = false, "derived"_a = false, "canonical"_a = true, "witness"_a = false,
+          "words"_a = nb::none(), "K"_a = nb::none(), "goal"_a = false, "derived"_a = false, "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "threads"_a = 1, "framework"_a = nb::none(), "validate"_a = true,
           "stream"_a = nb::none(), "ctx"_a = nb::none(), "Expands a batch of states [N, W] (see mymyr.rl.expand).");
     m.def("expand_into", &expand_into, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),
           "succ"_a = nb::none(), "parent"_a = nb::none(), "schema"_a = nb::none(), "binding"_a = nb::none(),
-          "goal"_a = nb::none(), "derived"_a = nb::none(), "offsets"_a = nb::none(), "canonical"_a = true, "witness"_a = false,
+          "goal"_a = nb::none(), "derived"_a = nb::none(), "offsets"_a = nb::none(), "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "validate"_a = true, "stream"_a = nb::none(), "ctx"_a = nb::none(),
           "Destination-passing expand into caller arrays (see mymyr.rl.expand_into).");
     m.def(
@@ -1899,7 +1911,7 @@ void bind_rl(nb::module_& parent)
             d["goals"] = st.goals;
             return d;
         },
-        "task"_a, "steps"_a, "episode"_a = 50, "seed"_a = 0, nb::kw_only(), "canonical"_a = true, "witness"_a = false,
+        "task"_a, "steps"_a, "episode"_a = 50, "seed"_a = 0, nb::kw_only(), "canonical_order"_a = true, "witness_pruning"_a = false,
         "Native random walks (one call): expand, move to a uniformly random successor, restart at a dead end and after "
         "`episode` steps (0: only at a dead end).");
     m.def(
@@ -1940,7 +1952,8 @@ void bind_rl(nb::module_& parent)
                             "action labels are None after a reset; goal and termination describe its initial states. "
                             "Once the batch and every array taken from it are dropped, its memory goes back to "
                             "the pool for later results (CpuEnvPool::recycle).")
-        .def_prop_ro("rows", [](const PyPoolBatch& p) { return p.b->rows; })
+        .def_prop_ro("rows", [](const PyPoolBatch& p) { return p.b->rows; },
+                     "The number of environments in the batch.")
         .def_prop_ro("words", [](const PyPoolBatch& p) { return p.b->words; },
                      "Atom words of the rows: the pool's words, or the widest instance's among the batch's envs.")
         .def_prop_ro("row_words", [](const PyPoolBatch& p) { return p.b->row_words(); }, "words + numeric_words.")
@@ -2009,7 +2022,7 @@ void bind_rl(nb::module_& parent)
 
     nb::class_<PyCpuPool>(
         m, "CpuEnvPool",
-        "EnvPool-style asynchronous environments on the CPU (rl/pool.hpp): num_envs envs over a "
+        "EnvPool-style asynchronous environments on the CPU: num_envs envs over a "
         "table or a suite, stepped by worker threads. send(env_ids, actions) enqueues a step of some envs and returns at once; "
         "recv() returns the oldest sends' results in send order. An env's step is the host env's (rl::HostEnv): the "
         "same semantics and RNG streams (env id = the env's index), so results do not depend on the thread count or "
@@ -2025,7 +2038,7 @@ void bind_rl(nb::module_& parent)
                 const std::optional<u32> words = opt_int_arg<u32>(words_in, "words", 1);
                 const u32 threads = threads_arg(threads_in);
                 const u64 seed = int_arg<u64>(seed_in, "seed");
-                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
+                const u32 max_steps = opt_int_arg<u32>(max_steps_in, "max_steps", 1).value_or(0);  // 0: no limit
                 rl::EnvConfig c;
                 c.seed = seed;
                 c.max_steps = max_steps;
@@ -2047,9 +2060,9 @@ void bind_rl(nb::module_& parent)
                 o.sampling = std::move(sampling);
                 new (self) PyCpuPool(std::move(ref), c, num_envs, o, fw, std::move(sampler_obj));
             },
-            "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 0, "goals"_a = false, "seed"_a = 0, "max_steps"_a = 0,
+            "table"_a, "num_envs"_a, nb::kw_only(), "threads"_a = 1, "goals"_a = false, "seed"_a = 0, "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
-            "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
+            "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
             "framework"_a = nb::none(), "words"_a = nb::none(), "sampler"_a.none() = "auto",
             "threads 0: the hardware's; goals: per-env goal masks (the step's goal test is then the mask test); the "
             "results come as `framework` arrays (None: NumPy). sampler (\"auto\" and \"uniform\": uniform, or an "
@@ -2060,10 +2073,14 @@ void bind_rl(nb::module_& parent)
             "as wide as the widest instance among its envs (after a step: their instances and those they autoreset "
             "into), so a step costs each env's own instance width; "
             "words fixes the width of every batch instead (at least table.words).")
-        .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); })
-        .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); })
-        .def_prop_ro("threads", [](const PyCpuPool& p) { return p.pool().threads(); })
-        .def_prop_ro("goals", [](const PyCpuPool& p) { return p.pool().goals(); })
+        .def_prop_ro("table", [](const PyCpuPool& p) { return SuiteArg(p.ref().obj); },
+                     "The TaskTable or TaskSuite the environments run on.")
+        .def_prop_ro("num_envs", [](const PyCpuPool& p) { return p.pool().num_envs(); },
+                     "The number of environments.")
+        .def_prop_ro("threads", [](const PyCpuPool& p) { return p.pool().threads(); },
+                     "The worker threads of a step.")
+        .def_prop_ro("goals", [](const PyCpuPool& p) { return p.pool().goals(); },
+                     "Whether every environment has its own goal (goals=True: PoolBatch.goal_pos and goal_neg).")
         .def_prop_ro(
             "words",
             [](const PyCpuPool& p) -> std::optional<u32> {
@@ -2072,14 +2089,20 @@ void bind_rl(nb::module_& parent)
                 return p.pool().words();
             },
             "The fixed atom words of every batch's rows (words=), or None: each batch has its own (PoolBatch.words).")
-        .def_prop_ro("numeric_words", [](const PyCpuPool& p) { return p.pool().numeric_words(); })
-        .def_prop_ro("label_width", [](const PyCpuPool& p) { return p.pool().label_width(); })
-        .def_prop_ro("framework", [](const PyCpuPool& p) { return framework_name(p.framework()); })
+        .def_prop_ro("numeric_words", [](const PyCpuPool& p) { return p.pool().numeric_words(); },
+                     "Numeric words per state row (0 for classical tables).")
+        .def_prop_ro("label_width", [](const PyCpuPool& p) { return p.pool().label_width(); },
+                     "Binding objects per action label (the largest schema arity).")
+        .def_prop_ro("framework", [](const PyCpuPool& p) { return framework_name(p.framework()); },
+                     "The framework of the batches' arrays: 'numpy', 'torch' or 'jax'.")
         .def_prop_ro("sampler", [](const PyCpuPool& p) { return Arg<ann::Sampler>(p.sampler()); },
                      "The rl.InstanceSampler of resets and autoresets (None: instances are kept).")
-        .def_prop_ro("seed", [](const PyCpuPool& p) { return p.pool().config().seed; })
-        .def_prop_ro("max_steps", [](const PyCpuPool& p) { return p.pool().config().max_steps; })
-        .def_prop_ro("dead_end", [](const PyCpuPool& p) { return std::string(dead_end_name(p.pool().config().dead_end)); })
+        .def_prop_ro("seed", [](const PyCpuPool& p) { return p.pool().config().seed; },
+                     "The seed of the environments' random streams (instance draws).")
+        .def_prop_ro("max_steps", [](const PyCpuPool& p) { return steps_limit(p.pool().config().max_steps); },
+                     "The steps after which an episode is truncated (None: never).")
+        .def_prop_ro("dead_end", [](const PyCpuPool& p) { return std::string(dead_end_name(p.pool().config().dead_end)); },
+                     "Which states are dead ends: 'no_successors' or 'none'.")
         .def_prop_ro("pending", [](const PyCpuPool& p) { return p.pool().pending(); }, "Sends not yet received.")
         .def(
             "reset",

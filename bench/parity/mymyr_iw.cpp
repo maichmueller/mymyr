@@ -344,7 +344,6 @@ int main(int argc, char** argv)
         std::string extra, message;
         std::vector<Action> plan;
         double cost = 0;
-        bool cost_exact = true;
         u32 fluent_slots = 0;
         u64 table_bytes = 0, node_bytes = 0;
         const auto ts = std::chrono::steady_clock::now();
@@ -359,7 +358,6 @@ int main(int argc, char** argv)
             }
             plan = r.plan;
             cost = r.cost;
-            cost_exact = r.cost_exact;
             message = r.message;
             fluent_slots = r.fluent_slots;
             table_bytes = r.peak_table_bytes;
@@ -383,7 +381,6 @@ int main(int argc, char** argv)
             }
             plan = r.plan;
             cost = r.cost;
-            cost_exact = r.cost_exact;
             message = r.message;
             fluent_slots = r.fluent_slots;
             table_bytes = r.peak_table_bytes;
@@ -408,7 +405,7 @@ int main(int argc, char** argv)
                     static_cast<unsigned long long>(all_sums.expanded), static_cast<unsigned long long>(all_sums.generated),
                     static_cast<unsigned long long>(all_sums.in_tree), extra.c_str());
         if (status == SearchStatus::Solved)
-            std::printf(",\"plan_len\":%zu,\"plan_cost\":%.17g,\"cost_exact\":%s", plan.size(), cost, cost_exact ? "true" : "false");
+            std::printf(",\"plan_len\":%zu,\"plan_cost\":%.17g", plan.size(), cost);
         if (print_plan)
             std::printf(",\"plan\":%s", plan_json(*task, plan).c_str());
         if (!message.empty())

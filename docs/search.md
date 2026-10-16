@@ -1,8 +1,10 @@
 # Search
 
 `mymyr.search` provides layer-based searches, best-first searches (A*, weighted A*, GBFS and a heuristic beam),
-enforced hill-climbing and an anytime search. Results expose a status and a plan; best-first results also expose the
-path cost and goal state.
+enforced hill-climbing and an anytime search, and a plan validator. Every search returns a result with the same
+fields, `status`, `solved`, `plan`, `cost`, `goal_state`, `stats` (a `search.Statistics`) and `message`, beside fields
+of its own; its options follow the [API conventions](conventions.md) (`threads=`, `seed=`, the budgets, `width=` and
+`max_width=`).
 
 ```python
 from pathlib import Path
@@ -14,17 +16,18 @@ data = Path("tests/data/pddl/counters")
 task = mymyr.Task.from_pddl(data / "domain.pddl", data / "p01.pddl")
 
 result = search.brfs(task, layer_order="goal_count", beam_width=8)
-print(result.status, result.solved, len(result.plan))
+print(result.status, result.solved, len(result.plan), result.cost, result.stats.expanded)
 
 best_first = search.astar(task, heuristic="max")
-print(best_first.status, best_first.cost, len(best_first.plan))
+print(best_first.status, best_first.cost, len(best_first.plan), best_first.stats)
 ```
 
 ## Layer-based search
 
 `brfs` is breadth-first search. `iw`, `iw_pass` and `siw` use novelty pruning; `liw` restricts novelty with fact
-landmarks. `abstracted_iw` and `projective_iw` use abstracted features. `rollout_iw` samples a rollout. IW width is
-selected with `max_arity` (or `width` on the abstracted variants). `astar_iw` is weighted A* with minimum-g novelty
+landmarks. `abstracted_iw` and `projective_iw` use abstracted features. `rollout_iw` samples a rollout. The largest
+novelty width of a ladder of IW passes is `max_width` (`iw`, `siw`, `liw`, the rollouts); a single pass takes `width`
+(`iw_pass`, `abstracted_iw`, `astar_iw`). `astar_iw` is weighted A* with minimum-g novelty
 pruning; it requires a classical task with unit action costs and does not guarantee an optimal plan.
 
 Layer orderings are `"queue"`, `"in_order"`, `"reverse"`, `"randomized"` and `"goal_count"`. `seed=` fixes randomized
@@ -49,7 +52,7 @@ deterministic for a given thread count and seed, and does not depend on the thre
 `beam_chunk` transitions.
 
 ```python
-exact = [search.iw(task, max_arity=2, layer_order="goal_count", beam_width=4, threads=t) for t in (1, 4)]
+exact = [search.iw(task, max_width=2, layer_order="goal_count", beam_width=4, threads=t) for t in (1, 4)]
 print(exact[0].status == exact[1].status, exact[0].passes[-1].expanded == exact[1].passes[-1].expanded)
 
 relaxed = search.brfs(task, layer_order="goal_count", beam_width=4,
@@ -59,7 +62,7 @@ print(relaxed.status, len(relaxed.plan))
 
 `astar` and `gbfs` accept `lazy=True` for lazy successor scoring, a heuristic, and its costs: `costs="auto"` (the
 default: the task's objective), `"unit"` or `"real"` (see the heuristics guide). The
-best-first `beam` also takes a heuristic and `width=`. IW and SIW support numeric tasks; the other best-first
+best-first `beam` also takes a heuristic and `beam_width=`. IW and SIW support numeric tasks; the other best-first
 algorithms also handle numeric conditions, effects and metric costs. AStarIW does not accept numeric tasks.
 
 ## Weighted A*, enforced hill-climbing and the anytime search
@@ -322,18 +325,64 @@ alternatives within one device search are not supported; device A*/GBFS use the 
 `search.CancelToken` supports cancellation from another thread. A search that does not solve the task returns an
 empty `plan`; an unsolved `siw` keeps the subplans of the subproblems it solved in `partial_plan`.
 
-`brfs` takes `max_states=`, `max_seconds=` and `cancel=`, and its result has a `status` like the other searches.
-It stops at the first goal state it expands and returns a shortest plan (`SOLVED`); with `threads > 1` it searches
-layer-synchronously and still returns a shortest plan. `stop_at_goal=False` goes on through the whole reachable space
-(for counts such as `goal_states`); a goal state reached on the way still makes it `SOLVED` with that plan, and
-`exhausted` tells whether every state was expanded.
+`brfs` takes the common options too. It stops at the first goal state it expands and returns a shortest plan
+(`SOLVED`); with `threads > 1` it searches layer-synchronously and still returns a shortest plan. `max_depth=d`
+expands the states of depth below `d` and stores those of depth `d`. `stop_at_goal=False` goes on through the whole
+reachable space (for counts such as `num_goal_states`); a goal state reached on the way still makes it `SOLVED` with
+that plan, and `exhausted` tells whether every state was expanded.
+
+## Negative action costs
+
+A* and its variants (weighted A* with or without a cost bound, lazy A*, the anytime search) need non-negative action
+costs: with a negative one, reopening a state can lower its g value without end (a cycle of negative cost is cheaper
+on every lap). They check every transition and stop with `FAILED` at the first one that lowers the metric value,
+naming both values in `message`. Greedy best-first search, the heuristic beam, enforced hill-climbing and the
+layer-based searches close each state once, so they terminate on such tasks; the plan they return is valid, and its
+`cost` is the metric value it reaches, which may be negative. The device A* and GBFS assume non-negative costs.
+
+```python
+domain = """(define (domain d) (:requirements :strips :negative-preconditions :action-costs)
+  (:predicates (a) (goal)) (:functions (total-cost))
+  (:action refund :parameters () :precondition (not (a)) :effect (and (a) (decrease (total-cost) 1)))
+  (:action finish :parameters () :precondition (a) :effect (and (goal) (increase (total-cost) 3))))"""
+problem = "(define (problem p) (:domain d) (:init (= (total-cost) 0)) (:goal (goal)) (:metric minimize (total-cost)))"
+negative = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+refused = search.astar(negative, heuristic="blind")
+print(refused.status, refused.message)  # failed: A* needs non-negative action costs, ...
+print(search.gbfs(negative, heuristic="blind").cost)  # 2.0
+```
+
+## Validating plans
+
+`search.validate_plan(task, plan)` replays a plan and returns a `PlanValidation`. The plan is IPC plan text (a `str`,
+as `format_plan` writes it and the CLI reads it), the path of a plan file (an `os.PathLike`), or a list of `Action`s
+as the searches return them; `start=` replays it from another state. Each action must name an action of the task
+with as many arguments as its parameters, objects of the parameters' types, and be applicable in the state the ones
+before it reached (its precondition holds, derived atoms through the axioms, its effects are defined); its effects
+are then applied, conditional and numeric ones included. The goal must hold at the end. The result is truthy when
+the plan is valid and carries the plan's `cost` under the task's metric (as the searches report it), the reached
+`state` and the parsed `plan`; otherwise `error` (a `search.PlanError`) says why, `step` is the 0-based index of the
+first failing action (`len(plan)` when the goal does not hold at the end), `line` its line in plan text, `action`
+and `condition` the action and the unsatisfied condition, and `message` all of it in one line.
+
+```python
+result = search.gbfs(task)
+check = search.validate_plan(task, result.plan)
+assert check and check.cost == result.cost
+
+text = search.format_plan(task, result.plan)
+broken = search.validate_plan(task, "\n".join(text.splitlines()[1:]))  # drop the first action
+print(broken.error, broken.step, broken.message)
+```
+
+`mymyr validate DOMAIN PROBLEM PLAN` runs the same check from the [command line](cli.md#validating-a-plan).
 
 ## Observers
 
 `search.Observer` is the base class of search observers: subclass it, override the events you need and pass an instance
 as `observer=` to `brfs`, `iw`, `siw`, `astar`, `gbfs`, `beam`, `ehc`, `anytime_astar`, `astar_iw` or the IW family
 variants. The events are `on_start(state)`, `on_expand(id, state)`, `on_generate(parent, action, child, state, is_new)`,
-`on_prune(parent, action, state)`, `on_pass(arity, stats)` (after an IW pass, a BrFS layer with its depth, an EHC
+`on_prune(parent, action, state)`, `on_pass(width, stats)` (after an IW pass, a BrFS layer with its depth, an EHC
 lookahead or an anytime iteration with its index),
 `on_solution(plan, cost)`, `on_progress(stats)` (every `progress_interval` expansions; returning False stops the search
 with status `CANCELLED`) and `on_end(status, stats)`; the IW family variants also send
@@ -400,6 +449,6 @@ class PerThread(search.Observer):
 
 observer = PerThread()
 result = search.brfs(task, threads=4, observer=observer)
-assert sum(w.expanded for w in observer.workers) == result.expanded
+assert sum(w.expanded for w in observer.workers) == result.stats.expanded
 print(len(result.plan), "steps;", len(set().union(*(w.threads for w in observer.workers))), "threads")
 ```

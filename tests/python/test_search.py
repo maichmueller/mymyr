@@ -18,7 +18,7 @@ GRIPPER = ROOT / "tests/data/benchmarks/classic/strips/gripper"
 
 
 def passes(r):
-    return [(p.arity, p.expanded, p.generated, p.generated_in_tree) for p in r.passes]
+    return [(p.width, p.expanded, p.generated, p.generated_in_tree) for p in r.passes]
 
 
 def replay(task, plan):
@@ -69,7 +69,7 @@ def test_brfs_stops_at_the_first_goal_by_default(store):
     r = search.brfs(task, **BRFS_STORES[store])
     assert r.status == Status.SOLVED and r.solved and not r.exhausted
     assert len(r.plan) == shortest.cost and task.is_goal(replay(task, r.plan))
-    assert r.states < search.brfs(task, stop_at_goal=False, **BRFS_STORES[store]).states
+    assert r.stats.states < search.brfs(task, stop_at_goal=False, **BRFS_STORES[store]).stats.states
 
 
 @pytest.mark.parametrize("store", sorted(BRFS_STORES))
@@ -77,13 +77,13 @@ def test_a_whole_space_brfs_that_reached_a_goal_is_solved(store):
     task = text_task("depot__p02")
     first = search.brfs(task, **BRFS_STORES[store])
     r = search.brfs(task, stop_at_goal=False, **BRFS_STORES[store])
-    assert r.status == Status.SOLVED and r.solved and r.exhausted and r.goal_states > 0
+    assert r.status == Status.SOLVED and r.solved and r.exhausted and r.num_goal_states > 0
     # the plan to the first goal state expanded: the shortest one
     assert len(r.plan) == len(first.plan) and task.is_goal(replay(task, r.plan))
 
 
 @pytest.mark.parametrize("name,kw", [("blocks__probBLOCKS-8-0", {}), ("blocks__probBLOCKS-8-0", dict(max_states=40)),
-                                     ("openstacks-opt08-adl__p03", dict(max_arity=1))])
+                                     ("openstacks-opt08-adl__p03", dict(max_width=1))])
 def test_an_unsolved_siw_has_an_empty_plan_and_a_partial_plan(name, kw):
     task = text_task(name)
     r = search.siw(task, **kw)
@@ -97,13 +97,62 @@ def test_an_unsolved_siw_has_an_empty_plan_and_a_partial_plan(name, kw):
     unsatisfied = sum(not s.holds(g) for g in [*goal.fluent_literals, *goal.derived_literals])
     assert unsatisfied == r.subproblems[-1].unsatisfied_at_start
     assert "partial_plan_length=" in repr(r)
-    assert search.siw(task, max_arity=2, goal=lambda s: True).partial_plan == []
+    assert search.siw(task, max_width=2, goal=lambda s: True).partial_plan == []
 
 
 def test_a_whole_space_brfs_without_a_goal_is_exhausted_with_an_empty_plan():
     task = text_task("depot__p02")
     r = search.brfs(task, stop_at_goal=False, goal=lambda s: False)
-    assert r.status == Status.EXHAUSTED and r.exhausted and not r.solved and r.plan == [] and r.goal_states == 0
+    assert r.status == Status.EXHAUSTED and r.exhausted and not r.solved and r.plan == [] and r.num_goal_states == 0
+
+
+@pytest.mark.parametrize("store", sorted(BRFS_STORES))
+def test_brfs_takes_the_common_start_blocked_and_budget_options(store):
+    task = text_task("depot__p02")
+    kw = BRFS_STORES[store]
+    full = search.brfs(task, **kw)
+    assert full.cost == len(full.plan) and full.goal_state is not None and task.is_goal(full.goal_state)
+    assert search.validate_plan(task, full.plan).cost == full.cost
+    # start: a shortest plan from that state
+    after = task.apply(task.initial_state, full.plan[0])
+    r = search.brfs(task, start=after, **kw)
+    assert r.solved and len(r.plan) == len(full.plan) - 1 and search.validate_plan(task, r.plan, start=after).valid
+    # blocked states are never stored and count as pruned; blocking every successor of the start leaves it alone
+    succ = task.successor_states(task.initial_state)
+    r = search.brfs(task, blocked_states=succ, **kw)
+    assert r.status == Status.EXHAUSTED and r.stats.states == 1 and r.stats.expanded == 1
+    assert r.stats.pruned == len(task.applicable_actions(task.initial_state))
+    r = search.brfs(task, blocked_states=[after], **kw)
+    assert r.solved and len(r.plan) >= len(full.plan) and r.stats.pruned > 0
+    # max_depth: states deeper than it are stored, not expanded
+    r = search.brfs(task, max_depth=2, **kw)
+    assert r.status == Status.EXHAUSTED and r.layers <= 2
+    assert search.brfs(task, max_depth=len(full.plan) + 1, **kw).solved  # the goal state is expanded
+    # max_expanded stops it before the next expansion
+    r = search.brfs(task, max_expanded=5, **kw)
+    assert r.status == Status.OUT_OF_STATES and r.stats.expanded <= 5 and r.plan == [] and r.goal_state is None
+
+
+def test_every_search_result_has_the_common_fields(blocks):
+    results = [search.brfs(blocks), search.astar(blocks, heuristic="max"), search.gbfs(blocks),
+               search.beam(blocks, beam_width=50), search.ehc(blocks), search.anytime_astar(blocks, heuristic="ff"),
+               search.iw(blocks, max_width=2), search.siw(blocks), search.iw_pass(blocks, 2),
+               search.liw(blocks, max_width=2), search.abstracted_iw(blocks, width=2), search.projective_iw(blocks),
+               search.rollout_iw(blocks, seed=1), search.astar_iw(blocks, width=2),
+               search.atomic_goal_portfolio(blocks), *search.find_rollouts_parallel(blocks, [1], max_width=2)]
+    for r in results:
+        name = type(r).__name__
+        assert isinstance(r.status, Status) and r.solved == (r.status == Status.SOLVED), name
+        assert isinstance(r.stats, search.Statistics) and isinstance(r.message, str), name
+        assert all(isinstance(getattr(r.stats, f), int) for f in ("expanded", "generated", "states", "pruned",
+                                                                     "memory_bytes")), name
+        assert isinstance(r.stats.seconds, float) and r.stats.seconds >= 0, name
+        if r.solved:
+            v = search.validate_plan(blocks, r.plan)
+            assert v.valid and r.cost == v.cost and r.goal_state.atoms() == v.state.atoms(), name
+        else:
+            assert r.plan == [] and r.cost == 0.0 and r.goal_state is None, name
+    assert sum(r.solved for r in results) >= 5 and not all(r.solved for r in results)  # both kinds
 
 
 # ------------------------------------------------------------------------------------------------ control surface
@@ -125,7 +174,7 @@ def test_budgets(gripper):
     assert r.status == Status.OUT_OF_STATES and r.stats.expanded <= 101
     r = search.astar(gripper, heuristic="blind", max_seconds=0.0)
     assert r.status == Status.OUT_OF_TIME
-    r = search.iw(gripper, max_arity=2, max_states=10)
+    r = search.iw(gripper, max_width=2, max_states=10)
     assert r.status == Status.OUT_OF_STATES
 
 
@@ -157,7 +206,7 @@ def test_custom_and_any_of_goals(gripper):
     r2 = search.astar(gripper, heuristic="blind", goal=[[target]])
     assert r2.status == Status.SOLVED and r2.cost == 3
     # width 2: moving back to roomb with the ball makes no new single atom true
-    r3 = search.iw(gripper, max_arity=2, goal=[[target, "(not (at-robby rooma))"]])
+    r3 = search.iw(gripper, max_width=2, goal=[[target, "(not (at-robby rooma))"]])
     assert r3.status == Status.SOLVED and target in atom_strs(r3.goal_state)
     assert "(at-robby rooma)" not in atom_strs(r3.goal_state)
 
@@ -165,9 +214,9 @@ def test_custom_and_any_of_goals(gripper):
 def test_blocked_states(gripper):
     s0 = gripper.initial_state
     succ = gripper.successor_states(s0)
-    r = search.iw(gripper, max_arity=1, blocked_states=succ)
+    r = search.iw(gripper, max_width=1, blocked_states=succ)
     assert r.passes[-1].blocked > 0
-    assert r.status == Status.EXHAUSTED and r.total.expanded <= 2  # only the start state can be expanded
+    assert r.status == Status.EXHAUSTED and r.stats.expanded <= 2  # only the start state can be expanded
     r = search.astar(gripper, heuristic="blind", blocked_states=succ)
     assert r.status != Status.SOLVED and r.stats.expanded == 1
 
@@ -213,7 +262,7 @@ def test_observer_events(gripper):
     assert o.n["expand"] == r.stats.expanded
     assert o.n["generate"] == r.stats.generated
     o = Obs()
-    r = search.iw(gripper, max_arity=2, observer=o)
+    r = search.iw(gripper, max_width=2, observer=o)
     assert o.n["pass"] == len(r.passes)
 
 
@@ -269,7 +318,7 @@ def test_heuristic_object(gripper):
 
 def test_many_threads_one_task(gripper):
     """Free-threaded: 16 threads search one task at once; every result equals the single-threaded one."""
-    ref_iw = passes(search.iw(gripper, max_arity=2))
+    ref_iw = passes(search.iw(gripper, max_width=2))
     ref_astar = search.astar(gripper, heuristic="max", max_expanded=20_000).stats.expanded
     errors = []
 
@@ -277,7 +326,7 @@ def test_many_threads_one_task(gripper):
         try:
             for _ in range(2):
                 task = gripper.local() if i % 2 else gripper
-                assert passes(search.iw(task, max_arity=2)) == ref_iw
+                assert passes(search.iw(task, max_width=2)) == ref_iw
                 assert search.astar(task, heuristic="max", max_expanded=20_000).stats.expanded == ref_astar
         except Exception as e:  # noqa: BLE001
             errors.append(e)
@@ -291,10 +340,37 @@ def test_many_threads_one_task(gripper):
 
 
 def test_reprs_and_types(gripper):
-    r = search.iw(gripper, max_arity=1)
+    r = search.iw(gripper, max_width=1)
     assert "IwResult(" in repr(r) and isinstance(r.passes[0], search.IwPass)
     assert str(Status.SOLVED) == "solved"
     assert isinstance(search.siw(gripper).subproblems[0], search.SiwSubproblem)
-    b = search.beam(gripper, width=50)
+    b = search.beam(gripper, beam_width=50)
     assert b.algorithm == "beam" and isinstance(b.stats, search.Statistics)
     assert "BrfsResult(" in repr(search.brfs(gripper, max_states=1000))
+
+
+NEGATIVE_CYCLE = (
+    """(define (domain d) (:requirements :strips :negative-preconditions :action-costs)
+ (:predicates (a) (goal)) (:functions (total-cost))
+ (:action on :parameters () :precondition (not (a)) :effect (and (a) (decrease (total-cost) 1)))
+ (:action off :parameters () :precondition (a) :effect (and (not (a)) (decrease (total-cost) 1)))
+ (:action finish :parameters () :precondition (a) :effect (and (goal) (increase (total-cost) 100))))""",
+    """(define (problem p) (:domain d) (:init (= (total-cost) 0)) (:goal (goal)) (:metric minimize (total-cost)))""",
+)
+
+
+def test_astar_refuses_negative_action_costs_and_greedy_searches_terminate():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    task = mymyr.Task(mymyr.Domain.from_string(NEGATIVE_CYCLE[0]).instantiate_string(NEGATIVE_CYCLE[1]))
+    # every lap of the on/off cycle lowers the cost: A* would reopen states forever
+    for r in (search.astar(task, heuristic="blind"), search.astar(task, heuristic="blind", lazy=True),
+              search.astar(task, heuristic="max", weight=2), search.anytime_astar(task, heuristic="blind")):
+        assert r.status == Status.FAILED and r.plan == [] and r.cost == 0.0 and r.goal_state is None
+        assert "non-negative action costs" in r.message and "from 0 to -1" in r.message, r.message
+        assert r.stats.expanded <= 2
+    # the greedy and layered searches close each state once and end with the plan they find
+    for r in (search.gbfs(task, heuristic="blind"), search.ehc(task, heuristic="blind"),
+              search.beam(task, heuristic="blind"), search.brfs(task), search.iw(task)):
+        assert r.solved and r.cost == search.validate_plan(task, r.plan).cost
+        assert r.cost == 100 - len(r.plan) + 1

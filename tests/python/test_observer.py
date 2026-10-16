@@ -51,15 +51,12 @@ class Counter(Observer):
 
 
 def totals(r):
-    if isinstance(r, search.BrfsResult):
-        return r.expanded, r.generated
-    s = r.stats if isinstance(r, search.BestFirstResult) else r.total
-    return s.expanded, s.generated
+    return r.stats.expanded, r.stats.generated
 
 
 RUNS = {
-    "iw": lambda t, o: search.iw(t, max_arity=2, observer=o),
-    "siw": lambda t, o: search.siw(t, max_arity=2, observer=o),
+    "iw": lambda t, o: search.iw(t, max_width=2, observer=o),
+    "siw": lambda t, o: search.siw(t, max_width=2, observer=o),
     "brfs": lambda t, o: search.brfs(t, observer=o),
     "brfs_exhaustive": lambda t, o: search.brfs(t, stop_at_goal=False, observer=o),
     "brfs_chunked": lambda t, o: search.brfs(t, store="chunked", observer=o),
@@ -95,8 +92,8 @@ def test_brfs_layers_and_new_states(small, store):
     r = search.brfs(small, store=store, stop_at_goal=False, observer=o)
     assert r.status == Status.SOLVED and r.exhausted
     assert len(o.passes) == r.layers and [p[0] for p in o.passes] == list(range(r.layers))
-    assert sum(p[1] for p in o.passes) == r.expanded and sum(p[2] for p in o.passes) == r.generated
-    assert sum(p[3] for p in o.passes) == r.states - 1 == o.new
+    assert sum(p[1] for p in o.passes) == r.stats.expanded and sum(p[2] for p in o.passes) == r.stats.generated
+    assert sum(p[3] for p in o.passes) == r.stats.states - 1 == o.new
 
 
 class Worker(Observer):
@@ -130,21 +127,21 @@ class Root(Counter):
 def test_brfs_threads_send_hot_events_to_worker_observers(task, threads):
     o = Root()
     r = search.brfs(task, threads=threads, stop_at_goal=False, observer=o)
-    assert r.threads == threads and len(o.workers) == threads
-    assert sum(w.expanded for w in o.workers) == r.expanded
-    assert sum(w.generated for w in o.workers) == r.generated
-    assert sum(w.new for w in o.workers) == r.states - 1
+    assert r.threads_used == threads and len(o.workers) == threads
+    assert sum(w.expanded for w in o.workers) == r.stats.expanded
+    assert sum(w.generated for w in o.workers) == r.stats.generated
+    assert sum(w.new for w in o.workers) == r.stats.states - 1
     assert all(w.children == {None} for w in o.workers if w.generated)  # ids are assigned when a layer ends
     assert len(set().union(*(w.threads for w in o.workers))) > 1  # called from the worker threads
     assert o.expanded == 0 and o.started == 1 and o.ended[0] == Status.SOLVED  # lifecycle on the root
-    assert len(o.passes) == r.layers and sum(p[1] for p in o.passes) == r.expanded
+    assert len(o.passes) == r.layers and sum(p[1] for p in o.passes) == r.stats.expanded
 
 
 def test_brfs_threads_without_make_worker_run_on_one_thread(task):
     o = Counter()
     r = search.brfs(task, threads=4, observer=o)
-    assert r.threads == 1 and o.threads == {threading.get_ident()}
-    assert (o.expanded, o.generated) == (r.expanded, r.generated)
+    assert r.threads_used == 1 and o.threads == {threading.get_ident()}
+    assert (o.expanded, o.generated) == (r.stats.expanded, r.stats.generated)
     assert r.status == Status.SOLVED and o.solutions[0][0] == r.plan
 
 
@@ -217,7 +214,7 @@ def test_duck_typed_observers_still_work(small):
 
     o = Plain()
     r = search.brfs(small, observer=o)
-    assert o.n == r.expanded
+    assert o.n == r.stats.expanded
 
 
 def test_on_progress_stops_the_search(task):
@@ -227,7 +224,7 @@ def test_on_progress_stops_the_search(task):
 
     for run in (lambda o: search.brfs(task, observer=o, progress_interval=100),
                 lambda o: search.astar(task, heuristic="max", observer=o, progress_interval=100),
-                lambda o: search.iw(task, max_arity=2, observer=o, progress_interval=100)):
+                lambda o: search.iw(task, max_width=2, observer=o, progress_interval=100)):
         r = run(Stop())
         assert r.status == Status.CANCELLED
         assert totals(r)[0] <= 600

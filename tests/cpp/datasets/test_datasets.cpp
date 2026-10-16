@@ -357,8 +357,8 @@ TEST(Sampler, DeterministicPerSeedAndCorrectSupports)
     a.sample_states(again);
     EXPECT_EQ(again, xa);
     EXPECT_EQ(a.num_states(), S->num_states());
-    EXPECT_EQ(a.num_dead_end_states(), S->num_unsolvable_states());
-    EXPECT_EQ(a.num_alive_states(), S->num_states() - S->num_unsolvable_states());
+    EXPECT_EQ(a.num_unsolvable_states(), S->num_unsolvable_states());
+    EXPECT_EQ(a.num_solvable_states(), S->num_states() - S->num_unsolvable_states());
     EXPECT_EQ(static_cast<i32>(a.max_steps_to_goal()), S->max_goal_distance());
     for (i32 n = 0; n <= S->max_goal_distance(); ++n)
     {
@@ -374,7 +374,7 @@ TEST(Sampler, DeterministicPerSeedAndCorrectSupports)
         EXPECT_TRUE(std::is_sorted(support.begin(), support.end()));
     }
     for (int i = 0; i < 1000; ++i)
-        EXPECT_TRUE(S->is_unsolvable(a.sample_dead_end_state()));
+        EXPECT_TRUE(S->is_unsolvable(a.sample_unsolvable_state()));
     EXPECT_THROW((void)a.sample_state_n_steps_from_goal(S->max_goal_distance() + 1), std::out_of_range);
     EXPECT_THROW((void)a.sample_state_n_steps_from_goal(-1), std::out_of_range);
     // uniform over all states: every state of a small space shows up
@@ -391,8 +391,8 @@ TEST(Sampler, NoDeadEnds)
     if (!task)
         GTEST_SKIP();
     StateSpaceSampler s(space_of(task, {}), 1);
-    EXPECT_EQ(s.num_dead_end_states(), 0u);
-    EXPECT_THROW((void)s.sample_dead_end_state(), std::out_of_range);
+    EXPECT_EQ(s.num_unsolvable_states(), 0u);
+    EXPECT_THROW((void)s.sample_unsolvable_state(), std::out_of_range);
 }
 
 // ----------------------------------------------------------------------------------------------- generalized

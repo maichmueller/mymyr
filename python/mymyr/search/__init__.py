@@ -1,15 +1,15 @@
 """The search family, heuristics and landmarks (search/*.hpp, landmarks/*.hpp and
 reachability/*.hpp in the C++ core).
 
-    r = mymyr.search.iw(task, max_arity=2)              # IW(k) ladder
-    r = mymyr.search.siw(task, max_arity=2)             # serialized IW
+    r = mymyr.search.iw(task, max_width=2)              # IW(k) ladder
+    r = mymyr.search.siw(task, max_width=2)             # serialized IW
     r = mymyr.search.astar_iw(task, heuristic="max", width=2, features="classical")
     r = mymyr.search.astar(task, heuristic="max")       # A* (eager; lazy=True for lazy)
     r = mymyr.search.astar(task, heuristic="ff", weight=2)   # weighted A*: f = g + 2 h
     r = mymyr.search.gbfs(task, heuristic="ff", lazy=True)
     r = mymyr.search.ehc(task)                          # enforced hill-climbing, h_FF with helpful actions
     r = mymyr.search.anytime_astar(task, max_seconds=60)    # restarting weighted A*, weights 5, 3, 2, 1
-    r = mymyr.search.beam(task, width=100)
+    r = mymyr.search.beam(task, beam_width=100)
     r = mymyr.search.brfs(task, threads=8)              # breadth-first search to a shortest plan, deterministic ids
     r.status, r.plan, r.cost, r.goal_state              # Status.SOLVED, [Action], float, State
     text = mymyr.search.format_plan(task, r.plan)       # IPC plan text; parse_plan(task, text) reads it back
@@ -62,26 +62,26 @@ generation order, or randomly by ``seed`` with ``randomize_ties=True``); ``beam_
 successors the beam drops still mark the novelty table (``"all_tested"``) or only the kept ones do
 (``"survivors_only"``):
 
-    r = mymyr.search.iw(task, max_arity=2, layer_order="goal_count", beam_width=32, beam_novelty="survivors_only")
+    r = mymyr.search.iw(task, max_width=2, layer_order="goal_count", beam_width=32, beam_novelty="survivors_only")
 
 ``threads`` runs the beam's layer step (successor generation, scoring, read-only novelty tests) on that many threads
 with the single-threaded result. ``beam_novelty="relaxed_survivors_only"`` (goal_count only) splits each layer's
 transitions into ``min(threads, ceil(n / beam_chunk))`` parts and keeps the best ``beam_width`` of every part before
 merging, so its result depends on the thread count (deterministic for a thread count and seed):
 
-    r = mymyr.search.iw(task, max_arity=2, layer_order="goal_count", beam_width=32, threads=8)
+    r = mymyr.search.iw(task, max_width=2, layer_order="goal_count", beam_width=32, threads=8)
     r = mymyr.search.brfs(task, layer_order="goal_count", beam_width=32,
                           beam_novelty="relaxed_survivors_only", threads=8)
 
 The IW family variants:
 
-    r = mymyr.search.liw(task, max_arity=1, landmarks="lifted")       # LIW(k): landmark-restricted novelty
+    r = mymyr.search.liw(task, max_width=1, landmarks="lifted")       # LIW(k): landmark-restricted novelty
     r = mymyr.search.abstracted_iw(task, width=2)                     # AIW / BAIW (base_abstracted=True)
     r = mymyr.search.projective_iw(task)                              # alias of abstracted IW(1)
     r = mymyr.search.rollout_iw(task, ordering=ActionOrdering.DIRECT_GOAL_ACHIEVER_FIRST)
-    b = mymyr.search.find_rollouts_parallel(task, seeds=range(64), max_arity=1, report_co_occurrence=True)
+    b = mymyr.search.find_rollouts_parallel(task, seeds=range(64), max_width=1, report_co_occurrence=True)
     rows = mymyr.search.intersect_co_occurrence(b)                   # {Atom: [Atom]} over the batch
-    p = mymyr.search.atomic_goal_portfolio(task, goal=[["(on a b)"]], num_threads=1)
+    p = mymyr.search.atomic_goal_portfolio(task, goal=[["(on a b)"]], threads=1)
     p.plan, p.certified_optimal
 
 LIW, abstracted IW and projective IW return an :class:`IwResult`; ``landmarks`` is a :class:`FactLandmarkGraph`,
@@ -96,7 +96,7 @@ Landmarks and relaxed reachability:
     g.landmarks, g.disjunctive, g.orderings, g.num_unachieved(state)
     rr = mymyr.search.RelaxedReachability(task)             # delete-relaxed fixpoint without grounding
     rr.is_reachable("(on a b)"), rr.goal_reachable_without(["(clear a)"]), rr.restricted([...]).atoms("on")
-    order = mymyr.search.LandmarkTransitionOrdering(g)      # iw(task, max_arity=1, transition_ordering=order)
+    order = mymyr.search.LandmarkTransitionOrdering(g)      # iw(task, max_width=1, transition_ordering=order)
 
 Every search runs with the thread state detached: other Python threads keep running, and any number of searches may
 run at once on one task (free-threaded CPython). Common keyword arguments:
@@ -113,7 +113,7 @@ run at once on one task (free-threaded CPython). Common keyword arguments:
 - ``blocked_states``: States the search never enters;
 - ``observer``: a :class:`Observer` subclass that overrides the events it needs: ``on_start(state)``,
   ``on_expand(id, state)``, ``on_generate(parent, action, child, state, is_new)``, ``on_prune(parent, action, state)``,
-  ``on_pass(arity, stats)``, ``on_solution(plan, cost)``, ``on_progress(stats) -> bool`` (False stops the search),
+  ``on_pass(width, stats)``, ``on_solution(plan, cost)``, ``on_progress(stats) -> bool`` (False stops the search),
   ``on_end(status, stats)``, and for the IW family variants ``on_transition(parent, action, child, state, outcome)``
   (a :class:`TransitionOutcome`). Events it does not override are never called. Any object with some of these
   methods works too:
@@ -160,6 +160,8 @@ from mymyr._core._search import (
     LiftedLandmark,
     MergedLandingStates,
     ParallelRolloutsResult,
+    PlanError,
+    PlanValidation,
     PortfolioResult,
     ReachabilityDisambiguation,
     ReachabilityStatistics,
@@ -197,6 +199,7 @@ from mymyr._core._search import (
     projective_iw,
     rollout_iw,
     siw,
+    validate_plan,
     verify_pi_plus_fact_landmarks,
 )
 from mymyr.search._observer import Observer
@@ -227,6 +230,8 @@ __all__ = [
     "MergedLandingStates",
     "Observer",
     "ParallelRolloutsResult",
+    "PlanError",
+    "PlanValidation",
     "PortfolioResult",
     "ReachabilityDisambiguation",
     "ReachabilityStatistics",
@@ -264,5 +269,6 @@ __all__ = [
     "projective_iw",
     "rollout_iw",
     "siw",
+    "validate_plan",
     "verify_pi_plus_fact_landmarks",
 ]

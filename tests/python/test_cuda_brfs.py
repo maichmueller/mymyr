@@ -106,11 +106,11 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     task = text_task(name, atoms=atoms)
     r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
     c = mymyr.search.brfs(task, threads=2, fingerprint=True, stop_at_goal=False)
-    assert (r.states, r.expanded, r.generated, r.goal_states, r.layers, r.exhausted) == (
-        c.states,
-        c.expanded,
-        c.generated,
-        c.goal_states,
+    assert (r.stats.states, r.stats.expanded, r.stats.generated, r.num_goal_states, r.layers, r.exhausted) == (
+        c.stats.states,
+        c.stats.expanded,
+        c.stats.generated,
+        c.num_goal_states,
         c.layers,
         c.exhausted,
     )
@@ -120,14 +120,14 @@ def test_device_brfs_ids_equal_the_cpu(ctx, name, atoms):
     assert r.solved == c.solved and [a.label for a in r.plan] == [a.label for a in c.plan]
     # the chunk size changes nothing
     small = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, chunk_states=97, stop_at_goal=False)
-    assert (small.states, small.fingerprint) == (r.states, r.fingerprint)
-    assert small.stats["chunks"] > r.stats["chunks"]
+    assert (small.stats.states, small.fingerprint) == (r.stats.states, r.fingerprint)
+    assert small.counters["chunks"] > r.counters["chunks"]
     # small layers run in device loops (fixed slots); timings=True drives every chunk from the host: the same ids
     if atoms != "lazy":
-        assert r.stats["loops"] > 0 and r.stats["captures"] > 0
+        assert r.counters["loops"] > 0 and r.counters["captures"] > 0
     timed = mc.brfs(text_task(name, atoms=atoms), ctx=ctx, fingerprint=True, timings=True, stop_at_goal=False)
-    assert (timed.states, timed.layers, timed.fingerprint) == (r.states, r.layers, r.fingerprint)
-    assert timed.stats["loops"] == 0
+    assert (timed.stats.states, timed.layers, timed.fingerprint) == (r.stats.states, r.layers, r.fingerprint)
+    assert timed.counters["loops"] == 0
 
 
 def test_device_brfs_state_space_and_plans(ctx):
@@ -136,12 +136,12 @@ def test_device_brfs_state_space_and_plans(ctx):
     r = mc.brfs(task, ctx=ctx)
     words = r.state_words("torch")
     nodes = r.nodes("torch")
-    assert words.device.type == "cuda" and tuple(words.shape) == (r.states, r.words)
-    assert tuple(nodes.shape) == (r.states, 2) and int(nodes[0, 0]) == -1
+    assert words.device.type == "cuda" and tuple(words.shape) == (r.stats.states, r.words)
+    assert tuple(nodes.shape) == (r.stats.states, 2) and int(nodes[0, 0]) == -1
     s0 = task.initial_state
     assert np.array_equal(host(words[0])[: s0.num_words], np.asarray(s0.words, np.uint64))
     # a node's parent comes first, and replaying its plan reaches its row
-    i = r.states - 1
+    i = r.stats.states - 1
     parent = int(nodes[i, 0])
     assert 0 <= parent < i
     plan = r.plan_to(i)
@@ -158,7 +158,7 @@ def test_device_brfs_state_space_and_plans(ctx):
         c = mymyr.search.brfs(task)
         assert g.solved and c.solved
         assert [a.label for a in g.plan] == [a.label for a in c.plan]
-        assert g.states == c.states
+        assert g.stats.states == c.stats.states
 
 
 # ------------------------------------------------------------------------------------------------ rl.expand on device
@@ -176,8 +176,8 @@ def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
     for kw in (
         dict(),
         dict(goal=True, K=0),
-        dict(canonical=False),
-        dict(witness=True, K=4),
+        dict(canonical_order=False),
+        dict(witness_pruning=True, K=4),
         dict(capacity=17, goal=True),
         dict(words=1),
     ):

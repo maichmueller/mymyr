@@ -2,7 +2,6 @@
 
 import os
 import re
-import sys
 import threading
 
 import numpy as np
@@ -10,7 +9,7 @@ import pytest
 
 import mymyr
 from mymyr import _core, search
-from conftest import ROOT, text_task, walk
+from conftest import ROOT, gil_stays_off, text_task, walk
 from python_children import run_code
 
 consumer = pytest.importorskip("mymyr._testing._ext_consumer")
@@ -118,7 +117,7 @@ def test_c_api_from_many_threads(blocks):
 
 
 def test_gil_stays_disabled():
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()
 
 
 # ------------------------------------------------------------------------------------------------ minor 2
@@ -305,7 +304,7 @@ def test_brfs_through_the_c_api_matches_mymyr_brfs(name):
     ref = search.brfs(task, witness_pruning=False, max_states=CAP, stop_at_goal=False)
     states, expanded, generated, goals, layers, exhausted, solved, plan, _ = consumer.brfs(task, s0, g0, CAP, False)
     assert (states, expanded, generated, goals, layers, exhausted, solved) == (
-        ref.states, ref.expanded, ref.generated, ref.goal_states, ref.layers, ref.exhausted, ref.solved)
+        ref.stats.states, ref.stats.expanded, ref.stats.generated, ref.num_goal_states, ref.layers, ref.exhausted, ref.solved)
     assert plan == [(a.label[0], tuple(a.label[1])) for a in ref.plan]
 
 
@@ -317,7 +316,7 @@ def test_brfs_to_a_goal_through_the_c_api_matches_plan_and_cost(name):
     ref = search.brfs(task, witness_pruning=False, max_states=250_000)
     states, expanded, generated, goals, layers, _, solved, plan, cost = consumer.brfs(task, s0, g0, 250_000, True)
     assert (states, expanded, generated, goals, layers, solved) == (
-        ref.states, ref.expanded, ref.generated, ref.goal_states, ref.layers, ref.solved)
+        ref.stats.states, ref.stats.expanded, ref.stats.generated, ref.num_goal_states, ref.layers, ref.solved)
     if solved:
         assert plan == [(a.label[0], tuple(a.label[1])) for a in ref.plan]
         assert cost == plan_cost(task, ref.plan)
@@ -332,7 +331,7 @@ def test_brfs_through_the_c_api_on_a_classical_task():
     s0 = task.initial_state
     ref = search.brfs(task, witness_pruning=False, max_states=CAP)
     states, expanded, generated, goals, layers, _, solved, plan, cost = consumer.brfs(task, s0, 0.0, CAP, True)
-    assert (states, expanded, generated, solved) == (ref.states, ref.expanded, ref.generated, ref.solved)
+    assert (states, expanded, generated, solved) == (ref.stats.states, ref.stats.expanded, ref.stats.generated, ref.solved)
     assert plan == [(a.label[0], tuple(a.label[1])) for a in ref.plan] and cost == len(plan)
 
 

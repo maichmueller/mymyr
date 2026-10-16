@@ -1,5 +1,8 @@
 # Reinforcement learning
 
+Options follow the [API conventions](conventions.md): `threads=` (default 1, `0`: one per hardware thread), `seed=`,
+`max_steps=` (`None`: no truncation).
+
 `mymyr.rl.expand(table, states)` batches action expansion. It returns successor rows and CSR offsets, along with
 parent ids and action labels (`schema` and `binding`). NumPy, CPU torch and CPU JAX arrays use the CPU path; the output
 uses the input array's framework and word encoding. Inputs are read in place and outputs are views over a mymyr-owned
@@ -227,10 +230,10 @@ whatever the action, and it does not set `info["invalid"]`.
 
 Transitions are `CpuEnvPool` steps with the same keywords (`max_steps`, `step_reward`, `goal_reward`, `dead_end`,
 `dead_end_reward`, `dead_end_terminal`), and the defaults are the same sparse reach-goal rewards. `terminated` holds at
-goals and terminal dead ends, and `truncated` holds after `max_steps` steps of an episode (`max_steps=0` never
-truncates). Goals and terminal dead ends are absorbing: a further step does not move, pays nothing and stays
-terminated. A reset into a goal (a solved instance) reports `info["is_goal"]` and `info["terminated"]`, and its first
-step is absorbing. `info` also carries `task_id`, `num_actions`, `steps` and `action_mask`.
+goals and terminal dead ends, and `truncated` holds after `max_steps` steps of an episode (`max_steps=None`, the
+default, never truncates). Goals and terminal dead ends are absorbing: a further step does not move, pays nothing and
+stays terminated. A reset into a goal (a solved instance) reports `info["is_goal"]` and `info["terminated"]`, and its
+first step is absorbing. `info` also carries `task_id`, `num_actions`, `steps` and `action_mask`.
 
 The problems are a task, a table or a suite, or `domain=` and `problems=` (a file, a directory, a glob or a list), which
 build `TaskTable.from_pddl(domain, problems)`. Each reset draws the instance with `sampler=`: uniform (`"auto"`,
@@ -245,7 +248,7 @@ generator (`action_space.seed(s)`).
 
 ### Vector environment
 
-`VectorEnv(table, num_envs, threads=0, ...)` takes the keywords of `Env` and steps all environments in one native call.
+`VectorEnv(table, num_envs, threads=1, ...)` takes the keywords of `Env` and steps all environments in one native call.
 It does not step N Python environments. Its observations are batched: a tuple of N symbolic observations, an int8
 `[N, n]` array, or one encoder batch of the N graphs (entity ids global over the batch, the input of a message-passing
 model). Index actions are an int array `[N]` with `info["action_mask"]` `[N, max_actions]`. Env `i` is environment

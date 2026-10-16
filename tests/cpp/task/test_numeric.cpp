@@ -377,7 +377,7 @@ TEST(ActionCosts, NumericPlans)
     };
     const std::vector<Case> cases = {
         {"m-woodworking", false, 1, true, 2, 40},  {"m-transport", false, 2, true, 5, 54},
-        {"m-transport", true, 2, true, 7, 154},    {"cs-delivery", true, 2, true, 14, 79},
+        {"m-transport", true, 2, true, 7, 154},    {"cs-delivery", true, 2, true, 14, 34},
         {"cs-delivery-nometric", true, 2, true, 14, 14},
         {"cs-counters", false, 2, false, 0, 0},  // every state has the same atoms
         {"m-zenotravel-numeric", true, 2, false, 0, 0},
@@ -394,14 +394,12 @@ TEST(ActionCosts, NumericPlans)
         {
             const search::SiwResult r = search::siw(*task, o);
             ASSERT_EQ(r.status == search::SearchStatus::Solved, c.solved) << c.name;
-            EXPECT_TRUE(r.cost_exact);
             plan = r.plan, cost = r.cost, goal = r.goal_state;
         }
         else
         {
             const search::IwResult r = search::iw(*task, o);
             ASSERT_EQ(r.status == search::SearchStatus::Solved, c.solved) << c.name;
-            EXPECT_TRUE(r.cost_exact);
             plan = r.plan, cost = r.cost, goal = r.goal_state;
         }
         if (!c.solved)
@@ -422,10 +420,7 @@ TEST(ActionCosts, NumericPlans)
         }
         EXPECT_TRUE(task->is_goal(s.view())) << c.name;
         EXPECT_EQ(s, *goal) << c.name;
-        if (!c.siw)
-        {
-            EXPECT_LE(cost, g) << c.name;
-        }
+        EXPECT_LE(cost, g) << c.name;
     }
 }
 

@@ -39,8 +39,7 @@ struct SiwResult
     SearchStatus status = SearchStatus::Exhausted;
     std::vector<Action> plan;          // empty unless solved
     std::vector<Action> partial_plan;  // unless solved: the subplans of the solved subproblems (empty when solved)
-    double cost = 0;  // the sum of the subplans' costs (search/iw.hpp), each from its start state; 0 unless solved
-    bool cost_exact = true;  // as in IwResult
+    double cost = 0;  // the plan's cost under the task's metric, from the start state; 0 unless solved
     std::optional<State> goal_state;
     std::vector<SiwSubproblem> subproblems;  // including a last one that failed
     SearchStatistics total;                  // over every pass of every subproblem

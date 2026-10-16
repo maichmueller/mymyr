@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <limits>
 #include <memory>
 #include <span>
@@ -725,7 +726,11 @@ public:
     f64 bound = std::numeric_limits<f64>::infinity();  // plans cost less (A*)
     bool bounded = false;         // the bound is finite
     bool bound_with_h = false;    // the bound prunes by g + h (an admissible heuristic of the task's goal)
-    bool lowered_g = false;       // a transition lowered g under a finite bound (expand stops; the search fails)
+    /// A*: g must not decrease along a transition (A*'s termination with reopening and its optimality rest on
+    /// non-negative costs); a transition that lowers g makes the search fail, as under a finite bound.
+    bool nonnegative = false;
+    bool lowered_g = false;       // a transition lowered g (expand stops; the search fails)
+    f64 lowered_from = 0, lowered_to = 0;  // the metric values of the first such transition
 
     /// Whether a state with metric value g and heuristic value h (0 when not evaluated) cannot lie on a plan cheaper
     /// than the cost bound.
@@ -830,6 +835,9 @@ private:
     std::vector<f64> m_batch_h;
 };
 
+/// A metric value for an error message (shortest round-trip form).
+inline std::string format_g(f64 g) { return std::format("{}", g); }
+
 /// Generates the transitions of state `id` (cur) into tr, in generation order: blocked successors are dropped
 /// (pruned, on_prune), the others are inserted into the store; a new state gets its search node (parent id, g through
 /// this transition), and a path-dependent heuristic's status is progressed along every transition (merged into the
@@ -871,9 +879,11 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
                 return true;
             }
             const f64 g = c.g_next(gp, d);
-            if (c.bounded && g < gp)  // the bound prunes by g: sound for non-decreasing g only
+            if ((c.bounded || c.nonnegative) && g < gp)  // A* and the bound need non-decreasing g
             {
                 c.lowered_g = true;
+                c.lowered_from = gp;
+                c.lowered_to = g;
                 stop = true;
                 return false;
             }
@@ -903,8 +913,11 @@ bool expand(Context& c, S& store, Nodes& nodes, u32 id, Cur& cur, std::vector<u6
             return true;
         });
     if (c.lowered_g)
-        throw std::invalid_argument("mymyr " + c.r.algorithm +
-                                    ": a cost bound needs non-negative action costs, and a transition lowered the metric value");
+        throw std::invalid_argument("mymyr " + c.r.algorithm + ": " +
+                                    (c.nonnegative ? "A* needs non-negative action costs"
+                                                   : "a cost bound needs non-negative action costs") +
+                                    ", and a transition lowered the metric value from " + format_g(c.lowered_from) +
+                                    " to " + format_g(c.lowered_to) + " (a negative action cost)");
     return !stop;
 }
 
@@ -970,6 +983,7 @@ BestFirstResult run(const Task& task, const BestFirstOptions& o, const char* alg
         c = std::make_unique<Context>(task, o, r, algorithm);
         if (!c->ok())
             return r;
+        c->nonnegative = astar;
         dispatch<Run>(*c);
     }
     catch (const heuristics::Interrupted&)

@@ -68,13 +68,19 @@ class PlanCost
 {
 public:
     explicit PlanCost(const Task& task) : m_costs(task) {}
-    /// Always true (every cost effect is evaluated).
-    [[nodiscard]] bool exact() const noexcept { return true; }
     [[nodiscard]] bool has_action_costs() const noexcept { return !m_costs.unit(); }
+    /// The metric value of `start`: the cost of the empty plan from it.
+    [[nodiscard]] double initial(const State& start) const { return m_costs.initial(start.view()); }
     /// The cost of `plan` from `start`; may rewrite actions (see above).
     double apply(Successors& succ, const State& start, std::vector<Action>& plan) const
     {
-        return heuristics::plan_metric(succ, m_costs, start, m_costs.initial(start.view()), plan);
+        return apply(succ, start, initial(start), plan);
+    }
+    /// The metric value after `plan` from `start`, whose metric value is g0 (a plan continued from a state reached
+    /// by an earlier one); may rewrite actions (see above).
+    double apply(Successors& succ, const State& start, double g0, std::vector<Action>& plan) const
+    {
+        return heuristics::plan_metric(succ, m_costs, start, g0, plan);
     }
 
 private:

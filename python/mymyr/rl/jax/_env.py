@@ -17,17 +17,24 @@ __all__ = ["Env", "EnvState", "Observation", "PaddedExpansion", "FlatExpansion",
 class EnvState(NamedTuple):
     """The state of N environments (a pytree of arrays; the leading dimension is the environment).
 
-    ``states`` holds the state words as uint32 halves (a u64 row of ``row_words`` words is ``2 * row_words``
-    uint32, low word first), ``task_id`` each environment's instance (int32; 0 over a table of one), ``steps`` the steps
-    of the current episode, ``draws`` the counter-based RNG's draw counters (uint32 [N, 2]: low, high), ``env_id`` each
-    environment's RNG stream, ``count`` the successors of the current state, ``goal_pos`` / ``goal_neg`` the per-env
-    goal masks (uint32 [N, 2 words] with goals=True, else [N, 0]). ``counts`` / ``views`` are the device fast path's
-    cache of the current state (uint32 [N, C] and [N, 2V]; [N, 0] on the CPU and on the general path): opaque, kept
-    current by reset, step and refresh. ``reset_counts`` [N] uint32 and ``sampling_seed`` [N, 2] uint32 hold the
-    independent instance sampler's per-environment counters and keys. ``at_goal`` [N] bool says whether the current
-    state is a goal (by the goal masks with goals=True, else the instance's goal): reset, step and refresh keep it,
-    and a step leaves those environments where they are (absorbing). Writing ``states`` or the goal masks needs
-    :meth:`Env.refresh`."""
+    Fields:
+        states: the state words as uint32 halves (a u64 row of ``row_words`` words is ``2 * row_words`` uint32, low
+            word first).
+        task_id: each environment's instance (int32; 0 over a table of one).
+        steps: the steps of the current episode.
+        draws: the counter-based RNG's draw counters (uint32 [N, 2]: low, high).
+        env_id: each environment's RNG stream.
+        count: the successors of the current state.
+        counts, views: the device fast path's cache of the current state (uint32 [N, C] and [N, 2V]; [N, 0] on the
+            CPU and on the general path): opaque, kept current by reset, step and refresh.
+        goal_pos, goal_neg: the per-env goal masks (uint32 [N, 2 words] with goals=True, else [N, 0]).
+        reset_counts, sampling_seed: the instance sampler's per-environment counters ([N] uint32) and keys
+            ([N, 2] uint32).
+        at_goal: whether the current state is a goal ([N] bool; by the goal masks with goals=True, else the
+            instance's goal). Reset, step and refresh keep it, and a step leaves those environments where they are
+            (absorbing).
+
+    Writing ``states`` or the goal masks needs :meth:`Env.refresh`."""
 
     states: Any
     task_id: Any
@@ -145,7 +152,7 @@ class Env:
     They are XLA FFI calls (mymyr._core._rl_jax): on a CUDA device the step runs ``cuda::DeviceEnv`` on XLA's stream
     (the fast path: no host synchronization), on the CPU ``rl::HostEnv``; both give the same results bit for bit.
 
-    A step follows ``rl::HostEnv`` (include/mymyr/rl/env.hpp): the action indexes the current state's successors in
+    A step follows the host environments' (CpuEnvPool's) semantics: the action indexes the current state's successors in
     canonical order (outside [0, count): no move, ``info["invalid"]``), the reward is step_reward (+ goal_reward
     at a goal, + dead_end_reward at a dead end), terminated = goal or dead end (``dead_end_terminal``), truncated = not
     terminated and the episode reached max_steps. With ``autoreset`` (SAME_STEP) a finished environment restarts from
@@ -155,7 +162,7 @@ class Env:
     instance's goal unless goals are given).
 
     Randomness: ``action=None`` is the random policy, a uniform successor from Philox-4x32-10 of (seed, env id, draw
-    counter) with seed = :func:`key_seed` (key) (rl/rng.hpp): an environment's trajectory depends on the key, its
+    counter) with seed = :func:`key_seed` (key): an environment's trajectory depends on the key, its
     ``env_id`` and its draw counter only, not on the batch, the device or ``vmap``. Passing the same key to every step
     reproduces ``rl::HostEnv`` / ``cuda::DeviceEnv`` with that seed; per-step keys are fine too.
 
@@ -172,15 +179,15 @@ class Env:
         device: Any = None,
         goals: bool = False,
         sampler: Any = "uniform",
-        max_steps: int = 0,
+        max_steps: int | None = None,
         step_reward: float = 0.0,
         goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
         autoreset: bool = True,
-        canonical: bool = True,
-        witness: bool = False,
+        canonical_order: bool = True,
+        witness_pruning: bool = False,
         path: str = "auto",
         labels: bool = True,
         final_state: bool = True,
@@ -203,8 +210,8 @@ class Env:
             dead_end_reward=dead_end_reward,
             dead_end_terminal=dead_end_terminal,
             autoreset=autoreset,
-            canonical=canonical,
-            witness=witness,
+            canonical_order=canonical_order,
+            witness_pruning=witness_pruning,
             path=path,
         )
         _ffi.register()
@@ -433,17 +440,19 @@ class Env:
             info["no_autoreset"] = ()
         return s, self.observation(s), reward, terminated, truncated, info
 
-    def random_actions(self, key: Any, state: EnvState, max_actions: int = 0) -> Any:
+    def random_actions(self, key: Any, state: EnvState, max_actions: Optional[int] = None) -> Any:
         """The random policy's next choices without stepping (int32 [N]): the successor slots ``step(key, state)``
-        would take (Philox of (key_seed(key), env_id, draws), rl/rng.hpp, in jnp), limited to the first
-        ``max_actions`` successors (0: no limit); 0 where there is no successor. ``step(key, state,
+        would take (Philox of (key_seed(key), env_id, draws), in jnp), limited to the first
+        ``max_actions`` successors (None: no limit); 0 where there is no successor. ``step(key, state,
         random_actions(key, state))`` equals ``step(key, state)`` when no count exceeds max_actions."""
         from . import rng
 
         n = state.count.shape
         seed = jnp.broadcast_to(key_seed(key), (*n, 2))
         count = state.count.astype(jnp.int32)
-        if max_actions:
+        if max_actions is not None:
+            if int(max_actions) < 1:
+                raise ValueError("mymyr: max_actions must be None or positive")
             count = jnp.minimum(count, jnp.int32(max_actions))
         lo, hi = rng.bits64(seed, state.env_id, state.draws, rng.PURPOSE_SUCCESSOR)
         pick = rng.below(lo, hi, jnp.maximum(count, 1).astype(jnp.uint32)).astype(jnp.int32)

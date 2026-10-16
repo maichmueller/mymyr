@@ -223,7 +223,7 @@ def test_plans_do_not_depend_on_the_atom_slots(search_name):
             for atoms in ("lazy", "auto", "reachable", "dense")]
     assert all(r.returncode == 0 for r in outs), [r.stderr for r in outs]
     assert len({r.stdout for r in outs}) == 1
-    counts = {re.sub(r"[0-9.]+ ?s\b|time[^,\n]*", "", r.stderr) for r in outs}
+    counts = {re.sub(r"[0-9.]+ ?s\b|time[^,\n]*|memory[^\n]*", "", r.stderr) for r in outs}  # wider rows, more bytes
     assert len(counts) == 1, counts
 
 
@@ -282,8 +282,54 @@ def test_info_reports_numeric_fluents():
     assert "metric: minimize" in out and "actions: 4 in the source, 4 schemas after normalization" in out
 
 
+def test_validate_accepts_the_written_plan_and_names_the_first_failure(tmp_path):
+    d, p = OPTIMAL["blocks__probBLOCKS-8-0"]
+    out = tmp_path / "plan.txt"
+    assert run("plan", d, p, "-o", out).returncode == 0
+    r = run("validate", d, p, out)
+    assert (r.returncode, r.stdout, r.stderr) == (0, "valid plan: 18 actions, cost 18\n", "")
+    lines = out.read_text().splitlines()
+    first = search.parse_plan(mymyr.Task.from_pddl(d, p), out.read_text())[0]
+    n = first.original_arity
+    cases = {
+        "dropped.txt": (lines[1:], "plan[0] "),  # the second action needs the first's effects
+        "short.txt": (lines[:-2], "the goal does not hold after the plan's 17 actions: "),
+        "unknown.txt": (["(fly a b)"] + lines, "plan[0] (fly a b) (line 1): "),
+        "arity.txt": ([f"({first.name})"] + lines, f"takes {n} argument{'s' if n != 1 else ''}, the action has 0"),
+    }
+    for name, (text, words) in cases.items():
+        (tmp_path / name).write_text("\n".join(text) + "\n")
+        r = run("validate", d, p, tmp_path / name)
+        assert r.returncode == 1 and r.stdout == "", (name, r.stderr)
+        assert r.stderr.startswith("mymyr: invalid plan: ") and words in r.stderr and r.stderr.count("\n") == 1, (
+            name, r.stderr)
+    r = run("validate", d, p, tmp_path / "missing.txt")
+    assert r.returncode == 2 and r.stderr.startswith("mymyr: error: ") and "No such file" in r.stderr
+
+
+def test_write_text_and_pddl_read_back(tmp_path):
+    d = PDDL / "blocks/domain.pddl"
+    problems = [PDDL / "blocks/probBLOCKS-8-0.pddl", PDDL / "blocks/smedium.pddl"]
+    tasks = [mymyr.Task.from_pddl(d, p) for p in problems]
+    r = run("write", d, *problems, "--format", "pddl", "-o", tmp_path / "pddl")
+    assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
+    assert sorted(f.name for f in (tmp_path / "pddl").iterdir()) == ["domain.pddl", "probBLOCKS-8-0.pddl", "smedium.pddl"]
+    for p, t in zip(problems, tasks):
+        assert mymyr.Task.from_pddl(tmp_path / "pddl/domain.pddl", tmp_path / "pddl" / p.name).to_text() == t.to_text()
+    r = run("write", d, *problems, "-o", tmp_path / "text")
+    assert r.returncode == 0, r.stderr
+    for p, t in zip(problems, tasks):
+        assert mymyr.Task.from_text(tmp_path / "text" / (p.stem + ".txt")).to_text() == t.to_text()
+    r = run("write", d, problems[0])
+    assert r.returncode == 0 and r.stdout == tasks[0].to_text()
+    r = run("write", d, problems[0], "-f", "pddl")
+    assert r.returncode == 0 and r.stdout == "\n".join(tasks[0].to_pddl())
+    r = run("write", d, *problems)
+    assert r.returncode == 2 and "several problems need --output DIR" in r.stderr
+
+
 def test_help_and_version():
-    for args in (["--help"], ["plan", "--help"], ["info", "--help"]):
+    for args in (["--help"], ["plan", "--help"], ["info", "--help"], ["validate", "--help"], ["write", "--help"]):
         r = run(*args)
         assert r.returncode == 0 and r.stdout.startswith("usage: mymyr"), args
     plan_help = run("plan", "--help").stdout

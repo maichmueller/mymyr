@@ -350,16 +350,19 @@ std::vector<PyDeviceGeneration> generate_many(nb::handle table, const Common& a,
 }
 
 const char* k_options_doc =
-    " Options: as in the CPU generator's (mymyr.datasets.state_space): max_states (fail at max(max_states, 2) states "
-    "or more), max_seconds, remove_if_unsolvable, labels; threads are host threads for the host-side work "
-    "(state-dependent costs, host output; 0: all cores). chunk_states caps the parents per chunk, view_bytes the "
-    "per-chunk view memory, expected_states pre-sizes the arrays; none changes the result. "
-    "ctx: a mymyr.cuda.Context, or None: the task's (table's) default context on `device` (default 0). stream: the "
-    "stream of the work and of the result's arrays (None: the context's). Tasks beyond the device's limits "
-    "raise ValueError; negative, NaN or undefined transition costs ValueError.";
+    "\n\nKeyword arguments:\n"
+    "    max_states, max_seconds, remove_if_unsolvable, labels: as in mymyr.datasets.state_space (the generation "
+    "fails at max(max_states, 2) states or more).\n"
+    "    threads: host threads for the host-side work (state-dependent costs, host output); 0: one per hardware "
+    "thread.\n"
+    "    chunk_states, view_bytes, expected_states: the parents per chunk, the view memory per chunk and the "
+    "pre-sized states; none changes the result.\n"
+    "    ctx: a mymyr.cuda.Context, or None: the task's (table's) default context on `device` (default 0).\n"
+    "    stream: the stream of the work and of the result's arrays (None: the context's).\n\n"
+    "Raises ValueError for tasks beyond the device's limits and for negative, NaN or undefined transition costs.";
 
 #define MYMYR_DSS_ARGS                                                                                                  \
-    nb::kw_only(), "ctx"_a = nb::none(), "device"_a = nb::none(), "stream"_a = nb::none(), "threads"_a = 0,            \
+    nb::kw_only(), "ctx"_a = nb::none(), "device"_a = nb::none(), "stream"_a = nb::none(), "threads"_a = 1,            \
         "max_states"_a = nb::none(), "max_seconds"_a = nb::none(), "remove_if_unsolvable"_a = true, "labels"_a = true, \
         "chunk_states"_a = nb::none(), "view_bytes"_a = nb::none(), "expected_states"_a = nb::none()
 }  // namespace
@@ -377,24 +380,36 @@ void bind_cuda_datasets(nb::module_& parent)
         "costs, reverse CSR, goal distances and flags), with the arrays in device memory. arrays() exports them "
         "zero-copy (torch, jax or dlpack; the consumer's stream waits for the work that wrote them); to_host() is the "
         "mymyr.datasets.StateSpace; mymyr.datasets.StateSpaceSampler(space) samples it. The initial state is id 0.")
-        .def_prop_ro("task", [](const PyDeviceStateSpace& x) { return task_object(x.owner.obj); })
-        .def_prop_ro("num_states", [](const PyDeviceStateSpace& x) { return x.d->num_states(); })
-        .def_prop_ro("num_transitions", [](const PyDeviceStateSpace& x) { return x.d->num_transitions(); })
-        .def_prop_ro("initial_state_id", [](const PyDeviceStateSpace& x) { return x.d->initial_state(); })
+        .def_prop_ro("task", [](const PyDeviceStateSpace& x) { return task_object(x.owner.obj); },
+                     "The Task the space was generated from.")
+        .def_prop_ro("num_states", [](const PyDeviceStateSpace& x) { return x.d->num_states(); },
+                     "The number of states (state ids are 0 .. num_states - 1).")
+        .def_prop_ro("num_transitions", [](const PyDeviceStateSpace& x) { return x.d->num_transitions(); },
+                     "The number of transitions (edge ids are 0 .. num_transitions - 1).")
+        .def_prop_ro("initial_state_id", [](const PyDeviceStateSpace& x) { return x.d->initial_state(); },
+                     "The id of the initial state (0).")
         .def_prop_ro("words", [](const PyDeviceStateSpace& x) { return x.d->words(); }, "Fluent words per state row.")
-        .def_prop_ro("numeric_words", [](const PyDeviceStateSpace& x) { return x.d->numeric_words(); })
-        .def_prop_ro("row_words", [](const PyDeviceStateSpace& x) { return x.d->row_words(); })
-        .def_prop_ro("has_labels", [](const PyDeviceStateSpace& x) { return x.d->has_labels(); })
-        .def_prop_ro("label_width", [](const PyDeviceStateSpace& x) { return x.d->label_width(); })
+        .def_prop_ro("numeric_words", [](const PyDeviceStateSpace& x) { return x.d->numeric_words(); },
+                     "Numeric words per state row after the fluent words.")
+        .def_prop_ro("row_words", [](const PyDeviceStateSpace& x) { return x.d->row_words(); },
+                     "Words per state row: words + numeric_words.")
+        .def_prop_ro("has_labels", [](const PyDeviceStateSpace& x) { return x.d->has_labels(); },
+                     "Whether the transitions carry their labels (schema and binding).")
+        .def_prop_ro("label_width", [](const PyDeviceStateSpace& x) { return x.d->label_width(); },
+                     "Binding objects per label (the largest schema arity).")
         .def_prop_ro("unit_costs", [](const PyDeviceStateSpace& x) { return x.d->unit_costs(); },
                      "True if every transition costs 1 (arrays() then has no 'costs').")
-        .def_prop_ro("num_goal_states", [](const PyDeviceStateSpace& x) { return x.d->num_goal_states(); })
-        .def_prop_ro("num_unsolvable_states", [](const PyDeviceStateSpace& x) { return x.d->num_unsolvable_states(); })
+        .def_prop_ro("num_goal_states", [](const PyDeviceStateSpace& x) { return x.d->num_goal_states(); },
+                     "The number of goal states.")
+        .def_prop_ro("num_unsolvable_states", [](const PyDeviceStateSpace& x) { return x.d->num_unsolvable_states(); },
+                     "The number of states from which no goal state is reachable.")
         .def_prop_ro("max_goal_distance", [](const PyDeviceStateSpace& x) { return x.d->max_goal_distance(); },
                      "The largest finite unit goal distance (-1 if no state reaches a goal).")
-        .def_prop_ro("layers", [](const PyDeviceStateSpace& x) { return x.d->layers(); })
+        .def_prop_ro("layers", [](const PyDeviceStateSpace& x) { return x.d->layers(); },
+                     "The breadth-first layers the generation expanded.")
         .def_prop_ro("nbytes", [](const PyDeviceStateSpace& x) { return space_bytes(*x.d); }, "Device bytes of the arrays.")
-        .def_prop_ro("device", [](const PyDeviceStateSpace& x) { return x.d->context()->device(); })
+        .def_prop_ro("device", [](const PyDeviceStateSpace& x) { return x.d->context()->device(); },
+                     "The CUDA device index of the arrays.")
         .def_prop_ro("stream", [](const PyDeviceStateSpace& x) { return reinterpret_cast<std::intptr_t>(x.d->stream()); },
                      "The stream the arrays were written on (a cudaStream_t).")
         .def(
@@ -441,22 +456,24 @@ void bind_cuda_datasets(nb::module_& parent)
     nb::class_<PyDeviceGeneration>(m, "DeviceGenerationResult",
                                    "The outcome of one device generation (mymyr.datasets.GenerationResult's fields): "
                                    "the device space and / or its host copy, per the output option.")
-        .def_prop_ro("status", [](const PyDeviceGeneration& g) { return g.status; })
+        .def_prop_ro("status", [](const PyDeviceGeneration& g) { return search_status(g.status); },
+                     "How the generation ended (mymyr.search.Status), as GenerationResult.status: EXHAUSTED when the "
+                     "space is complete.")
         .def_prop_ro("space", [](const PyDeviceGeneration& g) { return g.space; },
-                     "The device space (status OK, output 'device' or 'both'), else None.")
+                     "The device space (status EXHAUSTED, output 'device' or 'both'), else None.")
         .def_prop_ro("host", [](const PyDeviceGeneration& g) { return g.host; },
-                     "The mymyr.datasets.StateSpace (status OK, output 'host' or 'both'), else None.")
-        .def_prop_ro("states", [](const PyDeviceGeneration& g) { return g.states; },
-                     "States stored when the instance's generation ended (also when it failed).")
-        .def_prop_ro("seconds", [](const PyDeviceGeneration& g) { return g.seconds; },
-                     "Wall time from the instance's admission to its output.")
-        .def_prop_ro("stats", [](const PyDeviceGeneration& g) { return stats_dict(g.stats); },
-                     "Counters of the call that generated it (shared by a table's results): waves, chunks, multi (1: "
-                     "the multi-instance kernels ran the table), states, transitions, generate_ms, post_ms, output_ms, "
-                     "host_cost_ms, rehashes, widenings, device_bytes.")
-        .def("__bool__", [](const PyDeviceGeneration& g) { return g.status == StateSpaceStatus::Ok; })
+                     "The mymyr.datasets.StateSpace (status EXHAUSTED, output 'host' or 'both'), else None.")
+        .def_prop_ro("stats", [](const PyDeviceGeneration& g) { return generation_stats(g.states, g.seconds); },
+                     "Statistics: states (stored when the instance's generation ended, also when it failed) and "
+                     "seconds (wall time from the instance's admission to its output); the other counts are 0.")
+        .def_prop_ro("counters", [](const PyDeviceGeneration& g) { return stats_dict(g.stats); },
+                     "Counters of the call that generated it (a dict, shared by a table's results): waves, chunks, "
+                     "multi (1: the multi-instance kernels ran the table), states, transitions, generate_ms, post_ms, "
+                     "output_ms, host_cost_ms, rehashes, widenings, device_bytes.")
+        .def("__bool__", [](const PyDeviceGeneration& g) { return g.status == StateSpaceStatus::Ok; },
+             "The space is complete.")
         .def("__repr__", [](const PyDeviceGeneration& g) {
-            return std::string("DeviceGenerationResult(status=") + datasets::to_string(g.status) +
+            return std::string("DeviceGenerationResult(status=") + search::to_string(search_status(g.status)) +
                    ", states=" + std::to_string(g.states) + ")";
         });
 
@@ -504,7 +521,7 @@ void bind_cuda_datasets(nb::module_& parent)
         },
         "table"_a, MYMYR_DSS_ARGS, "output"_a = "device", "wave_states"_a = nb::none(), "wave_instances"_a = nb::none(),
         (std::string("The state spaces of every instance of a task table, all in one device pipeline (results in "
-                     "table order; instance i's equal generate_state_space(table[i])). Instances are admitted in "
+                     "table order; instance i's equal generate_state_space(table[i])).\n\nInstances are admitted in "
                      "waves: while a wave holds fewer than wave_states states (default 2^24) and wave_instances "
                      "instances (default unlimited); a wave's device memory is about states x (row bytes + 64) + "
                      "transitions x (32 + 4 x label_width) bytes. With output 'host' each wave's device memory is "

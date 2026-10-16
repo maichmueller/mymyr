@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--envs", default="16384,65536")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--reps", type=int, default=3)
-    ap.add_argument("--max-steps", type=int, default=0)
+    ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--labels", action="store_true")
     ap.add_argument("--final", action="store_true")
     ap.add_argument("--modes", default="scan,loop")

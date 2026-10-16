@@ -1,8 +1,9 @@
-"""Problems of the table instance sets for domains whose instances in the fork's data dir are
-all small: gripper (data/gripper/domain.pddl), logistics (data/logistics/domain.pddl) and miconic-simpleadl
-(data/miconic-simpleadl/domain.pddl, conditional effects). The problems use those domain files unchanged and follow the
-layout of the fork's own problems there. Deterministic (no randomness): python3 tests/data/table_instances/gen.py writes the files
-next to this script.
+"""Writes the problems of the table instance sets, larger instances of three vendored domains whose own problems are
+all small: gripper/gripper-<n>.pddl for tests/data/benchmarks/small/gripper/domain.pddl, logistics/logistics-c<cities>-
+s<size>-p<packages>-a<planes>.pddl for tests/data/benchmarks/small/logistics/domain.pddl, and
+miconic-simpleadl/simple-f<floors>-p<passengers>-<q|c>.pddl for tests/data/benchmarks/small/miconic-simpleadl/domain.pddl
+(conditional effects). The problems follow the layout of the problems next to those domains. Deterministic (no
+randomness): python3 tests/data/table_instances/gen.py writes the files next to this script.
 """
 import pathlib
 
@@ -10,7 +11,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 
 
 def gripper(n):
-    """n balls in rooma, both grippers free (data/gripper/test_problem4.pddl for n = 4)."""
+    """n balls in rooma, both grippers free, every ball's goal roomb."""
     balls = [f"ball{i}" for i in range(1, n + 1)]
     lines = [f"(define (problem gripper-{n})", "    (:domain gripper-strips)", "    (:objects",
              "        left right " + " ".join(balls), "    )", "    (:init", "        (room rooma)", "        (room roomb)",
@@ -26,7 +27,7 @@ def gripper(n):
 
 def logistics(cities, size, packages, planes):
     """`cities` cities of `size` locations each (location 0 an airport), one truck per city, `planes` airplanes and
-    `packages` packages (data/logistics/test_problem.pddl's layout); positions and goals by a fixed arithmetic rule."""
+    `packages` packages; positions and goals by a fixed arithmetic rule."""
     locs = [[f"l{c}-{k}" for k in range(size)] for c in range(cities)]
     objs = ([f"a{i}" for i in range(planes)] + [f"c{c}" for c in range(cities)] + [f"t{c}" for c in range(cities)]
             + [l for ls in locs for l in ls] + [f"p{i}" for i in range(packages)])
@@ -53,8 +54,8 @@ def logistics(cities, size, packages, planes):
 
 
 def miconic_simpleadl(floors, passengers, quantified):
-    """The layout of pddl-generators' miconic-simpleadl (bench/cuda/conditional_tasks/simple-f24-p12.pddl): the lift at f0,
-    passenger i from floor (3i + 1) % F to (5i + 2) % F (moved one floor up where the two coincide). The goal is
+    """The lift at f0, passenger i from floor (3i + 1) % F to (5i + 2) % F (moved one floor up where the two
+    coincide). The goal is
     `(forall (?p - passenger) (served ?p))` (a goal axiom after normalization) or the conjunction of the served atoms."""
     name = f"simple-f{floors}-p{passengers}-{'q' if quantified else 'c'}"
     ps = [f"p{i}" for i in range(passengers)]

@@ -52,6 +52,14 @@
 // state beyond the bound ends the search at once. Exhausted then means that the search space holds no plan cheaper
 // than the bound. Sound for non-negative action costs: a transition that lowers g makes the search fail.
 //
+// Negative costs: A* (eager, lazy, weighted, and the anytime search built on it) needs non-negative action costs, as
+// its termination with reopening and its optimality rest on them (a cycle of negative cost would reopen states
+// forever). A constant negative cost fails every best-first search before it starts (heuristics::ActionCosts); a
+// cost that depends on the binding or the state is known only on a transition, and A* fails (status Failed, the
+// message names the two metric values) at the first transition that lowers g. GBFS, beam search and enforced
+// hill-climbing order by h and close every state once, so they terminate with such costs and report the plan's
+// metric value as its cost.
+//
 // SearchControl: budget.max_states bounds the stored states, max_expanded the expansions (both OutOfStates),
 // max_depth the depth (in actions) of expanded states (deeper states are not expanded), max_seconds the wall time
 // (OutOfTime); cancel and on_progress returning false give Cancelled. blocked_states are never entered (the start

@@ -36,13 +36,13 @@ void StateSpaceSampler::index(std::span<const i32> unit)
     for (u32 s = 0; s < N; ++s)
     {
         if (unit[s] == k_unsolvable_distance)
-            m_dead_ends.push_back(s);
+            m_unsolvable.push_back(s);
         else
             ++m_by_steps_offsets[static_cast<usize>(unit[s]) + 1];
     }
     for (usize i = 1; i < m_by_steps_offsets.size(); ++i)
         m_by_steps_offsets[i] += m_by_steps_offsets[i - 1];
-    m_by_steps.resize(N - m_dead_ends.size());
+    m_by_steps.resize(N - m_unsolvable.size());
     std::vector<u64> fill(m_by_steps_offsets.begin(), m_by_steps_offsets.end());
     for (u32 s = 0; s < N; ++s)
         if (unit[s] != k_unsolvable_distance)
@@ -72,11 +72,11 @@ u32 StateSpaceSampler::sample_state_n_steps_from_goal(i32 n)
     return s[m_rng.bounded(s.size())];
 }
 
-u32 StateSpaceSampler::sample_dead_end_state()
+u32 StateSpaceSampler::sample_unsolvable_state()
 {
-    if (m_dead_ends.empty())
-        throw std::out_of_range("mymyr: the state space has no dead-end states");
-    return m_dead_ends[m_rng.bounded(m_dead_ends.size())];
+    if (m_unsolvable.empty())
+        throw std::out_of_range("mymyr: the state space has no unsolvable states");
+    return m_unsolvable[m_rng.bounded(m_unsolvable.size())];
 }
 
 void StateSpaceSampler::sample_states(std::span<u32> out)
@@ -91,9 +91,9 @@ void StateSpaceSampler::sample_states_n_steps_from_goal(i32 n, std::span<u32> ou
         x = sample_state_n_steps_from_goal(n);
 }
 
-void StateSpaceSampler::sample_dead_end_states(std::span<u32> out)
+void StateSpaceSampler::sample_unsolvable_states(std::span<u32> out)
 {
     for (u32& x : out)
-        x = sample_dead_end_state();
+        x = sample_unsolvable_state();
 }
 }  // namespace mymyr::datasets

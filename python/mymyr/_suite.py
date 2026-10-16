@@ -113,26 +113,32 @@ class SuiteIwBatch:
 
     @property
     def status(self) -> list[Any]:
+        """Per search: its mymyr.search.Status."""
         return self._gather("status")
 
     @property
     def solved(self) -> list[bool]:
+        """Per search: whether it found a plan."""
         return self._gather("solved")
 
     @property
     def plan_length(self) -> list[int]:
+        """Per search: its plan's length; -1 unless solved."""
         return self._gather("plan_length")
 
     @property
     def effective_width(self) -> list[int]:
+        """Per search: the width of the pass that solved it (0 unless solved)."""
         return self._gather("effective_width")
 
     @property
     def expanded(self) -> list[int]:
+        """Per search: the states it expanded, over its passes."""
         return self._gather("expanded")
 
     @property
     def generated(self) -> list[int]:
+        """Per search: the successors it generated, over its passes."""
         return self._gather("generated")
 
     @property
@@ -147,35 +153,46 @@ class SuiteIwBatch:
         return [dom[g] for g in self._ids]
 
     @property
-    def stats(self) -> dict[str, Any]:
-        """The parts' device statistics summed (device_bytes: the most of a part)."""
+    def counters(self) -> dict[str, Any]:
+        """The parts' device counters summed (device_bytes: the most of a part)."""
         out: dict[str, Any] = {}
         for p in self.parts:
-            for key, v in p.stats.items():
+            for key, v in p.counters.items():
                 out[key] = max(out.get(key, 0), v) if key == "device_bytes" else out.get(key, 0) + v
         return out
 
+    def stats(self, i: int) -> Any:
+        """The counts of search i over its passes (mymyr.search.Statistics, as mymyr.search.IwResult.stats)."""
+        p, j = self._at(i)
+        return p.stats(j)
+
     def plan(self, i: int) -> list[Any]:
+        """The plan of search i (empty unless solved)."""
         p, j = self._at(i)
         return p.plan(j)
 
     def goal_state(self, i: int) -> Any:
+        """The goal state search i reached, or None."""
         p, j = self._at(i)
         return p.goal_state(j)
 
     def passes(self, i: int) -> list[Any]:
+        """The IW passes of search i (mymyr.search.IwPass; as mymyr.search.IwResult.passes)."""
         p, j = self._at(i)
         return p.passes(j)
 
     def cost(self, i: int) -> float:
+        """The plan cost of search i (0 unless solved)."""
         p, j = self._at(i)
         return p.cost(j)
 
     def reached_slots(self, i: int) -> list[int]:
+        """Rollouts: the fluent slots of every state rollout i created (ascending); empty for other searches."""
         p, j = self._at(i)
         return p.reached_slots(j)
 
     def reached_atoms(self, i: int) -> list[int]:
+        """Rollouts: the canonical ids of the reached fluent atoms of rollout i (ascending)."""
         p, j = self._at(i)
         return p.reached_atoms(j)
 

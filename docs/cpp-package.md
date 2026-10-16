@@ -13,7 +13,8 @@ target_link_libraries(app PRIVATE mymyr::core mymyr::frontend)
 For a source install, build the project and run `cmake --install build --prefix <prefix>`. Set `mymyr_DIR` to
 `<prefix>/lib/cmake/mymyr` when configuring a consumer. An installed wheel contains the same headers and CMake
 package; `mymyr.get_include()` returns its header directory and `mymyr.get_cmake_dir()` returns its CMake package
-directory. These paths may not contain the installed SDK in an editable or in-tree install.
+directory. An editable install (`pip install -e .`) has them too, next to its compiled extension in
+site-packages; a build tree used through `PYTHONPATH` has none.
 
 The package's C++ headers and static libraries are a source-level interface. Build consumers with C++26 (GCC 16 or
 Clang 22 with libc++) and the standard library used to build the package, then rebuild them when mymyr changes. The

@@ -1,12 +1,12 @@
 """mymyr.Domain: the loki front end from Python (parse and normalize once, instantiate many, thread-safe)."""
 
 import pathlib
-import sys
 import threading
 
 import pytest
 
 import mymyr
+from conftest import gil_stays_off
 from mymyr import formalism as fm
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -59,7 +59,7 @@ def test_concurrent_instantiation_on_one_domain():
         t.join()
     assert not errors
     assert len(results) == 64 and all(r == expected for r in results)
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()
 
 
 def test_errors_surface_as_exceptions():

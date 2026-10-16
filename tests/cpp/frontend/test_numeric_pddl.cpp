@@ -224,7 +224,6 @@ TEST(NumericPddl, TransportOpt08SiwPlanCost)
     ASSERT_EQ(r.status, search::SearchStatus::Solved);
     EXPECT_EQ(r.plan.size(), 21u);
     EXPECT_EQ(r.cost, 1102);  // 21 is the plan length
-    EXPECT_TRUE(r.cost_exact);
 }
 
 TEST(NumericPddl, TasksWithNumericFunctionsKeepTheirStateSpace)

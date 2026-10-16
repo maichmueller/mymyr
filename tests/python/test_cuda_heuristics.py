@@ -57,7 +57,7 @@ def test_heuristic_equals_cpu(ctx, name, kind):
     assert h.kind == kind
     assert h.stats["evaluations"] >= len(states) and h.stats["operators"] > 0
     # the launch configuration changes no value
-    for kw in ({"variant": "frontier"}, {"warp_groups": True}, {"threads": 64, "force_global": True}, {"max_blocks": 1}):
+    for kw in ({"variant": "frontier"}, {"warp_groups": True}, {"block_threads": 64, "force_global": True}, {"max_blocks": 1}):
         assert list(mc.Heuristic(task, kind, ctx=ctx, **kw).evaluate(states)) == ref, kw
 
 
@@ -119,7 +119,7 @@ def test_astar_batch_one_is_the_cpu_search(ctx, name, h):
     assert [str(a) for a in dev.plan] == [str(a) for a in cpu.plan] and dev.cost == cpu.cost
     assert dev.evaluations == cpu.evaluations and dev.initial_h == cpu.initial_h
     assert dev.algorithm == "astar_eager (device)"
-    assert dev.device["steps"] > 0 and dev.device["popped"] >= dev.stats.expanded
+    assert dev.counters["steps"] > 0 and dev.counters["popped"] >= dev.stats.expanded
 
 
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "gripper__prob05", "logistics00__probLOGISTICS-6-1"])
@@ -132,7 +132,7 @@ def test_astar_batches_find_optimal_plans(ctx, name):
         assert dev.solved and dev.cost == cpu.cost, (batch, single)
         assert replay(task, dev.plan) == dev.goal_state
         assert task.is_goal(dev.goal_state)
-        assert dev.device["max_batch"] <= batch
+        assert dev.counters["max_batch"] <= batch
         again = mc.astar(task, heuristic="max", ctx=ctx, batch=batch, single_bucket=single, chunk_states=97)
         assert [str(a) for a in again.plan] == [str(a) for a in dev.plan]
         assert again.stats.expanded == dev.stats.expanded and again.stats.generated == dev.stats.generated

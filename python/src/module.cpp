@@ -106,14 +106,16 @@ NB_MODULE(_core, m)
 {
     m.doc() = "mymyr native core";
     m.attr("__version__") = std::string(mymyr::version());
-    m.def("build_info", [] { return std::string(mymyr::build_info()); });
+    m.def("build_info", [] { return std::string(mymyr::build_info()); },
+          "How the extension was built: 'mymyr <version> (<build type>, <compiler>)'.");
     m.def("free_threaded_build", [] {
 #ifdef Py_GIL_DISABLED
         return true;
 #else
         return false;
 #endif
-    });
+    },
+          "Whether the extension was built for free-threaded CPython (Py_GIL_DISABLED).");
     m.def("hash_rows", &hash_rows, "states"_a,
           "Hash each row of a (N, W) uint64 state-word matrix (trailing zero words ignored). Zero-copy input.");
     mymyr::python::bind_formalism(m);

@@ -294,11 +294,11 @@ def test_constructed_goals_give_the_plans_of_the_equivalent_forms():
     for goal in ([[target]], [[atom]], g, [g], [[task.literal(atom)]]):
         a = search.astar(task, heuristic="blind", goal=goal)
         b = search.brfs(task, stop_at_goal=True, goal=goal)
-        i = search.iw(task, max_arity=2, goal=goal)
+        i = search.iw(task, max_width=2, goal=goal)
         a0 = search.astar(task, heuristic="blind", goal=[[target]])
         assert a.plan == a0.plan and a.goal_state.holds(atom)
         assert b.solved and b.plan == search.brfs(task, stop_at_goal=True, goal=[[target]]).plan
-        assert i.plan == search.iw(task, max_arity=2, goal=[[target]]).plan
+        assert i.plan == search.iw(task, max_width=2, goal=[[target]]).plan
     # the task's goal as a ground condition: the plans of the task's goal
     depot = text_task("depot__p02")
     goal = depot.goal_condition
@@ -323,7 +323,7 @@ def test_negative_derived_and_static_goal_literals():
     held = next(a for a in s.atoms() if a.predicate.name == "at-robby")
     neg = task.ground_condition([task.literal(held, positive=False)])
     for r in (search.brfs(task, stop_at_goal=True, goal=neg), search.astar(task, heuristic="blind", goal=neg),
-              search.iw(task, max_arity=1, goal=neg)):
+              search.iw(task, max_width=1, goal=neg)):
         assert len(r.plan) == 1
         assert not task.apply(s, r.plan[0]).holds(held)
     # a derived goal literal (philosophers: blocked) and its negation
@@ -331,7 +331,7 @@ def test_negative_derived_and_static_goal_literals():
     derived = phil.goal_condition.literals[0]
     assert derived.atom.kind == "derived"
     one = phil.ground_condition([derived])
-    r = search.iw(phil, max_arity=2, goal=one)
+    r = search.iw(phil, max_width=2, goal=one)
     assert r.status == search.Status.SOLVED and one.holds(r.goal_state)
     b = search.brfs(phil, stop_at_goal=True, goal=one)
     assert b.solved and len(b.plan) <= len(r.plan) and one.holds(b_states(phil, b.plan))

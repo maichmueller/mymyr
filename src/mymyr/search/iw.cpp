@@ -1199,6 +1199,7 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_ar
         }
         r.peak_table_bytes = std::max(r.peak_table_bytes, po.table_bytes);
         r.peak_node_bytes = std::max(r.peak_node_bytes, po.node_bytes);
+        r.total.memory_bytes = std::max(r.total.memory_bytes, po.table_bytes + po.node_bytes);
         push(po.st);
         if (po.st.status == SearchStatus::Solved)
         {
@@ -1235,7 +1236,6 @@ IwResult run_iw(const Task& task, const IwOptions& options, int only_arity)
     {
         const detail::PlanCost pc(task);
         r.cost = pc.apply(succ, root, r.plan);
-        r.cost_exact = pc.exact();
     }
     r.fluent_slots = task.atoms().fluent_slots();
     if (c.observer)

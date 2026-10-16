@@ -29,9 +29,9 @@ the states again; required on a device).
   device's general path), tagged ``cudagraph_unsafe``.
 - ``mymyr::random_actions(env, draws, count, first_env, max_actions)``: the random policy's next choices [N] int64
   (the counter-based RNG at the draw counters; no step).
-- ``mymyr::expand(table, states, task_ids, K, witness)``: the padded expansion [N, K] (succ, schema, binding, goal,
-  mask, count).
-- ``mymyr::expand_flat(table, states, task_ids, capacity, witness)``: the flat expansion (succ, parent, schema,
+- ``mymyr::expand(table, states, task_ids, K, witness_pruning)``: the padded expansion [N, K] (succ, schema, binding,
+  goal, mask, count).
+- ``mymyr::expand_flat(table, states, task_ids, capacity, witness_pruning)``: the flat expansion (succ, parent, schema,
   binding, goal, offsets). ``capacity=None`` sizes the outputs by the data: the row count M is an unbacked symbolic
   size under ``torch.compile``; a capacity gives static shapes (rows past it are dropped, rows past the total are
   padding: succ 0, parent / schema / binding -1, goal False; offsets keep the true counts).
@@ -66,6 +66,17 @@ __all__ = [
 
 _unsafe = (torch.Tag.cudagraph_unsafe,)
 
+
+def _op(name: str, **kwargs: Any) -> Any:
+    """torch.library.custom_op that keeps the function's docstring on the op."""
+
+    def wrap(fn: Any) -> Any:
+        op = torch.library.custom_op(name, **kwargs)(fn)
+        op.__doc__ = fn.__doc__
+        return op
+
+    return wrap
+
 _lock = threading.Lock()
 _objects: dict[int, Any] = {}
 _by_id: dict[int, int] = {}
@@ -95,6 +106,7 @@ def unregister(handle: int) -> None:
 
 
 def lookup(handle: int) -> Any:
+    """The object registered under ``handle`` (:func:`register`). Raises ValueError for an unknown handle."""
     try:
         return _objects[handle]
     except KeyError:
@@ -286,7 +298,7 @@ def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, 
     return out
 
 
-@torch.library.custom_op(
+@_op(
     "mymyr::reset", mutates_args=("states", "steps", "counts", "views", "goal_pos", "goal_neg", "count", "at_goal")
 )
 def reset(
@@ -303,6 +315,9 @@ def reset(
     mask: Optional[Tensor],
     keep_goals: bool,
 ) -> None:
+    """``mymyr::reset``: resets the rows (all, or those with ``mask[i]``) in place into their instances ``task_ids``
+    (set by the caller first): steps 0, the instance's goal masks unless ``keep_goals``, the cache, ``count`` and
+    ``at_goal``. ``env`` is a :func:`register` handle; the tensors are the environment state of the module docstring."""
     reset_impl(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at_goal, mask, keep_goals)
 
 
@@ -311,7 +326,7 @@ def _(env, states, task_ids, steps, counts, views, goal_pos, goal_neg, count, at
     return None
 
 
-@torch.library.custom_op("mymyr::refresh", mutates_args=("counts", "views", "count", "at_goal"))
+@_op("mymyr::refresh", mutates_args=("counts", "views", "count", "at_goal"))
 def refresh(
     env: int,
     states: Tensor,
@@ -323,6 +338,8 @@ def refresh(
     count: Tensor,
     at_goal: Optional[Tensor],
 ) -> None:
+    """``mymyr::refresh``: recomputes the cache, ``count`` and ``at_goal`` of states (task ids, goal masks) the
+    caller wrote. ``env`` is a :func:`register` handle."""
     refresh_impl(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)
 
 
@@ -331,7 +348,7 @@ def _(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal):
     return None
 
 
-@torch.library.custom_op("mymyr::refresh_sync", mutates_args=("counts", "views", "count", "at_goal"), tags=_unsafe)
+@_op("mymyr::refresh_sync", mutates_args=("counts", "views", "count", "at_goal"), tags=_unsafe)
 def refresh_sync(
     env: int,
     states: Tensor,
@@ -343,6 +360,8 @@ def refresh_sync(
     count: Tensor,
     at_goal: Optional[Tensor],
 ) -> None:
+    """``mymyr::refresh_sync``: :func:`refresh` for environments whose calls synchronize (the device's general path);
+    tagged ``cudagraph_unsafe``."""
     refresh_impl(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal)
 
 
@@ -351,7 +370,7 @@ def _(env, states, task_ids, counts, views, goal_pos, goal_neg, count, at_goal):
     return None
 
 
-@torch.library.custom_op(
+@_op(
     "mymyr::step",
     mutates_args=(
         "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg"
@@ -374,6 +393,10 @@ def step(
     first_env: int,
     final: bool,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """``mymyr::step``: one step of every environment in place, ``action`` [N] int64 (None: the random policy);
+    autoresetting rows restart in ``next_task_ids[i]`` where given. Returns (reward, terminated, truncated, goal,
+    invalid, schema, binding, final_states); ``final_states`` is [N, row_words], the reached states before the
+    autoreset, with ``final`` and [0, row_words] without."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
         first_env, final,
@@ -388,7 +411,7 @@ def _(
     return _step_outputs(lookup(env).label_width, states, final)
 
 
-@torch.library.custom_op(
+@_op(
     "mymyr::step_sync",
     mutates_args=(
         "states", "task_ids", "steps", "draws", "counts", "views", "count", "at_goal", "goal_pos", "goal_neg"
@@ -412,6 +435,8 @@ def step_sync(
     first_env: int,
     final: bool,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """``mymyr::step_sync``: :func:`step` for environments whose calls synchronize (the device's general path);
+    tagged ``cudagraph_unsafe``."""
     return step_impl(
         env, states, task_ids, steps, draws, counts, views, count, at_goal, goal_pos, goal_neg, action, next_task_ids,
         first_env, final,
@@ -426,8 +451,10 @@ def _(
     return _step_outputs(lookup(env).label_width, states, final)
 
 
-@torch.library.custom_op("mymyr::random_actions", mutates_args=())
+@_op("mymyr::random_actions", mutates_args=())
 def random_actions(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: int) -> Tensor:
+    """``mymyr::random_actions``: the random policy's next choices [N] int64 at the draw counters (no step);
+    ``max_actions`` > 0 caps the choice at that many actions, 0 does not."""
     return random_actions_impl(env, draws, count, first_env, max_actions)
 
 
@@ -439,15 +466,20 @@ def _(env, draws, count, first_env, max_actions):
 # ------------------------------------------------------------------------------------------------ expansion
 
 
-@torch.library.custom_op("mymyr::expand", mutates_args=(), tags=_unsafe)
+@_op("mymyr::expand", mutates_args=(), tags=_unsafe)
 def expand(
-    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness: bool = False
+    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness_pruning: bool = False
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """``mymyr::expand``: the padded expansion of ``states`` [N, row_words] over the registered table ``table``:
+    (succ [N, K, row_words], schema [N, K], binding [N, K, label_width], goal [N, K], mask [N, K], count [N]). ``K``
+    > 0 is the padded width; ``witness_pruning`` as in ``rl.expand``."""
     t = lookup(table)
     if K <= 0:
         raise ValueError("mymyr: expand needs K > 0 (the padded width is a static shape)")
     words = states.shape[1] - t.numeric_words
-    x = mymyr.rl.expand(t, states, task_ids, words=words, K=K, goal=True, witness=witness, stream=_stream(states))
+    x = mymyr.rl.expand(
+        t, states, task_ids, words=words, K=K, goal=True, witness_pruning=witness_pruning, stream=_stream(states)
+    )
     p = x.padded
     return p.succ, p.schema, p.binding, p.goal, p.mask, p.count
 
@@ -466,25 +498,34 @@ def _padded_outputs(table: int, states: Tensor, K: int) -> tuple[Tensor, ...]:
 
 
 @expand.register_fake
-def _(table, states, task_ids, K, witness=False):
+def _(table, states, task_ids, K, witness_pruning=False):
     return _padded_outputs(table, states, K)
 
 
-@torch.library.custom_op("mymyr::expand_flat", mutates_args=(), tags=_unsafe)
+@_op("mymyr::expand_flat", mutates_args=(), tags=_unsafe)
 def expand_flat(
-    table: int, states: Tensor, task_ids: Optional[Tensor], capacity: Optional[int] = None, witness: bool = False
+    table: int,
+    states: Tensor,
+    task_ids: Optional[Tensor],
+    capacity: Optional[int] = None,
+    witness_pruning: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """``mymyr::expand_flat``: the flat expansion of ``states`` over the registered table ``table``: (succ [M,
+    row_words], parent [M], schema [M], binding [M, label_width], goal [M], offsets [N + 1]). ``capacity=None`` sizes
+    the outputs by the data; a capacity gives static shapes (see the module docstring)."""
     t = lookup(table)
     n, rw = states.shape
     words = rw - t.numeric_words
     if capacity is None:
-        x = mymyr.rl.expand(t, states, task_ids, words=words, goal=True, witness=witness, stream=_stream(states))
+        x = mymyr.rl.expand(
+            t, states, task_ids, words=words, goal=True, witness_pruning=witness_pruning, stream=_stream(states)
+        )
         return x.succ, x.parent, x.schema, x.binding, x.goal, x.offsets
     out = _flat_outputs(t, states, capacity)
     succ, parent, schema, binding, goal, offsets = out
     mymyr.rl.expand_into(
         t, states, task_ids, succ=succ, parent=parent, schema=schema, binding=binding, goal=goal, offsets=offsets,
-        witness=witness, stream=_stream(states),
+        witness_pruning=witness_pruning, stream=_stream(states),
     )  # fmt: skip
     return out
 
@@ -503,7 +544,7 @@ def _flat_outputs(t: Any, states: Tensor, m: Any) -> tuple[Tensor, ...]:
 
 
 @expand_flat.register_fake
-def _(table, states, task_ids, capacity=None, witness=False):
+def _(table, states, task_ids, capacity=None, witness_pruning=False):
     m = torch.library.get_ctx().new_dynamic_size() if capacity is None else capacity
     return _flat_outputs(lookup(table), states, m)
 
@@ -511,37 +552,47 @@ def _(table, states, task_ids, capacity=None, witness=False):
 # ------------------------------------------------------------------------------------------------ derived words
 
 
-@torch.library.custom_op("mymyr::expand_derived", mutates_args=(), tags=_unsafe)
+@_op("mymyr::expand_derived", mutates_args=(), tags=_unsafe)
 def expand_derived(
-    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness: bool = False
+    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness_pruning: bool = False
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """``mymyr::expand_derived``: :func:`expand` with the successors' derived words as a seventh result, int64 [N, K,
+    table.derived_words]."""
     t = lookup(table)
     if K <= 0:
         raise ValueError("mymyr: expand_derived needs K > 0 (the padded width is a static shape)")
     words = states.shape[1] - t.numeric_words
     x = mymyr.rl.expand(
-        t, states, task_ids, words=words, K=K, goal=True, derived=True, witness=witness, stream=_stream(states)
+        t, states, task_ids, words=words, K=K, goal=True, derived=True, witness_pruning=witness_pruning,
+        stream=_stream(states),
     )
     p = x.padded
     return p.succ, p.schema, p.binding, p.goal, p.mask, p.count, p.derived
 
 
 @expand_derived.register_fake
-def _(table, states, task_ids, K, witness=False):
+def _(table, states, task_ids, K, witness_pruning=False):
     n = states.shape[0]
     return (*_padded_outputs(table, states, K), states.new_empty((n, K, lookup(table).derived_words)))
 
 
-@torch.library.custom_op("mymyr::expand_flat_derived", mutates_args=(), tags=_unsafe)
+@_op("mymyr::expand_flat_derived", mutates_args=(), tags=_unsafe)
 def expand_flat_derived(
-    table: int, states: Tensor, task_ids: Optional[Tensor], capacity: Optional[int] = None, witness: bool = False
+    table: int,
+    states: Tensor,
+    task_ids: Optional[Tensor],
+    capacity: Optional[int] = None,
+    witness_pruning: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """``mymyr::expand_flat_derived``: :func:`expand_flat` with the successors' derived words as a seventh result,
+    int64 [M, table.derived_words]."""
     t = lookup(table)
     n, rw = states.shape
     words = rw - t.numeric_words
     if capacity is None:
         x = mymyr.rl.expand(
-            t, states, task_ids, words=words, goal=True, derived=True, witness=witness, stream=_stream(states)
+            t, states, task_ids, words=words, goal=True, derived=True, witness_pruning=witness_pruning,
+            stream=_stream(states),
         )
         return x.succ, x.parent, x.schema, x.binding, x.goal, x.offsets, x.derived
     out = _flat_outputs(t, states, capacity)
@@ -549,12 +600,12 @@ def expand_flat_derived(
     succ, parent, schema, binding, goal, offsets = out
     mymyr.rl.expand_into(
         t, states, task_ids, succ=succ, parent=parent, schema=schema, binding=binding, goal=goal, derived=derived,
-        offsets=offsets, witness=witness, stream=_stream(states),
+        offsets=offsets, witness_pruning=witness_pruning, stream=_stream(states),
     )  # fmt: skip
     return (*out, derived)
 
 
 @expand_flat_derived.register_fake
-def _(table, states, task_ids, capacity=None, witness=False):
+def _(table, states, task_ids, capacity=None, witness_pruning=False):
     m = torch.library.get_ctx().new_dynamic_size() if capacity is None else capacity
     return (*_flat_outputs(lookup(table), states, m), states.new_empty((m, lookup(table).derived_words)))

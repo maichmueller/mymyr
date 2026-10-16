@@ -4,7 +4,8 @@ Create a heuristic with `mymyr.search.Heuristic(task, kind)`. Built-in kinds are
 `"add"`, `"ff"`, `"h2"`, `"set_additive"`, `"lmcut"` and `"lmcount"`; set-additive also accepts `"hsa"` and
 `"setadd"`. Call the object on a state for its value. Positive infinity means the heuristic proves the state is a dead
 end. LM-cut and the landmark count, whose value depends on the path to a state, have their own section in the
-[search guide](search.md#lm-cut-and-the-landmark-count).
+[search guide](search.md#lm-cut-and-the-landmark-count). Option names and defaults follow the
+[API conventions](conventions.md).
 
 ```python
 from pathlib import Path

@@ -156,15 +156,15 @@ def test_generation_outputs_and_statuses(ctx):
     c = cpu_space(task)
     for output in ("device", "host", "both"):
         r = mc.generate_state_space(task, ctx=ctx, output=output, remove_if_unsolvable=False)
-        assert r and r.status == datasets.Status.OK and r.states == c.num_states and r.seconds >= 0
+        assert r and r.status == mymyr.search.Status.EXHAUSTED and r.stats.states == c.num_states and r.stats.seconds >= 0
         assert (r.space is not None) == (output != "host") and (r.host is not None) == (output != "device")
         if r.host is not None:
             assert_same_arrays(r.host.arrays(), c.arrays())
             assert r.host.task is task
-        assert r.stats["states"] == c.num_states and r.stats["waves"] == 1
+        assert r.counters["states"] == c.num_states and r.counters["waves"] == 1
     small = mc.generate_state_space(task, ctx=ctx, max_states=10)
-    assert small.status == datasets.Status.OUT_OF_STATES and not small and small.space is None
-    assert datasets.generate(task, max_states=10).status == datasets.Status.OUT_OF_STATES
+    assert small.status == mymyr.search.Status.OUT_OF_STATES and not small and small.space is None
+    assert datasets.generate(task, max_states=10).status == mymyr.search.Status.OUT_OF_STATES
     with pytest.raises(ValueError, match="output"):
         mc.generate_state_space(task, ctx=ctx, output="disk")
     with pytest.raises(ValueError, match="differs"):
@@ -239,13 +239,13 @@ def test_state_spaces_equal_cpu_pool(ctx, sets, name):
                 assert_same_space(d, c)
     results = mc.generate_state_spaces(table, ctx=ctx, output="host", max_states=20000, remove_if_unsolvable=False,
                                        wave_instances=2)
-    assert results[0].stats["waves"] >= 2
+    assert results[0].counters["waves"] >= 2
     for r, c in zip(results, cpu):
         assert (r.host is None) == (c is None) and r.space is None
         if c is not None:
             assert_same_arrays(r.host.arrays(), c.arrays())
         else:
-            assert r.status == datasets.Status.OUT_OF_STATES
+            assert r.status == mymyr.search.Status.OUT_OF_STATES
 
 
 def test_generalized_state_space_from_device(ctx, sets):
@@ -269,11 +269,11 @@ def test_samplers_over_device_spaces(ctx):
     d = datasets.state_space(task, device=ctx, remove_if_unsolvable=False)
     sd, sc = datasets.StateSpaceSampler(d, seed=5), datasets.StateSpaceSampler(c, seed=5)
     assert sd.space is d and sc.space is c
-    assert (sd.num_states, sd.num_dead_end_states, sd.num_alive_states, sd.max_steps_to_goal) == (
-        sc.num_states, sc.num_dead_end_states, sc.num_alive_states, sc.max_steps_to_goal)
+    assert (sd.num_states, sd.num_unsolvable_states, sd.num_solvable_states, sd.max_steps_to_goal) == (
+        sc.num_states, sc.num_unsolvable_states, sc.num_solvable_states, sc.max_steps_to_goal)
     assert np.array_equal(sd.sample_states(500), sc.sample_states(500))
     assert np.array_equal(sd.sample_states_n_steps_from_goal(3, 100), sc.sample_states_n_steps_from_goal(3, 100))
-    assert np.array_equal(sd.sample_dead_end_states(50), sc.sample_dead_end_states(50))
+    assert np.array_equal(sd.sample_unsolvable_states(50), sc.sample_unsolvable_states(50))
     assert sd.sample_state() == sc.sample_state()
     ids = sd.states_n_steps_from_goal(2)
     del sd
@@ -296,7 +296,7 @@ def starts_of(tasks, per):
 
 def iw_record(b, i):
     return (b.status[i], [str(a) for a in b.plan(i)], b.goal_state(i), b.cost(i),
-            [(p.arity, p.status, p.expanded, p.generated) for p in b.passes(i)])
+            [(p.width, p.status, p.expanded, p.generated) for p in b.passes(i)])
 
 
 @pytest.mark.parametrize("name", ["gripper", "blocks"])
@@ -305,12 +305,12 @@ def test_multi_iw_over_tables(ctx, sets, name):
     table = rl.TaskTable(tasks)
     starts, ids = starts_of(tasks, 5)
     for arity in (1, 2):
-        b = mc.multi_iw(table, starts, task_ids=ids, ctx=ctx, max_arity=arity, max_states=20000)
+        b = mc.multi_iw(table, starts, task_ids=ids, ctx=ctx, max_width=arity, max_states=20000)
         assert len(b) == len(starts) and b.task_ids == ids
         for i, (s, k) in enumerate(zip(starts, ids)):
-            one = mc.multi_iw(tasks[k], [s], ctx=ctx, max_arity=arity, max_states=20000)
+            one = mc.multi_iw(tasks[k], [s], ctx=ctx, max_width=arity, max_states=20000)
             assert iw_record(b, i) == iw_record(one, 0)
-            cpu = mymyr.search.iw(tasks[k], max_arity=arity, start=s, max_states=20000)
+            cpu = mymyr.search.iw(tasks[k], max_width=arity, start=s, max_states=20000)
             assert b.status[i] == cpu.status and [str(a) for a in b.plan(i)] == [str(a) for a in cpu.plan]
             if b.solved[i]:
                 assert b.goal_state(i).task is tasks[k] and b.plan(i)[0].task is tasks[k] if b.plan(i) else True
@@ -320,9 +320,9 @@ def test_multi_iw_over_tables(ctx, sets, name):
         other = next(t for t, kk in zip(starts[i + 1:] + starts[:i], ids[i + 1:] + ids[:i]) if kk == k)
         fresh = [a for a in other.atom_slots() if a not in set(s.atom_slots())]
         goals.append((fresh[:2], []))
-    b = mc.multi_iw(table, starts, task_ids=np.asarray(ids, np.int32), ctx=ctx, goals=goals, max_arity=1)
+    b = mc.multi_iw(table, starts, task_ids=np.asarray(ids, np.int32), ctx=ctx, goals=goals, max_width=1)
     for i, (s, k) in enumerate(zip(starts, ids)):
-        one = mc.multi_iw(tasks[k], [s], ctx=ctx, goals=[goals[i]], max_arity=1)
+        one = mc.multi_iw(tasks[k], [s], ctx=ctx, goals=[goals[i]], max_width=1)
         assert iw_record(b, i) == iw_record(one, 0)
 
 

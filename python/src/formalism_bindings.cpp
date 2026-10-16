@@ -148,7 +148,9 @@ void identity_protocol(nb::class_<V>& cls, const char* kind)
         return static_cast<nb::ssize_t>(std::hash<const void*>{}(a.t.get()) ^ (std::hash<u32>{}(a.i) * 0x9e3779b97f4a7c15ULL) ^
                                         std::hash<std::string_view>{}(kind));
     });
-    cls.def_prop_ro("index", [](const V& a) { return a.i; });
+    cls.def_prop_ro("index", [](const V& a) { return a.i; },
+                    "The position in the normalized task's table of this kind (NormalizedTask.types, objects, ...); "
+                    "views of one task are equal when their indices are.");
 }
 
 template<class V, class Vec>
@@ -203,46 +205,60 @@ void bind_formalism(nb::module_& parent)
 
     // --- Type
     {
-        nb::class_<TypeV> c(m, "Type");
+        nb::class_<TypeV> c(m, "Type",
+                            "A type of the normalized task (NormalizedTask.types).");
         identity_protocol(c, "type");
         ClassDescriptor<TypeV>{c}
-            .field("name", [](const TypeV& v) { return std::string(v.d().str(v.d().types[v.i].name)); })
+            .field("name", [](const TypeV& v) { return std::string(v.d().str(v.d().types[v.i].name)); },
+                   "The type name.")
             .field("bases", [](const TypeV& v) { return type_list(v.t, v.d().types[v.i].bases); }, "direct supertypes")
             .finish();
         c.def("__repr__", [](const TypeV& v) { return "Type(" + std::string(v.d().str(v.d().types[v.i].name)) + ")"; });
     }
     // --- Object
     {
-        nb::class_<ObjectV> c(m, "Object");
+        nb::class_<ObjectV> c(m, "Object",
+                              "An object or constant of the normalized task (NormalizedTask.objects).");
         identity_protocol(c, "object");
         ClassDescriptor<ObjectV>{c}
-            .field("name", [](const ObjectV& v) { return std::string(v.d().str(v.d().objects[v.i].name)); })
-            .field("types", [](const ObjectV& v) { return type_list(v.t, v.d().objects[v.i].types); })
-            .field("is_constant", [](const ObjectV& v) { return v.d().objects[v.i].constant; })
+            .field("name", [](const ObjectV& v) { return std::string(v.d().str(v.d().objects[v.i].name)); },
+                   "The object name.")
+            .field("types", [](const ObjectV& v) { return type_list(v.t, v.d().objects[v.i].types); },
+                   "The Types the object was declared with.")
+            .field("is_constant", [](const ObjectV& v) { return v.d().objects[v.i].constant; },
+                   "Whether the domain declares it (a constant) rather than the problem.")
             .finish();
         c.def("__repr__", [](const ObjectV& v) { return "Object(" + std::string(v.d().str(v.d().objects[v.i].name)) + ")"; });
         c.def("__str__", [](const ObjectV& v) { return std::string(v.d().str(v.d().objects[v.i].name)); });
     }
     // --- Parameter
     {
-        nb::class_<ParameterV> c(m, "Parameter");
+        nb::class_<ParameterV> c(m, "Parameter",
+                                 "A parameter of a predicate, function, schema or axiom.");
         identity_protocol(c, "parameter");
         ClassDescriptor<ParameterV>{c}
-            .field("name", [](const ParameterV& v) { return std::string(v.d().str(v.d().params[v.i].name)); })
-            .field("position", [](const ParameterV& v) { return v.position; })
-            .field("types", [](const ParameterV& v) { return type_list(v.t, v.d().params[v.i].types); })
+            .field("name", [](const ParameterV& v) { return std::string(v.d().str(v.d().params[v.i].name)); },
+                   "The parameter name without the '?'.")
+            .field("position", [](const ParameterV& v) { return v.position; },
+                   "The 0-based position in its owner's parameter list.")
+            .field("types", [](const ParameterV& v) { return type_list(v.t, v.d().params[v.i].types); },
+                   "The Types of the parameter (several for 'either').")
             .finish();
         c.def("__repr__", [](const ParameterV& v) { return "Parameter(?" + std::string(v.d().str(v.d().params[v.i].name)) + ")"; });
     }
     // --- Predicate
     {
-        nb::class_<PredicateV> c(m, "Predicate");
+        nb::class_<PredicateV> c(m, "Predicate",
+                                 "A predicate of the normalized task (NormalizedTask.predicates).");
         identity_protocol(c, "predicate");
         ClassDescriptor<PredicateV>{c}
-            .field("name", [](const PredicateV& v) { return std::string(v.d().str(v.d().predicates[v.i].name)); })
+            .field("name", [](const PredicateV& v) { return std::string(v.d().str(v.d().predicates[v.i].name)); },
+                   "The predicate name.")
             .field("kind", [](const PredicateV& v) { return std::string(kind_name(v.d().predicates[v.i].kind)); }, "'static', 'fluent' or 'derived'")
-            .field("arity", [](const PredicateV& v) { return v.d().predicates[v.i].arity; })
-            .field("parameters", [](const PredicateV& v) { return parameter_list(v.t, v.d().predicates[v.i].params); })
+            .field("arity", [](const PredicateV& v) { return v.d().predicates[v.i].arity; },
+                   "The number of parameters.")
+            .field("parameters", [](const PredicateV& v) { return parameter_list(v.t, v.d().predicates[v.i].params); },
+                   "The Parameters.")
             .finish();
         c.def("__repr__", [](const PredicateV& v) {
             const auto& p = v.d().predicates[v.i];
@@ -251,13 +267,17 @@ void bind_formalism(nb::module_& parent)
     }
     // --- Function
     {
-        nb::class_<FunctionV> c(m, "Function");
+        nb::class_<FunctionV> c(m, "Function",
+                                "A numeric function of the normalized task (NormalizedTask.functions).");
         identity_protocol(c, "function");
         ClassDescriptor<FunctionV>{c}
-            .field("name", [](const FunctionV& v) { return std::string(v.d().str(v.d().functions[v.i].name)); })
+            .field("name", [](const FunctionV& v) { return std::string(v.d().str(v.d().functions[v.i].name)); },
+                   "The function name.")
             .field("kind", [](const FunctionV& v) { return std::string(kind_name(v.d().functions[v.i].kind)); }, "'static', 'fluent' or 'auxiliary'")
-            .field("arity", [](const FunctionV& v) { return v.d().functions[v.i].arity; })
-            .field("parameters", [](const FunctionV& v) { return parameter_list(v.t, v.d().functions[v.i].params); })
+            .field("arity", [](const FunctionV& v) { return v.d().functions[v.i].arity; },
+                   "The number of parameters.")
+            .field("parameters", [](const FunctionV& v) { return parameter_list(v.t, v.d().functions[v.i].params); },
+                   "The Parameters.")
             .finish();
         c.def("__repr__", [](const FunctionV& v) {
             const auto& f = v.d().functions[v.i];
@@ -266,18 +286,24 @@ void bind_formalism(nb::module_& parent)
     }
     // --- NumericEffect
     {
-        nb::class_<NumericEffectV> c(m, "NumericEffect");
-        c.def_prop_ro("index", [](const NumericEffectV& v) { return v.i; });
+        nb::class_<NumericEffectV> c(m, "NumericEffect",
+                                     "A numeric effect of a schema: a function updated by an expression.");
+        c.def_prop_ro("index", [](const NumericEffectV& v) { return v.i; },
+                      "The effect's index in the numeric effect table of its owner.");
         ClassDescriptor<NumericEffectV>{c}
-            .field("operator", [](const NumericEffectV& v) { return std::string(op_name(v.e().op)); })
-            .field("function", [](const NumericEffectV& v) { return FunctionV{{v.t, v.e().func.v}}; })
+            .field("operator", [](const NumericEffectV& v) { return std::string(op_name(v.e().op)); },
+                   "The update: 'assign', 'increase', 'decrease', 'scale-up' or 'scale-down'.")
+            .field("function", [](const NumericEffectV& v) { return FunctionV{{v.t, v.e().func.v}}; },
+                   "The Function it updates.")
             .field("terms", [](const NumericEffectV& v) {
                 nb::list l;
                 for (fm::Term x : TaskData::slice(v.d().terms, v.e().terms))
                     l.append(term_object(bare_owner(v.t), x, v.vars));
                 return nb::tuple(l);
-            })
-            .field("expression", [](const NumericEffectV& v) { return PyExpression{task_pool(bare_owner(v.t), v.vars), v.e().expr}; })
+            },
+                   "The arguments of the updated function (Objects or the schema's Variables).")
+            .field("expression", [](const NumericEffectV& v) { return PyExpression{task_pool(bare_owner(v.t), v.vars), v.e().expr}; },
+                   "The Expression of the new value.")
             .finish();
         c.def("__str__", [](const NumericEffectV& v) {
             const auto& e = v.e();
@@ -289,7 +315,9 @@ void bind_formalism(nb::module_& parent)
     }
     // --- ConditionalEffect
     {
-        nb::class_<ConditionalEffectV> c(m, "ConditionalEffect");
+        nb::class_<ConditionalEffectV> c(m, "ConditionalEffect",
+                                         "An effect of a schema with its own parameters and condition (an "
+                                         "unconditional effect has neither).");
         identity_protocol(c, "conditional_effect");
         auto vars_of = [](const ConditionalEffectV& v) { return scope_variables(v.d(), v.schema_params, v.d().conditional_effects[v.i].extra_params); };
         ClassDescriptor<ConditionalEffectV>{c}
@@ -301,10 +329,12 @@ void bind_formalism(nb::module_& parent)
             }, "a ConjunctiveCondition over the schema's parameters followed by the forall parameters")
             .field("add_effects", [vars_of](const ConditionalEffectV& v) {
                 return literal_tuple(v.t, v.d().conditional_effects[v.i].effects, vars_of(v), true);
-            })
+            },
+                   "The atoms it makes true.")
             .field("delete_effects", [vars_of](const ConditionalEffectV& v) {
                 return literal_tuple(v.t, v.d().conditional_effects[v.i].effects, vars_of(v), false);
-            })
+            },
+                   "The atoms it makes false.")
             .field("numeric_effects", [vars_of](const ConditionalEffectV& v) {
                 nb::list l;
                 const auto r = v.d().conditional_effects[v.i].numeric_effects;
@@ -312,7 +342,8 @@ void bind_formalism(nb::module_& parent)
                 for (u32 k = 0; k < r.count; ++k)
                     l.append(NumericEffectV{{v.t, r.begin + k}, vars, std::nullopt});
                 return l;
-            })
+            },
+                   "Its NumericEffects.")
             .field("auxiliary_effect", [vars_of](const ConditionalEffectV& v) -> nb::object {
                 const auto& ce = v.d().conditional_effects[v.i];
                 if (!ce.auxiliary)
@@ -323,14 +354,19 @@ void bind_formalism(nb::module_& parent)
     }
     // --- Schema (action)
     {
-        nb::class_<SchemaV> c(m, "Schema");
+        nb::class_<SchemaV> c(m, "Schema",
+                              "An action schema of the normalized task (NormalizedTask.schemas); a PDDL action may "
+                              "become several (one per branch of a disjunctive precondition).");
         identity_protocol(c, "schema");
         ClassDescriptor<SchemaV>{c}
-            .field("name", [](const SchemaV& v) { return std::string(v.d().str(v.d().schemas[v.i].name)); })
-            .field("arity", [](const SchemaV& v) { return v.d().schemas[v.i].arity(); })
+            .field("name", [](const SchemaV& v) { return std::string(v.d().str(v.d().schemas[v.i].name)); },
+                   "The name of the PDDL action it comes from.")
+            .field("arity", [](const SchemaV& v) { return v.d().schemas[v.i].arity(); },
+                   "The number of parameters, those normalization added included.")
             .field("original_arity", [](const SchemaV& v) { return v.d().schemas[v.i].original_arity; },
                    "parameters written in the PDDL; the rest were introduced by normalization")
-            .field("parameters", [](const SchemaV& v) { return parameter_list(v.t, v.d().schemas[v.i].params); })
+            .field("parameters", [](const SchemaV& v) { return parameter_list(v.t, v.d().schemas[v.i].params); },
+                   "The Parameters.")
             .field("precondition", [](const SchemaV& v) {
                 return Arg<PyConjunctiveCondition>(make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::precondition(v.d(), SchemaId{v.i})));
             }, "a ConjunctiveCondition over the parameters")
@@ -349,10 +385,12 @@ void bind_formalism(nb::module_& parent)
     }
     // --- Axiom
     {
-        nb::class_<AxiomV> c(m, "Axiom");
+        nb::class_<AxiomV> c(m, "Axiom",
+                             "An axiom: a rule of a derived predicate (NormalizedTask.axioms).");
         identity_protocol(c, "axiom");
         ClassDescriptor<AxiomV>{c}
-            .field("parameters", [](const AxiomV& v) { return parameter_list(v.t, v.d().axioms[v.i].params); })
+            .field("parameters", [](const AxiomV& v) { return parameter_list(v.t, v.d().axioms[v.i].params); },
+                   "The Parameters of the rule.")
             .field("head", [](const AxiomV& v) {
                 const auto& a = v.d().axioms[v.i];
                 const auto terms = v.d().terms_of(a.head);
@@ -362,7 +400,9 @@ void bind_formalism(nb::module_& parent)
             .field("body", [](const AxiomV& v) {
                 return Arg<PyConjunctiveCondition>(make_conjunctive_condition(bare_owner(v.t), ConjunctiveCondition::axiom_body(v.d(), v.i)));
             }, "a ConjunctiveCondition over the parameters")
-            .field("from_problem", [](const AxiomV& v) { return v.d().axioms[v.i].from_problem; })
+            .field("from_problem", [](const AxiomV& v) { return v.d().axioms[v.i].from_problem; },
+                   "Whether normalization made the rule from the problem (a goal formula compiled into a derived "
+                   "predicate) rather than from the domain.")
             .finish();
         c.def("__repr__", [](const AxiomV& v) {
             const auto& a = v.d().axioms[v.i];
@@ -372,26 +412,39 @@ void bind_formalism(nb::module_& parent)
     }
     // --- GroundFunctionValue
     {
-        nb::class_<GroundValueV> c(m, "GroundFunctionValue");
+        nb::class_<GroundValueV> c(m, "GroundFunctionValue",
+                                   "The initial value of a ground function term.");
         ClassDescriptor<GroundValueV>{c}
-            .field("function", [](const GroundValueV& v) { return FunctionV{{v.t, v.v().func.v}}; })
-            .field("objects", [](const GroundValueV& v) { return object_list(v.t, v.v().objects); })
-            .field("value", [](const GroundValueV& v) { return v.v().value; })
+            .field("function", [](const GroundValueV& v) { return FunctionV{{v.t, v.v().func.v}}; },
+                   "The Function.")
+            .field("objects", [](const GroundValueV& v) { return object_list(v.t, v.v().objects); },
+                   "The Objects of the arguments.")
+            .field("value", [](const GroundValueV& v) { return v.v().value; },
+                   "The value.")
             .finish();
     }
     // --- Task (formalism root)
     {
         nb::class_<FormalismTask> c(m, "NormalizedTask", "The complete normalized task (read-only).");
         ClassDescriptor<FormalismTask>{c}
-            .field("domain_name", [](const FormalismTask& v) { return v.t->domain_name; })
-            .field("problem_name", [](const FormalismTask& v) { return v.t->problem_name; })
-            .field("requirements", [](const FormalismTask& v) { return v.t->requirements; })
-            .field("types", [](const FormalismTask& v) { return views_of<TypeV>(v.t, v.t->types); })
-            .field("objects", [](const FormalismTask& v) { return views_of<ObjectV>(v.t, v.t->objects); })
-            .field("predicates", [](const FormalismTask& v) { return views_of<PredicateV>(v.t, v.t->predicates); })
-            .field("functions", [](const FormalismTask& v) { return views_of<FunctionV>(v.t, v.t->functions); })
-            .field("schemas", [](const FormalismTask& v) { return views_of<SchemaV>(v.t, v.t->schemas); })
-            .field("axioms", [](const FormalismTask& v) { return views_of<AxiomV>(v.t, v.t->axioms); })
+            .field("domain_name", [](const FormalismTask& v) { return v.t->domain_name; },
+                   "The name of the PDDL domain.")
+            .field("problem_name", [](const FormalismTask& v) { return v.t->problem_name; },
+                   "The name of the PDDL problem.")
+            .field("requirements", [](const FormalismTask& v) { return v.t->requirements; },
+                   "The PDDL requirements the domain and problem declare.")
+            .field("types", [](const FormalismTask& v) { return views_of<TypeV>(v.t, v.t->types); },
+                   "Every Type, 'object' and 'number' included.")
+            .field("objects", [](const FormalismTask& v) { return views_of<ObjectV>(v.t, v.t->objects); },
+                   "Every Object: the domain's constants and the problem's objects.")
+            .field("predicates", [](const FormalismTask& v) { return views_of<PredicateV>(v.t, v.t->predicates); },
+                   "Every Predicate (static, fluent and derived).")
+            .field("functions", [](const FormalismTask& v) { return views_of<FunctionV>(v.t, v.t->functions); },
+                   "Every Function.")
+            .field("schemas", [](const FormalismTask& v) { return views_of<SchemaV>(v.t, v.t->schemas); },
+                   "Every action Schema.")
+            .field("axioms", [](const FormalismTask& v) { return views_of<AxiomV>(v.t, v.t->axioms); },
+                   "Every Axiom.")
             .field("static_init", [](const FormalismTask& v) { return ground_atoms(v.t, v.t->static_init); }, "GroundAtoms")
             .field("fluent_init", [](const FormalismTask& v) { return ground_atoms(v.t, v.t->fluent_init); }, "GroundAtoms")
             .field("static_values", [](const FormalismTask& v) {
@@ -399,20 +452,27 @@ void bind_formalism(nb::module_& parent)
                 for (u32 i = 0; i < v.t->static_values.size(); ++i)
                     l.append(GroundValueV{{v.t, i}, false});
                 return l;
-            })
+            },
+                   "The GroundFunctionValues of the static functions.")
             .field("fluent_values", [](const FormalismTask& v) {
                 nb::list l;
                 for (u32 i = 0; i < v.t->fluent_values.size(); ++i)
                     l.append(GroundValueV{{v.t, i}, true});
                 return l;
-            })
-            .field("auxiliary_initial", [](const FormalismTask& v) { return v.t->auxiliary_initial; })
+            },
+                   "The initial GroundFunctionValues of the fluent functions.")
+            .field("auxiliary_initial", [](const FormalismTask& v) { return v.t->auxiliary_initial; },
+                   "The initial value of total-cost when the problem declares one, else None.")
             .field("goal", [](const FormalismTask& v) { return Arg<PyGroundCondition>(make_ground_condition(bare_owner(v.t), GroundCondition::goal(*v.t))); },
                    "a GroundCondition")
             .field("encoding_goal", [](const FormalismTask& v) { return make_encoding_goal(bare_owner(v.t)); },
                    "tuple of GroundLiteral: the goal as written, expanded (Task.encoding_goal)")
-            .field("encoding_goal_complete", [](const FormalismTask& v) { return v.t->encoding_goal_complete; })
-            .field("encoding_goal_unsatisfiable", [](const FormalismTask& v) { return v.t->encoding_goal_unsatisfiable; })
+            .field("encoding_goal_complete", [](const FormalismTask& v) { return v.t->encoding_goal_complete; },
+                   "Whether the goal's ground literals (quantifiers expanded, disjunctions decided by static "
+                   "atoms) are the whole goal; False when a disjunction or a numeric constraint was left out of "
+                   "them.")
+            .field("encoding_goal_unsatisfiable", [](const FormalismTask& v) { return v.t->encoding_goal_unsatisfiable; },
+                   "Whether a goal literal over a static predicate is false, so the goal can never hold.")
             .field("metric", [](const FormalismTask& v) -> nb::object {
                 if (!v.t->metric)
                     return nb::none();

@@ -169,6 +169,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     auto hot_of = [&](u32 k) { return worker_obs[k] ? worker_obs[k].get() : root; };
     auto goal_of = [&](u32 k) -> const GoalSpec& { return worker_goals.empty() ? control.goal : worker_goals[k]; };
 
+    const auto t0 = detail::Clock::now();
     const State start = o.start ? *o.start : task.initial_state();
     const double secs = control.budget.max_seconds;
     const bool timed = secs < 1e15;
@@ -339,7 +340,6 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     const Incumbent::Snapshot snap = incumbent.read();
     result.iw_completed_depth = coord.get_completed_depth();
     result.iw_lower_bound = coord.get_lower_bound();
-    result.total_expansions = coord.get_total_expansions();
     result.fluent_slots = task.atoms().fluent_slots();
     auto append_note = [&]
     {
@@ -349,6 +349,10 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     SearchStatistics total = result.certifier.total;
     for (const RolloutIwStatistics& s : result.rollout_statistics)
         add_stats(total, s.statistics());
+    total.seconds = std::chrono::duration<double>(detail::Clock::now() - t0).count();
+    result.stats = total;
+    result.stats.expanded = coord.get_total_expansions();
+    result.stats.memory_bytes = result.certifier.total.memory_bytes;
     if (snap.length == SearchCoordination::k_no_incumbent)
     {
         const SearchStatus cs = result.certifier_ran ? result.certifier_status : (control.cancel.requested() ? SearchStatus::Cancelled
@@ -391,7 +395,10 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
         const detail::PlanCost pc(task);
         const WorkspaceLease lease = task.workspace();
         result.cost = pc.apply(lease->successors(), start, result.plan);
-        result.cost_exact = pc.exact();
+        State s = start;
+        for (const Action& a : result.plan)
+            s = lease->successors().apply(s.view(), a.label());
+        result.goal_state = std::move(s);
     }
     if (root)
     {
