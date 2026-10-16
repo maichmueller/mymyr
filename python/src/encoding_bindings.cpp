@@ -78,7 +78,7 @@ struct type_caster<mymyr::python::ann::EncodingGoals>
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
 {
-    static constexpr auto Name = const_name("mymyr.rl.Expansion");
+    static constexpr auto Name = const_name("mymyr._core._rl.Expansion");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>

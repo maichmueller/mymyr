@@ -402,9 +402,7 @@ def test_the_default_options_encode_the_goal_relations():
     "options, match",
     [
         ({"max_goal_level": 1}, "max_goal_level is not supported"),
-        ({"target_sources": ("action",)}, "targets other than 'goal' is not supported"),
-        ({"target_sources": ("history",)}, "targets other than 'goal' is not supported"),
-        ({"predicate_virtual_nodes": True}, "predicate_virtual_nodes is not supported"),
+        ({"target_sources": ("history",)}, "subgoal and history targets is not supported"),
         ({"horizon_mode": "full"}, "horizon is not supported"),
     ],
 )
