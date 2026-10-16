@@ -43,8 +43,8 @@ def test_device_brfs_runs_conditional_effects_and_axioms(ctx, name, ce, axioms, 
     task = text_task(name, atoms=atoms)
     r = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
     c = mymyr.search.brfs(task, threads=2, fingerprint=True, stop_at_goal=False)
-    assert (r.states, r.generated, r.goal_states, r.fingerprint) == (c.states, c.generated, c.goal_states, c.fingerprint)
-    s = r.stats
+    assert (r.stats.states, r.stats.generated, r.num_goal_states, r.fingerprint) == (c.stats.states, c.stats.generated, c.num_goal_states, c.fingerprint)
+    s = r.counters
     assert s["host_schemas"] == 0 and s["host_ce_schemas"] == 0
     assert (s["ce_schemas"] > 0) == ce
     assert s["device_axioms"] == (1 if axioms else 0)
@@ -59,4 +59,4 @@ def test_stop_at_goal_over_derived_goals(ctx):
     c = mymyr.search.brfs(task)
     assert g.solved and c.solved
     assert [a.label for a in g.plan] == [a.label for a in c.plan]
-    assert g.states == c.states
+    assert g.stats.states == c.stats.states

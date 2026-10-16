@@ -35,7 +35,7 @@ def test_counts_match_the_fork(case):
     task = fork_task(d, p)
     for threads in (1, 3):
         r = datasets.generate(task, threads=threads, remove_if_unsolvable=False)
-        assert r.status == datasets.Status.OK and r and r.states == n
+        assert r.status == mymyr.search.Status.EXHAUSTED and r and r.stats.states == n
         s = r.space
         assert (s.num_states, s.num_transitions, s.num_goal_states, s.num_unsolvable_states) == (n, e, goal, unsolvable)
         assert s.max_goal_distance == max_d

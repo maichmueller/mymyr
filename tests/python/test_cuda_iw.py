@@ -55,8 +55,8 @@ def assert_equal(batch, i, cpu):
     if g is not None:
         assert g == cpu.goal_state
     dev_passes, cpu_passes = batch.passes(i), cpu.passes
-    assert [(p.arity, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped, p.placeholder) for p in dev_passes] == [
-        (p.arity, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped, p.placeholder) for p in cpu_passes
+    assert [(p.width, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped, p.placeholder) for p in dev_passes] == [
+        (p.width, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped, p.placeholder) for p in cpu_passes
     ]
     assert batch.expanded[i] == sum(p.expanded for p in cpu_passes)
     assert batch.generated[i] == sum(p.generated for p in cpu_passes)
@@ -69,14 +69,14 @@ def test_multi_iw_equals_cpu_iw(ctx, name, arity):
     task = text_task(name)
     starts = walk(task, steps=12, seed=3, walks=2)
     for goals in (None, walk_goals(starts, 2)):
-        batch = mc.multi_iw(task, starts, ctx=ctx, goals=goals, max_arity=arity, max_states=3000)
+        batch = mc.multi_iw(task, starts, ctx=ctx, goals=goals, max_width=arity, max_states=3000)
         assert len(batch) == len(starts)
         for i, s in enumerate(starts):
             kw = {} if goals is None else {"goal": [[task.atom(k) for k in goals[i][0]]]}
-            cpu = mymyr.search.iw(task, max_arity=arity, start=s, max_states=3000, **kw)
+            cpu = mymyr.search.iw(task, max_width=arity, start=s, max_states=3000, **kw)
             assert_equal(batch, i, cpu)
-        assert batch.stats["candidates"] > 0
-        assert batch.stats["loop_handoffs"] == 0  # (a hand-off needs a row over emit_budget: 2^24 tuples by default)
+        assert batch.counters["candidates"] > 0
+        assert batch.counters["loop_handoffs"] == 0  # (a hand-off needs a row over emit_budget: 2^24 tuples by default)
 
 
 def test_multi_iw_launch_configuration_and_budgets(ctx):
@@ -92,7 +92,7 @@ def test_multi_iw_launch_configuration_and_budgets(ctx):
     for budget in ({"max_expanded": 3}, {"max_states": 5}, {"max_depth": 1}, {"max_seconds": 0}):
         batch = mc.multi_iw(task, starts, ctx=ctx, **budget)
         for i, s in enumerate(starts):
-            assert_equal(batch, i, mymyr.search.iw(task, max_arity=1, start=s, **budget))
+            assert_equal(batch, i, mymyr.search.iw(task, max_width=1, start=s, **budget))
     assert set(mc.multi_iw(task, starts, ctx=ctx, max_seconds=0).status) == {mymyr.search.Status.OUT_OF_TIME}
 
 
@@ -117,7 +117,7 @@ def test_batched_iw1_from_torch_rows(ctx):
     assert sum(batch.solved) > 0
     for i, s in enumerate(starts):
         goal = [[task.atom(k) for k in goals[i][0]]]
-        assert_equal(batch, i, mymyr.search.iw(task, max_arity=1, start=s, goal=goal))
+        assert_equal(batch, i, mymyr.search.iw(task, max_width=1, start=s, goal=goal))
 
 
 def test_rollouts_are_deterministic(ctx):
@@ -160,11 +160,11 @@ def test_ground_condition_goals(ctx):
     starts = walk(task, steps=10, seed=5, walks=2)
     slots = walk_goals(starts, 2)
     conditions = [task.ground_condition([task.atom(k) for k in pos]) for pos, _ in slots]
-    a = mc.multi_iw(task, starts, ctx=ctx, goals=slots, max_arity=2, max_states=3000)
-    b = mc.multi_iw(task, starts, ctx=ctx, goals=conditions, max_arity=2, max_states=3000)
+    a = mc.multi_iw(task, starts, ctx=ctx, goals=slots, max_width=2, max_states=3000)
+    b = mc.multi_iw(task, starts, ctx=ctx, goals=conditions, max_width=2, max_states=3000)
     assert a.status == b.status and a.plan_length == b.plan_length
     for i, s in enumerate(starts):
-        assert_equal(b, i, mymyr.search.iw(task, max_arity=2, start=s, max_states=3000, goal=conditions[i]))
+        assert_equal(b, i, mymyr.search.iw(task, max_width=2, start=s, max_states=3000, goal=conditions[i]))
     # a negative literal
     held = next(iter(task.initial_state.atoms()))
     neg = task.ground_condition([task.literal(held, positive=False)])
@@ -172,11 +172,11 @@ def test_ground_condition_goals(ctx):
     assert sum(r.solved) > 0
     phil = text_task("philosophers__p03-phil4")
     derived = phil.ground_condition([phil.goal_condition.literals[0]])
-    b = mc.multi_iw(phil, [phil.initial_state], ctx=ctx, goals=[derived], max_arity=2, max_states=3000)
-    assert_equal(b, 0, mymyr.search.iw(phil, goal=derived, max_arity=2, max_states=3000))
+    b = mc.multi_iw(phil, [phil.initial_state], ctx=ctx, goals=[derived], max_width=2, max_states=3000)
+    assert_equal(b, 0, mymyr.search.iw(phil, goal=derived, max_width=2, max_states=3000))
     counters = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    b = mc.multi_iw(counters, [counters.initial_state], ctx=ctx, goals=[counters.goal_condition], max_arity=2, max_states=3000)
-    assert_equal(b, 0, mymyr.search.iw(counters, goal=counters.goal_condition, max_arity=2, max_states=3000))
+    b = mc.multi_iw(counters, [counters.initial_state], ctx=ctx, goals=[counters.goal_condition], max_width=2, max_states=3000)
+    assert_equal(b, 0, mymyr.search.iw(counters, goal=counters.goal_condition, max_width=2, max_states=3000))
 
 
 def test_errors(ctx):
@@ -191,7 +191,7 @@ def test_errors(ctx):
     with pytest.raises(ValueError, match="fluent slot"):
         mc.multi_iw(task, [s], ctx=ctx, goals=[([10**6], [])])
     with pytest.raises(ValueError):
-        mc.multi_iw(task, [s], ctx=ctx, max_arity=3)
+        mc.multi_iw(task, [s], ctx=ctx, max_width=3)
     with pytest.raises(ValueError, match="max_next_layer_states"):
         mc.rollouts(task, [1], ctx=ctx, max_next_layer_states=0)
     with pytest.raises(TypeError):

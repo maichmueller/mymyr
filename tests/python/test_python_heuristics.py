@@ -53,7 +53,7 @@ def test_object_with_evaluate(task):
     for lazy in (False, True):
         r = search.astar(task, heuristic=obj, lazy=lazy, max_expanded=200_000)
         assert r.status == Status.SOLVED
-    assert search.beam(task, heuristic=obj, width=100).status == Status.SOLVED
+    assert search.beam(task, heuristic=obj, beam_width=100).status == Status.SOLVED
 
 
 class Batched:
@@ -83,7 +83,7 @@ def test_evaluate_batch(task, single):
     g = search.gbfs(task, heuristic=obj)
     assert g.status == Status.SOLVED and obj.sizes
     obj = Batched(task, single)
-    b = search.beam(task, heuristic=obj, width=50)
+    b = search.beam(task, heuristic=obj, beam_width=50)
     assert b.status == Status.SOLVED and len(obj.sizes) <= b.layers
     # lazy searches evaluate one state at a time (through evaluate_batch when there is no evaluate)
     obj = Batched(task, single)

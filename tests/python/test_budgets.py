@@ -49,7 +49,7 @@ BRFS = {
 def test_brfs_stores_at_most_max_states(fanout, name, max_states):
     r = search.brfs(fanout, max_states=max_states, **BRFS[name])
     assert r.status == Status.OUT_OF_STATES
-    assert r.states == max_states
+    assert r.stats.states == max_states
 
 
 BEST_FIRST = {
@@ -71,9 +71,9 @@ def test_best_first_stores_at_most_max_states(fanout, name, store, max_states):
 
 
 IW = {
-    "iw": lambda t, **kw: search.iw(t, max_arity=1, **kw),
-    "iw2": lambda t, **kw: search.iw(t, max_arity=2, optimize_iw1=False, **kw),
-    "siw": lambda t, **kw: search.siw(t, max_arity=1, **kw),
+    "iw": lambda t, **kw: search.iw(t, max_width=1, **kw),
+    "iw2": lambda t, **kw: search.iw(t, max_width=2, optimize_iw1=False, **kw),
+    "siw": lambda t, **kw: search.siw(t, max_width=1, **kw),
     "astar_iw": lambda t, **kw: search.astar_iw(t, heuristic="blind", **kw),
 }
 
@@ -89,9 +89,9 @@ def test_iw_family_stops_at_max_states(fanout, name, max_states):
 def test_the_state_that_fills_the_store_stops_the_search(fanout, store):
     # FANOUT + 1 states: a budget of exactly the space stops at its last state, one more exhausts it
     r = search.brfs(fanout, store=store, max_states=FANOUT + 1, stop_at_goal=False)
-    assert r.status == Status.OUT_OF_STATES and r.states == FANOUT + 1
+    assert r.status == Status.OUT_OF_STATES and r.stats.states == FANOUT + 1
     r = search.brfs(fanout, store=store, max_states=FANOUT + 2, stop_at_goal=False)
-    assert r.status == Status.SOLVED and r.exhausted and r.states == FANOUT + 1
+    assert r.status == Status.SOLVED and r.exhausted and r.stats.states == FANOUT + 1
 
 
 # One expansion with 2^24 + 256 transitions (witness pruning off), almost all to one successor state: without checks
@@ -109,7 +109,7 @@ def expansion_seconds(wide):
     """The time of the whole search: one expansion of the initial state, then dead ends."""
     t0 = time.perf_counter()
     r = search.brfs(wide, witness_pruning=False, stop_at_goal=False)
-    assert r.exhausted and r.generated == 2**24 + 256
+    assert r.exhausted and r.stats.generated == 2**24 + 256
     return time.perf_counter() - t0
 
 
@@ -119,7 +119,7 @@ WIDE = {
     "brfs_concurrent": lambda t, **kw: search.brfs(t, store="concurrent", threads=2, witness_pruning=False, **kw),
     "astar": lambda t, **kw: search.astar(t, heuristic="blind", **kw),
     "gbfs": lambda t, **kw: search.gbfs(t, heuristic="blind", **kw),
-    "iw": lambda t, **kw: search.iw(t, max_arity=1, **kw),
+    "iw": lambda t, **kw: search.iw(t, max_width=1, **kw),
 }
 
 

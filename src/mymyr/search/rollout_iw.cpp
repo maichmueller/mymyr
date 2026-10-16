@@ -172,7 +172,6 @@ public:
             r.goal_state = State(g.w, g.nw);
             const PlanCost pc(m_task);
             r.cost = pc.apply(m_succ, root, r.plan);
-            r.cost_exact = pc.exact();
         }
         else
             switch (m_interrupt)

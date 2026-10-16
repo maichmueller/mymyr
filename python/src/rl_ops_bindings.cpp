@@ -263,12 +263,12 @@ void bind_rl_ops(nb::module_& parent)
     nb::module_ m = parent.def_submodule("_rl_ops", "Novelty rewards, prefix masks and hindsight relabels (mymyr.rl)");
     m.def("novelty_update", &novelty_update, "seen"_a, "states"_a, "reward"_a = nb::none(), nb::kw_only(),
           "stream"_a = nb::none(),
-          "Width-1 novelty update in place (rl/novelty.hpp): reward[i] = popcount(states[i] & ~seen[i]) over the first S "
+          "Width-1 novelty update in place: reward[i] = popcount(states[i] & ~seen[i]) over the first S "
           "words, then seen[i] |= states[i]. seen [N, S] and states [N, >= S] are 64-bit words (or 32-bit halves); "
           "reward [N] int32 (None: not written). Host or CUDA arrays.");
     m.def("prefix_masks", &prefix_masks, "parent"_a, "schema"_a, "binding"_a, "query"_a, "prefix"_a.none(), "depth"_a, "mask"_a,
           nb::kw_only(), "stream"_a = nb::none(),
-          "Factored action masks (rl/prefix.hpp) into mask [N, num_objects] (bool), mask[i, o] set iff a successor "
+          "Factored action masks into mask [N, num_objects] (bool), mask[i, o] set iff a successor "
           "row j (parent [M], schema [M], binding [M, L] int32; parent -1 = padding) of state i is labelled "
           "(query[i], prefix[i, :depth], o, ...). query [N] int32, prefix [N, >= depth] int32 (None for depth 0).");
     m.def("schema_masks", &schema_masks, "parent"_a, "schema"_a, "mask"_a, nb::kw_only(), "stream"_a = nb::none(),
@@ -279,7 +279,7 @@ void bind_rl_ops(nb::module_& parent)
           "strategy"_a = "future", "subset"_a = 0, "seed"_a = 0,
           "first_env"_a = 0, "env_ids"_a = nb::none(), "goal_atoms"_a = nb::none(), "step_reward"_a = 0.0f,
           "goal_reward"_a = 1.0f, "stream"_a = nb::none(),
-          "Hindsight relabels (rl/her.hpp) of states [T, N, RW] (64-bit words or 32-bit halves; the reached states) "
+          "Hindsight relabels of states [T, N, RW] (64-bit words or 32-bit halves; the reached states) "
           "and done [T, N] into goal [T, N, k, W] (k relabels, W <= RW goal words), source [T, N, k] int32, achieved "
           "[T, N, k] bool, reward [T, N, k] float32 and valid [T, N, k] bool (no earlier state of the episode holds the "
           "goal; prev_states [T, N, RW], the states the steps started from, adds each episode's first state). subset 0: every atom of the source state (restricted to "

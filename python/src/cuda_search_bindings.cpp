@@ -109,12 +109,12 @@ search::WidthZero width_zero_of(nb::handle v)
 }
 
 /// The options shared by the three entry points.
-cuda::MultiIwOptions options_of(u32 max_arity, nb::handle width_zero, bool optimize_iw1, bool witness_pruning,
+cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optimize_iw1, bool witness_pruning,
                                 bool canonical_order, bool exact, nb::handle max_states, nb::handle max_expanded,
                                 nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states)
 {
     cuda::MultiIwOptions o;
-    o.max_arity = max_arity;
+    o.max_arity = max_width;
     o.width_zero = width_zero_of(width_zero);
     o.optimize_iw1 = optimize_iw1;
     o.witness_pruning = witness_pruning;
@@ -354,7 +354,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                      "per search")
         .def_prop_ro("plan_length", [](const PyIwBatch& x) { return x.b.plan_length; }, "per search; -1 unless solved")
         .def_prop_ro("effective_width", [](const PyIwBatch& x) { return x.b.effective_width; },
-                     "per search: the arity of the pass that solved it (0 unless solved)")
+                     "per search: the width of the pass that solved it (0 unless solved)")
         .def_prop_ro("expanded",
                      [](const PyIwBatch& x) {
                          std::vector<u64> out(x.b.n);
@@ -441,7 +441,23 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         .def_prop_ro("task_ids",
                      [](const PyIwBatch& x) { return x.ids.empty() ? std::vector<u32>(x.b.n, 0) : x.ids; },
                      "per search: its instance of the table (0 for a task)")
-        .def_prop_ro("stats",
+        .def(
+            "stats",
+            [](const PyIwBatch& x, i64 i) {
+                search::SearchStatistics s;
+                for (const search::IwPassStatistics& p : x.b.passes(checked_index(x, i)))
+                {
+                    const search::SearchStatistics q = p.statistics();
+                    s.expanded += q.expanded;
+                    s.generated += q.generated;
+                    s.states += q.states;
+                    s.pruned += q.pruned;
+                    s.seconds += q.seconds;
+                }
+                return s;
+            },
+            "i"_a, "The counts of search i over its passes (mymyr.search.Statistics, as mymyr.search.IwResult.stats).")
+        .def_prop_ro("counters",
                      [](const PyIwBatch& x) {
                          const cuda::MultiIwStats& s = x.b.stats;
                          nb::typed<nb::dict, std::string, std::variant<double, u64>> d{nb::dict()};
@@ -465,7 +481,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                          d["device_bytes"] = s.device_bytes;
                          return d;
                      },
-                     "device statistics of the call")
+                     "A dict of the call's device counters and times.")
         .def("__repr__", [](const PyIwBatch& x) {
             u64 solved = 0;
             for (u32 i = 0; i < x.b.n; ++i)
@@ -475,19 +491,19 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         });
 
 #define MYMYR_MULTI_IW_COMMON_ARGS                                                                                            \
-    "max_arity"_a = 1, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,        \
+    "max_width"_a = 1, "width_zero"_a = "expand_depth_one", "optimize_iw1"_a = true, "witness_pruning"_a = false,        \
         "canonical_order"_a = true, "exact"_a = true, "max_states"_a = nb::none(), "max_expanded"_a = nb::none(),       \
         "max_depth"_a = nb::none(), "max_seconds"_a = nb::none(), "max_searches"_a = nb::none(),                        \
         "chunk_states"_a = nb::none()
 
     m.def(
         "multi_iw",
-        [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_arity_in, StrArg width_zero,
+        [](TableArg task, StartsArg starts, ContextArg ctx, GoalsArg goals, IntArg max_width_in, StrArg width_zero,
            bool optimize_iw1, bool witness_pruning, bool canonical_order, bool exact, IntArg max_states,
            IntArg max_expanded, IntArg max_depth, FloatArg max_seconds, IntArg max_searches, IntArg chunk_states,
            TaskIdsArg task_ids) {
-            const u32 max_arity = int_arg<u32>(max_arity_in, "max_arity");
-            const cuda::MultiIwOptions opts = options_of(max_arity, width_zero, optimize_iw1, witness_pruning, canonical_order,
+            const u32 max_width = int_arg<u32>(max_width_in, "max_width");
+            const cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                          exact, max_states, max_expanded, max_depth, max_seconds,
                                                          max_searches, chunk_states);
             PyIwBatch x;
@@ -529,9 +545,10 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "search.iw from every start state, all searches at once on the device: search i equals "
         "mymyr.search.iw(task, start=starts[i], ...) (status, plan, goal state, per-pass counts) for every group and "
         "chunk size (exact batch novelty; exact=False is relaxed novelty: valid IW, but the kept states depend on "
-        "timing). goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
-        "numeric constraints, or (positive slots, negative slots). Numeric tasks preserve CPU I32/F64 encodings. "
-        "Budgets apply per search and pass as in search.iw; max_seconds spans the call. "
+        "timing). Numeric tasks keep their CPU I32/F64 encodings.\n\n"
+        "goals: None (the task's goal) or one per start, a GroundCondition with fluent/derived literals and "
+        "numeric constraints, or (positive slots, negative slots). Budgets apply per search and pass as in search.iw; "
+        "max_seconds spans the call.\n\n"
         "Over a mymyr.rl.TaskTable: search i runs on instance task_ids[i] (starts: States of their "
         "instances, or rows of the table's width; goals in the instance's slots) and equals the search of that "
         "instance's task; the searches of an instance run together, the instances one after the other.");
@@ -539,14 +556,14 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
     m.def(
         "rollouts",
         [](TaskArg task, SeedsArg seeds, ContextArg ctx, StateArg start, Arg<GoalArg> goal,
-           IntArg max_next_layer_states, IntArg max_arity_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
+           IntArg max_next_layer_states, IntArg max_width_in, StrArg width_zero, bool optimize_iw1, bool witness_pruning,
            bool canonical_order, bool exact, IntArg max_states, IntArg max_expanded, IntArg max_depth,
            FloatArg max_seconds, IntArg max_searches, IntArg chunk_states) {
-            const u32 max_arity = int_arg<u32>(max_arity_in, "max_arity");
+            const u32 max_width = int_arg<u32>(max_width_in, "max_width");
             const Owner o = owner_of(task);
             const TaskPtr& t = o.core->task;
             const cuda::ContextPtr c = g_lookup(*o.core, ctx, 0);
-            cuda::MultiIwOptions opts = options_of(max_arity, width_zero, optimize_iw1, witness_pruning, canonical_order,
+            cuda::MultiIwOptions opts = options_of(max_width, width_zero, optimize_iw1, witness_pruning, canonical_order,
                                                    exact, max_states, max_expanded, max_depth, max_seconds, max_searches,
                                                    chunk_states);
             if (!max_next_layer_states.is_none())
@@ -579,7 +596,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "task"_a, "seeds"_a, nb::kw_only(), "ctx"_a = nb::none(), "start"_a = nb::none(), "goal"_a = nb::none(),
         "max_next_layer_states"_a = nb::none(), MYMYR_MULTI_IW_COMMON_ARGS,
         "Randomized IW rollouts on the device, one per seed: rollout k equals the CPU rollout of the same seed "
-        "(search/parallel_rollouts.hpp: every next layer shuffled by the rollout's SplitMix64 stream, "
+        "(every next layer shuffled by the rollout's SplitMix64 stream, "
         "max_next_layer_states truncates it): status, plan, per-pass counts and the reached fluent atoms "
         "(IwBatch.reached_atoms). goal: None (the task's goal), a GroundCondition with fluent/derived literals and "
         "numeric constraints, or (positive slots, negative slots). Not reported: "
@@ -702,7 +719,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
         "Exact batched IW(1): optimized IW(1) from each start state, all at once on the "
         "device. starts: host states, or a CUDA word array [N, W] uint64 / [N, 2W] uint32 (torch, JAX, DLPack) read in "
         "place after the work on `stream` (None: the context's stream). Per search: status, plan_length, goal_state "
-        "(IwBatch); equal to mymyr.search.iw(task, max_arity=1, start=...). Over a mymyr.rl.TaskTable: "
+        "(IwBatch); equal to mymyr.search.iw(task, max_width=1, start=...). Over a mymyr.rl.TaskTable: "
         "search i runs on instance task_ids[i] (host ints, or an int32 CUDA array read after the work on `stream`); "
         "device starts are rows of at most the table's width.");
 #undef MYMYR_MULTI_IW_COMMON_ARGS

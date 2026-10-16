@@ -17,9 +17,10 @@ Use a 3.15t interpreter instead by changing the Python version passed to `uv ven
 
 ## Build from source
 
-Building the PDDL-enabled package needs a C++26 compiler (GCC 16 or newer), CMake 3.25 or newer, Ninja, and a free-
-threaded CPython 3.14t or 3.15t interpreter. The dependency superbuild installs loki, abseil, fmt and Boost headers;
-the main build links them into the front-end archive.
+Building the PDDL-enabled package needs a C++26 compiler (GCC 16 or newer), CMake 3.25 or newer, Ninja, and CPython
+3.14 or newer. A free-threaded interpreter (3.14t, 3.15t) runs the Python callbacks of parallel searches in parallel;
+the GIL build works too, with those callbacks taking turns on the GIL. The dependency superbuild installs loki, abseil,
+fmt and Boost headers; the main build links them into the front-end archive.
 
 ```bash
 cmake -S dependencies -B dependencies/build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -51,7 +52,10 @@ print(search.format_plan(task, result.plan))
 ```
 
 `Task.from_pddl` is available in builds with the PDDL front end. `Task.from_text` reads mymyr's normalized task format
-when a parser is not needed. The next pages show task inspection, search options, heuristics and batched interfaces.
+when a parser is not needed. The next pages show task inspection, search options, heuristics and batched interfaces;
+every module names its options and result fields the same way ([API conventions](conventions.md)).
+`search.validate_plan(task, result.plan)` checks a plan and computes its cost, and `task.to_pddl()` writes the
+normalized task back as PDDL.
 
 The same search runs from the command line: `mymyr plan tests/data/pddl/counters/domain.pddl
 tests/data/pddl/counters/p01.pddl` prints the plan (see [Command line](cli.md)).

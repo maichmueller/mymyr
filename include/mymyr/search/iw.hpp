@@ -126,7 +126,6 @@ struct IwResult
     SearchStatus status = SearchStatus::Exhausted;
     std::vector<Action> plan;
     double cost = 0;                 // the plan cost (see above); 0 unless solved
-    bool cost_exact = true;          // always true (every total-cost effect is evaluated)
     std::optional<State> goal_state;
     std::vector<IwPassStatistics> passes;  // one per arity run, index = arity
     SearchStatistics total;                // sums over the passes

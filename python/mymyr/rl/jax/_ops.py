@@ -1,7 +1,7 @@
 """Prefix masks, novelty rewards and HER relabels as jitted jnp functions.
 
 Each equals its native counterpart in :mod:`mymyr.rl` (``rl::prefix_masks``, ``rl::novelty_update``,
-``rl::her_relabel``; include/mymyr/rl/ops.hpp) bit for bit; they are pure functions of JAX arrays (state words as
+``rl::her_relabel``) bit for bit; they are pure functions of JAX arrays (state words as
 uint32 halves), so they run inside ``jax.jit``, ``jax.vmap`` and ``lax.scan`` on any JAX device.
 """
 
@@ -139,18 +139,23 @@ def her_relabel(
     goal_reward: float = 1.0,
     words: Optional[int] = None,
 ) -> HerBatch:
-    """Hindsight relabels with atom-set goals (Andrychowicz et al. 2017), equal to
-    ``mymyr.rl.her_relabel``: ``states`` uint32 [T, N, W2] are the states the steps reached (``info["final_state"]``),
-    ``done`` bool [T, N] ends an episode after step t (terminated or truncated). For every transition (t, i) and
-    j < k a source step t' of the same episode is drawn: ``"future"`` uniform in [t, end], ``"episode"`` uniform in
-    [start, end], ``"final"`` the episode's last step in the window; the goal is the atoms of states[t', i] (restricted
-    to ``goal_atoms`` [W2], or [N, W2]: env i's own, if given), or ``subset`` of them drawn without replacement. Draws are Philox blocks of
-    (seed = key_seed(key); draw, env id, purpose rng.PURPOSE_HER) with draw = (t k + j)(1 + subset) + d, d = 0 for the
-    step and d = 1.. for the atoms (env id: env_ids[i], else first_env + i), so relabels do not depend on the batch.
-    Episodes that continue past the window draw from the window's steps only. ``valid`` marks the relabels with no
-    earlier state of the episode that holds the goal (the reached states of its earlier steps in the window and, with
-    ``prev_states`` uint32 [T, N, W2], the states the steps started from, its first state). ``words``: the goals cover
-    the first W words of a row (2W uint32 halves; default: the whole row)."""
+    """Hindsight relabels with atom-set goals (Andrychowicz et al. 2017), equal to ``mymyr.rl.her_relabel``.
+
+    ``states`` uint32 [T, N, W2] are the states the steps reached (``info["final_state"]``), ``done`` bool [T, N] ends
+    an episode after step t (terminated or truncated). For every transition (t, i) and j < k a source step t' of the
+    same episode is drawn: ``"future"`` uniform in [t, end], ``"episode"`` uniform in [start, end], ``"final"`` the
+    episode's last step in the window. The goal is the atoms of states[t', i] (restricted to ``goal_atoms`` [W2], or
+    [N, W2]: env i's own, if given), or ``subset`` of them drawn without replacement. Episodes that continue past the
+    window draw from the window's steps only.
+
+    Draws are Philox blocks of (seed = key_seed(key); draw, env id, purpose rng.PURPOSE_HER) with draw =
+    (t k + j)(1 + subset) + d, d = 0 for the step and d = 1.. for the atoms (env id: env_ids[i], else first_env + i),
+    so relabels do not depend on the batch.
+
+    ``valid`` marks the relabels with no earlier state of the episode that holds the goal (the reached states of its
+    earlier steps in the window and, with ``prev_states`` uint32 [T, N, W2], the states the steps started from, its
+    first state). ``words``: the goals cover the first W words of a row (2W uint32 halves; default: the whole
+    row)."""
     if strategy not in _STRATEGIES:
         raise ValueError("mymyr: strategy must be 'future', 'final' or 'episode'")
     states = jnp.asarray(states, jnp.uint32)

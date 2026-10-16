@@ -1,7 +1,7 @@
 """Novelty rewards, prefix masks and hindsight relabels in the inputs' framework.
 
-NumPy arrays and torch tensors (CPU or CUDA) run the native helpers (mymyr._core._rl_ops: rl/novelty.hpp,
-rl/prefix.hpp, rl/her.hpp; CUDA tensors on torch's current stream, without a host synchronization); JAX arrays run the
+NumPy arrays and torch tensors (CPU or CUDA) run the native helpers (mymyr._core._rl_ops;
+CUDA tensors on torch's current stream, without a host synchronization); JAX arrays run the
 jnp versions of :mod:`mymyr.rl.jax` (pure functions, jit-able). All of them give the same values.
 """
 
@@ -177,13 +177,16 @@ def her_relabel(
     For every transition (t, i) and j < k a source step t' of the same episode is drawn (``"future"``: uniform in
     [t, end]; ``"episode"``: uniform in [start, end]; ``"final"``: the episode's last step in the window), and the goal is
     the atoms of states[t', i] (restricted to ``goal_atoms`` [W]), or ``subset`` of them drawn without replacement. The
-    draws are the counter-based RNG's (rl/her.hpp: seed, env id = env_ids[i] or first_env + i, purpose k_her), so a
+    draws are the counter-based RNG's (seed, env id = env_ids[i] or first_env + i, purpose k_her), so a
     relabel does not depend on the batch or the device. ``words`` limits the goals to the first W words of a row (the
-    atom words of a numeric task's rows). ``valid`` marks the relabels whose transition is part of the episode under
+    atom words of a numeric task's rows).
+
+    ``valid`` marks the relabels whose transition is part of the episode under
     the relabelled goal: no reached state of the episode's earlier steps in the window holds it, nor, with
     ``prev_states`` [T, N, RW] (the states the steps started from: the observations), the episode's first state (its
-    reset state, or the state before the window), which is not tested without them. NumPy / torch (CPU or CUDA) run
-    the native helper; JAX arrays the jnp version (``seed`` may then be a JAX key)."""
+    reset state, or the state before the window), which is not tested without them.
+
+    NumPy / torch (CPU or CUDA) run the native helper; JAX arrays the jnp version (``seed`` may then be a JAX key)."""
     fw = _framework(states)
     kk = int(k)
     m = 0 if subset is None else int(subset)

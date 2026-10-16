@@ -2,7 +2,7 @@
 
 `Task.from_pddl(domain, problem)` parses PDDL when mymyr is built with the loki front end (enabled by default).
 `Task.from_text(path)` reads a normalized task file. `mymyr.formalism.read_task_text(path)` exposes the normalized
-formalism without compiling a search task.
+formalism without compiling a search task. Option names and defaults follow the [API conventions](conventions.md).
 
 A `Task` owns the compiled planning data. Its `initial_state`, `State` values and `Action` labels are immutable and
 hashable. A state contains true fluent atoms and, for numeric tasks, numeric values. `task.state(atoms, values=...)`
@@ -169,10 +169,11 @@ and `task.options` returns them:
 | --- | --- | --- |
 | `atoms` | `'auto'` (default), `'reachable'`, `'dense'`, `'lazy'` | how atoms get their slots (below) |
 | `reachability_budget` | steps, default `2**25`; `0` is unbounded | work bound of the analysis behind `'auto'` and `'reachable'` |
-| `numeric_storage` | `'auto'` (default), `'i32'`, `'f64'` | the type of a numeric slot |
+| `numeric_storage` | `'auto'` (default), `'i32'`, `'f64'` | the type of a numeric slot; `'auto'` is `'i32'` when every value of the task stays integral and no quantum is set, else `'f64'` |
 | `numeric_quantum` | `0` (default) or `q > 0` | stored values snap to multiples of `q` |
 | `numeric_tolerant` | `False` (default) | tolerant numeric semantics: values below 1e6 snap to a 1e-9 grid, comparisons use a 1e-9 tolerance |
-| `matching`, `fc_free_params` | `'auto'`, `'fixed'`, `'fc'`; `4` | how bindings are matched (no effect on the encoding) |
+| `matching` | `'auto'` (default), `'fixed'`, `'fc'` | how actions and axioms find their bindings: `'fixed'` binds parameters in a fixed order and checks each partial binding against the state, `'fc'` binds the most constrained parameter first and prunes the others' candidates as it goes (forward checking), `'auto'` uses forward checking for conditions with more than `fc_free_params` free parameters. It changes speed, not the applicable actions |
+| `fc_free_params` | int, default `4` | the threshold of `matching='auto'` |
 
 **Atom slots.** The *typed-dense* space of a task has one atom per predicate and object tuple whose objects can occur
 at those positions: objects of the types that the effects and axioms adding the predicate allow there, plus constants

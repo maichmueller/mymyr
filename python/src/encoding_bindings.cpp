@@ -321,7 +321,8 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
     cls.def_prop_ro(
            "options", [schema_of](const Py& self) { return options_dict(schema_of(self).options()); },
            "The options in normal form, as the keyword arguments that rebuild this schema.")
-        .def_prop_ro("num_relations", [schema_of](const Py& self) { return schema_of(self).num_relations(); })
+        .def_prop_ro("num_relations", [schema_of](const Py& self) { return schema_of(self).num_relations(); },
+                     "The number of relations in the catalog.")
         .def_prop_ro(
             "implicit_entities", [schema_of](const Py& self) { return schema_of(self).implicit_entity_arrays(); },
             "Whether the entity arrays are implicit under these options: entity_role and entity_ref are then omitted "
@@ -420,7 +421,8 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
                      {
                          const auto names = schema_of(self).slot_role_names();
                          return std::vector<std::string>(names.begin(), names.end());
-                     })
+                     },
+                     "The names of the slot roles (relation_slot_roles holds indices into them).")
         .def_prop_ro(
             "entity_role_names",
             [schema_of](const Py& self)
@@ -671,8 +673,10 @@ void bind_encoding(nb::module_& parent)
         module, "FlatBatch",
         "The graphs of a batch of states: one graph per row, with the tuples of every relation of the schema. The arrays "
         "are read-only and keep the batch alive; every export shares their memory.");
-    batch.def_prop_ro("num_graphs", [](const PyFlatBatch& self) { return self.arrays->scalar("num_graphs"); })
-        .def_prop_ro("num_relations", [](const PyFlatBatch& self) { return self.arrays->scalar("num_relations"); })
+    batch.def_prop_ro("num_graphs", [](const PyFlatBatch& self) { return self.arrays->scalar("num_graphs"); },
+                      "The number of graphs (states) in the batch.")
+        .def_prop_ro("num_relations", [](const PyFlatBatch& self) { return self.arrays->scalar("num_relations"); },
+                     "The number of relations of the schema the batch was encoded with.")
         .def_prop_ro(
             "schema", [](const PyFlatBatch& self) { return PyEncodingSchema{self.schema}; },
             "The EncodingSchema the batch was encoded for.")
@@ -729,7 +733,8 @@ void bind_encoding(nb::module_& parent)
         encoder_doc.c_str());
     define_schema_properties(encoder_class,
                              [](const PyFlatEncoder& self) -> const encoding::EncodingSchema& { return self.encoder->schema(); });
-    encoder_class.def_prop_ro("table", [](const PyFlatEncoder& self) { return TableArg(self.reference.obj); })
+    encoder_class.def_prop_ro("table", [](const PyFlatEncoder& self) { return TableArg(self.reference.obj); },
+                              "The TaskTable (or TaskSuite) the encoder encodes states of.")
         .def_prop_ro(
             "schema", [](const PyFlatEncoder& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
             "The EncodingSchema of the encoder.")

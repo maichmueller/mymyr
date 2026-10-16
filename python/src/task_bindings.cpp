@@ -14,6 +14,7 @@
 #include "py_task.hpp"
 
 #include "mymyr/core/bitset.hpp"
+#include "mymyr/formalism/pddl_writer.hpp"
 #include "mymyr/formalism/text_format.hpp"
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/successor/bindings.hpp"
@@ -148,6 +149,35 @@ Arg<PyAction> make_label(const Owner& o, u32 schema, const i32* binding, u32 ari
 
 bool is_state(nb::handle h) { return nb::isinstance<PyState>(h); }
 const PyState& state_of(nb::handle h) { return *nb::inst_ptr<PyState>(h); }
+
+/// A copy of the task's data whose initial fluent atoms and numeric values are those of `s` (to write `s` as a
+/// problem's initial state).
+formalism::TaskData with_initial_state(const PyTaskCore& core, StateView s)
+{
+    const Task& T = *core.task;
+    formalism::TaskData d = *core.data;
+    d.fluent_init.clear();
+    d.fluent_values.clear();
+    const AtomIndex& A = T.atoms();
+    for (const u32 b : A.slots_in_canonical_order(AtomKind::Fluent, s.w, s.nw))
+    {
+        const SlotId slot{b};
+        const auto args = A.arguments(slot);
+        const formalism::Range r{static_cast<u32>(d.object_ids.size()), static_cast<u32>(args.size())};
+        for (const u32 x : args)
+            d.object_ids.push_back(ObjectId{x});
+        d.fluent_init.push_back({A.predicate(slot), r});
+    }
+    const plan::Numeric& N = T.numeric();
+    for (u32 i = 0; i < N.slots; ++i)
+    {
+        const u32 b = N.slot_args_begin[i], e = N.slot_args_begin[i + 1];
+        const formalism::Range r{static_cast<u32>(d.object_ids.size()), e - b};
+        d.object_ids.insert(d.object_ids.end(), N.slot_args.begin() + b, N.slot_args.begin() + e);
+        d.fluent_values.push_back({FunctionId{N.slot_function[i]}, r, T.numeric_value(s, i)});
+    }
+    return d;
+}
 
 /// The states of a batch for `task`. Numeric tasks: rows are [bits | slots]; arrays are [N, W + NN] (the last
 /// task.numeric_words() columns are the numeric words), States are packed with their values.
@@ -1706,7 +1736,8 @@ void bind_task_api(nb::class_<C>& cls)
                 StateArg s = state_arg(*self.p->core, state);
                 return self.p->core->task->is_goal(s.view);
             },
-            "state"_a)
+            "state"_a,
+            "Whether the goal holds in `state` (derived atoms evaluated through the axioms).")
         .def(
             "is_applicable",
             [](Self self, StateLike state, ActionLike action) {
@@ -1715,7 +1746,8 @@ void bind_task_api(nb::class_<C>& cls)
                 const ActionLabel label{SchemaId{schema}, {reinterpret_cast<const ObjectId*>(binding.data()), binding.size()}};
                 return is_applicable(*self.p->core->task, s.view, label);
             },
-            "state"_a, "action"_a)
+            "state"_a, "action"_a,
+            "Whether `action` (an Action, '(schema o1 ... on)' or (schema, objects)) is applicable in `state`.")
         .def(
             "action",
             [owner](Self self, SchemaLike schema, ObjectsArg objects) {
@@ -2165,11 +2197,59 @@ void bind_task(nb::module_& m)
                      "Content hash of the normalized task (equal across processes).")
         .def_prop_ro("formalism", [](const PyTask& t) { return FormalismTask{t.core->data, t.core->source}; },
                      "The normalized task (mymyr.formalism.NormalizedTask).")
-        .def_prop_ro("domain_name", [](const PyTask& t) { return t.core->data->domain_name; })
-        .def_prop_ro("problem_name", [](const PyTask& t) { return t.core->data->problem_name; })
-        .def_prop_ro("num_objects", [](const PyTask& t) { return t.core->task->num_objects(); })
-        .def_prop_ro("num_schemas", [](const PyTask& t) { return t.core->task->num_schemas(); })
-        .def_prop_ro("num_predicates", [](const PyTask& t) { return t.core->data->predicates.size(); })
+        .def(
+            "to_text",
+            [](const PyTask& t) {
+                nb::gil_scoped_release release;
+                return formalism::write_task_text(*t.core->data, true);
+            },
+            "The task in mymyr's normalized text format, which Task.from_text reads back into an equal task.\n\n"
+            "The format names predicates, functions and actions, not objects (they become o0, o1, ...).")
+        .def(
+            "to_pddl",
+            [](const PyTask& t, Arg<std::optional<PyState>> start) {
+                const PyState* st = nullptr;
+                if (!start.is_none())
+                {
+                    if (!nb::isinstance<PyState>(start))
+                        throw nb::type_error("mymyr: start must be a State");
+                    st = &state_of(start);
+                    if (st->core->task->uid() != t.core->task->uid())
+                        throw nb::value_error("mymyr: the start state belongs to another task");
+                }
+                formalism::PddlFiles f;
+                {
+                    nb::gil_scoped_release release;
+                    if (st == nullptr)
+                        f = formalism::write_pddl(*t.core->data);
+                    else
+                        f = formalism::write_pddl(with_initial_state(*t.core, st->s.view()));
+                }
+                return nb::make_tuple(f.domain, f.problems.front());
+            },
+            nb::kw_only(), "start"_a = nb::none(),
+            "The task as PDDL, which Task.from_pddl reads back into an equal task.\n\n"
+            "The texts describe the normalized task: conditions are conjunctions of literals, and what normalization "
+            "compiled into derived predicates stays derived predicates with their rules, but for the goal's, which "
+            "are written back into the goal as the formula they stand for. mymyr.write_pddl writes one domain for "
+            "several problems.\n\n"
+            "Args:\n"
+            "    start: A State of this task to write as the problem's initial state (its fluent atoms and numeric "
+            "values; the static atoms stay the task's). Default: the task's initial state.\n\n"
+            "Returns:\n"
+            "    A tuple (domain, problem) of PDDL texts.\n\n"
+            "Raises:\n"
+            "    ValueError: start belongs to another task.")
+        .def_prop_ro("domain_name", [](const PyTask& t) { return t.core->data->domain_name; },
+                     "The name of the PDDL domain.")
+        .def_prop_ro("problem_name", [](const PyTask& t) { return t.core->data->problem_name; },
+                     "The name of the PDDL problem.")
+        .def_prop_ro("num_objects", [](const PyTask& t) { return t.core->task->num_objects(); },
+                     "The number of objects, constants included.")
+        .def_prop_ro("num_schemas", [](const PyTask& t) { return t.core->task->num_schemas(); },
+                     "The number of action schemas after normalization (an action may become several).")
+        .def_prop_ro("num_predicates", [](const PyTask& t) { return t.core->data->predicates.size(); },
+                     "The number of predicates (static, fluent and derived, normalization's included).")
         .def_prop_ro("objects", [](const PyTask& t) {
             std::vector<std::string> v;
             for (const auto& o : t.core->data->objects)
@@ -2223,7 +2303,8 @@ void bind_task(nb::module_& m)
                 v.push_back(t.core->task->numeric_name(i));
             return v;
         }, "The ground function of each numeric slot, e.g. '(fuel truck1)'.")
-        .def_prop_ro("has_axioms", [](const PyTask& t) { return t.core->task->has_axioms(); })
+        .def_prop_ro("has_axioms", [](const PyTask& t) { return t.core->task->has_axioms(); },
+                     "Whether the task has axioms (derived predicates).")
         .def_prop_ro("options", [](const PyTask& t) {
             const nb::tuple o = options_tuple(t.core->task->options());
             nb::typed<nb::dict, std::string, ann::Any> d{nb::dict()};
@@ -2317,7 +2398,8 @@ void bind_task(nb::module_& m)
     nb::class_<PyHandle> handle(m, "TaskHandle",
                                 "A per-thread handle of a Task (task.local()): the Task's per-state methods, without "
                                 "sharing a Python object between threads.");
-    handle.def_prop_ro("task", [](const PyHandle& h) { return Arg<PyTask>(h.task); })
+    handle.def_prop_ro("task", [](const PyHandle& h) { return Arg<PyTask>(h.task); },
+                       "The Task this handle serves.")
         .def("__reduce__", [](const PyHandle& h) {
             return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_handle"), nb::make_tuple(h.task));
         })
@@ -2351,7 +2433,8 @@ void bind_task(nb::module_& m)
                          return nb::ndarray<nb::numpy, const u64, nb::ndim<1>>(s.s.data(), 1, shape, self);
                      },
                      "The trimmed state words as a read-only NumPy uint64 view.")
-        .def_prop_ro("num_words", [](const PyState& s) { return s.s.size_words(); })
+        .def_prop_ro("num_words", [](const PyState& s) { return s.s.size_words(); },
+                     "The number of 64-bit words of the state's row (atom words, then numeric words).")
         .def("numeric_values",
              [](const PyState& s) {
                  const std::vector<f64> v = s.core->task->numeric_values(s.s.view());
@@ -2371,7 +2454,8 @@ void bind_task(nb::module_& m)
                      },
                      "The numeric words as a read-only NumPy uint64 view (task.numeric_storage encoding; empty for "
                      "classical tasks).")
-        .def_prop_ro("task", [](const PyState& s) { return task_object(s.owner); })
+        .def_prop_ro("task", [](const PyState& s) { return task_object(s.owner); },
+                     "The Task this state belongs to.")
         .def_prop_ro("owner", [](const PyState& s) { return Arg<std::variant<PyTask, PyHandle>>(s.owner); },
                      "The Task or TaskHandle that created it.")
         .def("canonical_hash", [](const PyState& s) { return s.core->task->canonical_hash(s.s.view()); },
@@ -2405,7 +2489,8 @@ void bind_task(nb::module_& m)
              "Truth of a ground atom (a GroundAtom, '(on a b)', ('on', 'a', 'b') or a slot), a GroundLiteral or "
              "'(not (on a b))', or a GroundCondition: fluent atoms from the state, static ones from the task, derived "
              "ones by evaluating the axioms, numeric constraints by the state's values.")
-        .def("is_goal", [](const PyState& s) { return s.core->task->is_goal(s.s.view()); })
+        .def("is_goal", [](const PyState& s) { return s.core->task->is_goal(s.s.view()); },
+             "Whether the task's goal holds in this state.")
         .def("applicable_actions",
              [](const PyState& s) { return applicable_actions(Owner{s.core, s.owner}, s.s.view()); },
              "The applicable actions (Task.applicable_actions).")
@@ -2428,7 +2513,9 @@ void bind_task(nb::module_& m)
              "Successor states (Task.successor_states).")
         .def("apply",
              [](const PyState& s, ActionLike action) { return apply(Owner{s.core, s.owner}, s.s.view(), action); },
-             "action"_a)
+             "action"_a,
+             "The successor under `action` (an Action, '(schema o1 ... on)' or (schema, objects)).\n\nRaises:\n    "
+             "ValueError: the action is not applicable in this state.")
         .def("__reduce__", &state_reduce)
         .def("__str__", [](const PyState& s) { return "{" + state_str(s, ~usize{0}) + "}"; })
         .def("__repr__", [](const PyState& s) { return "State({" + state_str(s, 8) + "})"; });
@@ -2437,13 +2524,15 @@ void bind_task(nb::module_& m)
     nb::class_<PyAction>(m, "Action",
                          "An action label (schema, binding): the schema's full parameter list bound to objects. "
                          "Equal to the labels of the same task with the same schema and binding.")
-        .def_prop_ro("schema", [](const PyAction& a) { return a.schema; })
+        .def_prop_ro("schema", [](const PyAction& a) { return a.schema; },
+                     "The index of the action's schema in Task.formalism.schemas.")
         .def_prop_ro("binding", [](const PyAction& a) {
             nb::list l;
             for (u32 o : a.binding)
                 l.append(o);
             return nb::typed<nb::tuple, int, nb::ellipsis>(nb::tuple(l));
-        })
+        },
+                     "The object indices bound to the schema's parameters, in parameter order (a tuple of ints).")
         .def_prop_ro("label", [](nb::handle self) {
             nb::object b = self.attr("binding");
             return nb::typed<nb::tuple, int, nb::typed<nb::tuple, int, nb::ellipsis>>(
@@ -2457,23 +2546,28 @@ void bind_task(nb::module_& m)
                 v.push_back(name_of(*a.core->data, a.core->data->objects[o].name));
             return v;
         }, "Object names of the binding.")
-        .def_prop_ro("arity", [](const PyAction& a) { return a.binding.size(); })
+        .def_prop_ro("arity", [](const PyAction& a) { return a.binding.size(); },
+                     "The number of bound parameters (the schema's arity, normalization's parameters included).")
         .def_prop_ro("original_arity", [](const PyAction& a) { return a.core->data->schemas[a.schema].original_arity; },
                      "Parameters written in the PDDL (the rest were introduced by normalization).")
-        .def_prop_ro("task", [](const PyAction& a) { return task_object(a.owner); })
+        .def_prop_ro("task", [](const PyAction& a) { return task_object(a.owner); },
+                     "The Task this action belongs to.")
         .def("apply",
              [](const PyAction& a, StateLike state) {
                  const Owner o{a.core, a.owner};
                  StateArg s = state_arg(*a.core, state);
                  return make_state(o, apply_action(*a.core->task, s.view, a.label()));
              },
-             "state"_a)
+             "state"_a,
+             "The successor of `state` under this action.\n\nRaises:\n    ValueError: the action is not applicable "
+             "in `state`, or `state` belongs to another task.")
         .def("is_applicable",
              [](const PyAction& a, StateLike state) {
                  StateArg s = state_arg(*a.core, state);
                  return is_applicable(*a.core->task, s.view, a.label());
              },
-             "state"_a)
+             "state"_a,
+             "Whether this action is applicable in `state` (its precondition holds and its effects are defined).")
         .def("__eq__",
              [](const PyAction& a, nb::handle b) -> nb::object {
                  if (!nb::isinstance<PyAction>(b))
@@ -2503,6 +2597,31 @@ void bind_task(nb::module_& m)
         })
         .def("__str__", [](const PyAction& a) { return action_str(a); })
         .def("__repr__", [](const PyAction& a) { return "Action" + action_str(a); });
+
+    m.def(
+        "write_pddl",
+        [](nb::typed<nb::sequence, PyTask> tasks) {
+            std::vector<const formalism::TaskData*> data;
+            std::vector<std::shared_ptr<const formalism::TaskData>> keep;
+            for (nb::handle h : tasks)
+            {
+                if (!nb::isinstance<PyTask>(h))
+                    throw nb::type_error("mymyr: write_pddl takes a sequence of Tasks");
+                keep.push_back(nb::inst_ptr<PyTask>(h)->core->data);
+                data.push_back(keep.back().get());
+            }
+            formalism::PddlFiles f;
+            {
+                nb::gil_scoped_release release;
+                f = formalism::write_pddl(data);
+            }
+            return nb::make_tuple(f.domain, f.problems);
+        },
+        "tasks"_a,
+        "Tasks of one domain as PDDL: a tuple (domain, problems) with one problem text per task.\n\n"
+        "Each problem's goal holds the derived predicates normalization introduced for it as the formula they stand "
+        "for, so that the domain is shared (Task.to_pddl writes them into the domain instead). Raises ValueError when "
+        "the tasks do not share their domain, or for no tasks.");
 
     // --- pickling helpers (module-level, so pickle can find them by name)
     m.def("_restore_task", &restore_task);

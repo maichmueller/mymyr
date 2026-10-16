@@ -49,7 +49,6 @@ from mymyr._core._datasets import (
     KnowledgeBase,
     StateSpace,
     StateSpaceSampler,
-    Status,
     TupleGraph,
     generate,
     generate_many,
@@ -96,7 +95,7 @@ def state_space(
     task: Task | TaskHandle,
     *,
     device: None = None,
-    threads: int | None = None,
+    threads: int = 1,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
@@ -107,7 +106,7 @@ def state_space(
     task: Task | TaskHandle,
     *,
     device: int | Context,
-    threads: int | None = None,
+    threads: int = 1,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
@@ -117,7 +116,7 @@ def state_space(
     task: Task | TaskHandle,
     *,
     device: int | Context | None = None,
-    threads: int | None = None,
+    threads: int = 1,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
@@ -125,18 +124,17 @@ def state_space(
 ) -> StateSpace | DeviceStateSpace | None:
     """The state space of a task, or None if the generation failed.
 
-    device None: on the CPU (a StateSpace; threads: generation threads, default 1). Otherwise a device ordinal or a
-    mymyr.cuda.Context: on that device (a mymyr.cuda.DeviceStateSpace with the same ids and arrays, in device memory;
-    threads: host threads for the host-side work, default all cores).
+    device None: on the CPU (a StateSpace; threads: generation threads, default 1; 0: one per hardware thread).
+    Otherwise a device ordinal or a mymyr.cuda.Context: on that device (a mymyr.cuda.DeviceStateSpace with the same ids
+    and arrays, in device memory; threads: host threads for the host-side work, default 1; 0: one per hardware thread).
 
-    Options: max_states (fail when the space has max(max_states, 2) states or more), max_seconds,
-    remove_if_unsolvable (no space when the initial state cannot reach a goal), labels (keep (schema, binding) per
-    transition).
+    Options: max_states (fail when the space has max(max_states, 2) states or more), max_seconds, remove_if_unsolvable
+    (no space when the initial state cannot reach a goal), labels (keep (schema, binding) per transition).
     """
     if device is None:
         return _cpu_state_space(
             task,
-            threads=1 if threads is None else threads,
+            threads=threads,
             max_states=max_states,
             max_seconds=max_seconds,
             remove_if_unsolvable=remove_if_unsolvable,
@@ -145,7 +143,7 @@ def state_space(
     return _cuda_module().state_space(
         task,
         **_device_args(device),
-        threads=0 if threads is None else threads,
+        threads=threads,
         max_states=max_states,
         max_seconds=max_seconds,
         remove_if_unsolvable=remove_if_unsolvable,
@@ -158,7 +156,7 @@ def state_spaces(
     tasks: Tasks,
     *,
     device: None = None,
-    threads: int | None = None,
+    threads: int = 1,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
@@ -171,7 +169,7 @@ def state_spaces(
     tasks: Tasks,
     *,
     device: int | Context,
-    threads: int | None = None,
+    threads: int = 1,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
@@ -183,7 +181,7 @@ def state_spaces(
     tasks: Tasks,
     *,
     device: int | Context | None = None,
-    threads: int | None = None,
+    threads: int = 1,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
@@ -195,16 +193,16 @@ def state_spaces(
     (global) order; None where the generation failed. Space i equals state_space(tasks[i], ...); over a suite its domain
     is suite.domain_of[i] and its labels carry that domain's schema ids.
 
-    device None: the CPU instance pool (generate_many: one task per worker, threads workers, default all cores).
-    Otherwise each domain's instances run in one device pipeline (mymyr.cuda.state_spaces; a sequence of tasks becomes
-    TaskSuite.group(tasks)), the domains one after the other, admitted in waves of fewer than wave_states states
-    (default 2^24) and at most wave_instances instances (default unlimited), which bound the device memory. Options as
-    state_space().
+    device None: the CPU instance pool (generate_many: one task per worker, `threads` workers, default 1; 0: one per
+    hardware thread). Otherwise each domain's instances run in one device pipeline (mymyr.cuda.state_spaces; a sequence
+    of tasks becomes TaskSuite.group(tasks)), the domains one after the other, admitted in waves of fewer than
+    wave_states states (default 2^24) and at most wave_instances instances (default unlimited), which bound the device
+    memory. Options as state_space().
     """
     if device is None:
         results = generate_many(
             _tasks(tasks),
-            threads=0 if threads is None else threads,
+            threads=threads,
             max_states=max_states,
             max_seconds=max_seconds,
             remove_if_unsolvable=remove_if_unsolvable,
@@ -214,7 +212,7 @@ def state_spaces(
     return _cuda_module().state_spaces(
         _table(tasks),
         **_device_args(device),
-        threads=0 if threads is None else threads,
+        threads=threads,
         max_states=max_states,
         max_seconds=max_seconds,
         remove_if_unsolvable=remove_if_unsolvable,
@@ -228,18 +226,18 @@ def generalized_state_space(
     tasks: Tasks,
     *,
     device: int | Context | None = None,
-    threads: int | None = None,
+    threads: int = 1,
     sort_by_size: bool = True,
     max_states: int | None = None,
     max_seconds: float | None = None,
     remove_if_unsolvable: bool = True,
     labels: bool = True,
 ) -> GeneralizedStateSpace:
-    """The generalized state space of tasks of one domain: each task's state space, failures
-    skipped, sorted ascending by size (stable), then their disjoint union. device None: the CPU instance pool (threads
-    workers, default all cores). Otherwise the spaces come from one device pipeline (mymyr.cuda.generate_state_spaces
-    with host output); the graph is the same. A TaskSuite of several domains raises ValueError (one generalized space
-    per domain: pass suite.tables[d])."""
+    """The generalized state space of tasks of one domain: each task's state space, failures skipped, sorted ascending
+    by size (stable), then their disjoint union. device None: the CPU instance pool (`threads` workers, default 1; 0:
+    one per hardware thread). Otherwise the spaces come from one device pipeline (mymyr.cuda.generate_state_spaces with
+    host output); the graph is the same. A TaskSuite of several domains raises ValueError (one generalized space per
+    domain: pass suite.tables[d])."""
     if isinstance(tasks, TaskSuite) and tasks.num_domains > 1:
         raise ValueError(
             f"mymyr: a generalized state space is of one domain; the suite has {tasks.num_domains} (pass suite.tables[d])"
@@ -262,7 +260,7 @@ def generalized_state_space(
             _table(tasks),
             **_device_args(device),
             output="host",
-            threads=0 if threads is None else threads,
+            threads=threads,
             max_states=max_states,
             max_seconds=max_seconds,
             remove_if_unsolvable=remove_if_unsolvable,
@@ -280,7 +278,6 @@ __all__ = [
     "KnowledgeBase",
     "StateSpace",
     "StateSpaceSampler",
-    "Status",
     "TupleGraph",
     "generalized_state_space",
     "generate",

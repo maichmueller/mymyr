@@ -116,11 +116,11 @@ def test_device_numeric_expand_and_search(counters):
     assert uploaded.validate() == (0, 0)
     cpu_brfs = search.brfs(counters, stop_at_goal=False)
     gpu_brfs = mc.brfs(counters, ctx=ctx, stop_at_goal=False)
-    assert gpu_brfs.states == cpu_brfs.states
+    assert gpu_brfs.stats.states == cpu_brfs.stats.states
     stored = torch.from_dlpack(gpu_brfs.state_words()).cpu().numpy()
     decoded = counters.decode(stored)
-    assert len(decoded) == gpu_brfs.states and decoded[0] == counters.initial_state
-    assert len(set(decoded)) == gpu_brfs.states
+    assert len(decoded) == gpu_brfs.stats.states and decoded[0] == counters.initial_state
+    assert len(set(decoded)) == gpu_brfs.stats.states
     starts = [counters.initial_state] + counters.successor_states(counters.initial_state)
     arr, _ = rows(counters, starts)
     device_rows = torch.from_numpy(arr).cuda()
@@ -246,7 +246,7 @@ def test_numeric_cuda_labels_heuristics_and_table_starts(name):
     host = mc.batched_iw1(table, starts, task_ids=ids, ctx=ctx, max_states=20000)
     device = mc.batched_iw1(table, torch.from_numpy(rows(task, starts)[0].view(np.int64)).cuda(), task_ids=ids, ctx=ctx, max_states=20000)
     for i, start in enumerate(starts):
-        expected = search.iw(task, start=start, max_arity=1, max_states=20000)
+        expected = search.iw(task, start=start, max_width=1, max_states=20000)
         assert host.status[i] == device.status[i] == expected.status
         assert host.goal_state(i) == device.goal_state(i) == expected.goal_state
         assert host.cost(i) == device.cost(i) == expected.cost

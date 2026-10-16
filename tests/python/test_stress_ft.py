@@ -4,14 +4,13 @@ single-threaded run on a separate Task. Labels, goal flags and canonical hashes 
 tasks are comparable."""
 
 import random
-import sys
 import threading
 
 import numpy as np
 import pytest
 
 from mymyr import rl
-from conftest import text_task
+from conftest import gil_stays_off, text_task
 
 THREADS = 64
 STEPS = 25
@@ -66,7 +65,7 @@ def test_sixty_four_threads_share_one_task(name, atoms):
             steps, seen = trace(task, api, i)
             results[i] = steps
             if atoms != "lazy":  # tables take fixed atom slots only
-                kw = ({}, {"pool": shared_pool}, {"threads": 2}, {"canonical": True})[i % 4]
+                kw = ({}, {"pool": shared_pool}, {"threads": 2}, {"canonical_order": True})[i % 4]
                 check_expand(task, seen, steps, kw)
         except Exception as e:  # noqa: BLE001 - reported below
             errors.append((i, repr(e)))
@@ -78,7 +77,7 @@ def test_sixty_four_threads_share_one_task(name, atoms):
         t.join()
     assert not errors, errors[:3]
     assert results == expected
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()
 
 
 @pytest.mark.parametrize("atoms", ["lazy", "reachable"])
@@ -113,7 +112,7 @@ def test_threads_share_states_across_handles(atoms):
     for t in threads:
         t.join()
     assert not errors, errors[:3]
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()
 
 
 def test_threads_share_one_python_heuristic():
@@ -168,4 +167,4 @@ def test_threads_share_one_python_heuristic():
         t.join()
     assert not errors, errors[:3]
     assert results == [expected[i % 8] for i in range(threads_n)]
-    assert not sys._is_gil_enabled()
+    assert gil_stays_off()

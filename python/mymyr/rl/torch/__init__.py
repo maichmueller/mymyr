@@ -29,12 +29,12 @@ steps and the policy in one graph, one launch per replay), ``torch.cuda.graph`` 
 ``torch.compile(mode="reduce-overhead")`` of a function that steps a BatchedEnv (its tensors are marked static).
 PlanningEnv replays a captured graph of its step (the env step and the observation) at every TorchRL step.
 
-Semantics of a step (the host reference rl::HostEnv, include/mymyr/rl/env.hpp): the action indexes the current state's
+Semantics of a step (the same as CpuEnvPool's): the action indexes the current state's
 successors in canonical order; the environment moves there (an index outside [0, count) does not move and is
 flagged ``invalid``; a state without successors is stuck: no move, terminated). reward = step_reward (+ goal_reward if
 the reached state is a goal, + dead_end_reward if it is a non-goal state without successors); terminated = goal or
 dead end (``dead_end="no_successors"``, terminal unless ``dead_end_terminal=False``; ``"none"``: no dead ends);
-truncated = not terminated and max_steps > 0 and the episode reached max_steps steps. With autoreset (BatchedEnv's
+truncated = not terminated and max_steps is set and the episode reached max_steps steps. With autoreset (BatchedEnv's
 default) a finished environment restarts from a sampled instance (or of ``next_task_ids[i]``) within
 the step (``final=True`` returns the reached states); PlanningEnv leaves resets to TorchRL. With ``goals=True`` each
 env carries goal masks (``goal_pos`` / ``goal_neg``) and the goal test is the mask test (relabelled or multi-goal

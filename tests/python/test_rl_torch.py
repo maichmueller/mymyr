@@ -386,7 +386,7 @@ def test_planning_env_partial_reset(blocks):
     pytest.importorskip("torchrl")
     from torchrl.envs.utils import step_mdp
 
-    env = rt.PlanningEnv(blocks, 6, max_steps=0)
+    env = rt.PlanningEnv(blocks, 6, max_steps=None)
     td = env.reset()
     td["action"] = torch.zeros(6, dtype=torch.int64)
     td = step_mdp(env.step(td))
@@ -614,11 +614,14 @@ def test_rand_action_is_the_counter_random_policy(blocks, max_actions):
             td = env.rand_action(td)
             assert torch.equal(td["action"].cpu(), want)
             td = step_mdp(env.step(td))
+            assert torch.equal(twin.random_actions(max_actions).cpu(), want)
             if max_actions is None:
                 twin.step(None)  # the random policy's own step takes the same successors
             else:
                 twin.step(want.to(twin.device))
             assert torch.equal(env.batched.states, twin.states) and torch.equal(env.batched.draws, twin.draws)
+        with pytest.raises(ValueError, match="max_actions must be None or positive"):
+            twin.random_actions(0)
         # a rollout without a policy follows the same streams after set_seed
         env.set_seed(9)
         twin.set_seed(9)

@@ -67,7 +67,7 @@ def same_space(s, t, *, statistics=True):
     for n in range(s.max_goal_distance + 1):
         assert np.array_equal(a.sample_states_n_steps_from_goal(n, 20), b.sample_states_n_steps_from_goal(n, 20))
     if s.num_unsolvable_states:
-        assert np.array_equal(a.sample_dead_end_states(20), b.sample_dead_end_states(20))
+        assert np.array_equal(a.sample_unsolvable_states(20), b.sample_unsolvable_states(20))
     if statistics:
         assert (t.threads, t.layers, t.search_seconds, t.post_seconds) == (s.threads, s.layers, s.search_seconds,
                                                                           s.post_seconds)
@@ -178,7 +178,7 @@ def test_pickle_state_spaces(case):
     r = datasets.generate(task, max_states=5)
     for x in (r, datasets.generate(task, **options)):
         y = pickle.loads(pickle.dumps(x))
-        assert (y.status, y.states, y.seconds, bool(y)) == (x.status, x.states, x.seconds, bool(x))
+        assert (y.status, y.stats.states, y.stats.seconds, bool(y)) == (x.status, x.stats.states, x.stats.seconds, bool(x))
         assert (y.space is None) == (x.space is None)
         if x.space is not None:
             same_space(x.space, y.space)
@@ -215,20 +215,20 @@ def test_pickle_tuple_graphs_generalized_spaces_and_knowledge_bases():
 
 
 def _iw(t):
-    return search.iw(t, max_arity=2)
+    return search.iw(t, max_width=2)
 
 
 SEARCHES = {
     "iw": _iw,
-    "siw": lambda t: search.siw(t, max_arity=2),
+    "siw": lambda t: search.siw(t, max_width=2),
     "astar": lambda t: search.astar(t, heuristic="lmcut"),
     "gbfs": lambda t: search.gbfs(t, heuristic="ff"),
-    "beam": lambda t: search.beam(t, width=4),
+    "beam": lambda t: search.beam(t, beam_width=4),
     "brfs": search.brfs,
     "astar_iw": search.astar_iw,
     "rollout_iw": lambda t: search.rollout_iw(t, seed=3),
     "liw": search.liw,
-    "iw_pass": lambda t: search.iw_pass(t, arity=1),
+    "iw_pass": lambda t: search.iw_pass(t, width=1),
     "abstracted_iw": search.abstracted_iw,
     "projective_iw": search.projective_iw,
     "rollouts": lambda t: search.find_rollouts_parallel(t, [1, 2, 3], report_landing_states=True),
@@ -273,7 +273,7 @@ def test_pickle_search_results(name):
 @needs_frontend
 def test_search_result_pickles_are_checked():
     task = pddl_task("gripper", "p01")
-    r = search.iw(task, max_arity=2)
+    r = search.iw(task, max_width=2)
     assert r.plan
     restore, (kind, t, fingerprint, fields) = r.__reduce__()
     assert restore(kind, t, fingerprint, fields).plan == r.plan
@@ -552,7 +552,7 @@ def digest(obj):
             h.update(k.encode())
             h.update(np.ascontiguousarray(v).tobytes())
         h.update(datasets.StateSpaceSampler(s, seed=11).sample_states(100).tobytes())
-        h.update(str([search.iw(s.task, max_arity=1).plan]).encode())
+        h.update(str([search.iw(s.task, max_width=1).plan]).encode())
     if isinstance(obj, datasets.KnowledgeBase) and obj.has_tuple_graphs:
         for i in range(len(spaces)):
             for g in obj.tuple_graphs(i):

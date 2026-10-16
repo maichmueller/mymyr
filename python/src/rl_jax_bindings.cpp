@@ -1437,7 +1437,7 @@ void bind_rl_jax(nb::module_& parent)
             [](PyJaxEnv* self, SuiteArg table, Arg<int> device, ContextArg ctx, IntArg max_steps_in, f32 step_reward,
                f32 goal_reward, Arg<ann::DeadEnd> dead_end, f32 dead_end_reward, bool dead_end_terminal, bool autoreset,
                bool canonical, bool witness, Arg<ann::EnvPath> path) {
-                const u32 max_steps = int_arg<u32>(max_steps_in, "max_steps");
+                const u32 max_steps = opt_int_arg<u32>(max_steps_in, "max_steps", 1).value_or(0);  // 0: no limit
                 rl::EnvConfig c;
                 c.max_steps = max_steps;
                 c.step_reward = step_reward;
@@ -1450,9 +1450,9 @@ void bind_rl_jax(nb::module_& parent)
                 c.witness_pruning = witness;
                 new (self) PyJaxEnv(std::move(table), std::move(device), std::move(ctx), c, nb::cast<std::string>(path));
             },
-            "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "max_steps"_a = 0,
+            "table"_a, nb::kw_only(), "device"_a = nb::none(), "ctx"_a = nb::none(), "max_steps"_a = nb::none(),
             "step_reward"_a = 0.0f, "goal_reward"_a = 1.0f, "dead_end"_a = "no_successors", "dead_end_reward"_a = 0.0f,
-            "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical"_a = true, "witness"_a = false,
+            "dead_end_terminal"_a = true, "autoreset"_a = true, "canonical_order"_a = true, "witness_pruning"_a = false,
             "path"_a = "auto")
         .def_prop_ro("handle", &PyJaxEnv::handle, "The FFI attribute `handle` of this environment's calls.")
         .def_prop_ro("table", [](const PyJaxEnv& e) { return SuiteArg(e.ref().obj); })
@@ -1473,15 +1473,16 @@ void bind_rl_jax(nb::module_& parent)
         .def_prop_ro("initial_counts", &PyJaxEnv::initial_counts, "Successors of each instance's initial state [I].")
         .def_prop_ro("max_objects", [](const PyJaxEnv& e) { return e.entry().suite->max_objects(); })
         .def_prop_ro("num_schemas", [](const PyJaxEnv& e) { return e.entry().suite->max_schemas(); })
-        .def_prop_ro("max_steps", [](const PyJaxEnv& e) { return e.entry().cfg.max_steps; })
+        .def_prop_ro("max_steps", [](const PyJaxEnv& e) { return steps_limit(e.entry().cfg.max_steps); },
+                     "The steps after which an episode is truncated (None: never).")
         .def_prop_ro("step_reward", [](const PyJaxEnv& e) { return e.entry().cfg.step_reward; })
         .def_prop_ro("goal_reward", [](const PyJaxEnv& e) { return e.entry().cfg.goal_reward; })
         .def_prop_ro("dead_end", [](const PyJaxEnv& e) { return std::string(dead_end_name(e.entry().cfg.dead_end)); })
         .def_prop_ro("dead_end_reward", [](const PyJaxEnv& e) { return e.entry().cfg.dead_end_reward; })
         .def_prop_ro("dead_end_terminal", [](const PyJaxEnv& e) { return e.entry().cfg.dead_end_terminal; })
         .def_prop_ro("autoreset", [](const PyJaxEnv& e) { return e.entry().cfg.autoreset; })
-        .def_prop_ro("canonical", [](const PyJaxEnv& e) { return e.entry().cfg.canonical_order; })
-        .def_prop_ro("witness", [](const PyJaxEnv& e) { return e.entry().cfg.witness_pruning; })
+        .def_prop_ro("canonical_order", [](const PyJaxEnv& e) { return e.entry().cfg.canonical_order; })
+        .def_prop_ro("witness_pruning", [](const PyJaxEnv& e) { return e.entry().cfg.witness_pruning; })
         .def("initial_states", &PyJaxEnv::initial_states,
              "The instances' initial states as uint32 halves, row-major [I * 2 row_words] (low word first).")
         .def("set_launch", &PyJaxEnv::set_launch, "launch"_a,

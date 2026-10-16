@@ -34,7 +34,7 @@ testpaths = ["tests/python", "tests/parity/python"]
 markers = ["parity: compares mymyr with recorded reference results (skips without the reference data)"]
 
 [tool.cibuildwheel]
-# free-threaded CPython only; Linux wheels are x86_64 manylinux, macOS wheels are arm64
+# wheels for free-threaded CPython; Linux wheels are x86_64 manylinux, macOS wheels are arm64
 build = ["cp314t-*", "cp315t-*"]
 skip = ["*musllinux*"]
 build-verbosity = 1

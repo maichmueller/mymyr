@@ -555,9 +555,11 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
     // --- Atom
     {
         nb::class_<PyLiftedAtom> c(m, "Atom", "A lifted atom: a predicate applied to objects and variables (Task.atom with '?x' terms).");
-        c.def_prop_ro("predicate", [](const PyLiftedAtom& a) { return PredicateView{{a.o.data, a.predicate.v}}; })
+        c.def_prop_ro("predicate", [](const PyLiftedAtom& a) { return PredicateView{{a.o.data, a.predicate.v}}; },
+                      "The Predicate.")
             .def_prop_ro("terms", [](const PyLiftedAtom& a) { return term_tuple(a.o, a.terms, a.vars); }, "an Object or a Variable per argument")
-            .def_prop_ro("is_ground", [](const PyLiftedAtom& a) { return all_objects(a.terms); })
+            .def_prop_ro("is_ground", [](const PyLiftedAtom& a) { return all_objects(a.terms); },
+                         "Whether every term is an object (no variables).")
             .def("__eq__",
                  [](const PyLiftedAtom& a, nb::handle b) -> nb::object {
                      const PyLiftedAtom* o = as<PyLiftedAtom>(b);
@@ -572,12 +574,16 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
     // --- Literal
     {
         nb::class_<PyLiteral> c(m, "Literal", "A lifted literal: an Atom and its polarity.");
-        c.def_prop_ro("atom", [](const PyLiteral& l) { return l.atom; })
-            .def_prop_ro("predicate", [](const PyLiteral& l) { return PredicateView{{l.atom.o.data, l.atom.predicate.v}}; })
-            .def_prop_ro("positive", [](const PyLiteral& l) { return l.positive; })
+        c.def_prop_ro("atom", [](const PyLiteral& l) { return l.atom; },
+                      "The Atom.")
+            .def_prop_ro("predicate", [](const PyLiteral& l) { return PredicateView{{l.atom.o.data, l.atom.predicate.v}}; },
+                         "The Predicate of the atom.")
+            .def_prop_ro("positive", [](const PyLiteral& l) { return l.positive; },
+                         "False for a negated atom.")
             .def_prop_ro("terms", [](const PyLiteral& l) { return term_tuple(l.atom.o, l.atom.terms, l.atom.vars); },
                          "an Object or a Variable per argument")
-            .def_prop_ro("is_ground", [](const PyLiteral& l) { return all_objects(l.atom.terms); })
+            .def_prop_ro("is_ground", [](const PyLiteral& l) { return all_objects(l.atom.terms); },
+                         "Whether every term is an object (no variables).")
             .def("__eq__",
                  [](const PyLiteral& a, nb::handle b) -> nb::object {
                      const PyLiteral* o = as<PyLiteral>(b);
@@ -595,15 +601,19 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
     // --- GroundAtom
     {
         nb::class_<PyGroundAtom> c(m, "GroundAtom", "A ground atom: a predicate applied to objects.");
-        c.def_prop_ro("predicate", [](const PyGroundAtom& a) { return PredicateView{{a.o.data, a.a.predicate.v}}; })
-            .def_prop_ro("objects", [](const PyGroundAtom& a) { return object_tuple(a.o.data, a.a.objects); })
-            .def_prop_ro("predicate_index", [](const PyGroundAtom& a) { return a.a.predicate.v; })
+        c.def_prop_ro("predicate", [](const PyGroundAtom& a) { return PredicateView{{a.o.data, a.a.predicate.v}}; },
+                      "The Predicate.")
+            .def_prop_ro("objects", [](const PyGroundAtom& a) { return object_tuple(a.o.data, a.a.objects); },
+                         "The Objects of the arguments, in order.")
+            .def_prop_ro("predicate_index", [](const PyGroundAtom& a) { return a.a.predicate.v; },
+                         "The index of the predicate in Task.formalism.predicates.")
             .def_prop_ro("object_indices", [](const PyGroundAtom& a) {
                 std::vector<u32> v;
                 for (ObjectId o : a.a.objects)
                     v.push_back(o.v);
                 return v;
-            })
+            },
+                         "The indices of the arguments in Task.formalism.objects.")
             .def_prop_ro("kind", [](const PyGroundAtom& a) { return std::string(kind_name(a.o.data->predicates[a.a.predicate.v].kind)); },
                          "'static', 'fluent' or 'derived'")
             .def_prop_ro(
@@ -638,10 +648,14 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
     // --- GroundLiteral
     {
         nb::class_<PyGroundLiteral> c(m, "GroundLiteral", "A ground literal: a GroundAtom and its polarity.");
-        c.def_prop_ro("atom", [](const PyGroundLiteral& l) { return PyGroundAtom{l.o, l.l.atom}; })
-            .def_prop_ro("predicate", [](const PyGroundLiteral& l) { return PredicateView{{l.o.data, l.l.atom.predicate.v}}; })
-            .def_prop_ro("positive", [](const PyGroundLiteral& l) { return l.l.positive; })
-            .def_prop_ro("objects", [](const PyGroundLiteral& l) { return object_tuple(l.o.data, l.l.atom.objects); })
+        c.def_prop_ro("atom", [](const PyGroundLiteral& l) { return PyGroundAtom{l.o, l.l.atom}; },
+                      "The GroundAtom.")
+            .def_prop_ro("predicate", [](const PyGroundLiteral& l) { return PredicateView{{l.o.data, l.l.atom.predicate.v}}; },
+                         "The Predicate of the atom.")
+            .def_prop_ro("positive", [](const PyGroundLiteral& l) { return l.l.positive; },
+                         "False for a negated atom.")
+            .def_prop_ro("objects", [](const PyGroundLiteral& l) { return object_tuple(l.o.data, l.l.atom.objects); },
+                         "The Objects of the atom's arguments.")
             .def(
                 "holds", [](const PyGroundLiteral& l, Arg<PyState> state) {
                     const PyState& s = formula_state(l.o, state);
@@ -670,7 +684,8 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
     // --- Expression
     {
         nb::class_<PyExpression> c(m, "Expression", "A node of a numeric expression tree.");
-        c.def_prop_ro("index", [](const PyExpression& e) { return e.i; })
+        c.def_prop_ro("index", [](const PyExpression& e) { return e.i; },
+                      "The node's index in the expression table of its owner.")
             .def_prop_ro("op", [](const PyExpression& e) {
                 switch ((*e.p.exprs)[e.i].op)
                 {
@@ -683,21 +698,25 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                     case fm::ExprOp::Neg: return std::string("neg");
                 }
                 return std::string("?");
-            })
+            },
+                         "The node kind: 'number', 'function', '+', '-', '*', '/' or 'neg'.")
             .def_prop_ro("value", [](const PyExpression& e) -> std::optional<f64> {
                 const auto& x = (*e.p.exprs)[e.i];
                 return x.op == fm::ExprOp::Number ? std::optional<f64>(x.value) : std::nullopt;
-            })
+            },
+                         "The constant of a 'number' node; None for the other kinds.")
             .def_prop_ro("function", [](const PyExpression& e) -> std::optional<FunctionView> {
                 const auto& x = (*e.p.exprs)[e.i];
                 return x.op == fm::ExprOp::Function ? std::optional<FunctionView>(FunctionView{{e.p.o.data, x.func.v}}) : std::nullopt;
-            })
+            },
+                         "The Function of a 'function' node; None for the other kinds.")
             .def_prop_ro("terms", [](const PyExpression& e) {
                 const auto& x = (*e.p.exprs)[e.i];
                 if (x.op != fm::ExprOp::Function)
                     return tuple_of<Term>(nb::list());
                 return term_tuple(e.p.o, std::span(*e.p.terms).subspan(x.terms.begin, x.terms.count), e.p.vars);
-            })
+            },
+                         "The arguments (Objects or Variables) of a 'function' node; empty for the other kinds.")
             .def_prop_ro("children", [](const PyExpression& e) {
                 nb::list l;
                 const auto& x = (*e.p.exprs)[e.i];
@@ -709,7 +728,8 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                     l.append(PyExpression{e.p, x.b});
                 }
                 return tuple_of<PyExpression>(l);
-            })
+            },
+                         "The operands: two for '+', '-', '*' and '/', one for 'neg', none for the leaves.")
             .def("__eq__",
                  [](const PyExpression& a, nb::handle b) -> nb::object {
                      const PyExpression* o = as<PyExpression>(b);
@@ -723,10 +743,14 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
     // --- NumericConstraint
     {
         nb::class_<PyNumericConstraint> c(m, "NumericConstraint", "A comparison of two numeric expressions.");
-        c.def_prop_ro("index", [](const PyNumericConstraint& k) { return k.i; })
-            .def_prop_ro("comparator", [](const PyNumericConstraint& k) { return std::string(cmp_name((*k.p.constraints)[k.i].cmp)); })
-            .def_prop_ro("lhs", [](const PyNumericConstraint& k) { return PyExpression{k.p, (*k.p.constraints)[k.i].lhs}; })
-            .def_prop_ro("rhs", [](const PyNumericConstraint& k) { return PyExpression{k.p, (*k.p.constraints)[k.i].rhs}; })
+        c.def_prop_ro("index", [](const PyNumericConstraint& k) { return k.i; },
+                      "The constraint's index in the constraint table of its owner.")
+            .def_prop_ro("comparator", [](const PyNumericConstraint& k) { return std::string(cmp_name((*k.p.constraints)[k.i].cmp)); },
+                         "The comparison: '<', '<=', '=', '>=', '>' or '!='.")
+            .def_prop_ro("lhs", [](const PyNumericConstraint& k) { return PyExpression{k.p, (*k.p.constraints)[k.i].lhs}; },
+                         "The left Expression.")
+            .def_prop_ro("rhs", [](const PyNumericConstraint& k) { return PyExpression{k.p, (*k.p.constraints)[k.i].rhs}; },
+                         "The right Expression.")
             .def("__eq__",
                  [](const PyNumericConstraint& a, nb::handle b) -> nb::object {
                      const PyNumericConstraint* o = as<PyNumericConstraint>(b);
@@ -750,12 +774,17 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                           for (u32 v = 0; v < x.c->arity(); ++v)
                               l.append(term_object(x.o, static_cast<fm::Term>(v), vars));
                           return tuple_of<PyVariable>(l);
-                      })
+                      },
+                      "The Variables of the condition, in position order.")
             .def_prop_ro("arity", [](const PyConjunctiveCondition& x) { return x.c->arity(); }, "The number of variables.")
-            .def_prop_ro("literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, std::nullopt); })
-            .def_prop_ro("static_literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, fm::PredKind::Static); })
-            .def_prop_ro("fluent_literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, fm::PredKind::Fluent); })
-            .def_prop_ro("derived_literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, fm::PredKind::Derived); })
+            .def_prop_ro("literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, std::nullopt); },
+                         "Every Literal of the condition (static, fluent and derived).")
+            .def_prop_ro("static_literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, fm::PredKind::Static); },
+                         "The literals over static predicates.")
+            .def_prop_ro("fluent_literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, fm::PredKind::Fluent); },
+                         "The literals over fluent predicates.")
+            .def_prop_ro("derived_literals", [](const PyConjunctiveCondition& x) { return literal_tuple(x, fm::PredKind::Derived); },
+                         "The literals over derived predicates.")
             .def_prop_ro(
                 "equalities",
                 [](const PyConjunctiveCondition& x) {
@@ -766,7 +795,8 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                     return tuple_of<nb::typed<nb::tuple, Term, Term, bool>>(l);
                 },
                 "(lhs, rhs, positive) per (in)equality of two terms: lhs == rhs if positive, else lhs != rhs")
-            .def_prop_ro("numeric_constraints", [](const PyConjunctiveCondition& x) { return constraint_tuple(condition_pool(x.o, x.c)); })
+            .def_prop_ro("numeric_constraints", [](const PyConjunctiveCondition& x) { return constraint_tuple(condition_pool(x.o, x.c)); },
+                         "The NumericConstraints.")
             .def(
                 "ground",
                 [](const PyConjunctiveCondition& x, Arg<PyState> state, Arg<int> limit, PartialArg partial) {
@@ -829,11 +859,16 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
         nb::class_<PyGroundCondition> c(m, "GroundCondition",
                                         "A ground conjunctive condition: ground literals (static, fluent and derived) and "
                                         "ground numeric constraints. A goal of the searches (goal=).");
-        c.def_prop_ro("literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, std::nullopt); })
-            .def_prop_ro("static_literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, fm::PredKind::Static); })
-            .def_prop_ro("fluent_literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, fm::PredKind::Fluent); })
-            .def_prop_ro("derived_literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, fm::PredKind::Derived); })
-            .def_prop_ro("numeric_constraints", [](const PyGroundCondition& x) { return constraint_tuple(condition_pool(x.o, x.c)); })
+        c.def_prop_ro("literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, std::nullopt); },
+                      "Every GroundLiteral of the condition (static, fluent and derived).")
+            .def_prop_ro("static_literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, fm::PredKind::Static); },
+                         "The literals over static predicates.")
+            .def_prop_ro("fluent_literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, fm::PredKind::Fluent); },
+                         "The literals over fluent predicates.")
+            .def_prop_ro("derived_literals", [](const PyGroundCondition& x) { return ground_literal_tuple(x, fm::PredKind::Derived); },
+                         "The literals over derived predicates.")
+            .def_prop_ro("numeric_constraints", [](const PyGroundCondition& x) { return constraint_tuple(condition_pool(x.o, x.c)); },
+                         "The ground NumericConstraints.")
             .def(
                 "holds",
                 [](const PyGroundCondition& x, Arg<PyState> state) {

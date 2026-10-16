@@ -104,6 +104,7 @@ AnytimeResult anytime_astar(const Task& task, const AnytimeOptions& o)
             r.dead_ends += x.dead_ends;
             r.reopened += x.reopened;
             r.store_bytes = std::max(r.store_bytes, x.store_bytes);
+            r.stats.memory_bytes = r.store_bytes;
             if (k == 0)
             {
                 r.initial_h = x.initial_h;

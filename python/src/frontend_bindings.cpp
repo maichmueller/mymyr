@@ -191,8 +191,10 @@ void bind_frontend(nb::module_& m)
             },
             "The normalized domain alone (mymyr.formalism.NormalizedTask): types, constants (as its objects), "
             "predicates, functions, schemas and the domain's axioms; no initial state and no goal.")
-        .def_prop_ro("name", [](const PyDomain& self) { return self.d->name(); })
-        .def_prop_ro("path", [](const PyDomain& self) { return self.d->path(); })
+        .def_prop_ro("name", [](const PyDomain& self) { return self.d->name(); },
+                     "The name of the PDDL domain.")
+        .def_prop_ro("path", [](const PyDomain& self) { return self.d->path(); },
+                     "The file the domain was read from (empty for Domain.from_string).")
         .def("__repr__", [](const PyDomain& self) { return "Domain(" + self.d->name() + ")"; });
 }
 }  // namespace mymyr::python

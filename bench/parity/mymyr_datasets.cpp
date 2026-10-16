@@ -611,10 +611,10 @@ int run_sampler(const Common& c)
         ++d_any[vstar(s)];
     }
     u64 dead_wrong = 0;
-    if (sampler.num_dead_end_states() > 0)
+    if (sampler.num_unsolvable_states() > 0)
         for (u64 i = 0; i < c.samples; ++i)
         {
-            const u32 s = sampler.sample_dead_end_state();
+            const u32 s = sampler.sample_unsolvable_state();
             seq.u64le(s);
             dead_wrong += !r.space->is_unsolvable(s);
             ++hits_dead[hs[s]];
@@ -645,7 +645,7 @@ int run_sampler(const Common& c)
                 "\"states_by_vstar\":%s,\"sample_state_vstar_hist\":%s,\"sample_state_support\":%zu,\"sample_state_min_hits\":%llu,"
                 "\"sample_state_max_hits\":%llu,\"dead_end_support\":%zu,\"dead_end_wrong\":%llu,\"n_steps\":%s,\"samples_hash\":\"%s\"}\n",
                 problem.c_str(), static_cast<unsigned long long>(c.seed), static_cast<unsigned long long>(c.samples), sampler.num_states(),
-                sampler.num_dead_end_states(), sampler.num_alive_states(), sampler.max_steps_to_goal(), histogram_json(by_d).c_str(),
+                sampler.num_unsolvable_states(), sampler.num_solvable_states(), sampler.max_steps_to_goal(), histogram_json(by_d).c_str(),
                 histogram_json(d_any).c_str(), hits_any.size(), static_cast<unsigned long long>(min_hits),
                 static_cast<unsigned long long>(max_hits), hits_dead.size(), static_cast<unsigned long long>(dead_wrong), per_n.c_str(),
                 hex(seq.h).c_str());

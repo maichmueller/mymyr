@@ -1,22 +1,26 @@
-"""The ``mymyr`` command line (also ``python -m mymyr``): plan a PDDL task with one of mymyr's searches, or summarize
-a domain and problem.
+"""The ``mymyr`` command line (also ``python -m mymyr``): plan a PDDL task with one of mymyr's searches, validate a
+plan, write the normalized task, or summarize a domain and problem.
 
     mymyr plan domain.pddl problem.pddl                      # A* with h_max; the plan to stdout
     mymyr plan domain.pddl problem.pddl --search gbfs -o plan.txt -v
     mymyr plan domain.pddl problem.pddl --search astar --heuristic ff --weight 2
     mymyr plan domain.pddl problem.pddl --search anytime --weights 5,3,2,1 --max-seconds 60
+    mymyr validate domain.pddl problem.pddl plan.txt
+    mymyr write domain.pddl problem.pddl --format pddl -o normalized/
     mymyr info domain.pddl problem.pddl
     mymyr --version
 
 Exit codes of ``mymyr plan``: 0 a plan was found (by the anytime search also when a budget stopped it later), 1 the
 search proved the task unsolvable or exhausted its search space without a plan, 2 invalid usage, an unreadable file or
 PDDL mymyr cannot read (and any other error), 3 a budget (``--max-states``, ``--max-seconds``) stopped the search.
-Errors are one line on stderr; ``--debug`` adds the traceback.
+``mymyr validate``: 0 the plan is valid, 1 it is not, 2 as above. Errors are one line on stderr; ``--debug`` adds the
+traceback.
 """
 
 from __future__ import annotations
 
 import argparse
+import pathlib
 import sys
 import threading
 import time
@@ -55,7 +59,8 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     p = _Parser(
         prog="mymyr",
-        description="Lifted classical and numeric planning: plan a PDDL task or summarize it.",
+        description="Lifted classical and numeric planning: plan a PDDL task, validate a plan, write the normalized "
+        "task or summarize it.",
     )
     p.add_argument("--version", action="version", version=f"mymyr {mymyr.__version__}")
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
@@ -105,7 +110,7 @@ def _parser() -> argparse.ArgumentParser:
         "-w",
         "--width",
         type=int,
-        help="the largest novelty arity of iw and siw (default: 2), the novelty width of astar_iw (default: 1)",
+        help="the largest novelty width of iw and siw (default: 2), the novelty width of astar_iw (default: 1)",
     )
     plan.add_argument(
         "-j", "--threads", type=int, default=1, help="threads of brfs (the other searches run on one thread; default: 1)"
@@ -123,10 +128,49 @@ def _parser() -> argparse.ArgumentParser:
     )
     plan.add_argument("-o", "--plan-file", metavar="FILE", help="write the plan to FILE instead of stdout")
     plan.add_argument(
-        "-v", "--verbose", action="store_true", help="print statistics (expanded, generated, time, cost) to stderr"
+        "-v", "--verbose", action="store_true",
+        help="print statistics (expanded, generated, stored and pruned states, time, memory, cost) to stderr"
     )
     plan.add_argument("--debug", action="store_true", help="show the traceback of an error")
     plan.set_defaults(run=_plan)
+
+    validate = sub.add_parser(
+        "validate",
+        help="check a plan",
+        description="Replay a plan on the task: check that each action names the task's objects with the declared "
+        "types and is applicable, apply its effects (conditional and numeric ones, derived predicates through the "
+        "axioms), check the goal at the end and compute the plan's cost under the task's metric.",
+        epilog="Exit codes: 0 the plan is valid; 1 it is not (the first failing action and the reason go to stderr); "
+        "2 invalid usage, an unreadable file or unsupported PDDL.",
+    )
+    validate.add_argument("domain", metavar="DOMAIN", help="the PDDL domain file")
+    validate.add_argument("problem", metavar="PROBLEM", help="the PDDL problem file")
+    validate.add_argument(
+        "plan", metavar="PLAN", help="the plan in the IPC format: one '(action object ...)' per line, ';' comments"
+    )
+    validate.add_argument("--debug", action="store_true", help="show the traceback of an error")
+    validate.set_defaults(run=_validate)
+
+    write = sub.add_parser(
+        "write",
+        help="write the normalized task",
+        description="Write tasks as mymyr normalizes them: as mymyr's task text or as PDDL. The PDDL of several "
+        "problems shares one domain file; each problem parses back with it to the same task.",
+    )
+    write.add_argument("domain", metavar="DOMAIN", help="the PDDL domain file")
+    write.add_argument("problems", metavar="PROBLEM", nargs="+", help="PDDL problem files of the domain")
+    write.add_argument(
+        "-f", "--format", choices=("text", "pddl"), default="text", help="mymyr's task text or PDDL (default: text)"
+    )
+    write.add_argument(
+        "-o",
+        "--output",
+        metavar="DIR",
+        help="write files into DIR (created when missing): <problem>.txt per problem, or domain.pddl and "
+        "<problem>.pddl; without it one problem's text, or its domain and problem, go to stdout",
+    )
+    write.add_argument("--debug", action="store_true", help="show the traceback of an error")
+    write.set_defaults(run=_write)
 
     info = sub.add_parser(
         "info",
@@ -193,7 +237,7 @@ def _search(task: mymyr.Task, a: argparse.Namespace, cancel: search.CancelToken)
         return search.anytime_astar(task, heuristic=h, weights=a.weights or (5, 3, 2, 1), **budget)
     if a.search == "brfs":
         return search.brfs(task, threads=a.threads, **budget)
-    width = {} if a.width is None else ({"width": a.width} if a.search == "astar_iw" else {"max_arity": a.width})
+    width = {} if a.width is None else ({"width": a.width} if a.search == "astar_iw" else {"max_width": a.width})
     if a.search == "iw":
         return search.iw(task, **width, **budget)
     if a.search == "siw":
@@ -226,14 +270,6 @@ def _cancellable(run: Callable[[search.CancelToken], Any]) -> Any:
     return out["result"]
 
 
-def _statistics(r: Any) -> tuple[int, int, int, float]:
-    """(expanded, generated, states, search seconds) of any of the searches' results."""
-    if isinstance(r, search.BrfsResult):
-        return r.expanded, r.generated, r.states, r.seconds
-    s = r.stats if isinstance(r, search.BestFirstResult) else r.total
-    return s.expanded, s.generated, s.states, s.seconds
-
-
 def _plan(a: argparse.Namespace) -> int:
     _check_options(a)
     t0 = time.perf_counter()
@@ -251,17 +287,20 @@ def _plan(a: argparse.Namespace) -> int:
             sys.stdout.write(text)
             sys.stdout.flush()
     if a.verbose:
-        expanded, generated, states, seconds = _statistics(r)
+        st = r.stats
         h = a.heuristic or DEFAULT_HEURISTIC.get(a.search)
         weight = f", weight {a.weight:g}" if a.weight is not None else ""
         lines = [
             f"search: {a.search}" + (f" with heuristic {h}" if h else "") + weight,
             f"status: {status}",
-            f"expanded: {expanded}",
-            f"generated: {generated}",
-            f"states: {states}",
-            f"time: {seconds:.3f} s search, {parse_s:.3f} s parse",
+            f"expanded: {st.expanded}",
+            f"generated: {st.generated}",
+            f"states: {st.states}",
+            f"pruned: {st.pruned}",
+            f"time: {st.seconds:.3f} s search, {parse_s:.3f} s parse",
         ]
+        if st.memory_bytes:
+            lines.append(f"memory: {st.memory_bytes / 2**20:.1f} MiB")
         if isinstance(r, search.EhcResult):
             e = r.ehc
             lines.append(
@@ -274,7 +313,7 @@ def _plan(a: argparse.Namespace) -> int:
             lines.append(f"iterations: {len(r.iterations)}, optimal: {'yes' if r.optimal else 'not proven'}")
         if text is not None:
             lines.append(f"plan length: {len(r.plan)}")
-            lines.append(f"cost: {_plan_cost(text)}")
+            lines.append(f"cost: {r.cost:g}")
         print("\n".join(lines), file=sys.stderr)
     if status == search.Status.SOLVED:
         return EXIT_SOLVED
@@ -292,10 +331,45 @@ def _plan(a: argparse.Namespace) -> int:
     raise UsageError(f"{a.search} cannot run on this task: {message}")
 
 
-def _plan_cost(text: str) -> str:
-    """The cost of the IPC plan text, from its last line "; cost = <c> (<kind> cost)"."""
-    last = text.rstrip().splitlines()[-1]
-    return last.split("=", 1)[1].split("(", 1)[0].strip() if "=" in last else "?"
+# ------------------------------------------------------------------------------------------------------- validate
+
+
+def _validate(a: argparse.Namespace) -> int:
+    task = mymyr.Task.from_pddl(a.domain, a.problem)
+    v = search.validate_plan(task, pathlib.Path(a.plan))
+    if v.valid:
+        n = len(v.plan)
+        print(f"valid plan: {n} action{'' if n == 1 else 's'}, cost {v.cost:g}")
+        return EXIT_SOLVED
+    print(f"mymyr: invalid plan: {v.message}", file=sys.stderr)
+    return EXIT_NO_PLAN
+
+
+# ---------------------------------------------------------------------------------------------------------- write
+
+
+def _write(a: argparse.Namespace) -> int:
+    if a.output is None and len(a.problems) > 1:
+        raise UsageError("several problems need --output DIR")
+    tasks = [mymyr.Task.from_pddl(a.domain, p) for p in a.problems]
+    stems = [pathlib.Path(p).stem for p in a.problems]
+    if len(set(stems)) < len(stems):
+        raise UsageError("the problem files' names (without suffix) must differ")
+    if a.format == "text":
+        files = {f"{s}.txt": t.to_text() for s, t in zip(stems, tasks)}
+    else:
+        domain, problems = mymyr.write_pddl(tasks)
+        if "domain" in stems:
+            raise UsageError("a problem file named domain.pddl would overwrite the domain")
+        files = {"domain.pddl": domain} | {f"{s}.pddl": p for s, p in zip(stems, problems)}
+    if a.output is None:
+        sys.stdout.write("\n".join(files.values()))
+        return EXIT_SOLVED
+    out = pathlib.Path(a.output)
+    out.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (out / name).write_text(text)
+    return EXIT_SOLVED
 
 
 # ----------------------------------------------------------------------------------------------------------- info

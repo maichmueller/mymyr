@@ -11,7 +11,7 @@
     r = mymyr.search.astar(task, goal=g)                       # goal=: ground conditions, any of which counts
     h = task.local()                                           # per-thread handle for hot Python loops
     exp = mymyr.rl.expand(task, states)                        # batched: flat CSR + padded view, zero-copy arrays
-    r = mymyr.search.iw(task, max_arity=2)                     # searches: iw, siw, brfs, astar, gbfs, beam
+    r = mymyr.search.iw(task, max_width=2)                     # searches: iw, siw, brfs, astar, gbfs, beam
     space = mymyr.datasets.state_space(task)                   # state spaces, samplers, object graphs
 """
 
@@ -32,6 +32,7 @@ from mymyr._core import (
     build_info,
     free_threaded_build,
     hash_rows,
+    write_pddl,
 )
 from mymyr._core._formalism import (
     Atom,
@@ -72,6 +73,7 @@ __all__ = [
     "hash_rows",
     "rl",
     "search",
+    "write_pddl",
 ]
 
 if hasattr(_core, "Domain"):  # built with the loki front end (MYMYR_FRONTEND, the default)
@@ -80,7 +82,10 @@ if hasattr(_core, "Domain"):  # built with the loki front end (MYMYR_FRONTEND, t
     __all__.append("Domain")
 
 
-_PACKAGE_DIR = _os.path.dirname(_os.path.abspath(__file__))
+# The installed C++ package (headers, CMake package, libraries) sits next to the compiled extension: in a wheel that
+# is this package's directory, in an editable install the package directory in site-packages, while the Python
+# sources stay in the source tree.
+_INSTALL_DIR = _os.path.dirname(_os.path.abspath(_core.__file__))
 
 
 def get_include() -> str:
@@ -89,9 +94,9 @@ def get_include() -> str:
     The C++ package is a source-level interface: consumers compile with C++26 (GCC 16, or clang 22 with libc++) and
     the C++ standard library the wheel was built with (libstdc++ on Linux, libc++ on macOS), and are rebuilt when
     mymyr changes. The plain-C API in ``mymyr/ext.h`` is the stable binary interface. The directory exists in an
-    installed wheel, not in an editable or in-tree install.
+    installed wheel and in an editable install (``pip install -e``), not in an in-tree build.
     """
-    return _os.path.join(_PACKAGE_DIR, "include")
+    return _os.path.join(_INSTALL_DIR, "include")
 
 
 def get_cmake_dir() -> str:
@@ -100,6 +105,7 @@ def get_cmake_dir() -> str:
     ``mymyr::encoding`` and ``mymyr::frontend`` (and ``mymyr::cuda`` in a CUDA wheel). The libraries are static and carry their
     dependencies, so nothing else needs to be installed.
 
-    Like :func:`get_include`, this is a source-level interface that needs C++26; it exists in an installed wheel only.
+    Like :func:`get_include`, this is a source-level interface that needs C++26; it exists in an installed wheel and
+    in an editable install.
     """
-    return _os.path.join(_PACKAGE_DIR, "lib", "cmake", "mymyr")
+    return _os.path.join(_INSTALL_DIR, "lib", "cmake", "mymyr")

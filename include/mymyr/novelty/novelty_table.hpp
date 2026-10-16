@@ -19,7 +19,7 @@
 //     C(a_1, 1) + C(a_2, 2) + ... + C(a_j, j), a bijection onto 0 .. C(n, j) - 1 for atoms below n that does not
 //     depend on n. Dense, a bit table of C(capacity, j) bits indexed by the rank (j! times smaller than a mixed-radix
 //     table, and growing the capacity only appends zero bits); sparse, an open-addressing set of the 64-bit ranks, or
-//     of 128-bit packed tuples when C(max_atoms, j) does not fit in 64 bits (the idea is from tyr's novelty table).
+//     of 128-bit packed tuples when C(max_atoms, j) does not fit in 64 bits.
 // A level is dense while its bit table fits in TableOptions::max_dense_bytes. Tables grow with the slot count (lazy
 // slots, 1.5x; level 2 copies its rows); a level whose dense table would exceed the budget switches to sparse, one
 // way.

@@ -5,6 +5,7 @@
 #include "mymyr/search/brfs.hpp"
 
 #include "beam_detail.hpp"
+#include "iw_detail.hpp"
 #include "layer_order_detail.hpp"
 
 #include "mymyr/core/team.hpp"
@@ -101,16 +102,29 @@ constexpr u32 k_no_goal = ~u32{0};
 class Control
 {
 public:
-    Control(const BrfsOptions& o, search::SearchObserver* obs)
+    Control(const Task& task, const BrfsOptions& o, search::SearchObserver* obs)
         : m_o(o), m_obs(obs), m_timed(o.max_seconds < std::numeric_limits<double>::infinity()),
-          m_next_progress(std::max<u64>(1, o.progress_interval))
+          m_next_progress(std::max<u64>(1, o.progress_interval)), m_blocked(o.blocked_states),
+          m_start(o.start ? *o.start : task.initial_state())
     {
+        if (o.start && o.start->numeric_words() != task.numeric_words())
+            throw std::invalid_argument("mymyr brfs: the start state has no numeric values of this task");
+        for (const State& b : o.blocked_states)
+            if (b.numeric_words() != task.numeric_words())
+                throw std::invalid_argument("mymyr brfs: a blocked state has no numeric values of this task");
         if (m_timed)
             m_deadline = m_t0 + std::chrono::duration_cast<Clock::duration>(
                                     std::chrono::duration<double>(std::max(0.0, o.max_seconds)));
     }
 
     [[nodiscard]] search::SearchObserver* observer() const { return m_obs; }
+    /// The search's start state (BrfsOptions::start, else the task's initial state).
+    [[nodiscard]] const State& start_state() const { return m_start; }
+    /// Whether a successor is a blocked state (compared by content). Read-only: safe from every thread.
+    [[nodiscard]] bool blocked(const u64* w, u32 n, const u64* num, u32 nn) const
+    {
+        return !m_blocked.empty() && m_blocked.contains(StateView{w, n, num, nn});
+    }
     [[nodiscard]] Clock::time_point deadline() const { return m_deadline; }
     [[nodiscard]] bool timed() const { return m_timed; }
 
@@ -123,6 +137,11 @@ public:
     /// Before an expansion: false once max_seconds, the token or on_progress stops the search.
     bool keep_going(const BrfsResult& r, u64 states)
     {
+        if (r.expanded >= m_o.max_expanded)
+        {
+            stop(search::SearchStatus::OutOfStates);
+            return false;
+        }
         if (--m_countdown != 0) [[likely]]
             return true;
         m_countdown = k_check_every;
@@ -179,12 +198,16 @@ public:
         else if (m_stopped)
             r.status = *m_stopped;
         else
-            r.status = r.exhausted ? search::SearchStatus::Exhausted : search::SearchStatus::OutOfStates;
+            // a search max_depth cut ran out of states as well (as the other searches report it)
+            r.status = r.exhausted || r.layers >= m_o.max_depth ? search::SearchStatus::Exhausted
+                                                                : search::SearchStatus::OutOfStates;
         if (!m_obs)
             return;
         if (r.solved)
-            m_obs->on_solution(r.plan, static_cast<double>(r.plan.size()));
-        m_obs->on_end(r.status, statistics(r.expanded, r.generated, r.states));
+            m_obs->on_solution(r.plan, r.cost);
+        search::SearchStatistics st = statistics(r.expanded, r.generated, r.states);
+        st.pruned = r.pruned;
+        m_obs->on_end(r.status, st);
     }
 
 private:
@@ -198,6 +221,8 @@ private:
     u32 m_countdown = 1;
     u32 m_transitions = search::k_check_transitions;
     std::optional<search::SearchStatus> m_stopped;
+    search::detail::BlockedSet m_blocked;
+    State m_start;
 };
 
 /// The action of a successor as the observer gets it.
@@ -254,7 +279,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
     const u32 NN = task.numeric_words();
     FlatStateStore store(std::max<u32>(1, task.words()), 16, NN);
     Nodes nodes;
-    const State& s0 = task.initial_state();
+    const State& s0 = ctl.start_state();
     store.insert(s0.view());
     nodes.root();
     std::vector<u64> cur, next;
@@ -322,6 +347,13 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
                     return false;
                 ++r.generated;
                 const u32 nn = apply_delta(cur.data(), n, d, next);
+                if (ctl.blocked(next.data(), nn, d.num, NN))
+                {
+                    ++r.pruned;
+                    if constexpr (Observed)
+                        obs->on_prune(id, action_of(succ, s, b), {next.data(), nn, d.num, NN});
+                    return true;
+                }
                 const auto [child, fresh] = store.insert(next.data(), nn, d.num);
                 if constexpr (Observed)
                     obs->on_generate(id, action_of(succ, s, b), child.v, {next.data(), nn, d.num, NN}, fresh);
@@ -363,7 +395,6 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
         r.solved = true;
         r.plan = nodes.plan(first_goal, succ);
     }
-    ctl.finish(r);
     return r;
 }
 
@@ -377,7 +408,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
     const u32 NN = task.numeric_words();
     ChunkedStateStore store(std::max<u32>(1, task.words()), NN);
     Nodes nodes;
-    const State& s0 = task.initial_state();
+    const State& s0 = ctl.start_state();
     store.insert(s0.view());
     nodes.root();
     std::vector<u64> cur, next, curnum(NN), scratch;
@@ -465,6 +496,13 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
                         bits::reset(next.data(), x.v);
                 for (SlotId x : d.add)
                     bits::set(next.data(), x.v);
+                if (ctl.blocked(next.data(), bits::trimmed_size(next.data(), W), d.num, NN))
+                {
+                    ++r.pruned;
+                    if constexpr (Observed)
+                        obs->on_prune(id, action_of(succ, s, b), {next.data(), bits::trimmed_size(next.data(), W), d.num, NN});
+                    return true;
+                }
                 const auto [child, fresh] = store.insert_successor(StateId{id}, cur.data(), next.data(), d);
                 if constexpr (Observed)
                     obs->on_generate(id, action_of(succ, s, b), child.v,
@@ -513,7 +551,6 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
         r.solved = true;
         r.plan = nodes.plan(first_goal, succ);
     }
-    ctl.finish(r);
     return r;
 }
 
@@ -542,7 +579,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
             return Store(std::max<u32>(1, task.words()), NN);
     }();
     Nodes nodes;
-    const State& s0 = task.initial_state();
+    const State& s0 = ctl.start_state();
     store.insert(s0.view());
     nodes.root();
     ctl.start(s0.view());
@@ -577,6 +614,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
     std::vector<u32> order, keys;
     std::vector<Expansion> exps;
     std::vector<std::vector<u64>> mcur(members), mnum(members), mnext(members);
+    std::vector<u64> mpruned(members, 0);  // blocked successors per member
     std::vector<std::vector<u32>> mids(members);  // chunked: find_successor's scratch
     struct Ref
     {
@@ -620,6 +658,11 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
                 }
                 const u32 seq = x.transitions++;
                 const u32 nn = apply_delta(cv.w, cv.nw, d, nx);
+                if (ctl.blocked(nx.data(), nn, d.num, NN))
+                {
+                    ++mpruned[t];
+                    return true;
+                }
                 if (!relaxed)
                 {
                     // stored before the batch (the store is only read meanwhile): its insert would find it
@@ -846,6 +889,8 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
     r.search_s = seconds_since(t0);
     r.exhausted = exhausted;
     r.states = store.size();
+    for (const u64 p : mpruned)
+        r.pruned += p;
     if constexpr (flat)
         r.words = store.stride();
     else
@@ -865,7 +910,6 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
         r.solved = true;
         r.plan = nodes.plan(first_goal, succ);
     }
-    ctl.finish(r);
     return r;
 }
 
@@ -886,7 +930,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
             keys.push_back({hash::mix64(2 * c + 1 + 0x9E3779B97F4A7C15ULL), hash::mix64(2 * c + 2 + 0x9E3779B97F4A7C15ULL)});
         }
     };
-    const State& s0 = task.initial_state();
+    const State& s0 = ctl.start_state();
     const u32 NN = task.numeric_words();
     // numeric tasks: the stored fingerprint also covers the numeric words (the layer keeps the atom part for updates)
     auto key_of = [&](Fingerprint128 f, const u64* num)
@@ -991,6 +1035,14 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
                             bits::reset(next.data(), x.v);
                     for (SlotId x : d.add)
                         bits::set(next.data(), x.v);
+                    if (ctl.blocked(next.data(), bits::trimmed_size(next.data(), W), d.num, NN))
+                    {
+                        ++r.pruned;
+                        if constexpr (Observed)
+                            obs->on_prune(pid, action_of(succ, s, b),
+                                          {next.data(), bits::trimmed_size(next.data(), W), d.num, NN});
+                        return true;
+                    }
                     Fingerprint128 f = cf;
                     if (tog.size() < W)
                         tog.resize(W, 0);
@@ -1056,7 +1108,6 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
         r.solved = true;
         r.plan = nodes.plan(first_goal, succ);
     }
-    ctl.finish(r);
     return r;
 }
 
@@ -1067,7 +1118,7 @@ struct alignas(64) ThreadState
     Successors* succ = nullptr;
     search::SearchObserver* obs = nullptr;  // the thread's observer (BrfsOptions::observer, make_worker)
     std::vector<u64> next;
-    u64 generated = 0, goals = 0, expanded = 0;
+    u64 generated = 0, goals = 0, expanded = 0, pruned = 0;
     u64 next_progress = 0;
     u32 tick = 0;
     u32 transitions = 0;  // since the last check of the time and the token inside an expansion
@@ -1104,7 +1155,7 @@ public:
         r.store = "concurrent";
         r.threads = m_T;
         const auto t0 = Clock::now();
-        const State& s0 = m_task.initial_state();
+        const State& s0 = m_ctl.start_state();
         m_loc.push_back(m_store.insert(0, s0.data(), s0.size_words(), ~u64{0}, s0.numeric().data()).first);
         m_stored.store(1, std::memory_order_relaxed);
         m_ctl.start(s0.view());
@@ -1176,6 +1227,7 @@ public:
             r.generated += w.generated;
             r.goal_states += w.goals;
             r.expanded += w.expanded;
+            r.pruned += w.pruned;
         }
         r.store_bytes = m_store.bytes() + m_loc.capacity() * sizeof(u32);
         if (m_o.fingerprint)
@@ -1198,7 +1250,6 @@ public:
         for (u64 id = m_layer_hi > 64 ? m_layer_hi - 64 : 0; id < m_layer_hi; ++id)
             maxw = std::max(maxw, m_store.record(m_loc[id]).nw);
         r.words = maxw;
-        m_ctl.finish(r);
         return r;
     }
 
@@ -1266,6 +1317,8 @@ private:
         ThreadState& w = m_ws[t];
         if (m_halt.load(std::memory_order_relaxed))
             return false;
+        if (m_o.max_expanded != ~u64{0} && m_expansions.fetch_add(1, std::memory_order_relaxed) >= m_o.max_expanded)
+            return halt(search::SearchStatus::OutOfStates);
         if ((w.tick++ & 7) == 0)
         {
             if (m_ctl.timed() && Clock::now() >= m_ctl.deadline())
@@ -1329,6 +1382,12 @@ private:
                 }
                 const u32 kk = k++;
                 const u32 nn = apply_delta(rec.w, rec.nw, d, w.next);
+                if (m_ctl.blocked(w.next.data(), nn, d.num, m_task.numeric_words()))
+                {
+                    ++w.generated;
+                    ++w.pruned;
+                    return true;
+                }
                 bool fresh;
                 if (bounded)
                 {
@@ -1488,6 +1547,7 @@ private:
     std::atomic<bool> m_stop{false};
     std::atomic<u64> m_goal{~u64{0}};  // the smallest id of a goal state expanded
     std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress, states)
+    std::atomic<u64> m_expansions{0};  // expansions begun, when max_expanded is finite
     std::atomic<u64> m_stored{0};  // states stored, when max_states is finite (ConcurrentStateStore::insert_bounded)
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;
@@ -1534,7 +1594,7 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
     if (ordered && store != BrfsOptions::Store::Flat && store != BrfsOptions::Store::Chunked)
         throw std::invalid_argument("mymyr brfs: ordered layers need the flat or chunked store");
     BrfsResult r;
-    Control ctl(options, options.observer);
+    Control ctl(task, options, options.observer);
     if (beam && (T > 1 || relaxed))
         r = store == BrfsOptions::Store::Flat ? run_beam<FlatStateStore>(task, options, T, ctl)
                                               : run_beam<ChunkedStateStore>(task, options, T, ctl);
@@ -1585,7 +1645,19 @@ BrfsResult brfs(const Task& task, const BrfsOptions& options)
                 break;
         }
     }
+    if (r.solved)
+    {
+        // the cost under the task's metric and the goal state, by replaying the plan from the start state
+        const WorkspaceLease lease = task.workspace();
+        Successors& succ = lease->successors();
+        r.cost = search::detail::PlanCost(task).apply(succ, ctl.start_state(), r.plan);
+        State s = ctl.start_state();
+        for (const Action& a : r.plan)
+            s = succ.apply(s.view(), a.label());
+        r.goal_state = std::move(s);
+    }
     r.fluent_slots = task.atoms().fluent_slots();
+    ctl.finish(r);
     return r;
 }
 }  // namespace mymyr

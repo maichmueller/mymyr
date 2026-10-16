@@ -223,9 +223,12 @@ class SymbolicSpace(gymnasium.Space):
 
     @property
     def is_np_flattenable(self) -> bool:
+        """False: the space has no flat numpy form (gymnasium.spaces.flatten does not apply)."""
         return False
 
     def sample(self, mask: Any = None, probability: Any = None) -> SymbolicObservation:
+        """The observation of the initial state of a uniformly drawn instance. Raises ValueError for a mask or
+        probabilities."""
         if mask is not None or probability is not None:
             raise ValueError("mymyr: a SymbolicSpace samples without masks")
         tasks = self._observer.problems.tasks
@@ -233,6 +236,7 @@ class SymbolicSpace(gymnasium.Space):
         return self._observer.observe(tasks[t].initial_state, t)
 
     def contains(self, x: Any) -> bool:
+        """Whether ``x`` is a SymbolicObservation with this space's fields over its instances' predicates."""
         if not isinstance(x, SymbolicObservation):
             return False
         if any((value is not None) != wanted for value, wanted in zip(x, self._fields)):
@@ -294,9 +298,13 @@ class GroundActionSpace(gymnasium.Space):
 
     @property
     def is_np_flattenable(self) -> bool:
+        """False: the space has no flat numpy form (gymnasium.spaces.flatten does not apply)."""
         return False
 
     def sample(self, mask: Any = None, probability: Any = None) -> Action:
+        """A uniformly drawn applicable action of the current state (without one: an action of the current instance,
+        not applicable there). Raises ValueError for a mask or probabilities, or when the instance has no ground
+        action."""
         if mask is not None or probability is not None:
             raise ValueError("mymyr: a GroundActionSpace samples without masks")
         t, actions = self._current()
@@ -312,6 +320,7 @@ class GroundActionSpace(gymnasium.Space):
         raise ValueError("mymyr: the instance has no ground action to sample (no objects for its schemas)")
 
     def contains(self, x: Any) -> bool:
+        """Whether ``x`` is an Action of the current instance's Task (applicable or not)."""
         if not isinstance(x, Action):
             return False
         t, _ = self._current()
@@ -467,7 +476,7 @@ def check_action_mode(mode: str) -> str:
     return mode
 
 
-def env_config(max_steps: int, step_reward: float, goal_reward: float, dead_end: str, dead_end_reward: float,
+def env_config(max_steps: int | None, step_reward: float, goal_reward: float, dead_end: str, dead_end_reward: float,
                dead_end_terminal: bool) -> dict:
     """The CpuEnvPool keywords of the RL contract."""
     return dict(max_steps=max_steps, step_reward=step_reward, goal_reward=goal_reward, dead_end=dead_end,

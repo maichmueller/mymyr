@@ -33,7 +33,7 @@ def test_stubs_parse_and_are_typed():
     for p in d.glob("*.pyi"):
         ast.parse(p.read_text(), filename=str(p))
     search = (d / "_search.pyi").read_text()
-    assert "def iw(task: mymyr._core.Task | mymyr._core.TaskHandle, *, max_arity: int = 2," in search
+    assert "def iw(task: mymyr._core.Task | mymyr._core.TaskHandle, *, max_width: int = 2," in search
     assert "max_seconds: float | None = None" in search
     assert "cancel: CancelToken | None = None" in search
     assert (
@@ -46,7 +46,7 @@ def test_stubs_parse_and_are_typed():
     # the IW family variants, landmarks and relaxed reachability (search_bindings.cpp, landmarks_bindings.cpp)
     task = "task: mymyr._core.Task | mymyr._core.TaskHandle"
     landmarks = "landmarks: FactLandmarkGraph | Literal['approximate', 'lifted'] | None = None"
-    assert f"def liw({task}, *, max_arity: int = 2, {landmarks}, disjunctive: bool = False," in search
+    assert f"def liw({task}, *, max_width: int = 2, {landmarks}, disjunctive: bool = False," in search
     assert f"def abstracted_iw({task}, *, width: int = 1, base_abstracted: bool = False," in search
     assert f"def astar_iw({task}, *, heuristic:" in search
     assert "features: str = 'classical'" in search
@@ -68,7 +68,7 @@ def test_stubs_parse_and_are_typed():
     assert search.count(beam) == 7  # iw, iw_pass, siw, brfs, liw, abstracted_iw, projective_iw
     assert search.count("beam_chunk: int = 1024, threads: int = 1") == 6  # all but brfs (threads first)
     assert f"def rollout_iw({task}, *, ordering: ActionOrdering | str = ActionOrdering.IN_ORDER, seed: int = 0," in search
-    assert f"def find_rollouts_parallel({task}, seeds: Sequence[int], *, max_arity: int = 2, num_threads: int = 0," in search
+    assert f"def find_rollouts_parallel({task}, seeds: Sequence[int], *, max_width: int = 2, threads: int = 1," in search
     rollouts = "results: ParallelRolloutsResult | Sequence[RolloutResult]"
     assert f"def intersect_co_occurrence({rollouts}) -> dict[mymyr._core._formalism.GroundAtom, list[mymyr._core._formalism.GroundAtom]]" in search
     assert f"def merge_landing_states({rollouts}) -> MergedLandingStates" in search
@@ -78,7 +78,7 @@ def test_stubs_parse_and_are_typed():
     assert "def rollout_statuses(self) -> list[Status | None]" in search
     assert "def winning_worker(self) -> int | None" in search
     assert f"def lifted_fact_landmarks({task}, *, reachability: RelaxedReachability | None = None," in search
-    assert ") -> WitnessQuery: ..." in search
+    assert ") -> WitnessQuery:" in search
     for name, result in (("astar_iw", "AStarIwResult"), ("liw", "IwResult"), ("abstracted_iw", "IwResult"), ("projective_iw", "IwResult"),
                          ("rollout_iw", "RolloutIwResult"), ("find_rollouts_parallel", "ParallelRolloutsResult"),
                          ("atomic_goal_portfolio", "PortfolioResult"), ("approximate_fact_landmarks", "FactLandmarkGraph"),
@@ -147,7 +147,7 @@ def test_stubs_parse_and_are_typed():
     # the XLA FFI environments, the RL helpers and the random policy's actions
     assert "def random_actions(self, draws: mymyr._typing.SupportsDLPack, count: mymyr._typing.SupportsDLPack," in env
     jx = (d / "_rl_jax.pyi").read_text()
-    assert "witness: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto') -> None" in jx
+    assert "witness_pruning: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto') -> None" in jx
     assert "def ffi_targets() -> list[tuple[str, str, dict[str, types.CapsuleType], bool]]" in jx
     assert "def initial_states(self) -> list[int]" in jx and "def initial_counts(self) -> list[int]" in jx
     # task tables, per-row task ids, the CPU pool
@@ -160,16 +160,16 @@ def test_stubs_parse_and_are_typed():
         assert ("def from_pddl(domain: mymyr._core.Domain | str | os.PathLike, problems: str | os.PathLike | "
                 "Sequence[str | os.PathLike], *, atoms: str = 'auto',") in rl
         assert ("numeric_storage: str = 'auto', numeric_quantum: float = 0.0, numeric_tolerant: bool = False, "
-                "reachability_budget: int = 33554432, threads: int | None = None) -> TaskTable:") in rl
+                "reachability_budget: int = 33554432, threads: int = 1) -> TaskTable:") in rl
     # knowledge bases and tuple graphs
     ds = (d / "_datasets.pyi").read_text()
-    assert ("def tuple_graphs(space: StateSpace, *, width: int = 0, dominance_pruning: bool = True, threads: int = 0) -> "
+    assert ("def tuple_graphs(space: StateSpace, *, width: int = 0, dominance_pruning: bool = True, threads: int = 1) -> "
             "list[TupleGraph]:") in ds
     assert "def tuple_graph(space: StateSpace, vertex: int, *, width: int = 0, dominance_pruning: bool = True) -> TupleGraph:" in ds
     assert "def atoms(self, vertex: int) -> list[mymyr._core._formalism.GroundAtom]:" in ds
     assert "def arrays(self, framework: Literal['numpy', 'torch', 'jax', 'dlpack'] | None = None) -> dict[str, Any]:" in ds
     kb = ("def __init__(self, tasks: mymyr._core._rl.TaskTable | Sequence[mymyr._core.Task | mymyr._core.TaskHandle], *, "
-          "threads: int = 0, max_states: int | None = None,")
+          "threads: int = 1, max_states: int | None = None,")
     assert kb in ds
     assert "generalized: bool = False, width: int | None = None, dominance_pruning: bool = True) -> None:" in ds
     assert "def generalized_state_space(self) -> GeneralizedStateSpace | None:" in ds
@@ -187,8 +187,8 @@ def test_stubs_parse_and_are_typed():
     assert "def domain_of(self) -> list[int]" in rl and "def global_id(self, domain: int, local: int) -> int" in rl
     assert "def __getstate__(self) -> tuple[list[mymyr._core.Task]]" in rl
     suite = "table: TaskSuite | TaskTable | mymyr._core.Task | mymyr._core.TaskHandle"
-    assert f"def __init__(self, {suite}, num_envs: int, *, threads: int = 0," in rl
-    assert f"def fast_unsupported({table}, *, canonical: bool = True," in env
+    assert f"def __init__(self, {suite}, num_envs: int, *, threads: int = 1," in rl
+    assert f"def fast_unsupported({table}, *, canonical_order: bool = True," in env
     assert "def recv(self, min_rows: int = 0) -> PoolBatch" in rl and "class CpuEnvPool:" in rl
     assert f"def __init__(self, {table}, *, device: int | None = None," in jx
     assert ": object" not in rl and "-> object" not in rl and "-> list:" not in rl and "-> dict:" not in rl
@@ -213,7 +213,8 @@ def test_cuda_stubs_are_typed():
     assert "def padded(self) -> DevicePaddedExpansion | None" in cuda
     assert "def actions(self, state: int) -> list[mymyr._core.Action]" in cuda
     assert "def status(self) -> mymyr._core._search.Status" in cuda
-    assert "def stats(self) -> dict[str, float | int]" in cuda
+    assert "def stats(self) -> mymyr._core._search.Statistics" in cuda
+    assert "def counters(self) -> dict[str, float | int]" in cuda
     # multi-search IW, rollouts, batched IW(1)
     goal = "mymyr._core._formalism.GroundCondition | tuple[Sequence[int], Sequence[int]]"
     goals = f"goals: Sequence[{goal}] | None = None"
@@ -233,11 +234,11 @@ def test_cuda_stubs_are_typed():
     assert "heuristic: Literal['blind', 'max', 'add', 'ff', 'h2', 'set_additive'] = 'max', costs: Literal['auto', 'unit', 'real'] = 'auto'" in cuda
     assert "variant: Literal['auto', 'sweep', 'frontier'] = 'auto') -> DeviceSearchResult" in cuda
     assert "def stats(self) -> mymyr._core._search.Statistics" in cuda
-    assert "def device(self) -> dict[str, float | int | bool | str]" in cuda
+    assert "def counters(self) -> dict[str, float | int | bool | str]" in cuda
     # device state spaces, IW over task tables, samplers over device spaces
     table = "mymyr._core._rl.TaskTable | mymyr._core.Task | mymyr._core.TaskHandle"
     ids = "task_ids: mymyr._typing.SupportsDLPack | Sequence[int] | None = None"
-    dss = f"ctx: Context | None = None, device: int | None = None, {stream}, threads: int = 0"
+    dss = f"ctx: Context | None = None, device: int | None = None, {stream}, threads: int = 1"
     assert f"def state_space(task: mymyr._core.Task | mymyr._core.TaskHandle, *, {dss}," in cuda
     assert ") -> DeviceStateSpace | None:" in cuda
     assert f"def state_spaces(table: {table}, *, {dss}," in cuda

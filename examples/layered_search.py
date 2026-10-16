@@ -16,4 +16,4 @@ result = search.brfs(
     beam_novelty="survivors_only",
     seed=0,
 )
-print(result.status, result.solved, len(result.plan), result.states)
+print(result.status, result.solved, len(result.plan), result.stats.states)

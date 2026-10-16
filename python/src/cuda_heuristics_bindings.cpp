@@ -274,7 +274,7 @@ StatsDict heuristic_stats(const cuda::DeviceHeuristicStats& s)
     d["ground_actions"] = u64{s.ground_actions};
     d["grounding_seconds"] = s.grounding_seconds;
     d["variant"] = std::string(cuda::to_string(s.variant));
-    d["threads"] = u64{s.threads};
+    d["block_threads"] = u64{s.threads};
     d["blocks"] = u64{s.blocks};
     d["warp_groups"] = s.warp_groups;
     d["shared"] = s.shared;
@@ -393,15 +393,15 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
         .def(
             "__init__",
             [](PyDeviceHeuristic* self, TaskArg task, EvalKindArg kind, CostsArg costs, ContextArg ctx, VariantArg variant,
-               IntArg threads, BoolArg warp_groups, IntArg max_blocks, bool force_global,
+               IntArg block_threads, BoolArg warp_groups, IntArg max_blocks, bool force_global,
                IntArg max_operators, IntArg max_scratch_bytes) {
                 const Owner o = owner_of(task);
                 cuda::DeviceHeuristicOptions ho;
                 ho.kind = kind_of(kind, "kind");
                 ho.costs = costs_of(costs);
                 ho.variant = variant_of(variant);
-                if (!threads.is_none())
-                    ho.threads = int_arg<u32>(threads, "threads");
+                if (!block_threads.is_none())
+                    ho.threads = int_arg<u32>(block_threads, "block_threads");
                 if (!warp_groups.is_none())
                     ho.warp_groups = nb::cast<bool>(warp_groups) ? 1 : 0;
                 if (!max_blocks.is_none())
@@ -422,7 +422,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                 self->h = std::move(h);
             },
             "task"_a, "kind"_a = "ff", nb::kw_only(), "costs"_a = "auto", "ctx"_a = nb::none(), "variant"_a = "auto",
-            "threads"_a = nb::none(), "warp_groups"_a = nb::none(), "max_blocks"_a = nb::none(), "force_global"_a = false,
+            "block_threads"_a = nb::none(), "warp_groups"_a = nb::none(), "max_blocks"_a = nb::none(), "force_global"_a = false,
             "max_operators"_a = nb::none(), "max_scratch_bytes"_a = nb::none(),
             "kind: 'max', 'add', 'ff', 'h2' or 'set_additive'; costs: 'auto' (the default: the task's objective, 'unit' for a "
             "task without action costs and metric, else 'real'), 'unit' (every action 1) or 'real' (the task's action costs). The launch "
@@ -445,7 +445,8 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
             "state"_a,
             "The CPU reference of the device's value (h_max, h_add, h²: mymyr.search.Heuristic's; h_FF, set-additive: the device's "
             "supporter rule on the CPU); inf for dead ends.")
-        .def_prop_ro("kind", [](const PyDeviceHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); })
+        .def_prop_ro("kind", [](const PyDeviceHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); },
+                     "The heuristic: 'max', 'add', 'ff', 'h2' or 'set_additive'.")
         .def_prop_ro("stats", [](const PyDeviceHeuristic& self) { return heuristic_stats(self.h->stats()); },
                      "evaluations, launches, CPU fallbacks, the grounding's size and the resolved launch configuration")
         .def("__repr__", [](const PyDeviceHeuristic& self) {
@@ -458,29 +459,48 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
     nb::class_<PyDeviceSearchResult>(m, "DeviceSearchResult",
                                      "The result of mymyr.cuda.astar / gbfs: what mymyr.search.BestFirstResult reports, and "
                                      "the device statistics.")
-        .def_prop_ro("status", [](const PyDeviceSearchResult& x) { return x.r.result.status; })
-        .def_prop_ro("solved", [](const PyDeviceSearchResult& x) { return x.r.result.status == search::SearchStatus::Solved; })
-        .def_prop_ro("plan", [](const PyDeviceSearchResult& x) { return plan_list(x.o, x.r.result.plan); })
-        .def_prop_ro("cost", [](const PyDeviceSearchResult& x) { return x.r.result.cost; })
+        .def_prop_ro("status", [](const PyDeviceSearchResult& x) { return x.r.result.status; },
+                     "How the search ended (mymyr.search.Status).")
+        .def_prop_ro("solved", [](const PyDeviceSearchResult& x) { return x.r.result.status == search::SearchStatus::Solved; },
+                     "True when status is Status.SOLVED (there is a plan).")
+        .def_prop_ro("plan", [](const PyDeviceSearchResult& x) { return plan_list(x.o, x.r.result.plan); },
+                     "The plan: a list of Actions from the start state to a goal state (empty without a plan).")
+        .def_prop_ro("cost", [](const PyDeviceSearchResult& x) { return x.r.result.cost; },
+                     "The plan's cost under the task's metric (0.0 without a plan).")
         .def_prop_ro("goal_state",
                      [](const PyDeviceSearchResult& x) -> Arg<std::optional<PyState>> {
                          if (!x.r.result.goal_state)
                              return Arg<std::optional<PyState>>(nb::none());
                          return Arg<std::optional<PyState>>(make_state(x.o, State(*x.r.result.goal_state)));
-                     })
-        .def_prop_ro("stats", [](const PyDeviceSearchResult& x) { return x.r.result.stats; })
-        .def_prop_ro("evaluations", [](const PyDeviceSearchResult& x) { return x.r.result.evaluations; })
-        .def_prop_ro("dead_ends", [](const PyDeviceSearchResult& x) { return x.r.result.dead_ends; })
-        .def_prop_ro("reopened", [](const PyDeviceSearchResult& x) { return x.r.result.reopened; })
-        .def_prop_ro("initial_h", [](const PyDeviceSearchResult& x) { return x.r.result.initial_h; })
-        .def_prop_ro("heuristic", [](const PyDeviceSearchResult& x) { return x.r.result.heuristic; })
-        .def_prop_ro("setup_seconds", [](const PyDeviceSearchResult& x) { return x.r.result.setup_seconds; })
-        .def_prop_ro("algorithm", [](const PyDeviceSearchResult& x) { return x.r.result.algorithm; })
-        .def_prop_ro("store", [](const PyDeviceSearchResult& x) { return x.r.result.store; })
-        .def_prop_ro("queue", [](const PyDeviceSearchResult& x) { return x.r.result.queue; })
-        .def_prop_ro("message", [](const PyDeviceSearchResult& x) { return x.r.result.message; })
-        .def_prop_ro("device", [](const PyDeviceSearchResult& x) { return device_stats(x.r.device); },
-                     "steps (graph / host-driven), device loops, captures, aborts, chunks, popped / stale entries, the largest batch, "
+                     },
+                     "The State the plan reaches (None without a plan).")
+        .def_prop_ro("stats",
+                     [](const PyDeviceSearchResult& x) {
+                         search::SearchStatistics s = x.r.result.stats;
+                         s.memory_bytes = std::max(s.memory_bytes, x.r.result.store_bytes);
+                         return s;
+                     },
+                     "The search's counts and time (mymyr.search.Statistics; memory_bytes: the device store).")
+        .def_prop_ro("evaluations", [](const PyDeviceSearchResult& x) { return x.r.result.evaluations; },
+                     "Heuristic evaluations by the search.")
+        .def_prop_ro("dead_ends", [](const PyDeviceSearchResult& x) { return x.r.result.dead_ends; },
+                     "States the heuristic rated +inf.")
+        .def_prop_ro("reopened", [](const PyDeviceSearchResult& x) { return x.r.result.reopened; },
+                     "A*: states whose g decreased after they were opened.")
+        .def_prop_ro("initial_h", [](const PyDeviceSearchResult& x) { return x.r.result.initial_h; },
+                     "The heuristic value of the start state.")
+        .def_prop_ro("heuristic", [](const PyDeviceSearchResult& x) { return x.r.result.heuristic; },
+                     "The evaluator's counts when the search ended (HeuristicStatistics).")
+        .def_prop_ro("setup_seconds", [](const PyDeviceSearchResult& x) { return x.r.result.setup_seconds; },
+                     "Seconds spent building the device heuristic and uploading the task, before the search.")
+        .def_prop_ro("algorithm", [](const PyDeviceSearchResult& x) { return x.r.result.algorithm; },
+                     "The search that ran, e.g. 'astar_eager' or 'gbfs'.")
+        .def_prop_ro("store", [](const PyDeviceSearchResult& x) { return x.r.result.store; }, "The state store used.")
+        .def_prop_ro("queue", [](const PyDeviceSearchResult& x) { return x.r.result.queue; }, "The open list used.")
+        .def_prop_ro("message", [](const PyDeviceSearchResult& x) { return x.r.result.message; },
+                     "Why the search stopped early or could not run (empty when it ran to its end).")
+        .def_prop_ro("counters", [](const PyDeviceSearchResult& x) { return device_stats(x.r.device); },
+                     "A dict of device counters: steps (graph / host-driven), device loops, captures, aborts, chunks, popped / stale entries, the largest batch, "
                      "device bytes, host and heuristic times")
         .def("__repr__", [](const PyDeviceSearchResult& x) {
             const search::BestFirstResult& r = x.r.result;

@@ -53,7 +53,7 @@ def meddle(task, state):
 
 def nested_searches(task):
     budget = {"max_states": 200, "max_expanded": 100}
-    for r in (search.brfs(task, max_states=200), search.iw(task, max_arity=1, **budget), search.astar(task, **budget)):
+    for r in (search.brfs(task, max_states=200), search.iw(task, max_width=1, **budget), search.astar(task, **budget)):
         if r.solved:
             assert replays(task, r.plan)
 
@@ -98,8 +98,8 @@ class Meddler(Observer):
 
 
 RUNS = {
-    "iw": lambda t, o: search.iw(t, max_arity=2, observer=o),
-    "siw": lambda t, o: search.siw(t, max_arity=2, observer=o),
+    "iw": lambda t, o: search.iw(t, max_width=2, observer=o),
+    "siw": lambda t, o: search.siw(t, max_width=2, observer=o),
     "brfs": lambda t, o: search.brfs(t, stop_at_goal=True, observer=o),
     "brfs_chunked": lambda t, o: search.brfs(t, store="chunked", stop_at_goal=True, observer=o),
     "brfs_compact": lambda t, o: search.brfs(t, store="compact", stop_at_goal=True, observer=o),
@@ -108,7 +108,7 @@ RUNS = {
     "astar_lazy": lambda t, o: search.astar(t, heuristic="max", lazy=True, observer=o),
     "gbfs": lambda t, o: search.gbfs(t, heuristic="ff", observer=o),
     "gbfs_lazy": lambda t, o: search.gbfs(t, heuristic="ff", lazy=True, observer=o),
-    "beam": lambda t, o: search.beam(t, width=4, observer=o),
+    "beam": lambda t, o: search.beam(t, beam_width=4, observer=o),
     "astar_iw": lambda t, o: search.astar_iw(t, observer=o),
     "rollout_iw": lambda t, o: search.rollout_iw(t, max_rollouts=200, observer=o),
 }
@@ -144,7 +144,7 @@ def test_meddling_worker_observers_do_not_change_brfs(task, threads):
 def test_nested_searches_two_levels_deep(two_puts):
     class Outer(Observer):
         def on_generate(self, parent, action, child, state, is_new):
-            inner = search.iw(two_puts, max_arity=2, observer=Meddler(two_puts, nested=1))
+            inner = search.iw(two_puts, max_width=2, observer=Meddler(two_puts, nested=1))
             assert inner.solved and replays(two_puts, inner.plan)
 
     r = search.brfs(two_puts, stop_at_goal=True, observer=Outer())
@@ -161,7 +161,7 @@ def test_goal_tests_and_python_heuristics_may_meddle(task):
         return 0.0
 
     for ref, got in (
-        (search.iw(task, max_arity=2), search.iw(task, max_arity=2, goal=goal)),
+        (search.iw(task, max_width=2), search.iw(task, max_width=2, goal=goal)),
         (search.astar(task, heuristic="blind"), search.astar(task, heuristic=h)),
     ):
         assert got.status == ref.status and plan_of(got) == plan_of(ref)

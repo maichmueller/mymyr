@@ -3,13 +3,12 @@ the applicable ground actions), value semantics, and pickling."""
 
 import itertools
 import pickle
-import sys
 
 import numpy as np
 import pytest
 
 import mymyr
-from conftest import BLOCKS, ROOT, SMALL_TASKS, TASKS, text_task, walk
+from conftest import BLOCKS, ROOT, SMALL_TASKS, TASKS, gil_stays_off, text_task, walk
 
 needs_frontend = pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
 
@@ -210,5 +209,4 @@ def test_pickles_keep_the_encoding():
 
 
 def test_gil_stays_disabled():
-    if hasattr(sys, "_is_gil_enabled"):
-        assert not sys._is_gil_enabled()
+    assert gil_stays_off()

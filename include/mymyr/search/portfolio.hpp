@@ -31,7 +31,7 @@
 // together (one per popped IW node, one per materialized rollout node);
 // budget.max_depth applies to every worker; budget.max_states applies per worker (per IW pass, per rollout round);
 // cancel and blocked_states apply to every worker. coordination must be null (the portfolio coordinates its workers
-// itself). Observer (tyr's make_worker protocol, search/control.hpp): SearchObserver::make_worker(k) is called for
+// itself). Observer (make_worker, search/control.hpp): SearchObserver::make_worker(k) is called for
 // k = 0..K on the calling thread, and worker k sends its hot events there (node ids are per worker); the root observer
 // gets on_start before, and after every worker has joined on_pass for each certifier pass, on_solution for the
 // returned plan and on_end (statistics summed over all workers). A Custom goal needs GoalSpec::make_worker(k) the
@@ -76,8 +76,8 @@ struct PortfolioResult
     SearchStatus status = SearchStatus::Exhausted;
     std::vector<Action> plan;
     double cost = 0;
-    bool cost_exact = true;
     u32 plan_length = ~u32{0};
+    std::optional<State> goal_state;  // the state the plan reaches (unless solved: none)
     bool certified_optimal = false;
     u32 iw_lower_bound = 0;                                 // iw_completed_depth + 1, or 0
     u32 iw_completed_depth = SearchCoordination::k_no_depth;  // deepest layer the certifier finished
@@ -90,7 +90,10 @@ struct PortfolioResult
     std::vector<RolloutIwStatistics> rollout_statistics;      // per rollout worker, summed over its rounds
     std::vector<SearchStatus> rollout_statuses;               // of each worker's last round
     std::vector<u32> rollout_rounds;                          // rounds run (0: the worker never started)
-    u64 total_expansions = 0;
+    /// expanded: the expansions of the certifier and the rollout workers (what PortfolioOptions' max_expanded
+    /// bounds); generated, states and pruned: summed over the certifier and the workers; seconds: the portfolio's wall
+    /// time; memory_bytes: the certifier's.
+    SearchStatistics stats;
     u32 threads_used = 0;
     u32 fluent_slots = 0;
 };

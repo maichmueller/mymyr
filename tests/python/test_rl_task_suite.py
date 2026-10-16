@@ -539,7 +539,7 @@ def test_state_spaces_over_a_suite():
 
 def iw_record(b, i):
     return (b.status[i], [str(a) for a in b.plan(i)], b.goal_state(i), b.cost(i),
-            [(p.arity, p.status, p.expanded, p.generated) for p in b.passes(i)])
+            [(p.width, p.status, p.expanded, p.generated) for p in b.passes(i)])
 
 
 def test_iw_over_a_suite():
@@ -557,11 +557,11 @@ def test_iw_over_a_suite():
     order = np.random.default_rng(1).permutation(len(starts))
     starts, ids = [starts[k] for k in order], [ids[k] for k in order]
     ctx = mc.Context(0, max_bytes=1 << 30)
-    b = mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_arity=2)
+    b = mc.multi_iw(s, starts, task_ids=ids, ctx=ctx, max_width=2)
     assert isinstance(b, mc.SuiteIwBatch) and len(b) == len(starts) and b.task_ids == ids
-    assert b.domains == [s.domain_of[g] for g in ids] and b.stats["passes"] > 0
+    assert b.domains == [s.domain_of[g] for g in ids] and b.counters["passes"] > 0
     for i, (st, g) in enumerate(zip(starts, ids)):
-        one = mc.multi_iw(s[g], [st], ctx=ctx, max_arity=2)
+        one = mc.multi_iw(s[g], [st], ctx=ctx, max_width=2)
         assert iw_record(b, i) == iw_record(one, 0), i
     # batched IW(1): host starts, and device rows of the suite's width with device task ids
     rows = np.zeros((len(starts), s.words), np.uint64)
