@@ -718,7 +718,8 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         GTEST_SKIP() << "no PDDL data";
     const cuda::DeviceEncoder device(device_context(), encoder);
     const cuda::GraphBounds& b = device.bounds();
-    // the bounds recomputed from the context's cells
+    // the bounds recomputed from the context's cells; an action cell has no tuple on the device (it has no expansion
+    // input), but its count still takes a cell
     const auto view = encoder->context().view();
     cuda::GraphBounds expected;
     for (u32 i = 0; i < encoder->table().size(); ++i)
@@ -728,6 +729,8 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         bool nullary = false;
         for (u32 c = 0; c < inst.num_cells; ++c)
         {
+            if (encoding::detail::is_action_op(inst.cells[c].op))
+                continue;
             tuples += inst.cells[c].b - inst.cells[c].a;
             args += u64{inst.cells[c].b - inst.cells[c].a} * inst.cells[c].arity;
             nullary = nullary || inst.cells[c].logical_arity == 0;
@@ -766,10 +769,10 @@ TEST(DeviceEncoder, PinnedBytesNeededOfBlocks)
     EXPECT_EQ(device.bounds().entities, 9u);
     EXPECT_EQ(device.bounds().tuples, 97u);
     EXPECT_EQ(device.bounds().args, 161u);
-    EXPECT_EQ(device.bounds().cells, 6u);
+    EXPECT_EQ(device.bounds().cells, 10u);  // 6 state cells and 4 action cells
     EXPECT_EQ(encoder->schema().num_relations(), 25u);
     const auto scratch = device.scratch_layout(device.worst_case(1000));
-    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1037312u);
+    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1053312u);
 }
 
 TEST(DeviceEncoder, ReserveRetainsScratchAndOutputsBelongToTheCaller)
