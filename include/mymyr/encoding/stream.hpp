@@ -14,9 +14,7 @@
 //
 // Action rows. An appended expansion row names the state it belongs to; the stream stores the labels of the rows
 // (schema and binding) of each state and nothing else. A flush encodes with one expansion made of the stored rows,
-// graph after graph: the entity_ref of an action entity is a row of that expansion, so the rows of graph g start at
-// action_offsets()[g] (the offsets before the flush) and entity_ref - action_offsets()[g] is the position of the row
-// among the rows that were appended for that state.
+// graph after graph, so the entity_ref of an action entity reads as encode() gives it for an expansion of the same states.
 //
 // Errors. Invalid rows raise std::invalid_argument ("mymyr: encoding: ...") when they are appended where the rows alone
 // show it (a task id out of range, a row narrower than its instance, goal masks narrower than their instance, a
@@ -56,9 +54,6 @@ public:
     [[nodiscard]] u64 size() const;
     /// Drops every row.
     void clear();
-    /// The rows of the action expansion a flush would encode: row g of the stream owns the expansion rows
-    /// [offsets[g], offsets[g + 1]). Empty for rows without actions; size() + 1 entries otherwise.
-    [[nodiscard]] std::vector<i64> action_offsets() const;
 
     /// Encodes the rows held and empties the stream, on the members of `pool` (as FlatEncoder::encode). If the
     /// encoding throws, the rows are kept.
@@ -103,8 +98,6 @@ public:
     void clear();
     /// The indices of the rows held, ascending: the order of the graphs of a flush.
     [[nodiscard]] std::vector<i64> indices() const;
-    /// The offsets of the rows' action rows in the expansion a flush would encode (FlatStream::action_offsets).
-    [[nodiscard]] std::vector<i64> action_offsets() const;
 
     /// Encodes the rows held, in ascending order of their indices, on the members of `pool`. The rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);

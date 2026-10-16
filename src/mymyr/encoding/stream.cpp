@@ -277,23 +277,6 @@ public:
         m_garbage = 0;
     }
 
-    /// The offsets of the rows' action rows in the expansion of `n` rows in the order `order` (null: slots 0 .. n - 1).
-    [[nodiscard]] std::vector<i64> action_offsets(const u32* order, u64 n) const
-    {
-        std::vector<i64> out;
-        if (!m_inputs.actions || n == 0)
-            return out;
-        out.resize(n + 1);
-        i64 total = 0;
-        for (u64 i = 0; i < n; ++i)
-        {
-            out[i] = total;
-            total += m_spans[order ? order[i] : i].count;
-        }
-        out[n] = total;
-        return out;
-    }
-
     /// The input of the rows in the order `order` (null: slots 0 .. n - 1, which must be all slots, none free). It
     /// points into the store, or into the gather buffers when the order is not the storage order; both are valid until
     /// the next call that changes the store or assembles.
@@ -522,12 +505,6 @@ void FlatStream::clear()
     m_impl->store.reset();
 }
 
-std::vector<i64> FlatStream::action_offsets() const
-{
-    std::lock_guard lock(m_impl->mutex);
-    return m_impl->store.action_offsets(nullptr, m_impl->store.live());
-}
-
 std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool)
 {
     std::lock_guard lock(m_impl->mutex);
@@ -710,13 +687,6 @@ std::vector<i64> FlatMutableStream::indices() const
     for (usize i = 0; i < out.size(); ++i)
         out[i] = m_impl->sorted[i].first;
     return out;
-}
-
-std::vector<i64> FlatMutableStream::action_offsets() const
-{
-    std::lock_guard lock(m_impl->mutex);
-    m_impl->order();
-    return m_impl->store.action_offsets(m_impl->direct ? nullptr : m_impl->slots.data(), m_impl->slots.size());
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool)

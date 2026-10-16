@@ -4,8 +4,8 @@ A batch stores no names. The naming rules, per entity role:
 
 - an object is named as in its task (``entity_ref`` is its index in ``task.objects``);
 - the auxiliary entity is ``auxiliary``;
-- a goal entity is named after the plain goal tuple it stands for (``entity_ref`` is the tuple's index in the batch):
-  ``[+](on c b)[g]``, ``[-](clear a)[g]``; a nullary literal is ``[+](handempty)[g]``;
+- a goal entity is named after the plain goal tuple it is the target of: ``[+](on c b)[g]``, ``[-](clear a)[g]``; a
+  nullary literal is ``[+](handempty)[g]``;
 - an action entity is named after its action tuple: ``(unstack a b)``, the schema name followed by the objects;
 - a predicate virtual node is ``predicate:<name>`` after the predicate of its key relation (``entity_ref``).
 """
@@ -20,8 +20,8 @@ from mymyr._core._encoding import FlatBatch
 _GOAL_RELATION = re.compile(r"^\[([+-])\](.+)\[g\]$")
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 
-_OBJECT, _PREDICATE_VIRTUAL, _GOAL, _ACTION, _AUXILIARY = 0, 1, 2, 4, 8
-_ARGUMENT_SLOT, _ACTION_SLOT = 0, 3
+_OBJECT, _PREDICATE_VIRTUAL, _AUXILIARY = 0, 1, 8
+_ARGUMENT_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT = 0, 3, 4
 
 
 @dataclass(frozen=True)
@@ -77,12 +77,9 @@ class _Graph:
         self.names = schema.relation_names
         self.arities = schema.relation_arities
         self.slot_roles = schema.relation_slot_roles
-        self.lanes = schema.relation_lanes
-        self.levels = schema.relation_levels
         self.entity_role_names = schema.entity_role_names
         self.graph = graph
         self.task_id = int(np.asarray(batch.task_ids)[graph])
-        self.offsets = np.asarray(batch.relation_offsets)
         self.arg_offsets = np.asarray(batch.relation_arg_offsets)
         self.args = np.asarray(batch.relation_args)
         self.by_relation = encoder.options["layout"] == "relation"
@@ -101,9 +98,8 @@ class _Graph:
             self.role = np.asarray(batch.entity_role)[self.begin : self.end].astype(np.int64)
             self.ref = np.asarray(batch.entity_ref)[self.begin : self.end].astype(np.int64)
 
-    def segment(self, relation, graph=None):
-        graph = self.graph if graph is None else graph
-        return relation * self.graphs + graph if self.by_relation else graph * self.relations + relation
+    def segment(self, relation):
+        return relation * self.graphs + self.graph if self.by_relation else self.graph * self.relations + relation
 
     def tuples(self, relation):
         """The tuples of a relation in this graph as an array [count, arity] of graph-local entity ids."""
@@ -111,18 +107,6 @@ class _Graph:
         first, last = int(self.arg_offsets[segment]), int(self.arg_offsets[segment + 1])
         arity = self.arities[relation]
         return (self.args[first:last] - self.begin).reshape(-1, arity)
-
-    def locate(self, tuple_id):
-        """The (relation, position in its cell) of the tuple with this batch id; ValueError if it is not a tuple of this
-        graph."""
-        segment = int(np.searchsorted(self.offsets, tuple_id, side="right")) - 1
-        if segment < 0 or segment >= self.relations * self.graphs or tuple_id >= self.offsets[segment + 1]:
-            raise ValueError(f"mymyr: encoding: tuple {tuple_id} is not in the batch")
-        relation, graph = (segment // self.graphs, segment % self.graphs) if self.by_relation else (
-            segment % self.relations, segment // self.relations)
-        if graph != self.graph:
-            raise ValueError(f"mymyr: encoding: tuple {tuple_id} belongs to graph {graph}, not to graph {self.graph}")
-        return relation, tuple_id - int(self.offsets[segment])
 
 
 def _argument_names(graph, relation, local, objects):
@@ -143,18 +127,20 @@ def _names(encoder, batch, graph):
             names[i] = g.entity_role_names[_AUXILIARY]
         elif role == _PREDICATE_VIRTUAL:
             names[i] = f"predicate:{_base_predicate(g.names[ref])}"
-        elif role == _GOAL:
-            relation, local = g.locate(ref)
-            match = _GOAL_RELATION.match(g.names[relation])
-            arguments = _argument_names(g, relation, local, objects)
-            names[i] = f"[{match.group(1)}]({' '.join([match.group(2)] + arguments)})[g]"
+    # goal and action entities are the target of the tuple they stand for
     for relation, name in enumerate(g.names):
-        if g.lanes[relation] != "action":
-            continue
-        position = g.slot_roles[relation].index(_ACTION_SLOT)
-        schema = name.partition("#")[0]
-        for local, row in enumerate(g.tuples(relation)):
-            names[int(row[position])] = f"({' '.join([schema] + _argument_names(g, relation, local, objects))})"
+        roles = g.slot_roles[relation]
+        if _GOAL_TARGET_SLOT in roles:
+            position = roles.index(_GOAL_TARGET_SLOT)
+            sign, predicate = _GOAL_RELATION.match(name).groups()
+            for local, row in enumerate(g.tuples(relation)):
+                arguments = _argument_names(g, relation, local, objects)
+                names[int(row[position])] = f"[{sign}]({' '.join([predicate] + arguments)})[g]"
+        elif _ACTION_SLOT in roles:
+            position = roles.index(_ACTION_SLOT)
+            schema = name.partition("#")[0]
+            for local, row in enumerate(g.tuples(relation)):
+                names[int(row[position])] = f"({' '.join([schema] + _argument_names(g, relation, local, objects))})"
     unnamed = [i for i, name in enumerate(names) if name is None]
     if unnamed:
         raise ValueError(f"mymyr: encoding: no naming rule for the entities {unnamed} of graph {graph} (roles "

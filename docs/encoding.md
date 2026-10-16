@@ -270,11 +270,9 @@ assert len(mutable) == 1
   any inputs. Rows narrower than their instance are refused when appended, with the same errors as `encode`; errors
   that need the encoder (a goal bit with no atom slot, action labels of another instance, an action order that is not
   canonical) are raised by `flush`, which keeps the rows.
-- **Action rows.** The action rows of the appended expansions are copied and joined in row order, so with
-  `actions` the `entity_ref` of an action entity is a row of that concatenation, not of any one expansion you
-  gave: the action rows of graph `g` start at `action_offsets()[g]` (`len(stream) + 1` entries, in the order of the
-  next flush), and `entity_ref - action_offsets()[g]` is the position among its state's rows.
-  `action_offsets()` is empty for rows without `actions`.
+- **Action rows.** The action rows of the appended expansions are copied and joined in row order, so a flushed batch is
+  that of one expansion over all rows: the `entity_ref` of an action entity is what `encode` gives for the same states
+  and action rows.
 - **Threads.** The methods of one stream take turns (a flush holds the stream until its batch is encoded); a stream is
   not a way to encode concurrently, use one stream per producer or `encode` itself.
 
@@ -361,8 +359,8 @@ sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scrat
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The encoder is not a
 CUDA or JAX-jitted operation.
 
-`mymyr/encoding/stream.hpp` has the streams: `FlatStream(encoder)` with `append(EncodeInput)`, `size()`, `clear()`,
-`action_offsets()` and `flush(pool)` (or `flush(pool, capacities, sizes)`), and `FlatMutableStream(encoder)` with
+`mymyr/encoding/stream.hpp` has the streams: `FlatStream(encoder)` with `append(EncodeInput)`, `size()`, `clear()`
+and `flush(pool)` (or `flush(pool, capacities, sizes)`), and `FlatMutableStream(encoder)` with
 `append(indices, input)`, `update(indices, input)`, `remove(indices)`, `contains(index)`, `indices()` and the same
 `flush`. They throw `std::invalid_argument` for invalid rows or indices and `std::out_of_range` for an index that is not
 held; their methods take a mutex, and each stream has its own `EncodeScratch`.

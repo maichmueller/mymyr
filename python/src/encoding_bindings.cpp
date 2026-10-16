@@ -85,7 +85,7 @@ struct type_caster<mymyr::python::ann::EncodingGoals>
 template<>
 struct type_caster<mymyr::python::ann::EncodingGraphDescription>
 {
-    static constexpr auto Name = const_name("mymyr.encoding.GraphDescription");
+    static constexpr auto Name = const_name("mymyr._typing.GraphDescription");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
@@ -1022,17 +1022,12 @@ void bind_encoding(nb::module_& parent)
             "Encodes the rows held, in the order they were appended, and empties the stream: the result equals "
             "`encoder.encode(rows, ...)` over the same rows bit for bit. framework, threads, pool and capacities are "
             "as in `encode`; `framework` defaults to the stream's. The graph g of the batch is the g-th appended row. "
-            "With `actions`, `entity_ref` of an action entity is a row of the concatenation of the appended "
-            "expansions' rows in graph order: graph g's rows start at `action_offsets()[g]` (taken before the flush), "
-            "so `entity_ref - action_offsets()[g]` is the position among the rows appended for that state. If the "
+            "With `actions`, the action rows are those appended for each state, so `entity_ref` of an action "
+            "entity is what `encode` gives for the same expansion. If the "
             "encoding raises (or, with `capacities`, overflows: `sizes['overflow']`), the rows are kept, so that the "
             "flush can be repeated with larger capacities. A stream without rows flushes to a batch of no graphs.")
         .def(
             "clear", [](PyFlatStream& self) { self.stream->clear(); }, "Drops every row.")
-        .def(
-            "action_offsets", [](PyFlatStream& self) { return int64_array(self.stream->action_offsets()); },
-            "The offsets of the rows' action rows in the expansion the next flush encodes: row g owns the expansion rows "
-            "[offsets[g], offsets[g + 1]), len(stream) + 1 entries (an empty array for rows without `actions`).")
         .def("__len__", [](const PyFlatStream& self) { return self.stream->size(); }, "The rows held.")
         .def_prop_ro("encoder", [](const PyFlatStream& self) { return nb::typed<nb::object, PyFlatEncoder>(self.encoder); },
                      "The FlatRelationEncoder of the stream.");
@@ -1099,19 +1094,14 @@ void bind_encoding(nb::module_& parent)
             "flush", &flush_stream<PyFlatMutableStream>, nb::kw_only(), "framework"_a = nb::none(), "threads"_a = 1,
             "pool"_a = nb::none(), "capacities"_a = nb::none(),
             "Encodes the rows held in ascending order of their indices and keeps them. framework, threads, pool and "
-            "capacities are as in `encode`; `framework` defaults to the stream's. With `actions`, `entity_ref` of an "
-            "action entity is a row of the concatenation of the held rows' expansion rows in that order: graph j's "
-            "rows start at `action_offsets()[j]`, so `entity_ref - action_offsets()[j]` is the position among the rows "
-            "given for that state. A stream without rows flushes to a batch of no graphs.")
+            "capacities are as in `encode`; `framework` defaults to the stream's. With `actions`, the action rows "
+            "are those given for each state, so `entity_ref` of an action entity is what `encode` gives for the same "
+            "expansion. A stream without rows flushes to a batch of no graphs.")
         .def(
             "clear", [](PyFlatMutableStream& self) { self.stream->clear(); }, "Drops every row.")
         .def(
             "indices", [](PyFlatMutableStream& self) { return int64_array(self.stream->indices()); },
             "The indices of the rows held, ascending: the order of the graphs of a flush.")
-        .def(
-            "action_offsets", [](PyFlatMutableStream& self) { return int64_array(self.stream->action_offsets()); },
-            "The offsets of the rows' action rows in the expansion a flush encodes: graph j owns the expansion rows "
-            "[offsets[j], offsets[j + 1]) (an empty array for rows without `actions`).")
         .def(
             "__contains__", [](const PyFlatMutableStream& self, i64 index) { return self.stream->contains(index); },
             "index"_a, "Whether a row is held under `index`.")

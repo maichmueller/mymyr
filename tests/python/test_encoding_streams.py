@@ -124,15 +124,10 @@ def test_a_stream_flush_equals_one_encode_over_random_appends(pool_of, name, var
             picks += chunk
         assert len(stream) == len(picks)
         threads = 1 if round_ % 2 else 3
-        offsets = stream.action_offsets()
         batch = stream.flush(threads=threads)
         assert len(stream) == 0
         whole = pool.inputs(picks, variant)
         assert_same(batch, encoder.encode(**whole))
-        if variant[1] and picks:
-            assert offsets.tolist() == whole["actions"].offsets.tolist()
-        else:
-            assert len(offsets) == 0
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -172,8 +167,6 @@ def test_a_mutable_stream_flush_equals_one_encode_over_random_updates_and_remova
             batch = stream.flush(threads=1 + 2 * (step % 2))
             assert_same(batch, encoder.encode(**whole))
             assert len(stream) == len(model)
-            if variant[1]:
-                assert stream.action_offsets().tolist() == whole["actions"].offsets.tolist()
         assert len(stream) == len(model)
         assert all(index in stream for index in list(model)[:3])
     indices = sorted(model)
@@ -267,31 +260,23 @@ def test_the_rows_of_a_stream_give_the_same_inputs_until_it_is_empty_again():
             add(**pool.inputs([3], variant))
 
 
-def test_the_expansion_rows_of_a_flush_are_the_appended_ones_in_graph_order():
+def test_the_action_entities_of_a_flush_are_those_of_the_appended_states_in_graph_order():
     task = text_task("logistics00__probLOGISTICS-6-1")
     table = rl.as_table(task)
     states = walk(task, steps=6, walks=2)
     encoder = encoding.FlatRelationEncoder(task, target_sources=("action",), goal_derivations=())
     stream = encoder.stream()
     chunks = [states[:3], states[3:4], states[4:]]
-    expansions = [rl.expand(table, chunk) for chunk in chunks]
-    for chunk, expansion in zip(chunks, expansions):
-        stream.append(chunk, actions=expansion)
-    offsets = stream.action_offsets()
-    assert len(offsets) == len(states) + 1
-    assert offsets[-1] == sum(len(e.schema) for e in expansions)
+    for chunk in chunks:
+        stream.append(chunk, actions=rl.expand(table, chunk))
     batch = stream.flush()
     graph = 0
-    for chunk, expansion in zip(chunks, expansions):
-        for j in range(len(chunk)):
+    for chunk in chunks:
+        for state in chunk:
             begin, end = (int(x) for x in batch.entity_offsets[graph : graph + 2])
-            roles, refs = batch.entity_role[begin:end], batch.entity_ref[begin:end]
+            roles = batch.entity_role[begin:end]
             names = encoder.entity_names(batch, graph)
-            rows = refs[roles == 4]
-            assert sorted(int(r) for r in rows) == list(range(int(offsets[graph]), int(offsets[graph + 1])))
-            for ref, name in zip(rows, [n for n, r in zip(names, roles) if r == 4]):
-                local = int(ref) - int(offsets[graph]) + int(expansion.offsets[j])
-                assert str(expansion.action(local)) == name
+            assert sorted(n for n, r in zip(names, roles) if r == 4) == sorted(str(a) for a in state.applicable_actions())
             graph += 1
 
 
@@ -392,7 +377,7 @@ def test_a_stream_without_rows_flushes_to_an_empty_batch():
             assert batch.num_graphs == 0 and len(stream) == 0
             assert_same(batch, encoder.encode(**pool.inputs([], variant)))
     mutable = encoder.mutable_stream()
-    assert mutable.indices().tolist() == [] and mutable.action_offsets().tolist() == []
+    assert mutable.indices().tolist() == []
     mutable.append([], **pool.inputs([], VARIANTS[-1]))
     mutable.remove([])
     assert len(mutable) == 0

@@ -220,11 +220,6 @@ TEST(FlatStream, AFlushEqualsOneEncodeOfTheAppendedRows)
             }
             ASSERT_EQ(stream.size(), all.size());
             const Selected whole(pool, all);
-            const auto offsets = stream.action_offsets();
-            if (flavor.actions && !all.empty())
-                EXPECT_EQ(offsets, std::vector<i64>(whole.offsets.begin(), whole.offsets.end()));
-            else
-                EXPECT_TRUE(offsets.empty());
             const auto reference = encoder->encode(whole.input(flavor.row_goals, flavor.actions));
             const auto flushed = stream.flush(one);
             expect_equal_bundles(*reference, *flushed);
@@ -488,11 +483,6 @@ TEST(FlatMutableStream, AFlushEqualsOneEncodeOfTheRowsInIndexOrder)
                 const std::vector<u64> live = picks_of(model);
                 const Selected whole(pool, live);
                 ASSERT_EQ(stream.indices(), indices_of(model));
-                const auto offsets = stream.action_offsets();
-                if (flavor.actions && !live.empty())
-                {
-                    EXPECT_EQ(offsets, std::vector<i64>(whole.offsets.begin(), whole.offsets.end()));
-                }
                 const auto reference = encoder->encode(whole.input(flavor.row_goals, flavor.actions));
                 expect_equal_bundles(*reference, *stream.flush(one));
                 EXPECT_EQ(stream.size(), model.size());
