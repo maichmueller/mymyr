@@ -32,13 +32,32 @@ target_sources(mymyr_cuda PRIVATE src/env.cu src/env.cpp)
 target_sources(mymyr_cuda PRIVATE src/rl_ops.cu)
 # batched grounded heuristics, device A* and GBFS (cuda/heuristics.hpp, cuda/astar.hpp, cuda/gbfs.hpp)
 target_sources(mymyr_cuda PRIVATE src/heuristics.cu src/h2.cu src/heuristics.cpp src/astar.cu src/astar.cpp src/gbfs.cpp src/numeric_best_first.cpp)
-# rows of schemas with conditional effects (sub-plans at the leaf) and axiom strata on the device; the kernels share
-# src/lifted_device.cuh with lifted.cu and are instantiated in units of their own (parallel builds)
-target_sources(mymyr_cuda PRIVATE src/lifted_ce.cu src/lifted_ce16.cu src/lifted_ce64.cu src/axioms.cu src/lifted_deep.cu
-                                   src/lifted_deep64.cu)
-# successor rows wider than 64 words (built in chunks)
-target_sources(mymyr_cuda PRIVATE src/lifted_wide.cu src/lifted_wide_ce.cu src/lifted_wide_pick.cu)
-# task tables on the device and the multi-instance launches of the kernels (units of their own: parallel builds)
+# axiom strata on the device
+target_sources(mymyr_cuda PRIVATE src/axioms.cu)
+# the kernel instantiations of the successor generator (conditional effects, wide rows, deep matchers, picks, count caches),
+# generated: one translation unit per group of kernels (lifted_units.cmake), so that the compiles are small and parallel.
+# The units are object libraries, so that those of the largest kernels can take a job pool of their own.
+include(${CMAKE_CURRENT_LIST_DIR}/lifted_units.cmake)
+foreach(units mymyr_cuda_lifted_units mymyr_cuda_lifted_heavy)
+    if(units STREQUAL "mymyr_cuda_lifted_units")
+        add_library(${units} OBJECT ${_mymyr_lifted_light_sources})
+    else()
+        add_library(${units} OBJECT ${_mymyr_lifted_heavy_sources})
+    endif()
+    target_include_directories(${units} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(${units} PRIVATE mymyr::core mymyr::encoding CUDA::cudart_static
+        $<BUILD_INTERFACE:mymyr_warnings>)
+    target_compile_options(${units} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+    target_compile_definitions(${units} PRIVATE MYMYR_HAS_CUDA=1)
+    set_target_properties(${units} PROPERTIES
+        CUDA_STANDARD 23
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_EXTENSIONS OFF
+        CUDA_RUNTIME_LIBRARY Static
+        POSITION_INDEPENDENT_CODE ON)
+    target_sources(mymyr_cuda PRIVATE $<TARGET_OBJECTS:${units}>)
+endforeach()
+# task tables on the device and the multi-instance launches of the kernels
 target_sources(mymyr_cuda PRIVATE src/device_table.cpp src/table_launch.cpp src/lifted_multi.cu src/lifted_multi_write.cu src/lifted_multi_pick.cu)
 # device state spaces, one task or the instances of a table in waves (cuda/state_space.hpp)
 target_sources(mymyr_cuda PRIVATE src/state_space.cu src/state_space.cpp)
@@ -61,11 +80,17 @@ set_target_properties(mymyr_cuda PROPERTIES
     CUDA_EXTENSIONS OFF
     CUDA_RUNTIME_LIBRARY Static
     POSITION_INDEPENDENT_CODE ON)
-# The largest device translation units need several GB each in nvcc's front end and ptxas. With Ninja,
-# -DCMAKE_JOB_POOLS=cuda_compile=<n> runs at most n of the library's compiles at a time while the rest of the build
-# keeps its parallelism.
+# Device translation units need up to 3 GB in nvcc's front end and ptxas, and four kernels (conditional effects over
+# 16 or more object-bitset words) up to 7 GB. With Ninja, -DCMAKE_JOB_POOLS=cuda_compile=<n> runs at most n of the
+# library's compiles at a time while the rest of the build keeps its parallelism; cuda_compile_heavy=<m> additionally
+# bounds the compiles of the four largest kernels (the units of mymyr_cuda_lifted_heavy), which otherwise share
+# cuda_compile.
 if(CMAKE_JOB_POOLS MATCHES "(^|;)cuda_compile=[0-9]+")
-    set_target_properties(mymyr_cuda PROPERTIES JOB_POOL_COMPILE cuda_compile)
+    set_target_properties(mymyr_cuda mymyr_cuda_lifted_units PROPERTIES JOB_POOL_COMPILE cuda_compile)
+    set_target_properties(mymyr_cuda_lifted_heavy PROPERTIES JOB_POOL_COMPILE cuda_compile)
+endif()
+if(CMAKE_JOB_POOLS MATCHES "(^|;)cuda_compile_heavy=[0-9]+")
+    set_target_properties(mymyr_cuda_lifted_heavy PROPERTIES JOB_POOL_COMPILE cuda_compile_heavy)
 endif()
 target_link_libraries(mymyr_cuda PUBLIC mymyr::core mymyr::encoding CUDA::cudart_static
     PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)

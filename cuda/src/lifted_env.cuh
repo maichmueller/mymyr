@@ -9,6 +9,13 @@
 
 namespace mymyr::cuda::lifted
 {
+/// The launches of one (OW, FC) case of the count-cache and pick kernels (launch_count_keys_ow, launch_pick_ow),
+/// defined in the translation units of their own (lifted_cases.cuh).
+template<u32 OW, bool FC, bool M>
+cudaError_t count_keys_case(const GenArgs& a, const CountCache& c, bool first, cudaStream_t s);
+template<u32 OW, bool FC, u32 WB, bool M>
+cudaError_t pick_case(const GenArgs& a, const Picks& pk, cudaStream_t s);
+
 namespace
 {
 /// multi_row of launch position j; in a range launch (Multi::starts) false at once for a position outside the launch's
@@ -335,27 +342,27 @@ cudaError_t dispatch_count_keys(const GenArgs& a, const CountCache& c, bool firs
     {
         switch (ow)
         {
-            case 1: return launch_count_keys_ow<1, true, M>(a, c, first, s);
-            case 2: return launch_count_keys_ow<2, true, M>(a, c, first, s);
-            case 3: return launch_count_keys_ow<3, true, M>(a, c, first, s);
-            case 4: return launch_count_keys_ow<4, true, M>(a, c, first, s);
+            case 1: return count_keys_case<1, true, M>(a, c, first, s);
+            case 2: return count_keys_case<2, true, M>(a, c, first, s);
+            case 3: return count_keys_case<3, true, M>(a, c, first, s);
+            case 4: return count_keys_case<4, true, M>(a, c, first, s);
             default: return cudaErrorInvalidValue;
         }
     }
     switch (ow)
     {
-        case 1: return launch_count_keys_ow<1, false, M>(a, c, first, s);
-        case 2: return launch_count_keys_ow<2, false, M>(a, c, first, s);
-        case 3: return launch_count_keys_ow<3, false, M>(a, c, first, s);
-        case 4: return launch_count_keys_ow<4, false, M>(a, c, first, s);
-        case 5: return launch_count_keys_ow<5, false, M>(a, c, first, s);
-        case 6: return launch_count_keys_ow<6, false, M>(a, c, first, s);
-        case 7: return launch_count_keys_ow<7, false, M>(a, c, first, s);
-        case 8: return launch_count_keys_ow<8, false, M>(a, c, first, s);
-        case 12: return launch_count_keys_ow<12, false, M>(a, c, first, s);
-        case 16: return launch_count_keys_ow<16, false, M>(a, c, first, s);
-        case 24: return launch_count_keys_ow<24, false, M>(a, c, first, s);
-        case 32: return launch_count_keys_ow<32, false, M>(a, c, first, s);
+        case 1: return count_keys_case<1, false, M>(a, c, first, s);
+        case 2: return count_keys_case<2, false, M>(a, c, first, s);
+        case 3: return count_keys_case<3, false, M>(a, c, first, s);
+        case 4: return count_keys_case<4, false, M>(a, c, first, s);
+        case 5: return count_keys_case<5, false, M>(a, c, first, s);
+        case 6: return count_keys_case<6, false, M>(a, c, first, s);
+        case 7: return count_keys_case<7, false, M>(a, c, first, s);
+        case 8: return count_keys_case<8, false, M>(a, c, first, s);
+        case 12: return count_keys_case<12, false, M>(a, c, first, s);
+        case 16: return count_keys_case<16, false, M>(a, c, first, s);
+        case 24: return count_keys_case<24, false, M>(a, c, first, s);
+        case 32: return count_keys_case<32, false, M>(a, c, first, s);
         default: return cudaErrorInvalidValue;
     }
 }
@@ -623,33 +630,33 @@ cudaError_t dispatch_pick(const GenArgs& a, const Picks& pk, cudaStream_t s)
     {
         switch (ow)
         {
-            case 1: return launch_pick_ow<1, true, WB, M>(a, pk, s);
-            case 2: return launch_pick_ow<2, true, WB, M>(a, pk, s);
-            case 3: return launch_pick_ow<3, true, WB, M>(a, pk, s);
-            case 4: return launch_pick_ow<4, true, WB, M>(a, pk, s);
+            case 1: return pick_case<1, true, WB, M>(a, pk, s);
+            case 2: return pick_case<2, true, WB, M>(a, pk, s);
+            case 3: return pick_case<3, true, WB, M>(a, pk, s);
+            case 4: return pick_case<4, true, WB, M>(a, pk, s);
             default: return cudaErrorInvalidValue;
         }
     }
     switch (ow)
     {
-        case 1: return launch_pick_ow<1, false, WB, M>(a, pk, s);
-        case 2: return launch_pick_ow<2, false, WB, M>(a, pk, s);
-        case 3: return launch_pick_ow<3, false, WB, M>(a, pk, s);
-        case 4: return launch_pick_ow<4, false, WB, M>(a, pk, s);
-        case 5: return launch_pick_ow<5, false, WB, M>(a, pk, s);
-        case 6: return launch_pick_ow<6, false, WB, M>(a, pk, s);
-        case 7: return launch_pick_ow<7, false, WB, M>(a, pk, s);
-        case 8: return launch_pick_ow<8, false, WB, M>(a, pk, s);
+        case 1: return pick_case<1, false, WB, M>(a, pk, s);
+        case 2: return pick_case<2, false, WB, M>(a, pk, s);
+        case 3: return pick_case<3, false, WB, M>(a, pk, s);
+        case 4: return pick_case<4, false, WB, M>(a, pk, s);
+        case 5: return pick_case<5, false, WB, M>(a, pk, s);
+        case 6: return pick_case<6, false, WB, M>(a, pk, s);
+        case 7: return pick_case<7, false, WB, M>(a, pk, s);
+        case 8: return pick_case<8, false, WB, M>(a, pk, s);
         default: break;
     }
     if constexpr (WB >= k_max_words)
     {
         switch (ow)
         {
-            case 12: return launch_pick_ow<12, false, WB, M>(a, pk, s);
-            case 16: return launch_pick_ow<16, false, WB, M>(a, pk, s);
-            case 24: return launch_pick_ow<24, false, WB, M>(a, pk, s);
-            case 32: return launch_pick_ow<32, false, WB, M>(a, pk, s);
+            case 12: return pick_case<12, false, WB, M>(a, pk, s);
+            case 16: return pick_case<16, false, WB, M>(a, pk, s);
+            case 24: return pick_case<24, false, WB, M>(a, pk, s);
+            case 32: return pick_case<32, false, WB, M>(a, pk, s);
             default: break;
         }
     }

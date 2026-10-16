@@ -2,8 +2,9 @@
 // task. The matcher executors (lifted_device.cuh) are line-by-line ports of successor/detail/engine.hpp (Engine::run,
 // search, search_fc) turned into iterative loops, so a
 // thread emits the bindings of one (state, schema) in exactly the CPU engine's order, witnesses included. This unit holds
-// the views, the counts, the rows of schemas without conditional effects (their rows: lifted_ce.cu), the goal tests,
-// the host-row placement, the scans, the padding and the picks.
+// the launchers: the views, the counts, the rows with and without conditional effects, the deep matchers, the goal tests,
+// the host-row placement, the scans, the padding and the picks. The kernels they dispatch to are instantiated in
+// the generated units of cuda/lifted_units.cmake.
 // Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_env.cuh"
@@ -176,24 +177,12 @@ cudaError_t launch_check_rows(const u64* data, u64 stride, u32 words, u64 rows, 
     return cudaGetLastError();
 }
 
-namespace wide_units
-{
-cudaError_t write(const GenArgs& a, cudaStream_t s);
-cudaError_t pick(const GenArgs& a, const Picks& picks, cudaStream_t s);
-}  // namespace wide_units
-
-namespace deep_units
-{
-cudaError_t count_deep(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, u32* counts, cudaStream_t s);
-cudaError_t write_deep(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, const u32* offsets, Labels labels,
-                       SuccessorRows out, cudaStream_t s);
-}  // namespace deep_units
-
 cudaError_t launch_count(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, u32* counts, cudaStream_t s)
 {
+    const GenArgs a{t, p, v, set, nullptr, counts, Labels{}, SuccessorRows{}};
     if (set.deep)
-        return deep_units::count_deep(t, p, v, set, counts, s);
-    return dispatch_ow<false, 1>(GenArgs{t, p, v, set, nullptr, counts, Labels{}, SuccessorRows{}}, s);
+        return dispatch_deep<false, 1>(a, s);
+    return dispatch_ow<false, 1>(a, s);
 }
 
 cudaError_t launch_write(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, const u32* offsets, Labels labels,
@@ -201,18 +190,45 @@ cudaError_t launch_write(const rl::dev::TaskView& t, Parents p, Views v, SchemaS
 {
     if (out.deferred && !labels.binding)
         return cudaErrorInvalidValue;
-    if (set.deep)
-        return deep_units::write_deep(t, p, v, set, offsets, labels, out, s);
     const GenArgs a{t, p, v, set, offsets, nullptr, labels, out};
+    const u32 need = p.words > out.out_words ? p.words : out.out_words;
+    if (set.deep)
+    {
+        if (need <= 2)
+            return dispatch_deep<true, 2>(a, s);
+        if (need <= 4)
+            return dispatch_deep<true, 4>(a, s);
+        if (need <= 16)
+            return dispatch_deep<true, 16>(a, s);
+        if (need <= k_max_words)
+            return dispatch_deep<true, k_max_words>(a, s);
+        return dispatch_deep<true, k_wide>(a, s);
+    }
     // the successor row lives in u64 y[WB]: registers for WB <= 4, a WB-word local array up to 64 words, built in
-    // chunks of 64 words beyond (lifted_wide.cu)
-    switch (row_class(p.words > out.out_words ? p.words : out.out_words, t.ow))
+    // chunks of 64 words beyond
+    switch (row_class(need, t.ow))
     {
         case 2: return dispatch_ow<true, 2>(a, s);
         case 4: return dispatch_ow<true, 4>(a, s);
         case 16: return dispatch_ow<true, 16>(a, s);
         case k_max_words: return dispatch_ow<true, k_max_words>(a, s);
-        default: return wide_units::write(a, s);
+        default: return dispatch_ow<true, k_wide>(a, s);
+    }
+}
+
+cudaError_t launch_write_ce(const rl::dev::TaskView& t, Parents p, Views v, SchemaSet set, const u32* offsets, Labels labels,
+                            SuccessorRows out, cudaStream_t s)
+{
+    if (out.deferred)
+        return cudaErrorInvalidValue;  // launch_put has no conditional effects
+    const GenArgs a{t, p, v, set, offsets, nullptr, labels, out};
+    switch (row_class(p.words > out.out_words ? p.words : out.out_words, t.ow))
+    {
+        case 2:
+        case 4: return dispatch_ow<true, 4, true>(a, s);
+        case 16: return dispatch_ow<true, 16, true>(a, s);
+        case k_max_words: return dispatch_ow<true, k_max_words, true>(a, s);
+        default: return dispatch_ow<true, k_wide, true>(a, s);
     }
 }
 
@@ -303,7 +319,7 @@ cudaError_t launch_pick(const rl::dev::TaskView& t, Parents p, Views v, SchemaSe
         case 4: return dispatch_pick<4, false>(a, picks, s);
         case 16: return dispatch_pick<16, false>(a, picks, s);
         case k_max_words: return dispatch_pick<k_max_words, false>(a, picks, s);
-        default: return wide_units::pick(a, picks, s);
+        default: return dispatch_pick<k_wide, false>(a, picks, s);
     }
 }
 }  // namespace mymyr::cuda::lifted

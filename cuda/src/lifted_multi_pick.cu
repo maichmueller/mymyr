@@ -6,11 +6,6 @@
 
 namespace mymyr::cuda::lifted
 {
-namespace wide_units
-{
-cudaError_t pick_multi(const GenArgs& a, const Picks& picks, cudaStream_t s);
-}  // namespace wide_units
-
 cudaError_t launch_pick_multi(const Multi& m, Parents p, Views v, SchemaSet set, Picks picks, Labels labels,
                               SuccessorRows out, u32 wb, cudaStream_t s)
 {
@@ -27,7 +22,7 @@ cudaError_t launch_pick_multi(const Multi& m, Parents p, Views v, SchemaSet set,
         case 4: return dispatch_pick<4, true>(a, picks, s);
         case 16: return dispatch_pick<16, true>(a, picks, s);
         case k_max_words: return dispatch_pick<k_max_words, true>(a, picks, s);
-        case k_wide: return wide_units::pick_multi(a, picks, s);
+        case k_wide: return dispatch_pick<k_wide, true>(a, picks, s);
         default: return cudaErrorInvalidValue;
     }
 }

@@ -1,8 +1,8 @@
 // Multi-instance launches of the lifted successor kernels (include/mymyr/cuda/lifted.hpp, "several instances"):
 // the views, counts, count caches and goal tests over rows of several instances of a task table, and the row order that
 // groups them by instance. The kernels are those of lifted.cu with the instance resolved per thread (lifted_env.cuh,
-// lifted_device.cuh: template flag M); the write and pick kernels are instantiated in lifted_multi_write.cu and
-// lifted_multi_pick.cu (parallel builds).
+// lifted_device.cuh: template flag M); the write and pick launchers are in lifted_multi_write.cu and
+// lifted_multi_pick.cu.
 // Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_env.cuh"
