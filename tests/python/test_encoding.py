@@ -388,20 +388,22 @@ def test_the_encoder_describes_its_schema():
     assert encoding.FlatRelationEncoder(task, **options).schema_fingerprint == schema.schema_fingerprint
 
 
-def test_the_default_goal_derivations_are_refused():
+def test_the_default_options_encode_the_goal_relations():
     task = text_task("gripper__prob05")
-    with pytest.raises(ValueError, match="^mymyr: encoding: goal_derivations is not supported"):
-        encoding.FlatRelationEncoder(task)
-    encoding.EncodingSchema(task)  # the catalog itself lists them
+    encoder = encoding.FlatRelationEncoder(task)
+    names = encoder.relation_names
+    assert "[+]at[g]" in names and "[+]at[g][sat]" in names and "[+]at[g][unsat]" not in names
+    batch = encoder.encode(task.initial_state)
+    assert batch.goal_complete.tolist() == [1]
 
 
 # ------------------------------------------------------------------------------------------------ errors
 @pytest.mark.parametrize(
     "options, match",
     [
-        ({"goal_derivations": ("plain",)}, "goal_derivations is not supported"),
         ({"max_goal_level": 1}, "max_goal_level is not supported"),
-        ({"target_sources": ("action",)}, "targets is not supported"),
+        ({"target_sources": ("action",)}, "targets other than 'goal' is not supported"),
+        ({"target_sources": ("history",)}, "targets other than 'goal' is not supported"),
         ({"predicate_virtual_nodes": True}, "predicate_virtual_nodes is not supported"),
         ({"horizon_mode": "full"}, "horizon is not supported"),
     ],

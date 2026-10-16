@@ -52,12 +52,11 @@ namespace
 
 void refuse_unsupported(const FlatOptions& o)
 {
-    if (!o.goal_derivations.empty())
-        unsupported("goal_derivations");
     if (o.max_goal_level > 0)
         unsupported("max_goal_level");
-    if (!o.targets.empty())
-        unsupported("targets");
+    if (o.targets.contains(TargetSource::Subgoal) || o.targets.contains(TargetSource::Action) ||
+        o.targets.contains(TargetSource::History))
+        unsupported("targets other than 'goal'");
     if (o.predicate_virtual_nodes)
         unsupported("predicate_virtual_nodes");
     if (o.horizon.mode != HorizonMode::None)
@@ -75,10 +74,11 @@ struct alignas(k_cache_line) Member
     std::vector<detail::GraphTotals> totals;  // the slice's graphs
     std::vector<u32> cell_counts;             // the slice's cells, graph after graph, in cell order (relation-major)
     std::vector<u64> tally;                   // [R] tuples per relation in the slice (relation-major)
-    u64 entities = 0, tuples = 0, args = 0;   // the slice's sizes
+    u64 entities = 0, tuples = 0, args = 0, targets = 0;  // the slice's sizes
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;  // the first row of each kind of invalid input
+    u64 narrow_goal = k_none, bad_goal_bits = k_none;
     // between the passes
-    u64 entity_start = 0, tuple_start = 0, arg_start = 0;  // where the slice starts in the batch
+    u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0;  // where the slice starts in the batch
     std::vector<u64> start_tuples, start_args;  // [R] where the slice starts in each relation (relation-major)
     // pass two
     std::vector<u64> run_tuples, run_args;  // [R] the running positions
@@ -93,6 +93,7 @@ struct EncodeScratch::Impl
     const u64* counted_data = nullptr;
     const i32* counted_ids = nullptr;
     const u64* counted_derived = nullptr;
+    const u64* counted_goal = nullptr;
     u64 counted_rows = 0;
     FlatSizes sizes;
 
@@ -127,9 +128,27 @@ struct Pass
 
     [[nodiscard]] const u64* derived_of(u64 g, u32 instance) const noexcept
     {
-        if (!context.needs_derived(instance))
+        if (!context.needs_derived(instance, in.goal_pos != nullptr, in.goal_derived_pos != nullptr))
             return nullptr;
         return in.derived ? in.derived + g * s.derived_stride : s.derived.get() + g * s.derived_stride;
+    }
+
+    /// What the lanes read for graph g of `instance`: the state row, its derived words (null if not needed) and the
+    /// goal masks of the row (null: the instance's goal).
+    [[nodiscard]] detail::RowInput row_input(u64 g, u32 instance) const noexcept
+    {
+        detail::RowInput row{in.states.row(g), derived_of(g, instance)};
+        if (in.goal_pos)
+        {
+            row.goal_pos = in.goal_pos + g * in.goal_stride;
+            row.goal_neg = in.goal_neg + g * in.goal_stride;
+        }
+        if (in.goal_derived_pos)
+        {
+            row.goal_derived_pos = in.goal_derived_pos + g * in.goal_derived_stride;
+            row.goal_derived_neg = in.goal_derived_neg + g * in.goal_derived_stride;
+        }
+        return row;
     }
 };
 
@@ -142,8 +161,8 @@ void count_range(const Pass& p, u32 t)
     const u32 instances = table.size();
     Member& m = p.s.members[t];
     m.totals.assign(hi - lo, detail::GraphTotals{});
-    m.entities = m.tuples = m.args = 0;
-    m.bad_id = m.narrow = m.bad_bits = k_none;
+    m.entities = m.tuples = m.args = m.targets = 0;
+    m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = k_none;
     if (p.relation_major)
     {
         m.tally.assign(p.R, 0);
@@ -163,8 +182,14 @@ void count_range(const Pass& p, u32 t)
             continue;
         }
         const detail::InstanceView v = detail::instance_view(p.view, instance);
-        const u64* row = p.in.states.row(g);
-        const u64* derived = p.derived_of(g, instance);
+        if ((p.in.goal_pos && p.in.goal_words < v.words) || (p.in.goal_derived_pos && p.in.goal_derived_words < v.derived_words))
+        {
+            m.narrow_goal = std::min(m.narrow_goal, g);
+            continue;
+        }
+        const detail::RowInput input = p.row_input(g, instance);
+        const u64* row = input.atoms;
+        const u64* derived = input.derived;
         if (derived && p.evaluate)
         {
             u64* dst = p.s.derived.get() + g * p.s.derived_stride;
@@ -188,15 +213,19 @@ void count_range(const Pass& p, u32 t)
             cell_counts = m.cell_counts.data() + at;
         }
         detail::GraphTotals& totals = m.totals[g - lo];
-        totals = detail::count_graph(v, {row, derived}, cell_counts);
-        if (totals.flags & detail::k_graph_bad_row)
+        totals = detail::count_graph(v, input, cell_counts);
+        if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal))
         {
-            m.bad_bits = std::min(m.bad_bits, g);
+            if (totals.flags & detail::k_graph_bad_row)
+                m.bad_bits = std::min(m.bad_bits, g);
+            else
+                m.bad_goal_bits = std::min(m.bad_goal_bits, g);
             continue;
         }
         m.entities += totals.entities;
         m.tuples += totals.tuples;
         m.args += totals.args;
+        m.targets += totals.targets;
         if (p.relation_major)
             for (u32 i = 0; i < v.num_cells; ++i)
                 m.tally[v.cells[i].relation] += cell_counts[i];
@@ -215,25 +244,30 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
                                   static_cast<I*>(b.relation_arg_offsets),
                                   static_cast<I*>(b.relation_args),
                                   b.entity_role,
-                                  static_cast<I*>(b.entity_ref)};
+                                  static_cast<I*>(b.entity_ref),
+                                  b.goal_complete,
+                                  static_cast<I*>(b.target_offsets),
+                                  static_cast<I*>(b.target_entity),
+                                  b.target_group};
     I* entity_offsets = static_cast<I*>(b.entity_offsets);
     Member& m = p.s.members[t];
-    u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start;
+    u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start;
     auto fill_one = [&](u64 g)
     {
         const u32 instance = p.instance_of(g);
         const detail::InstanceView v = detail::instance_view(p.view, instance);
         const detail::GraphTotals& totals = m.totals[g - lo];
-        const detail::RowInput row{p.in.states.row(g), p.derived_of(g, instance)};
+        const detail::RowInput row = p.row_input(g, instance);
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         if (p.relation_major)
-            detail::fill_graph_relation_major<I>(v, row, g, entity, totals, out);
+            detail::fill_graph_relation_major<I>(v, row, g, entity, totals, out, target);
         else
-            detail::fill_graph<I>(v, row, g, tuple, arg, entity, totals, out);
+            detail::fill_graph<I>(v, row, g, tuple, arg, entity, totals, out, target);
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
+        target += totals.targets;
     };
     if (!p.relation_major)
     {
@@ -352,6 +386,14 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         invalid("the state row stride is smaller than its width");
     if (in.derived && in.derived_stride < context.max_derived_words())
         invalid("the derived row stride is smaller than the derived words of an instance");
+    if (in.goal_pos && !m_schema->has_goal_complete())
+        invalid("goals are given, but the schema has no goal relations");
+    if ((in.goal_pos == nullptr) != (in.goal_neg == nullptr))
+        invalid("the goal needs both goal_pos and goal_neg");
+    if ((in.goal_derived_pos == nullptr) != (in.goal_derived_neg == nullptr))
+        invalid("the derived goal needs both goal_derived_pos and goal_derived_neg");
+    if (in.goal_derived_pos && !in.goal_pos)
+        invalid("the derived goal masks need the goal masks over the fluent slots");
     if (R && graphs > std::numeric_limits<u64>::max() / R - 1)
         throw std::overflow_error("mymyr: encoding: the batch has too many cells");
     const bool evaluate = !in.derived && context.max_derived_words() > 0;
@@ -367,12 +409,14 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     // 2. validate, evaluate and count, in parallel over the graphs
     const Pass pass{in, s, context, context.view(), graphs, members, R, relation_major, evaluate};
     run(pool, members, [&pass](u32 t) { count_range(pass, t); });
-    u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;
+    u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
     for (const Member& m : s.members)
     {
         bad_id = std::min(bad_id, m.bad_id);
         narrow = std::min(narrow, m.narrow);
         bad_bits = std::min(bad_bits, m.bad_bits);
+        narrow_goal = std::min(narrow_goal, m.narrow_goal);
+        bad_goal_bits = std::min(bad_goal_bits, m.bad_goal_bits);
     }
     const rl::TaskTable& table = this->table();
     if (bad_id != k_none)
@@ -381,19 +425,29 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     if (narrow != k_none)
         invalid("row " + std::to_string(narrow) + " has " + std::to_string(states.words) +
                 " words, its instance needs " + std::to_string(table.instance(pass.instance_of(narrow)).words));
+    if (narrow_goal != k_none)
+    {
+        const detail::InstanceView v = detail::instance_view(pass.view, pass.instance_of(narrow_goal));
+        invalid("the goal masks of row " + std::to_string(narrow_goal) + " are narrower than its instance needs (" +
+                std::to_string(v.words) + " words, " + std::to_string(v.derived_words) + " derived words)");
+    }
     if (bad_bits != k_none)
         invalid("row " + std::to_string(bad_bits) + " sets an atom bit its instance does not have");
+    if (bad_goal_bits != k_none)
+        invalid("the goal of row " + std::to_string(bad_goal_bits) + " sets an atom bit its instance does not have");
 
     // 3. scan the members, in u64: where each starts in the batch and, relation-major, in every relation
-    u64 entities = 0, tuples = 0, args = 0;
+    u64 entities = 0, tuples = 0, args = 0, targets = 0;
     for (Member& m : s.members)
     {
         m.entity_start = entities;
         m.tuple_start = tuples;
         m.arg_start = args;
+        m.target_start = targets;
         entities += m.entities;
         tuples += m.tuples;
         args += m.args;
+        targets += m.targets;
     }
     if (relation_major)
     {
@@ -421,8 +475,9 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     sizes.entities = entities;
     sizes.tuples = tuples;
     sizes.args = args;
+    sizes.targets = targets;
     const u64 limit = index_limit(index);
-    if (entities > limit || tuples > limit || args > limit || graphs * R + 1 > limit || graphs + 1 > limit)
+    if (entities > limit || tuples > limit || args > limit || targets > limit || graphs * R + 1 > limit || graphs + 1 > limit)
         sizes.overflow |= k_overflow_index;
 
     s.sizes = sizes;
@@ -430,6 +485,7 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     s.counted_data = states.data;
     s.counted_ids = in.task_ids;
     s.counted_derived = in.derived;
+    s.counted_goal = in.goal_pos;
     s.counted_rows = graphs;
     return sizes;
 }
@@ -439,8 +495,9 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
 {
     Scratch& s = scratch.impl();
     if (!s.counted || s.counted_rows != in.states.rows || s.counted_data != in.states.data ||
-        s.counted_ids != in.task_ids || s.counted_derived != in.derived || s.sizes.entities != sizes.entities ||
-        s.sizes.tuples != sizes.tuples || s.sizes.args != sizes.args)
+        s.counted_ids != in.task_ids || s.counted_derived != in.derived || s.counted_goal != in.goal_pos ||
+        s.sizes.entities != sizes.entities || s.sizes.tuples != sizes.tuples || s.sizes.args != sizes.args ||
+        s.sizes.targets != sizes.targets)
         invalid("fill needs the scratch and the sizes of count() on the same input");
     if (sizes.overflow != 0)
         invalid("the batch does not fit: its sizes overflow");
@@ -461,6 +518,14 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         (out.entity_ref != nullptr) != !schema.implicit_entity_arrays())
         invalid(schema.implicit_entity_arrays() ? "entity_role and entity_ref must be null, the schema omits them"
                                                 : "entity_role and entity_ref are null, the schema stores them");
+    if ((out.goal_complete != nullptr) != schema.has_goal_complete())
+        invalid(schema.has_goal_complete() ? "goal_complete is null, the schema stores it"
+                                           : "goal_complete must be null, the schema has no goal relations");
+    if ((out.target_offsets != nullptr) != schema.has_targets() ||
+        (!schema.has_targets() && (out.target_entity != nullptr || out.target_group != nullptr)) ||
+        (sizes.targets > 0 && (!out.target_entity || !out.target_group)))
+        invalid(schema.has_targets() ? "a target array is null, the schema stores them"
+                                     : "the target arrays must be null, the schema has no targets");
     const bool evaluate = !in.derived && m_context->max_derived_words() > 0;
     const Pass pass{in,
                     s,
@@ -479,6 +544,8 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
     auto close = [&]<class I>(I)
     {
         static_cast<I*>(out.entity_offsets)[graphs] = static_cast<I>(sizes.entities);
+        if (out.target_offsets)
+            static_cast<I*>(out.target_offsets)[graphs] = static_cast<I>(sizes.targets);
         static_cast<I*>(out.relation_offsets)[cells] = static_cast<I>(sizes.tuples);
         static_cast<I*>(out.relation_arg_offsets)[cells] = static_cast<I>(sizes.args);
     };
@@ -492,7 +559,8 @@ FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const FlatCapacities& 
                                    ThreadPool& pool, EncodeScratch& scratch) const
 {
     FlatSizes sizes = count(in, pool, scratch);
-    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args)
+    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args ||
+        sizes.targets > capacities.targets)
         sizes.overflow |= k_overflow_capacity;
     if (!sizes.overflowed())
         fill(in, sizes, out, pool, scratch);
@@ -509,8 +577,9 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
 namespace
 {
 /// The arrays of a bundle that allocate() built, in the order it adds them: task_ids, num_objects, entity_offsets,
-/// [entity_role, entity_ref], [relation_counts], relation_offsets, relation_arg_offsets, relation_args.
-FlatBuffers buffers_of(rl::ArrayBundle& bundle, bool entity_arrays, bool counts)
+/// [entity_role, entity_ref], [relation_counts], relation_offsets, relation_arg_offsets, relation_args,
+/// [goal_complete], [target_offsets, target_entity, target_group].
+FlatBuffers buffers_of(rl::ArrayBundle& bundle, bool entity_arrays, bool counts, bool goal_complete, bool targets)
 {
     FlatBuffers out;
     const auto& arrays = bundle.arrays();
@@ -533,11 +602,19 @@ FlatBuffers buffers_of(rl::ArrayBundle& bundle, bool entity_arrays, bool counts)
     out.relation_offsets = take("relation_offsets");
     out.relation_arg_offsets = take("relation_arg_offsets");
     out.relation_args = take("relation_args");
+    if (goal_complete)
+        out.goal_complete = static_cast<u8*>(take("goal_complete"));
+    if (targets)
+    {
+        out.target_offsets = take("target_offsets");
+        out.target_entity = take("target_entity");
+        out.target_group = static_cast<u8*>(take("target_group"));
+    }
     return out;
 }
 }  // namespace
 
-rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args) const
+rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets) const
 {
     const IndexType index = m_schema->options().index;
     const u64 R = m_schema->num_relations();
@@ -556,6 +633,14 @@ rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args) const
     builder.add_uninitialized("relation_offsets", itype, shape1(graphs * R + 1));
     builder.add_uninitialized("relation_arg_offsets", itype, shape1(graphs * R + 1));
     builder.add_uninitialized("relation_args", itype, shape1(args));
+    if (m_schema->has_goal_complete())
+        builder.add_uninitialized("goal_complete", rl::DType::U8, shape1(graphs));
+    if (m_schema->has_targets())
+    {
+        builder.add_uninitialized("target_offsets", itype, shape1(graphs + 1));
+        builder.add_uninitialized("target_entity", itype, shape1(targets));
+        builder.add_uninitialized("target_group", rl::DType::U8, shape1(targets));
+    }
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
     builder.scalar("num_relations", static_cast<i64>(R));
@@ -578,11 +663,15 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(sizes.entities, index, "entities");
         detail::check_index_range(sizes.tuples, index, "tuples");
         detail::check_index_range(sizes.args, index, "tuple arguments");
+        detail::check_index_range(sizes.targets, index, "targets");
         detail::check_index_range(graphs * R + 1, index, "relation cells");
         detail::check_index_range(graphs + 1, index, "graphs");
     }
-    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(in.states.rows, sizes.entities, sizes.args));
-    fill(in, sizes, buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts()), pool, scratch);
+    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(in.states.rows, sizes.entities, sizes.args, sizes.targets));
+    fill(in, sizes,
+         buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(), m_schema->has_goal_complete(),
+                    m_schema->has_targets()),
+         pool, scratch);
     return bundle;
 }
 
@@ -591,12 +680,14 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
                                                                     EncodeScratch& scratch, FlatSizes& sizes) const
 {
     sizes = count(in, pool, scratch);
-    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args)
+    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args ||
+        sizes.targets > capacities.targets)
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = in.states.rows;
     const bool fits = !sizes.overflowed();
-    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args));
-    const FlatBuffers out = buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts());
+    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args, capacities.targets));
+    const FlatBuffers out = buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(),
+                                       m_schema->has_goal_complete(), m_schema->has_targets());
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
     // the entries a batch does not use are zero, and an overflowing batch is all zero
     auto zero = [](void* data, u64 from, u64 to, usize width)
@@ -609,6 +700,11 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         {
             zero(out.entity_role, sizes.entities, capacities.entities, 1);
             zero(out.entity_ref, sizes.entities, capacities.entities, index_bytes);
+        }
+        if (out.target_entity)
+        {
+            zero(out.target_entity, sizes.targets, capacities.targets, index_bytes);
+            zero(out.target_group, sizes.targets, capacities.targets, 1);
         }
     }
     else

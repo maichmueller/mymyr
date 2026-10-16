@@ -69,6 +69,9 @@ void check_schema(const encoding::EncodingSchema& schema)
         if (schema.options().include_derived && relation.lane == encoding::Lane::Derived)
             throw std::invalid_argument("mymyr: encoding: the device does not encode derived relations: "
                                         "set include_derived = false");
+    if (schema.has_goal_complete())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode goal relations: "
+                                    "set goal_derivations = {}");
     if (schema.options().layout != encoding::Layout::Graph)
         throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
 }
