@@ -26,6 +26,13 @@ std::string action_relation_name(const DomainSignature::ActionSchema& action, bo
     return split ? action.name + "#" + std::to_string(action.arity) : action.name;
 }
 
+/// Whether the relation lists the atoms of its predicate in the state, without a sign, goal level or derivation.
+bool is_plain_state_relation(const Relation& relation)
+{
+    const bool state_lane = relation.lane == Lane::Fluent || relation.lane == Lane::Static || relation.lane == Lane::Derived;
+    return state_lane && relation.sign == 0 && !relation.level && !relation.derivation && !relation.state_anchored;
+}
+
 /// The predicates every domain has for its types; they have no goal relations.
 bool is_top_type(std::string_view name) { return name == "object" || name == "number"; }
 
@@ -418,6 +425,22 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
                                                    { return other.name == action.name && other.arity != action.arity; });
             schema->m_schema_relation.push_back(static_cast<i32>(*schema->find(action_relation_name(action, split))));
         }
+    {
+        // the key of a predicate: its plain state relation, else its first relation
+        std::unordered_map<i32, i32> key;
+        for (u32 id = 0; id < schema->m_relations.size(); ++id)
+        {
+            const Relation& relation = schema->m_relations[id];
+            if (relation.predicate < 0)
+                continue;
+            const auto [held, first] = key.try_emplace(relation.predicate, static_cast<i32>(id));
+            if (!first && is_plain_state_relation(relation) &&
+                !is_plain_state_relation(schema->m_relations[static_cast<u32>(held->second)]))
+                held->second = static_cast<i32>(id);
+        }
+        for (const Relation& relation : schema->m_relations)
+            schema->m_virtual_key.push_back(relation.predicate < 0 ? -1 : key.at(relation.predicate));
+    }
     schema->m_goal_complete = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });

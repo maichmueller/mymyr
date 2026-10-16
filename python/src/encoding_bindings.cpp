@@ -1,4 +1,5 @@
 #include "arrays.hpp"
+#include "py_expansion.hpp"
 #include "py_pool.hpp"
 #include "py_table.hpp"
 #include "rl_imports.hpp"
@@ -37,6 +38,9 @@ struct EncodingRootPolicy
 struct EncodingGoals
 {
 };
+struct EncodingActions
+{
+};
 struct EncodingEntityArrays
 {
 };
@@ -72,6 +76,11 @@ struct type_caster<mymyr::python::ann::EncodingGoals>
         "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
 };
 template<>
+struct type_caster<mymyr::python::ann::EncodingActions>
+{
+    static constexpr auto Name = const_name("mymyr._core._rl.Expansion");
+};
+template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
 {
     static constexpr auto Name = const_name("typing.Literal['include', 'exclude', 'encode_only']");
@@ -89,6 +98,7 @@ using ResultDict = nb::typed<nb::dict, std::string, ann::Any>;
 using TextSequenceArg = Arg<std::vector<std::string>>;
 using DerivedArg = Arg<ann::ArrayLike>;
 using GoalsArg = Arg<ann::EncodingGoals>;
+using ActionsArg = Arg<ann::EncodingActions>;
 
 struct PyEncodingSchema
 {
@@ -260,7 +270,9 @@ constexpr const char* k_option_doc =
     "include_static / include_derived: the state relations of the static (types included) / derived "
     "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
     "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
-    "slot in the predicate relations' tuples. include_actions: one relation per action schema. target_sources: "
+    "slot in the predicate relations' tuples: a graph gets a virtual entity (role predicate_virtual) for each predicate that "
+    "has a tuple in it, numbered in catalog order, and none for the others; its entity_ref is the id of the predicate's "
+    "state relation. include_actions: one relation per action schema. target_sources: "
     "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
     "targets need the plain goal derivation, action targets include_actions). layout, "
     "index_dtype: how a batch is stored; layout='relation' stores the tuples relation by relation across the graphs "
@@ -551,7 +563,7 @@ void import_goals(rlimp::Imports& imports, nb::handle goals, u64 rows, encoding:
 }
 
 PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
-                   GoalsArg goals_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
+                   GoalsArg goals_arg, ActionsArg actions_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
                    CapacitiesArg capacities_in)
 {
     const u32 threads = threads_arg(threads_in);
@@ -593,6 +605,26 @@ PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_id
     if (!goals_arg.is_none())
         import_goals(imports, goals_arg, states.view.rows, input);
 
+    ExpansionBuffers actions;
+    if (!actions_arg.is_none())
+    {
+        actions = expansion_buffers(actions_arg);
+        const rl::TaskTable& made_over = *actions.table;
+        if (actions.states != states.view.rows)
+            throw nb::value_error(("mymyr: encoding: actions expand " + std::to_string(actions.states) +
+                                   " states, the batch has " + std::to_string(states.view.rows) + " rows")
+                                      .c_str());
+        if (made_over.schema_names() != table.schema_names() || made_over.schema_arities() != table.schema_arities())
+            throw nb::value_error("mymyr: encoding: actions were expanded over another domain than the encoder's");
+        for (u64 row = 0; row < states.view.rows; ++row)
+            if (actions.task_ids[row] != (ids ? ids[row] : 0))
+                throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
+                                       " were expanded for instance " + std::to_string(actions.task_ids[row]) +
+                                       ", the batch has instance " + std::to_string(ids ? ids[row] : 0))
+                                          .c_str());
+        input.actions = &actions.view;
+    }
+
     PyFlatBatch output;
     output.framework = parse_framework(framework, state_arg);
     output.schema = self.encoder->schema_ptr();
@@ -627,7 +659,10 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"entity_role",
      "uint8 [E]: the role of each entity, an index into entity_role_names. Absent when the entity arrays are implicit "
      "(FlatBatch.implicit_entities)."},
-    {"entity_ref", "index [E]: an object's instance-local id, -1 for the auxiliary entity. Absent when implicit."},
+    {"entity_ref",
+     "index [E]: an object's instance-local id; a goal entity's tuple (its position in all tuples in layout order); an "
+     "action entity's first row in the expansion given as `actions`; a predicate virtual node's key (the id of its "
+     "predicate's state relation); -1 for the auxiliary entity. Absent when implicit."},
     {"relation_counts",
      "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
      "emit_counts=False."},
@@ -643,9 +678,11 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"target_offsets",
      "index [G + 1]: graph g's targets are [target_offsets[g], target_offsets[g + 1]). Absent without target_sources."},
     {"target_entity",
-     "index [T]: the entity of each target, graph after graph in entity order. Absent like target_offsets."},
+     "index [T]: the entity of each target (goal entities, then action entities), graph after graph in entity order. "
+     "Absent like target_offsets."},
     {"target_group",
-     "uint8 [T]: the group of each target, an index into target_group_names (0: goal). Absent like target_offsets."},
+     "uint8 [T]: the group of each target, an index into target_group_names (0: goal, 2: action). Absent like "
+     "target_offsets."},
 };
 }  // namespace
 
@@ -723,8 +760,8 @@ void bind_encoding(nb::module_& parent)
         "fluent, derived and static atoms. A graph holds nothing that its state and instance do not have.");
     static const std::string encoder_doc =
         std::string("The encoder of a Task, TaskHandle or one-domain TaskTable under the options of EncodingSchema. "
-                    "Options that this encoder does not encode (subgoal levels, subgoal, action and history targets, "
-                    "predicate virtual nodes, horizons) raise ValueError (\"mymyr: encoding: ...\"). ") +
+                    "Options that this encoder does not encode (subgoal levels, subgoal and history targets, "
+                    "horizons) raise ValueError (\"mymyr: encoding: ...\"). ") +
         k_option_doc;
     define_init(
         encoder_class,
@@ -739,7 +776,7 @@ void bind_encoding(nb::module_& parent)
             "schema", [](const PyFlatEncoder& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
             "The EncodingSchema of the encoder.")
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
-             "goals"_a = nb::none(), "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(),
+             "goals"_a = nb::none(), "actions"_a = nb::none(), "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(),
              "capacities"_a = nb::none(),
              "Encodes the rows `states` (an array of state words [N, W] of any DLPack framework, u64 words or u32 halves "
              "[N, 2W], or a State or list of States) into one graph each. task_ids: the instance of each row (required "
@@ -748,6 +785,12 @@ void bind_encoding(nb::module_& parent)
              "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
              "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
              "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "actions: the mymyr.rl.Expansion of the same states over the same table (rl.expand(table, states, "
+             "task_ids)): the action relations then hold one tuple (action entity, objects...) per distinct ground "
+             "action among the expansion rows of each state, in lexicographic order of the objects, and "
+             "`entity_ref` of an action entity is the index of its first row in the expansion (apply that action "
+             "with expansion.succ[row]). Without it the action relations are empty. The rows must be in canonical "
+             "order (rl.expand's default); an expansion made with witness=True gives the pruned set of actions. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "

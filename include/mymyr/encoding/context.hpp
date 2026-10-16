@@ -49,8 +49,13 @@ public:
     /// and static_args (i32 [rows, max_arity]; the objects of each fluent slot, derived slot and sorted, deduplicated
     /// static tuple of an instance, -1 padded), goal_words (u64: per instance the positive and negative goal masks over
     /// its fluent words, then over its derived words) and goal_args (i32 [rows, max_arity]: the constant goal tuples of
-    /// each goal cell, sorted and without duplicates, -1 padded). An instance's cells are sorted by relation id, at most
-    /// one per relation; per-graph cell counts (detail::count_graph) are per cell, in this order, not per relation.
+    /// each goal cell, sorted and without duplicates, -1 padded), action_schemas (u32: the schemas of each action
+    /// relation, ascending), schema_arity (u32 [schemas]: the objects of each action schema's ground actions),
+    /// relation_virtual (u32 [relations]: the virtual index of each relation's predicate, k_no_virtual for none) and
+    /// virtual_relation (u32: the key relation of each virtual index); the last two are empty without predicate virtual
+    /// nodes. An instance's cells are sorted by relation id, at most one per relation; per-graph cell counts
+    /// (detail::count_graph) are per cell, in this order, not per relation. Every instance has a cell for each action
+    /// relation of the schema, whose tuples come from the expansion rows of a graph and not from its state.
     ///
     /// An instance's goal is its encoding goal (Task::encoding_goal()): a literal whose predicate has no goal relation
     /// in the schema (the equality and nullary predicates can be left out) is dropped, the others become mask bits or
@@ -85,6 +90,7 @@ private:
     rl::ArrayBundle m_arrays;
     u32 m_max_arity = 1;
     u32 m_max_derived_words = 0;
+    u32 m_num_virtual = 0;
     std::vector<u8> m_needs_derived;
 };
 }

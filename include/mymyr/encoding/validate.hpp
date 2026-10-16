@@ -22,9 +22,14 @@ namespace mymyr::encoding
 ///   local index num_objects, and has it iff one of its tuples uses an auxiliary slot;
 /// - no tuple occurs twice in a cell, and the tuples of a cell ascend strictly in lexicographic order;
 /// - goal_complete is present iff the schema has goal relations, with values 0 and 1; the target arrays are present iff
-///   the schema has targets, target_offsets is a valid offset array, and a graph's goal entities follow its objects and
-///   its auxiliary entity, one per tuple of the plain goal relations with a goal target, numbered in the order of those
-///   relations and tuples; each is the first argument of its tuple and refers to the tuple's batch id (the position of
-///   the tuple in layout order); the graph's targets are its goal entities, in group 0.
+///   the schema has targets, and target_offsets is a valid offset array;
+/// - the entities of a graph past its objects are, in this order: the auxiliary entity; the goal entities, one per tuple of
+///   the plain goal relations with a goal target, numbered in the order of those relations and tuples, each the first
+///   argument of its tuple and referring to the tuple's batch id (the position of the tuple in layout order); the action
+///   entities, one per tuple of an action relation, numbered the same way, each the first argument of its tuple and
+///   referring to an expansion row (a non-negative entity_ref); the predicate virtual entities, one per predicate that has
+///   a tuple in the graph and none for the others, ascending in entity_ref (the key of the predicate,
+///   EncodingSchema::virtual_key), each the predicate slot of exactly the tuples of its predicate's relations;
+/// - the graph's targets are its goal entities in group 0, then, with action targets, its action entities in group 2.
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
 }

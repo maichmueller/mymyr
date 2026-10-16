@@ -26,7 +26,7 @@ assert np.array_equal(encoder.encode(state).relation_args, batch.relation_args)
 
 `FlatRelationEncoder(table_or_task, *, <options>)` takes a `Task`, a `TaskHandle` or a one-domain `rl.TaskTable` and the
 options of the [schema](#encoding-schema).
-`encoder.encode(states, task_ids=None, *, derived=None, goals=None, framework=None, threads=1, pool=None, capacities=None)`
+`encoder.encode(states, task_ids=None, *, derived=None, goals=None, actions=None, framework=None, threads=1, pool=None, capacities=None)`
 returns a `FlatBatch`. It is reentrant: one encoder serves any number of concurrent calls.
 
 - **`states`:**
@@ -50,6 +50,14 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   `goal_complete` is 1. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
   that is narrower, or one that sets an atom bit its instance does not have, raises `ValueError`. Without the derived
   pair a row's derived goal part is empty. `goals` applies to every row of the call.
+- **`actions`:** the `rl.Expansion` of the same states over the same table (`rl.expand(table, states, task_ids)`), on
+  the host: the encoder reads its action rows, the labels of the successors, instead of recomputing the applicable
+  actions. Without it a schema with action relations has no action tuples. The expansion must hold the states of the
+  call in order (`actions.num_states` equals the rows), with every row's actions in the canonical order that
+  `rl.expand` writes (ascending action schema, then ascending binding), and must not have overflowed; a label
+  narrower than the table's, or a schema or object the instance lacks, raises `ValueError`. `actions` needs the action relations
+  (`include_actions=True`, the default) and applies to every row of the call. An expansion that `rl.expand` pruned
+  (a witness expansion, which keeps the rows of a subset of the actions) encodes exactly the rows it has.
 - **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).
 - **`threads`:** the threads that encode the batch (default 1; 0 means the hardware threads). The result does not depend
   on it: a batch is byte-identical for every thread count. Threads pay off for large batches only: waking a thread
@@ -71,14 +79,16 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   true sizes.
 
 Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `max_goal_level`
-above 0, `target_sources` other than `goal`, `predicate_virtual_nodes` and `horizon_mode`. Numeric tasks raise as well.
+above 0, subgoal and history targets and `horizon_mode`. Numeric tasks raise as well.
 Every other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed
 `derived` array) raises `ValueError` too; a batch that needs more indices than the index type holds raises
 `OverflowError` (`index_dtype='int64'` lifts the limit).
 
 ## Lanes
 
-A graph has the objects of its instance as entities, in the task's object order. Its relations hold:
+A graph has the objects of its instance as entities, in the task's object order, then the auxiliary entity, the goal
+entities, the action entities and the predicate virtual nodes, each when the options and the state give it one. Its
+relations hold:
 
 - the tuples of the **fluent** atoms of the row, the **derived** atoms (from `derived` or evaluated), and the **static**
   atoms of the instance, each atom in the relation of its predicate, with its arguments as the tuple. The types are
@@ -89,9 +99,10 @@ A graph has the objects of its instance as entities, in the task's object order.
   `nullary=False` there are no nullary relations and no auxiliary entity.
 
 - the **goal** relations, below.
+- the **action** relations, from `actions`: one tuple per action of the state, below.
 
 A graph contains nothing that its state and instance do not have: no entity or tuple stands for something absent.
-The history and action relations of the schema have no tuples in a batch.
+The history relations of the schema have no tuples in a batch.
 
 ### Goals
 
@@ -121,6 +132,34 @@ first argument of its tuple; its `entity_ref` is the tuple's index among all tup
 (so it differs between the two layouts). The batch lists the goal entities as targets: `target_offsets` `[G + 1]`,
 `target_entity` `[T]` and `target_group` `[T]` (0: goal, an index into `encoder.target_group_names`).
 
+### Actions
+
+Given `actions`, the applicable actions of each state are the rows of its expansion. An action of schema `name` with
+the binding `(o_1, ..., o_k)` is the tuple `(o_1, ..., o_k)` of the action relation `name`; a schema with no parameters
+is a unary tuple over its own **action entity** and takes no auxiliary entity. A schema that the front end split in
+several (a disjunctive precondition) shares one relation, and an action that two of its schemas both give is one tuple:
+the relation lists each binding once. One action relation gathers at most 32 schemas (a task with more raises `ValueError`).
+
+With `target_sources=("action",)` (or `("action", "goal")`) every distinct action tuple gets an **action entity** (entity
+role 4, after the goal entities), numbered in the order of the action relations (relation id, then tuple), and it is
+the first argument of its tuple. The entity's `entity_ref` is the row of the action in the expansion (`actions.offsets[g]`
+plus the position among its state's rows, the first one for a binding listed by several schemas), so `actions.action(ref)`
+is the action and `actions.succ[ref]` its successor: a policy that picks an action entity picks that row. The batch lists
+the action entities as targets of group 2 (`encoder.target_group_names`), after the goal entities of their graph. A
+batch has no action entities for a call without `actions`.
+
+### Predicate virtual nodes
+
+With `predicate_virtual_nodes=True` a graph has one **predicate virtual node** (entity role 1, the last entities of
+the graph) for each predicate that one of its tuples has a relation of: the relations of a predicate are its state
+relation and its goal relations (`[+]on[g]`, `[+]on[g][sat]`, ...). A tuple of such a relation has the node as an
+extra argument right before the predicate's own arguments (after the goal entity of a goal tuple that has one);
+action tuples have no predicate slot. A node exists only if some tuple uses it, so a predicate without tuples in the
+graph has no node, and the nodes are numbered by ascending `entity_ref`, which is the id of the predicate's key
+relation: its plain state relation, or for a predicate without one (a static or derived predicate whose state
+relation is dropped) its first relation in the catalog (C++: `EncodingSchema::virtual_key`). The nullary atoms of a predicate are
+the tuple over its node and the auxiliary entity. Actions are not virtual-node predicates.
+
 ## The batch
 
 For `G` graphs and `R = schema.num_relations` relations, with `I` the index type (`int32` by default, `int64` with
@@ -131,8 +170,8 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `task_ids` | int32 `[G]` | the instance of each row |
 | `num_objects` | I `[G]` | the objects of the instance (the auxiliary entity is not counted) |
 | `entity_offsets` | I `[G + 1]` | graph `g`'s entities are `[entity_offsets[g], entity_offsets[g + 1])` |
-| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 2 goal, 8 auxiliary; omitted when implicit |
-| `entity_ref` | I `[E]` | an object's instance-local id; a goal entity's tuple index; -1 for the auxiliary entity; omitted like `entity_role` |
+| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 1 predicate virtual node, 2 goal, 4 action, 8 auxiliary; omitted when implicit |
+| `entity_ref` | I `[E]` | an object's instance-local id; a goal entity's tuple index; an action entity's row in `actions`; a virtual node's key relation id; -1 for the auxiliary entity; omitted like `entity_role` |
 | `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)`, in both layouts; omitted with `emit_counts=False` |
 | `relation_offsets` | I `[G * R + 1]` | segment `s` holds the tuples `[offsets[s], offsets[s + 1])`; cell `(g, r)` is `s = g * R + r`, or `r * G + g` in the relation layout |
 | `relation_arg_offsets` | I `[G * R + 1]` | the same offsets into `relation_args` |
@@ -140,7 +179,7 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `goal_complete` | uint8 `[G]` | 1 iff the goal relations hold the whole goal; present iff the schema has goal relations |
 | `target_offsets` | I `[G + 1]` | graph `g`'s targets are `[target_offsets[g], target_offsets[g + 1])`; present iff the schema has targets |
 | `target_entity` | I `[T]` | the entity of each target, graph after graph |
-| `target_group` | uint8 `[T]` | the group of each target (0: goal) |
+| `target_group` | uint8 `[T]` | the group of each target (0: goal, 2: action) |
 
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),

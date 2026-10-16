@@ -1,7 +1,7 @@
 // mymyr_encoding: the relational encoder on states of a seeded random walk, one JSON line:
 //
 //   mymyr_encoding domain.pddl problem.pddl [N = 1024] [seed = 1] [layout = graph|relation] [threads = 1]
-//   [goals = off|on|targets]
+//   [goals = off|on|targets] [actions = off|on|targets|virtual] [singles = 256]
 //
 // The walk starts at the initial state and restarts there at dead ends. The line reports the best of 5 timed encodes of
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
@@ -9,7 +9,10 @@
 // tuple arguments of the batch. faults_per_call is the minor page faults of one timed encode, averaged over the timed
 // encodes. goals selects the goal relations: off (none, the default), on (the plain and satisfied relations of the
 // instance goal) or targets (plain, satisfied and unsatisfied, with the goal entities as targets).
-// single_us_per_call is one encode per state of the first min(N, 256) states (one row per call).
+// single_us_per_call is one encode per state of the first min(N, singles) states (one row per call; singles = 0 skips it). actions selects the
+// action lane: off (no expansion is given, so the action relations are empty, the default), on (the expansion of the
+// states is given), targets (and every action tuple's entity is a target) or virtual (and the predicates get virtual
+// nodes); the expansion is made before the timing and its time is not part of the line.
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -39,6 +42,43 @@ long minor_faults()
 }
 
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+/// The action rows of a batch of states, with the arrays that the expansion points at.
+struct Expanded
+{
+    rl::Expansion x;
+    std::vector<u64> succ;
+    std::vector<i32> parent, schema, binding, offsets;
+};
+
+std::shared_ptr<Expanded> expand_rows(const rl::TaskTable& table, const u64* rows, u64 count, u32 words)
+{
+    auto e = std::make_shared<Expanded>();
+    const std::vector<i32> ids(count, 0);
+    u64 capacity = count * 8 + 16;
+    for (;;)
+    {
+        e->succ.assign(capacity * words, 0);
+        e->parent.assign(capacity, 0);
+        e->schema.assign(capacity, 0);
+        e->binding.assign(capacity * table.label_width(), 0);
+        e->offsets.assign(count + 1, 0);
+        e->x = {};
+        e->x.capacity = capacity;
+        e->x.words = words;
+        e->x.label_width = table.label_width();
+        e->x.succ = e->succ.data();
+        e->x.parent = e->parent.data();
+        e->x.schema = e->schema.data();
+        e->x.binding = e->binding.data();
+        e->x.offsets = e->offsets.data();
+        rl::expand(table, {rows, count, words, 0, 0}, ids.data(), e->x);
+        if (!e->x.overflow())
+            return e;
+        capacity = std::max(capacity * 2, e->x.total);
+        words = std::max(words, e->x.words_needed);
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv)
@@ -102,6 +142,12 @@ int main(int argc, char** argv)
         }
         else if (goals != "on")
             throw std::invalid_argument("goals must be off, on or targets");
+        const std::string actions = argc > 8 ? argv[8] : "off";
+        if (actions == "targets" || actions == "virtual")
+            options.targets.insert(encoding::TargetSource::Action);
+        else if (actions != "off" && actions != "on")
+            throw std::invalid_argument("actions must be off, on, targets or virtual");
+        options.predicate_virtual_nodes = actions == "virtual";
         const auto parsed = encoding::parse_layout(layout);
         if (!parsed)
             throw std::invalid_argument("layout must be graph or relation");
@@ -109,6 +155,12 @@ int main(int argc, char** argv)
         const auto encoder = encoding::FlatEncoder::create(table, options);
         encoding::EncodeInput in;
         in.states = {rows.data(), n, words, 0, 0};
+        std::shared_ptr<Expanded> batch_actions;
+        if (actions != "off")
+        {
+            batch_actions = expand_rows(*table, rows.data(), n, words);
+            in.actions = &batch_actions->x;
+        }
         double best = 1e300;
         std::shared_ptr<const rl::ArrayBundle> bundle;
         ThreadPool pool(threads);
@@ -122,16 +174,22 @@ int main(int argc, char** argv)
             best = std::min(best, now_s() - t0);
         }
         const long faults_per_call = (minor_faults() - faults0) / 5;
-        const u64 singles = std::min<u64>(n, 256);
+        const u64 singles = std::min<u64>(n, argc > 9 ? std::strtoull(argv[9], nullptr, 10) : 256);
         double best_single = 1e300;
         std::shared_ptr<const rl::ArrayBundle> one_bundle;
-        for (int rep = 0; rep < 40; ++rep)
+        std::vector<std::shared_ptr<Expanded>> single_actions;
+        if (actions != "off")
+            for (u64 i = 0; i < singles; ++i)
+                single_actions.push_back(expand_rows(*table, rows.data() + i * words, 1, words));
+        for (int rep = 0; rep < (singles ? 40 : 0); ++rep)
         {
             const double t0 = now_s();
             for (u64 i = 0; i < singles; ++i)
             {
                 encoding::EncodeInput one;
                 one.states = {rows.data() + i * words, 1, words, 0, 0};
+                if (!single_actions.empty())
+                    one.actions = &single_actions[i]->x;
                 one_bundle = encoder->encode(one, pool, scratch);
             }
             best_single = std::min(best_single, now_s() - t0);
@@ -184,13 +242,13 @@ int main(int argc, char** argv)
         const auto* offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_offsets")));
         const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
         const u64 cells = n * encoder->schema().num_relations();
-        std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"goals\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
+        std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"goals\": \"%s\", \"actions\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
                     "\"single_us_per_call\": %.3f, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
-                    layout.c_str(), goals.c_str(), threads, best * 1e6 / static_cast<double>(n),
+                    layout.c_str(), goals.c_str(), actions.c_str(), threads, best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), best_single * 1e6 / static_cast<double>(singles), faults_per_call, offsets[cells], arg_offsets[cells]);
+                    best_fill * 1e6 / static_cast<double>(n), best_single * 1e6 / static_cast<double>(std::max<u64>(singles, 1)), faults_per_call, offsets[cells], arg_offsets[cells]);
     }
     catch (const std::exception& error)
     {

@@ -158,13 +158,14 @@ class Mismatch:
 @dataclass(frozen=True)
 class Context:
     """What the allowed differences may look at: the fixture, its task, the state record of the graph, the config and
-    the goal literals the record was encoded with (``None``: the task's goal)."""
+    the goal literals (``None``: the task's goal) and the actions (``None``: none) the record was encoded with."""
 
     fixture: dict
     task: object
     state: dict
     config: str
     goals: tuple | None = None
+    actions: tuple | None = None
 
 
 def fixture_graph(fixture, record, sources=None):
@@ -198,13 +199,16 @@ def fixture_graph(fixture, record, sources=None):
     return Graph(wanted, entities, tuples)
 
 
-def entity_name(role, ref, task):
-    """The name of an entity of the native encoding, from its role and reference. Objects are named as in the task and
-    the auxiliary entity ``AUXILIARY``; the goal entities are named by ``native_graph`` from their tuples."""
+def entity_name(role, ref, task, relation_names):
+    """The name of an entity of the native encoding, from its role and reference. Objects are named as in the task,
+    the auxiliary entity ``AUXILIARY`` and a predicate virtual node ``predicate:<name>`` after its key relation; the
+    goal and action entities are named by ``native_graph`` from their tuples."""
     if role == "object":
         return task.objects[ref]
     if role == "auxiliary":
         return AUXILIARY
+    if role == "predicate_virtual":
+        return f"predicate:{base_predicate(relation_names[ref])}"
     raise NotImplementedError(f"no naming rule for the entity role {role!r}")
 
 
@@ -215,7 +219,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     """Graph ``row`` of a batch of ``encoder``, restricted to the relations of the given lanes (``None``: all).
     ``tasks`` are the tasks of the batch's table, indexed by task id. A goal entity is named
     ``[+](predicate arguments)[g]`` after the plain goal tuple it stands for (the entity's reference is the tuple's
-    index in the batch)."""
+    index in the batch). An action entity is named ``(action arguments)`` after the action tuples it leads."""
     task = tasks[int(batch.task_ids[row])]
     role_names = batch.schema.entity_role_names
     begin, end = (int(x) for x in batch.entity_offsets[row : row + 2])
@@ -230,7 +234,8 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     def segment(relation):
         return relation * graphs + row if by_relation else row * relations + relation
 
-    entities = [None if role == "goal" else (role, entity_name(role, ref, task)) for role, ref in zip(roles, refs)]
+    entities = [None if role in ("goal", "action") else (role, entity_name(role, ref, task, names))
+                for role, ref in zip(roles, refs)]
     rows = {}
     for relation in range(relations):
         count = int(batch.relation_counts[row, relation])
@@ -249,9 +254,13 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
                 position = next(i for i, (role, ref) in enumerate(zip(roles, refs))
                                 if role == "goal" and ref == int(identifier))
                 assert key[0] == position, f"{names[relation]}: the first argument is not the goal entity"
-                arguments_ = [entities[x][1] for x in key[1:] if roles[x] != "auxiliary"]
+                arguments_ = [entities[x][1] for x in key[1:] if roles[x] not in ("auxiliary", "predicate_virtual")]
                 entities[position] = ("goal", f"[{goal.group(1)}]({' '.join([goal.group(2)] + arguments_)})[g]")
-    assert all(e is not None for e in entities), "a goal entity belongs to no goal tuple"
+        if encoder.relation_lanes[relation] == "action" and "action" in roles:
+            for key in rows[relation]:
+                assert roles[key[0]] == "action", f"{names[relation]}: the first argument is not the action entity"
+                entities[key[0]] = ("action", f"({' '.join([names[relation]] + [entities[x][1] for x in key[1:]])})")
+    assert all(e is not None for e in entities), "a goal or action entity belongs to no tuple"
     selected = [i for i, lane in enumerate(encoder.relation_lanes) if lanes is None or lane in lanes]
     tuples = {}
     unordered = []
@@ -342,7 +351,8 @@ def _without_equality(expected, actual, context):
         return expected, actual
     kept = {name: ts for name, ts in expected.tuples.items() if base_predicate(name) != "="}
     catalog = [c for c in expected.catalog if base_predicate(c[0]) != "="]
-    return replace(expected, catalog=catalog, tuples=kept), actual
+    entities = [e for e in expected.entities if e != ("predicate_virtual", "predicate:=")]
+    return replace(expected, catalog=catalog, entities=entities, tuples=kept), actual
 
 
 def _holding_nullary_atoms(context):
@@ -401,17 +411,21 @@ def _nullary_over_auxiliary(expected, actual, context):
     config that keeps them; a nullary relation that the native catalog lacks, or has in addition, stays a mismatch."""
     fixture = context.fixture
     catalog = fixture["catalogs"][fixture["configs"][NULLARY_CONFIG]["catalog"]]
-    own = fixture["catalogs"][fixture["configs"][context.config]["catalog"]]["names"]
+    own_catalog = fixture["catalogs"][fixture["configs"][context.config]["catalog"]]
+    own = own_catalog["names"]
+    actions = {n for n, source in zip(own, own_catalog["sources"]) if source == "action"}
     kinds = {kind_of(name) for name in own}
     nullary = [(name, 0) for name, arity, source in zip(catalog["names"], catalog["logical_arities"], catalog["sources"])
-               if arity == 0 and source in COMPARED_SOURCES and kind_of(name) in kinds]
+               if arity == 0 and source in sources_of(NULLARY_CONFIG) and kind_of(name) in kinds]
     names = {name for name, _ in nullary}
     holding = _holding_nullary_atoms(context)
-    expected_catalog = sorted([c for c in expected.catalog if c[1] != 0] + nullary, key=lambda c: c[0].encode())
+    expected_catalog = sorted([c for c in expected.catalog if c[1] != 0 or c[0] in actions] + nullary,
+                              key=lambda c: c[0].encode())
     tuples = {name: ts for name, ts in expected.tuples.items() if name not in names}
     goal_present = _present_nullary_goal_relations(context, names)
     present = [name for name, _ in nullary if name in holding or name in goal_present]
     targets = bool(SUPPORTED[context.config].get("target_sources"))
+    virtual = SUPPORTED[context.config].get("predicate_virtual_nodes", False)
     entities = list(expected.entities)
     if present:
         last = max((i for i, (role, _) in enumerate(entities) if role == "object"), default=-1)
@@ -420,65 +434,69 @@ def _nullary_over_auxiliary(expected, actual, context):
         goal = GOAL_RELATION.match(name)
         if targets and goal and name in goal_present:
             entity = f"[{goal.group(1)}]({goal.group(2)})[g]"
-            last = max(i for i, (role, _) in enumerate(entities) if role in ("object", "auxiliary", "goal"))
-            entities.insert(last + 1, ("goal", entity))
+            if ("goal", entity) not in entities:
+                last = max(i for i, (role, _) in enumerate(entities) if role in ("object", "auxiliary", "goal"))
+                entities.insert(last + 1, ("goal", entity))
             tuples[name] = [(entity, AUXILIARY)]
         else:
             tuples[name] = [(AUXILIARY,)]
+        if virtual:
+            node = ("predicate_virtual", f"predicate:{base_predicate(name)}")
+            if node not in entities:
+                entities.append(node)
+            slot = node[1]
+            tuples[name] = [t[:-1] + (slot, t[-1]) for t in tuples[name]]
     return replace(expected, catalog=expected_catalog, entities=entities, tuples=tuples), actual
 
 
-def _without_virtual_nodes(expected, actual, context):
-    """The reference's graph has the predicate virtual nodes and the action entities its config asks for. The native
-    encoder is compared with both off: their entities, and the predicate slot of each tuple that carries one, are
-    projected away from the reference."""
-    options = SUPPORTED[context.config]
-    if options.get("predicate_virtual_nodes", True) or options.get("include_actions", True):
+def _action_subset(expected, actual, context):
+    """The reference was given the actions of its record; the native encoder is given every applicable action. When
+    the record lists fewer, the native action entities that it does not list, and the tuples over them, are
+    projected away."""
+    if context.actions is None:
         return expected, actual
-    fixture = context.fixture
-    catalog = fixture["catalogs"][fixture["configs"][context.config]["catalog"]]
-    predicate = catalog["slot_role_names"].index("predicate_slot")
-    slots = dict(zip(catalog["names"], catalog["slots"]))
-
-    def project(name, ts):
-        keep = [i for i, role in enumerate(slots[name]) if role != predicate]
-        return ts if len(keep) == len(slots[name]) else [tuple(t[i] for i in keep) for t in ts]
-
-    entities = [e for e in expected.entities if e[0] not in ("predicate_virtual", "action")]
-    return replace(_map_tuples(expected, project), entities=entities), actual
+    given = set(context.actions)
+    dropped = {name for role, name in actual.entities if role == "action" and name not in given}
+    if not dropped:
+        return expected, actual
+    entities = [e for e in actual.entities if e[1] not in dropped or e[0] != "action"]
+    tuples = {n: [t for t in ts if not dropped & set(t)] for n, ts in actual.tuples.items()}
+    return expected, replace(actual, entities=entities, tuples=tuples)
 
 
-def _sorted_goal_entities(expected, actual, context):
-    """Goal entities are numbered in canonical order (relation, then tuple) natively and in the order of the goal
-    literals in mifrost: compared in name order."""
-    def order(graph):
-        positions = [i for i, (role, _) in enumerate(graph.entities) if role == "goal"]
-        entities = list(graph.entities)
-        for i, name in zip(positions, sorted(graph.entities[i][1] for i in positions)):
-            entities[i] = ("goal", name)
-        return replace(graph, entities=entities)
+def _sorted_role(role):
+    def reconcile(expected, actual, context):
+        def order(graph):
+            positions = [i for i, (r, _) in enumerate(graph.entities) if r == role]
+            entities = list(graph.entities)
+            for i, name in zip(positions, sorted(graph.entities[i][1] for i in positions)):
+                entities[i] = (role, name)
+            return replace(graph, entities=entities)
 
-    return order(expected), order(actual)
+        return order(expected), order(actual)
+
+    return reconcile
 
 
 def _helper_argument_order(expected, actual, context):
+    slots = int(bool(SUPPORTED[context.config].get("predicate_virtual_nodes", False)))
+
     def permute(name, ts):
         order = helper_column_order(context.task, context.fixture, name) if HELPER.match(name) else None
-        return ts if order is None else [tuple(t[i] for i in order) for t in ts]
+        return ts if order is None else [t[:slots] + tuple(t[slots + i] for i in order) for t in ts]
 
     return expected, _map_tuples(actual, permute)
 
 
 REGISTRY = (
     Difference(
-        "virtual_nodes_and_actions_off",
-        "The reference's config asks for predicate virtual nodes and action targets, which the native encoder is "
-        "compared without; the entities of both and the predicate slot of the tuples are projected out of the "
-        "reference.",
-        "the entities of roles predicate_virtual and action, and the predicate slot columns, only while the native "
-        "options turn both off",
-        (("f03", "C3"),),
-        _without_virtual_nodes,
+        "action_subset",
+        "A record's reference encoding was given the actions listed in its inputs, which can be fewer than the "
+        "applicable ones; the native encoder is given every applicable action.",
+        "the action entities that the record does not list, and the tuples over them, only when the record lists "
+        "fewer actions than the state has",
+        (("f03", "C3"), ("f04", "C3"), ("f06", "C3"), ("f07", "C3")),
+        _action_subset,
     ),
     Difference(
         "object_order",
@@ -510,7 +528,23 @@ REGISTRY = (
         "them in the order of the goal literals.",
         "the entities of role goal: compared in name order",
         (("f03", "C3"),),
-        _sorted_goal_entities,
+        _sorted_role("goal"),
+    ),
+    Difference(
+        "action_entity_order",
+        "Action entities are numbered in the canonical order of the expansion rows (action schema, then binding); "
+        "mifrost numbers them in the order of the actions it was given.",
+        "the entities of role action: compared in name order",
+        (("f02", "C3"), ("f03", "C3")),
+        _sorted_role("action"),
+    ),
+    Difference(
+        "predicate_virtual_order",
+        "Predicate virtual nodes are numbered by the id of the predicate's relation among the used predicates; "
+        "mifrost numbers them in the order of their first use.",
+        "the entities of role predicate_virtual: compared in name order",
+        (("f01", "C3"),),
+        _sorted_role("predicate_virtual"),
     ),
     Difference(
         "helper_argument_order",
@@ -555,22 +589,33 @@ SUPPORTED = {
     "C1": dict(include_actions=False),
     "C2": dict(goal_derivations=("plain", "satisfied", "unsatisfied"), nullary=True, layout="relation",
                include_actions=False),
-    "C3": dict(target_sources=("goal",), include_actions=False, predicate_virtual_nodes=False),
+    "C3": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True),
+    "C3N": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True, nullary=True),
+    "C3D": dict(target_sources=("action", "goal"), predicate_virtual_nodes=True, nullary=True,
+                goal_derivations=("plain", "satisfied", "unsatisfied")),
 }
 # Relation sources of the fixtures' catalogs (inside a compared config) that the comparison leaves out, with the lane
 # that turns them on.
 PENDING_SOURCES = {
-    "action": "actions",
+    "action": "actions (of the configs whose native encoder has no action relations)",
     "history": "history",
 }
 COMPARED_SOURCES = ("state", "goal", "goal_derivation")
 COMPARED_LANES = ("fluent", "static", "derived", "goal", "goal_derivation")
+
+
+def sources_of(config):
+    """The relation sources compared for ``config``: the action relations too while its native encoder has them."""
+    return COMPARED_SOURCES + (("action",) if SUPPORTED[config].get("include_actions", True) else ())
+
+
+def lanes_of(config):
+    """The lanes compared for ``config``: the action lane too while its native encoder has it."""
+    return COMPARED_LANES + (("action",) if SUPPORTED[config].get("include_actions", True) else ())
 # Configs that are not compared yet, with the lanes they need.
 PENDING_CONFIGS = {
-    "C3N": "goals, actions, targets, virtual nodes",
-    "C3D": "goals, actions, targets, virtual nodes",
-    "C3S": "goals, actions, subgoals, targets, virtual nodes",
-    "C3H": "goals, actions, history, targets, virtual nodes",
+    "C3S": "goals, subgoals",
+    "C3H": "goals, history",
     "C4_L1": "goals, subgoals",
     "C4_L1N": "goals, subgoals",
     "C4_L2": "goals, subgoals",
@@ -643,17 +688,26 @@ def goal_masks(task, literals):
 
 def encode_records(task, config, rows, records):
     """The native encoder of ``config`` and, per record, its (batch, row): the records without goal literals in one
-    batch, each record with goal literals alone, with its literals as the goal."""
+    batch, each record with goal literals alone, with its literals as the goal. The encoder is given the expansion
+    of its states for the action lane."""
+    from mymyr import rl
+
     encoder = native_encoder(task, config)
+    table = rl.as_table(task)
+    actions = SUPPORTED[config].get("include_actions", True)
+
+    def encode(states, **options):
+        return encoder.encode(states, actions=rl.expand(table, states) if actions else None, **options)
+
     placed = [None] * len(records)
     plain = [i for i, r in enumerate(records) if "goals" not in r["inputs"]]
     if plain:
-        batch = encoder.encode([rows[i] for i in plain])
+        batch = encode([rows[i] for i in plain])
         for k, i in enumerate(plain):
             placed[i] = (batch, k)
     for i, record in enumerate(records):
         if "goals" in record["inputs"]:
-            placed[i] = (encoder.encode([rows[i]], goals=goal_masks(task, record["inputs"]["goals"])), 0)
+            placed[i] = (encode([rows[i]], goals=goal_masks(task, record["inputs"]["goals"])), 0)
     return encoder, placed
 
 
@@ -668,9 +722,10 @@ def run_case(path, config):
     result = CaseResult({}, set())
     for record, (batch, row) in zip(records, placed):
         goals = tuple(record["inputs"]["goals"]) if "goals" in record["inputs"] else None
-        context = Context(fixture, task, states[record["state"]], config, goals)
-        expected = fixture_graph(fixture, record, COMPARED_SOURCES)
-        actual = native_graph(encoder, batch, row, [task], COMPARED_LANES)
+        actions = tuple(record["inputs"]["actions"]) if "actions" in record["inputs"] else None
+        context = Context(fixture, task, states[record["state"]], config, goals, actions)
+        expected = fixture_graph(fixture, record, sources_of(config))
+        actual = native_graph(encoder, batch, row, [task], lanes_of(config))
         result.mismatches[record["state"]] = compare(expected, actual, context)
         result.needed |= needed_differences(expected, actual, context)
     return result
