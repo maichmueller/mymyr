@@ -211,6 +211,110 @@ without `target_sources`, `predicate_virtual_nodes`, `include_actions` and a hor
 and `encoder.implicit_entities` tell, `batch.implicit_entities` is the batch's flag). Omitted arrays raise
 `AttributeError` on the batch and are absent from `as_dict()`.
 
+## Streams
+
+Rows that arrive one by one (a search expanding states, an actor stepping several environments) are encoded in one call
+by collecting them in a stream. `encoder.stream(*, framework=None)` returns an append-only `FlatStream`,
+`encoder.mutable_stream(*, framework=None)` a `FlatMutableStream` whose rows have indices you choose. A stream copies
+the rows it is given, so the caller's arrays can be reused at once, and `flush` encodes all rows it holds in a single
+`encode` call: the batch equals `encoder.encode(rows, ...)` over the same rows bit for bit, whatever the way the rows
+arrived.
+
+```python
+import numpy as np
+import mymyr
+from mymyr import encoding, rl
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+encoder = encoding.FlatRelationEncoder(task, target_sources=("goal", "action"))
+table = rl.as_table(task)
+states = [task.initial_state]
+for _ in range(3):
+    states.append(task.successor_states(states[-1])[0])
+
+stream = encoder.stream()
+stream.append(states[:2], actions=rl.expand(table, states[:2]))
+stream.append(states[2:], actions=rl.expand(table, states[2:]))
+assert len(stream) == 4
+batch = stream.flush()                       # the stream is empty again
+assert len(stream) == 0 and batch.num_graphs == 4
+expected = encoder.encode(states, actions=rl.expand(table, states))
+assert np.array_equal(batch.relation_args, expected.relation_args)
+assert np.array_equal(batch.entity_ref, expected.entity_ref)
+
+mutable = encoder.mutable_stream()
+mutable.append([7, 3], states[:2], actions=rl.expand(table, states[:2]))
+mutable.update(3, states[2], actions=rl.expand(table, states[2:3]))
+mutable.remove(7)
+assert list(mutable.indices()) == [3] and 3 in mutable
+assert mutable.flush().num_graphs == 1       # the rows are kept
+assert len(mutable) == 1
+```
+
+- **`FlatStream.append(states, task_ids=None, *, derived=None, goals=None, actions=None)`** takes the arguments of
+  `encode` and adds the rows. `flush(*, framework=None, threads=1, pool=None, capacities=None)` takes the remaining
+  arguments of `encode`, encodes the rows in the order of the appends and **empties** the stream. A flush that
+  raises, or whose batch overflowed its `capacities`, keeps the rows. `clear()` drops the rows, `len(stream)` counts
+  them, `stream.encoder` is the encoder.
+- **`FlatMutableStream`** stores each row under an index: `append(indices, states, task_ids=None, *, ...)` adds rows
+  under new indices, `update(indices, states, ...)` replaces the rows under held ones (with all their inputs), and
+  `remove(indices)` drops them. An index is an int, an integer array or a sequence of ints; any 64-bit integer,
+  negative ones included. `flush` encodes the rows in **ascending order of their indices** and **keeps** them, so
+  graph `j` of the batch is the row of `indices()[j]`; `index in stream` tells whether a row is held. An index that is
+  repeated within a call or already held raises `ValueError` on `append`; an index that is not held raises `KeyError`
+  on `update` and `remove`. A call that raises changes nothing.
+- **Per-row inputs.** `derived`, `goals` and `actions` are as in `encode`, with one rule: every row of a stream gives
+  the same inputs. The first rows appended to a stream without rows decide (a stream with `goals` keeps a goal for every
+  row, a stream with `actions` the action rows of every state, a single `[1, W]` goal is copied for every row), and a
+  later `append` or `update` that gives other inputs raises `ValueError`. A stream that holds no rows again takes
+  any inputs. Rows narrower than their instance are refused when appended, with the same errors as `encode`; errors
+  that need the encoder (a goal bit with no atom slot, action labels of another instance, an action order that is not
+  canonical) are raised by `flush`, which keeps the rows.
+- **Action rows.** The action rows of the appended expansions are copied and joined in row order, so with
+  `actions` the `entity_ref` of an action entity is a row of that concatenation, not of any one expansion you
+  gave: the action rows of graph `g` start at `action_offsets()[g]` (`len(stream) + 1` entries, in the order of the
+  next flush), and `entity_ref - action_offsets()[g]` is the position among its state's rows.
+  `action_offsets()` is empty for rows without `actions`.
+- **Threads.** The methods of one stream take turns (a flush holds the stream until its batch is encoded); a stream is
+  not a way to encode concurrently, use one stream per producer or `encode` itself.
+
+## Names
+
+A batch stores no names. `encoder.entity_names(batch, graph)` returns the names of the entities of graph `graph` in
+entity order, and `encoder.describe(batch, graph)` a `mymyr.encoding.GraphDescription`: `entities` lists `(role, name)`
+for each entity, `relations` maps every relation with tuples to its tuples as tuples of entity names, in catalog order and
+in the order of the encoding, and `str(description)` prints it. Both work on a batch of either layout, with or without
+the omitted entity arrays, and on a batch of the capacity form; the batch must come from this encoder's schema.
+A graph out of range raises `IndexError`, a batch of another schema or one that overflowed its capacities
+`ValueError`.
+
+```python
+description = encoder.describe(batch, 0)
+print(description)
+assert description.entities[0] == ("object", task.objects[0])
+```
+
+The name of an entity follows its role:
+
+| Entity | Name |
+|---|---|
+| object | its name in the task (`task.objects[entity_ref]`) |
+| auxiliary | `auxiliary` |
+| goal | `[+](on c b)[g]` or `[-](clear a)[g]`: the sign, then the predicate and objects of the plain goal tuple the entity stands for; a nullary literal is `[+](handempty)[g]` |
+| action | `(unstack a b)`: the action schema, then the objects of its action tuple |
+| predicate virtual node | `predicate:on` |
+
+The names are a function of the batch and the task: they do not depend on the layout, the process or the hash seed.
+
+## Pickling
+
+A `FlatRelationEncoder` pickles as its table (or task), its options and the fingerprint of its schema, so an encoder
+can go to worker processes with `multiprocessing` or `torch.multiprocessing`. Loading rebuilds the encoder from the
+table and the options and compares the schema fingerprint with the pickled one: an encoder that would encode otherwise
+(one that a different mymyr version builds with another schema, say) raises `ValueError` instead of producing batches that differ from the
+sender's. The loaded encoder's output equals the original's bit for bit. Batches and streams are not picklable: encode in
+the worker, or send the arrays.
+
 ## Encoding schema
 
 `mymyr.encoding.EncodingSchema(table_or_task, **options)` (C++: `mymyr/encoding/schema.hpp`) is the relation catalog of
@@ -256,3 +360,9 @@ tuples, args, targets); `fill(in, sizes, buffers, pool, scratch)` then writes it
 sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scratch, sizes)` returns a bundle whose
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The encoder is not a
 CUDA or JAX-jitted operation.
+
+`mymyr/encoding/stream.hpp` has the streams: `FlatStream(encoder)` with `append(EncodeInput)`, `size()`, `clear()`,
+`action_offsets()` and `flush(pool)` (or `flush(pool, capacities, sizes)`), and `FlatMutableStream(encoder)` with
+`append(indices, input)`, `update(indices, input)`, `remove(indices)`, `contains(index)`, `indices()` and the same
+`flush`. They throw `std::invalid_argument` for invalid rows or indices and `std::out_of_range` for an index that is not
+held; their methods take a mutex, and each stream has its own `EncodeScratch`.
