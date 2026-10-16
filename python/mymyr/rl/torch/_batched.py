@@ -133,14 +133,14 @@ class BatchedEnv:
         device: Union[str, torch.device] = "cpu",
         goals: bool = False,
         seed: int = 0,
-        max_steps: int = 0,
+        max_steps: int | None = None,
         step_reward: float = 0.0,
         goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
         autoreset: bool = True,
-        witness: bool = False,
+        witness_pruning: bool = False,
         path: str = "auto",
         threads: int = 1,
         ctx: Any = None,
@@ -153,7 +153,8 @@ class BatchedEnv:
         self.core = _rl_torch.Env(
             table, device=index, ctx=ctx, seed=seed, max_steps=max_steps, step_reward=step_reward,
             goal_reward=goal_reward, dead_end=dead_end, dead_end_reward=dead_end_reward,
-            dead_end_terminal=dead_end_terminal, autoreset=autoreset, witness=witness, path=path, threads=threads,
+            dead_end_terminal=dead_end_terminal, autoreset=autoreset, witness_pruning=witness_pruning, path=path,
+            threads=threads,
         )  # fmt: skip
         self.handle = _ops.register(self.core)
         self.num_envs = int(num_envs)
@@ -190,26 +191,32 @@ class BatchedEnv:
 
     @property
     def table(self) -> Any:
+        """The Task, TaskTable or TaskSuite of the instances."""
         return self.core.table
 
     @property
     def num_instances(self) -> int:
+        """The number of instances an episode can start in (task ids 0 .. num_instances - 1)."""
         return self.core.num_instances
 
     @property
     def row_words(self) -> int:
+        """Words per state row: the atom words, then the numeric words."""
         return self.core.row_words
 
     @property
     def words(self) -> int:
+        """Atom words per state row (the table's words, at least 1)."""
         return self.core.words
 
     @property
     def label_width(self) -> int:
+        """Columns of a step's binding output (the largest arity, at least 1)."""
         return self.core.label_width
 
     @property
     def goals(self) -> bool:
+        """Whether the environments carry per-env goal masks (``goals=True``)."""
         return self.goal_pos is not None
 
     def _ids(self) -> Optional[Tensor]:
@@ -350,12 +357,16 @@ class BatchedEnv:
             out.goal_pos.copy_(self.goal_pos)
             out.goal_neg.copy_(self.goal_neg)
 
-    def random_actions(self, max_actions: int = 0) -> Tensor:
+    def random_actions(self, max_actions: Optional[int] = None) -> Tensor:
         """The random policy's next choices without stepping ([N] int64 on ``device``): the successors ``step(None)``
         would take now (the counter-based RNG at the current draw counters), limited to the first ``max_actions``
-        successors (0: no limit); 0 where there is none. ``step(random_actions())`` equals ``step(None)`` when no count
-        exceeds max_actions. No host synchronization; the custom op ``mymyr::random_actions`` under torch.compile."""
-        args = (self.handle, self.draws, self.count, self.first_env, int(max_actions))
+        successors (None: no limit); 0 where there is none. ``step(random_actions())`` equals ``step(None)`` when no
+        count exceeds max_actions. No host synchronization; the custom op ``mymyr::random_actions`` under
+        torch.compile."""
+        if max_actions is not None and int(max_actions) < 1:
+            raise ValueError("mymyr: max_actions must be None or positive")
+        # the custom op takes 0 for no limit
+        args = (self.handle, self.draws, self.count, self.first_env, 0 if max_actions is None else int(max_actions))
         if torch.compiler.is_compiling():
             return torch.ops.mymyr.random_actions(*args)
         return _ops.random_actions_impl(*args)

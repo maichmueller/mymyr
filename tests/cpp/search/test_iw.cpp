@@ -439,7 +439,6 @@ TEST(IwSemantics, PlanCostTakesTheCheapestAction)
     ASSERT_EQ(r.status, SearchStatus::Solved);
     ASSERT_EQ(r.plan.size(), 4u);
     EXPECT_DOUBLE_EQ(r.cost, 4.5);
-    EXPECT_TRUE(r.cost_exact);
     for (const Action& a : r.plan)
         EXPECT_EQ(a.schema.v, 1u);
     expect_valid_plan(*task, task->initial_state(), r.plan, task_goal(*task));

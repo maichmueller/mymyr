@@ -4,7 +4,7 @@ The action space is the K successor slots of a node's state (the index into its 
 slots at or past the state's successor count are invalid (masked at the root, a -1e9 prior inside the tree). A
 simulation is one environment step with the given action (the device fast path: no host synchronization), so the
 embedding is the environment state (:class:`EnvState`). The environment must not reset or truncate inside the tree:
-use ``autoreset=False`` and ``max_steps=0``. The dynamics are exact (the planning task itself), the value and the
+use ``autoreset=False`` and ``max_steps=None``. The dynamics are exact (the planning task itself), the value and the
 prior come from the user (``value_fn(params, obs) -> [B]``, ``prior_fn(params, obs) -> [B, K]`` logits; uniform
 without a prior_fn)::
 
@@ -34,7 +34,7 @@ def _check(env: Env) -> None:
     if env.native.autoreset or env.native.max_steps:
         raise ValueError(
             "mymyr: the mctx adapter needs an environment without autoreset and truncation (Env(..., autoreset=False, "
-            "max_steps=0)): a search must not leave the tree's states"
+            "max_steps=None)): a search must not leave the tree's states"
         )
 
 

@@ -114,7 +114,6 @@ struct RolloutIwResult
     SearchStatus status = SearchStatus::Exhausted;
     std::vector<Action> plan;
     double cost = 0;
-    bool cost_exact = true;
     std::optional<State> goal_state;
     RolloutIwStatistics statistics;
     bool root_solved = false;  // the reachable width-1 space was exhausted (relative to the bounds, see the counters)

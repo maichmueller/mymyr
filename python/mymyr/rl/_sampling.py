@@ -38,10 +38,12 @@ class InstanceSampler:
 
     @property
     def num_instances(self) -> int:
+        """The number of instances it draws from (ids 0 .. num_instances - 1)."""
         return self._num_instances
 
     @property
     def weights(self) -> Optional[tuple[float, ...]]:
+        """The weight of each instance, or None for the uniform distribution."""
         return self._weights
 
     def _arrays(self, like: Any) -> tuple[Any, Any]:

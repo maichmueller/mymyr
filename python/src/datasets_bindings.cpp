@@ -739,7 +739,7 @@ PyStateSpace restore_space(nb::handle task, u64 fingerprint, u64 encoding_finger
 
 /// The keyword arguments of KnowledgeBase(), in order (KbOptions: those after the tasks).
 #define MYMYR_KB_ARGS                                                                                                      \
-    nb::kw_only(), "threads"_a = 0, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \
+    nb::kw_only(), "threads"_a = 1, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),                           \
         "remove_if_unsolvable"_a = true, "labels"_a = true, "sort_by_size"_a = true, "generalized"_a = false,           \
         "width"_a = nb::none(), "dominance_pruning"_a = true
 
@@ -861,13 +861,13 @@ PyKnowledgeBase restore_kb(nb::handle table, nb::handle options, nb::handle spac
 }
 
 const char* k_space_doc =
-    "The full transition model of a task as flat arrays (datasets/state_space.hpp): every reachable state (ids in breadth-first discovery order, the same at every thread count), every "
+    "The full transition model of a task as flat arrays: every reachable state (ids in breadth-first discovery order, the same at every thread count), every "
     "applicable action as a transition (parallel edges and self-loops included), forward and reverse CSR, labels, "
     "transition costs, goal distances (V*: unit by BFS, cost by Dijkstra) and goal / unsolvable / alive flags. "
     "arrays() exports them zero-copy. The initial state is id 0.";
 
 const char* k_options_doc =
-    "Options: threads (0: all cores; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
+    "Options: threads (0: one per hardware thread; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
     "or more), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
     "labels (keep (schema, binding) per transition). State words are the same for every thread count (a task with lazy atom slots has none).";
 
@@ -881,35 +881,43 @@ void bind_datasets(nb::module_& parent)
     nb::module_ m = parent.def_submodule(
         "_datasets", "State spaces, generalized state spaces, knowledge bases, tuple graphs and samplers (mymyr.datasets)");
 
-    nb::enum_<StateSpaceStatus>(m, "Status", "Outcome of a state space generation.")
-        .value("OK", StateSpaceStatus::Ok)
-        .value("OUT_OF_STATES", StateSpaceStatus::OutOfStates)
-        .value("TIMEOUT", StateSpaceStatus::Timeout)
-        .value("UNSOLVABLE", StateSpaceStatus::Unsolvable)
-        .def("__str__", [](StateSpaceStatus s) { return std::string(to_string(s)); });
-
     // ---------------------------------------------------------------------------------------------- StateSpace
     nb::class_<PyStateSpace>(m, "StateSpace", k_space_doc)
-        .def_prop_ro("task", [](const PyStateSpace& s) { return task_object(s.owner.obj); })
-        .def_prop_ro("num_states", [](const PyStateSpace& s) { return s.space->num_states(); })
-        .def_prop_ro("num_transitions", [](const PyStateSpace& s) { return s.space->num_transitions(); })
-        .def_prop_ro("initial_state_id", [](const PyStateSpace& s) { return s.space->initial_state(); })
+        .def_prop_ro("task", [](const PyStateSpace& s) { return task_object(s.owner.obj); },
+                     "The Task the space was generated for.")
+        .def_prop_ro("num_states", [](const PyStateSpace& s) { return s.space->num_states(); },
+                     "The number of states (state ids are 0 .. num_states - 1).")
+        .def_prop_ro("num_transitions", [](const PyStateSpace& s) { return s.space->num_transitions(); },
+                     "The number of transitions (edge ids are 0 .. num_transitions - 1).")
+        .def_prop_ro("initial_state_id", [](const PyStateSpace& s) { return s.space->initial_state(); },
+                     "The id of the initial state (always 0).")
         .def_prop_ro("words", [](const PyStateSpace& s) { return s.space->words(); }, "Fluent words per state row.")
-        .def_prop_ro("numeric_words", [](const PyStateSpace& s) { return s.space->numeric_words(); })
-        .def_prop_ro("row_words", [](const PyStateSpace& s) { return s.space->row_words(); })
-        .def_prop_ro("has_labels", [](const PyStateSpace& s) { return s.space->has_labels(); })
-        .def_prop_ro("label_width", [](const PyStateSpace& s) { return s.space->label_width(); })
+        .def_prop_ro("numeric_words", [](const PyStateSpace& s) { return s.space->numeric_words(); },
+                     "Numeric words per state row (0 for classical tasks).")
+        .def_prop_ro("row_words", [](const PyStateSpace& s) { return s.space->row_words(); },
+                     "Words per state row: words + numeric_words.")
+        .def_prop_ro("has_labels", [](const PyStateSpace& s) { return s.space->has_labels(); },
+                     "Whether the transitions carry their actions (labels=True at generation).")
+        .def_prop_ro("label_width", [](const PyStateSpace& s) { return s.space->label_width(); },
+                     "Binding objects per transition label (the largest schema arity; 0 without labels).")
         .def_prop_ro("unit_costs", [](const PyStateSpace& s) { return s.space->unit_costs(); },
                      "True if every transition costs 1 (arrays() then has no 'costs').")
-        .def_prop_ro("num_goal_states", [](const PyStateSpace& s) { return s.space->num_goal_states(); })
-        .def_prop_ro("num_unsolvable_states", [](const PyStateSpace& s) { return s.space->num_unsolvable_states(); })
+        .def_prop_ro("num_goal_states", [](const PyStateSpace& s) { return s.space->num_goal_states(); },
+                     "The number of goal states.")
+        .def_prop_ro("num_unsolvable_states", [](const PyStateSpace& s) { return s.space->num_unsolvable_states(); },
+                     "The number of unsolvable states (no goal is reachable from them).")
         .def_prop_ro("max_goal_distance", [](const PyStateSpace& s) { return s.space->max_goal_distance(); },
                      "The largest finite unit goal distance (-1 if no state reaches a goal).")
-        .def_prop_ro("threads", [](const PyStateSpace& s) { return s.space->threads(); })
-        .def_prop_ro("layers", [](const PyStateSpace& s) { return s.space->layers(); })
-        .def_prop_ro("search_seconds", [](const PyStateSpace& s) { return s.space->search_seconds(); })
-        .def_prop_ro("post_seconds", [](const PyStateSpace& s) { return s.space->post_seconds(); })
-        .def_prop_ro("nbytes", [](const PyStateSpace& s) { return s.space->bytes(); })
+        .def_prop_ro("threads", [](const PyStateSpace& s) { return s.space->threads(); },
+                     "The threads the generation ran on.")
+        .def_prop_ro("layers", [](const PyStateSpace& s) { return s.space->layers(); },
+                     "The breadth-first layers the generation expanded.")
+        .def_prop_ro("search_seconds", [](const PyStateSpace& s) { return s.space->search_seconds(); },
+                     "Seconds of the breadth-first generation.")
+        .def_prop_ro("post_seconds", [](const PyStateSpace& s) { return s.space->post_seconds(); },
+                     "Seconds after the generation: the backward edges, goal distances and flags.")
+        .def_prop_ro("nbytes", [](const PyStateSpace& s) { return s.space->bytes(); },
+                     "The approximate memory of the space, in bytes.")
         .def(
             "arrays", [](const PyStateSpace& s, FrameworkArg framework) { return space_arrays(s, parse_framework(framework)); },
             "framework"_a = nb::none(),
@@ -957,12 +965,18 @@ void bind_datasets(nb::module_& parent)
             "id"_a, "The transitions out of a state: (action, target id), in canonical action order.")
         .def("label", [](const PyStateSpace& s, i64 e) { return label_of(s, edge_id(s, e)); }, "edge"_a,
              "The action of a transition.")
-        .def("source", [](const PyStateSpace& s, i64 e) { return s.space->source(edge_id(s, e)); }, "edge"_a)
-        .def("target", [](const PyStateSpace& s, i64 e) { return s.space->forward_targets()[edge_id(s, e)]; }, "edge"_a)
-        .def("cost", [](const PyStateSpace& s, i64 e) { return s.space->cost(edge_id(s, e)); }, "edge"_a)
-        .def("is_goal", [](const PyStateSpace& s, i64 id) { return s.space->is_goal(state_id(s, id)); }, "id"_a)
-        .def("is_unsolvable", [](const PyStateSpace& s, i64 id) { return s.space->is_unsolvable(state_id(s, id)); }, "id"_a)
-        .def("is_alive", [](const PyStateSpace& s, i64 id) { return s.space->is_alive(state_id(s, id)); }, "id"_a)
+        .def("source", [](const PyStateSpace& s, i64 e) { return s.space->source(edge_id(s, e)); }, "edge"_a,
+             "The state id a transition starts from.")
+        .def("target", [](const PyStateSpace& s, i64 e) { return s.space->forward_targets()[edge_id(s, e)]; }, "edge"_a,
+             "The state id a transition leads to.")
+        .def("cost", [](const PyStateSpace& s, i64 e) { return s.space->cost(edge_id(s, e)); }, "edge"_a,
+             "The cost of a transition under the task's metric (1.0 when unit_costs).")
+        .def("is_goal", [](const PyStateSpace& s, i64 id) { return s.space->is_goal(state_id(s, id)); }, "id"_a,
+             "Whether the state is a goal state.")
+        .def("is_unsolvable", [](const PyStateSpace& s, i64 id) { return s.space->is_unsolvable(state_id(s, id)); }, "id"_a,
+             "Whether no goal is reachable from the state.")
+        .def("is_alive", [](const PyStateSpace& s, i64 id) { return s.space->is_alive(state_id(s, id)); }, "id"_a,
+             "Whether the state is neither a goal state nor unsolvable.")
         .def(
             "unit_goal_distance", [](const PyStateSpace& s, i64 id) { return s.space->unit_goal_distances()[state_id(s, id)]; },
             "id"_a, "-1 if no goal is reachable.")
@@ -1001,21 +1015,28 @@ void bind_datasets(nb::module_& parent)
                    ", unsolvable=" + std::to_string(s.space->num_unsolvable_states()) + ")";
         });
 
-    nb::class_<PyGenerationResult>(m, "GenerationResult")
-        .def_prop_ro("status", [](const PyGenerationResult& r) { return r.status; })
+    nb::class_<PyGenerationResult>(m, "GenerationResult",
+                                   "The outcome of a state space generation: its status, the state space when it is "
+                                   "complete, and its counts. True when the space is complete.")
+        .def_prop_ro("status", [](const PyGenerationResult& r) { return search_status(r.status); },
+                     "How the generation ended (mymyr.search.Status): EXHAUSTED when every reachable state was "
+                     "expanded (the space is complete), OUT_OF_STATES or OUT_OF_TIME when a budget stopped it, "
+                     "UNSOLVABLE when the goal is statically false or, with remove_if_unsolvable, the initial state "
+                     "is unsolvable.")
         .def_prop_ro("space", [](const PyGenerationResult& r) { return nb::typed<nb::object, std::optional<PyStateSpace>>(r.space); },
-                     "The state space (None unless status is OK).")
-        .def_prop_ro("states", [](const PyGenerationResult& r) { return r.states; },
-                     "States stored when the generation ended (also when it failed).")
-        .def_prop_ro("seconds", [](const PyGenerationResult& r) { return r.seconds; })
-        .def("__bool__", [](const PyGenerationResult& r) { return !r.space.is_none(); })
+                     "The StateSpace (None unless status is EXHAUSTED).")
+        .def_prop_ro("stats", [](const PyGenerationResult& r) { return generation_stats(r.states, r.seconds); },
+                     "Statistics: states (stored when the generation ended, also when it failed) and seconds (its "
+                     "wall time); the other counts are 0.")
+        .def("__bool__", [](const PyGenerationResult& r) { return !r.space.is_none(); }, "The space is complete.")
         .def("__reduce__",
              [](const PyGenerationResult& r) {
                  return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_generation_result"),
                                        nb::make_tuple(static_cast<int>(r.status), r.space, r.states, r.seconds));
              })
         .def("__repr__", [](const PyGenerationResult& r) {
-            return std::string("GenerationResult(status=") + to_string(r.status) + ", states=" + std::to_string(r.states) + ")";
+            return std::string("GenerationResult(status=") + search::to_string(search_status(r.status)) +
+                   ", states=" + std::to_string(r.states) + ")";
         });
 
     m.def(
@@ -1063,7 +1084,7 @@ void bind_datasets(nb::module_& parent)
                 out.append(nb::cast(wrap(owners[i], std::move(rs[i])), nb::rv_policy::move));
             return out;
         },
-        "tasks"_a, nb::kw_only(), "threads"_a = 0, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),
+        "tasks"_a, nb::kw_only(), "threads"_a = 1, "max_states"_a = nb::none(), "max_seconds"_a = nb::none(),
         "remove_if_unsolvable"_a = true, "labels"_a = true,
         "The instance pool: the state spaces of many tasks, one task per worker thread (threads workers; 0: all "
         "cores), each generated single-threaded. Results in input order. Options as generate().");
@@ -1071,8 +1092,8 @@ void bind_datasets(nb::module_& parent)
     // ---------------------------------------------------------------------------------------------- generalized
     nb::class_<PyGeneralizedStateSpace>(
         m, "GeneralizedStateSpace",
-        "One graph over the state spaces of several problems of one domain "
-        "(datasets/generalized_state_space.hpp): their disjoint union in input order. State s of problem p is vertex "
+        "One graph over the state spaces of several problems of one domain: "
+        "their disjoint union in input order. State s of problem p is vertex "
         "vertex_offsets[p] + s and transition e of problem p is edge edge_offsets[p] + e, so the edges out of a vertex "
         "are its state's transitions in their order. The initial, goal and unsolvable vertices are the problems' ones.")
         .def(
@@ -1104,8 +1125,10 @@ void bind_datasets(nb::module_& parent)
                 return out;
             },
             "The problems' state spaces (problem p = spaces[p]).")
-        .def_prop_ro("num_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->num_vertices(); })
-        .def_prop_ro("num_edges", [](const PyGeneralizedStateSpace& g) { return g.gss->num_edges(); })
+        .def_prop_ro("num_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->num_vertices(); },
+                     "The number of vertices: the states of every problem.")
+        .def_prop_ro("num_edges", [](const PyGeneralizedStateSpace& g) { return g.gss->num_edges(); },
+                     "The number of edges: the transitions of every problem.")
         .def(
             "arrays",
             [](const PyGeneralizedStateSpace& g, FrameworkArg framework) {
@@ -1150,11 +1173,13 @@ void bind_datasets(nb::module_& parent)
             "vertex"_a, "The (problem, state id) of a vertex.")
         .def(
             "source", [](const PyGeneralizedStateSpace& g, i64 e) { return g.gss->source(gss_index(e, g.gss->num_edges(), "edge")); },
-            "edge"_a)
+            "edge"_a,
+            "The vertex an edge starts from.")
         .def(
             "target",
             [](const PyGeneralizedStateSpace& g, i64 e) { return g.gss->forward_targets()[gss_index(e, g.gss->num_edges(), "edge")]; },
-            "edge"_a)
+            "edge"_a,
+            "The vertex an edge leads to.")
         .def("__reduce__",
              [](nb::handle self) {
                  nb::list spaces;
@@ -1162,9 +1187,12 @@ void bind_datasets(nb::module_& parent)
                      spaces.append(s);
                  return nb::make_tuple(self.type(), nb::make_tuple(spaces));
              })
-        .def("initial_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->initial_vertices(); })
-        .def("goal_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->goal_vertices(); })
-        .def("unsolvable_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->unsolvable_vertices(); })
+        .def("initial_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->initial_vertices(); },
+             "The initial vertex of each problem, in problem order.")
+        .def("goal_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->goal_vertices(); },
+             "The goal vertices, ascending.")
+        .def("unsolvable_vertices", [](const PyGeneralizedStateSpace& g) { return g.gss->unsolvable_vertices(); },
+             "The unsolvable vertices, ascending.")
         .def("__repr__", [](const PyGeneralizedStateSpace& g) {
             return "GeneralizedStateSpace(problems=" + std::to_string(g.spaces.size()) + ", vertices=" +
                    std::to_string(g.gss->num_vertices()) + ", edges=" + std::to_string(g.gss->num_edges()) + ")";
@@ -1190,7 +1218,7 @@ void bind_datasets(nb::module_& parent)
     // ---------------------------------------------------------------------------------------------- samplers
     nb::class_<PySampler>(m, "StateSpaceSampler",
                           "Uniform samplers over a state space : any state, states n "
-                          "steps from a goal, dead ends. Deterministic for a seed on every platform (xoshiro256**). "
+                          "steps from a goal, unsolvable states. Deterministic for a seed on every platform (xoshiro256**). "
                           "Samples are state ids. The space may be a device state space "
                           "(mymyr.cuda.DeviceStateSpace, CUDA builds): the sampler then holds its unit goal distances "
                           "on the host (downloaded once) and gives the samples of its host copy.")
@@ -1209,16 +1237,20 @@ void bind_datasets(nb::module_& parent)
                 new (self) PySampler{space, std::make_shared<SamplerCore>(std::span<const i32>(unit), seed)};
             },
             "space"_a, "seed"_a = 0)
-        .def_prop_ro("space", [](const PySampler& s) { return SamplerSpace(s.space); })
+        .def_prop_ro("space", [](const PySampler& s) { return SamplerSpace(s.space); },
+                     "The state space it samples from.")
         .def("set_seed", [](PySampler& s, IntArg seed_in) {
             const u64 seed = int_arg<u64>(seed_in, "seed");
             std::lock_guard lock(s.core->mutex);
             s.core->sampler.set_seed(seed);
-        }, "seed"_a)
+        }, "seed"_a,
+             "Restarts the sampler's random stream at `seed` (the samples that follow equal those of a new sampler "
+             "with that seed).")
         .def("sample_state", [](PySampler& s) {
             std::lock_guard lock(s.core->mutex);
             return s.core->sampler.sample_state();
-        })
+        },
+             "A uniform state id.")
         .def("sample_state_n_steps_from_goal", [](PySampler& s, IntArg n_in) {
             const i32 n = int_arg<i32>(n_in, "n", 0);
             std::lock_guard lock(s.core->mutex);
@@ -1231,17 +1263,18 @@ void bind_datasets(nb::module_& parent)
                 throw nb::value_error(e.what());
             }
         }, "n"_a, "A state with unit goal distance n (ValueError if there is none).")
-        .def("sample_dead_end_state", [](PySampler& s) {
+        .def("sample_unsolvable_state", [](PySampler& s) {
             std::lock_guard lock(s.core->mutex);
             try
             {
-                return s.core->sampler.sample_dead_end_state();
+                return s.core->sampler.sample_unsolvable_state();
             }
             catch (const std::out_of_range& e)
             {
                 throw nb::value_error(e.what());
             }
-        })
+        },
+             "A uniform unsolvable state id.\n\nRaises:\n    ValueError: the space has no unsolvable state.")
         .def(
             "sample_states",
             [](PySampler& s, IntArg count_in, FrameworkArg framework) {
@@ -1275,9 +1308,11 @@ void bind_datasets(nb::module_& parent)
                 }
                 return AnyArray(fresh_u32(v, fw));
             },
-            "n"_a, "count"_a, "framework"_a = nb::none())
+            "n"_a, "count"_a, "framework"_a = nb::none(),
+            "`count` uniform state ids with unit goal distance n (uint32).\n\nRaises:\n    ValueError: no state "
+            "has unit goal distance n.")
         .def(
-            "sample_dead_end_states",
+            "sample_unsolvable_states",
             [](PySampler& s, IntArg count_in, FrameworkArg framework) {
                 const u64 count = int_arg<u64>(count_in, "count");
                 const Framework fw = parse_framework(framework);
@@ -1286,7 +1321,7 @@ void bind_datasets(nb::module_& parent)
                     std::lock_guard lock(s.core->mutex);
                     try
                     {
-                        s.core->sampler.sample_dead_end_states(v);
+                        s.core->sampler.sample_unsolvable_states(v);
                     }
                     catch (const std::out_of_range& e)
                     {
@@ -1295,12 +1330,17 @@ void bind_datasets(nb::module_& parent)
                 }
                 return AnyArray(fresh_u32(v, fw));
             },
-            "count"_a, "framework"_a = nb::none())
-        .def_prop_ro("num_states", [](const PySampler& s) { return s.core->sampler.num_states(); })
-        .def_prop_ro("num_dead_end_states", [](const PySampler& s) { return s.core->sampler.num_dead_end_states(); })
-        .def_prop_ro("num_alive_states", [](const PySampler& s) { return s.core->sampler.num_alive_states(); },
-                     "States that are not dead ends (goal states included).")
-        .def_prop_ro("max_steps_to_goal", [](const PySampler& s) { return s.core->sampler.max_steps_to_goal(); })
+            "count"_a, "framework"_a = nb::none(),
+            "`count` uniform unsolvable state ids (uint32).\n\nRaises:\n    ValueError: the space has no "
+            "unsolvable state.")
+        .def_prop_ro("num_states", [](const PySampler& s) { return s.core->sampler.num_states(); },
+                     "The number of states of the space.")
+        .def_prop_ro("num_unsolvable_states", [](const PySampler& s) { return s.core->sampler.num_unsolvable_states(); },
+                     "The number of unsolvable states.")
+        .def_prop_ro("num_solvable_states", [](const PySampler& s) { return s.core->sampler.num_solvable_states(); },
+                     "The states from which a goal is reachable (goal states included).")
+        .def_prop_ro("max_steps_to_goal", [](const PySampler& s) { return s.core->sampler.max_steps_to_goal(); },
+                     "The largest unit goal distance of a solvable state.")
         .def(
             "states_n_steps_from_goal",
             [](const PySampler& s, IntArg n_in, FrameworkArg framework) {
@@ -1311,16 +1351,17 @@ void bind_datasets(nb::module_& parent)
             },
             "n"_a, "framework"_a = nb::none(), "The ids with unit goal distance n, ascending (a view).")
         .def(
-            "dead_end_states",
+            "unsolvable_states",
             [](const PySampler& s, FrameworkArg framework) {
-                return AnyArray(view<u32>(s.core, s.core->sampler.dead_end_states(), parse_framework(framework)));
+                return AnyArray(view<u32>(s.core, s.core->sampler.unsolvable_states(), parse_framework(framework)));
             },
-            "framework"_a = nb::none());
+            "framework"_a = nb::none(),
+            "The unsolvable state ids, ascending (a view).");
 
     // ---------------------------------------------------------------------------------------------- tuple graphs
     nb::class_<PyTupleGraph>(
         m, "TupleGraph",
-        "The tuple graph of a state-space vertex (the root; datasets/tuple_graph.hpp; "
+        "The tuple graph of a state-space vertex (the root; "
         "Lipovetzky and Geffner 2012): which tuples of at most `width` fluent atoms are first reached at each "
         "breadth-first distance from the root, the problem vertices (states) at that distance in which each is novel, "
         "and the edges u -> t between consecutive distances where every problem vertex of u has a successor among "
@@ -1330,13 +1371,18 @@ void bind_datasets(nb::module_& parent)
         .def_prop_ro("space", [](const PyTupleGraph& g) { return nb::typed<nb::object, PyStateSpace>(g.space); },
                      "The state space the root belongs to.")
         .def_prop_ro("root", [](const PyTupleGraph& g) { return g.graph->root(); }, "The root's state id.")
-        .def_prop_ro("width", [](const PyTupleGraph& g) { return g.graph->width(); })
-        .def_prop_ro("dominance_pruning", [](const PyTupleGraph& g) { return g.graph->dominance_pruning(); })
-        .def_prop_ro("num_vertices", [](const PyTupleGraph& g) { return g.graph->num_vertices(); })
-        .def_prop_ro("num_edges", [](const PyTupleGraph& g) { return g.graph->num_edges(); })
+        .def_prop_ro("width", [](const PyTupleGraph& g) { return g.graph->width(); },
+                     "The largest tuple size.")
+        .def_prop_ro("dominance_pruning", [](const PyTupleGraph& g) { return g.graph->dominance_pruning(); },
+                     "Whether only the vertices with minimal problem-vertex sets were kept.")
+        .def_prop_ro("num_vertices", [](const PyTupleGraph& g) { return g.graph->num_vertices(); },
+                     "The number of vertices.")
+        .def_prop_ro("num_edges", [](const PyTupleGraph& g) { return g.graph->num_edges(); },
+                     "The number of edges.")
         .def_prop_ro("num_distances", [](const PyTupleGraph& g) { return g.graph->num_distances(); },
                      "The number of distances with vertices (the largest distance + 1).")
-        .def_prop_ro("nbytes", [](const PyTupleGraph& g) { return g.graph->bytes(); })
+        .def_prop_ro("nbytes", [](const PyTupleGraph& g) { return g.graph->bytes(); },
+                     "The approximate memory of the graph, in bytes.")
         .def(
             "vertices_at",
             [](const PyTupleGraph& g, i64 d) {
@@ -1347,7 +1393,8 @@ void bind_datasets(nb::module_& parent)
                 return out;
             },
             "distance"_a, "The vertices at a distance (consecutive ids, ascending).")
-        .def("distance", [](const PyTupleGraph& g, i64 v) { return g.graph->distance(tuple_vertex(*g.graph, v)); }, "vertex"_a)
+        .def("distance", [](const PyTupleGraph& g, i64 v) { return g.graph->distance(tuple_vertex(*g.graph, v)); }, "vertex"_a,
+             "The breadth-first distance of a vertex from the root.")
         .def("tuple", [](const PyTupleGraph& g, i64 v) { return to_vector(g.graph->tuple(tuple_vertex(*g.graph, v))); },
              "vertex"_a, "The vertex's tuple: fluent atom slots of the space's task, ascending (empty: the empty tuple).")
         .def(
@@ -1456,9 +1503,9 @@ void bind_datasets(nb::module_& parent)
                 out.append(nb::cast(PyTupleGraph{std::make_shared<const TupleGraph>(std::move(g)), space_obj}, nb::rv_policy::move));
             return out;
         },
-        "space"_a, nb::kw_only(), "width"_a = 0, "dominance_pruning"_a = true, "threads"_a = 0,
+        "space"_a, nb::kw_only(), "width"_a = 0, "dominance_pruning"_a = true, "threads"_a = 1,
         "The tuple graph of every vertex of a state space (index = state id): width "
-        "0..5 (0: the root and its successor states), dominance_pruning, threads (0: all cores; the result is the "
+        "0..5 (0: the root and its successor states), dominance_pruning, threads (0: one per hardware thread; the result is the "
         "same at every count). Cost: a breadth-first search per vertex, enumerating the tuples of at most width atoms "
         "of every state it reaches; tuple_graph() builds one.");
 
@@ -1483,12 +1530,12 @@ void bind_datasets(nb::module_& parent)
     // ---------------------------------------------------------------------------------------------- knowledge bases
     nb::class_<PyKnowledgeBase>(
         m, "KnowledgeBase",
-        "What is known about a set of tasks of one domain (datasets/knowledge_base.hpp): the "
+        "What is known about a set of tasks of one domain: the "
         "tasks (a mymyr.rl.TaskTable), the state space of every task whose generation succeeded (failures skipped; "
         "max_states and max_seconds bound each one), sorted ascending by size unless sort_by_size=False (ties in task "
         "order), optionally the generalized state space over them (generalized=True), and optionally the tuple graphs "
         "of every vertex of every space (width=0..5; tuple graphs of large spaces are better built per vertex with "
-        "tuple_graph(space, vertex)). Every step runs on `threads` threads (0: all cores) with the same result at "
+        "tuple_graph(space, vertex)).\n\nEvery step runs on `threads` threads (0: one per hardware thread) with the same result at "
         "every count. A knowledge base pickles as its tasks, options, state spaces and tuple graphs (unpickling "
         "validates them and rebuilds the generalized state space; nothing is generated again), and saves to a file "
         "with datasets.save.")
@@ -1522,7 +1569,8 @@ void bind_datasets(nb::module_& parent)
         .def_prop_ro("generalized_state_space", [](const PyKnowledgeBase& kb) { return kb.gss; },
                      "The generalized state space over state_spaces (problem i = state space i), or None unless "
                      "generalized=True.")
-        .def_prop_ro("has_tuple_graphs", [](const PyKnowledgeBase& kb) { return kb.kb->has_tuple_graphs(); })
+        .def_prop_ro("has_tuple_graphs", [](const PyKnowledgeBase& kb) { return kb.kb->has_tuple_graphs(); },
+                     "Whether the knowledge base holds tuple graphs (built with width=).")
         .def_prop_ro(
             "width",
             [](const PyKnowledgeBase& kb) {

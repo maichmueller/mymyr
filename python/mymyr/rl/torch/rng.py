@@ -1,4 +1,4 @@
-"""The counter-based RNG of the environments (rl/rng.hpp): Philox-4x32-10, the same on the host and the device.
+"""The counter-based RNG of the environments: Philox-4x32-10, the same on the host and the device.
 
 A draw is a pure function of (seed, env id, draw counter, purpose): the successor of environment ``first_env + i`` at
 its draw counter ``d`` is ``successor_indices(seed, first_env + i, d, count)``. No state is shared between

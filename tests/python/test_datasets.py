@@ -77,7 +77,7 @@ def test_arrays_are_consistent(depot, depot_space):
     with pytest.raises(ValueError):
         a["goal"][0] = True
     # the same count as the BrFS without witness pruning
-    assert search.brfs(depot, witness_pruning=False, stop_at_goal=False).states == n
+    assert search.brfs(depot, witness_pruning=False, stop_at_goal=False).stats.states == n
 
 
 def test_states_labels_and_transitions(depot, depot_space):
@@ -132,15 +132,15 @@ def test_options(tmp_path, depot):
     task = mymyr.Task.from_pddl(dom, write(tmp_path, "p.pddl", "(define (problem p) (:domain dead) (:init (a)) (:goal (g)))"))
     # the initial state cannot reach the goal: no space unless remove_if_unsolvable=False
     r = datasets.generate(task)
-    assert r.status == datasets.Status.UNSOLVABLE and r.space is None and not r
+    assert r.status == search.Status.UNSOLVABLE and r.space is None and not r
     assert datasets.state_space(task) is None
     s = datasets.state_space(task, remove_if_unsolvable=False)
     assert s.num_states == 2 and s.num_unsolvable_states == 2 and s.unit_goal_distance(0) == -1
     assert s.cost_goal_distance(0) == float("inf")
     # max_states: fails iff the space has max(max_states, 2) states or more
-    assert datasets.generate(depot, max_states=40320).status == datasets.Status.OUT_OF_STATES
-    assert datasets.generate(depot, max_states=40321, threads=2).status == datasets.Status.OK
-    assert datasets.generate(depot, max_seconds=0.0).status == datasets.Status.TIMEOUT
+    assert datasets.generate(depot, max_states=40320).status == search.Status.OUT_OF_STATES
+    assert datasets.generate(depot, max_states=40321, threads=2).status == search.Status.EXHAUSTED
+    assert datasets.generate(depot, max_seconds=0.0).status == search.Status.OUT_OF_TIME
     # without labels
     s = datasets.state_space(depot, labels=False)
     assert not s.has_labels and "label_schemas" not in s.arrays()
@@ -148,14 +148,14 @@ def test_options(tmp_path, depot):
         s.label(0)
     with pytest.raises(TypeError):
         datasets.generate("depot")
-    assert str(datasets.Status.OUT_OF_STATES) == "out_of_states"
+    assert str(search.Status.OUT_OF_STATES) == "out_of_states"
 
 
 # ------------------------------------------------------------------------------------------------ pool
 def test_pool_equals_single_generations():
     tasks = [text_task(n, atoms="dense") for n in ("depot__p02", "philosophers__p03-phil4")] * 3
     rs = datasets.generate_many(tasks, threads=4, remove_if_unsolvable=False)
-    assert [r.status for r in rs] == [datasets.Status.OK] * 6
+    assert [r.status for r in rs] == [search.Status.EXHAUSTED] * 6
     for t, r in zip(tasks, rs):
         assert r.space.task is t
         one = datasets.state_space(t, remove_if_unsolvable=False)
@@ -221,7 +221,7 @@ def test_sampler():
     assert not np.array_equal(x, datasets.StateSpaceSampler(s, seed=8).sample_states(1000))
     a.set_seed(7)
     assert np.array_equal(a.sample_states(1000), x)
-    assert (a.num_states, a.num_dead_end_states, a.num_alive_states) == (662, 153, 509)
+    assert (a.num_states, a.num_unsolvable_states, a.num_solvable_states) == (662, 153, 509)
     assert a.max_steps_to_goal == s.max_goal_distance == 14
     d = s.arrays()["unit_goal_distances"]
     for n in range(a.max_steps_to_goal + 1):
@@ -230,15 +230,15 @@ def test_sampler():
         support = a.states_n_steps_from_goal(n)
         assert np.array_equal(support, np.flatnonzero(d == n))
         assert d[a.sample_state_n_steps_from_goal(n)] == n
-    assert s.arrays()["unsolvable"][a.sample_dead_end_states(500)].all()
-    assert np.array_equal(a.dead_end_states(), np.flatnonzero(d < 0))
+    assert s.arrays()["unsolvable"][a.sample_unsolvable_states(500)].all()
+    assert np.array_equal(a.unsolvable_states(), np.flatnonzero(d < 0))
     with pytest.raises(ValueError):
         a.sample_state_n_steps_from_goal(15)
     # uniform: every state shows up
     assert np.unique(a.sample_states(40000)).size == s.num_states
     no_dead = datasets.StateSpaceSampler(datasets.state_space(small_task("gripper", "p-2-0.pddl")))
     with pytest.raises(ValueError):
-        no_dead.sample_dead_end_state()
+        no_dead.sample_unsolvable_state()
 
 
 # ------------------------------------------------------------------------------------------------ frameworks

@@ -66,7 +66,7 @@ def golden_task(name):
 
 
 def passes(r):
-    return [(p.arity, p.expanded, p.generated, p.generated_in_tree) for p in r.passes]
+    return [(p.width, p.expanded, p.generated, p.generated_in_tree) for p in r.passes]
 
 
 def golden_passes(entry):
@@ -90,7 +90,7 @@ def test_golden_iw_per_pass(name):
     for entry in g["iw"]:
         if entry["status"] not in ("solved", "failed"):  # the fork stopped on a budget
             continue
-        r = search.iw(task, max_arity=entry["k"], max_seconds=60)
+        r = search.iw(task, max_width=entry["k"], max_seconds=60)
         assert passes(r) == golden_passes(entry), (name, entry["k"])
         assert str(r.status) == ("solved" if entry["status"] == "solved" else "exhausted")
         if entry["status"] == "solved":
@@ -104,7 +104,7 @@ def test_golden_iw_per_pass(name):
 def test_golden_brfs_counts(name):
     g = load_golden(name)["brfs"]
     r = search.brfs(golden_task(name), witness_pruning=False, stop_at_goal=False)
-    assert r.exhausted and r.states == g["states"] and r.generated == g["generated"]
+    assert r.exhausted and r.stats.states == g["states"] and r.stats.generated == g["generated"]
 
 
 @pytest.mark.parametrize("name", [n for n in golden_cases()

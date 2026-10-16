@@ -914,7 +914,7 @@ TEST(Portfolio, CertifierAloneEqualsIw1)
             EXPECT_EQ(r.cost, ref.cost);
             EXPECT_TRUE(r.certified_optimal);
             EXPECT_EQ(r.winning_worker, 0u);
-            EXPECT_EQ(r.total_expansions, ref.total.expanded) << name;
+            EXPECT_EQ(r.stats.expanded, ref.total.expanded) << name;
         }
         else
             EXPECT_EQ(r.status, SearchStatus::Exhausted) << name;
@@ -935,7 +935,7 @@ TEST(Portfolio, SerialIsReproducibleAndCertifiesAtomicGoals)
         EXPECT_EQ(a.plan, b.plan);
         EXPECT_EQ(a.winning_worker, b.winning_worker);
         EXPECT_EQ(a.rollout_rounds, b.rollout_rounds);
-        EXPECT_EQ(a.total_expansions, b.total_expansions);
+        EXPECT_EQ(a.stats.expanded, b.stats.expanded);
         const u32 slot = task->atoms().intern(c);
         EXPECT_TRUE(reaches_goal(*task, a.plan, [slot](StateView s) { return bits::test(s.w, s.nw, slot); }));
         // serial: the certifier runs first and, having found the plan, leaves nothing to the rollouts
@@ -974,7 +974,7 @@ TEST(Portfolio, RolloutWorkersAndCertification)
         {
             EXPECT_TRUE(r.certified_optimal);
         }
-        EXPECT_GE(r.total_expansions, r.certifier.total.expanded);
+        EXPECT_GE(r.stats.expanded, r.certifier.total.expanded);
     }
     // rollouts alone find a plan the exhausted certifier does not: not certified
     {
@@ -1032,8 +1032,8 @@ TEST(Portfolio, HooksBudgetsAndErrors)
         o.control.budget.max_expanded = 10;
         const PortfolioResult r = atomic_goal_portfolio(*task, o);
         EXPECT_NE(r.status, SearchStatus::Solved);
-        EXPECT_GE(r.total_expansions, 10u);
-        EXPECT_LE(r.total_expansions, 10u + 4u) << "every worker stops at its next expansion";
+        EXPECT_GE(r.stats.expanded, 10u);
+        EXPECT_LE(r.stats.expanded, 10u + 4u) << "every worker stops at its next expansion";
     }
     {
         SearchCoordination coord;

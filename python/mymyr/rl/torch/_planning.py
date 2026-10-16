@@ -16,33 +16,40 @@ class PlanningEnv(EnvBase):
     """N planning environments over a TaskSuite or a TaskTable (or a Task) as a TorchRL environment (batch_size [N]).
 
     Observation: ``state`` [N, row_words] int64 (the state words), ``task_id`` [N] int64 (the env's instance) and
-    ``count`` [N] int64 (its successors); with ``max_actions=K`` also ``action_mask`` [N, K] bool (successor k
-    exists); with ``goals=True`` also ``goal_pos`` / ``goal_neg`` [N, words] int64 (the env's goal as word masks: its
-    instance's goal after a reset, or the one given; the step's goal test is then the mask test). Action: ``action``
-    [N] int64, an index into the state's successors in canonical order (schema, then binding), Categorical(K) with
-    ``max_actions=K`` (successors past K are out of reach), otherwise unbounded (an index outside [0, count) does not
-    move). Reward [N, 1] float32: step_reward, plus goal_reward on reaching a goal, plus dead_end_reward on reaching
-    (or being stuck in) a dead end. ``terminated`` = goal or dead end (``dead_end_terminal``), ``truncated`` =
-    max_steps reached (0: never), ``done`` = either. Finished environments are reset by TorchRL (``_reset`` masks); the
-    reset tensordict may carry ``next_task_id`` [N] (curriculum: the instances the reset rows restart in) and, with goals,
-    ``next_goal_pos`` / ``next_goal_neg``. Explicit reset kwargs also accept ``goal_pos`` / ``goal_neg``.
-    Observation goal masks are not reset assignments. Every reset waits for the device work
-    and raises the device environment's errors (``BatchedEnv.check_errors``: a ``task_id`` outside the table, states
-    written into ``batched`` without ``refresh``).
+    ``count`` [N] int64 (its successors); with ``max_actions=K`` also ``action_mask`` [N, K] bool (successor k exists);
+    with ``goals=True`` also ``goal_pos`` / ``goal_neg`` [N, words] int64 (the env's goal as word masks: its instance's
+    goal after a reset, or the one given; the step's goal test is then the mask test).
+
+    Action: ``action`` [N] int64, an index into the state's successors in canonical order (schema, then binding),
+    Categorical(K) with ``max_actions=K`` (successors past K are out of reach), otherwise unbounded (an index outside
+    [0, count) does not move).
+
+    Reward [N, 1] float32: step_reward, plus goal_reward on reaching a goal, plus dead_end_reward on reaching (or being
+    stuck in) a dead end. ``terminated`` = goal or dead end (``dead_end_terminal``), ``truncated`` = max_steps reached
+    (None: never), ``done`` = either.
+
+    Finished environments are reset by TorchRL (``_reset`` masks); the reset tensordict may carry ``next_task_id`` [N]
+    (curriculum: the instances the reset rows restart in) and, with goals, ``next_goal_pos`` / ``next_goal_neg``.
+    Explicit reset kwargs also accept ``goal_pos`` / ``goal_neg``. Observation goal masks are not reset assignments.
+    Every reset waits for the device work and raises the device environment's errors (``BatchedEnv.check_errors``: a
+    ``task_id`` outside the table, states written into ``batched`` without ``refresh``).
 
     ``device="cpu"`` runs the host environments (any table, numeric ones included; ``threads`` splits a batch),
-    ``"cuda[:i]"`` the device ones, including numeric tables, with identical trajectories for the same actions. Random actions
-    (:meth:`rand_action`, used by ``rollout`` without a policy) are the environments' counter-based random policy (the
-    seed of ``set_seed``, env id, draw counter; rl/rng.hpp) through the custom op ``mymyr::random_actions``: uniform over
-    the current successors (the first ``max_actions`` of them), so a rollout without a policy equals
+    ``"cuda[:i]"`` the device ones, including numeric tables, with identical trajectories for the same actions.
+
+    Random actions (:meth:`rand_action`, used by ``rollout`` without a policy) are the environments' counter-based
+    random policy (the seed of ``set_seed``, env id, draw counter) through the custom op ``mymyr::random_actions``:
+    uniform over the current successors (the first ``max_actions`` of them), so a rollout without a policy equals
     ``BatchedEnv.step(None)`` and the host, device and JAX environments for the same seed, on any device and batch
-    split. A TaskSuite, a TaskTable and a Task pickle, so ``ParallelEnv`` and collectors can build PlanningEnvs in
+    split.
+
+    A TaskSuite, a TaskTable and a Task pickle, so ``ParallelEnv`` and collectors can build PlanningEnvs in
     subprocesses. Over a suite, ``task_id`` is global (``mymyr.rl.task_domains`` gives the rows' domains).
 
-    CUDA graphs: on a device environment whose steps can be captured (``batched.capturable``: the fast path), a
-    step replays a CUDA graph of the environment step and the observation (captured at the first step; ``graph=False``:
-    eager steps), then copies its outputs into the step's TensorDict: the same tensors, with a fraction of the host's
-    launch work (TorchRL's own per-step work stays). The graph reads the environments' tensors in place, so resets,
+    CUDA graphs: on a device environment whose steps can be captured (``batched.capturable``: the fast path), a step
+    replays a CUDA graph of the environment step and the observation (captured at the first step; ``graph=False``: eager
+    steps), then copies its outputs into the step's TensorDict: the same tensors, with a fraction of the host's launch
+    work (TorchRL's own per-step work stays). The graph reads the environments' tensors in place, so resets,
     ``set_seed`` and writes into ``batched``'s tensors between steps apply as with eager steps. Steps traced by
     torch.compile, or captured into an enclosing CUDA graph, are eager.
     """
@@ -58,13 +65,13 @@ class PlanningEnv(EnvBase):
         max_actions: Optional[int] = None,
         goals: bool = False,
         seed: int = 0,
-        max_steps: int = 0,
+        max_steps: int | None = None,
         step_reward: float = 0.0,
         goal_reward: float = 1.0,
         dead_end: str = "no_successors",
         dead_end_reward: float = 0.0,
         dead_end_terminal: bool = True,
-        witness: bool = False,
+        witness_pruning: bool = False,
         path: str = "auto",
         threads: int = 1,
         ctx: Any = None,
@@ -72,9 +79,10 @@ class PlanningEnv(EnvBase):
         graph: bool = True,
     ) -> None:
         env = BatchedEnv(
-            table, num_envs, task_ids=task_ids, sampler=sampler, device=device, goals=goals, seed=seed, max_steps=max_steps,
-            step_reward=step_reward, goal_reward=goal_reward, dead_end=dead_end, dead_end_reward=dead_end_reward,
-            dead_end_terminal=dead_end_terminal, autoreset=False, witness=witness, path=path, threads=threads, ctx=ctx,
+            table, num_envs, task_ids=task_ids, sampler=sampler, device=device, goals=goals, seed=seed,
+            max_steps=max_steps, step_reward=step_reward, goal_reward=goal_reward, dead_end=dead_end,
+            dead_end_reward=dead_end_reward, dead_end_terminal=dead_end_terminal, autoreset=False,
+            witness_pruning=witness_pruning, path=path, threads=threads, ctx=ctx,
             first_env=first_env,
         )  # fmt: skip
         super().__init__(device=env.device, batch_size=torch.Size([num_envs]), allow_done_after_reset=True)
@@ -189,13 +197,15 @@ class PlanningEnv(EnvBase):
         """A uniform successor index of each environment's current state (0 where there is none), from the counter-based
         RNG at the environments' draw counters (the choice their random-policy step would make; the custom op
         ``mymyr::random_actions``, so it traces under torch.compile)."""
-        action = self._env.random_actions(self._K or 0)
+        action = self._env.random_actions(self._K)
         if tensordict is None:
             return TensorDict({"action": action}, batch_size=self.batch_size, device=self.device)
         tensordict.set("action", action)
         return tensordict
 
     def close(self, *, raise_if_closed: bool = True) -> None:
+        """Drops the captured step graph and its static tensors and closes the BatchedEnv (torchrl's
+        ``EnvBase.close``; ``raise_if_closed`` as there)."""
         self._graph = self._static = None
         self._env.close()
         super().close(raise_if_closed=raise_if_closed)

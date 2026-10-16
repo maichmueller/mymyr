@@ -96,8 +96,8 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         sampler: Any = "auto",
         first_env: int = 0,
         autoreset_mode: Union[str, AutoresetMode] = "next_step",
-        threads: int = 0,
-        max_steps: int = 0,
+        threads: int = 1,
+        max_steps: int | None = None,
         step_reward: float = 0.0,
         goal_reward: float = 1.0,
         dead_end: str = "no_successors",
@@ -109,7 +109,7 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
             raise ValueError(f"mymyr: render_mode must be None or 'ansi', not {render_mode!r}")
         if max_episode_steps is not None:  # gymnasium.make_vec's time limit: the native truncation
-            max_steps = int(max_episode_steps) if max_steps == 0 else min(int(max_steps), int(max_episode_steps))
+            max_steps = int(max_episode_steps) if max_steps is None else min(int(max_steps), int(max_episode_steps))
         if isinstance(num_envs, (bool, np.bool_)) or not isinstance(num_envs, (int, np.integer)) or num_envs < 1:
             raise ValueError("mymyr: num_envs must be a positive int")
         self.num_envs = int(num_envs)
@@ -181,10 +181,12 @@ class VectorEnv(gymnasium.vector.VectorEnv):
 
     @property
     def table(self) -> Any:
+        """The Task, TaskTable or TaskSuite of the instances."""
         return self._problems.table
 
     @property
     def num_instances(self) -> int:
+        """The number of instances an episode can start in (task ids 0 .. num_instances - 1)."""
         return len(self._problems)
 
     @property
@@ -229,6 +231,10 @@ class VectorEnv(gymnasium.vector.VectorEnv):
     # ------------------------------------------------------------------------------------------ gymnasium API
 
     def reset(self, *, seed: Any = None, options: Optional[dict] = None) -> tuple[Any, dict]:
+        """Starts episodes and returns (observations, infos). ``seed``: an int for every env or a list of one per
+        env (see the class). ``options``: ``task_ids`` (int [num_envs], the instances to start in) and
+        ``reset_mask`` (bool [num_envs], the envs to reset; the first reset resets every env). ``infos["terminated"]``
+        marks the envs whose start state is terminal. Raises ValueError for an unknown option or a wrong shape."""
         n = self.num_envs
         mask = np.ones(n, np.bool_)
         task_ids = None
@@ -272,6 +278,9 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         return self._observe(), infos
 
     def step(self, actions: Any) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, dict]:
+        """Takes one action per env and returns (observations, rewards float64 [N], terminated bool [N],
+        truncated bool [N], infos); envs that ended reset as ``autoreset_mode`` says. Raises RuntimeError before
+        the first reset."""
         self._require_reset()
         n = self.num_envs
         index = self._indices(actions)
@@ -329,6 +338,7 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         return self._observe(), rewards, terminated, truncated, infos
 
     def render(self) -> Optional[tuple[str, ...]]:
+        """Per env, its state's atoms and the goal as text under ``render_mode="ansi"``, else None."""
         if self.render_mode != "ansi":
             return None
         self._require_reset()
@@ -339,6 +349,7 @@ class VectorEnv(gymnasium.vector.VectorEnv):
         )
 
     def close_extras(self, **kwargs: Any) -> None:
+        """Releases the environments' pool (``close()`` calls it); reset and step raise RuntimeError afterwards."""
         self._pool = None
 
     # ------------------------------------------------------------------------------------------ internals

@@ -113,27 +113,31 @@ struct GoalSpec
     Kind kind = Kind::Task;
     std::vector<AtomGoal> goals;
     std::function<bool(StateView)> test;  // Custom only; called on the searching thread(s)
-    /// Custom only: per-worker goal tests for parallel searches (tyr's make_worker protocol). A parallel search calls
+    /// Custom only: per-worker goal tests for parallel searches. A parallel search calls
     /// make_worker(w) once per worker w on the calling thread, before any worker runs, and worker w then calls only
     /// the function it got. Empty (the default), or returning an empty function, means "not parallel-safe": the
     /// parallel searches then run on the calling thread alone (search/parallel_rollouts.hpp, portfolio.hpp).
     std::function<std::function<bool(StateView)>(u32 worker)> make_worker;
 };
 
+/// The counts every search reports, under the same names in every result.
 struct SearchStatistics
 {
-    u64 expanded = 0;
-    u64 generated = 0;
-    u64 states = 0;  // stored (BrFS, A*, GBFS) or novel (IW) states
-    u64 pruned = 0;  // blocked, not novel, or dead ends
-    double seconds = 0;
+    u64 expanded = 0;   // states whose successors were generated
+    u64 generated = 0;  // transitions generated (successors, duplicates included)
+    u64 states = 0;     // stored (BrFS, A*, GBFS) or novel (IW) states
+    u64 pruned = 0;     // successors not entered: blocked, not novel, or dead ends
+    double seconds = 0; // wall time of the search
+    /// Bytes of the search's states, nodes, open lists and novelty tables when it ended (IW ladders: of its largest
+    /// pass). Results fill it; observer events carry 0.
+    u64 memory_bytes = 0;
 };
 
-/// What became of the successor of a transition (tyr's TransitionOutcome), reported by SearchObserver::on_transition.
+/// What became of the successor of a transition, reported by SearchObserver::on_transition.
 enum class TransitionOutcome : u8
 {
     Opened,     // a new state entered the search (open list, IW tree, rollout tree)
-    Reopened,   // a known state was reached on a cheaper path and re-entered the open list (tyr's RELAXED)
+    Reopened,   // a known state was reached on a cheaper path and re-entered the open list
     Duplicate,  // a known state; nothing changed (a width-0 duplicate entry, an existing rollout child)
     Pruned,     // not entered: not novel, blocked, a self loop, beyond a depth bound, or cut by a budget
     DeadEnd,    // not entered: recognized as a dead end (infinite heuristic value, no applicable action)
@@ -156,11 +160,11 @@ public:
     virtual void on_solution(std::span<const Action> /*plan*/, double /*cost*/) {}
     virtual bool on_progress(const SearchStatistics& /*so_far*/) { return true; }
     virtual void on_end(SearchStatus /*status*/, const SearchStatistics& /*total*/) {}
-    /// Every transition of an expanded state with what became of its successor (TransitionOutcome, tyr's
-    /// TransitionOutcome). Called after on_generate / on_prune, which are kept. `child` is the successor's id, or ~0
+    /// Every transition of an expanded state with what became of its successor (TransitionOutcome).
+    /// Called after on_generate / on_prune, which are kept. `child` is the successor's id, or ~0
     /// when it got none (pruned). Emitted by the searches that document it (the IW family variants).
     virtual void on_transition(u64 /*parent*/, const Action& /*action*/, u64 /*child*/, StateView /*child_state*/, TransitionOutcome /*outcome*/) {}
-    /// Per-worker observers for parallel searches (tyr's make_worker protocol). A parallel search calls make_worker(w)
+    /// Per-worker observers for parallel searches. A parallel search calls make_worker(w)
     /// once per worker w on the calling thread before any worker runs. Worker w then sends its hot events (on_expand,
     /// on_generate, on_prune, on_transition, on_progress) to the returned observer, from one thread at a time, while
     /// the lifecycle events (on_start, on_pass, on_solution, on_end) stay on this, the root observer, and are called

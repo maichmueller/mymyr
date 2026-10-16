@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import sys
+import sysconfig
 import tempfile
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -137,6 +138,15 @@ def pytest_pyfunc_call(pyfuncitem):
     if entry["outcome"] == "skipped":
         pytest.skip(entry["skip"])
     return True
+
+
+# A free-threaded interpreter. On the GIL build the threads of the concurrency tests take turns on the GIL.
+FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
+def gil_stays_off():
+    """Whether a free-threaded interpreter still runs without the GIL (always True on the GIL build)."""
+    return not FREE_THREADED or not sys._is_gil_enabled()
 
 
 @pytest.fixture(autouse=True)

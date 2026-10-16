@@ -93,8 +93,8 @@ def test_budgets_name_the_argument_and_its_range(task):
 def test_non_numbers_raise_type_error_naming_the_argument(task):
     with pytest.raises(TypeError, match=r"^mymyr: max_states must be an int, not float$"):
         search.astar(task, max_states=1.5)
-    with pytest.raises(TypeError, match=r"^mymyr: max_arity must be an int, not str$"):
-        search.iw(task, max_arity="2")
+    with pytest.raises(TypeError, match=r"^mymyr: max_width must be an int, not str$"):
+        search.iw(task, max_width="2")
     with pytest.raises(TypeError, match=r"^mymyr: max_seconds must be a number, not str$"):
         search.astar(task, max_seconds="1")
     with pytest.raises(TypeError, match=r"^mymyr: seeds must be a sequence of ints$"):
@@ -105,15 +105,15 @@ def test_ints_of_any_index_type_and_none_are_accepted(task):
     r = search.astar(task, max_states=np.int64(50), max_depth=None, max_seconds=np.float32(60))
     assert r.status == search.Status.OUT_OF_STATES
     assert search.astar(task, max_states=50, max_seconds=60).status == search.Status.OUT_OF_STATES
-    assert search.iw(task, max_arity=True).status in (search.Status.SOLVED, search.Status.EXHAUSTED)
+    assert search.iw(task, max_width=True).status in (search.Status.SOLVED, search.Status.EXHAUSTED)
 
 
 def test_beam_width_is_positive(task):
-    with pytest.raises(ValueError, match=r"^mymyr: width must be an int in \[1, 4294967295\], got 0$"):
-        search.beam(task, width=0)
+    with pytest.raises(ValueError, match=r"^mymyr: beam_width must be an int in \[1, 4294967295\], got 0$"):
+        search.beam(task, beam_width=0)
     with pytest.raises(ValueError, match=r"^mymyr: standard_weight must be an int in \[1, 4294967295\], got 0$"):
         search.gbfs(task, standard_weight=0)
-    assert search.beam(task, width=1).status in (search.Status.SOLVED, search.Status.EXHAUSTED)
+    assert search.beam(task, beam_width=1).status in (search.Status.SOLVED, search.Status.EXHAUSTED)
 
 
 def test_expand_capacity_is_at_most_the_row_limit(task):
@@ -135,7 +135,7 @@ def test_lists_and_constructors_name_the_argument(task):
         rl.ThreadPool(-1)
     with pytest.raises(ValueError, match=r"^mymyr: num_envs must be an int in \[1, 4294967295\], got 0$"):
         rl.CpuEnvPool(task, 0)
-    with pytest.raises(ValueError, match=r"^mymyr: max_steps must be an int in \[0, 4294967295\], got -1$"):
+    with pytest.raises(ValueError, match=r"^mymyr: max_steps must be None or an int in \[1, 4294967295\], got -1$"):
         rl.CpuEnvPool(task, 2, max_steps=-1)
     with pytest.raises(ValueError, match=r"^mymyr: steps must be an int >= 0, got -1$"):
         rl.random_walks(task, -1)

@@ -43,7 +43,7 @@ def status_name(s, ladder):
 
 
 def per_pass(passes, arity=None):
-    return ";".join(f"{arity if arity is not None else p.arity}:{p.expanded}/{p.generated}/{p.generated_in_tree}"
+    return ";".join(f"{arity if arity is not None else p.width}:{p.expanded}/{p.generated}/{p.generated_in_tree}"
                     for p in passes)
 
 
@@ -165,7 +165,7 @@ def run_row(task, row):
                                      preserve_goal_atoms=a["preserve_goal"], **lm, **kw)
             assert per_pass(r.passes, a["k"]) == e["per_pass"], what
         else:
-            r = search.liw(task, max_arity=a["k"], **lm, **kw)
+            r = search.liw(task, max_width=a["k"], **lm, **kw)
             assert per_pass(r.passes) == e["per_pass"], what
         assert status_name(r.status, a["algo"] == "liw") == e["status"], what
         if r.solved:
@@ -173,13 +173,13 @@ def run_row(task, row):
     elif a["algo"] == "rollout_iw":
         r = search.rollout_iw(task, ordering=ORDERING[a["ordering"]], seed=a["seed"], max_states=a["max_states"], **kw)
         assert status_name(r.status, False) == e["status"], what
-        assert rollout_stats(r.statistics) == e["rollout"], what
+        assert rollout_stats(r.rollout) == e["rollout"], what
         assert r.root_solved == e["root_solved"], what
         if r.solved:
             assert len(r.plan) == e["plan_len"], what
     elif a["algo"] == "rollouts":
         seeds = [int(s) for s in a["seeds"].split(",")]
-        b = search.find_rollouts_parallel(task, seeds, max_arity=a["k"], num_threads=4,
+        b = search.find_rollouts_parallel(task, seeds, max_width=a["k"], threads=4,
                                           max_next_layer_states=a["max_next_layer_states"], report_landing_states=True,
                                           report_co_occurrence=True, **kw)
         assert len(b) == len(e["rollouts"]), what
@@ -204,7 +204,7 @@ def run_row(task, row):
         for s in filter(None, a["orderings"].split(",")):
             kind, _, seed = s.partition(":")
             orderings.append((kind if kind != "dgaf" else "direct_goal_achiever_first", int(seed or 0)))
-        r = search.atomic_goal_portfolio(task, num_rollout_workers=a["workers"], num_threads=a["threads"],
+        r = search.atomic_goal_portfolio(task, num_rollout_workers=a["workers"], threads=a["threads"],
                                          rollout_orderings=orderings, **kw)
         assert status_name(r.status, True) == e["status"], what
         assert (r.plan_length if r.solved else 0) == e["plan_length"], what
@@ -214,8 +214,8 @@ def run_row(task, row):
         assert cs == e["certifier_status"], what
         assert (NO_VALUE if r.iw_completed_depth is None else r.iw_completed_depth) == e["iw_completed_depth"], what
         assert r.iw_lower_bound == e["iw_lower_bound"], what
-        assert r.total_expansions == e["total_expansions"], what
-        assert (r.certifier.total.expanded, r.certifier.total.generated) == (e["expanded"], e["generated"]), what
+        assert r.stats.expanded == e["total_expansions"], what
+        assert (r.certifier.stats.expanded, r.certifier.stats.generated) == (e["expanded"], e["generated"]), what
         assert [rollout_stats(s) for s in r.rollout_statistics] == e["rollout_statistics"], what
         assert [("in_progress" if s is None else status_name(s, False)) for s in r.rollout_statuses] \
             == e["rollout_statuses"], what

@@ -783,18 +783,25 @@ void bind_arrays(nb::module_& m)
             for (i64 s : a.shape)
                 l.append(s);
             return nb::tuple(l);
-        })
+        },
+                     "The extent of each dimension (a tuple of ints).")
         .def_prop_ro("strides", [](const DLArray& a) {
             nb::list l;
             for (i64 s : a.strides)
                 l.append(s * static_cast<i64>(rl::dtype_bytes(a.dtype)));
             return nb::tuple(l);
         }, "strides in bytes")
-        .def_prop_ro("dtype", [](const DLArray& a) { return std::string(dtype_name(a.dtype)); })
-        .def_prop_ro("ndim", [](const DLArray& a) { return a.shape.size(); })
-        .def_prop_ro("readonly", [](const DLArray& a) { return a.readonly; })
-        .def_prop_ro("data_ptr", [](const DLArray& a) { return reinterpret_cast<std::uintptr_t>(a.data); })
-        .def_prop_ro("nbytes", [](const DLArray& a) { return a.elements() * rl::dtype_bytes(a.dtype); })
+        .def_prop_ro("dtype", [](const DLArray& a) { return std::string(dtype_name(a.dtype)); },
+                     "The element type as a NumPy name: 'bool', 'int8', 'uint8', 'int32', 'uint32', 'int64', "
+                     "'uint64', 'float32' or 'float64'.")
+        .def_prop_ro("ndim", [](const DLArray& a) { return a.shape.size(); },
+                     "The number of dimensions.")
+        .def_prop_ro("readonly", [](const DLArray& a) { return a.readonly; },
+                     "Whether the array is a read-only view (frameworks must not write through it).")
+        .def_prop_ro("data_ptr", [](const DLArray& a) { return reinterpret_cast<std::uintptr_t>(a.data); },
+                     "The address of the first element (host or device memory, see __dlpack_device__).")
+        .def_prop_ro("nbytes", [](const DLArray& a) { return a.elements() * rl::dtype_bytes(a.dtype); },
+                     "The size of the elements in bytes.")
         .def("__len__", [](const DLArray& a) -> i64 {
             if (a.shape.empty())
                 throw nb::type_error("len() of a 0-d array");

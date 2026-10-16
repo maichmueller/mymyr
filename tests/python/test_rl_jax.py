@@ -627,8 +627,10 @@ def test_random_actions_are_the_random_policy():
         state, _ = env.reset(key, 50, first_env=7)
         step = jax.jit(env.step)
         ra = jax.jit(env.random_actions, static_argnums=2)
+        with pytest.raises(ValueError, match="max_actions"):
+            env.random_actions(key, state, 0)
         for _ in range(10):
-            a = ra(key, state, 0)
+            a = ra(key, state, None)
             r1 = step(key, state)
             r2 = step(key, state, a)
             for x, y in zip(jax.tree.leaves(r1), jax.tree.leaves(r2)):

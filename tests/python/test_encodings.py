@@ -261,7 +261,7 @@ def test_heuristics_and_atom_listings_do_not_depend_on_lazy_slots():
         label = next(str(x) for x in fixed.applicable_actions(a) if fixed.apply(a, x) == s)
         a, b = s, lazy.apply(b, next(x for x in lazy.applicable_actions(b) if str(x) == label))
     for run in (lambda t: search.gbfs(t, heuristic="ff", max_expanded=5000),
-                lambda t: search.beam(t, width=32, max_expanded=5000)):
+                lambda t: search.beam(t, beam_width=32, max_expanded=5000)):
         rf, rl_ = run(fixed), run(lazy)
         assert [str(x) for x in rf.plan] == [str(x) for x in rl_.plan] and rf.stats.expanded == rl_.stats.expanded
 

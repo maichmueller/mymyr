@@ -1,9 +1,9 @@
-import sys
 import threading
 
 import numpy as np
 
 import mymyr
+from conftest import FREE_THREADED, gil_stays_off
 
 
 def test_version_and_build():
@@ -12,10 +12,9 @@ def test_version_and_build():
 
 
 def test_free_threaded_interpreter_stays_gil_free():
-    # importing the extension must not re-enable the GIL on a free-threaded interpreter
-    if hasattr(sys, "_is_gil_enabled"):
-        assert mymyr.free_threaded_build()
-        assert not sys._is_gil_enabled()
+    # the extension is built for the interpreter; importing it must not re-enable the GIL on a free-threaded one
+    assert mymyr.free_threaded_build() == FREE_THREADED
+    assert gil_stays_off()
 
 
 def test_hash_rows_ignores_trailing_zero_words():

@@ -1,10 +1,10 @@
 #pragma once
 // State space samplers over a StateSpace:
 //   - sample_state: uniform over all states;
-//   - sample_state_n_steps_from_goal(n): uniform over the states with unit goal distance n (dead ends never);
-//   - sample_dead_end_state: uniform over the unsolvable states;
-//   - the counts: states, dead ends, "alive" states (all states that are not dead ends, goal states included), and
-//     the largest unit goal distance of a non-dead-end state.
+//   - sample_state_n_steps_from_goal(n): uniform over the states with unit goal distance n (unsolvable states never);
+//   - sample_unsolvable_state: uniform over the unsolvable states;
+//   - the counts: states, unsolvable states, solvable states (every other state, goal states included), and the
+//     largest unit goal distance of a solvable state.
 // The samplers draw with datasets::Rng, core/random.hpp's Xoshiro256 (xoshiro256**, Lemire's bounded integers): the
 // same seed gives the same samples on every platform and standard library. Samples are state ids of the space.
 //
@@ -39,20 +39,20 @@ public:
     [[nodiscard]] u32 sample_state();
     /// Throws std::out_of_range if no state has unit goal distance n.
     [[nodiscard]] u32 sample_state_n_steps_from_goal(i32 n);
-    /// Throws std::out_of_range if the space has no dead end.
-    [[nodiscard]] u32 sample_dead_end_state();
+    /// Throws std::out_of_range if the space has no unsolvable state.
+    [[nodiscard]] u32 sample_unsolvable_state();
     /// Bulk versions: out.size() samples each.
     void sample_states(std::span<u32> out);
     void sample_states_n_steps_from_goal(i32 n, std::span<u32> out);
-    void sample_dead_end_states(std::span<u32> out);
+    void sample_unsolvable_states(std::span<u32> out);
 
     [[nodiscard]] u32 num_states() const noexcept { return m_n; }
-    [[nodiscard]] u32 num_dead_end_states() const noexcept { return static_cast<u32>(m_dead_ends.size()); }
-    [[nodiscard]] u32 num_alive_states() const noexcept { return num_states() - num_dead_end_states(); }
+    [[nodiscard]] u32 num_unsolvable_states() const noexcept { return static_cast<u32>(m_unsolvable.size()); }
+    [[nodiscard]] u32 num_solvable_states() const noexcept { return num_states() - num_unsolvable_states(); }
     [[nodiscard]] u32 max_steps_to_goal() const noexcept { return m_max_steps; }
     /// States with unit goal distance n (ascending ids; empty if none).
     [[nodiscard]] std::span<const u32> states_n_steps_from_goal(i32 n) const noexcept;
-    [[nodiscard]] std::span<const u32> dead_end_states() const noexcept { return m_dead_ends; }
+    [[nodiscard]] std::span<const u32> unsolvable_states() const noexcept { return m_unsolvable; }
 
 private:
     void index(std::span<const i32> unit);
@@ -62,7 +62,7 @@ private:
     u32 m_n = 0;
     std::vector<u64> m_by_steps_offsets;  // CSR over unit distance 0..max
     std::vector<u32> m_by_steps;
-    std::vector<u32> m_dead_ends;
+    std::vector<u32> m_unsolvable;
     u32 m_max_steps = 0;
 };
 }  // namespace mymyr::datasets

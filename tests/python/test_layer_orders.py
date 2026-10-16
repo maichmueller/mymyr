@@ -29,13 +29,13 @@ def replays(task, plan):
 
 
 def iw_key(r):
-    return r.status, [str(a) for a in r.plan], [(p.arity, p.expanded, p.generated) for p in r.passes]
+    return r.status, [str(a) for a in r.plan], [(p.width, p.expanded, p.generated) for p in r.passes]
 
 
 def test_in_order_brfs_is_the_queued_brfs(gripper):
     q = search.brfs(gripper, witness_pruning=False, fingerprint=True)
     o = search.brfs(gripper, witness_pruning=False, fingerprint=True, layer_order="in_order")
-    assert (o.states, o.expanded, o.generated, o.fingerprint) == (q.states, q.expanded, q.generated, q.fingerprint)
+    assert (o.stats.states, o.stats.expanded, o.stats.generated, o.fingerprint) == (q.stats.states, q.stats.expanded, q.stats.generated, q.fingerprint)
 
 
 @pytest.mark.parametrize("order", ORDERS)
@@ -45,55 +45,55 @@ def test_ordered_brfs_finds_a_shallowest_goal(gripper, order):
     assert r.solved and len(r.plan) == len(first.plan)
     assert replays(gripper, r.plan)
     full = search.brfs(gripper, witness_pruning=False, layer_order=order, seed=3)
-    assert full.states == search.brfs(gripper, witness_pruning=False).states  # the order changes ids, not states
+    assert full.stats.states == search.brfs(gripper, witness_pruning=False).stats.states  # the order changes ids, not states
 
 
 def test_goal_count_order_and_direction(gripper):
     more = search.brfs(gripper, stop_at_goal=True, layer_order="goal_count")
     fewer = search.brfs(gripper, stop_at_goal=True, layer_order="goal_count", prefer_more_satisfied_goals=False)
-    assert more.expanded <= fewer.expanded
-    assert search.brfs(gripper, stop_at_goal=True, layer_order="reverse").expanded != search.brfs(
-        gripper, stop_at_goal=True).expanded
+    assert more.stats.expanded <= fewer.stats.expanded
+    assert search.brfs(gripper, stop_at_goal=True, layer_order="reverse").stats.expanded != search.brfs(
+        gripper, stop_at_goal=True).stats.expanded
 
 
 def test_randomized_order_follows_the_seed(blocks):
-    a = search.iw(blocks, max_arity=2, layer_order="randomized", seed=7)
-    b = search.iw(blocks, max_arity=2, layer_order="randomized", seed=7)
+    a = search.iw(blocks, max_width=2, layer_order="randomized", seed=7)
+    b = search.iw(blocks, max_width=2, layer_order="randomized", seed=7)
     assert iw_key(a) == iw_key(b)
-    keys = {str(iw_key(search.iw(blocks, max_arity=2, layer_order="randomized", seed=k))) for k in range(4)}
+    keys = {str(iw_key(search.iw(blocks, max_width=2, layer_order="randomized", seed=k))) for k in range(4)}
     assert len(keys) > 1
 
 
 def test_truncated_layers(gripper):
     q = search.brfs(gripper, stop_at_goal=True)
     t = search.brfs(gripper, stop_at_goal=True, layer_order="goal_count", max_next_layer_states=4)
-    assert t.expanded < q.expanded
+    assert t.stats.expanded < q.stats.expanded
     assert not t.solved or replays(gripper, t.plan)
-    r = search.iw(gripper, max_arity=2, layer_order="goal_count", max_next_layer_states=3)
-    full = search.iw(gripper, max_arity=2)
+    r = search.iw(gripper, max_width=2, layer_order="goal_count", max_next_layer_states=3)
+    full = search.iw(gripper, max_width=2)
     assert sum(p.expanded for p in r.passes) <= sum(p.expanded for p in full.passes) or r.status != Status.SOLVED
 
 
 def test_iw_siw_and_iw_pass_take_layer_orders(blocks):
-    q = search.iw(blocks, max_arity=2)
-    assert iw_key(search.iw(blocks, max_arity=2, layer_order="in_order")) == iw_key(q)
+    q = search.iw(blocks, max_width=2)
+    assert iw_key(search.iw(blocks, max_width=2, layer_order="in_order")) == iw_key(q)
     for order in ORDERS:
-        r = search.iw(blocks, max_arity=2, layer_order=order, seed=1)
+        r = search.iw(blocks, max_width=2, layer_order=order, seed=1)
         assert r.status in (Status.SOLVED, Status.EXHAUSTED)
         if r.solved:
             assert replays(blocks, r.plan)
-        s = search.siw(blocks, max_arity=2, layer_order=order, seed=1)
+        s = search.siw(blocks, max_width=2, layer_order=order, seed=1)
         if s.solved:
             assert replays(blocks, s.plan)
         p = search.iw_pass(blocks, 1, layer_order=order, seed=1)
-        assert [x.arity for x in p.passes] == [1]
-    goal_count = search.iw(blocks, max_arity=2, layer_order="goal_count")
+        assert [x.width for x in p.passes] == [1]
+    goal_count = search.iw(blocks, max_width=2, layer_order="goal_count")
     assert goal_count.passes[-1].expanded != q.passes[-1].expanded or iw_key(goal_count) == iw_key(q)
 
 
 def test_the_iw_family_takes_goal_count(blocks):
-    r = search.liw(blocks, max_arity=1, layer_order="goal_count", prefer_more_satisfied_goals=False)
-    assert [p.arity for p in r.passes] == [0, 1]
+    r = search.liw(blocks, max_width=1, layer_order="goal_count", prefer_more_satisfied_goals=False)
+    assert [p.width for p in r.passes] == [0, 1]
     a = search.abstracted_iw(blocks, width=1, layer_order="reverse")
     assert a.passes[0].expanded > 0
 

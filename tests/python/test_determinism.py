@@ -66,12 +66,12 @@ def records(task):
     states = walk(task, steps=16, seed=5, walks=4)
     exp = rl.expand(task, states)
     brfs = search.brfs(task, max_states=BUDGET, fingerprint=True, stop_at_goal=False)
-    iw = search.iw(task, max_arity=2, max_expanded=BUDGET)
-    siw = search.siw(task, max_arity=2, max_expanded=BUDGET)
+    iw = search.iw(task, max_width=2, max_expanded=BUDGET)
+    siw = search.siw(task, max_width=2, max_expanded=BUDGET)
     astar = search.astar(task, heuristic="max", max_expanded=BUDGET)
     gbfs = search.gbfs(task, heuristic="ff", max_expanded=BUDGET)
     lazy = search.gbfs(task, heuristic="ff", lazy=True, max_expanded=BUDGET)
-    beam = search.beam(task, width=32, max_expanded=BUDGET)
+    beam = search.beam(task, beam_width=32, max_expanded=BUDGET)
     ss = datasets.generate(task, threads=2, max_states=DATASETS_BUDGET, remove_if_unsolvable=False)
     space = [] if ss.space is None else [
         [arr(v) for k, v in sorted(ss.space.arrays().items())],
@@ -85,9 +85,9 @@ def records(task):
         "task.encoding": arr(task.encode([s0])),
         "applicable": [str(a) for a in task.applicable_actions(s0)],
         "expand": [arr(exp.succ), arr(exp.offsets), arr(exp.schema), arr(exp.binding), arr(exp.parent)],
-        "brfs": [brfs.states, brfs.expanded, brfs.generated, brfs.layers, brfs.fingerprint],
-        "iw": plan(iw) + [[(p.arity, p.expanded, p.generated) for p in iw.passes]],
-        "siw": plan(siw) + [siw.total.expanded],
+        "brfs": [brfs.stats.states, brfs.stats.expanded, brfs.stats.generated, brfs.layers, brfs.fingerprint],
+        "iw": plan(iw) + [[(p.width, p.expanded, p.generated) for p in iw.passes]],
+        "siw": plan(siw) + [siw.stats.expanded],
         "astar": plan(astar) + [astar.stats.expanded, astar.stats.generated],
         "gbfs": plan(gbfs) + [gbfs.stats.expanded],
         "gbfs_lazy": plan(lazy) + [lazy.stats.expanded],

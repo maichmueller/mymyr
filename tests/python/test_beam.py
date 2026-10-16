@@ -39,7 +39,7 @@ def replays(task, plan):
 
 
 def passes(r):
-    return [(p.arity, p.expanded, p.generated, p.generated_in_tree) for p in r.passes]
+    return [(p.width, p.expanded, p.generated, p.generated_in_tree) for p in r.passes]
 
 
 def beam(width, mode="all_tested", **kw):
@@ -58,18 +58,18 @@ def test_novelty_modes_differ_on_a_dropped_successor(tmp_path):
 
 @pytest.mark.parametrize("mode", ["all_tested", "survivors_only"])
 def test_iw_iw_pass_and_siw_take_a_beam(blocks, mode):
-    plain = search.iw(blocks, max_arity=2, layer_order="goal_count")
-    wide = search.iw(blocks, max_arity=2, **beam(1 << 30))  # wider than every layer: all_tested changes nothing
+    plain = search.iw(blocks, max_width=2, layer_order="goal_count")
+    wide = search.iw(blocks, max_width=2, **beam(1 << 30))  # wider than every layer: all_tested changes nothing
     if mode == "all_tested":
         assert passes(wide) == passes(plain)
-    r = search.iw(blocks, max_arity=2, **beam(4, mode))
+    r = search.iw(blocks, max_width=2, **beam(4, mode))
     assert r.status in (Status.SOLVED, Status.EXHAUSTED)
     assert r.passes[-1].expanded != plain.passes[-1].expanded
     if r.solved:
         assert replays(blocks, r.plan)
     p = search.iw_pass(blocks, 2, **beam(4, mode))
-    assert passes(p) == passes(r)[-1:] or r.passes[-1].arity != 2
-    s = search.siw(blocks, max_arity=2, **beam(4, mode))
+    assert passes(p) == passes(r)[-1:] or r.passes[-1].width != 2
+    s = search.siw(blocks, max_width=2, **beam(4, mode))
     assert s.status in (Status.SOLVED, Status.EXHAUSTED)
     if s.solved:
         assert replays(blocks, s.plan)
@@ -81,15 +81,15 @@ def test_brfs_takes_a_beam(gripper, mode):
     for store in ("flat", "chunked"):
         r = search.brfs(gripper, stop_at_goal=True, store=store, **beam(3, mode))
         assert r.solved and replays(gripper, r.plan)
-        assert r.expanded < full.expanded
+        assert r.stats.expanded < full.stats.expanded
     # brfs has no novelty table: the modes are the same
     a = search.brfs(gripper, stop_at_goal=True, **beam(3))
-    assert (r.expanded, r.generated, [str(x) for x in r.plan]) == (a.expanded, a.generated, [str(x) for x in a.plan])
+    assert (r.stats.expanded, r.stats.generated, [str(x) for x in r.plan]) == (a.stats.expanded, a.stats.generated, [str(x) for x in a.plan])
 
 
 def test_the_iw_family_takes_a_beam(blocks):
-    r = search.liw(blocks, max_arity=1, **beam(4))
-    assert [p.arity for p in r.passes] == [0, 1]
+    r = search.liw(blocks, max_width=1, **beam(4))
+    assert [p.width for p in r.passes] == [0, 1]
     for mode in ("all_tested", "survivors_only"):
         a = search.abstracted_iw(blocks, width=1, **beam(4, mode))
         assert a.passes[0].expanded > 0
@@ -101,14 +101,14 @@ def test_the_iw_family_takes_a_beam(blocks):
 
 def test_random_ties_follow_the_seed(gripper):
     def key(**kw):
-        r = search.iw(gripper, max_arity=2, **beam(3, randomize_ties=True, **kw))
+        r = search.iw(gripper, max_width=2, **beam(3, randomize_ties=True, **kw))
         return r.status, [str(a) for a in r.plan], passes(r)
 
     assert key(seed=5) == key(seed=5)
-    plain = search.iw(gripper, max_arity=2, **beam(3))
+    plain = search.iw(gripper, max_width=2, **beam(3))
     assert len({str(key(seed=k)) for k in range(4)} | {str((plain.status, [str(a) for a in plain.plan], passes(plain)))}) > 1
     b = search.brfs(gripper, stop_at_goal=True, **beam(3, randomize_ties=True, seed=5))
-    assert b.expanded == search.brfs(gripper, stop_at_goal=True, **beam(3, randomize_ties=True, seed=5)).expanded
+    assert b.stats.expanded == search.brfs(gripper, stop_at_goal=True, **beam(3, randomize_ties=True, seed=5)).stats.expanded
 
 
 def test_every_ordered_kind_takes_a_beam(gripper):
@@ -146,13 +146,13 @@ def test_invalid_beam_arguments(gripper):
 
 def test_a_beam_refuses_a_transition_ordering(gripper):
     order = search.LandmarkTransitionOrdering(search.approximate_fact_landmarks(gripper))
-    r = search.iw(gripper, max_arity=1, transition_ordering=order, **beam(4))
+    r = search.iw(gripper, max_width=1, transition_ordering=order, **beam(4))
     assert r.status == Status.FAILED and "transition ordering" in r.message
 
 
 def summary(r):
     if isinstance(r, search.BrfsResult):
-        return r.solved, [str(a) for a in r.plan], r.expanded, r.generated, r.states
+        return r.solved, [str(a) for a in r.plan], r.stats.expanded, r.stats.generated, r.stats.states
     return repr(r), [str(a) for a in r.plan], passes(r) if hasattr(r, "passes") else None
 
 
@@ -164,35 +164,35 @@ class Expansions(search.Observer):
 @pytest.mark.parametrize("mode", ["all_tested", "survivors_only"])
 def test_threads_give_the_single_threaded_result(blocks, mode):
     kw = beam(4, mode, randomize_ties=True, seed=3)
-    runs = [lambda **t: search.iw(blocks, max_arity=2, **kw, **t),
+    runs = [lambda **t: search.iw(blocks, max_width=2, **kw, **t),
             lambda **t: search.iw_pass(blocks, 1, **kw, **t),
-            lambda **t: search.siw(blocks, max_arity=2, **kw, **t),
+            lambda **t: search.siw(blocks, max_width=2, **kw, **t),
             lambda **t: search.abstracted_iw(blocks, width=2, **kw, **t),
             lambda **t: search.projective_iw(blocks, **kw, **t),
             lambda **t: search.brfs(blocks, stop_at_goal=True, witness_pruning=False, **kw, **t)]
     if mode == "all_tested":
-        runs.append(lambda **t: search.liw(blocks, max_arity=1, **kw, **t))
+        runs.append(lambda **t: search.liw(blocks, max_width=1, **kw, **t))
     for run in runs:
         one = summary(run(threads=1))
         for t in (2, 4):
             assert summary(run(threads=t)) == one
     r = search.brfs(blocks, stop_at_goal=True, threads=4, **kw)
-    assert r.threads == 4
+    assert r.threads_used == 4
 
 
 def test_relaxed_survivors_only_beam(blocks, gripper):
     kw = beam(4, "relaxed_survivors_only", beam_chunk=16)
     for task in (blocks, gripper):
         for t in (1, 2, 4):
-            r = search.iw(task, max_arity=2, threads=t, **kw)
-            assert summary(search.iw(task, max_arity=2, threads=t, **kw)) == summary(r)  # deterministic
+            r = search.iw(task, max_width=2, threads=t, **kw)
+            assert summary(search.iw(task, max_width=2, threads=t, **kw)) == summary(r)  # deterministic
             assert not r.solved or replays(task, r.plan)
             b = search.brfs(task, stop_at_goal=True, threads=t, **kw)
             assert not b.solved or replays(task, b.plan)
     # one part (beam_chunk above every layer's transitions): the same for every thread count
     one = dict(kw, beam_chunk=1 << 30)
-    ref = summary(search.iw(gripper, max_arity=2, **one))
-    assert all(summary(search.iw(gripper, max_arity=2, threads=t, **one)) == ref for t in (2, 8))
+    ref = summary(search.iw(gripper, max_width=2, **one))
+    assert all(summary(search.iw(gripper, max_width=2, threads=t, **one)) == ref for t in (2, 8))
     a = search.abstracted_iw(blocks, width=1, **one)
     assert summary(search.abstracted_iw(blocks, width=1, threads=4, **one)) == summary(a)
 

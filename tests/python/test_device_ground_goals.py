@@ -13,8 +13,8 @@ def assert_result(batch, i, expected):
     assert [str(a) for a in batch.plan(i)] == [str(a) for a in expected.plan]
     assert batch.goal_state(i) == expected.goal_state
     assert batch.cost(i) == expected.cost
-    assert [(p.arity, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped) for p in batch.passes(i)] == [
-        (p.arity, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped) for p in expected.passes
+    assert [(p.width, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped) for p in batch.passes(i)] == [
+        (p.width, p.status, p.expanded, p.generated, p.generated_in_tree, p.skipped) for p in expected.passes
     ]
 
 
@@ -40,7 +40,7 @@ def test_ground_conjunction_searches(case, atoms):
     starts = [task.initial_state]
     labels = task.applicable_actions(starts[0])
     starts.append(task.apply(starts[0], labels[0]) if labels else starts[0])
-    options = {"max_arity": 2, "max_states": 3000}
+    options = {"max_width": 2, "max_states": 3000}
     expected = [search.iw(task, start=s, goal=goal, **options) for s in starts]
     assert expected[0].status == search.iw(task, goal=[goal], **options).status
     for result in expected:
@@ -70,7 +70,7 @@ def test_ground_conjunction_searches(case, atoms):
     table = TaskTable([task, task])
     ids = [1, 0]
     b = cuda.batched_iw1(table, starts, task_ids=ids, goals=[goal, goal], ctx=ctx, max_states=3000)
-    references = [search.iw(task, start=s, goal=goal, max_arity=1, max_states=3000) for s in starts]
+    references = [search.iw(task, start=s, goal=goal, max_width=1, max_states=3000) for s in starts]
     for i, result in enumerate(references):
         assert_result(b, i, result)
     try:

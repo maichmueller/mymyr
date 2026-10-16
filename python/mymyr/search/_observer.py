@@ -32,7 +32,7 @@ class Observer:
       ``on_end`` once (so the number of ``on_expand`` and ``on_generate`` calls equals the result's ``expanded`` and
       ``generated`` statistics);
     - ``on_prune`` for a successor that is not entered (not novel, blocked, a dead end), after its ``on_generate``;
-    - ``on_pass``: after every IW(k) pass (iw, siw, the IW family variants: the arity and the pass's statistics) and
+    - ``on_pass``: after every IW(k) pass (iw, siw, the IW family variants: the width and the pass's statistics) and
       after every layer of ``brfs`` (its depth and the layer's statistics);
     - ``on_transition``: every transition of an expanded state with a :class:`TransitionOutcome` (the IW family
       variants, astar_iw).
@@ -76,8 +76,8 @@ class Observer:
         """What became of a successor (the IW family variants, astar_iw); ``child`` is None when it got no id."""
 
     @_default_event
-    def on_pass(self, arity: int, stats: Statistics) -> None:
-        """An IW pass of this arity, or the brfs layer of this depth, ended; ``stats`` are its own counts."""
+    def on_pass(self, width: int, stats: Statistics) -> None:
+        """An IW pass of this width, or the brfs layer of this depth, ended; ``stats`` are its own counts."""
 
     @_default_event
     def on_solution(self, plan: list[Action], cost: float) -> None:

@@ -434,7 +434,7 @@ def test_device_paths_agree_with_the_cpu(shape, context):
     ctx = mc.Context(0, max_bytes=1 << 30)
     cpu = search.brfs(task, fingerprint=True, stop_at_goal=False)
     gpu = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
-    assert (gpu.states, gpu.generated, gpu.goal_states, gpu.fingerprint) == (cpu.states, cpu.generated, cpu.goal_states, cpu.fingerprint)
+    assert (gpu.stats.states, gpu.stats.generated, gpu.num_goal_states, gpu.fingerprint) == (cpu.stats.states, cpu.stats.generated, cpu.num_goal_states, cpu.fingerprint)
     assert_state_spaces_agree(task, ctx)
     ctx.synchronize()
 
@@ -454,7 +454,7 @@ def test_device_ground_goals_agree_with_the_cpu(shape, context):
     mc = cuda_module()
     task = task_of(shape, context)
     goal = task.goal_condition
-    options = {"max_arity": 2, "max_states": 3000}
+    options = {"max_width": 2, "max_states": 3000}
     starts = [task.initial_state, task.apply(task.initial_state, task.applicable_actions(task.initial_state)[0])]
     ctx = mc.Context(0, max_bytes=1 << 30)
     batch = mc.multi_iw(task, starts, goals=[goal, goal], ctx=ctx, **options)
@@ -486,9 +486,9 @@ def test_device_paths_evaluate_numeric_helper_rules_on_the_cpu():
     ctx = mc.Context(0, max_bytes=1 << 30)
     cpu = search.brfs(task, fingerprint=True, stop_at_goal=False)
     gpu = mc.brfs(task, ctx=ctx, fingerprint=True, stop_at_goal=False)
-    assert (gpu.states, gpu.generated, gpu.goal_states, gpu.fingerprint) == (cpu.states, cpu.generated, cpu.goal_states, cpu.fingerprint)
-    assert gpu.stats["device_axioms"] == 0 and gpu.stats["host_axiom_ms"] > 0.0
-    options = {"max_arity": 1, "max_states": 1000}
+    assert (gpu.stats.states, gpu.stats.generated, gpu.num_goal_states, gpu.fingerprint) == (cpu.stats.states, cpu.stats.generated, cpu.num_goal_states, cpu.fingerprint)
+    assert gpu.counters["device_axioms"] == 0 and gpu.counters["host_axiom_ms"] > 0.0
+    options = {"max_width": 1, "max_states": 1000}
     expected = search.iw(task, goal=task.goal_condition, **options)
     batch = mc.multi_iw(task, [task.initial_state], goals=[task.goal_condition], ctx=ctx, **options)
     assert batch.status[0] == expected.status and [str(a) for a in batch.plan(0)] == [str(a) for a in expected.plan]

@@ -151,6 +151,12 @@ std::optional<T> opt_int_arg(nb::handle h, const char* name, T lo = std::numeric
     return arg_detail::int_value<T>(h, name, lo, hi, true);
 }
 
+/// A limit that 0 means "none" in a configuration, as Python sees it: None for 0, else the count.
+inline std::optional<u32> steps_limit(u32 v) noexcept
+{
+    return v ? std::optional<u32>(v) : std::nullopt;
+}
+
 /// The ints of the sequence argument `name`, each in [lo, hi].
 template<std::integral T>
 std::vector<T> int_list_arg(nb::handle h, const char* name, T lo = std::numeric_limits<T>::lowest(),

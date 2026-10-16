@@ -8,7 +8,10 @@ A data-oriented, lifted-first rewrite of the [mimir](https://github.com/maichmue
 core, with free-threaded Python bindings and an optional CUDA backend.
 
 - Flat POD data with no global repositories: states are values, and containers are local and droppable.
-- Free-threaded CPython (3.14t and 3.15t) is the only Python target.
+- Python bindings for CPython 3.14 and newer. Free-threaded CPython (3.14t, 3.15t) is the main target: there
+  Python callbacks (observers, heuristics, goal tests) of parallel searches and concurrent Python callers run in
+  parallel. The bindings also build and run on the GIL build of CPython, where these Python parts take turns on
+  the GIL; the native work (searches, state spaces, environment pools, encoders) releases it either way.
 - A CUDA backend with classical and numeric tasks, and RL/JAX/PyTorch/Gymnasium interop are core features.
 
 ## Installing from PyPI
@@ -30,7 +33,7 @@ wheel builds.
 - A C++26 compiler (GCC >= 16)
 - CMake >= 3.25 and Ninja
 - Optional: CUDA 13 (`-DMYMYR_CUDA=ON`)
-- Optional: CPython 3.14t or 3.15t, free-threaded, for the Python bindings
+- Optional: CPython 3.14 or newer for the Python bindings (free-threaded 3.14t or 3.15t recommended)
 
 ## Building the dependencies
 
@@ -85,9 +88,9 @@ uv pip install --python .venv/bin/python -e ".[test]"
 .venv/bin/python -m pytest
 ```
 
-(or the equivalent with plain `python -m venv` and `pip`, given a free-threaded 3.14t or 3.15t interpreter). Pass CMake
-options through `CMAKE_ARGS`, e.g. `CMAKE_ARGS="-DMYMYR_CUDA=ON" uv pip install ...` for the CUDA backend, or
-`-DMYMYR_DEPS_PREFIX=<prefix>` to reuse an existing dependency install.
+(or the equivalent with plain `python -m venv` and `pip`, given a CPython 3.14 or newer interpreter, free-threaded
+preferably). Pass CMake options through `CMAKE_ARGS`, e.g. `CMAKE_ARGS="-DMYMYR_CUDA=ON" uv pip install ...` for the
+CUDA backend, or `-DMYMYR_DEPS_PREFIX=<prefix>` to reuse an existing dependency install.
 
 ### Example
 
@@ -106,7 +109,8 @@ batch = pool.step()
 print(batch.states.shape, batch.reward, batch.terminated)
 ```
 
-User guides and tested scripts are in [docs/](docs/README.md) and [examples/](examples/).
+User guides and tested scripts are in [docs/](docs/README.md) and [examples/](examples/); the option names, defaults
+and result fields every module shares are in [API conventions](docs/conventions.md).
 
 `mymyr.encoding.FlatRelationEncoder(task_or_table, goal_derivations=())` encodes states into relational graphs: the
 objects are the entities, and the fluent, derived and static atoms are the tuples of the relations of an

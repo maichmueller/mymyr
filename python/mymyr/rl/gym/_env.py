@@ -68,7 +68,7 @@ class Env(gymnasium.Env):
     terminations and truncations are those of ``mymyr.rl.CpuEnvPool`` (the RL contract, with the same keywords):
     ``reward = step_reward``, plus ``goal_reward`` on reaching a goal, plus ``dead_end_reward`` on reaching (or being
     stuck in) a dead end; ``terminated`` at a goal or a terminal dead end; ``truncated`` after ``max_steps`` steps of
-    an episode (0: never). Goals and terminal dead ends are absorbing: a step there does not move, pays nothing and
+    an episode (None: never). Goals and terminal dead ends are absorbing: a step there does not move, pays nothing and
     stays terminated. A reset into a goal state (a solved instance) reports ``info["is_goal"]``, and its first step is
     such an absorbing step.
 
@@ -103,7 +103,7 @@ class Env(gymnasium.Env):
         max_actions: Optional[int] = None,
         sampler: Any = "auto",
         env_id: int = 0,
-        max_steps: int = 0,
+        max_steps: int | None = None,
         step_reward: float = 0.0,
         goal_reward: float = 1.0,
         dead_end: str = "no_successors",
@@ -163,6 +163,7 @@ class Env(gymnasium.Env):
 
     @property
     def num_instances(self) -> int:
+        """The number of instances an episode can start in (task ids 0 .. num_instances - 1)."""
         return len(self._problems)
 
     @property
@@ -185,6 +186,7 @@ class Env(gymnasium.Env):
 
     @property
     def env_id(self) -> int:
+        """This environment's index in the instance draws (env ``env_id`` of a ``CpuEnvPool`` with the same seed)."""
         return self._env_id
 
     def applicable_actions(self) -> list[Action]:
@@ -232,6 +234,9 @@ class Env(gymnasium.Env):
         return self._observe(), info
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
+        """Takes ``action`` (an index, or a ground action under ``action="ground"``) and returns (observation,
+        reward, terminated, truncated, info). An action that is not applicable does not move and sets
+        ``info["invalid"]``. Raises RuntimeError before the first reset."""
         self._require_reset()
         index = self._index(action)
         batch = self._open_pool().step(actions=np.array([index], np.int64))
@@ -245,12 +250,14 @@ class Env(gymnasium.Env):
         return self._observe(), reward, terminated, truncated, info
 
     def render(self) -> Optional[str]:
+        """The state's atoms and the goal as text under ``render_mode="ansi"``, else None."""
         if self.render_mode != "ansi":
             return None
         self._require_reset()
         return render_text(self._problems, self._task_id, self.state, self._steps, self._count)
 
     def close(self) -> None:
+        """Releases the environment's pool; reset and step raise RuntimeError afterwards."""
         self._pool = None
         super().close()
 

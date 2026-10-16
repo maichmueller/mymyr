@@ -1,4 +1,4 @@
-"""The counter-based RNG of mymyr (rl/rng.hpp: Philox-4x32-10) in jnp, for jitted code.
+"""The counter-based RNG of mymyr (Philox-4x32-10) in jnp, for jitted code.
 
 ``philox(counters, seed)`` equals ``mymyr.rl.torch.rng.philox`` / ``rl::rng::philox4x32_10`` bit for bit; the draws of
 the environments and of :func:`mymyr.rl.her_relabel` are Philox blocks of (seed; draw, env, purpose). JAX has no

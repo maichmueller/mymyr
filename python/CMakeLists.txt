@@ -5,7 +5,7 @@ execute_process(
     OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE nanobind_ROOT)
 find_package(nanobind 3.1 CONFIG REQUIRED)
 
-# Free-threaded CPython is the only target. No shared NB_DOMAIN: downstream native modules use the versioned
+# Free-threaded on a free-threaded CPython; a GIL build ignores FREE_THREADED. No shared NB_DOMAIN: downstream native modules use the versioned
 # capsule C API instead.
 nanobind_add_module(_core FREE_THREADED NB_STATIC
     src/module.cpp

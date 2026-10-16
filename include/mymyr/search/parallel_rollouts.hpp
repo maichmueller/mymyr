@@ -26,7 +26,7 @@
 // of the task; merge_landing_states deduplicates across rollouts.
 //
 // Threads: num_threads (0: the hardware's) capped at the number of rollouts; rollouts are handed out dynamically and
-// results are returned in seed order. Per-worker hooks (search/control.hpp, tyr's make_worker protocol): a worker is
+// results are returned in seed order. Per-worker hooks (search/control.hpp, make_worker): a worker is
 // a rollout (index into seeds). With an observer, SearchObserver::make_worker(k) is called for every rollout on the
 // calling thread; rollout k sends its hot events (on_expand, on_generate, on_prune, on_transition, on_progress) to the
 // returned observer. The root observer gets on_start before and, after every rollout has joined, in rollout order

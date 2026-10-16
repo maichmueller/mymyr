@@ -33,7 +33,6 @@ SiwResult siw(const Task& task, const SiwOptions& options)
             r.cost = 0;
             r.partial_plan = std::exchange(r.plan, {});
         }
-        r.cost_exact = plan_cost.exact();
         r.fluent_slots = task.atoms().fluent_slots();
         if (c.observer)
         {
@@ -46,6 +45,7 @@ SiwResult siw(const Task& task, const SiwOptions& options)
 
     if (goal.statically_false() || task_goal.statically_false())
         return finish(SearchStatus::Unsolvable);
+    r.cost = plan_cost.initial(cur);
 
     while (true)
     {
@@ -78,6 +78,7 @@ SiwResult siw(const Task& task, const SiwOptions& options)
             detail::add_pass(r.total, p);
         r.peak_table_bytes = std::max(r.peak_table_bytes, ir.peak_table_bytes);
         r.peak_node_bytes = std::max(r.peak_node_bytes, ir.peak_node_bytes);
+        r.total.memory_bytes = std::max(r.total.memory_bytes, ir.total.memory_bytes);
         r.subproblems.push_back(std::move(sub));
         if (ir.status != SearchStatus::Solved)
         {
@@ -85,8 +86,8 @@ SiwResult siw(const Task& task, const SiwOptions& options)
             return finish(ir.status);
         }
         r.max_effective_width = std::max(r.max_effective_width, ir.effective_width);
-        // the subplans' costs add up, each measured from the start value
-        r.cost += plan_cost.apply(succ, cur, ir.plan);
+        // the metric value runs on through the subplans: each starts from the value its start state was reached with
+        r.cost = plan_cost.apply(succ, cur, r.cost, ir.plan);
         r.plan.insert(r.plan.end(), std::make_move_iterator(ir.plan.begin()), std::make_move_iterator(ir.plan.end()));
         cur = std::move(*ir.goal_state);
     }

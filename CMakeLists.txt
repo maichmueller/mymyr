@@ -86,6 +86,7 @@ add_library(mymyr_core STATIC
     src/mymyr/version.cpp
     src/mymyr/core/memory.cpp
     src/mymyr/formalism/task_data.cpp
+    src/mymyr/formalism/pddl_writer.cpp
     src/mymyr/formalism/text_format.cpp
     src/mymyr/task/atom_index.cpp
     src/mymyr/task/compile.cpp
@@ -133,6 +134,7 @@ add_library(mymyr_core STATIC
     src/mymyr/search/ehc.cpp
     src/mymyr/search/anytime.cpp
     src/mymyr/search/plan_file.cpp
+    src/mymyr/search/validate.cpp
     # relaxed reachability and landmarks
     src/mymyr/reachability/join.cpp
     src/mymyr/reachability/relaxed_reachability.cpp

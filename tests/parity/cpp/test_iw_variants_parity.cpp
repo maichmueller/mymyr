@@ -347,7 +347,7 @@ void run_row(const Task& task, const json::Value& row)
         EXPECT_EQ(r.certifier_ran ? status_name(r.certifier_status, true) : std::string("in_progress"), e["certifier_status"].str) << what;
         EXPECT_EQ(r.iw_completed_depth, num(e["iw_completed_depth"])) << what;
         EXPECT_EQ(r.iw_lower_bound, num(e["iw_lower_bound"])) << what;
-        EXPECT_EQ(r.total_expansions, num(e["total_expansions"])) << what;
+        EXPECT_EQ(r.stats.expanded, num(e["total_expansions"])) << what;
         EXPECT_EQ(r.certifier.total.expanded, num(e["expanded"])) << what;
         EXPECT_EQ(r.certifier.total.generated, num(e["generated"])) << what;
         ASSERT_EQ(r.rollout_statistics.size(), e["rollout_statistics"].arr.size()) << what;

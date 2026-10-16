@@ -62,6 +62,7 @@ def register() -> None:
 
 
 def registered() -> bool:
+    """Whether :func:`register` has registered the FFI targets with JAX."""
     return _done
 
 

@@ -1,4 +1,5 @@
-"""The C++ SDK that the wheel carries: headers and the CMake package (mymyr.get_include / mymyr.get_cmake_dir)."""
+"""The C++ SDK that the wheel and an editable install carry: headers and the CMake package (mymyr.get_include /
+mymyr.get_cmake_dir), next to the compiled extension."""
 
 import pathlib
 
@@ -6,14 +7,14 @@ import pytest
 
 import mymyr
 
-PACKAGE = pathlib.Path(mymyr.__file__).resolve().parent
+INSTALL = pathlib.Path(mymyr._core.__file__).resolve().parent
 
 
 @pytest.fixture(scope="module")
 def sdk_installed():
-    # an editable or in-tree install has no installed headers next to the package
-    if not (PACKAGE / "include").is_dir():
-        pytest.skip("mymyr is not an installed wheel: no SDK next to the package")
+    # an in-tree build has no installed headers next to the extension
+    if not (INSTALL / "include").is_dir():
+        pytest.skip("mymyr is an in-tree build: no SDK next to the extension")
 
 
 def test_get_include(sdk_installed):
@@ -41,3 +42,8 @@ def test_the_libraries_are_installed(sdk_installed):
 def test_the_paths_are_plain_strings():
     assert isinstance(mymyr.get_include(), str)
     assert isinstance(mymyr.get_cmake_dir(), str)
+
+
+def test_the_paths_are_next_to_the_extension():
+    assert pathlib.Path(mymyr.get_include()).parent == INSTALL
+    assert pathlib.Path(mymyr.get_cmake_dir()).parents[2] == INSTALL

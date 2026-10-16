@@ -27,6 +27,7 @@
 #include "mymyr/cuda/runtime.hpp"
 #include "mymyr/cuda/suite_expand.hpp"
 #include "mymyr/search/control.hpp"
+#include "mymyr/search/validate.hpp"
 #include "mymyr/successor/successors.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -957,6 +958,8 @@ struct PyDeviceBrfs
     cuda::DeviceBrfsResult r;
     Owner o;
     PyContextPtr ctx;
+    double cost = 0;                  // of the plan, by replaying it on the CPU (0 unless solved)
+    std::optional<State> goal_state;  // the state the plan reaches (unless solved: none)
 };
 
 nb::object action_object(const Owner& o, const Action& a)
@@ -1021,7 +1024,7 @@ void bind_cuda(nb::module_& parent)
 {
     nb::module_ m = parent.def_submodule("_cuda", "CUDA backend: contexts, device tasks, arenas, DLPack");
 
-    m.def("device_count", [] { return cuda::device_count(); });
+    m.def("device_count", [] { return cuda::device_count(); }, "The number of visible CUDA devices.");
     m.def("available", [] { return cuda::device_count() > 0; }, "True if a CUDA device is visible");
 
     nb::class_<PyContextObj>(m, "Context",
@@ -1040,12 +1043,14 @@ void bind_cuda(nb::module_& parent)
                 new (self) PyContextObj{std::make_shared<PyContext>(cuda::DeviceContext::create(device, o))};
             },
             "device"_a = 0, "max_bytes"_a = 0, "release_threshold"_a = nb::none())
-        .def_prop_ro("device", [](const PyContextObj& c) { return c.p->ctx->device(); })
-        .def_prop_ro("name", [](const PyContextObj& c) { return c.p->ctx->name(); })
-        .def_prop_ro("compute_capability", [](const PyContextObj& c) { return c.p->ctx->compute_capability(); })
+        .def_prop_ro("device", [](const PyContextObj& c) { return c.p->ctx->device(); }, "The CUDA device index.")
+        .def_prop_ro("name", [](const PyContextObj& c) { return c.p->ctx->name(); }, "The device's name.")
+        .def_prop_ro("compute_capability", [](const PyContextObj& c) { return c.p->ctx->compute_capability(); },
+                     "The device's compute capability as major * 10 + minor (89 for 8.9).")
         .def_prop_ro("stream", [](const PyContextObj& c) { return reinterpret_cast<std::intptr_t>(c.p->ctx->stream()); },
                      "the compute stream (a cudaStream_t, usable as torch.cuda.ExternalStream(ctx.stream))")
-        .def_prop_ro("copy_stream", [](const PyContextObj& c) { return reinterpret_cast<std::intptr_t>(c.p->ctx->copy_stream()); })
+        .def_prop_ro("copy_stream", [](const PyContextObj& c) { return reinterpret_cast<std::intptr_t>(c.p->ctx->copy_stream()); },
+                     "The copy stream (a cudaStream_t) of the arenas' host syncs.")
         .def("usage", [](const PyContextObj& c) {
             const cuda::PoolUsage u = c.p->ctx->usage();
             nb::typed<nb::dict, std::string, u64> d{nb::dict()};
@@ -1054,12 +1059,16 @@ void bind_cuda(nb::module_& parent)
             d["reserved_high"] = u.reserved_high;
             d["used_high"] = u.used_high;
             return d;
-        })
+        },
+             "The memory pool's bytes: a dict of reserved, used and their high-water marks reserved_high, used_high.")
         .def("synchronize", [](const PyContextObj& c) {
             c.p->ctx->synchronize();
             c.p->drain(true);
-        })
-        .def("trim", [](const PyContextObj& c, IntArg keep_in) { const u64 keep = int_arg<u64>(keep_in, "keep"); c.p->ctx->trim(keep); }, "keep"_a = 0)
+        },
+             "Blocks until the compute and copy streams are idle and releases the inputs held for their work.")
+        .def("trim", [](const PyContextObj& c, IntArg keep_in) { const u64 keep = int_arg<u64>(keep_in, "keep"); c.p->ctx->trim(keep); }, "keep"_a = 0,
+             "Returns reserved pool memory beyond `keep` bytes to the driver (after synchronizing the streams) and "
+             "frees the cached pinned buffers.")
         .def_prop_ro("pending_imports", [](const PyContextObj& c) {
             c.p->drain();
             return c.p->pending();
@@ -1078,12 +1087,18 @@ void bind_cuda(nb::module_& parent)
                 new (self) PyDeviceTask{std::move(c), std::move(dt), o.core->task};
             },
             "task"_a, "ctx"_a = nb::none())
-        .def_prop_ro("bytes", [](const PyDeviceTask& t) { return t.dt->bytes(); })
-        .def_prop_ro("version", [](const PyDeviceTask& t) { return t.dt->version(); })
-        .def_prop_ro("upload_seconds", [](const PyDeviceTask& t) { return t.dt->upload_seconds(); })
-        .def_prop_ro("upload_device_ms", [](const PyDeviceTask& t) { return t.dt->upload_device_ms(); })
-        .def_prop_ro("context", [](const PyDeviceTask& t) { return PyContextObj{t.ctx}; })
-        .def_prop_ro("data_ptr", [](const PyDeviceTask& t) { return reinterpret_cast<std::uintptr_t>(t.dt->device_block()); })
+        .def_prop_ro("bytes", [](const PyDeviceTask& t) { return t.dt->bytes(); },
+                     "Device bytes of the uploaded arrays.")
+        .def_prop_ro("version", [](const PyDeviceTask& t) { return t.dt->version(); },
+                     "The layout version of the device arrays.")
+        .def_prop_ro("upload_seconds", [](const PyDeviceTask& t) { return t.dt->upload_seconds(); },
+                     "Wall time of the upload, in seconds.")
+        .def_prop_ro("upload_device_ms", [](const PyDeviceTask& t) { return t.dt->upload_device_ms(); },
+                     "Device time of the upload copies, in milliseconds.")
+        .def_prop_ro("context", [](const PyDeviceTask& t) { return PyContextObj{t.ctx}; },
+                     "The Context the task lives in.")
+        .def_prop_ro("data_ptr", [](const PyDeviceTask& t) { return reinterpret_cast<std::uintptr_t>(t.dt->device_block()); },
+                     "The device address of the uploaded block (an integer).")
         .def(
             "download",
             [](const PyDeviceTask& t) {
@@ -1277,11 +1292,14 @@ void bind_cuda(nb::module_& parent)
                 new (self) PyArena{std::move(c), std::move(a), words};
             },
             "ctx"_a, "words"_a, "capacity"_a = 1024)
-        .def_prop_ro("words", [](const PyArena& a) { return a.words; })
-        .def_prop_ro("device_size", [](const PyArena& a) { return a.arena->device_size(); })
-        .def_prop_ro("host_size", [](const PyArena& a) { return a.arena->host_size(); })
-        .def_prop_ro("capacity", [](const PyArena& a) { return a.arena->capacity(); })
-        .def_prop_ro("synced_upto", [](const PyArena& a) { return a.arena->synced_upto(); })
+        .def_prop_ro("words", [](const PyArena& a) { return a.words; }, "Words per state row (W).")
+        .def_prop_ro("device_size", [](const PyArena& a) { return a.arena->device_size(); }, "Rows on the device.")
+        .def_prop_ro("host_size", [](const PyArena& a) { return a.arena->host_size(); },
+                     "Rows valid in the host mirror (advanced by poll() and wait()).")
+        .def_prop_ro("capacity", [](const PyArena& a) { return a.arena->capacity(); },
+                     "Rows the device array holds before it grows (it at least doubles).")
+        .def_prop_ro("synced_upto", [](const PyArena& a) { return a.arena->synced_upto(); },
+                     "The end of the last sync issued (host_size once every sync in flight has landed).")
         .def(
             "append",
             [](PyArena& a, StatesLike states) {
@@ -1306,8 +1324,9 @@ void bind_cuda(nb::module_& parent)
             },
             "states"_a, "Appends rows: device arrays by a device copy (read in place), host arrays by an upload")
         .def("sync", [](PyArena& a) { a.arena->sync_to_host(); }, "Starts copying the new tail to the host mirror")
-        .def("poll", [](PyArena& a) { return a.arena->poll(); })
-        .def("wait", [](PyArena& a) { a.arena->wait(); })
+        .def("poll", [](PyArena& a) { return a.arena->poll(); },
+             "Advances host_size over the syncs that have landed; True when none is in flight.")
+        .def("wait", [](PyArena& a) { a.arena->wait(); }, "Blocks until every sync in flight has landed.")
         .def(
             "device_view",
             [](const PyArena& a, IntArg lo_in, SizeArg hi_obj, FrameworkArg framework) -> ArrayOut {
@@ -1427,10 +1446,13 @@ void bind_cuda(nb::module_& parent)
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
                              "The padded [N, K] view of a device expansion (rl.PaddedExpansion's arrays, on the device).")
-        .def_prop_ro("K", [](const DevicePadded& p) { return p.K; })
-        .def_prop_ro("words", [](const DevicePadded& p) { return p.words; })
-        .def_prop_ro("numeric_words", [](const DevicePadded& p) { return p.numeric_words; })
-        .def_prop_ro("overflow", [](const DevicePadded& p) { return p.overflow; })
+        .def_prop_ro("K", [](const DevicePadded& p) { return p.K; },
+                     "The padded successor count per state (the second dimension).")
+        .def_prop_ro("words", [](const DevicePadded& p) { return p.words; }, "Atom words per row (W).")
+        .def_prop_ro("numeric_words", [](const DevicePadded& p) { return p.numeric_words; },
+                     "Numeric words per row after the atom words (0 for classical tables).")
+        .def_prop_ro("overflow", [](const DevicePadded& p) { return p.overflow; },
+                     "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const DevicePadded& p) -> ArrayOut {
             return p.array(p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.K});
         }, "[N, K] int32: row of the flat arrays, -1 = none")
@@ -1507,13 +1529,20 @@ void bind_cuda(nb::module_& parent)
             cuda::check(cudaStreamSynchronize(e.flat.os.s), "cudaStreamSynchronize");  // pageable source
             return export_region(buf, 0, e.flat.os, rl::DType::I32, {static_cast<i64>(e.flat.rows)}, false, e.fw, e.enc);
         }, "[N] int32 successors per state (a fresh array)")
-        .def_prop_ro("total", [](const PyDeviceExpansion& e) { return e.flat.total; })
-        .def_prop_ro("capacity", [](const PyDeviceExpansion& e) { return e.flat.capacity; })
-        .def_prop_ro("num_states", [](const PyDeviceExpansion& e) { return e.flat.rows; })
-        .def_prop_ro("words", [](const PyDeviceExpansion& e) { return e.flat.words; })
-        .def_prop_ro("numeric_words", [](const PyDeviceExpansion& e) { return e.flat.numeric_words; })
-        .def_prop_ro("words_needed", [](const PyDeviceExpansion& e) { return e.flat.words_needed; })
-        .def_prop_ro("label_width", [](const PyDeviceExpansion& e) { return e.flat.label_width; })
+        .def_prop_ro("total", [](const PyDeviceExpansion& e) { return e.flat.total; },
+                     "The successor rows of the batch, those beyond the capacity included.")
+        .def_prop_ro("capacity", [](const PyDeviceExpansion& e) { return e.flat.capacity; },
+                     "The successor rows the outputs hold; total > capacity is an overflow.")
+        .def_prop_ro("num_states", [](const PyDeviceExpansion& e) { return e.flat.rows; },
+                     "The number of expanded states (the batch size).")
+        .def_prop_ro("words", [](const PyDeviceExpansion& e) { return e.flat.words; }, "Atom words per row (W).")
+        .def_prop_ro("numeric_words", [](const PyDeviceExpansion& e) { return e.flat.numeric_words; },
+                     "Numeric words per row after the atom words (0 for classical tables).")
+        .def_prop_ro("words_needed", [](const PyDeviceExpansion& e) { return e.flat.words_needed; },
+                     "The atom words every successor row needs; more than words is an overflow (new atoms under lazy "
+                     "slots).")
+        .def_prop_ro("label_width", [](const PyDeviceExpansion& e) { return e.flat.label_width; },
+                     "Binding objects per successor (the largest schema arity).")
         .def_prop_ro("num_objects", [](const PyDeviceExpansion& e) { return e.ref.suite->max_objects(); },
                      "The most objects of an instance of the table (the columns of rl.prefix_masks).")
         .def_prop_ro("num_schemas", [](const PyDeviceExpansion& e) { return e.ref.suite->max_schemas(); },
@@ -1522,9 +1551,12 @@ void bind_cuda(nb::module_& parent)
                      "The table (or Task) the expansion was made over.")
         .def_prop_ro("overflow", [](const PyDeviceExpansion& e) {
             return e.flat.total > e.flat.capacity || e.flat.words_needed > e.flat.words;
-        })
-        .def_prop_ro("framework", [](const PyDeviceExpansion& e) { return framework_name(e.fw); })
-        .def_prop_ro("context", [](const PyDeviceExpansion& e) { return PyContextObj{e.ctx}; })
+        },
+                     "Whether the outputs miss rows or words: total > capacity or words_needed > words.")
+        .def_prop_ro("framework", [](const PyDeviceExpansion& e) { return framework_name(e.fw); },
+                     "The framework of the arrays: 'torch', 'jax' or 'dlpack'.")
+        .def_prop_ro("context", [](const PyDeviceExpansion& e) { return PyContextObj{e.ctx}; },
+                     "The Context the arrays live in.")
         .def_prop_ro("stream", [](const PyDeviceExpansion& e) { return e.flat.os.dl; },
                      "the stream the arrays were produced on (a DLPack stream value)")
         .def_prop_ro("padded", [](const PyDeviceExpansion& e) -> Arg<std::optional<DevicePadded>> {
@@ -1597,28 +1629,51 @@ void bind_cuda(nb::module_& parent)
             const BrfsResult& r = x.r.result;
             return r.solved ? search::SearchStatus::Solved
                             : (r.exhausted ? search::SearchStatus::Exhausted : search::SearchStatus::OutOfStates);
-        })
-        .def_prop_ro("solved", [](const PyDeviceBrfs& x) { return x.r.result.solved; })
-        .def_prop_ro("exhausted", [](const PyDeviceBrfs& x) { return x.r.result.exhausted; })
+        }, "How the search ended (mymyr.search.Status).")
+        .def_prop_ro("solved", [](const PyDeviceBrfs& x) { return x.r.result.solved; },
+                     "True when status is Status.SOLVED (there is a plan).")
         .def_prop_ro("plan", [](const PyDeviceBrfs& x) {
             ActionList out{nb::list()};
             for (const Action& a : x.r.result.plan)
                 out.append(action_object(x.o, a));
             return out;
-        })
-        .def_prop_ro("states", [](const PyDeviceBrfs& x) { return x.r.result.states; })
-        .def_prop_ro("expanded", [](const PyDeviceBrfs& x) { return x.r.result.expanded; })
-        .def_prop_ro("generated", [](const PyDeviceBrfs& x) { return x.r.result.generated; })
-        .def_prop_ro("goal_states", [](const PyDeviceBrfs& x) { return x.r.result.goal_states; })
-        .def_prop_ro("layers", [](const PyDeviceBrfs& x) { return x.r.result.layers; })
-        .def_prop_ro("seconds", [](const PyDeviceBrfs& x) { return x.r.result.search_s; })
-        .def_prop_ro("store", [](const PyDeviceBrfs& x) { return x.r.result.store; })
-        .def_prop_ro("store_bytes", [](const PyDeviceBrfs& x) { return x.r.result.store_bytes; })
-        .def_prop_ro("threads", [](const PyDeviceBrfs& x) { return x.r.result.threads; })
-        .def_prop_ro("fingerprint", [](const PyDeviceBrfs& x) { return x.r.result.fingerprint; })
-        .def_prop_ro("words", [](const PyDeviceBrfs& x) { return std::max<u32>(1, x.b->words() - x.o.core->task->numeric_slots()); }, "atom words per stored state row")
-        .def_prop_ro("numeric_words", [](const PyDeviceBrfs& x) { return x.o.core->task->numeric_words(); })
-        .def_prop_ro("stats", [](const PyDeviceBrfs& x) {
+        }, "The plan to the first goal state expanded, a list of Actions (empty without a plan).")
+        .def_prop_ro("cost", [](const PyDeviceBrfs& x) { return x.cost; },
+                     "The plan's cost under the task's metric (0.0 without a plan).")
+        .def_prop_ro("goal_state",
+                     [](const PyDeviceBrfs& x) -> Arg<std::optional<PyState>> {
+                         if (!x.goal_state)
+                             return Arg<std::optional<PyState>>(nb::none());
+                         return Arg<std::optional<PyState>>(make_state(x.o, State(*x.goal_state)));
+                     },
+                     "The State the plan reaches (None without a plan).")
+        .def_prop_ro("stats",
+                     [](const PyDeviceBrfs& x) {
+                         const BrfsResult& r = x.r.result;
+                         search::SearchStatistics s;
+                         s.expanded = r.expanded;
+                         s.generated = r.generated;
+                         s.states = r.states;
+                         s.pruned = r.pruned;
+                         s.seconds = r.search_s;
+                         s.memory_bytes = r.store_bytes;
+                         return s;
+                     },
+                     "The search's counts and time (mymyr.search.Statistics; memory_bytes: the device store).")
+        .def_prop_ro("message", [](const PyDeviceBrfs& x) { return x.r.result.message; },
+                     "Why the search stopped early (empty when it ran to its end).")
+        .def_prop_ro("exhausted", [](const PyDeviceBrfs& x) { return x.r.result.exhausted; },
+                     "The whole reachable space was expanded (with stop_at_goal=False also when solved).")
+        .def_prop_ro("num_goal_states", [](const PyDeviceBrfs& x) { return x.r.result.goal_states; },
+                     "Goal states expanded.")
+        .def_prop_ro("layers", [](const PyDeviceBrfs& x) { return x.r.result.layers; }, "Layers expanded.")
+        .def_prop_ro("store", [](const PyDeviceBrfs& x) { return x.r.result.store; }, "The state store used.")
+        .def_prop_ro("fingerprint", [](const PyDeviceBrfs& x) { return x.r.result.fingerprint; },
+                     "With fingerprint=True: the hash of mymyr.search.BrfsResult.fingerprint; else 0.")
+        .def_prop_ro("words", [](const PyDeviceBrfs& x) { return std::max<u32>(1, x.b->words() - x.o.core->task->numeric_slots()); }, "Atom words per stored state row.")
+        .def_prop_ro("numeric_words", [](const PyDeviceBrfs& x) { return x.o.core->task->numeric_words(); },
+                     "Numeric words per stored state row (0 for a classical task).")
+        .def_prop_ro("counters", [](const PyDeviceBrfs& x) {
             const cuda::DeviceBrfsStats& s = x.r.stats;
             nb::typed<nb::dict, std::string, std::variant<double, u64>> d{nb::dict()};
             d["view_ms"] = s.view_ms;
@@ -1644,7 +1699,7 @@ void bind_cuda(nb::module_& parent)
             d["host_axiom_ms"] = s.host_axiom_ms;
             d["axiom_reruns"] = s.axiom_reruns;
             return d;
-        }, "per-phase device times (ms) and counters: view_ms (with axiom_ms, the device axioms), gen_ms, dedup_ms, "
+        }, "A dict of per-phase device times (ms) and counters: view_ms (with axiom_ms, the device axioms), gen_ms, dedup_ms, "
            "host_ms (with host_axiom_ms, CPU time on axioms); host_schemas (CPU fallback; host_ce_schemas of them with "
            "conditional effects), ce_schemas (conditional effects on the device), device_axioms (1: the axioms run on the "
            "device), axiom_reruns (lazy slots: axiom evaluations redone after interning derived atoms); chunks, groups "
@@ -1686,10 +1741,11 @@ void bind_cuda(nb::module_& parent)
              "id"_a, "The plan from the initial state to state `id` (replayed on the CPU)")
         .def("__repr__", [](const PyDeviceBrfs& x) {
             const BrfsResult& r = x.r.result;
-            return "BrfsResult(states=" + std::to_string(r.states) + ", expanded=" + std::to_string(r.expanded) +
-                   ", generated=" + std::to_string(r.generated) + ", layers=" + std::to_string(r.layers) +
-                   ", solved=" + (r.solved ? "True" : "False") + ", exhausted=" + (r.exhausted ? "True" : "False") +
-                   ", store=device)";
+            return std::string("BrfsResult(status=") +
+                   (r.solved ? "solved" : (r.exhausted ? "exhausted" : "out_of_states")) +
+                   ", plan_length=" + std::to_string(r.plan.size()) + ", layers=" + std::to_string(r.layers) +
+                   ", expanded=" + std::to_string(r.expanded) + ", generated=" + std::to_string(r.generated) +
+                   ", states=" + std::to_string(r.states) + ", store=device)";
         });
 
     m.def(
@@ -1719,6 +1775,12 @@ void bind_cuda(nb::module_& parent)
                 nb::gil_scoped_release release;
                 x.b = std::make_shared<cuda::DeviceBrfs>(c->ctx, o.core->task, opts);
                 x.r = x.b->run();
+                if (x.r.result.solved)
+                {
+                    search::PlanValidation v = search::validate_plan(*o.core->task, x.r.result.plan);
+                    x.cost = v.cost;
+                    x.goal_state = std::move(v.state);
+                }
                 if (o.core->task->numeric_slots())
                 {
                     const auto& t = *o.core->task;
@@ -1745,7 +1807,7 @@ void bind_cuda(nb::module_& parent)
         "count), whatever the chunk size; a search that expands a goal state is SOLVED with the CPU's plan to the first one, "
         "and stop_at_goal (the default) stops there. The state space stays on the device "
         "(state_words(), nodes()). Small layers run in device loops (one host read per loop); timings=True records "
-        "the per-phase device times instead (stats; every chunk then runs from the host).");
+        "the per-phase device times instead (counters; every chunk then runs from the host).");
     bind_cuda_search(m, [](PyTaskCore& core, nb::handle ctx, int device) { return task_context(core, ctx, device)->ctx; });
     bind_cuda_heuristics(m, [](PyTaskCore& core, nb::handle ctx, int device) { return task_context(core, ctx, device)->ctx; });
 }

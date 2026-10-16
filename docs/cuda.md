@@ -2,7 +2,9 @@
 
 The optional CUDA backend builds with CUDA Toolkit 13.0 and needs an NVIDIA GPU at runtime. Python wheels
 contain the CPU backend only. For a source build, set `MYMYR_CUDA=ON` and `CMAKE_CUDA_COMPILER` during the CMake
-configure or Python package build.
+configure or Python package build. The device searches and generators take the options and return the result
+fields of the CPU ones ([API conventions](conventions.md)); a device result adds `counters`, a dict of device counts
+and times.
 
 Device operations include task upload and smoke kernels, BrFS, multi-IW and rollouts; batched grounded h-max, h-add,
 h-FF, h² and set-additive; A* and GBFS; state-space generation; and the device path for `mymyr.rl.expand`. Device arrays can exchange
@@ -43,7 +45,7 @@ plans use the documented CPU fallback.
 The derived predicates `axiom_<k>` compiled from quantified and disjunctive conditions (see
 [Parsing and tasks](parsing-and-tasks.md)) are axioms like any other: the device evaluates their rules, unless a rule
 has a numeric comparison or more parameters than the device kernels take; then the task's axioms run on the CPU
-(`stats["device_axioms"] == 0`) and the results are the same.
+(`counters["device_axioms"] == 0` of a device BrFS result) and the results are the same.
 The device evaluates numeric conditions and effects only in tasks with numeric state values: a task whose numeric
 conditions or effects read only static functions and functions that never get a value (no initial value, no `assign`
 effect) is refused with `ValueError`; run it on the CPU.
@@ -59,7 +61,8 @@ from mymyr import cuda
 data = Path("tests/data/pddl/blocks")
 task = mymyr.Task.from_pddl(data / "domain.pddl", data / "probBLOCKS-8-0.pddl")
 result = cuda.brfs(task)
-print(result.status, result.solved, len(result.plan), result.stats)
+print(result.status, result.solved, len(result.plan), result.cost, result.stats)
+print(result.counters)  # per-phase device times and counters
 ```
 
 Set `CUDA_VISIBLE_DEVICES=0` to select the device exposed to the process. `cuda.available()` reports whether the build
