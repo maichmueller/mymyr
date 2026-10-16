@@ -1,9 +1,10 @@
 #pragma once
-// The device side of the lifted successor kernels (include/mymyr/cuda/lifted.hpp), shared by the translation units that
-// instantiate them: lifted.cu (views, counts, rows without conditional effects, picks), lifted_ce.cu (rows of schemas
-// with conditional effects) and axioms.cu (axiom strata). Internal: included by .cu files only (nvcc, C++23;
-// the device-code subset). Everything but GenArgs (the launch arguments the units pass each other) lives in an unnamed
-// namespace, so each translation unit instantiates its own kernels.
+// The device side of the lifted successor kernels (include/mymyr/cuda/lifted.hpp). The launchers (lifted.cu,
+// lifted_multi*.cu) include it for the dispatchers, which call one launch function per case (gen_warp_case, gen_block_case, deep_case); the
+// generated units of cuda/lifted_units.cmake define the cases (lifted_cases.cuh) and so compile the kernels, a few
+// cases each. axioms.cu instantiates the axiom kernels. Internal: included by .cu files only (nvcc, C++23; the
+// device-code subset). Everything but GenArgs and the case declarations lives in an unnamed namespace, so each
+// translation unit instantiates its own kernels.
 
 #include "mymyr/cuda/lifted.hpp"
 
@@ -507,7 +508,7 @@ __device__ inline void sort_rows(u32* base, u64 cnt, u32 stride, u32 n)
 
 }  // namespace
 
-/// Everything a count / write launch reads (outside the unnamed namespace: the units of the wide rows take it across
+/// Everything a count / write launch reads (outside the unnamed namespace: the case functions take it across
 /// translation units).
 struct GenArgs
 {
@@ -521,6 +522,17 @@ struct GenArgs
     SuccessorRows out;
     Multi m{};  // multi-instance launches: the instances and the row order
 };
+
+/// The launches of one (OW, FC) case of the count / write kernels (the warp-per-segment kernel, the block kernel) and of
+/// the deep kernels (launch_deep): launch_gen and the dispatchers below call them, and lifted_cases.cuh defines them,
+/// in translation units of their own (one or a few kernels each; lifted_units.cmake lists them), so that each kernel
+/// is compiled once and the dispatching code does not compile any.
+template<u32 OW, bool FC, bool Write, u32 WB, bool CE>
+cudaError_t gen_warp_case(const GenArgs& a, unsigned blocks, cudaStream_t s);
+template<u32 OW, bool FC, bool Write, u32 WB, bool CE, bool M>
+cudaError_t gen_block_case(const GenArgs& a, unsigned blocks, unsigned threads, cudaStream_t s);
+template<u32 OW, bool FC, bool Write, u32 WB>
+cudaError_t deep_case(const GenArgs& a, cudaStream_t s);
 
 namespace
 {
@@ -1359,13 +1371,11 @@ cudaError_t launch_gen(const GenArgs& a, cudaStream_t s)
         {
             const u64 warps = u64{a.p.rows} * a.set.count;
             const u64 wblocks = (warps + k_gen_warp_block / 32 - 1) / (k_gen_warp_block / 32);
-            k_gen_warp<OW, FC, Write, WB, CE><<<static_cast<unsigned>(wblocks), k_gen_warp_block, 0, s>>>(a);
-            return cudaGetLastError();
+            return gen_warp_case<OW, FC, Write, WB, CE>(a, static_cast<unsigned>(wblocks), s);
         }
     }
     const u32 warps = a.set.count < k_gen_block / 32 ? a.set.count : k_gen_block / 32;
-    k_gen<OW, FC, Write, WB, CE, M><<<static_cast<unsigned>(blocks), warps * 32, 0, s>>>(a);
-    return cudaGetLastError();
+    return gen_block_case<OW, FC, Write, WB, CE, M>(a, static_cast<unsigned>(blocks), warps * 32, s);
 }
 
 /// The kernels' OW is the task's (single instance: a.t.ow) or the launch's OW group (multi-instance: a.m.ow): the tables
@@ -2410,7 +2420,7 @@ cudaError_t launch_deep(const GenArgs& a, cudaStream_t s)
 }
 
 /// The deep kernels (SchemaSet::deep): matchers of up to k_deep_depth parameters, single instance, no conditional
-/// effects, object bitsets of at most k_deep_ow words (lifted_deep*.cu).
+/// effects, object bitsets of at most k_deep_ow words.
 template<bool Write, u32 WB>
 cudaError_t dispatch_deep(const GenArgs& a, cudaStream_t s)
 {
@@ -2418,14 +2428,14 @@ cudaError_t dispatch_deep(const GenArgs& a, cudaStream_t s)
         return cudaErrorInvalidValue;
     switch ((a.t.ow - 1) * 2 + (a.set.fc ? 1 : 0))
     {
-        case 0: return launch_deep<1, false, Write, WB>(a, s);
-        case 1: return launch_deep<1, true, Write, WB>(a, s);
-        case 2: return launch_deep<2, false, Write, WB>(a, s);
-        case 3: return launch_deep<2, true, Write, WB>(a, s);
-        case 4: return launch_deep<3, false, Write, WB>(a, s);
-        case 5: return launch_deep<3, true, Write, WB>(a, s);
-        case 6: return launch_deep<4, false, Write, WB>(a, s);
-        case 7: return launch_deep<4, true, Write, WB>(a, s);
+        case 0: return deep_case<1, false, Write, WB>(a, s);
+        case 1: return deep_case<1, true, Write, WB>(a, s);
+        case 2: return deep_case<2, false, Write, WB>(a, s);
+        case 3: return deep_case<2, true, Write, WB>(a, s);
+        case 4: return deep_case<3, false, Write, WB>(a, s);
+        case 5: return deep_case<3, true, Write, WB>(a, s);
+        case 6: return deep_case<4, false, Write, WB>(a, s);
+        case 7: return deep_case<4, true, Write, WB>(a, s);
         default: return cudaErrorInvalidValue;
     }
 }
