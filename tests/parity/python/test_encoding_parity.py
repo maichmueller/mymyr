@@ -15,7 +15,7 @@ from mymyr import encoding, rl
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
     HELPER, Context, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    native_graph, parse_literal, random_walk_batch, random_walk_rows, read, replay, run_case,
+    lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, replay, run_case, sources_of,
 )
 
 IDS = [p.stem[:3] for p in FIXTURES]
@@ -49,10 +49,12 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
             if config not in fixture["configs"]:
                 continue
             catalog = fixture["catalogs"][fixture["configs"][config]["catalog"]]
-            found |= set(catalog["sources"]) - set(COMPARED_SOURCES)
+            found |= set(catalog["sources"]) - set(sources_of(config))
     assert found == set(PENDING_SOURCES)
     assert set(COMPARED_SOURCES) & set(PENDING_SOURCES) == set()
     assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation")
+    assert [c for c in SUPPORTED if "action" in lanes_of(c)] == [c for c in SUPPORTED if "action" in sources_of(c)]
+    assert all(("action" in lanes_of(c)) == SUPPORTED[c].get("include_actions", True) for c in SUPPORTED)
 
 
 # ------------------------------------------------------------------------------------------------ parity
@@ -250,9 +252,11 @@ def goal_case(config, state="s1"):
     index = [r["state"] for r in records].index(state)
     batch, row = placed[index]
     goals = records[index]["inputs"].get("goals")
-    context = Context(fixture, task, states[state], config, None if goals is None else tuple(goals))
-    expected = fixture_graph(fixture, records[index], COMPARED_SOURCES)
-    return expected, native_graph(encoder, batch, row, [task], COMPARED_LANES), context
+    actions = records[index]["inputs"].get("actions")
+    context = Context(fixture, task, states[state], config, None if goals is None else tuple(goals),
+                      None if actions is None else tuple(actions))
+    expected = fixture_graph(fixture, records[index], sources_of(config))
+    return expected, native_graph(encoder, batch, row, [task], lanes_of(config)), context
 
 
 @pytest.mark.parametrize("config", ["C1", "C2", "C3"])
@@ -274,6 +278,45 @@ def test_goal_tuples_and_goal_entities_are_compared(config):
             renamed.entities[i] = (role, name + "_renamed")
             assert {m.kind for m in compare(expected, renamed, context)} >= {"entity"}
             break
+
+def test_action_tuples_action_entities_and_virtual_nodes_are_compared():
+    expected, actual, context = goal_case("C3")
+    assert compare(expected, actual, context) == []
+    roles = {role for role, _ in actual.entities}
+    assert {"action", "predicate_virtual"} <= roles
+    listed = {name for role, name in expected.entities if role == "action"}
+    action_relations = [n for n, ts in actual.tuples.items() if any(t[0] in listed for t in ts)]
+    assert action_relations
+    for name in action_relations:
+        victim = next(t for t in actual.tuples[name] if t[0] in listed)
+        dropped = copy(actual)
+        dropped.tuples[name] = [t for t in dropped.tuples[name] if t != victim]
+        assert ("tuple", name) in {(m.kind, m.where) for m in compare(expected, dropped, context)}
+    for role in ("action", "predicate_virtual"):
+        i = next(i for i, (r, n) in enumerate(actual.entities) if r == role and (role != "action" or n in listed))
+        renamed = copy(actual)
+        renamed.entities[i] = (role, actual.entities[i][1] + "_renamed")
+        assert {m.kind for m in compare(expected, renamed, context)} >= {"entity"}
+        lost = copy(actual)
+        del lost.entities[i]
+        assert {m.kind for m in compare(expected, lost, context)} >= {"entity"}
+    extra = copy(actual)
+    extra.entities.append(("predicate_virtual", "predicate:unused"))
+    assert {m.kind for m in compare(expected, extra, context)} == {"entity"}
+
+
+def test_a_record_that_lists_fewer_actions_excuses_only_the_unlisted_ones():
+    expected, actual, context = goal_case("C3")
+    listed = {name for role, name in expected.entities if role == "action"}
+    assert listed < {name for role, name in actual.entities if role == "action"}
+    kept = {name for role, name in actual.entities if role == "action" and name in listed}
+    assert kept == listed
+    name = next(n for n, ts in actual.tuples.items() if any(t[0] in listed for t in ts))
+    victim = next(t for t in actual.tuples[name] if t[0] in listed)
+    dropped = copy(actual)
+    dropped.tuples[name] = [t for t in dropped.tuples[name] if t != victim]
+    assert ("tuple", name) in {(m.kind, m.where) for m in compare(expected, dropped, context)}
+
 
 
 def test_the_goal_given_with_a_record_is_the_goal_of_its_graph():
