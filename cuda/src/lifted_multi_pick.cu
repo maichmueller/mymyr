@@ -1,6 +1,6 @@
 // Multi-instance launches of the pick kernel (include/mymyr/cuda/lifted.hpp, launch_pick_multi): lifted.cu's
 // launch_pick with the instance resolved per thread, one launch per OW group and row-width bucket (see lifted_multi.cu).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_env.cuh"
 

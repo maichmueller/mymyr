@@ -3,7 +3,7 @@
 // caller-owned outputs and a stream, allocates nothing, never synchronizes, and returns the launch's error code. The
 // same launchers back mymyr's drivers, the Python bindings and, later, XLA FFI handlers and torch custom ops.
 //
-// Device-code subset: this header is included by .cu translation units compiled by nvcc as C++20, so it
+// Device-code subset: this header is included by .cu translation units compiled by nvcc as C++23, so it
 // includes only the C runtime API header and task_arrays_view.hpp.
 //
 // Smoke kernels over an uploaded task (cuda/device_task.hpp): they run the MYMYR_HD readers of

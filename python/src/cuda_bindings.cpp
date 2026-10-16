@@ -1125,7 +1125,7 @@ void bind_cuda(nb::module_& parent)
                 const rl::ArrayBundle& b = t.dt->bundle();
                 ArrayDict d{nb::dict()};
                 for (const auto& [name, value] : b.scalars())
-                    d[nb::str(name.c_str())] = value;
+                    d[nb::str(name.data(), name.size())] = value;
                 auto sync = std::make_shared<TaskSync>(t.dt);
                 for (const rl::ArrayInfo& a : b.arrays())
                 {
@@ -1134,10 +1134,10 @@ void bind_cuda(nb::module_& parent)
                     s.owner = std::shared_ptr<const void>(t.dt, p);
                     s.data = p;
                     s.dtype = a.dtype;
-                    s.shape = a.shape;
+                    s.shape = a.shape.vec();
                     s.readonly = true;
                     s.words = a.words;
-                    d[nb::str(a.name.c_str())] =
+                    d[nb::str(a.name.data(), a.name.size())] =
                         export_device_array(std::move(s), DeviceExport{dl::k_cuda, t.ctx->ctx->device(), sync}, fw, default_words(fw));
                 }
                 return d;

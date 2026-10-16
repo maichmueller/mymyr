@@ -32,7 +32,7 @@ wheel builds.
 
 - A C++26 compiler (GCC >= 16)
 - CMake >= 3.25 and Ninja
-- Optional: CUDA 13 (`-DMYMYR_CUDA=ON`)
+- Optional: CUDA 13.4 or newer (`-DMYMYR_CUDA=ON`; its device code is C++23, with GCC 16 as nvcc's host compiler) and CMake >= 4.4 (the first to map CUDA C++23 to nvcc), on a driver >= 580
 - Optional: CPython 3.14 or newer for the Python bindings (free-threaded 3.14t or 3.15t recommended)
 
 ## Building the dependencies
@@ -58,7 +58,9 @@ cmake --build build
 ctest --test-dir build
 ```
 
-Add `-DMYMYR_CUDA=ON` (and, if needed, `-DCMAKE_CUDA_COMPILER=<path to nvcc>`) for the CUDA backend and its tests.
+Add `-DMYMYR_CUDA=ON` (and, if needed, `-DCMAKE_CUDA_COMPILER=<path to nvcc>`) for the CUDA backend and its tests; it
+needs CUDA 13.4 or newer and CMake 4.4 or newer, and the binaries run on NVIDIA drivers 580 or newer
+(`-DCMAKE_CUDA_ARCHITECTURES` defaults to the visible GPU; see [CUDA](docs/cuda.md)).
 Sanitizers: `-DMYMYR_SANITIZE="address;undefined"` or `-DMYMYR_SANITIZE=thread`.
 
 The tests that compare mymyr with recorded reference results live in `tests/parity` (ctest label `parity`, pytest
@@ -112,8 +114,8 @@ print(batch.states.shape, batch.reward, batch.terminated)
 User guides and tested scripts are in [docs/](docs/README.md) and [examples/](examples/); the option names, defaults
 and result fields every module shares are in [API conventions](docs/conventions.md).
 
-`mymyr.encoding.FlatRelationEncoder(task_or_table, goal_derivations=())` encodes states into relational graphs: the
-objects are the entities, and the fluent, derived and static atoms are the tuples of the relations of an
+`mymyr.encoding.FlatRelationEncoder(task_or_table)` encodes states into relational graphs: the
+objects are the entities, and the fluent, derived, static and goal atoms are the tuples of the relations of an
 `EncodingSchema`. The batches are flat integer arrays that NumPy, Torch, JAX and DLPack import without a copy, with no
 PyG dependency. See [native encoding](docs/encoding.md) for the array contract and the options.
 

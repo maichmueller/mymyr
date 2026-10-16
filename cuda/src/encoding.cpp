@@ -58,9 +58,9 @@ void check_extension(const encoding::EncodingContext& current, const encoding::E
     {
         const rl::ArrayInfo* b = grown.arrays().find(a.name);
         if (!b || b->dtype != a.dtype || b->elements() < a.elements())
-            not_an_extension("the array " + a.name + " is missing or shorter");
+            not_an_extension("the array " + a.name.str() + " is missing or shorter");
         if (std::memcmp(current.arrays().data(a), grown.arrays().data(*b), mul(a.elements(), rl::dtype_bytes(a.dtype))))
-            not_an_extension("the array " + a.name + " differs in the rows of the uploaded instances");
+            not_an_extension("the array " + a.name.str() + " differs in the rows of the uploaded instances");
     }
 }
 void check_schema(const encoding::EncodingSchema& schema)
@@ -69,6 +69,9 @@ void check_schema(const encoding::EncodingSchema& schema)
         if (schema.options().include_derived && relation.lane == encoding::Lane::Derived)
             throw std::invalid_argument("mymyr: encoding: the device does not encode derived relations: "
                                         "set include_derived = false");
+    if (schema.has_goal_complete())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode goal relations: "
+                                    "set goal_derivations = {}");
     if (schema.options().layout != encoding::Layout::Graph)
         throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
 }

@@ -28,12 +28,18 @@
 // requires that an imported buffer is never written again). Under lazy slots the snapshot covers the atom slots
 // published when it was taken (F grows later); in frozen mode it covers every slot.
 
+#include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/types.hpp"
 #include "mymyr/rl/task_arrays_view.hpp"
 #include "mymyr/task/task.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
+#include <initializer_list>
+#include <stdexcept>
 #include <memory>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -70,11 +76,73 @@ enum class DType : u8
     return 1;
 }
 
+/// An array's name, held inline (at most k_capacity characters) so that describing an array allocates nothing.
+class ArrayName
+{
+public:
+    static constexpr usize k_capacity = 31;
+    ArrayName() = default;
+    ArrayName(std::string_view text)
+    {
+        if (text.size() > k_capacity)
+            throw std::length_error("ArrayBundle: the name '" + std::string(text) + "' is longer than 31 characters");
+        std::memcpy(m_text.data(), text.data(), text.size());
+        m_size = static_cast<u8>(text.size());
+    }
+    ArrayName(const char* text) : ArrayName(std::string_view(text)) {}
+    ArrayName(const std::string& text) : ArrayName(std::string_view(text)) {}
+    [[nodiscard]] operator std::string_view() const noexcept { return {m_text.data(), m_size}; }
+    [[nodiscard]] std::string_view view() const noexcept { return *this; }
+    [[nodiscard]] std::string str() const { return std::string(view()); }
+    [[nodiscard]] const char* data() const noexcept { return m_text.data(); }
+    [[nodiscard]] usize size() const noexcept { return m_size; }
+    [[nodiscard]] friend bool operator==(const ArrayName& a, std::string_view b) noexcept { return a.view() == b; }
+    [[nodiscard]] friend bool operator==(const ArrayName& a, const ArrayName& b) noexcept { return a.view() == b.view(); }
+    [[nodiscard]] friend bool operator==(const ArrayName& a, const char* b) noexcept { return a.view() == b; }
+    friend std::ostream& operator<<(std::ostream& out, const ArrayName& name) { return out << name.view(); }
+
+private:
+    std::array<char, k_capacity> m_text{};  // not terminated: use view()
+    u8 m_size = 0;
+};
+
+/// The dimensions of an array, held inline (at most k_max_rank of them).
+class ArrayShape
+{
+public:
+    static constexpr usize k_max_rank = 4;
+    ArrayShape() = default;
+    ArrayShape(std::initializer_list<i64> dims) { assign(dims.begin(), dims.size()); }
+    ArrayShape(const std::vector<i64>& dims) { assign(dims.data(), dims.size()); }
+    [[nodiscard]] usize size() const noexcept { return m_rank; }
+    [[nodiscard]] bool empty() const noexcept { return m_rank == 0; }
+    [[nodiscard]] i64 operator[](usize i) const noexcept { return m_dims[i]; }
+    [[nodiscard]] i64 back() const noexcept { return m_dims[m_rank - 1]; }
+    [[nodiscard]] const i64* begin() const noexcept { return m_dims.data(); }
+    [[nodiscard]] const i64* end() const noexcept { return m_dims.data() + m_rank; }
+    [[nodiscard]] std::vector<i64> vec() const { return std::vector<i64>(begin(), end()); }
+    [[nodiscard]] friend bool operator==(const ArrayShape& a, const ArrayShape& b) noexcept
+    {
+        return std::equal(a.begin(), a.end(), b.begin(), b.end());
+    }
+
+private:
+    void assign(const i64* dims, usize rank)
+    {
+        if (rank > k_max_rank)
+            throw std::length_error("ArrayBundle: an array has more than 4 dimensions");
+        std::copy(dims, dims + rank, m_dims.begin());
+        m_rank = static_cast<u8>(rank);
+    }
+    std::array<i64, k_max_rank> m_dims{};
+    u8 m_rank = 0;
+};
+
 struct ArrayInfo
 {
-    std::string name;
+    ArrayName name;
     DType dtype = DType::I32;
-    std::vector<i64> shape;
+    ArrayShape shape;
     u64 offset = 0;      // bytes into the bundle's block (64-byte aligned)
     bool words = false;  // the last dimension holds state words: exporters may reinterpret it per framework
     [[nodiscard]] u64 elements() const noexcept
@@ -91,7 +159,7 @@ class ArrayBundle
 {
 public:
     [[nodiscard]] const std::vector<ArrayInfo>& arrays() const noexcept { return m_arrays; }
-    [[nodiscard]] const std::vector<std::pair<std::string, i64>>& scalars() const noexcept { return m_scalars; }
+    [[nodiscard]] const std::vector<std::pair<ArrayName, i64>>& scalars() const noexcept { return m_scalars; }
     [[nodiscard]] const void* data(const ArrayInfo& a) const noexcept { return m_base + a.offset; }
     [[nodiscard]] const ArrayInfo* find(std::string_view name) const noexcept;
     [[nodiscard]] i64 scalar(std::string_view name, i64 fallback = -1) const noexcept;
@@ -111,9 +179,9 @@ public:
 
 private:
     std::vector<ArrayInfo> m_arrays;
-    std::vector<std::pair<std::string, i64>> m_scalars;
-    std::unique_ptr<std::byte[]> m_block;
-    std::byte* m_base = nullptr;  // 64-byte aligned start inside m_block
+    std::vector<std::pair<ArrayName, i64>> m_scalars;
+    HostBlock m_block;  // 64-byte aligned; recycled through the block cache when large
+    std::byte* m_base = nullptr;
     u64 m_bytes = 0;
 };
 
@@ -122,16 +190,21 @@ class ArrayBundle::Builder
 public:
     /// Adds an array (copied at build()).
     template<class T>
-    void add(std::string name, DType dtype, std::vector<i64> shape, const std::vector<T>& values, bool words = false)
+    void add(ArrayName name, DType dtype, ArrayShape shape, const std::vector<T>& values, bool words = false)
     {
         const auto* p = reinterpret_cast<const std::byte*>(values.data());
-        add_bytes(std::move(name), dtype, std::move(shape), std::vector<std::byte>(p, p + values.size() * sizeof(T)), words);
+        add_bytes(name, dtype, shape, std::vector<std::byte>(p, p + values.size() * sizeof(T)), words);
     }
-    void add_bytes(std::string name, DType dtype, std::vector<i64> shape, std::vector<std::byte> bytes, bool words);
+    void add_bytes(ArrayName name, DType dtype, ArrayShape shape, std::vector<std::byte> bytes, bool words);
     /// Reserves an array in the block without copying anything in: its contents are unspecified until the caller writes
     /// them through ArrayBundle::mutable_data (the padding between arrays is zero).
-    void add_uninitialized(std::string name, DType dtype, std::vector<i64> shape, bool words = false);
-    void scalar(std::string name, i64 value) { m_scalars.emplace_back(std::move(name), value); }
+    void add_uninitialized(ArrayName name, DType dtype, ArrayShape shape, bool words = false);
+    Builder()
+    {
+        m_items.reserve(12);
+        m_scalars.reserve(8);
+    }
+    void scalar(ArrayName name, i64 value) { m_scalars.emplace_back(name, value); }
     [[nodiscard]] ArrayBundle build();
 
 private:
@@ -143,7 +216,7 @@ private:
         bool uninitialized = false;
     };
     std::vector<Item> m_items;
-    std::vector<std::pair<std::string, i64>> m_scalars;
+    std::vector<std::pair<ArrayName, i64>> m_scalars;
 };
 
 /// Kind codes of pred_kind.

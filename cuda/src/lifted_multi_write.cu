@@ -1,7 +1,7 @@
 // Multi-instance launches of the write kernel (include/mymyr/cuda/lifted.hpp, launch_write_multi): lifted.cu's
 // launch_write with the instance resolved per thread, one launch per OW group and row-width bucket (see
 // lifted_multi.cu). No conditional effects (the multi-instance paths run tables whose schemas have none).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

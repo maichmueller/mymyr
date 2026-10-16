@@ -2,7 +2,9 @@
 
 // The table-wide arrays an encoder reads: for every instance of a task table, which relations of an EncodingSchema
 // have tuples in its states and where those tuples come from (a slot range of the state words, a slot range of the
-// derived words, or the instance's static tuples), plus the objects of every atom slot and static tuple. They are fixed
+// derived words, the instance's static tuples, or its goal), plus the objects of every atom slot and static tuple. The
+// goal of an instance is stored as masks over its fluent and derived slots plus a constant part: the goal literals over
+// static predicates and over atoms without a slot, whose truth no state changes. They are fixed
 // width arrays in one rl::ArrayBundle with per-instance offsets, so a copy of the block (for example on a device) is
 // read through the same POD view, detail::ContextView (detail/lanes.hpp).
 
@@ -43,10 +45,17 @@ public:
     [[nodiscard]] static std::shared_ptr<const EncodingContext> create(rl::TaskTablePtr table,
                                                                        std::shared_ptr<const EncodingSchema> schema);
 
-    /// One block: inst (u64 [instances, detail::k_instance_columns]), cell (u32 [cells, 6]), slot_args, derived_args
+    /// One block: inst (u64 [instances, detail::k_instance_columns]), cell (u32 [cells, 8]), slot_args, derived_args
     /// and static_args (i32 [rows, max_arity]; the objects of each fluent slot, derived slot and sorted, deduplicated
-    /// static tuple of an instance, -1 padded). An instance's cells are sorted by relation id, at most one per relation;
-    /// per-graph cell counts (detail::count_graph) are per cell, in this order, not per relation.
+    /// static tuple of an instance, -1 padded), goal_words (u64: per instance the positive and negative goal masks over
+    /// its fluent words, then over its derived words) and goal_args (i32 [rows, max_arity]: the constant goal tuples of
+    /// each goal cell, sorted and without duplicates, -1 padded). An instance's cells are sorted by relation id, at most
+    /// one per relation; per-graph cell counts (detail::count_graph) are per cell, in this order, not per relation.
+    ///
+    /// An instance's goal is its encoding goal (Task::encoding_goal()): a literal whose predicate has no goal relation
+    /// in the schema (the equality and nullary predicates can be left out) is dropped, the others become mask bits or
+    /// constant tuples. A goal cell exists for each goal relation of a predicate that has atom slots in the instance or
+    /// a constant literal.
     [[nodiscard]] const rl::ArrayBundle& arrays() const noexcept { return m_arrays; }
     /// The arrays as a POD view on the copy of the block that starts at `block` (the host block by default; a device
     /// copy of the same bytes gives a device view).
@@ -58,8 +67,15 @@ public:
     [[nodiscard]] u32 max_arity() const noexcept { return m_max_arity; }
     /// The most derived words any instance that needs them has (0 if none does).
     [[nodiscard]] u32 max_derived_words() const noexcept { return m_max_derived_words; }
-    /// Whether the instance has a derived cell, i.e. its graphs read the derived atoms of the state.
-    [[nodiscard]] bool needs_derived(u32 instance) const noexcept { return m_needs_derived[instance] != 0; }
+    /// Whether the graphs of the instance read the derived atoms of the state: it has a derived state cell, or a
+    /// derived literal in its own goal that a satisfied or unsatisfied goal relation lists. With the goals of the rows
+    /// (`row_goals`) the instance's own goal does not count, and only a goal over derived slots (`row_derived_goals`)
+    /// reads them, in the satisfied and unsatisfied relations of the instance's derived predicates.
+    [[nodiscard]] bool needs_derived(u32 instance, bool row_goals = false, bool row_derived_goals = false) const noexcept
+    {
+        const u8 flags = m_needs_derived[instance];
+        return (flags & 1) != 0 || (row_goals ? (row_derived_goals && (flags & 4) != 0) : (flags & 2) != 0);
+    }
 
 private:
     EncodingContext() = default;

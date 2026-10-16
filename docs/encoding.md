@@ -11,7 +11,7 @@ import mymyr
 from mymyr import encoding
 
 task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
-encoder = encoding.FlatRelationEncoder(task, goal_derivations=())
+encoder = encoding.FlatRelationEncoder(task)
 state = task.initial_state
 batch = encoder.encode([state])
 assert batch.num_graphs == 1
@@ -26,7 +26,7 @@ assert np.array_equal(encoder.encode(state).relation_args, batch.relation_args)
 
 `FlatRelationEncoder(table_or_task, *, <options>)` takes a `Task`, a `TaskHandle` or a one-domain `rl.TaskTable` and the
 options of the [schema](#encoding-schema).
-`encoder.encode(states, task_ids=None, *, derived=None, framework=None, threads=1, pool=None, capacities=None)`
+`encoder.encode(states, task_ids=None, *, derived=None, goals=None, framework=None, threads=1, pool=None, capacities=None)`
 returns a `FlatBatch`. It is reentrant: one encoder serves any number of concurrent calls.
 
 - **`states`:**
@@ -43,6 +43,13 @@ another `Task` object is accepted when that task has the same `fingerprint()` an
 second parse of the same file), and refused with a `ValueError` naming the row and the instance otherwise.
 - **`derived`:** the derived atom words of each row, `[N, D]` u64 (or u32 halves), as `rl.expand` computes them. By
   default they are evaluated here, and only for rows whose instance has derived relations in the schema.
+- **`goals`:** a goal for every row instead of its instance's goal: `(goal_pos, goal_neg)` or `(goal_pos, goal_neg,
+  goal_derived_pos, goal_derived_neg)`, masks over the fluent (derived) atom slots as `rl.goal_masks` returns them.
+  The arrays are `[N, W]` (`[N, D]` for the derived pair), u64 words or u32 halves, or `[1, W]` for one goal that every
+  row shares. A row's goal relations then hold exactly its masked literals, with no [constant part](#goals), and its
+  `goal_complete` is 1. The masks of a row may be wider than its instance needs (the extra words are padding); a mask
+  that is narrower, or one that sets an atom bit its instance does not have, raises `ValueError`. Without the derived
+  pair a row's derived goal part is empty. `goals` applies to every row of the call.
 - **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).
 - **`threads`:** the threads that encode the batch (default 1; 0 means the hardware threads). The result does not depend
   on it: a batch is byte-identical for every thread count. Threads pay off for large batches only: waking a thread
@@ -54,19 +61,20 @@ second parse of the same file), and refused with a `ValueError` naming the row a
 - **`pool`:** a `mymyr.rl.ThreadPool` that you hold, like `rl.expand`'s: it is used instead of `threads` and shared by
   the calls that name it (one batch runs on it at a time).
 - **`capacities`:** `None` (default) sizes every array to the batch. A dict with the keys `entities`, `tuples` and
-  `args` gives the capacity of the variable-size arrays instead: `entity_role` and `entity_ref` have `entities`
-  entries, `relation_args` has `args` entries; the offset arrays keep their sizes (`G + 1`, `G * R + 1`) and `tuples`
+  `args` (and `targets` when the schema has targets) gives the capacity of the variable-size arrays instead:
+  `entity_role` and `entity_ref` have `entities` entries, `relation_args` has `args` entries, `target_entity` and
+  `target_group` have `targets` entries; the offset arrays keep their sizes (`G + 1`, `G * R + 1`) and `tuples`
   bounds the total number of tuples. The batch fills the first entries of each array and the rest is zero, so batches
   of different sizes share array shapes (for example under `jax.jit`). A batch that does not fit (a capacity too small,
   or an index type too narrow) leaves every array zero and sets `batch.sizes['overflow']`; `sizes['capacity_overflow']`
-  and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']` and `['args']` are the true sizes.
+  and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']` and `['targets']` are the
+  true sizes.
 
-Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `goal_derivations`,
-`max_goal_level` above 0, `target_sources`, `predicate_virtual_nodes` and `horizon_mode`. The
-default of `goal_derivations` is among them: **pass `goal_derivations=()`**. Numeric tasks raise as well. Every
-other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed `derived`
-array) raises `ValueError` too; a batch that needs more indices than the index type holds raises `OverflowError`
-(`index_dtype='int64'` lifts the limit).
+Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `max_goal_level`
+above 0, `target_sources` other than `goal`, `predicate_virtual_nodes` and `horizon_mode`. Numeric tasks raise as well.
+Every other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed
+`derived` array) raises `ValueError` too; a batch that needs more indices than the index type holds raises
+`OverflowError` (`index_dtype='int64'` lifts the limit).
 
 ## Lanes
 
@@ -80,8 +88,38 @@ A graph has the objects of its instance as entities, in the task's object order.
   one is the unary tuple over it. The graph has the auxiliary entity exactly when it has such a tuple. With
   `nullary=False` there are no nullary relations and no auxiliary entity.
 
+- the **goal** relations, below.
+
 A graph contains nothing that its state and instance do not have: no entity or tuple stands for something absent.
-The goal, history and action relations of the schema have no tuples in a batch.
+The history and action relations of the schema have no tuples in a batch.
+
+### Goals
+
+The goal of an instance is `Task.encoding_goal()` read as a set of ground literals (a conjunction, with `forall`
+expanded where the front end can; `goal_complete` is 0 for an instance whose goal had a conjunct it could not expand).
+A literal is placed in the relations of its predicate, `[+]` for a positive and `[-]` for a negative one. With the
+default `goal_derivations=("plain", "satisfied")` the relations are, per predicate and sign:
+
+- the plain relation `[+]on[g]` holds the tuple of every goal literal;
+- `[+]on[g][sat]` holds the literals that hold in the state (a positive literal whose atom is true, a negative one
+  whose atom is false); `goal_derivations` may add `"unsatisfied"`, `[+]on[g][unsat]`, the literals that do not.
+
+The literals of fluent and derived predicates (derived atoms from `derived` or evaluated) are evaluated against the
+state words with the goal's masks; those of static predicates and of atoms without a slot (not reachable by any state)
+have a fixed truth and form the constant part of the goal. A statically false literal is still emitted: in its plain
+relation, and in `[unsat]` for a positive literal over a false atom or `[sat]` for a negative one. Goal literals whose
+predicate has no goal relation (equality without `equality=True`, nullary atoms with `nullary=False`, the types) are
+not encoded. A cell lists its tuples in the lexicographic order of their arguments, constant part and masked
+literals merged.
+
+Nullary goal literals are unary tuples over the auxiliary entity, which the graph then has.
+
+With `target_sources=("goal",)` every plain goal tuple gets a **goal entity** (entity role 2, after the objects and the
+auxiliary entity), numbered in the order of the plain goal relations (relation id, then tuple) so that the id is
+`entity_offsets[g] + num_objects[g] + has_auxiliary + k` for the `k`-th plain goal tuple of graph `g`. The entity is the
+first argument of its tuple; its `entity_ref` is the tuple's index among all tuples of the batch in the batch's layout
+(so it differs between the two layouts). The batch lists the goal entities as targets: `target_offsets` `[G + 1]`,
+`target_entity` `[T]` and `target_group` `[T]` (0: goal, an index into `encoder.target_group_names`).
 
 ## The batch
 
@@ -93,12 +131,16 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `task_ids` | int32 `[G]` | the instance of each row |
 | `num_objects` | I `[G]` | the objects of the instance (the auxiliary entity is not counted) |
 | `entity_offsets` | I `[G + 1]` | graph `g`'s entities are `[entity_offsets[g], entity_offsets[g + 1])` |
-| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 8 auxiliary; omitted when implicit |
-| `entity_ref` | I `[E]` | an object's instance-local id; -1 for the auxiliary entity; omitted like `entity_role` |
+| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 2 goal, 8 auxiliary; omitted when implicit |
+| `entity_ref` | I `[E]` | an object's instance-local id; a goal entity's tuple index; -1 for the auxiliary entity; omitted like `entity_role` |
 | `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)`, in both layouts; omitted with `emit_counts=False` |
 | `relation_offsets` | I `[G * R + 1]` | segment `s` holds the tuples `[offsets[s], offsets[s + 1])`; cell `(g, r)` is `s = g * R + r`, or `r * G + g` in the relation layout |
 | `relation_arg_offsets` | I `[G * R + 1]` | the same offsets into `relation_args` |
 | `relation_args` | I `[A]` | the entities of the tuples, tuple after tuple, `relation_arities[r]` per tuple |
+| `goal_complete` | uint8 `[G]` | 1 iff the goal relations hold the whole goal; present iff the schema has goal relations |
+| `target_offsets` | I `[G + 1]` | graph `g`'s targets are `[target_offsets[g], target_offsets[g + 1])`; present iff the schema has targets |
+| `target_entity` | I `[T]` | the entity of each target, graph after graph |
+| `target_group` | uint8 `[T]` | the group of each target (0: goal) |
 
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),
@@ -165,12 +207,12 @@ relations. An encoder has the same properties.
 ## C++
 
 `mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
-encoder (pass `options.goal_derivations = {}`), and `encode(EncodeInput{states, task_ids, derived, derived_stride})`
+encoder, and `encode(EncodeInput{states, task_ids, derived, derived_stride, goal_pos, goal_neg, goal_stride, goal_words, ...})`
 returns the batch as an `rl::ArrayBundle` with the arrays and scalars above. `mymyr/encoding/validate.hpp` checks a
 batch against the contract. `encode(in, pool, scratch)` takes a `ThreadPool` (the batch is encoded by up to
 `ceil(graphs / k_graphs_per_member)` of its members, on the calling thread alone for a small batch, byte-identically for
 any pool) and a reusable `EncodeScratch`. `count(in, pool, scratch)` returns the `FlatSizes` of a batch (entities,
-tuples, args); `fill(in, sizes, buffers, pool, scratch)` then writes it into caller-provided `FlatBuffers`, and
+tuples, args, targets); `fill(in, sizes, buffers, pool, scratch)` then writes it into caller-provided `FlatBuffers`, and
 `encode_into(in, capacities, buffers, pool, scratch)` does both within `FlatCapacities`, reporting `overflow` in the
 sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scratch, sizes)` returns a bundle whose
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The encoder is not a

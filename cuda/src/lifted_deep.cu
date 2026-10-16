@@ -2,7 +2,7 @@
 // of up to k_deep_depth parameters, a warp per search (lifted_device.cuh, warp_fixed / warp_fc). launch_count and
 // launch_write route a deep set here; this unit has the counts and the rows of up to 4 words, lifted_deep64.cu the
 // wider rows (parallel builds).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

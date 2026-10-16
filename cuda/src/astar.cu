@@ -1,4 +1,4 @@
-// The kernels of the device best-first searches (include/mymyr/cuda/astar_kernels.hpp). Compiled by nvcc as C++20;
+// The kernels of the device best-first searches (include/mymyr/cuda/astar_kernels.hpp). Compiled by nvcc as C++23;
 // includes only the device-code subset (and CUB / Thrust).
 
 #include "mymyr/cuda/astar_kernels.hpp"

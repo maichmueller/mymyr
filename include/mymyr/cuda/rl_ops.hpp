@@ -4,7 +4,7 @@
 // the host loops, so both give the same bytes. Masks are zeroed on the stream first, then scattered (writes of 1 in any
 // order); novelty rows and relabels are independent threads.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20; POD, raw pointers and cudaStream_t.
+// Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/rl/her.hpp"
 #include "mymyr/rl/novelty.hpp"

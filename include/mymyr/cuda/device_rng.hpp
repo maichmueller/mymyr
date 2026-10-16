@@ -9,7 +9,7 @@
 // rollouts. Each rollout owns one stream (its seed), consumed in the CPU's order: one shuffle per completed layer,
 // across the passes of its ladder.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20.
+// Device-code subset: included by .cu files compiled by nvcc as C++23.
 
 #include "mymyr/core/types.hpp"
 

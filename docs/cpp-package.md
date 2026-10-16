@@ -20,6 +20,10 @@ The package's C++ headers and static libraries are a source-level interface. Bui
 Clang 22 with libc++) and the standard library used to build the package, then rebuild them when mymyr changes. The
 plain-C interface in [`mymyr/ext.h`](../include/mymyr/ext.h) provides the stable binary interface.
 
+The `mymyr::cuda` component is built with `-DMYMYR_CUDA=ON`, which needs CUDA 13.4 or newer and CMake 4.4 or newer: its
+device code is C++23 (nvcc with the project's GCC 16 as host compiler), while the headers a consumer includes stay
+C++26. Its binaries run on NVIDIA drivers 580 or newer; see the [CUDA page](cuda.md).
+
 The checked-in [C++ consumer project](../tests/cmake_consumer/) uses `find_package`, links `mymyr::core` and
 `mymyr::frontend`, parses a PDDL task, then prints “IW ... plan length ...” from its result. It also has a core-only
 mode that reads a normalized task file. The [consumer check script](../ci/check_cmake_consumer.sh) configures, builds

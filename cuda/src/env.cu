@@ -1,12 +1,11 @@
 // The device kernels of the environment step (include/mymyr/cuda/env_kernels.hpp). Every kernel is one thread per
 // environment and mirrors the host reference rl::HostEnv::step (src/mymyr/rl/env.cpp) statement by statement, so the
 // results agree bit for bit (the rewards are the same float sums in the same order).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/env_kernels.hpp"
 #include "mymyr/rl/rng.hpp"
 
-#include <curand_philox4x32_x.h>
 
 namespace mymyr::cuda::envk
 {
@@ -360,26 +359,15 @@ __global__ void k_row_counts(const u32* counts, u32 S, u64 stride, const i32* of
         count[i] = static_cast<i32>(row_count(counts, S, stride, offsets, i));
 }
 
-__global__ void k_philox(const u32* counters, const u32* keys, u64 n, u32* out, u32 curand)
+__global__ void k_philox(const u32* counters, const u32* keys, u64 n, u32* out)
 {
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < n; i += u64{gridDim.x} * blockDim.x)
     {
         const u32* c = counters + i * 4;
         const u32* k = keys + i * 2;
-        if (curand)
-        {
-            const uint4 r = curand_Philox4x32_10(make_uint4(c[0], c[1], c[2], c[3]), make_uint2(k[0], k[1]));
-            out[i * 4 + 0] = r.x;
-            out[i * 4 + 1] = r.y;
-            out[i * 4 + 2] = r.z;
-            out[i * 4 + 3] = r.w;
-        }
-        else
-        {
-            const rl::rng::Block4 r = rl::rng::philox4x32_10(rl::rng::Block4{{c[0], c[1], c[2], c[3]}}, k[0], k[1]);
-            for (u32 j = 0; j < 4; ++j)
-                out[i * 4 + j] = r.v[j];
-        }
+        const rl::rng::Block4 r = rl::rng::philox4x32_10(rl::rng::Block4{{c[0], c[1], c[2], c[3]}}, k[0], k[1]);
+        for (u32 j = 0; j < 4; ++j)
+            out[i * 4 + j] = r.v[j];
     }
 }
 __global__ void k_random_actions(const u64* draws, const i32* count, u64 rows, u64 seed, const u64* seed_dev,
@@ -458,10 +446,10 @@ cudaError_t launch_row_counts(const u32* counts, u32 num_schemas, u64 stride, co
     return cudaGetLastError();
 }
 
-cudaError_t launch_philox(const u32* counters, const u32* keys, u64 n, u32* out, u32 curand, cudaStream_t s)
+cudaError_t launch_philox(const u32* counters, const u32* keys, u64 n, u32* out, cudaStream_t s)
 {
     if (n)
-        k_philox<<<grid_for(n), k_block, 0, s>>>(counters, keys, n, out, curand);
+        k_philox<<<grid_for(n), k_block, 0, s>>>(counters, keys, n, out);
     return cudaGetLastError();
 }
 

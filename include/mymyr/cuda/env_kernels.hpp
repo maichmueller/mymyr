@@ -5,7 +5,7 @@
 // these kernels choose, move, and finish a step (rewards, termination, truncation, autoreset), with the semantics of
 // the host reference rl::HostEnv (rl/env.hpp), bit for bit.
 //
-// Device-code subset: included by .cu files compiled by nvcc as C++20; POD, raw pointers and cudaStream_t.
+// Device-code subset: included by .cu files compiled by nvcc as C++23; POD, raw pointers and cudaStream_t.
 
 #include "mymyr/rl/task_arrays_view.hpp"
 
@@ -193,7 +193,7 @@ cudaError_t launch_row_counts(const u32* counts, u32 num_schemas, u64 stride, co
 cudaError_t launch_store(u64* dst, u64 value, cudaStream_t s);
 
 /// The Philox-4x32-10 block of each counter (tests: cuRAND and the host agree with rl/rng.hpp).
-cudaError_t launch_philox(const u32* counters, const u32* keys, u64 n, u32* out, u32 curand, cudaStream_t s);
+cudaError_t launch_philox(const u32* counters, const u32* keys, u64 n, u32* out, cudaStream_t s);
 
 /// The random policy's next choices without stepping (TorchRL's rand_action): out[i] = rl::rng::successor_index(
 /// seed, first_env + i, draws[i], c) with c = count[i], limited to max_actions (0: no limit); 0 where c is 0 (the key

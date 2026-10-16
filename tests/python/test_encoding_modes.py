@@ -191,7 +191,7 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
     }
     for threads in (1, 4):
         batch = encoder.encode(states, capacities=exact, threads=threads)
-        assert batch.sizes == {**exact, "overflow": False, "capacity_overflow": False, "index_overflow": False}
+        assert batch.sizes == {**exact, "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False}
         same_arrays(batch, expected)
         roomy = {"entities": exact["entities"] + 9, "tuples": exact["tuples"], "args": exact["args"] + 13}
         batch = encoder.encode(states, capacities=roomy, threads=threads)
@@ -282,6 +282,8 @@ def test_a_forked_child_encodes_with_the_threads_of_its_parent():
     parent = encoder.encode(rows, threads=2)  # the parent's pool exists before the fork
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # JAX warns about every fork once it is loaded
+        # CPython warns about a fork of a multi-threaded process; this fork is the case under test
+        warnings.filterwarnings("ignore", message=".*multi-threaded.*fork", category=DeprecationWarning)
         child_id = os.fork()
     if child_id == 0:
         status = 1

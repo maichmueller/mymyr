@@ -1,5 +1,5 @@
 // Rows of schemas with conditional effects, successor rows of 17..64 words (see lifted_ce.cu).
-// Compiled by nvcc as C++20; includes only the device-code subset.
+// Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "lifted_device.cuh"
 

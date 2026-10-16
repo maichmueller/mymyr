@@ -203,6 +203,11 @@ public:
     [[nodiscard]] bool implicit_entity_arrays() const noexcept { return m_implicit_entities; }
     /// Whether a batch stores `relation_counts` (FlatOptions::emit_counts).
     [[nodiscard]] bool emits_counts() const noexcept { return m_options.emit_counts; }
+    /// Whether a batch stores `goal_complete`: the schema has goal relations (of any level or derivation).
+    [[nodiscard]] bool has_goal_complete() const noexcept { return m_goal_complete; }
+    /// Whether a batch stores the target arrays `target_offsets`, `target_entity` and `target_group`: the options name
+    /// at least one target source.
+    [[nodiscard]] bool has_targets() const noexcept { return !m_options.targets.empty(); }
 
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
     /// the encoded arrays beyond the catalog: the layout, the index type, whether relation_counts and the entity arrays
@@ -219,6 +224,7 @@ private:
     std::vector<u32> m_role_offsets;
     std::vector<i32> m_schema_relation;
     bool m_implicit_entities = false;
+    bool m_goal_complete = false;
     u64 m_fingerprint = 0;
 };
 }

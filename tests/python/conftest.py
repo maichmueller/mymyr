@@ -68,7 +68,9 @@ def walk(task, steps=20, seed=0, walks=2):
 # tests assert that it stays disabled, so a marked test runs in a child pytest process: the tests of one
 # module that were selected for this run share one child, and each reports the child's outcome.
 # Every other test fails if it leaves the GIL enabled, so that a missing mark is found at the test that
-# causes it rather than at a free-threading test later in the session.
+# causes it rather than at a free-threading test later in the session. The child runs with the GIL enabled from
+# the start (PYTHON_GIL=1, which its own worker processes inherit): it exists to load such modules, and a worker that
+# loaded one under ``-W error`` would die on the interpreter's warning about enabling the GIL.
 
 ISOLATED_REPORT = "MYMYR_TEST_ISOLATED_REPORT"
 _isolated_outcomes: dict[str, dict] = {}
@@ -110,10 +112,9 @@ def _run_isolated(config, path):
     args = ["-q", "-p", "no:cacheprovider", "--rootdir", str(config.rootpath)]
     for w in config.getoption("pythonwarnings") or []:
         args += ["-W", w]
-    # the child exists to load such modules
-    args += ["-W", "ignore:The global interpreter lock (GIL) has been enabled:RuntimeWarning"]
     proc = run_code("import pytest; sys.exit(pytest.main(sys.argv[1:]))", *args, *_isolated_groups[path],
-                    env={**os.environ, ISOLATED_REPORT: report}, timeout=None, capture_output=True, check=False)
+                    env={**os.environ, ISOLATED_REPORT: report, "PYTHON_GIL": "1"}, timeout=None,
+                    capture_output=True, check=False)
     try:
         for line in pathlib.Path(report).read_text().splitlines():
             entry = json.loads(line)

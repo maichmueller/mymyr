@@ -1,5 +1,5 @@
 // Smoke kernels (include/mymyr/cuda/kernels.hpp) over an uploaded task, and the helpers of the tests and the cost
-// measurements. Compiled by nvcc as C++20; includes only the device-code subset.
+// measurements. Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/kernels.hpp"
 

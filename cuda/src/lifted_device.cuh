@@ -1,7 +1,7 @@
 #pragma once
 // The device side of the lifted successor kernels (include/mymyr/cuda/lifted.hpp), shared by the translation units that
 // instantiate them: lifted.cu (views, counts, rows without conditional effects, picks), lifted_ce.cu (rows of schemas
-// with conditional effects) and axioms.cu (axiom strata). Internal: included by .cu files only (nvcc, C++20;
+// with conditional effects) and axioms.cu (axiom strata). Internal: included by .cu files only (nvcc, C++23;
 // the device-code subset). Everything but GenArgs (the launch arguments the units pass each other) lives in an unnamed
 // namespace, so each translation unit instantiates its own kernels.
 

@@ -1,6 +1,6 @@
 // The device state set of the layer BrFS (include/mymyr/cuda/state_set.hpp): a tag|ref table with a deterministic
 // winner among equal candidates (atomicMin of the pending reference) and scan-assigned ids (the owner flags are
-// computed inside the scan). Compiled by nvcc as C++20; includes only the device-code subset.
+// computed inside the scan). Compiled by nvcc as C++23; includes only the device-code subset.
 
 #include "mymyr/cuda/state_set.hpp"
 

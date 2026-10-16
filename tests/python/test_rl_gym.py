@@ -387,7 +387,10 @@ def test_async_vector_env_runs_the_envs_in_worker_processes(observation):
     domain, problems = paths("gripper")
     fns = [lambda i=i: mg.Env(domain=domain, problems=problems, observation=observation, env_id=i, max_steps=4)
            for i in range(2)]
-    workers = gym.vector.AsyncVectorEnv(fns, shared_memory=observation == "bits")  # symbolic: pickled observations
+    # symbolic: pickled observations. Spawned workers: the default start method on Linux is the forkserver, whose
+    # socket lives in the multiprocessing temp directory that the parent's exit handler removes while the
+    # forkserver is still shutting down.
+    workers = gym.vector.AsyncVectorEnv(fns, shared_memory=observation == "bits", context="spawn")
     local = gym.vector.SyncVectorEnv(fns)
 
     def same(a, b):

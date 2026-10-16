@@ -20,6 +20,11 @@ namespace mymyr::encoding
 ///   position's slot role (an object for an argument slot, the auxiliary entity for an auxiliary slot, ...);
 /// - each graph's objects come first and have their own index as entity_ref; a graph has at most one auxiliary entity, at
 ///   local index num_objects, and has it iff one of its tuples uses an auxiliary slot;
-/// - no tuple occurs twice in a cell, and the tuples of a cell ascend strictly in lexicographic order.
+/// - no tuple occurs twice in a cell, and the tuples of a cell ascend strictly in lexicographic order;
+/// - goal_complete is present iff the schema has goal relations, with values 0 and 1; the target arrays are present iff
+///   the schema has targets, target_offsets is a valid offset array, and a graph's goal entities follow its objects and
+///   its auxiliary entity, one per tuple of the plain goal relations with a goal target, numbered in the order of those
+///   relations and tuples; each is the first argument of its tuple and refers to the tuple's batch id (the position of
+///   the tuple in layout order); the graph's targets are its goal entities, in group 0.
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
 }
