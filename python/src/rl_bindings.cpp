@@ -19,6 +19,7 @@
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
 #include "py_domain.hpp"
+#include "py_expansion.hpp"
 #include "py_pool.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
@@ -1304,6 +1305,26 @@ private:
     std::unique_ptr<rl::CpuEnvPool> m_pool;
 };
 }  // namespace
+
+ExpansionBuffers expansion_buffers(nb::handle obj)
+{
+    if (!nb::isinstance<PyExpansion>(obj))
+        throw nb::type_error(("mymyr: expected a mymyr.rl.Expansion over host states, not " +
+                              nb::cast<std::string>(nb::type_name(obj.type())))
+                                 .c_str());
+    const PyExpansion& e = nb::cast<const PyExpansion&>(obj);
+    if (!e.ref.suite->single_domain())
+        throw nb::value_error("mymyr: the expansion was made over a suite of several domains");
+    ExpansionBuffers out;
+    out.view = e.flat.view();
+    out.states = e.flat.rows;
+    out.task_ids.assign(e.flat.rows, 0);
+    for (u64 row = 0; row < e.flat.rows; ++row)
+        out.task_ids[row] = static_cast<i32>(e.instance_of_state(row));
+    out.table = e.ref.suite->table(0);
+    out.keep = e.flat.block;
+    return out;
+}
 
 void bind_rl(nb::module_& parent)
 {
