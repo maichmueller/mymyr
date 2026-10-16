@@ -54,11 +54,8 @@ void refuse_unsupported(const FlatOptions& o)
 {
     if (o.max_goal_level > 0)
         unsupported("max_goal_level");
-    if (o.targets.contains(TargetSource::Subgoal) || o.targets.contains(TargetSource::Action) ||
-        o.targets.contains(TargetSource::History))
-        unsupported("targets other than 'goal'");
-    if (o.predicate_virtual_nodes)
-        unsupported("predicate_virtual_nodes");
+    if (o.targets.contains(TargetSource::Subgoal) || o.targets.contains(TargetSource::History))
+        unsupported("subgoal and history targets");
     if (o.horizon.mode != HorizonMode::None)
         unsupported("horizon");
 }
@@ -77,6 +74,8 @@ struct alignas(k_cache_line) Member
     u64 entities = 0, tuples = 0, args = 0, targets = 0;  // the slice's sizes
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;  // the first row of each kind of invalid input
     u64 narrow_goal = k_none, bad_goal_bits = k_none;
+    u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
+    std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0;  // where the slice starts in the batch
     std::vector<u64> start_tuples, start_args;  // [R] where the slice starts in each relation (relation-major)
@@ -94,6 +93,7 @@ struct EncodeScratch::Impl
     const i32* counted_ids = nullptr;
     const u64* counted_derived = nullptr;
     const u64* counted_goal = nullptr;
+    const rl::Expansion* counted_actions = nullptr;
     u64 counted_rows = 0;
     FlatSizes sizes;
 
@@ -148,7 +148,26 @@ struct Pass
             row.goal_derived_pos = in.goal_derived_pos + g * in.goal_derived_stride;
             row.goal_derived_neg = in.goal_derived_neg + g * in.goal_derived_stride;
         }
+        if (in.actions)
+        {
+            const rl::Expansion& x = *in.actions;
+            const u64 first = static_cast<u64>(x.offsets[g]);
+            row.actions = {x.schema + first,
+                           x.binding + first * x.label_width,
+                           x.parent ? x.parent + first : nullptr,
+                           x.label_width,
+                           static_cast<u32>(x.offsets[g + 1] - x.offsets[g]),
+                           first,
+                           g};
+        }
         return row;
+    }
+
+    /// Whether the expansion rows of graph g are a slice of the expansion: ascending offsets inside the rows written.
+    [[nodiscard]] bool action_slice_valid(u64 g) const noexcept
+    {
+        const rl::Expansion& x = *in.actions;
+        return x.offsets[g] >= 0 && x.offsets[g] <= x.offsets[g + 1] && static_cast<u64>(x.offsets[g + 1]) <= x.capacity;
     }
 };
 
@@ -163,6 +182,8 @@ void count_range(const Pass& p, u32 t)
     m.totals.assign(hi - lo, detail::GraphTotals{});
     m.entities = m.tuples = m.args = m.targets = 0;
     m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = k_none;
+    m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
+    m.virtual_scratch.resize(p.view.num_virtual);
     if (p.relation_major)
     {
         m.tally.assign(p.R, 0);
@@ -179,6 +200,11 @@ void count_range(const Pass& p, u32 t)
         if (p.in.states.words < table.instance(instance).words)
         {
             m.narrow = std::min(m.narrow, g);
+            continue;
+        }
+        if (p.in.actions && !p.action_slice_valid(g))
+        {
+            m.bad_slice = std::min(m.bad_slice, g);
             continue;
         }
         const detail::InstanceView v = detail::instance_view(p.view, instance);
@@ -213,13 +239,18 @@ void count_range(const Pass& p, u32 t)
             cell_counts = m.cell_counts.data() + at;
         }
         detail::GraphTotals& totals = m.totals[g - lo];
-        totals = detail::count_graph(v, input, cell_counts);
-        if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal))
+        totals = detail::count_graph(v, input, cell_counts, m.virtual_scratch.data());
+        if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal | detail::k_graph_bad_action_order |
+                            detail::k_graph_bad_action_label))
         {
             if (totals.flags & detail::k_graph_bad_row)
                 m.bad_bits = std::min(m.bad_bits, g);
-            else
+            else if (totals.flags & detail::k_graph_bad_goal)
                 m.bad_goal_bits = std::min(m.bad_goal_bits, g);
+            else if (totals.flags & detail::k_graph_bad_action_label)
+                m.bad_action_label = std::min(m.bad_action_label, g);
+            else
+                m.bad_action_order = std::min(m.bad_action_order, g);
             continue;
         }
         m.entities += totals.entities;
@@ -252,7 +283,8 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
     I* entity_offsets = static_cast<I*>(b.entity_offsets);
     Member& m = p.s.members[t];
     u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start;
-    auto fill_one = [&](u64 g)
+    u32* virtual_scratch = m.virtual_scratch.empty() ? nullptr : m.virtual_scratch.data();
+    auto fill_one = [&](u64 g, const u32* graph_counts)
     {
         const u32 instance = p.instance_of(g);
         const detail::InstanceView v = detail::instance_view(p.view, instance);
@@ -261,9 +293,9 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         if (p.relation_major)
-            detail::fill_graph_relation_major<I>(v, row, g, entity, totals, out, target);
+            detail::fill_graph_relation_major<I>(v, row, g, entity, totals, out, target, virtual_scratch, graph_counts);
         else
-            detail::fill_graph<I>(v, row, g, tuple, arg, entity, totals, out, target);
+            detail::fill_graph<I>(v, row, g, tuple, arg, entity, totals, out, target, virtual_scratch);
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
@@ -272,7 +304,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
     if (!p.relation_major)
     {
         for (u64 g = lo; g < hi; ++g)
-            fill_one(g);
+            fill_one(g, nullptr);
         return;
     }
     m.run_tuples = m.start_tuples;
@@ -317,8 +349,12 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
             m.run_tuples[r] = tuples;
             m.run_args[r] = args;
         }
+        const u32* graph_counts = cell_counts;
         for (u64 j = 0; j < width; ++j)
-            fill_one(first + j);
+        {
+            fill_one(first + j, graph_counts);
+            graph_counts += detail::instance_view(p.view, p.instance_of(first + j)).num_cells;
+        }
         cell_counts = next;
     }
 }
@@ -394,6 +430,20 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         invalid("the derived goal needs both goal_derived_pos and goal_derived_neg");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
+    if (const rl::Expansion* x = in.actions)
+    {
+        if (!m_schema->options().include_actions)
+            invalid("actions are given, but the schema has no action relations");
+        if (!x->offsets || !x->schema || !x->binding)
+            invalid("the action expansion needs its offsets, schema and binding arrays");
+        if (x->overflow())
+            invalid("the action expansion overflowed: it has " + std::to_string(x->total) + " rows for a capacity of " +
+                    std::to_string(x->capacity) + " and rows of " + std::to_string(x->words) + " words (" +
+                    std::to_string(x->words_needed) + " needed)");
+        if (x->label_width < context.table().label_width())
+            invalid("the action expansion's label width " + std::to_string(x->label_width) +
+                    " is below the table's largest action arity " + std::to_string(context.table().label_width()));
+    }
     if (R && graphs > std::numeric_limits<u64>::max() / R - 1)
         throw std::overflow_error("mymyr: encoding: the batch has too many cells");
     const bool evaluate = !in.derived && context.max_derived_words() > 0;
@@ -410,8 +460,12 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     const Pass pass{in, s, context, context.view(), graphs, members, R, relation_major, evaluate};
     run(pool, members, [&pass](u32 t) { count_range(pass, t); });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
+    u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     for (const Member& m : s.members)
     {
+        bad_slice = std::min(bad_slice, m.bad_slice);
+        bad_action_order = std::min(bad_action_order, m.bad_action_order);
+        bad_action_label = std::min(bad_action_label, m.bad_action_label);
         bad_id = std::min(bad_id, m.bad_id);
         narrow = std::min(narrow, m.narrow);
         bad_bits = std::min(bad_bits, m.bad_bits);
@@ -435,6 +489,15 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         invalid("row " + std::to_string(bad_bits) + " sets an atom bit its instance does not have");
     if (bad_goal_bits != k_none)
         invalid("the goal of row " + std::to_string(bad_goal_bits) + " sets an atom bit its instance does not have");
+    if (bad_slice != k_none)
+        invalid("the offsets of the action expansion do not give state " + std::to_string(bad_slice) +
+                " a slice of its rows");
+    if (bad_action_label != k_none)
+        invalid("the action rows of state " + std::to_string(bad_action_label) +
+                " have a schema or an object its instance does not have, or belong to another state");
+    if (bad_action_order != k_none)
+        invalid("the action rows of state " + std::to_string(bad_action_order) +
+                " are not in canonical order: strictly ascending in (schema, binding)");
 
     // 3. scan the members, in u64: where each starts in the batch and, relation-major, in every relation
     u64 entities = 0, tuples = 0, args = 0, targets = 0;
@@ -486,6 +549,7 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     s.counted_ids = in.task_ids;
     s.counted_derived = in.derived;
     s.counted_goal = in.goal_pos;
+    s.counted_actions = in.actions;
     s.counted_rows = graphs;
     return sizes;
 }
@@ -495,7 +559,7 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
 {
     Scratch& s = scratch.impl();
     if (!s.counted || s.counted_rows != in.states.rows || s.counted_data != in.states.data ||
-        s.counted_ids != in.task_ids || s.counted_derived != in.derived || s.counted_goal != in.goal_pos ||
+        s.counted_ids != in.task_ids || s.counted_derived != in.derived || s.counted_goal != in.goal_pos || s.counted_actions != in.actions ||
         s.sizes.entities != sizes.entities || s.sizes.tuples != sizes.tuples || s.sizes.args != sizes.args ||
         s.sizes.targets != sizes.targets)
         invalid("fill needs the scratch and the sizes of count() on the same input");

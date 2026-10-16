@@ -101,7 +101,8 @@ std::optional<u32> find_slot(std::span<const i32> padded, u32 width, u32 begin, 
 }
 
 InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::vector<i32>& state_relation,
-                            const GoalRelations& goal_relations, const EncodingSchema& schema, u32 max_arity)
+                            const GoalRelations& goal_relations, const std::vector<Cell>& action_cells,
+                            const EncodingSchema& schema, u32 max_arity)
 {
     const rl::TaskTable::Instance& instance = table.instance(index);
     const Task& task = *instance.task;
@@ -140,7 +141,8 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         const Relation& relation = schema.relation(relation_id);
         const u32 logical = static_cast<u32>(arity[ip]);
         const Lane lane = kind[ip] == rl::k_pred_static ? Lane::Static : kind[ip] == rl::k_pred_fluent ? Lane::Fluent : Lane::Derived;
-        if (relation.lane != lane || relation.logical_arity != logical || relation.arity != std::max(logical, 1u))
+        if (relation.lane != lane || relation.logical_arity != logical ||
+            relation.arity != std::max(logical, 1u) + (schema.options().predicate_virtual_nodes ? 1u : 0u))
             throw std::logic_error("mymyr: encoding: the relation " + relation.name + " does not match its predicate");
         Cell cell{relation_id, 0, 0, 0, relation.arity, logical};
         if (lane == Lane::Fluent)
@@ -302,6 +304,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
             }
         }
     }
+    out.cells.insert(out.cells.end(), action_cells.begin(), action_cells.end());
     std::sort(out.cells.begin(), out.cells.end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
     append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
     append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
@@ -367,10 +370,54 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         if (plain && own->slot_roles(id).front() == SlotRole::GoalTarget)
             goal_relations.target[id] = 1;
     }
+    // The action relations: the schemas of each, and one cell per relation in every instance (the domain's schemas are
+    // the instances').
+    std::vector<u32> action_schemas, schema_arity(table->schema_arities().begin(), table->schema_arities().end());
+    std::vector<Cell> action_cells;
+    for (u32 id = 0; id < own->num_relations() && own->options().include_actions; ++id)
+    {
+        const Relation& relation = own->relation(id);
+        if (relation.lane != Lane::Action)
+            continue;
+        const u32 begin = static_cast<u32>(action_schemas.size());
+        for (u32 s = 0; s < own->schema_relations().size(); ++s)
+            if (own->schema_relations()[s] == static_cast<i32>(id))
+            {
+                if (schema_arity[s] != relation.logical_arity)
+                    throw std::logic_error("mymyr: encoding: the action relation " + relation.name + " does not match its schema");
+                action_schemas.push_back(s);
+            }
+        const u32 end = static_cast<u32>(action_schemas.size());
+        if (end - begin > detail::k_max_action_runs)
+            throw std::invalid_argument("mymyr: encoding: the action '" + relation.name + "' has " +
+                                        std::to_string(end - begin) + " schemas, at most " +
+                                        std::to_string(detail::k_max_action_runs) + " can share a relation");
+        const CellOp op = own->options().targets.contains(TargetSource::Action) ? CellOp::ActionTarget : CellOp::Action;
+        action_cells.push_back({id, static_cast<u32>(op), begin, end, relation.arity, relation.logical_arity});
+    }
+    // The predicate virtual nodes: the virtual index of every relation's predicate (ascending with the predicate's key
+    // relation) and the key of every virtual index.
+    std::vector<u32> relation_virtual, virtual_relation;
+    if (own->options().predicate_virtual_nodes)
+    {
+        std::vector<i32> keys;
+        for (u32 id = 0; id < own->num_relations(); ++id)
+            if (own->virtual_key(id) >= 0)
+                keys.push_back(own->virtual_key(id));
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        for (i32 key : keys)
+            virtual_relation.push_back(static_cast<u32>(key));
+        for (u32 id = 0; id < own->num_relations(); ++id)
+            relation_virtual.push_back(own->virtual_key(id) < 0
+                                           ? detail::k_no_virtual
+                                           : static_cast<u32>(std::lower_bound(keys.begin(), keys.end(), own->virtual_key(id)) -
+                                                              keys.begin()));
+    }
     std::vector<InstanceRows> instances;
     instances.reserve(table->size());
     for (u32 i = 0; i < table->size(); ++i)
-        instances.push_back(build_instance(*table, i, state_relation, goal_relations, *schema, max_arity));
+        instances.push_back(build_instance(*table, i, state_relation, goal_relations, action_cells, *schema, max_arity));
 
     auto context = std::shared_ptr<EncodingContext>(new EncodingContext());
     context->m_max_arity = max_arity;
@@ -421,6 +468,11 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     builder.add("static_args", rl::DType::I32, shape(static_args), static_args);
     builder.add("goal_words", rl::DType::U64, {static_cast<i64>(goal_words.size())}, goal_words);
     builder.add("goal_args", rl::DType::I32, shape(goal_args), goal_args);
+    builder.add("action_schemas", rl::DType::U32, {static_cast<i64>(action_schemas.size())}, action_schemas);
+    builder.add("schema_arity", rl::DType::U32, {static_cast<i64>(schema_arity.size())}, schema_arity);
+    builder.add("relation_virtual", rl::DType::U32, {static_cast<i64>(relation_virtual.size())}, relation_virtual);
+    builder.add("virtual_relation", rl::DType::U32, {static_cast<i64>(virtual_relation.size())}, virtual_relation);
+    context->m_num_virtual = static_cast<u32>(virtual_relation.size());
     context->m_arrays = builder.build();
     context->m_table = std::move(table);
     context->m_schema = std::move(schema);
@@ -431,7 +483,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
-    // goal_args
+    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
@@ -443,6 +495,15 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
     v.static_args = reinterpret_cast<const i32*>(at(4));
     v.goal_words = reinterpret_cast<const u64*>(at(5));
     v.goal_args = reinterpret_cast<const i32*>(at(6));
+    v.action_schemas = reinterpret_cast<const u32*>(at(7));
+    v.schema_arity = reinterpret_cast<const u32*>(at(8));
+    v.num_schemas = m_table->num_schemas();
+    if (m_schema->options().predicate_virtual_nodes)
+    {
+        v.relation_virtual = reinterpret_cast<const u32*>(at(9));
+        v.virtual_relation = reinterpret_cast<const u32*>(at(10));
+        v.num_virtual = m_num_virtual;
+    }
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;

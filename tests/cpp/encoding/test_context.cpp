@@ -23,10 +23,15 @@ std::shared_ptr<const EncodingContext> context_of(const rl::TaskTablePtr& table,
     return EncodingContext::create(table, EncodingSchema::create(*table, options));
 }
 
-std::vector<Cell> cells_of(const EncodingContext& context, u32 instance)
+/// The cells of the state and goal relations of an instance (the action cells come with `with_actions`).
+std::vector<Cell> cells_of(const EncodingContext& context, u32 instance, bool with_actions = false)
 {
     const lanes::InstanceView v = lanes::instance_view(context.view(), instance);
-    return {v.cells, v.cells + v.num_cells};
+    std::vector<Cell> cells;
+    for (u32 i = 0; i < v.num_cells; ++i)
+        if (with_actions || !lanes::is_action_op(v.cells[i].op))
+            cells.push_back(v.cells[i]);
+    return cells;
 }
 
 std::set<std::string> cell_names(const EncodingContext& context, u32 instance)

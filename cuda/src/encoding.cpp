@@ -72,6 +72,12 @@ void check_schema(const encoding::EncodingSchema& schema)
     if (schema.has_goal_complete())
         throw std::invalid_argument("mymyr: encoding: the device does not encode goal relations: "
                                     "set goal_derivations = {}");
+    if (schema.options().predicate_virtual_nodes)
+        throw std::invalid_argument("mymyr: encoding: the device does not encode predicate virtual nodes: "
+                                    "set predicate_virtual_nodes = false");
+    if (schema.options().targets.contains(encoding::TargetSource::Action))
+        throw std::invalid_argument("mymyr: encoding: the device does not encode action targets: "
+                                    "remove 'action' from target_sources");
     if (schema.options().layout != encoding::Layout::Graph)
         throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
 }
@@ -89,6 +95,8 @@ GraphBounds graph_bounds(const encoding::EncodingContext& host)
         for (u32 c = 0; c < inst.num_cells; ++c)
         {
             const auto& cell = inst.cells[c];
+            if (encoding::detail::is_action_op(cell.op))  // the device has no action input: such a cell has no tuple
+                continue;
             b.tuples = add(b.tuples, cell.b - cell.a);
             b.args = add(b.args, mul(cell.b - cell.a, cell.arity));
             nullary = nullary || cell.logical_arity == 0;

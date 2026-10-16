@@ -591,11 +591,11 @@ TEST(EncoderOmitted, TheImplicitRuleFollowsTheOptions)
     EXPECT_FALSE(implicit(with_actions));
     FlatOptions virtual_nodes = options;
     virtual_nodes.predicate_virtual_nodes = true;
-    EXPECT_THROW((void)FlatEncoder::create(table, virtual_nodes), std::invalid_argument);  // not encoded yet
+    EXPECT_FALSE(implicit(virtual_nodes));
     FlatOptions always = options;
     always.entity_arrays = EntityArrays::Always;
     EXPECT_FALSE(implicit(always));
-    // the schema alone knows the rule for options this encoder does not encode yet
+    // the schema alone knows the rule for options this encoder does not encode
     const auto schema = [&](const FlatOptions& o) { return EncodingSchema::create(*table, o); };
     FlatOptions targets = options;
     targets.goal_derivations = {GoalDerivation::Plain};

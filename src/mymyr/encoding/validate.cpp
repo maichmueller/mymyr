@@ -3,6 +3,7 @@
 #include <bit>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace mymyr::encoding
 {
@@ -177,6 +178,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
 
     constexpr u8 k_object = static_cast<u8>(EntityRole::Object);
     constexpr u8 k_auxiliary = static_cast<u8>(EntityRole::Auxiliary);
+    constexpr u8 k_goal = static_cast<u8>(EntityRole::Goal);
+    constexpr u8 k_action = static_cast<u8>(EntityRole::Action);
+    constexpr u8 k_virtual = static_cast<u8>(EntityRole::PredicateVirtual);
+    const bool action_targets = schema.options().targets.contains(TargetSource::Action);
     for (u64 g = 0; g < G; ++g)
     {
         const i64 first = entity_offsets[g], last = entity_offsets[g + 1];
@@ -199,15 +204,37 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 fail("graph " + std::to_string(g) + " has an object after its objects");
         }
         u32 auxiliaries = 0;
+        i64 goal_entities = 0, action_entities = 0, virtual_entities = 0;
         for (i64 e = first; e < last; ++e)
-            auxiliaries += role_of(e) == k_auxiliary;
+        {
+            const u8 role = role_of(e);
+            auxiliaries += role == k_auxiliary;
+            goal_entities += role == k_goal;
+            action_entities += role == k_action;
+            virtual_entities += role == k_virtual;
+        }
         if (auxiliaries > 1)
             fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
-        // The goal entities follow the objects and the auxiliary entity, one per tuple of the plain goal relations with a
-        // goal target, numbered in the order of those relations and of their tuples; each refers to its tuple.
+        if (last - first != objects + auxiliaries + goal_entities + action_entities + virtual_entities)
+            fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary, goal, action nor predicate "
+                                               "virtual entities");
+        // The entities past the objects: the auxiliary entity, the goal entities, the action entities, the virtual entities.
         const i64 goal_start = first + objects + auxiliaries;
-        i64 goals = 0;
+        const i64 action_start = goal_start + goal_entities;
+        const i64 virtual_start = action_start + action_entities;
+        for (i64 e = goal_start; e < last; ++e)
+        {
+            const u8 expected = e < action_start ? k_goal : e < virtual_start ? k_action : k_virtual;
+            if (role_of(e) != expected)
+                fail("the entities of graph " + std::to_string(g) + " past its objects are not in the order auxiliary, goal, "
+                                                                  "action, predicate virtual");
+        }
+        // The goal entities follow the objects and the auxiliary entity, one per tuple of the plain goal relations with a
+        // goal target, numbered in the order of those relations and of their tuples; each refers to its tuple. The action
+        // entities follow them, one per tuple of an action relation, numbered the same way.
+        i64 goals = 0, actions = 0;
         bool auxiliary_used = false;
+        std::vector<bool> virtual_used(static_cast<usize>(virtual_entities), false);
         for (u64 r = 0; r < R; ++r)
         {
             const u64 cell = relation_major ? r * G + g : g * R + r;
@@ -220,6 +247,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
             const bool goal_target = roles.front() == SlotRole::GoalTarget;
+            const bool action = roles.front() == SlotRole::Action;
             for (u64 t = 0; t < n; ++t)
             {
                 const u64 at = static_cast<u64>(arg_offsets[cell]) + t * arity;
@@ -236,6 +264,22 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         fail("the targets of graph " + std::to_string(g) + " do not list its goal entities in order");
                     ++goals;
                 }
+                if (action)
+                {
+                    const i64 entity = args[at];
+                    if (entity != action_start + actions)
+                        fail("a tuple of " + where + " does not have the next action entity");
+                    if (entity_role && entity_ref[entity] < 0)
+                        fail("the action entity of a tuple of " + where + " does not refer to an expansion row");
+                    if (action_targets)
+                    {
+                        const i64 position = target_offsets[g] + goal_entities + actions;
+                        if (position >= target_offsets[g + 1] || target_entity[static_cast<u64>(position)] != entity ||
+                            target_group[position] != static_cast<u8>(TargetGroup::Action))
+                            fail("the targets of graph " + std::to_string(g) + " do not list its action entities in order");
+                    }
+                    ++actions;
+                }
                 for (u32 k = 0; k < arity; ++k)
                 {
                     const i64 id = args[at + k];
@@ -245,6 +289,12 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         fail("a tuple of " + where + " has an entity of the wrong role at position " + std::to_string(k));
                     if (roles[k] == SlotRole::Auxiliary)
                         auxiliary_used = true;
+                    if (roles[k] == SlotRole::Predicate)
+                    {
+                        if (entity_ref[id] != schema.virtual_key(static_cast<u32>(r)))
+                            fail("a tuple of " + where + " has the virtual node of another predicate");
+                        virtual_used[static_cast<usize>(id - virtual_start)] = true;
+                    }
                 }
                 if (t > 0)
                 {
@@ -258,10 +308,20 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 }
             }
         }
-        if (stored_targets && target_offsets[g] + goals != target_offsets[g + 1])
-            fail("graph " + std::to_string(g) + " has targets that are not goal entities");
-        if (schema.has_targets() && last - first != objects + auxiliaries + goals)
-            fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary nor goal entities");
+        const i64 expected_targets = goal_entities + (action_targets ? action_entities : 0);
+        if (stored_targets && target_offsets[g] + expected_targets != target_offsets[g + 1])
+            fail("graph " + std::to_string(g) + " has targets that are not its goal and action entities");
+        if (goals != goal_entities)
+            fail("graph " + std::to_string(g) + " has goal entities that no tuple of a plain goal relation starts with");
+        if (actions != action_entities)
+            fail("graph " + std::to_string(g) + " has action entities that no action tuple starts with");
+        for (i64 v = 0; v < virtual_entities; ++v)
+        {
+            if (!virtual_used[static_cast<usize>(v)])
+                fail("graph " + std::to_string(g) + " has a virtual node of a predicate that has no tuple");
+            if (v > 0 && entity_ref[virtual_start + v] <= entity_ref[virtual_start + v - 1])
+                fail("the virtual nodes of graph " + std::to_string(g) + " are not in the order of their predicates' keys");
+        }
         if ((auxiliaries == 1) != auxiliary_used)
             fail("graph " + std::to_string(g) + (auxiliary_used ? " uses an auxiliary entity it does not have"
                                                                 : " has an auxiliary entity no tuple uses"));

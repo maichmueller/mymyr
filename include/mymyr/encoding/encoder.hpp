@@ -86,6 +86,13 @@ struct EncodeInput
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    // The successors of each row, as rl::expand returns them (null: no action tuples). The graph of row g has one action
+    // entity per distinct ground action among the expansion rows [offsets[g], offsets[g + 1]), which must be the rows of
+    // the same state g: canonical order (by schema, then lexicographically by binding), the labels of the row's instance,
+    // and `parent` (when written) naming g. The expansion must not have overflowed, and needs `offsets`, `schema` and
+    // `binding`; `label_width` at least the table's. The schema must have action relations. The graph only reads the
+    // labels: the successor states, goal flags and derived words of the expansion are not used.
+    const rl::Expansion* actions = nullptr;
 };
 
 /// The capacities of the variable-size arrays of a batch, for the capacity form: how many entities (the entries of the
@@ -165,7 +172,8 @@ class FlatEncoder
 {
 public:
     /// Throws std::invalid_argument ("mymyr: encoding: ...") for invalid options and for options this encoder does not
-    /// encode: subgoal levels, subgoal, action and history targets, predicate virtual nodes and horizons.
+    /// encode: subgoal levels, subgoal and history targets, and horizons; and for a domain in which more than
+    /// detail::k_max_action_runs action schemas share one action relation.
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(rl::TaskTablePtr table, const FlatOptions& options);
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(TaskPtr task, const FlatOptions& options);
 
@@ -178,7 +186,8 @@ public:
 
     /// Encodes the rows on the calling thread into a new bundle. Const and reentrant. Throws std::invalid_argument for
     /// invalid input (a task id out of range, a row narrower than its instance, a state or goal bit its instance does
-    /// not have, a goal mask narrower than its instance, goal masks without their pair, numeric words) and
+    /// not have, a goal mask narrower than its instance, goal masks without their pair, numeric words, expansion rows that
+    /// are not the canonical rows of their state) and
     /// std::overflow_error when a count exceeds the index type.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in) const;
     /// The same on the members of `pool` (graphs are split over at most ceil(graphs / k_graphs_per_member) of them, on
