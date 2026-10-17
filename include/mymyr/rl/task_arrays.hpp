@@ -37,9 +37,9 @@
 #include <array>
 #include <cstring>
 #include <initializer_list>
-#include <stdexcept>
 #include <memory>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>

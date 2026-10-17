@@ -221,9 +221,15 @@ public:
 
 private:
     FlatEncoder() = default;
+    /// An uninitialized bundle with the pointers to its arrays (null for an array the schema omits).
+    struct Allocation
+    {
+        std::shared_ptr<rl::ArrayBundle> bundle;
+        FlatBuffers buffers;
+    };
     /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments and `targets`
     /// targets.
-    [[nodiscard]] rl::ArrayBundle allocate(u64 graphs, u64 entities, u64 args, u64 targets) const;
+    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets) const;
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;

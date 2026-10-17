@@ -165,6 +165,9 @@ int main(int argc, char** argv)
         std::shared_ptr<const rl::ArrayBundle> bundle;
         ThreadPool pool(threads);
         encoding::EncodeScratch scratch;
+        // two untimed calls: the first takes a fresh block and the second a second one (the first is still held), so
+        // the timed calls below recycle the two
+        bundle = encoder->encode(in, pool, scratch);
         bundle = encoder->encode(in, pool, scratch);
         const long faults0 = minor_faults();
         for (int rep = 0; rep < 5; ++rep)
@@ -175,7 +178,8 @@ int main(int argc, char** argv)
         }
         const long faults_per_call = (minor_faults() - faults0) / 5;
         const u64 singles = std::min<u64>(n, argc > 9 ? std::strtoull(argv[9], nullptr, 10) : 256);
-        double best_single = 1e300;
+        double best_single = 0;
+        bool timed_singles = false;
         std::shared_ptr<const rl::ArrayBundle> one_bundle;
         std::vector<std::shared_ptr<Expanded>> single_actions;
         if (actions != "off")
@@ -183,6 +187,7 @@ int main(int argc, char** argv)
                 single_actions.push_back(expand_rows(*table, rows.data() + i * words, 1, words));
         for (int rep = 0; rep < (singles ? 40 : 0); ++rep)
         {
+            timed_singles = true;
             const double t0 = now_s();
             for (u64 i = 0; i < singles; ++i)
             {
@@ -192,7 +197,8 @@ int main(int argc, char** argv)
                     one.actions = &single_actions[i]->x;
                 one_bundle = encoder->encode(one, pool, scratch);
             }
-            best_single = std::min(best_single, now_s() - t0);
+            const double elapsed = now_s() - t0;
+            best_single = rep == 0 ? elapsed : std::min(best_single, elapsed);
         }
         const u64 R = encoder->schema().num_relations();
         std::vector<i32> task_ids(n), num_objects(n), entity_offsets(n + 1), counts(n * R), tuple_offsets(n * R + 1),
@@ -239,16 +245,23 @@ int main(int argc, char** argv)
                 best_fill = std::min(best_fill, now_s() - t1);
             }
         }
+        std::string single_text = "null";
+        if (timed_singles)
+        {
+            char text[32];
+            std::snprintf(text, sizeof text, "%.3f", best_single * 1e6 / static_cast<double>(singles));
+            single_text = text;
+        }
         const auto* offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_offsets")));
         const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
         const u64 cells = n * encoder->schema().num_relations();
         std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"goals\": \"%s\", \"actions\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"single_us_per_call\": %.3f, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
+                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), goals.c_str(), actions.c_str(), threads, best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), best_single * 1e6 / static_cast<double>(std::max<u64>(singles, 1)), faults_per_call, offsets[cells], arg_offsets[cells]);
+                    best_fill * 1e6 / static_cast<double>(n), single_text.c_str(), faults_per_call, offsets[cells], arg_offsets[cells]);
     }
     catch (const std::exception& error)
     {
