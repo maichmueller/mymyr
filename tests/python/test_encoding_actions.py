@@ -7,8 +7,9 @@ import random
 import numpy as np
 import pytest
 
+import mymyr
 from mymyr import encoding, rl
-from conftest import text_task, walk
+from conftest import BLOCKS, text_task, walk
 
 GOAL_ROLE = 2
 ACTION_ROLE = 4
@@ -159,6 +160,23 @@ def test_the_expansion_argument_is_validated():
 
 def test_actions_need_action_relations():
     task = text_task("gripper__prob05")
+def test_the_expansion_must_be_over_the_encoders_own_task():
+    """An expansion over another problem of the same domain has the same schemas but other objects: it is refused,
+    while one over an equal task loaded again is accepted."""
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    task = mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl")
+    smaller = mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "smedium.pddl")
+    encoder = encoding.FlatRelationEncoder(task, **OPTIONS)
+    state = task.initial_state
+    with pytest.raises(ValueError, match="^mymyr: encoding: .*another task than instance 0"):
+        encoder.encode([state], actions=expand(smaller, [smaller.initial_state]))
+    again = mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl")
+    batch = encoder.encode([state], actions=expand(again, [again.initial_state]))
+    reference = encoder.encode([state], actions=expand(task, [state]))
+    assert np.array_equal(batch.relation_args, reference.relation_args)
+
+
     state = task.initial_state
     encoder = encoding.FlatRelationEncoder(task, include_actions=False)
     with pytest.raises(ValueError, match="^mymyr: encoding: .*action"):

@@ -58,8 +58,10 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   the host: the encoder reads its action rows, the labels of the successors, instead of recomputing the applicable
   actions. Without it a schema with action relations has no action tuples. The expansion must hold the states of the
   call in order (`actions.num_states` equals the rows), with every row's actions in the canonical order that
-  `rl.expand` writes (ascending action schema, then ascending binding), and must not have overflowed; a label
-  narrower than the table's, or a schema or object the instance lacks, raises `ValueError`. `actions` needs the action relations
+  `rl.expand` writes (ascending action schema, then ascending binding), and must not have overflowed. It must be over
+  the encoder's own table, or over a table whose instance for each row has the same `fingerprint()` and
+  `encoding_fingerprint()`; any other expansion, a label narrower than the table's, or a schema or object the instance
+  lacks raises `ValueError`. `actions` needs the action relations
   (`include_actions=True`, the default) and applies to every row of the call. An expansion that `rl.expand` pruned
   (a witness expansion, which keeps the rows of a subset of the actions) encodes exactly the rows it has.
 - **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).

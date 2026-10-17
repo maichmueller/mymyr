@@ -617,11 +617,27 @@ PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_id
         if (made_over.schema_names() != table.schema_names() || made_over.schema_arities() != table.schema_arities())
             throw nb::value_error("mymyr: encoding: actions were expanded over another domain than the encoder's");
         for (u64 row = 0; row < states.view.rows; ++row)
-            if (actions.task_ids[row] != (ids ? ids[row] : 0))
+        {
+            const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
+            if (actions.task_ids[row] != static_cast<i32>(instance))
                 throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
                                        " were expanded for instance " + std::to_string(actions.task_ids[row]) +
-                                       ", the batch has instance " + std::to_string(ids ? ids[row] : 0))
+                                       ", the batch has instance " + std::to_string(instance))
                                           .c_str());
+            // the rows' bindings and schemas are those of the instance they were expanded for: it must be the encoder's
+            if (instance >= made_over.size())
+                throw nb::value_error(("mymyr: encoding: the actions were expanded over a table without instance " +
+                                       std::to_string(instance))
+                                          .c_str());
+            const Task& expected = *table.task(instance);
+            const Task& given = *made_over.task(instance);
+            if (given.uid() != expected.uid() && (given.fingerprint() != expected.fingerprint() ||
+                                                  given.encoding_fingerprint() != expected.encoding_fingerprint()))
+                throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
+                                       " were expanded over another task than instance " + std::to_string(instance) +
+                                       " of the encoder's table: it differs in fingerprint or atom encoding")
+                                          .c_str());
+        }
         input.actions = &actions.view;
     }
 
@@ -795,8 +811,9 @@ void bind_encoding(nb::module_& parent)
              "action among the expansion rows of each state, in lexicographic order of the objects, and "
              "`entity_ref` of an action entity is the index of its first row among the rows of its own state "
              "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]). Without it the "
-             "action relations are empty. The rows must be in canonical "
-             "order (rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
+             "action relations are empty. The expansion must be over the encoder's own table or over tasks that "
+             "have, per instance, the same fingerprint and atom encoding. The rows must be in canonical order "
+             "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
