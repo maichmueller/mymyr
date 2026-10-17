@@ -450,3 +450,33 @@ def test_the_framework_of_a_stream():
         stream.flush(framework="tensorflow")
     assert stream.encoder is encoder
     assert encoder.mutable_stream().encoder is encoder
+
+
+@pytest.mark.parametrize("mutable", [False, True], ids=["append-only", "mutable"])
+@pytest.mark.parametrize("variant", [VARIANTS[1], VARIANTS[3]], ids=lambda v: "-".join(str(x) for x in v))
+def test_a_flushed_batch_stays_valid_while_later_flushes_reuse_memory(mutable, variant):
+    pool = Pool([text_task("blocks__probBLOCKS-8-0")], seed=17)
+    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, "graph"))
+    stream = encoder.mutable_stream() if mutable else encoder.stream()
+    rng = random.Random(3)
+
+    def add(picks):
+        given = pool.inputs(picks, variant)
+        stream.append(list(range(len(picks))), **given) if mutable else stream.append(**given)
+
+    kept = []
+    for round_ in range(12):
+        picks = [rng.randrange(pool.size) for _ in range(rng.choice([1, 7, 40, 90]))]
+        add(picks)
+        batch = stream.flush(threads=1 + 2 * (round_ % 2))
+        expected = encoder.encode(**pool.inputs(picks, variant))
+        # every batch stays valid, and equal to its encode, after later flushes took and released memory
+        kept.append((batch, expected, {k: np.array(v, copy=True) for k, v in batch.as_dict().items()}))
+        if mutable:
+            stream.clear()
+        if round_ % 3 == 2:
+            kept.pop(rng.randrange(len(kept)))
+        for old, reference, snapshot in kept:
+            assert_same(old, reference)
+            for key, value in old.as_dict().items():
+                assert np.array_equal(value, snapshot[key]), key
