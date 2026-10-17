@@ -86,6 +86,21 @@ struct Fixture
     std::vector<Cell> cells;
     std::vector<i32> slot_args, derived_args, static_args;
 
+    /// Gives instance `i` `count` cells from row `offset` on, for every list (there are no goal and no action cells, so
+    /// the lists are the same).
+    void set_cells(u64 i, u64 count, u64 offset)
+    {
+        u64* row = inst.data() + i * k_instance_columns;
+        for (const auto& [n, at] :
+             {std::pair{k_num_cells, k_cell_offset}, std::pair{k_num_row_cells, k_row_cell_offset},
+              std::pair{k_num_plain_cells, k_plain_cell_offset},
+              std::pair{k_num_plain_row_cells, k_plain_row_cell_offset}})
+        {
+            row[n] = count;
+            row[at] = offset;
+        }
+    }
+
     Fixture()
     {
         auto instance = [&](u64 objects, u64 words, u64 slots, u64 cell_count, u64 slot_offset, u64 static_offset)
@@ -94,11 +109,10 @@ struct Fixture
             row[k_num_objects] = objects;
             row[k_words] = words;
             row[k_fluent_slots] = slots;
-            row[k_num_cells] = row[k_num_row_cells] = cell_count;  // no goal cells: the cells of row goals are the same
-            row[k_cell_offset] = row[k_row_cell_offset] = cells.size();
             row[k_slot_args_offset] = slot_offset;
             row[k_static_args_offset] = static_offset;
             inst.insert(inst.end(), std::begin(row), std::end(row));
+            set_cells(inst.size() / k_instance_columns - 1, cell_count, cells.size());
         };
         // instance 0
         instance(3, 2, 67, 3, 0, 0);
@@ -420,7 +434,7 @@ TEST(EncodingLanes, AStaticTupleOfANullaryPredicateIsTheAuxiliaryTuple)
     Fixture fixture;
     // instance 1 gets a nullary static cell on relation 3
     fixture.cells.push_back({3, static_cast<u32>(CellOp::Static), 0, 1, 1, 0});
-    fixture.inst[k_instance_columns + k_num_cells] = fixture.inst[k_instance_columns + k_num_row_cells] = 3;
+    fixture.set_cells(1, 3, fixture.inst[k_instance_columns + k_cell_offset]);
     fixture.static_args.insert(fixture.static_args.end(), {-1, -1});
     const ContextView view = fixture.view();
     const InstanceView v = instance_view(view, 1);
@@ -469,9 +483,8 @@ TEST(EncodingLanes, DerivedBitsPastTheDerivedSlotsAreFlagged)
     fixture.inst[k_derived_words] = 1;
     fixture.inst[k_derived_slots] = 3;
     fixture.cells.insert(fixture.cells.begin() + 3, {3, static_cast<u32>(CellOp::Derived), 0, 3, 1, 1});
-    fixture.inst[k_num_cells] = 4;
-    for (u64 row = 1; row < 2; ++row)
-        fixture.inst[row * k_instance_columns + k_cell_offset] += 1;
+    fixture.set_cells(0, 4, 0);
+    fixture.set_cells(1, 2, fixture.inst[k_instance_columns + k_cell_offset] + 1);
     fixture.derived_args = {0, -1, 1, -1, 2, -1};
     const ContextView view = fixture.view();
     const std::vector<u64> atoms = {0, 0};

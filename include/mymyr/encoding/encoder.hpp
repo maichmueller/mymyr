@@ -182,8 +182,7 @@ class FlatEncoder
 {
 public:
     /// Throws std::invalid_argument ("mymyr: encoding: ...") for invalid options and for options this encoder does not
-    /// encode: subgoal levels, subgoal and history targets, and horizons; and for a domain in which more than
-    /// detail::k_max_action_runs action schemas share one action relation.
+    /// encode: subgoal levels, subgoal and history targets, and horizons.
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(rl::TaskTablePtr table, const FlatOptions& options);
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(TaskPtr task, const FlatOptions& options);
 

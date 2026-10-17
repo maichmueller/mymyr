@@ -71,8 +71,6 @@ inline constexpr u8 k_role_predicate_virtual = 1;
 inline constexpr u8 k_role_action = 4;
 inline constexpr u8 k_role_auxiliary = 8;
 
-/// The most action schemas that share one action relation (the merge of their rows keeps one cursor per schema).
-inline constexpr u32 k_max_action_runs = 32;
 /// The virtual rank of a predicate the graph does not use.
 inline constexpr u32 k_no_virtual = 0xFFFFFFFFu;
 
@@ -140,6 +138,10 @@ enum InstanceColumn : u32
     k_cell_offset,          // first row of those cells in `cells`
     k_num_row_cells,        // the cells of a graph with goals of its own
     k_row_cell_offset,      // first row of those cells in `cells`
+    k_num_plain_cells,      // the same two lists without the action cells (for a graph without expansion rows)
+    k_plain_cell_offset,
+    k_num_plain_row_cells,
+    k_plain_row_cell_offset,
     k_slot_args_offset,     // first row of the instance's fluent slots in `slot_args`
     k_derived_args_offset,  // the same for derived slots in `derived_args`
     k_static_args_offset,   // the same for static tuples in `static_args`
@@ -179,10 +181,10 @@ struct ContextView
 struct InstanceView
 {
     u32 num_objects, words, fluent_slots, derived_words, derived_slots;
-    u32 num_cells;      // the cells of a graph with the instance's goal, sorted by relation
-    u32 num_row_cells;  // the cells of a graph with goals of its own, sorted by relation
-    const Cell* cells;
-    const Cell* row_cells;
+    // The cells of a graph, sorted by relation: with the instance's goal or with goals of its own (row_cells), and with
+    // the action cells (a graph that has expansion rows) or without (plain_cells, plain_row_cells).
+    u32 num_cells, num_row_cells, num_plain_cells, num_plain_row_cells;
+    const Cell *cells, *row_cells, *plain_cells, *plain_row_cells;
     const i32* slot_args;
     const i32* derived_args;
     const i32* static_args;
@@ -212,8 +214,12 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.derived_slots = static_cast<u32>(row[k_derived_slots]);
     v.num_cells = static_cast<u32>(row[k_num_cells]);
     v.num_row_cells = static_cast<u32>(row[k_num_row_cells]);
+    v.num_plain_cells = static_cast<u32>(row[k_num_plain_cells]);
+    v.num_plain_row_cells = static_cast<u32>(row[k_num_plain_row_cells]);
     v.cells = c.cells + row[k_cell_offset];
     v.row_cells = c.cells + row[k_row_cell_offset];
+    v.plain_cells = c.cells + row[k_plain_cell_offset];
+    v.plain_row_cells = c.cells + row[k_plain_row_cell_offset];
     v.slot_args = c.slot_args + row[k_slot_args_offset] * c.max_arity;
     v.derived_args = c.derived_args + row[k_derived_args_offset] * c.max_arity;
     v.static_args = c.static_args + row[k_static_args_offset] * c.max_arity;
@@ -238,7 +244,10 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
 /// The expansion rows of one graph's state: the labels of its successors, in canonical order (by schema, then
 /// lexicographically by binding). `schema`, `binding` (rows of `label_width` objects, -1 past the schema's arity) and
 /// `parent` (the batch index of the expanded state; null: not checked) point at the state's first row, and `state` is
-/// the graph's index in the batch.
+/// the graph's index in the batch. A graph with rows (count > 0) also has two scratch arrays of the caller's: `starts`
+/// (v.num_schemas + 1 words), which count_graph fills with the first row of each schema and fill_graph reads, so it
+/// must survive between the two for the graph; and `cursors` (v.num_schemas words), the cursors of the merge of the
+/// runs of an action relation, which only the call that uses them needs.
 struct ActionRows
 {
     const i32* schema = nullptr;
@@ -247,11 +256,9 @@ struct ActionRows
     u32 label_width = 0;
     u32 count = 0;
     u64 state = 0;
-    const u32* starts = nullptr;  // [num_schemas + 1]: the first row with a schema of at least s (null: searched for)
+    u32* starts = nullptr;
+    u32* cursors = nullptr;
 };
-
-/// The most schemas whose run starts one graph indexes (a context with more searches the rows instead).
-inline constexpr u32 k_action_run_table = 64;
 
 /// The words a graph's tuples come from. `derived` may be null for an instance without derived cells. `goal_pos` and
 /// `goal_neg` (null: the instance's goal) are the row's own goal, masks over the fluent slots that replace the
@@ -269,18 +276,25 @@ struct RowInput
     ActionRows actions{};
 };
 
-/// The cells of a graph: those of the instance's goal, or, when the row has goal masks of its own, those of row goals.
+/// The cells of a graph: those of the instance's goal, or, when the row has goals of its own, those of row goals; the
+/// action cells only for a graph that has expansion rows.
 struct CellList
 {
     const Cell* cells;
     u32 count;
 };
 
+MYMYR_HD CellList cell_list(const InstanceView& v, bool row_goals, bool actions)
+{
+    if (actions)
+        return row_goals ? CellList{v.row_cells, v.num_row_cells} : CellList{v.cells, v.num_cells};
+    return row_goals ? CellList{v.plain_row_cells, v.num_plain_row_cells}
+                     : CellList{v.plain_cells, v.num_plain_cells};
+}
+
 MYMYR_HD CellList cell_list(const InstanceView& v, const RowInput& in)
 {
-    if (in.goal_pos)
-        return {v.row_cells, v.num_row_cells};
-    return {v.cells, v.num_cells};
+    return cell_list(v, in.goal_pos != nullptr, in.actions.count != 0);
 }
 
 /// The goal a graph encodes: the row's masks, or the instance's with its constant part.
@@ -332,6 +346,18 @@ MYMYR_HD u32 popcount64(u64 x)
     return static_cast<u32>(__popcll(x));
 #else
     return static_cast<u32>(__builtin_popcountll(x));
+#endif
+}
+
+/// The number of bits of x (0 for 0).
+MYMYR_HD u32 bit_length(u32 x)
+{
+    if (x == 0)
+        return 0;
+#if defined(__CUDA_ARCH__)
+    return 32u - static_cast<u32>(__clz(static_cast<int>(x)));
+#else
+    return 32u - static_cast<u32>(__builtin_clz(x));
 #endif
 }
 
@@ -418,130 +444,150 @@ MYMYR_HD bool tuple_before(const i32* a, const i32* b, u32 arity)
     return false;
 }
 
-/// Whether the expansion rows of a graph are valid labels of the instance and strictly ascending in (schema, binding):
-/// the flags k_graph_bad_action_label and k_graph_bad_action_order of the first violation, else 0. With `starts`
-/// (v.num_schemas + 1 words) it also records, on the way, the first row of each schema (the rows' run starts, meaningful
-/// when the result is 0).
-MYMYR_HD u32 check_actions(const InstanceView& v, const ActionRows& a, u32* starts = nullptr)
+/// The rows of one schema (`n` rows of `label_width` entries from `row`, each starting with `K` objects): sets
+/// `outside` if an object is not below `objects` and `unordered` if the rows are not strictly ascending. The rows are
+/// compared as keys of `bits` bits per object.
+template<u32 K>
+MYMYR_HD void check_run_packed(const i32* row, u32 label_width, u32 n, u32 objects, u32 bits, u32& outside,
+                               u32& unordered)
 {
-    const u32 S = v.num_schemas;
-    const u32 objects = v.num_objects;
-    u32 filled = 0, before = 0;
-    const i32* previous = nullptr;
-    u32 foreign = 0;
-    for (u32 i = 0; i < a.count; ++i)
-        foreign |= static_cast<u32>(a.schema[i]) >= S;
-    if (a.parent)
-        for (u32 i = 0; i < a.count; ++i)
-            foreign |= static_cast<u64>(a.parent[i]) != a.state;
-    if (foreign)
-        return k_graph_bad_action_label;
-    for (u32 i = 0; i < a.count; ++i)
+    u32 largest = 0;
+    u64 previous = 0;
+    for (u32 i = 0; i < n; ++i, row += label_width)
     {
-        const u32 s = static_cast<u32>(a.schema[i]);
-        const u32 arity = v.schema_arity[s];
-        const i32* row = a.binding + static_cast<u64>(i) * a.label_width;
-        u32 outside = 0;
-        switch (arity)
+        u64 key = 0;
+        for (u32 k = 0; k < K; ++k)
         {
-        case 3:
-            outside |= static_cast<u32>(row[2]) >= objects;
-            [[fallthrough]];
-        case 2:
-            outside |= static_cast<u32>(row[1]) >= objects;
-            [[fallthrough]];
-        case 1:
-            outside |= static_cast<u32>(row[0]) >= objects;
-            [[fallthrough]];
-        case 0:
-            break;
-        default:
-            for (u32 k = 0; k < arity; ++k)
-                outside |= static_cast<u32>(row[k]) >= objects;
+            const u32 x = static_cast<u32>(row[k]);
+            largest = x > largest ? x : largest;
+            key = (key << bits) | x;
         }
-        if (outside)
-            return k_graph_bad_action_label;
-        if (i > 0 && (s < before || (s == before && !tuple_before(previous, row, arity))))
-            return k_graph_bad_action_order;
-        if (starts)
-            for (; filled <= s; ++filled)
-                starts[filled] = i;
-        before = s;
+        unordered |= static_cast<u32>(key <= previous) & static_cast<u32>(i > 0);
+        previous = key;
+    }
+    outside |= static_cast<u32>(K > 0 && largest >= objects);
+}
+
+/// The same for rows of `arity` objects too wide for a key.
+MYMYR_HD void check_run_wide(const i32* row, u32 label_width, u32 n, u32 arity, u32 objects, u32& outside,
+                             u32& unordered)
+{
+    const i32* previous = nullptr;
+    for (u32 i = 0; i < n; ++i, row += label_width)
+    {
+        for (u32 k = 0; k < arity; ++k)
+            outside |= static_cast<u32>(static_cast<u32>(row[k]) >= objects);
+        if (i > 0 && !tuple_before(previous, row, arity))
+            unordered = 1;
         previous = row;
     }
-    if (starts)
-        for (; filled <= S; ++filled)
-            starts[filled] = a.count;
-    return 0;
+}
+
+/// Why the rows are not valid: the label flag for a schema out of range or a parent that is not the graph's state, else
+/// the order flag (the schemas descend). The slow path of check_actions.
+MYMYR_HD u32 action_row_fault(const InstanceView& v, const ActionRows& a)
+{
+    for (u32 i = 0; i < a.count; ++i)
+        if (static_cast<u32>(a.schema[i]) >= v.num_schemas ||
+            (a.parent && static_cast<u64>(static_cast<i64>(a.parent[i])) != a.state))
+            return k_graph_bad_action_label;
+    return k_graph_bad_action_order;
+}
+
+/// Whether the expansion rows of a graph are valid labels of the instance and strictly ascending in (schema, binding):
+/// the flags k_graph_bad_action_label and k_graph_bad_action_order, else 0. A row is a valid label if its schema is one
+/// of the context's, its parent (if given) is the graph's state, and the first `arity` entries of its binding are
+/// objects of the instance. It writes a.starts (the first row of each schema, in v.num_schemas + 1 words): one pass
+/// over the rows finds the run of each schema in turn, which consumes every row exactly if the schemas ascend and are
+/// in range and the parents are right, and the bindings of each run are then checked with its arity. After a violation
+/// the starts are all 0, so that the counts of the action cells are 0.
+MYMYR_HD u32 check_actions(const InstanceView& v, const ActionRows& a)
+{
+    const u32 S = v.num_schemas;
+    const u32 count = a.count;
+    u32* starts = a.starts;
+    const i32* schema = a.schema;
+    const i32* parent = a.parent;
+    const bool state_fits = a.state <= 0x7FFFFFFFu;
+    const i32 state = static_cast<i32>(a.state);
+    u32 row = 0;
+    if (state_fits)
+    {
+        for (u32 s = 0; s < S; ++s)
+        {
+            starts[s] = row;
+            if (parent)
+                while (row < count && static_cast<u32>(schema[row]) == s && parent[row] == state)
+                    ++row;
+            else
+                while (row < count && static_cast<u32>(schema[row]) == s)
+                    ++row;
+        }
+    }
+    if (row != count || !state_fits)
+    {
+        for (u32 s = 0; s <= S; ++s)
+            starts[s] = 0;
+        return !state_fits ? k_graph_bad_action_label : action_row_fault(v, a);
+    }
+    starts[S] = count;
+    const u32 L = a.label_width;
+    const u32 objects = v.num_objects;
+    const u32 bits = bit_length(objects ? objects - 1u : 0u);
+    u32 outside = 0, unordered = 0;
+    for (u32 s = 0; s < S; ++s)
+    {
+        const u32 n = starts[s + 1] - starts[s];
+        if (n == 0)
+            continue;
+        const u32 arity = v.schema_arity[s];
+        const i32* rows = a.binding + static_cast<u64>(starts[s]) * L;
+        if (arity > L)
+        {
+            outside = 1;
+            continue;
+        }
+        if (u64{arity} * bits > 64u)
+        {
+            check_run_wide(rows, L, n, arity, objects, outside, unordered);
+            continue;
+        }
+        switch (arity)
+        {
+        case 0: check_run_packed<0>(rows, L, n, objects, bits, outside, unordered); break;
+        case 1: check_run_packed<1>(rows, L, n, objects, bits, outside, unordered); break;
+        case 2: check_run_packed<2>(rows, L, n, objects, bits, outside, unordered); break;
+        case 3: check_run_packed<3>(rows, L, n, objects, bits, outside, unordered); break;
+        case 4: check_run_packed<4>(rows, L, n, objects, bits, outside, unordered); break;
+        default: check_run_wide(rows, L, n, arity, objects, outside, unordered);
+        }
+    }
+    return outside ? k_graph_bad_action_label : unordered ? k_graph_bad_action_order : 0u;
 }
 
 /// The cursors of the merge of one action relation's runs: the rows of the graph with each schema of the relation form
-/// one run (the rows are sorted by schema, so a run is found by binary search), and each run is ascending in the
-/// binding. next() yields the distinct ground actions in ascending order of the binding, each as the row of the first
-/// run (the lowest schema) that has it.
+/// one run (the rows are sorted by schema, so a run is the rows between the schema's start and the next schema's), and
+/// each run is ascending in the binding. next() yields the distinct ground actions in ascending order of the binding,
+/// each as the row of the first run (the lowest schema) that has it.
 struct ActionRuns
 {
     const ActionRows* rows;
+    const u32* schemas;  // the relation's schemas, ascending
+    u32* pos;            // the next row of each run: the rows' `cursors`
     u32 arity;
     u32 runs;
-    u32 pos[k_max_action_runs];
-    u32 end[k_max_action_runs];
 };
 
-/// The first row of `a` with a schema of at least `schema` (rows are sorted by schema).
-MYMYR_HD u32 schema_lower_bound(const ActionRows& a, u32 schema)
-{
-    if (a.starts)
-        return a.starts[schema];
-    u32 lo = 0, hi = a.count;
-    while (lo < hi)
-    {
-        const u32 mid = lo + (hi - lo) / 2u;
-        if (static_cast<u32>(a.schema[mid]) < schema)
-            lo = mid + 1u;
-        else
-            hi = mid;
-    }
-    return lo;
-}
-
-/// Fills `starts` (v.num_schemas + 1 words, at most k_action_run_table schemas) with the first row of each schema in the
-/// graph's rows (valid, sorted by schema), in one pass over the rows.
-MYMYR_HD void build_action_starts(const InstanceView& v, const ActionRows& a, u32* starts)
-{
-    const u32 S = v.num_schemas;
-    u32 filled = 0;
-    for (u32 i = 0; i < a.count; ++i)
-        for (const u32 s = static_cast<u32>(a.schema[i]); filled <= s; ++filled)
-            starts[filled] = i;
-    for (; filled <= S; ++filled)
-        starts[filled] = a.count;
-}
-
-/// `in`, or `local` (a copy of it) with the run starts of its expansion rows in `starts` (k_action_run_table + 1 words)
-/// when it has rows and few enough schemas to index them. The rows must be valid (check_actions).
-MYMYR_HD const RowInput& index_actions(const InstanceView& v, const RowInput& in, RowInput& local, u32* starts)
-{
-    if (!in.actions.count || v.num_schemas > k_action_run_table || in.actions.starts)
-        return in;
-    local = in;
-    build_action_starts(v, in.actions, starts);
-    local.actions.starts = starts;
-    return local;
-}
-
-/// The runs of the action cell `c` in the rows `a` (of rows sorted by schema).
+/// The runs of the action cell `c` in the rows `a` (of rows sorted by schema, with their starts).
 MYMYR_HD void action_runs_begin(ActionRuns& r, const Cell& c, const u32* action_schemas, const ActionRows& a)
 {
     r.rows = &a;
+    r.schemas = action_schemas + c.a;
+    r.pos = a.cursors;
     r.arity = c.logical_arity;
     r.runs = c.b - c.a;
     for (u32 j = 0; j < r.runs; ++j)
-    {
-        const u32 schema = action_schemas[c.a + j];
-        r.pos[j] = schema_lower_bound(a, schema);
-        r.end[j] = schema_lower_bound(a, schema + 1u);
-    }
+        r.pos[j] = a.starts[r.schemas[j]];
 }
 
 /// The next distinct ground action: sets `row` to its row in the graph's rows (the first run's, if several runs have it)
@@ -549,10 +595,11 @@ MYMYR_HD void action_runs_begin(ActionRuns& r, const Cell& c, const u32* action_
 MYMYR_HD bool action_runs_next(ActionRuns& r, u32& row)
 {
     const ActionRows& a = *r.rows;
+    const u32* starts = a.starts;
     u32 best = r.runs;
     for (u32 j = 0; j < r.runs; ++j)
     {
-        if (r.pos[j] == r.end[j])
+        if (r.pos[j] == starts[r.schemas[j] + 1u])
             continue;
         if (best == r.runs ||
             tuple_before(a.binding + static_cast<u64>(r.pos[j]) * a.label_width,
@@ -565,7 +612,7 @@ MYMYR_HD bool action_runs_next(ActionRuns& r, u32& row)
     const i32* chosen = a.binding + static_cast<u64>(row) * a.label_width;
     for (u32 j = best; j < r.runs; ++j)
     {
-        if (r.pos[j] == r.end[j])
+        if (r.pos[j] == starts[r.schemas[j] + 1u])
             continue;
         const i32* head = a.binding + static_cast<u64>(r.pos[j]) * a.label_width;
         if (j == best || (!tuple_before(chosen, head, r.arity) && !tuple_before(head, chosen, r.arity)))
@@ -582,7 +629,7 @@ MYMYR_HD u32 action_cell_count(const InstanceView& v, const Cell& c, const Actio
     if (c.b - c.a == 1u)
     {
         const u32 schema = v.action_schemas[c.a];
-        return schema_lower_bound(a, schema + 1u) - schema_lower_bound(a, schema);
+        return a.starts[schema + 1u] - a.starts[schema];
     }
     ActionRuns runs;
     action_runs_begin(runs, c, v.action_schemas, a);
@@ -680,27 +727,11 @@ MYMYR_HD bool has_virtual_nodes(const InstanceView& v) { return v.relation_virtu
 /// the relation of the list's cell i).
 /// Atom words past the instance's `words` are never read. With predicate virtual nodes `virtual_scratch` must hold
 /// v.num_virtual words (it is overwritten); the totals then count the predicates that have a tuple. The expansion rows
-/// of the graph are checked: a violation sets k_graph_bad_action_order or k_graph_bad_action_label, and the counts of
-/// the action cells are then meaningless.
-MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& given, u32* cell_counts,
+/// of the graph are checked (check_actions, which writes the rows' `starts`): a violation sets k_graph_bad_action_order
+/// or k_graph_bad_action_label, and the counts of the action cells are then meaningless.
+MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32* cell_counts,
                                  u32* virtual_scratch = nullptr)
 {
-    u32 starts[k_action_run_table + 1];
-    RowInput indexed{nullptr, nullptr};
-    const RowInput* chosen = &given;
-    u32 action_flags = 0;
-    if (given.actions.count)
-    {
-        const bool index = v.num_schemas <= k_action_run_table && !given.actions.starts;
-        action_flags = check_actions(v, given.actions, index ? starts : nullptr);
-        if (index && !action_flags)
-        {
-            indexed = given;
-            indexed.actions.starts = starts;
-            chosen = &indexed;
-        }
-    }
-    const RowInput& in = *chosen;
     GraphTotals t;
     t.tuples = 0;
     t.args = 0;
@@ -714,7 +745,7 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& given, u
     if (virtual_nodes)
         for (u32 p = 0; p < v.num_virtual; ++p)
             virtual_scratch[p] = 0;
-    t.flags |= action_flags;
+    t.flags |= in.actions.count ? check_actions(v, in.actions) : 0u;
     const CellList list = cell_list(v, in);
     const u32 num_cells = list.count;
     const Cell* cells = list.cells;
@@ -1028,27 +1059,73 @@ MYMYR_HD u64 predicate_entity(const InstanceView& v, const FillCursor& cursor, u
     return cursor.blocks.virtual_nodes + cursor.rank[p];
 }
 
-/// Writes the entity of one ground action: its role, its reference (`row`: the first row of the graph's expansion rows
-/// that has it, counted from the graph's first row) and, for an action target, its entry in the target arrays.
-template<class I>
-MYMYR_HD void write_action_entity(const GraphOut<I>& out, const FillCursor& cursor, bool target, u64 entity, u64 row)
+/// Writes the rows [begin, begin + n) of one action schema as the tuples of an action cell: for each row, its action
+/// entity (`first` + the row's position) and the first K objects of its binding (rows of `label_width` entries) as
+/// entity ids, the entity's role and reference (its row), and with Targets its target entry.
+template<class I, u32 K, bool Targets>
+MYMYR_HD void emit_action_rows(I* dst, const i32* binding, u32 label_width, u32 n, u32 begin, u64 first,
+                               u64 entity_base, u8* role, I* ref, I* target_entity, u8* target_group)
 {
-    if (out.entity_role)
+    for (u32 k = 0; k < n; ++k, binding += label_width, dst += 1 + K)
     {
-        out.entity_role[entity] = k_role_action;
-        out.entity_ref[entity] = static_cast<I>(row);
+        dst[0] = static_cast<I>(first + k);
+        for (u32 j = 0; j < K; ++j)
+            dst[1 + j] = static_cast<I>(entity_base + static_cast<u64>(binding[j]));
+        role[k] = k_role_action;
+        ref[k] = static_cast<I>(begin + k);
+        if constexpr (Targets)
+        {
+            target_entity[k] = static_cast<I>(first + k);
+            target_group[k] = k_target_group_action;
+        }
     }
-    if (target && out.target_entity)
+}
+
+template<class I, bool Targets>
+MYMYR_HD void emit_action_rows_of(u32 arity, I* dst, const i32* binding, u32 label_width, u32 n, u32 begin, u64 first,
+                                  u64 entity_base, u8* role, I* ref, I* target_entity, u8* target_group)
+{
+    switch (arity)
     {
-        const u64 at = cursor.target_base + cursor.goal_entities + (entity - cursor.blocks.action);
-        out.target_entity[at] = static_cast<I>(entity);
-        out.target_group[at] = k_target_group_action;
+    case 0:
+        emit_action_rows<I, 0, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
+                                      target_entity, target_group);
+        break;
+    case 1:
+        emit_action_rows<I, 1, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
+                                      target_entity, target_group);
+        break;
+    case 2:
+        emit_action_rows<I, 2, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
+                                      target_entity, target_group);
+        break;
+    case 3:
+        emit_action_rows<I, 3, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
+                                      target_entity, target_group);
+        break;
+    case 4:
+        emit_action_rows<I, 4, Targets>(dst, binding, label_width, n, begin, first, entity_base, role, ref,
+                                      target_entity, target_group);
+        break;
+    default:
+        for (u32 k = 0; k < n; ++k, binding += label_width)
+        {
+            *dst++ = static_cast<I>(first + k);
+            dst = emit_tuple<I>(dst, binding, arity, entity_base);
+            role[k] = k_role_action;
+            ref[k] = static_cast<I>(begin + k);
+            if constexpr (Targets)
+            {
+                target_entity[k] = static_cast<I>(first + k);
+                target_group[k] = k_target_group_action;
+            }
+        }
     }
 }
 
 /// Writes the tuples of action cell `c` in this graph to `dst`: for each distinct ground action, in ascending order of the
-/// binding, its entity (the next action entity of the graph) and its objects; writes the action entities too. Returns
-/// the number of tuples. Writes count * c.arity entries.
+/// binding, its entity (the next action entity of the graph) and its objects; writes the action entities (role and
+/// reference) and their target entries too. Returns the number of tuples. Writes count * c.arity entries.
 template<class I>
 MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
                               FillCursor& cursor, const GraphOut<I>& out, I* dst)
@@ -1058,42 +1135,26 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
         return 0;
     const u32 arity = c.logical_arity;
     const bool target = c.op == static_cast<u32>(CellOp::ActionTarget);
+    const u64 first = cursor.blocks.action + cursor.actions_written;
     u32 n = 0;
-    if (c.b - c.a == 1u)
+    if (c.b - c.a == 1u && out.entity_role && (!target || out.target_entity))
     {
+        // the cell's rows are the rows of its one schema: consecutive, in the order of the entities
         const u32 schema = v.action_schemas[c.a];
-        const u32 begin = schema_lower_bound(a, schema);
-        const u32 end = schema_lower_bound(a, schema + 1u);
-        n = end - begin;
-        const u64 first = cursor.blocks.action + cursor.actions_written;
-        u8* role = out.entity_role ? out.entity_role + first : nullptr;
-        I* ref = out.entity_role ? out.entity_ref + first : nullptr;
-        I* target_entity = nullptr;
-        u8* target_group = nullptr;
-        if (target && out.target_entity)
+        const u32 begin = a.starts[schema];
+        n = a.starts[schema + 1u] - begin;
+        const i32* binding = a.binding + static_cast<u64>(begin) * a.label_width;
+        u8* role = out.entity_role + first;
+        I* ref = out.entity_ref + first;
+        if (target)
         {
             const u64 at = cursor.target_base + cursor.goal_entities + cursor.actions_written;
-            target_entity = out.target_entity + at;
-            target_group = out.target_group + at;
+            emit_action_rows_of<I, true>(arity, dst, binding, a.label_width, n, begin, first, entity_base, role, ref,
+                                         out.target_entity + at, out.target_group + at);
         }
-        const i32* binding = a.binding + static_cast<u64>(begin) * a.label_width;
-        for (u32 k = 0; k < n; ++k, binding += a.label_width)
-        {
-            const u64 entity = first + k;
-            *dst++ = static_cast<I>(entity);
-            if (arity)
-                dst = emit_tuple<I>(dst, binding, arity, entity_base);
-            if (role)
-            {
-                role[k] = k_role_action;
-                ref[k] = static_cast<I>(begin + k);
-            }
-            if (target_entity)
-            {
-                target_entity[k] = static_cast<I>(entity);
-                target_group[k] = k_target_group_action;
-            }
-        }
+        else
+            emit_action_rows_of<I, false>(arity, dst, binding, a.label_width, n, begin, first, entity_base, role, ref,
+                                          nullptr, nullptr);
     }
     else
     {
@@ -1102,11 +1163,21 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
         u32 row = 0;
         while (action_runs_next(runs, row))
         {
-            const u64 entity = cursor.blocks.action + cursor.actions_written + n;
+            const u64 entity = first + n;
             *dst++ = static_cast<I>(entity);
             if (arity)
                 dst = emit_tuple<I>(dst, a.binding + static_cast<u64>(row) * a.label_width, arity, entity_base);
-            write_action_entity<I>(out, cursor, target, entity, row);
+            if (out.entity_role)
+            {
+                out.entity_role[entity] = k_role_action;
+                out.entity_ref[entity] = static_cast<I>(row);
+            }
+            if (target && out.target_entity)
+            {
+                const u64 at = cursor.target_base + cursor.goal_entities + cursor.actions_written + n;
+                out.target_entity[at] = static_cast<I>(entity);
+                out.target_group[at] = k_target_group_action;
+            }
             ++n;
         }
     }
@@ -1180,12 +1251,10 @@ MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g
 template<class I>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
-                         u32* virtual_scratch = nullptr)
+                         u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr)
 {
-    u32 starts[k_action_run_table + 1];
-    RowInput indexed{nullptr, nullptr};
-    const RowInput& in = index_actions(v, given, indexed, starts);
-    FillCursor cursor = begin_graph<I>(v, in, g, entity_base, totals, out, target_base, nullptr, virtual_scratch);
+    const RowInput& in = given;
+    FillCursor cursor = begin_graph<I>(v, in, g, entity_base, totals, out, target_base, cell_counts, virtual_scratch);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
     const CellList list = cell_list(v, in);
@@ -1200,7 +1269,7 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
     u32 r = 0;
     for (u32 i = 0; i < num_cells; ++i)
     {
-        const Cell c = cells[i];
+        const Cell& c = cells[i];
         for (; r < c.relation; ++r)
         {
             offsets[r] = static_cast<I>(tuples);
@@ -1210,8 +1279,10 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
         }
         offsets[r] = static_cast<I>(tuples);
         arg_offsets[r] = static_cast<I>(args);
-        const u32 n =
-            fill_cell_at<I>(v, c, in, entity_base, auxiliary, tuples - tuple_base, cursor, out, args_out + args);
+        const u32 n = is_action_op(c.op)
+                          ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, args_out + args)
+                          : fill_cell_at<I>(v, c, in, entity_base, auxiliary, tuples - tuple_base, cursor, out,
+                                            args_out + args);
         if (counts)
             counts[r] = static_cast<I>(n);
         tuples += n;
@@ -1237,9 +1308,7 @@ MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& g
                                         const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
                                         u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr)
 {
-    u32 starts[k_action_run_table + 1];
-    RowInput indexed{nullptr, nullptr};
-    const RowInput& in = index_actions(v, given, indexed, starts);
+    const RowInput& in = given;
     FillCursor cursor =
         begin_graph<I>(v, in, g, entity_base, totals, out, target_base, cell_counts, virtual_scratch);
     const u64 auxiliary = entity_base + v.num_objects;
@@ -1252,13 +1321,15 @@ MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& g
     u32 r = 0;
     for (u32 i = 0; i < num_cells; ++i)
     {
-        const Cell c = cells[i];
+        const Cell& c = cells[i];
         if (counts)
             for (; r < c.relation; ++r)
                 counts[r] = static_cast<I>(0);
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
-        const u32 n = fill_cell_at<I>(v, c, in, entity_base, auxiliary, graph_tuple, cursor, out,
-                                      out.relation_args + out.relation_arg_offsets[segment]);
+        I* dst = out.relation_args + out.relation_arg_offsets[segment];
+        const u32 n = is_action_op(c.op)
+                          ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst)
+                          : fill_cell_at<I>(v, c, in, entity_base, auxiliary, graph_tuple, cursor, out, dst);
         graph_tuple += n;
         if (counts)
         {

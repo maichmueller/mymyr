@@ -3,8 +3,10 @@
 #include "mymyr/core/bitset.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <span>
@@ -51,6 +53,7 @@ struct InstanceRows
 {
     std::vector<Cell> cells;      // with the instance's goal: the goal cells that can hold a tuple, narrowed
     std::vector<Cell> row_cells;  // with the goals of a row: the goal cells of every predicate that has slots
+    std::vector<Cell> plain_cells, plain_row_cells;  // the same two lists without the action cells
     std::vector<i32> slot_args, derived_args, static_args;  // rows of max_arity objects, -1 padded
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
     std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
@@ -354,6 +357,10 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
         list->insert(list->end(), action_cells.begin(), action_cells.end());
         std::sort(list->begin(), list->end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
     }
+    for (const auto& [list, plain] :
+         {std::pair{&out.cells, &out.plain_cells}, std::pair{&out.row_cells, &out.plain_row_cells}})
+        std::ranges::copy_if(*list, std::back_inserter(*plain),
+                             [](const Cell& c) { return !detail::is_action_op(c.op); });
     append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
     append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
     return out;
@@ -440,10 +447,6 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
                 action_schemas.push_back(s);
             }
         const u32 end = static_cast<u32>(action_schemas.size());
-        if (end - begin > detail::k_max_action_runs)
-            throw std::invalid_argument("mymyr: encoding: the action '" + relation.name + "' has " +
-                                        std::to_string(end - begin) + " schemas, at most " +
-                                        std::to_string(detail::k_max_action_runs) + " can share a relation");
         const CellOp op = own->options().targets.contains(TargetSource::Action) ? CellOp::ActionTarget : CellOp::Action;
         action_cells.push_back({id, static_cast<u32>(op), begin, end, relation.arity, relation.logical_arity});
     }
@@ -487,14 +490,37 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_fluent_slots] = rows.fluent_slots;
         columns[detail::k_derived_words] = rows.derived_words;
         columns[detail::k_derived_slots] = rows.derived_slots;
-        // the cells of row goals are stored only if they differ from the others
+        // each list of cells is stored once: a list equal to an earlier one of the instance shares its rows
         const auto same_cell = [](const Cell& x, const Cell& y) { return std::memcmp(&x, &y, sizeof(Cell)) == 0; };
-        const bool shared_cells = std::equal(rows.cells.begin(), rows.cells.end(), rows.row_cells.begin(),
-                                             rows.row_cells.end(), same_cell);
-        columns[detail::k_num_cells] = rows.cells.size();
-        columns[detail::k_cell_offset] = cells.size() / 8;
-        columns[detail::k_num_row_cells] = rows.row_cells.size();
-        columns[detail::k_row_cell_offset] = shared_cells ? cells.size() / 8 : (cells.size() / 8 + rows.cells.size());
+        const std::array<const std::vector<Cell>*, 4> lists = {&rows.cells, &rows.row_cells, &rows.plain_cells,
+                                                               &rows.plain_row_cells};
+        constexpr std::array<std::pair<detail::InstanceColumn, detail::InstanceColumn>, 4> list_columns = {
+            std::pair{detail::k_num_cells, detail::k_cell_offset},
+            std::pair{detail::k_num_row_cells, detail::k_row_cell_offset},
+            std::pair{detail::k_num_plain_cells, detail::k_plain_cell_offset},
+            std::pair{detail::k_num_plain_row_cells, detail::k_plain_row_cell_offset}};
+        std::array<u64, 4> list_offset{};
+        u64 next_offset = cells.size() / 8;
+        for (usize k = 0; k < lists.size(); ++k)
+        {
+            usize same = 0;
+            while (same < k && !std::equal(lists[same]->begin(), lists[same]->end(), lists[k]->begin(), lists[k]->end(),
+                                           same_cell))
+                ++same;
+            if (same < k)
+                list_offset[k] = list_offset[same];
+            else
+            {
+                list_offset[k] = next_offset;
+                next_offset += lists[k]->size();
+                for (const Cell& cell : *lists[k])
+                    for (u32 value :
+                         {cell.relation, cell.op, cell.a, cell.b, cell.arity, cell.logical_arity, cell.c, cell.d})
+                        cells.push_back(value);
+            }
+            columns[list_columns[k].first] = lists[k]->size();
+            columns[list_columns[k].second] = list_offset[k];
+        }
         columns[detail::k_slot_args_offset] = slot_args.size() / max_arity;
         columns[detail::k_derived_args_offset] = derived_args.size() / max_arity;
         columns[detail::k_static_args_offset] = static_args.size() / max_arity;
@@ -503,15 +529,6 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_goal_args_offset] = goal_args.size() / max_arity;
         columns[detail::k_goal_complete] = rows.goal_complete;
         inst.insert(inst.end(), std::begin(columns), std::end(columns));
-        for (const std::vector<Cell>* list : {&rows.cells, &rows.row_cells})
-        {
-            if (shared_cells && list == &rows.row_cells)
-                break;
-            for (const Cell& cell : *list)
-                for (u32 value :
-                     {cell.relation, cell.op, cell.a, cell.b, cell.arity, cell.logical_arity, cell.c, cell.d})
-                    cells.push_back(value);
-        }
         context->m_needs_derived[i] = rows.needs;
         if (rows.needs != 0)
             context->m_max_derived_words = std::max(context->m_max_derived_words, static_cast<u32>(rows.derived_words));

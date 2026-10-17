@@ -193,9 +193,19 @@ TEST(EncodingContext, AMixedTableHasConsistentOffsetsAndBuildsDeterministically)
         const u64* row = view.inst + i * lanes::k_instance_columns;
         EXPECT_EQ(row[lanes::k_cell_offset], cells);
         EXPECT_EQ(row[lanes::k_slot_args_offset], slots);
+        // the lists of an instance are stored once each, one after the other; a list equal to an earlier one shares it
+        u64 end = cells;
+        for (const auto& [count, offset] : {std::pair{lanes::k_num_cells, lanes::k_cell_offset},
+                                            std::pair{lanes::k_num_row_cells, lanes::k_row_cell_offset},
+                                            std::pair{lanes::k_num_plain_cells, lanes::k_plain_cell_offset},
+                                            std::pair{lanes::k_num_plain_row_cells, lanes::k_plain_row_cell_offset}})
+        {
+            EXPECT_GE(row[offset], cells);
+            end = std::max(end, row[offset] + row[count]);
+        }
         EXPECT_EQ(row[lanes::k_num_objects], table->instance(i).num_objects);
         EXPECT_EQ(row[lanes::k_encoding_fingerprint], table->task(i)->encoding_fingerprint());
-        cells += row[lanes::k_num_cells];
+        cells = end;
         slots += row[lanes::k_fluent_slots];
     }
     EXPECT_EQ(cells, context->arrays().find("cell")->shape[0]);

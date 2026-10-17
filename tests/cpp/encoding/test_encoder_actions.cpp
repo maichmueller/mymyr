@@ -277,6 +277,70 @@ TEST(EncoderActions, SchemasOfOneNameAreMergedAndDuplicatesDropped)
     EXPECT_EQ(*refs.begin(), 0);
 }
 
+/// A domain of 73 action schemas: `go` has a disjunctive precondition over 33 predicates (33 schemas of one name, so one
+/// action relation merges 33 runs) and `step0` ... `step39` one precondition each.
+rl::TaskTablePtr many_schemas_table()
+{
+    const std::filesystem::path directory = std::filesystem::path(::testing::TempDir());
+    const std::filesystem::path domain = directory / "many_schemas_domain.pddl";
+    const std::filesystem::path problem = directory / "many_schemas_problem.pddl";
+    std::string text = "(define (domain many-schemas) (:requirements :strips :typing :disjunctive-preconditions)\n"
+                       " (:types item) (:predicates (done ?x - item) (moved ?x - item)";
+    for (int k = 0; k < 40; ++k)
+        text += " (p" + std::to_string(k) + " ?x - item)";
+    text += ")\n (:action go :parameters (?x - item) :precondition (or";
+    for (int k = 0; k < 33; ++k)
+        text += " (p" + std::to_string(k) + " ?x)";
+    text += ") :effect (done ?x))\n";
+    for (int k = 0; k < 40; ++k)
+        text += " (:action step" + std::to_string(k) + " :parameters (?x - item) :precondition (p" +
+                std::to_string(k) + " ?x) :effect (and (moved ?x) (not (p" + std::to_string(k) + " ?x))))\n";
+    text += ")\n";
+    std::ofstream(domain) << text;
+    std::string init;
+    for (int k = 0; k < 40; ++k)
+    {
+        init += " (p" + std::to_string(k) + " a)";
+        if (k % 3 != 0)
+            init += " (p" + std::to_string(k) + " b)";
+        if (k % 5 == 0)
+            init += " (p" + std::to_string(k) + " c)";
+    }
+    std::ofstream(problem) << "(define (problem m) (:domain many-schemas) (:objects a b c - item)\n (:init" << init
+                           << ") (:goal (and (done a) (done b) (done c))))\n";
+    const auto task = Task::create(*frontend::load_task(domain, problem));
+    std::filesystem::remove(domain);
+    std::filesystem::remove(problem);
+    return rl::TaskTable::single(task);
+}
+
+TEST(EncoderActions, ManySchemasAndWideSplitRelationsAreEncoded)
+{
+    const auto table = many_schemas_table();
+    ASSERT_GT(table->num_schemas(), 64u);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+    {
+        FlatOptions options = action_options();
+        options.layout = layout;
+        options.goal_derivations = {};
+        const auto encoder = FlatEncoder::create(table, options);
+        const EncodingSchema& schema = encoder->schema();
+        u32 widest = 0;
+        std::map<i32, u32> schemas_of;
+        for (const i32 relation : schema.schema_relations())
+            widest = std::max(widest, ++schemas_of[relation]);
+        ASSERT_GT(widest, 32u);
+        const test::Rows rows = test::random_walk(*table, 0, 24, 5);
+        const auto expanded = expand_rows(*table, rows);
+        const auto batch = encoder->encode(input_of(rows, expanded.get()));
+        validate(*batch, schema);
+        expect_actions_match(*encoder, rows, *expanded, *batch);
+        // the initial state applies `go` to every object through many disjuncts
+        const auto counts = ints(*batch, "relation_counts");
+        EXPECT_EQ(counts[*schema.find("go")], 3);
+    }
+}
+
 TEST(EncoderActions, ARunThatIsNotInCanonicalOrderIsRefused)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
