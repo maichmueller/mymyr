@@ -138,7 +138,8 @@ struct BestFirstResult
     std::vector<Action> plan;
     double cost = 0;                     // g of the goal state; 0 unless solved
     std::optional<State> goal_state;
-    SearchStatistics stats;              // expanded, generated (transitions), states (stored), pruned, seconds
+    SearchStatistics stats;  // expanded, generated (transitions), states (stored), pruned, seconds, memory_bytes (states,
+                             // search nodes and open lists at the end)
     u64 evaluations = 0;                 // heuristic evaluations by the search
     u64 dead_ends = 0;                   // states with h = +inf
     u64 reopened = 0;                    // A*: states whose g decreased after they were opened
@@ -150,7 +151,6 @@ struct BestFirstResult
     double setup_seconds = 0;            // building the heuristic (grounding) and the action costs
     std::string algorithm, store, queue;
     std::string message;                 // why the search could not run (status Failed)
-    u64 store_bytes = 0;                 // states, search nodes and open lists at the end
     u32 fluent_slots = 0;                // assigned fluent atom slots at the end
 };
 

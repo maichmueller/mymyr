@@ -83,7 +83,7 @@ TEST_P(SuiteCounts, MatchTheProbe)
     const BrfsResult r = brfs(*task, bo);
     EXPECT_TRUE(r.exhausted);
     EXPECT_EQ(r.states, p.task.states);
-    EXPECT_EQ(r.goal_states, p.task.goal_states);
+    EXPECT_EQ(r.num_goal_states, p.task.goal_states);
     EXPECT_EQ(r.expanded, p.task.states);
     if (p.config.witness)
         EXPECT_EQ(r.generated, p.task.generated);
@@ -423,7 +423,7 @@ TEST(Brfs, ObserverEventsEqualTheStatistics)
             const std::string where = std::string(r.store) + " T=" + std::to_string(threads)
                                       + (parallel ? " workers" : "") + (stop ? " stop" : "");
             // without make_worker the search runs on one thread and sends everything to the root
-            EXPECT_EQ(r.threads, parallel ? threads : 1u) << where;
+            EXPECT_EQ(r.threads_used, parallel ? threads : 1u) << where;
             EXPECT_EQ(o.workers.size(), parallel ? threads : 0u) << where;
             if (parallel)
             {

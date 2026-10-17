@@ -288,7 +288,7 @@ std::vector<search::IwResult> multi_iw(ContextPtr ctx, rl::TaskTablePtr table, s
 MultiIwBatch batched_iw1(ContextPtr ctx, rl::TaskTablePtr table, DeviceStarts starts, std::span<const u32> task_ids,
                          MultiIwOptions options, cudaStream_t stream)
 {
-    options.max_arity = 1;
+    options.max_width = 1;
     DeviceTableIw x(std::move(ctx), std::move(table), options);
     return x.run(starts, task_ids, {}, {}, stream);
 }

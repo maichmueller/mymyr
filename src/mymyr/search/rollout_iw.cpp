@@ -200,7 +200,7 @@ public:
             }
         st.tree_nodes = m_nodes.size();
         st.seconds = std::chrono::duration<double>(Clock::now() - t0).count();
-        r.statistics = st;
+        r.rollout = st;
         r.fluent_slots = m_task.atoms().fluent_slots();
         return r;
     }
@@ -381,7 +381,7 @@ private:
         {
             m_hot->on_expand(node, sv);
             const u64 interval = std::max<u64>(m_o.control.progress_interval, 1);
-            if (m_st.expanded % interval == 0 && !m_hot->on_progress(m_st.statistics()))
+            if (m_st.expanded % interval == 0 && !m_hot->on_progress(m_st.stats()))
             {
                 m_interrupt = Interrupt::Cancelled;
                 return false;
@@ -699,7 +699,7 @@ RolloutIwResult run_rollout_iw(const Task& task, const RolloutIwOptions& options
     {
         if (r.status == SearchStatus::Solved)
             root->on_solution(r.plan, r.cost);
-        root->on_end(r.status, r.statistics.statistics());
+        root->on_end(r.status, r.rollout.stats());
     }
     return r;
 }

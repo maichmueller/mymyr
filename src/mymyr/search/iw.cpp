@@ -169,7 +169,7 @@ Context::~Context() = default;
 
 void add_pass(SearchStatistics& total, const IwPassStatistics& p)
 {
-    const SearchStatistics s = p.statistics();
+    const SearchStatistics s = p.stats();
     total.expanded += s.expanded;
     total.generated += s.generated;
     total.states += s.states;
@@ -322,7 +322,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
     SearchObserver* const obs = c.observer;
     Successors& succ = c.succ;
     IwPassStatistics& st = out.st;
-    st.arity = ps.arity;
+    st.width = ps.arity;
     const u32 k = ps.arity;
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
     const bool root_only = o.width_zero == WidthZero::RootOnly;
@@ -925,7 +925,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
             if (st.expanded >= progress_next)
             {
                 progress_next += interval;
-                if (!obs->on_progress(st.statistics()))
+                if (!obs->on_progress(st.stats()))
                 {
                     finish(SearchStatus::Cancelled);
                     break;
@@ -1120,7 +1120,7 @@ void run_pass(Context& c, StateView root, const GoalTest& goal, const PassSpec& 
 }
 }  // namespace
 
-IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_arity, int only_arity)
+IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_width, int only_arity)
 {
     IwResult r;
     const IwOptions& o = c.options;
@@ -1130,26 +1130,26 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_ar
         r.message = c.error;
         return r;
     }
-    const u32 top = only_arity >= 0 ? static_cast<u32>(only_arity) : max_arity;
+    const u32 top = only_arity >= 0 ? static_cast<u32>(only_arity) : max_width;
     if (top > novelty::k_max_arity)
     {
         r.status = SearchStatus::Failed;
         r.message = "IW arity " + std::to_string(top) + " exceeds the maximum " + std::to_string(novelty::k_max_arity);
         return r;
     }
-    const bool optimize = only_arity < 0 && o.optimize_iw1 && max_arity == 1;
+    const bool optimize = only_arity < 0 && o.optimize_iw1 && max_width == 1;
     const u32 first = only_arity >= 0 ? top : optimize ? 1 : 0;
     auto push = [&](const IwPassStatistics& p)
     {
         r.passes.push_back(p);
-        add_pass(r.total, p);
+        add_pass(r.stats, p);
         if (c.observer)
-            c.observer->on_pass(p.arity, p.statistics());
+            c.observer->on_pass(p.width, p.stats());
     };
     if (optimize)
     {
         IwPassStatistics p;
-        p.arity = 0;
+        p.width = 0;
         p.placeholder = true;
         push(p);
     }
@@ -1157,7 +1157,7 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_ar
     {
         // a statically false goal ends the first pass as UNSOLVABLE before anything is expanded
         IwPassStatistics p;
-        p.arity = first;
+        p.width = first;
         p.status = SearchStatus::Unsolvable;
         push(p);
         r.status = SearchStatus::Unsolvable;
@@ -1197,9 +1197,7 @@ IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_ar
             r.message = e.what();
             return r;
         }
-        r.peak_table_bytes = std::max(r.peak_table_bytes, po.table_bytes);
-        r.peak_node_bytes = std::max(r.peak_node_bytes, po.node_bytes);
-        r.total.memory_bytes = std::max(r.total.memory_bytes, po.table_bytes + po.node_bytes);
+        r.stats.memory_bytes = std::max(r.stats.memory_bytes, po.table_bytes + po.node_bytes);
         push(po.st);
         if (po.st.status == SearchStatus::Solved)
         {
@@ -1231,7 +1229,7 @@ IwResult run_iw(const Task& task, const IwOptions& options, int only_arity)
     if (c.observer)
         c.observer->on_start(root);
     const detail::GoalTest goal = detail::GoalTest::from_spec(task, options.control.goal);
-    IwResult r = detail::run_ladder(c, root, goal, options.max_arity, only_arity);
+    IwResult r = detail::run_ladder(c, root, goal, options.max_width, only_arity);
     if (r.status == SearchStatus::Solved)
     {
         const detail::PlanCost pc(task);
@@ -1242,7 +1240,7 @@ IwResult run_iw(const Task& task, const IwOptions& options, int only_arity)
     {
         if (r.status == SearchStatus::Solved)
             c.observer->on_solution(r.plan, r.cost);
-        c.observer->on_end(r.status, r.total);
+        c.observer->on_end(r.status, r.stats);
     }
     return r;
 }

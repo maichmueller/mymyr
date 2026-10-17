@@ -331,7 +331,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
         const StateView sv{cur.data(), n, NN ? cur.data() + W : nullptr, NN};
         succ.prepare(sv);
         const bool goal = is_goal(o.goal, succ, sv);
-        r.goal_states += goal;
+        r.num_goal_states += goal;
         if (goal && first_goal == k_no_goal)
             first_goal = id;
         if (goal && o.stop_at_goal)
@@ -386,7 +386,7 @@ BrfsResult run_flat(const Task& task, const BrfsOptions& o, Successors& succ, Co
     r.exhausted = pos == store.size();  // every stored state expanded (stop_at_goal stops before)
     r.states = store.size();
     r.words = store.stride();
-    r.store_bytes = store.bytes() + nodes.bytes();
+    r.memory_bytes = store.bytes() + nodes.bytes();
     if (o.fingerprint)
         for (u32 i = 0; i < store.size(); ++i)
             r.fingerprint ^= brfs_fingerprint_term(i, task.canonical_hash(store[StateId{i}]));
@@ -462,7 +462,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
         const StateView sv{cur.data(), n, NN ? curnum.data() : nullptr, NN};
         succ.prepare(sv);
         const bool goal = is_goal(o.goal, succ, sv);
-        r.goal_states += goal;
+        r.num_goal_states += goal;
         if (goal && first_goal == k_no_goal)
             first_goal = id;
         if (goal && o.stop_at_goal)
@@ -536,7 +536,7 @@ BrfsResult run_chunked(const Task& task, const BrfsOptions& o, Successors& succ,
     r.exhausted = pos == store.size();  // every stored state expanded (stop_at_goal stops before)
     r.states = store.size();
     r.words = store.words();
-    r.store_bytes = store.bytes() + nodes.bytes();
+    r.memory_bytes = store.bytes() + nodes.bytes();
     if (o.fingerprint)
     {
         std::vector<u64> w(store.words());
@@ -587,7 +587,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
     LayerLog log{o.layer_stats ? &r.layer_counts : nullptr, nullptr};
     LayerOrderer lo(task, o.layers);
     search::detail::BeamTeam team(task, T);
-    r.threads = team.size();
+    r.threads_used = team.size();
     Successors& succ = team.succ(0);  // the calling thread's
     const bool relaxed = lo.relaxed();
     const bool concurrent_goal = o.goal.kind != search::GoalSpec::Kind::Custom;
@@ -698,7 +698,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
             succ.prepare(cv);
             goal = is_goal(o.goal, succ, cv);
         }
-        r.goal_states += goal;
+        r.num_goal_states += goal;
         if (goal && first_goal == k_no_goal)
             first_goal = id;
         if (goal && o.stop_at_goal)
@@ -895,7 +895,7 @@ BrfsResult run_beam(const Task& task, const BrfsOptions& o, u32 T, Control& ctl)
         r.words = store.stride();
     else
         r.words = store.words();
-    r.store_bytes = store.bytes() + nodes.bytes();
+    r.memory_bytes = store.bytes() + nodes.bytes();
     if (o.fingerprint)
     {
         std::vector<u64> w, num;
@@ -988,7 +988,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
             const StateView sv{cur.data(), n, NN ? curnum.data() : nullptr, NN};
             succ.prepare(sv);
             const bool goal = is_goal(o.goal, succ, sv);
-            r.goal_states += goal;
+            r.num_goal_states += goal;
             if (goal && first_goal == k_no_goal)
                 first_goal = pid;
             if (goal && o.stop_at_goal)
@@ -1099,7 +1099,7 @@ BrfsResult run_compact(const Task& task, const BrfsOptions& o, Successors& succ,
     r.exhausted = !stopped && layer_f.empty();
     r.states = closed.size();
     r.words = W;
-    r.store_bytes = closed.bytes() + nodes.bytes() +
+    r.memory_bytes = closed.bytes() + nodes.bytes() +
                     (layer.capacity() + next_layer.capacity() + layer_num.capacity() + next_layer_num.capacity()) * sizeof(u64);
     if (o.fingerprint)
         r.fingerprint = 0;  // closed states are not kept: no per-id fingerprint
@@ -1153,7 +1153,7 @@ public:
     {
         BrfsResult r;
         r.store = "concurrent";
-        r.threads = m_T;
+        r.threads_used = m_T;
         const auto t0 = Clock::now();
         const State& s0 = m_ctl.start_state();
         m_loc.push_back(m_store.insert(0, s0.data(), s0.size_words(), ~u64{0}, s0.numeric().data()).first);
@@ -1225,11 +1225,11 @@ public:
         for (const ThreadState& w : m_ws)
         {
             r.generated += w.generated;
-            r.goal_states += w.goals;
+            r.num_goal_states += w.goals;
             r.expanded += w.expanded;
             r.pruned += w.pruned;
         }
-        r.store_bytes = m_store.bytes() + m_loc.capacity() * sizeof(u32);
+        r.memory_bytes = m_store.bytes() + m_loc.capacity() * sizeof(u32);
         if (m_o.fingerprint)
         {
             std::vector<u64> fps(m_T, 0);

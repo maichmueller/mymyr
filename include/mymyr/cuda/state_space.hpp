@@ -192,9 +192,9 @@ using DeviceStateSpacePtr = std::shared_ptr<const DeviceStateSpace>;
 
 struct DeviceStateSpaceResult
 {
-    datasets::StateSpaceStatus status = datasets::StateSpaceStatus::Ok;
-    DeviceStateSpacePtr space;     // status Ok and device output
-    datasets::StateSpacePtr host;  // status Ok and host output
+    search::SearchStatus status = search::SearchStatus::Exhausted;
+    DeviceStateSpacePtr space;     // status Exhausted and device output
+    datasets::StateSpacePtr host;  // status Exhausted and host output
     u64 states = 0;                // states stored when the instance's generation ended (also when it failed)
     f64 seconds = 0;               // wall time from the instance's admission to its output
 };

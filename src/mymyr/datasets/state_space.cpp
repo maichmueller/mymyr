@@ -29,18 +29,6 @@
 
 namespace mymyr::datasets
 {
-const char* to_string(StateSpaceStatus s) noexcept
-{
-    switch (s)
-    {
-        case StateSpaceStatus::Ok: return "ok";
-        case StateSpaceStatus::OutOfStates: return "out_of_states";
-        case StateSpaceStatus::Timeout: return "timeout";
-        case StateSpaceStatus::Unsolvable: return "unsolvable";
-    }
-    return "unknown";
-}
-
 // ------------------------------------------------------------------------------------------------- StateSpace
 struct StateSpace::Index
 {
@@ -670,7 +658,7 @@ public:
         m_t0 = t0;
         if (m_task.compiled().goal.unsatisfiable)
         {
-            r.status = StateSpaceStatus::Unsolvable;  // a statically false goal ends it at once
+            r.status = search::SearchStatus::Unsolvable;  // a statically false goal ends it at once
             r.seconds = seconds_since(t0);
             return r;
         }
@@ -683,7 +671,7 @@ public:
         u32 depth = 0;
         if (m_layer_hi >= m_limit)  // the initial state fills the store
         {
-            r.status = StateSpaceStatus::OutOfStates;
+            r.status = search::SearchStatus::OutOfStates;
             r.states = m_limit;
             r.seconds = seconds_since(t0);
             return r;
@@ -706,7 +694,7 @@ public:
             }
             if (const u8 s = m_stop.load(std::memory_order_relaxed))
             {
-                r.status = s == static_cast<u8>(Stop::Timeout) ? StateSpaceStatus::Timeout : StateSpaceStatus::OutOfStates;
+                r.status = s == static_cast<u8>(Stop::Timeout) ? search::SearchStatus::OutOfTime : search::SearchStatus::OutOfStates;
                 // out of states: the store reached the limit (the count at that point, whatever the threads)
                 r.states = s == static_cast<u8>(Stop::Timeout) ? std::max<u64>(m_layer_hi, m_store->approx_size()) : m_limit;
                 r.seconds = seconds_since(t0);
@@ -716,7 +704,7 @@ public:
             m_goal.resize(m_layer_hi, 0);
             if (m_layer_hi >= m_limit)
             {
-                r.status = StateSpaceStatus::OutOfStates;
+                r.status = search::SearchStatus::OutOfStates;
                 r.states = m_limit;
                 r.seconds = seconds_since(t0);
                 return r;
@@ -730,7 +718,7 @@ public:
         assemble(*space);
         if (!StateSpaceBuilder::finish(*space, m_team, m_o.remove_if_unsolvable))
         {
-            r.status = StateSpaceStatus::Unsolvable;
+            r.status = search::SearchStatus::Unsolvable;
             r.states = space->num_states();
             r.seconds = seconds_since(t0);
             return r;
@@ -1056,7 +1044,7 @@ public:
         const auto t0 = Clock::now();
         if (m_task.compiled().goal.unsatisfiable)
         {
-            r.status = StateSpaceStatus::Unsolvable;  // a statically false goal ends it at once
+            r.status = search::SearchStatus::Unsolvable;  // a statically false goal ends it at once
             r.seconds = seconds_since(t0);
             return r;
         }
@@ -1073,7 +1061,7 @@ public:
         store.insert(s0.data(), s0.size_words(), s0.numeric().data());
         if (store.size() >= limit)  // the initial state fills the store
         {
-            r.status = StateSpaceStatus::OutOfStates;
+            r.status = search::SearchStatus::OutOfStates;
             r.states = limit;
             r.seconds = seconds_since(t0);
             return r;
@@ -1089,7 +1077,7 @@ public:
         {
             if (timed && (id & 255) == 0 && seconds_since(t0) > m_o.max_seconds)
             {
-                r.status = StateSpaceStatus::Timeout;
+                r.status = search::SearchStatus::OutOfTime;
                 r.states = store.size();
                 r.seconds = seconds_since(t0);
                 return r;
@@ -1128,7 +1116,7 @@ public:
                 false, true);
             if (full)
             {
-                r.status = StateSpaceStatus::OutOfStates;
+                r.status = search::SearchStatus::OutOfStates;
                 r.states = limit;  // the store reached the limit (the parent's later successors are not counted)
                 r.seconds = seconds_since(t0);
                 return r;
@@ -1176,7 +1164,7 @@ public:
         Team team(1);
         if (!StateSpaceBuilder::finish(S, team, m_o.remove_if_unsolvable))
         {
-            r.status = StateSpaceStatus::Unsolvable;
+            r.status = search::SearchStatus::Unsolvable;
             r.states = N;
             r.seconds = seconds_since(t0);
             return r;

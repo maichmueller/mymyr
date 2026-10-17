@@ -49,7 +49,7 @@ struct DeviceStateSpace::Storage
 namespace
 {
 using Clock = std::chrono::steady_clock;
-using datasets::StateSpaceStatus;
+using search::SearchStatus;
 
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 double s_since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
@@ -677,7 +677,7 @@ struct Wave
     std::vector<u32> icount;    // states per member (after the last chunk)
     std::vector<u64> last;      // an upper bound of the member's largest state id
     std::vector<u8> dead;
-    std::vector<StateSpaceStatus> status;
+    std::vector<search::SearchStatus> status;
     std::vector<Clock::time_point> t0;
     Clock::time_point start;
 
@@ -829,7 +829,7 @@ private:
             w.icount.push_back(1);
             w.last.push_back(w.count + j);
             w.dead.push_back(0);
-            w.status.push_back(StateSpaceStatus::Ok);
+            w.status.push_back(search::SearchStatus::Exhausted);
             w.t0.push_back(Clock::now());
         }
         reserve_states(w, w.count + n);
@@ -857,7 +857,7 @@ private:
     }
 
     /// Marks member m as no longer expanded.
-    void kill(Wave& w, u32 m, StateSpaceStatus why)
+    void kill(Wave& w, u32 m, search::SearchStatus why)
     {
         if (w.dead[m])
             return;
@@ -960,10 +960,10 @@ private:
                 if (w.icount[m] >= limit)
                 {
                     w.icount[m] = static_cast<u32>(limit);
-                    kill(w, m, StateSpaceStatus::OutOfStates);
+                    kill(w, m, search::SearchStatus::OutOfStates);
                 }
                 else if (timed && b <= w.last[m] && s_since(w.t0[m]) > m_o.space.max_seconds)
-                    kill(w, m, StateSpaceStatus::Timeout);
+                    kill(w, m, search::SearchStatus::OutOfTime);
             }
             if (!m_multi && w.dead[0])
                 break;
@@ -994,7 +994,7 @@ private:
         w.icount.push_back(0);
         w.last.push_back(0);
         w.dead.push_back(1);
-        w.status.push_back(StateSpaceStatus::Unsolvable);
+        w.status.push_back(search::SearchStatus::Unsolvable);
         w.t0.push_back(Clock::now());
         w.host_live[w.k] = ssk::k_no_instance;
         if (m_multi)
@@ -1775,15 +1775,15 @@ private:
             const u32 id = w.first + m;
             DeviceStateSpaceResult& r = m_results[id];
             r.states = w.icount[m];
-            StateSpaceStatus st = w.status[m];
+            search::SearchStatus st = w.status[m];
             const u32 n_goal = stats[m * 3], n_unsolvable = stats[m * 3 + 1];
-            if (st == StateSpaceStatus::Ok && m_o.space.remove_if_unsolvable && (n_goal == 0 || root_unit[m] < 0))
-                st = StateSpaceStatus::Unsolvable;
-            if (st == StateSpaceStatus::Ok && bad[m])
+            if (st == search::SearchStatus::Exhausted && m_o.space.remove_if_unsolvable && (n_goal == 0 || root_unit[m] < 0))
+                st = search::SearchStatus::Unsolvable;
+            if (st == search::SearchStatus::Exhausted && bad[m])
                 throw std::domain_error("mymyr: the state space has a negative or NaN transition cost; goal distances by "
                                         "Dijkstra need non-negative costs");
             r.status = st;
-            if (st == StateSpaceStatus::Ok)
+            if (st == search::SearchStatus::Exhausted)
             {
                 auto space = std::make_shared<DeviceStateSpace>(
                     storage, parts[m], m_tasks[id], static_cast<u32>(P[m + 1] - P[m]), Q[m + 1] - Q[m], words[m], m_L, labels,
@@ -1949,7 +1949,7 @@ std::shared_ptr<const datasets::GeneralizedStateSpace> generalized_state_space(s
         host[i].states = r.states;
         host[i].seconds = r.seconds;
         host[i].space = r.host ? r.host : r.space ? r.space->to_host() : nullptr;
-        if (r.status == datasets::StateSpaceStatus::Ok && !host[i].space)
+        if (r.status == search::SearchStatus::Exhausted && !host[i].space)
             throw std::invalid_argument("mymyr: generalized_state_space: a successful result without a space");
     }
     return datasets::GeneralizedStateSpace::create(datasets::ordered_spaces(host, sort_ascending));

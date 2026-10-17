@@ -1656,7 +1656,7 @@ void bind_cuda(nb::module_& parent)
                          s.states = r.states;
                          s.pruned = r.pruned;
                          s.seconds = r.search_s;
-                         s.memory_bytes = r.store_bytes;
+                         s.memory_bytes = r.memory_bytes;
                          return s;
                      },
                      "The search's counts and time (mymyr.search.Statistics; memory_bytes: the device store).")

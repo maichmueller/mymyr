@@ -54,8 +54,8 @@ IwResult liw(const Task& task, const LiwOptions& o)
 {
     if (task.numeric_slots() > 0)
         throw std::invalid_argument("mymyr: LIW does not support tasks with numeric fluents (IW and SIW do)");
-    if (o.max_arity > novelty::k_max_arity)
-        return detail::failed("LIW arity " + std::to_string(o.max_arity) + " exceeds the maximum " + std::to_string(novelty::k_max_arity));
+    if (o.max_width > novelty::k_max_arity)
+        return detail::failed("LIW arity " + std::to_string(o.max_width) + " exceeds the maximum " + std::to_string(novelty::k_max_arity));
     const WorkspaceLease lease = task.workspace();
     Successors& succ = lease->successors();
     const detail::GoalTest goal = detail::GoalTest::from_spec(task, o.control.goal);
@@ -83,7 +83,7 @@ IwResult liw(const Task& task, const LiwOptions& o)
     const State root = o.start ? *o.start : task.initial_state();
     if (env.root)
         env.root->on_start(root);
-    IwResult r = detail::novelty_ladder(env, 0, o.max_arity, false,
+    IwResult r = detail::novelty_ladder(env, 0, o.max_width, false,
                                         [&](u32 k, detail::PassOut& po)
                                         {
                                             if (k == 0)

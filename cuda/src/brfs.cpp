@@ -232,7 +232,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     const auto t_start = Clock::now();
     BrfsResult r;
     r.store = "device";
-    r.threads = 0;
+    r.threads_used = 0;
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
 
     if (const std::string why = ChunkGenerator::search_unsupported(*task); !why.empty())
@@ -359,7 +359,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             if (x.first == 0)
             {
                 ++st.chunks;
-                r.goal_states += 1;
+                r.num_goal_states += 1;
                 stop = true;
                 r.solved = true;
                 goal_id = ck.b;
@@ -507,7 +507,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         r.layers += hl->layers;
         r.expanded += hl->expanded;
         r.generated += hl->generated;
-        r.goal_states += hl->goal_states;
+        r.num_goal_states += hl->goal_states;
         first_goal = std::min<u64>(first_goal, hl->first_goal);
         if (hl->chunks)
             ratios[ratio_at++ % k_window] = static_cast<double>(hl->max_ratio) / 256;
@@ -786,7 +786,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                         throw std::logic_error("mymyr: device BrFS: a sorted segment found no scratch (internal error)");
                     r.expanded += ck.ns;
                     r.generated += x.candidates;
-                    r.goal_states += x.goals;
+                    r.num_goal_states += x.goals;
                     if (x.goals)
                         first_goal = std::min<u64>(first_goal, ck.b + x.first);
                     count += x.fresh;
@@ -796,7 +796,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                     if (ck.before_goal)
                     {
                         // the parents before the first goal state are expanded: stop there (the CPU's order)
-                        r.goal_states += 1;
+                        r.num_goal_states += 1;
                         stop = true;
                         r.solved = true;
                         goal_id = ck.b + ck.ns;
@@ -852,14 +852,14 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                 else
                 {
                     r.generated -= transitions;
-                    r.goal_states -= succ.goal_holds() ? 1 : 0;
+                    r.num_goal_states -= succ.goal_holds() ? 1 : 0;
                 }
             }
             r.expanded = p + 1;
             if (r.solved && goal_id > p)  // the goal state after the parents of a chunk: never reached
             {
                 r.solved = false;
-                r.goal_states -= 1;
+                r.num_goal_states -= 1;
             }
             if (first_goal > p)
                 first_goal = ~u64{0};
@@ -873,7 +873,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     r.exhausted = exhausted;
     r.words = task->words();
     r.fluent_slots = task->atoms().fluent_slots();
-    r.store_bytes = states->capacity() * W * 8 + nodes->capacity() * 8 + slots * 8;
+    r.memory_bytes = states->capacity() * W * 8 + nodes->capacity() * 8 + slots * 8;
     fold_events();
     st.uploads = gen->uploads();
     const GeneratorStats gs = gen->stats();

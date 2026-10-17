@@ -575,7 +575,7 @@ TEST(DeviceConditionalEffects, MultiIwEqualsTheCpu)
             {
                 SCOPED_TRACE("IW(" + std::to_string(arity) + ")");
                 cuda::MultiIwOptions o;
-                o.max_arity = arity;
+                o.max_width = arity;
                 o.budget.max_states = 20000;
                 const std::vector<search::IwResult> d = cuda::multi_iw(context(), task, starts, o);
                 ASSERT_EQ(d.size(), starts.size());
@@ -583,7 +583,7 @@ TEST(DeviceConditionalEffects, MultiIwEqualsTheCpu)
                 {
                     SCOPED_TRACE("start " + std::to_string(i));
                     search::IwOptions co;
-                    co.max_arity = o.max_arity;
+                    co.max_width = o.max_width;
                     co.optimize_iw1 = o.optimize_iw1;
                     co.width_zero = o.width_zero;
                     co.witness_pruning = o.witness_pruning;

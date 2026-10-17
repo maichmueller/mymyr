@@ -48,7 +48,7 @@ datasets::StateSpacePtr space_of(const std::shared_ptr<const Task>& task)
     o.remove_if_unsolvable = false;
     o.labels = false;
     auto r = datasets::generate_state_space(task, o);
-    EXPECT_EQ(r.status, datasets::StateSpaceStatus::Ok);
+    EXPECT_EQ(r.status, search::SearchStatus::Exhausted);
     return r.space;
 }
 

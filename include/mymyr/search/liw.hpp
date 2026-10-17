@@ -4,11 +4,11 @@
 //   auto graph = std::make_shared<const mymyr::landmarks::FactLandmarkGraph>(
 //       mymyr::landmarks::FactLandmarkGraph::create({goal atoms...}));
 //   mymyr::search::LiwOptions o;
-//   o.max_arity = 1;
+//   o.max_width = 1;
 //   o.landmarks.graph = graph;
 //   mymyr::search::IwResult r = mymyr::search::liw(*task, o);
 //
-// The ladder runs the width-0 pass (as in iw(), WidthZero) and then LIW(1), ..., LIW(max_arity), each from the start
+// The ladder runs the width-0 pass (as in iw(), WidthZero) and then LIW(1), ..., LIW(max_width), each from the start
 // state with a fresh table, until a pass solves the task or stops on a budget; an exhausted ladder is
 // SearchStatus::Exhausted. There is no optimized IW(1), so
 // IwOptions::optimize_iw1 and IwOptions::tables are ignored. LIW(k) tracks pairs (landmark coordinate, free tuple of
@@ -31,7 +31,7 @@ struct LiwOptions : IwOptions
     LandmarkNovelty landmarks;
 };
 
-/// The LIW ladder: the width-0 pass, then LIW(1..max_arity). Status Failed (with a message) for an arity above
+/// The LIW ladder: the width-0 pass, then LIW(1..max_width). Status Failed (with a message) for an arity above
 /// novelty::k_max_arity or an invalid grouping.
 [[nodiscard]] IwResult liw(const Task& task, const LiwOptions& options = {});
 }  // namespace mymyr::search

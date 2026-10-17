@@ -187,12 +187,12 @@ int main(int argc, char** argv)
                     "\"search_s\":%.4f,\"states_per_s\":%.0f,\"fp\":\"%016llx\",\"store_mb\":%.1f,\"peak_rss_mb\":%.1f}\n",
                     task->num_objects(), task->num_schemas(), atom_mode_name(task->atoms().mode()),
                     static_cast<unsigned long long>(task->info().dense_fluent), r.fluent_slots, r.words, r.store.c_str(),
-                    r.threads, bo.witness_pruning ? "true" : "false", bo.canonical_order ? "true" : "false",
+                    r.threads_used, bo.witness_pruning ? "true" : "false", bo.canonical_order ? "true" : "false",
                     static_cast<unsigned long long>(r.states), static_cast<unsigned long long>(r.expanded),
-                    static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.goal_states), r.layers,
+                    static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.num_goal_states), r.layers,
                     r.exhausted ? "true" : "false", r.solved ? "true" : "false", r.plan.size(), prep, r.search_s,
                     r.search_s > 0 ? static_cast<double>(r.states) / r.search_s : 0.0,
-                    static_cast<unsigned long long>(r.fingerprint), static_cast<double>(r.store_bytes) / 1048576.0, peak_rss_mb());
+                    static_cast<unsigned long long>(r.fingerprint), static_cast<double>(r.memory_bytes) / 1048576.0, peak_rss_mb());
     }
     catch (const std::exception& e)
     {

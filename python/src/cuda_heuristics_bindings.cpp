@@ -476,9 +476,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                      "The State the plan reaches (None without a plan).")
         .def_prop_ro("stats",
                      [](const PyDeviceSearchResult& x) {
-                         search::SearchStatistics s = x.r.result.stats;
-                         s.memory_bytes = std::max(s.memory_bytes, x.r.result.store_bytes);
-                         return s;
+                         return x.r.result.stats;
                      },
                      "The search's counts and time (mymyr.search.Statistics; memory_bytes: the device store).")
         .def_prop_ro("evaluations", [](const PyDeviceSearchResult& x) { return x.r.result.evaluations; },

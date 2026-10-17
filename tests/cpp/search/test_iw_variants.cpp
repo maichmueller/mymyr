@@ -76,7 +76,7 @@ void expect_same_passes(const IwResult& a, const IwResult& b, const std::string&
     ASSERT_EQ(a.passes.size(), b.passes.size()) << what;
     for (usize i = 0; i < a.passes.size(); ++i)
     {
-        EXPECT_EQ(a.passes[i].arity, b.passes[i].arity) << what << " pass " << i;
+        EXPECT_EQ(a.passes[i].width, b.passes[i].width) << what << " pass " << i;
         EXPECT_EQ(a.passes[i].status, b.passes[i].status) << what << " pass " << i;
         EXPECT_EQ(a.passes[i].expanded, b.passes[i].expanded) << what << " pass " << i;
         EXPECT_EQ(a.passes[i].generated, b.passes[i].generated) << what << " pass " << i;
@@ -97,7 +97,7 @@ TEST_P(EngineOnSuite, ClassicLadderEqualsIw)
     for (u32 k : {0u, 1u, 2u})
     {
         IwOptions o;
-        o.max_arity = k;
+        o.max_width = k;
         const IwResult ref = iw(*task, o);
         expect_same_passes(run_classic(*task, k, {}), ref, t.name + " fast k=" + std::to_string(k));
         u32 states = 0;
@@ -129,7 +129,7 @@ TEST_P(EngineOnSuite, LayerOrderingsOfIwEqualTheClassicLadders)
         for (usize i = 0; i < orderings.size(); ++i)
         {
             IwOptions o;
-            o.max_arity = k;
+            o.max_width = k;
             o.layers = orderings[i];
             o.control.budget.max_expanded = 20000;
             const IwResult ref = iw(*task, o);
@@ -141,7 +141,7 @@ TEST_P(EngineOnSuite, LayerOrderingsOfIwEqualTheClassicLadders)
             if (i == 0)
             {
                 IwOptions q;
-                q.max_arity = k;
+                q.max_width = k;
                 q.control.budget.max_expanded = 20000;
                 expect_same_passes(iw(*task, q), ref, t.name + " in order = queue k=" + std::to_string(k));
             }
@@ -472,11 +472,11 @@ TEST(Liw, NoLandmarksEqualsPlainIw)
         for (u32 k : {1u, 2u})
         {
             IwOptions io;
-            io.max_arity = k;
+            io.max_width = k;
             io.optimize_iw1 = false;
             const IwResult ref = iw(*task, io);
             LiwOptions lo;
-            lo.max_arity = k;
+            lo.max_width = k;
             expect_same_passes(liw(*task, lo), ref, t.name + " k=" + std::to_string(k));
         }
     }
@@ -494,14 +494,14 @@ TEST(Liw, EqualsTheOracle)
             {
                 const std::string what = std::string(name) + " " + c.name + " k=" + std::to_string(k);
                 LiwOptions lo;
-                lo.max_arity = k;
+                lo.max_width = k;
                 lo.landmarks = make_landmarks(*task, c);
                 const IwResult r = liw(*task, lo);
                 IwOptions io;
-                io.max_arity = k;
+                io.max_width = k;
                 io.optimize_iw1 = false;
                 const IwResult plain = iw(*task, io);
-                differs += plain.total.expanded != r.total.expanded || plain.passes.size() != r.passes.size() ? 1 : 0;
+                differs += plain.stats.expanded != r.stats.expanded || plain.passes.size() != r.passes.size() ? 1 : 0;
                 ASSERT_NE(r.status, SearchStatus::Failed) << what << ": " << r.message;
                 const State root = task->initial_state();
                 for (usize i = 0; i < r.passes.size(); ++i)
@@ -531,7 +531,7 @@ TEST(Liw, AllPrivateWithUnsharedFails)
 {
     const auto task = Task::from_text_file(task_path("gripper__prob05"));
     LiwOptions lo;
-    lo.max_arity = 1;
+    lo.max_width = 1;
     lo.landmarks = make_landmarks(*task, {"bad", true, true, true});
     const IwResult r = liw(*task, lo);
     EXPECT_EQ(r.status, SearchStatus::Failed);
@@ -886,7 +886,7 @@ TEST(Liw, TableLayoutsAgree)
             for (u32 k : {1u, 2u})
             {
                 LiwOptions lo;
-                lo.max_arity = k;
+                lo.max_width = k;
                 lo.landmarks = make_landmarks(*task, c);
                 const IwResult fast = liw(*task, lo);
                 lo.landmarks.tables.max_dense_bytes = 0;

@@ -1059,7 +1059,7 @@ DeviceBestFirstResult Driver::run()
         st.uploads = gen ? gen->uploads() : 0;
         st.table_slots = slots;
         st.device_bytes = ctx->usage().used_high;
-        r.store_bytes = rows.bytes() + g.bytes() * 5 + flags.bytes() + best.bytes() + open.bytes() + slots * 8;
+        r.stats.memory_bytes = rows.bytes() + g.bytes() * 5 + flags.bytes() + best.bytes() + open.bytes() + slots * 8;
         r.fluent_slots = task->atoms().fluent_slots();
         return DeviceBestFirstResult{std::move(r), st};
     };

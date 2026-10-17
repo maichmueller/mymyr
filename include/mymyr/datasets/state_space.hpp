@@ -39,6 +39,7 @@
 
 #include "mymyr/core/once.hpp"
 #include "mymyr/core/types.hpp"
+#include "mymyr/search/control.hpp"
 #include "mymyr/state/state.hpp"
 #include "mymyr/successor/action.hpp"
 #include "mymyr/task/task.hpp"
@@ -57,19 +58,14 @@ struct StateSpaceOptions
 {
     u32 threads = 1;                                          // 0: std::thread::hardware_concurrency()
     u64 max_states = std::numeric_limits<u64>::max();         // fail (OutOfStates) when the space reaches this size
-    f64 max_seconds = std::numeric_limits<f64>::infinity();   // fail (Timeout) after this wall-clock time
+    f64 max_seconds = std::numeric_limits<f64>::infinity();   // fail (OutOfTime) after this wall-clock time
     bool remove_if_unsolvable = true;                         // fail (Unsolvable) if the initial state is unsolvable
     bool labels = true;                                       // keep (schema, binding) per transition
 };
 
-enum class StateSpaceStatus : u8
-{
-    Ok,
-    OutOfStates,  // max_states reached
-    Timeout,      // max_seconds reached
-    Unsolvable,   // the goal is statically false, or remove_if_unsolvable and the initial state is unsolvable
-};
-[[nodiscard]] const char* to_string(StateSpaceStatus s) noexcept;
+// A generation ends with a search::SearchStatus: Exhausted (the space is complete), OutOfStates (max_states reached),
+// OutOfTime (max_seconds reached) or Unsolvable (the goal is statically false, or remove_if_unsolvable and the initial
+// state is unsolvable).
 
 /// Unit goal distance of a state that cannot reach a goal.
 inline constexpr i32 k_unsolvable_distance = -1;
@@ -234,8 +230,8 @@ using StateSpacePtr = std::shared_ptr<const StateSpace>;
 
 struct StateSpaceResult
 {
-    StateSpaceStatus status = StateSpaceStatus::Ok;
-    StateSpacePtr space;  // set iff status == Ok
+    search::SearchStatus status = search::SearchStatus::Exhausted;
+    StateSpacePtr space;  // set iff status == Exhausted
     u64 states = 0;       // states stored when the generation ended (also when it failed)
     f64 seconds = 0;      // wall-clock time of the generation
 };

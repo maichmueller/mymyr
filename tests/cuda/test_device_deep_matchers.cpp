@@ -180,7 +180,7 @@ TEST(CudaDeep, OrganicSynthesisIwInSmallChunksEqualsOneChunk)
     {
         SCOPED_TRACE("arity " + std::to_string(arity));
         cuda::MultiIwOptions o;
-        o.max_arity = arity;
+        o.max_width = arity;
         o.budget.max_states = arity == 1 ? 200 : 60;
         cuda::DeviceMultiIw ref_run(context(), task, o);
         const cuda::MultiIwBatch ref = ref_run.run(starts);

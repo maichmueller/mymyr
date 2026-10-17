@@ -10,7 +10,7 @@
 // concurrent store. Ids are deterministic by default: an atomic-min discoverer key (parent id,
 // successor index) plus a per-layer counting sort reproduces the single-threaded ids at every thread count.
 //
-// Every expanded state is goal-tested (goal_states counts them). The plan reaches the first goal state expanded, a
+// Every expanded state is goal-tested (num_goal_states counts them). The plan reaches the first goal state expanded, a
 // shortest plan (multi-threaded: the goal state of the smallest id among those the threads reached before they
 // stopped, so which plan of that length can depend on the timing), and the status is then Solved. stop_at_goal (the
 // default) ends the search there; without it the search expands the whole reachable space (or what its budgets allow)
@@ -76,7 +76,7 @@ struct BrfsOptions
     std::vector<State> blocked_states{};  // never stored (compared by content; the start state is exempt)
     bool layer_stats = false;        // fill BrfsResult::layer_counts
     bool stop_at_goal = true;        // false: go on through the whole space after the first goal state
-    /// What counts as a goal state (stop_at_goal, BrfsResult::goal_states): the task's goal by default. A custom test
+    /// What counts as a goal state (stop_at_goal, BrfsResult::num_goal_states): the task's goal by default. A custom test
     /// (GoalSpec::Kind::Custom) needs threads == 1.
     search::GoalSpec goal{};
     bool fingerprint = false;        // hash over (id, canonical state) of the whole store (tests, determinism gates)
@@ -103,7 +103,7 @@ struct BrfsResult
     u64 expanded = 0;
     u64 generated = 0;  // successors generated (with duplicates and blocked ones)
     u64 pruned = 0;     // successors not stored because they are blocked
-    u64 goal_states = 0;
+    u64 num_goal_states = 0;
     u32 layers = 0;          // layers expanded (partly, if the search stopped inside one)
     /// With layer_stats: per expanded layer {expanded, generated, new states}.
     std::vector<std::array<u64, 3>> layer_counts;
@@ -118,9 +118,9 @@ struct BrfsResult
     double search_s = 0;
     u32 words = 0;         // fluent width at the end
     u32 fluent_slots = 0;  // assigned fluent atom slots at the end
-    u64 store_bytes = 0;
+    u64 memory_bytes = 0;
     u64 fingerprint = 0;
-    u32 threads = 1;
+    u32 threads_used = 1;
     std::string store;  // "flat", "chunked", "compact" or "concurrent"
     /// Why the search stopped early (empty when it ran to its end; options it does not take throw instead).
     std::string message;

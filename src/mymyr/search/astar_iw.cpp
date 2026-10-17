@@ -311,7 +311,7 @@ AStarIwResult astar_iw(const Task& task, const AStarIwOptions& o)
     {
         r.status = c ? c->interrupted_status() : SearchStatus::OutOfTime;
         if (c)
-            c->finish(r.stats.states, r.store_bytes);
+            c->finish(r.stats.states, r.stats.memory_bytes);
     }
     catch (const NonUnitCost&)
     {

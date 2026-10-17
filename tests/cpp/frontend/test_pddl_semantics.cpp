@@ -243,7 +243,7 @@ TEST(PddlSemantics, OnlyEffectsThatFireConflict)
     const BrfsResult r = brfs(*t, {.stop_at_goal = false});
     EXPECT_EQ(r.states, 8u);
     EXPECT_EQ(r.generated, 14u);
-    EXPECT_EQ(r.goal_states, 2u);
+    EXPECT_EQ(r.num_goal_states, 2u);
 }
 
 TEST(PddlSemantics, MetricsAreMinimizedOrRefused)
@@ -379,14 +379,14 @@ TEST(PddlSemantics, GoalAtomsNoStateHolds)
     BrfsResult r = brfs(*holds, {.stop_at_goal = false});
     EXPECT_TRUE(r.exhausted);
     EXPECT_EQ(r.states, 2u);
-    EXPECT_EQ(r.goal_states, 1u);
+    EXPECT_EQ(r.num_goal_states, 1u);
     rl::GoalMasks g = rl::goal_masks(*holds);
     EXPECT_FALSE(g.unsatisfiable);
     EXPECT_TRUE(std::ranges::all_of(g.neg, [](u64 w) { return w == 0; }));
     const auto never = make(domain, problem("(and (f a) (f b))"));
     r = brfs(*never, {.stop_at_goal = false});
     EXPECT_TRUE(r.exhausted);
-    EXPECT_EQ(r.goal_states, 0u);
+    EXPECT_EQ(r.num_goal_states, 0u);
     g = rl::goal_masks(*never);
     EXPECT_TRUE(g.unsatisfiable);
 }

@@ -7,11 +7,11 @@
 //
 // A tree over action sequences (two nodes may hold the same state), with the minimum depth at which each fluent atom
 // has been seen (the root's atoms at depth 0). The root is goal-tested first. Each rollout descends from the root:
-//   - a node's applicable actions are materialized once, all of them (statistics.expanded); none: a dead end, SOLVED;
+//   - a node's applicable actions are materialized once, all of them (rollout.expanded); none: a dead end, SOLVED;
 //   - the first action in ranked order (ActionOrdering) whose child is not SOLVED is taken; none: the node is SOLVED;
 //   - an existing child still at the best depth of one of its atoms is walked into (case 4), otherwise it is SOLVED
 //     (case 3);
-//   - a new child (statistics.generated) is goal-tested first (a goal ends the search), then counted against
+//   - a new child (rollout.generated) is goal-tested first (a goal ends the search), then counted against
 //     Budget::max_states, cut at Budget::max_depth (SOLVED), cut when depth + 1 reaches the incumbent bound (SOLVED),
 //     then registered: if it lowers the best depth of an atom (all of them are updated) the rollout continues (case 1),
 //     else it is SOLVED (case 2);
@@ -103,7 +103,7 @@ struct RolloutIwStatistics
     u64 tree_nodes = 0;
     double seconds = 0;
 
-    [[nodiscard]] SearchStatistics statistics() const
+    [[nodiscard]] SearchStatistics stats() const
     {
         return {.expanded = expanded, .generated = generated, .states = tree_nodes, .pruned = case2 + depth_bound_prunings + incumbent_bound_prunings + blocked, .seconds = seconds};
     }
@@ -115,7 +115,7 @@ struct RolloutIwResult
     std::vector<Action> plan;
     double cost = 0;
     std::optional<State> goal_state;
-    RolloutIwStatistics statistics;
+    RolloutIwStatistics rollout;  // the search's own counters (stats(): as SearchStatistics)
     bool root_solved = false;  // the reachable width-1 space was exhausted (relative to the bounds, see the counters)
     std::string message;       // why the search stopped when not solved
     u32 fluent_slots = 0;

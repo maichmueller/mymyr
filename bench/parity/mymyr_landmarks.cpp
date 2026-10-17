@@ -476,7 +476,7 @@ void mode_order(const Args& a, const Task& task)
         replay = std::make_shared<ReplayOrdering>(ordering, a.order_from);
     OrderRecorder rec(task, *ordering);
     search::IwOptions io;
-    io.max_arity = 1;
+    io.max_width = 1;
     io.control.budget.max_depth = a.max_layers;
     io.control.observer = &rec;
     if (replay)

@@ -205,7 +205,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
         r.stats.states = nodes.size();
         r.stats.seconds = std::chrono::duration<double>(Clock::now() - begin).count();
         r.fluent_slots = task->atoms().fluent_slots();
-        r.store_bytes = arena.size() + table.size() + nodes.size() * sizeof(Node) + open.size() * sizeof(Entry);
+        r.stats.memory_bytes = arena.size() + table.size() + nodes.size() * sizeof(Node) + open.size() * sizeof(Entry);
         st.steps = st.host_steps;
         st.max_batch = st.steps ? 1 : 0;
         st.uploads = gen.uploads();

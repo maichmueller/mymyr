@@ -305,7 +305,7 @@ std::string rollout_json(const Names& names, const RolloutResult& r, u64 seed, b
     std::string o = "{\"seed\":" + std::to_string(seed) + ",\"status\":\"" + parity::reference_status_name(r.search.status) + "\",\"per_pass\":\"";
     Sums s;
     for (const IwPassStatistics& p : r.search.passes)
-        s.add(p, p.arity);
+        s.add(p, p.width);
     o += s.per_pass + "\"";
     if (r.search.status == SearchStatus::Solved)
         o += ",\"plan_len\":" + std::to_string(r.search.plan.size()) + ",\"plan\":" + names.plan_json(r.search.plan);
@@ -583,12 +583,12 @@ int main(int argc, char** argv)
                 o.control = control;
                 if (max_states != ~u64{0})
                     o.control.budget.max_states = max_states;
-                o.max_arity = k;
+                o.max_width = k;
                 o.landmarks = lm;
                 o.successor_order = hook;
                 const IwResult r = liw(*task, o);
                 for (const IwPassStatistics& p : r.passes)
-                    sums.add(p, p.arity);
+                    sums.add(p, p.width);
                 status = parity::reference_status_name(r.status);
                 solved = r.status == SearchStatus::Solved;
                 plan = r.plan;
@@ -605,15 +605,15 @@ int main(int argc, char** argv)
                 o.max_rollouts = max_rollouts;
                 o.successor_order = hook;
                 const RolloutIwResult r = rollout_iw(*task, o);
-                sums.expanded = r.statistics.expanded;
-                sums.generated = r.statistics.generated;
+                sums.expanded = r.rollout.expanded;
+                sums.generated = r.rollout.generated;
                 status = rollout_status_name(r.status);
                 solved = r.status == SearchStatus::Solved;
                 plan = r.plan;
                 cost = r.cost;
                 message = r.message;
-                extra += ",\"rollout\":" + rollout_stats_json(r.statistics) + ",\"root_solved\":" + (r.root_solved ? "true" : "false") +
-                         ",\"num_rollouts\":" + std::to_string(r.statistics.rollouts) + ",\"num_tree_nodes\":" + std::to_string(r.statistics.tree_nodes);
+                extra += ",\"rollout\":" + rollout_stats_json(r.rollout) + ",\"root_solved\":" + (r.root_solved ? "true" : "false") +
+                         ",\"num_rollouts\":" + std::to_string(r.rollout.rollouts) + ",\"num_tree_nodes\":" + std::to_string(r.rollout.tree_nodes);
             }
             else if (algo == "rollouts")
             {
@@ -621,9 +621,9 @@ int main(int argc, char** argv)
                 o.iw.control = control;
                 if (max_states != ~u64{0})
                     o.iw.control.budget.max_states = max_states;
-                o.iw.max_arity = k;
+                o.iw.max_width = k;
                 o.iw.successor_order = hook;
-                o.num_threads = threads;
+                o.threads = threads;
                 o.max_next_layer_states = max_next_layer_states;
                 o.report_landing_states = report;
                 o.report_co_occurrence = report;
@@ -655,8 +655,8 @@ int main(int argc, char** argv)
                 if (max_states != ~u64{0})
                     o.control.budget.max_states = max_states;
                 o.num_rollout_workers = workers;
-                o.num_threads = threads;
-                o.base_seed = base_seed;
+                o.threads = threads;
+                o.seed = base_seed;
                 o.successor_order = hook;
                 std::istringstream in(orderings_arg);
                 std::string s;

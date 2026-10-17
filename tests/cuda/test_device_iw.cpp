@@ -86,7 +86,7 @@ std::string param_name(const ::testing::TestParamInfo<std::tuple<std::string, bo
 search::IwOptions cpu_options(const cuda::MultiIwOptions& d, const State& start)
 {
     search::IwOptions o;
-    o.max_arity = d.max_arity;
+    o.max_width = d.max_width;
     o.optimize_iw1 = d.optimize_iw1;
     o.width_zero = d.width_zero;
     o.witness_pruning = d.witness_pruning;
@@ -286,7 +286,7 @@ TEST_P(CudaMultiIwSuite, Iw2EqualsTheCpu)
     const auto task = load(name, frozen);
     const std::vector<State> starts = full_suite() ? device_ref_walks(*task, 4, 25, 7) : device_ref_walks(*task, 2, 11, 7);
     cuda::MultiIwOptions o;
-    o.max_arity = 2;
+    o.max_width = 2;
     o.budget.max_states = 20000;  // per pass: bounds the CPU reference's time on the large tasks
     check_against_cpu(task, starts, o, "iw2");
     check_against_cpu(task, starts, o, "iw2_goals", walk_goals(*task, starts, 3, true));
@@ -312,9 +312,9 @@ TEST_P(CudaMultiIwSuite, RolloutsEqualTheCpu)
             d.seeds = seeds;
             d.iw.max_next_layer_states = next;
             search::ParallelRolloutOptions c;
-            c.iw.max_arity = 1;
+            c.iw.max_width = 1;
             c.seeds = seeds;
-            c.num_threads = 4;
+            c.threads = 4;
             c.max_next_layer_states = next;
             if (own_goal)
             {
@@ -351,7 +351,7 @@ TEST(CudaGoals, DerivedConditionsEqualCpuSearches)
     ASSERT_FALSE(g->fluent_only());
     const std::vector<State> starts{task->initial_state()};
     cuda::MultiIwOptions options;
-    options.max_arity = 2;
+    options.max_width = 2;
     options.budget.max_states = 3000;
     check_against_cpu(task, starts, options, "derived goal", {*g});
     cuda::DeviceRolloutOptions d;
@@ -359,7 +359,7 @@ TEST(CudaGoals, DerivedConditionsEqualCpuSearches)
     d.iw = options;
     d.goals = {*g};
     search::IwOptions cpu;
-    cpu.max_arity = 2;
+    cpu.max_width = 2;
     cpu.control.budget = options.budget;
     cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf;
     cpu.control.goal.goals = {*g};
@@ -410,7 +410,7 @@ TEST(CudaMultiIw, ExactModeDoesNotDependOnTheLaunchConfiguration)
             const auto task = load(name, true);
             const std::vector<State> starts = sanitizer_size() ? device_ref_walks(*task, 1, 6, 23) : device_ref_walks(*task, 2, 15, 23);
             cuda::MultiIwOptions o;
-            o.max_arity = arity;
+            o.max_width = arity;
             o.budget.max_states = arity == 1 ? 5000 : 1500;  // one-row chunks at arity 2 are slow (host round trips)
             cuda::DeviceMultiIw ref_run(context(), task, o);
             const cuda::MultiIwBatch ref = ref_run.run(starts);
@@ -448,7 +448,7 @@ TEST(CudaMultiIw, CaptureDedupAndCapacitiesDoNotChangeTheResults)
             const auto task = load(name, true);
             const std::vector<State> starts = sanitizer_size() ? device_ref_walks(*task, 1, 6, 29) : device_ref_walks(*task, 2, 15, 29);
             cuda::MultiIwOptions o;
-            o.max_arity = arity;
+            o.max_width = arity;
             o.budget.max_states = arity == 1 ? 5000 : 1500;
             o.graphs = false;
             cuda::DeviceMultiIw ref_run(context(), task, o);
@@ -545,7 +545,7 @@ TEST(CudaMultiIw, OneRowChunksOverTheEmitBudgetLeaveTheDeviceLoop)
         SCOPED_TRACE("arity " + std::to_string(arity));
         const std::vector<State> starts = {walk[3], walk[3], walk[0]};
         cuda::MultiIwOptions o;
-        o.max_arity = arity;
+        o.max_width = arity;
         o.optimize_iw1 = false;  // (a root layer of the normal rule: a device loop from the first chunk on)
         o.budget.max_states = arity == 1 ? 3000 : 600;
         o.chunk_states = 2;
@@ -591,7 +591,7 @@ TEST(CudaMultiIw, BudgetsEqualTheCpu)
                 for (u64 e : {u64{0}, u64{1}, u64{5}, u64{37}})
                 {
                     cuda::MultiIwOptions o;
-                    o.max_arity = arity;
+                    o.max_width = arity;
                     o.budget.max_expanded = e;
                     o.budget.max_states = 3000;
                     check_against_cpu(task, starts, o, "max_expanded " + std::to_string(e));
@@ -599,14 +599,14 @@ TEST(CudaMultiIw, BudgetsEqualTheCpu)
                 for (u64 s : {u64{1}, u64{2}, u64{10}, u64{100}})
                 {
                     cuda::MultiIwOptions o;
-                    o.max_arity = arity;
+                    o.max_width = arity;
                     o.budget.max_states = s;
                     check_against_cpu(task, starts, o, "max_states " + std::to_string(s));
                 }
                 for (u32 d : {0u, 1u, 3u})
                 {
                     cuda::MultiIwOptions o;
-                    o.max_arity = arity;
+                    o.max_width = arity;
                     o.budget.max_depth = d;
                     o.budget.max_states = 3000;
                     check_against_cpu(task, starts, o, "max_depth " + std::to_string(d));
@@ -627,7 +627,7 @@ TEST(CudaMultiIw, PerSearchGoalsEqualTheCpu)
             for (u32 atoms : {1u, 3u})
             {
                 cuda::MultiIwOptions o;
-                o.max_arity = arity;
+                o.max_width = arity;
                 o.budget.max_states = 3000;
                 check_against_cpu(task, starts, o, "arity " + std::to_string(arity) + " goal atoms " + std::to_string(atoms),
                                   walk_goals(*task, starts, atoms, true));
@@ -678,7 +678,7 @@ TEST(CudaMultiIw, RelaxedNoveltyReturnsValidPlans)
             const auto task = load(name, true);
             const std::vector<State> starts = device_ref_walks(*task, 2, 15, 29);
             cuda::MultiIwOptions o;
-            o.max_arity = arity;
+            o.max_width = arity;
             o.exact = false;
             o.budget.max_states = 5000;
             const std::vector<search::IwResult> d = cuda::multi_iw(context(), task, starts, o);
@@ -743,7 +743,7 @@ TEST(CudaMultiIw, RejectsInvalidArguments)
     SKIP_WITHOUT_GPU();
     const auto task = load("depot__p02", true);
     cuda::MultiIwOptions o;
-    o.max_arity = 3;
+    o.max_width = 3;
     EXPECT_THROW((void)cuda::DeviceMultiIw(context(), task, o), std::invalid_argument);
     cuda::DeviceMultiIw x(context(), task);
     const std::vector<State> starts{task->initial_state(), task->initial_state()};
@@ -839,15 +839,15 @@ TEST(CudaRollouts, Iw2AndBudgetsEqualTheCpu)
                     seeds.push_back(s + 1);
                 cuda::DeviceRolloutOptions d;
                 d.seeds = seeds;
-                d.iw.max_arity = 2;
+                d.iw.max_width = 2;
                 d.iw.budget.max_states = 4000;
                 d.iw.max_next_layer_states = next;
                 const cuda::DeviceRolloutsResult r = cuda::find_rollouts(context(), task, d);
                 search::ParallelRolloutOptions c;
-                c.iw.max_arity = 2;
+                c.iw.max_width = 2;
                 c.iw.control.budget.max_states = 4000;
                 c.seeds = seeds;
-                c.num_threads = 4;
+                c.threads = 4;
                 c.max_next_layer_states = next;
                 const search::ParallelRolloutsResult ref = search::find_rollouts_parallel(*task, c);
                 for (usize i = 0; i < seeds.size(); ++i)

@@ -4,14 +4,14 @@
 //
 //   mymyr::search::PortfolioOptions o;
 //   o.num_rollout_workers = 4;
-//   o.num_threads = 1;  // serial and reproducible
+//   o.threads = 1;  // serial and reproducible
 //   mymyr::search::PortfolioResult r = mymyr::search::atomic_goal_portfolio(*task, o);
 //   if (r.status == mymyr::search::SearchStatus::Solved && r.certified_optimal) ...
 //
-// Workers: 0 is the certifier, the ladder of search/iw.hpp with max_arity 1 (optimized IW(1)) on the IW family engine,
+// Workers: 0 is the certifier, the ladder of search/iw.hpp with max_width 1 (optimized IW(1)) on the IW family engine,
 // publishing completed depths; 1..K run rollout_iw (search/rollout_iw.hpp) with ordering rollout_orderings[(k - 1) %
 // size], or, when that is empty, the built-in cycle DirectGoalAchieverFirst, MixedRegressionRandom, Randomized,
-// GoalRegressionRelevance with seed base_seed + k - 1. The best plan so far is kept under a mutex (its length is the
+// GoalRegressionRelevance with seed `seed + k - 1`. The best plan so far is kept under a mutex (its length is the
 // coordination's incumbent, which prunes the rollouts):
 //   - a certifier plan is shortest in the width-1 space and cancels everyone; otherwise the certifier cancels everyone
 //     once it has certified the incumbent;
@@ -21,7 +21,7 @@
 //     space (a certifier that searched its whole width-1 space without a plan certifies nothing about a rollout plan);
 //   - no plan: Unsolvable (static goal false), Exhausted (the certifier exhausted the width-1 space),
 //     or the certifier's status.
-// num_threads (0: the hardware's) is capped at K + 1; with one thread every worker runs to completion in order on the
+// threads (0: the hardware's) is capped at K + 1; with one thread every worker runs to completion in order on the
 // calling thread (certifier first), which is fully reproducible. With more, workers are handed to threads in index
 // order and the calling thread polls every 5 ms, cancelling on the deadline, the total expansion budget and the
 // CancelToken; the result then depends on timing.
@@ -63,8 +63,8 @@ struct PortfolioOptions
     SearchControl control;
     std::optional<State> start;
     u32 num_rollout_workers = 4;  // 0: the certifier alone
-    u32 num_threads = 0;          // 0: std::thread::hardware_concurrency()
-    u64 base_seed = 0;
+    u32 threads = 1;              // 0: std::thread::hardware_concurrency()
+    u64 seed = 0;
     std::vector<RolloutOrdering> rollout_orderings;  // cycled; empty: the built-in mix
     bool canonical_order = true;
     novelty::TableOptions tables;  // the certifier's novelty table

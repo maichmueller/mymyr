@@ -4,7 +4,7 @@
 // own Workspace).
 //
 //   mymyr::search::ParallelRolloutOptions o;
-//   o.iw.max_arity = 1;
+//   o.iw.max_width = 1;
 //   o.seeds = {1, 2, 3, 4};
 //   o.report_landing_states = true;
 //   auto r = mymyr::search::find_rollouts_parallel(*task, o);
@@ -25,7 +25,7 @@
 // slots: for a given seed a rollout's result is identical at every thread count. Landing states are ordinary States
 // of the task; merge_landing_states deduplicates across rollouts.
 //
-// Threads: num_threads (0: the hardware's) capped at the number of rollouts; rollouts are handed out dynamically and
+// Threads: threads (0: the hardware's) capped at the number of rollouts; rollouts are handed out dynamically and
 // results are returned in seed order. Per-worker hooks (search/control.hpp, make_worker): a worker is
 // a rollout (index into seeds). With an observer, SearchObserver::make_worker(k) is called for every rollout on the
 // calling thread; rollout k sends its hot events (on_expand, on_generate, on_prune, on_transition, on_progress) to the
@@ -51,7 +51,7 @@ struct ParallelRolloutOptions
 {
     IwOptions iw;                        // the ladder of every rollout
     std::vector<u64> seeds;              // one rollout per seed
-    u32 num_threads = 0;                 // 0: std::thread::hardware_concurrency()
+    u32 threads = 1;                     // 0: std::thread::hardware_concurrency()
     u32 max_next_layer_states = ~u32{0};
     bool report_landing_states = false;
     bool report_co_occurrence = false;

@@ -209,7 +209,7 @@ search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& star
     r.passes.assign(ps.begin(), ps.end());
     for (const search::IwPassStatistics& p : r.passes)
     {
-        const search::SearchStatistics s = p.statistics();
+        const search::SearchStatistics s = p.stats();
         r.total.expanded += s.expanded;
         r.total.generated += s.generated;
         r.total.states += s.states;
@@ -240,8 +240,8 @@ std::string multi_iw_unsupported(const Task& task, const MultiIwOptions& o)
 {
     if (std::string why = ChunkGenerator::search_unsupported(task); !why.empty())
         return why;
-    if (o.max_arity > 2)
-        return "IW arity " + std::to_string(o.max_arity) + " (the device runs arities 0, 1 and 2)";
+    if (o.max_width > 2)
+        return "IW arity " + std::to_string(o.max_width) + " (the device runs arities 0, 1 and 2)";
     return {};
 }
 
@@ -725,7 +725,7 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     out.status.assign(n, search::SearchStatus::Exhausted);
     out.effective_width.assign(n, 0);
     out.plan_length.assign(n, -1);
-    out.pass_slots = o.max_arity + 1;
+    out.pass_slots = o.max_width + 1;
     out.pass_stats.resize(u64{n} * out.pass_slots);
     out.num_passes.assign(n, 0);
     Host host;
@@ -750,7 +750,7 @@ MultiIwBatch DeviceMultiIw::Impl::run(DeviceStarts starts, std::span<const searc
     }
     // group size: the novelty tables of a group fit table_bytes
     const u64 tw = std::max<u32>(1, task->words());
-    const u64 per = o.max_arity >= 2 ? u64{512} * tw * tw : o.max_arity == 1 ? 8 * tw : 8;
+    const u64 per = o.max_width >= 2 ? u64{512} * tw * tw : o.max_width == 1 ? 8 * tw : 8;
     u32 group = static_cast<u32>(std::clamp<u64>(o.table_bytes / std::max<u64>(per, 1), 1, u64{1} << 24));
     if (o.max_searches)
         group = std::min(group, o.max_searches);
@@ -848,7 +848,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     }
     sv.reached = nullptr;
     sv.reached_words = 0;
-    const bool optimize = o.optimize_iw1 && o.max_arity == 1;
+    const bool optimize = o.optimize_iw1 && o.max_width == 1;
     std::vector<u32> pending(count);
     for (u32 i = 0; i < count; ++i)
         pending[i] = i;
@@ -888,7 +888,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     auto* counters = reinterpret_cast<unsigned long long*>(staged);
     auto* codes = reinterpret_cast<u32*>(staged + u64{count} * 4 * sizeof(u64));
     u32* depth = codes + count;
-    for (u32 k = first; k <= o.max_arity && !pending.empty(); ++k)
+    for (u32 k = first; k <= o.max_width && !pending.empty(); ++k)
     {
         if (out_of_time())
         {
@@ -1839,7 +1839,7 @@ std::vector<search::IwResult> multi_iw(ContextPtr ctx, TaskPtr task, std::span<c
 
 MultiIwBatch batched_iw1(ContextPtr ctx, TaskPtr task, DeviceStarts starts, MultiIwOptions options, cudaStream_t stream)
 {
-    options.max_arity = 1;
+    options.max_width = 1;
     DeviceMultiIw x(std::move(ctx), std::move(task), options);
     return x.run(starts, {}, {}, stream);
 }

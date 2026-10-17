@@ -166,10 +166,10 @@ TEST_P(DeviceNumeric, IwEqualsCpu)
     const auto starts = walks(*task, 4);
     for (u32 width : {1u, 2u})
     {
-        cuda::MultiIwOptions options; options.max_arity = width; options.budget.max_states = 20000;
+        cuda::MultiIwOptions options; options.max_width = width; options.budget.max_states = 20000;
         options.chunk_states = 7; options.track_reached = true;
         const auto results = cuda::multi_iw(ctx, task, starts, options);
-        search::IwOptions cpu; cpu.max_arity = width; cpu.control.budget.max_states = 20000;
+        search::IwOptions cpu; cpu.max_width = width; cpu.control.budget.max_states = 20000;
         for (u32 i = 0; i < starts.size(); ++i)
         {
             cpu.start = starts[i];
@@ -227,10 +227,10 @@ void compare_env_and_rollouts(const cuda::ContextPtr& ctx, const TaskPtr& task)
     {
         cuda::DeviceRolloutOptions options;
         options.seeds = {17, 1017, 2017, 3017};
-        options.iw.max_arity = 2; options.iw.max_next_layer_states = next; options.iw.budget.max_states = 20000;
+        options.iw.max_width = 2; options.iw.max_next_layer_states = next; options.iw.budget.max_states = 20000;
         search::ParallelRolloutOptions cpu;
-        cpu.seeds = options.seeds; cpu.iw.max_arity = 2; cpu.max_next_layer_states = next;
-        cpu.iw.control.budget.max_states = 20000; cpu.num_threads = 2;
+        cpu.seeds = options.seeds; cpu.iw.max_width = 2; cpu.max_next_layer_states = next;
+        cpu.iw.control.budget.max_states = 20000; cpu.threads = 2;
         search::ParallelRolloutsResult expected;
         if (!task->numeric_slots())
             expected = search::find_rollouts_parallel(*task, cpu);
@@ -558,9 +558,9 @@ TEST_P(DeviceNumericPddl, ExpandBrfsAndIwEqualCpu)
     const auto actual = cuda::brfs(ctx, task, options).result;
     EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
     EXPECT_EQ(actual.goal_states, expected.goal_states); EXPECT_EQ(actual.fingerprint, expected.fingerprint);
-    cuda::MultiIwOptions iw; iw.max_arity = 2; iw.budget.max_states = 20000;
+    cuda::MultiIwOptions iw; iw.max_width = 2; iw.budget.max_states = 20000;
     const auto results = cuda::multi_iw(ctx, task, std::span(states).first(4), iw);
-    search::IwOptions reference; reference.max_arity = 2; reference.control.budget.max_states = 20000;
+    search::IwOptions reference; reference.max_width = 2; reference.control.budget.max_states = 20000;
     for (u32 i = 0; i < results.size(); ++i)
     {
         reference.start = states[i];
@@ -761,7 +761,7 @@ TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
             const std::vector<u32> search_ids{2, 0, 1, 2, 1, 0};
             std::vector<State> starts;
             for (u32 i : search_ids) starts.push_back(table->task(i)->initial_state());
-            cuda::MultiIwOptions options; options.max_arity = 2;
+            cuda::MultiIwOptions options; options.max_width = 2;
             cuda::DeviceTableIw run(ctx, table, options);
             const auto results = run.run(starts, search_ids);
             ASSERT_EQ(results.numeric_words, table->numeric_words());
@@ -781,7 +781,7 @@ TEST(DeviceNumericRules, MixedTablesAndSuitesPreserveInstanceEncodings)
                                                  static_cast<u32>(search_ids.size()), 0}, search_ids);
             for (u32 i = 0; i < starts.size(); ++i)
             {
-                search::IwOptions cpu; cpu.max_arity = 2;
+                search::IwOptions cpu; cpu.max_width = 2;
                 const auto expected = search::iw(*table->task(search_ids[i]), cpu);
                 const auto actual = results.result(i, *table->task(search_ids[i]), starts[i], true);
                 const auto actual_device = device_starts.result(i, *table->task(search_ids[i]), starts[i], true);
@@ -830,7 +830,7 @@ TaskPtr ground_goal_task(bool numeric_axiom, TaskOptions options, bool goal_read
 void user_goals_equal_cpu(const cuda::ContextPtr& ctx, const TaskPtr& task,
                           const std::vector<State>& starts, const std::vector<search::GoalSpec::AtomGoal>& goals)
 {
-    cuda::MultiIwOptions options; options.max_arity = 2; options.budget.max_states = 5000;
+    cuda::MultiIwOptions options; options.max_width = 2; options.budget.max_states = 5000;
     options.max_searches = 2; options.chunk_states = 3;
     cuda::DeviceMultiIw run(ctx, task, options);
     const auto actual = run.run(starts, goals);
@@ -838,7 +838,7 @@ void user_goals_equal_cpu(const cuda::ContextPtr& ctx, const TaskPtr& task,
     EXPECT_EQ(actual.stats.device_loops, 0u);
     for (u32 i = 0; i < starts.size(); ++i)
     {
-        search::IwOptions cpu; cpu.max_arity = 2; cpu.control.budget = options.budget; cpu.start = starts[i];
+        search::IwOptions cpu; cpu.max_width = 2; cpu.control.budget = options.budget; cpu.start = starts[i];
         cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf; cpu.control.goal.goals = {goals[i]};
         const auto expected = search::iw(*task, cpu);
         const auto result = actual.result(i, *task, starts[i], true);
@@ -879,7 +879,7 @@ void user_goals_equal_cpu(const cuda::ContextPtr& ctx, const TaskPtr& task,
         const auto result = batch.run(seeds, nullptr, rollout_goals);
         for (u32 i = 0; i < seeds.size(); ++i)
         {
-            search::IwOptions cpu; cpu.max_arity = 2; cpu.control.budget = options.budget;
+            search::IwOptions cpu; cpu.max_width = 2; cpu.control.budget = options.budget;
             cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf; cpu.control.goal.goals = {rollout_goals[i]};
             cpu.layers = {.kind = search::LayerOrdering::Kind::Randomized, .seed = seeds[i], .max_next_layer_states = truncation};
             const auto expected = search::iw(*task, cpu);
@@ -972,7 +972,7 @@ TEST(DeviceNumericRules, StaticFunctionGoalsWithoutFluents)
     const auto results = cuda::multi_iw(context(), task, std::vector<State>(2, task->initial_state()), {}, goals);
     for (u32 i = 0; i < goals.size(); ++i)
     {
-        search::IwOptions cpu; cpu.max_arity = 1;
+        search::IwOptions cpu; cpu.max_width = 1;
         cpu.control.goal.kind = search::GoalSpec::Kind::AnyOf; cpu.control.goal.goals = {goals[i]};
         EXPECT_EQ(results[i].status, search::iw(*task, cpu).status);
     }
@@ -1029,7 +1029,7 @@ TEST(DeviceGoals, AtomsNoStateHolds)
         EXPECT_EQ(a.result.status, goals ? search::SearchStatus::Solved : search::SearchStatus::Unsolvable);
         cuda::DeviceStateSpaceOptions o; o.space.remove_if_unsolvable = false; o.output = cuda::StateSpaceOutput::Host;
         const cuda::DeviceStateSpaceResult s = cuda::state_space(ctx, task, o);
-        ASSERT_EQ(s.status, datasets::StateSpaceStatus::Ok);
+        ASSERT_EQ(s.status, search::SearchStatus::Exhausted);
         ASSERT_TRUE(s.host);
         EXPECT_EQ(s.host->num_states(), 2u);
         EXPECT_EQ(s.host->num_goal_states(), goals);

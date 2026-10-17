@@ -251,7 +251,7 @@ TEST(Numeric, BrfsCountsAreTheSameOnEveryStore)
                 EXPECT_TRUE(r.exhausted) << x.name << " " << r.store;
                 EXPECT_EQ(r.states, x.states) << x.name << " " << r.store << " T=" << threads;
                 EXPECT_EQ(r.generated, x.generated) << x.name << " " << r.store << " T=" << threads;
-                EXPECT_EQ(r.goal_states, x.goal_states) << x.name << " " << r.store << " T=" << threads;
+                EXPECT_EQ(r.num_goal_states, x.goal_states) << x.name << " " << r.store << " T=" << threads;
             }
     }
 }
@@ -272,7 +272,7 @@ TEST(Numeric, BrfsIsIndependentOfTheSlotType)
         const BrfsResult ra = brfs(*a, o), rb = brfs(*b, o);
         EXPECT_EQ(ra.states, rb.states) << name;
         EXPECT_EQ(ra.generated, rb.generated) << name;
-        EXPECT_EQ(ra.goal_states, rb.goal_states) << name;
+        EXPECT_EQ(ra.num_goal_states, rb.num_goal_states) << name;
         // the same states in the same order: the canonical hash covers the values, not their encoding
         EXPECT_EQ(ra.fingerprint, rb.fingerprint) << name;
     }
@@ -386,7 +386,7 @@ TEST(ActionCosts, NumericPlans)
     {
         const auto task = Task::from_text_file(numeric_task(c.name));
         search::IwOptions o;
-        o.max_arity = c.k;
+        o.max_width = c.k;
         std::vector<Action> plan;
         f64 cost = 0;
         std::optional<State> goal;
