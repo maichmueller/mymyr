@@ -178,7 +178,7 @@ def test_an_overflowed_expansion_is_refused():
 # ------------------------------------------------------------------------------------------------ virtual nodes
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("name", TASKS)
-def test_each_used_predicate_has_one_virtual_node_in_key_order(name, layout):
+def test_each_used_predicate_has_one_virtual_node_in_name_order(name, layout):
     task = text_task(name)
     states = walk(task, steps=8, walks=2)
     encoder = encoding.FlatRelationEncoder(task, layout=layout, **OPTIONS)
@@ -189,7 +189,8 @@ def test_each_used_predicate_has_one_virtual_node_in_key_order(name, layout):
         roles = np.asarray(batch.entity_role[begin:end])
         refs = np.asarray(batch.entity_ref[begin:end])
         virtual = [int(r) for r, role in zip(refs, roles) if role == VIRTUAL_ROLE]
-        assert virtual == sorted(set(virtual))
+        names = [schema.relation_names[ref] for ref in virtual]
+        assert names == sorted(set(names))
         first = int(np.argmax(roles == VIRTUAL_ROLE)) if virtual else None
         cells = graph_cells(batch, graph)
         used = set()

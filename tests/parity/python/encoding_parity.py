@@ -546,7 +546,7 @@ REGISTRY = (
     ),
     Difference(
         "predicate_virtual_order",
-        "Predicate virtual nodes are numbered by the id of the predicate's relation among the used predicates; "
+        "Predicate virtual nodes are numbered by the name of the predicate among the used predicates; "
         "mifrost numbers them in the order of their first use.",
         "the entities of role predicate_virtual: compared in name order",
         (("f01", "C3"),),

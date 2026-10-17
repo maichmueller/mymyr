@@ -46,9 +46,9 @@
 //     before it);
 //   - one action entity per tuple of an action cell, in fill order (relation, then tuple); its `entity_ref` is the row
 //     of the graph's first expansion row that has the ground action, counted from the graph's first row;
-//   - one virtual entity per predicate that has a tuple in the graph, in the order of the predicates' keys (the id of the
-//     predicate's plain state relation, else of its first relation); its `entity_ref` is that key. Predicates without a
-//     tuple have no entity, so the entities of a graph depend on its own tuples only.
+//   - one virtual entity per predicate that has a tuple in the graph, in the order of the predicates' names; its
+//     `entity_ref` is the predicate's key (the id of its plain state relation, else of its first relation). Predicates
+//     without a tuple have no entity, so the entities of a graph depend on its own tuples only.
 //
 // The rules exist once, in per-cell and per-entity functions: cell_count and accumulate_cell / finish_totals (sizes),
 // fill_entities and fill_cell (contents). count_graph and fill_graph are loops over them, and a kernel that spreads a
@@ -171,7 +171,7 @@ struct ContextView
     u32 num_schemas = 0;
     // Predicate virtual nodes (null: the context has none): the virtual index of each relation's predicate, or
     // k_no_virtual for a relation without a predicate, and the key relation of each virtual index. Virtual indices
-    // ascend with their keys.
+    // ascend with the names of their predicates.
     const u32* relation_virtual = nullptr;  // [num_relations]
     const u32* virtual_relation = nullptr;  // [num_virtual]
     u32 num_virtual = 0;

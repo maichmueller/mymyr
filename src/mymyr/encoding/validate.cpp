@@ -327,8 +327,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         {
             if (!virtual_used[static_cast<usize>(v)])
                 fail("graph " + std::to_string(g) + " has a virtual node of a predicate that has no tuple");
-            if (v > 0 && entity_ref[virtual_start + v] <= entity_ref[virtual_start + v - 1])
-                fail("the virtual nodes of graph " + std::to_string(g) + " are not in the order of their predicates' keys");
+            if (v > 0 && schema.virtual_rank(static_cast<u32>(entity_ref[virtual_start + v])) <=
+                             schema.virtual_rank(static_cast<u32>(entity_ref[virtual_start + v - 1])))
+                fail("the virtual nodes of graph " + std::to_string(g) +
+                     " are not in the order of their predicates' names");
         }
         if ((auxiliaries == 1) != auxiliary_used)
             fail("graph " + std::to_string(g) + (auxiliary_used ? " uses an auxiliary entity it does not have"

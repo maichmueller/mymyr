@@ -450,24 +450,19 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         const CellOp op = own->options().targets.contains(TargetSource::Action) ? CellOp::ActionTarget : CellOp::Action;
         action_cells.push_back({id, static_cast<u32>(op), begin, end, relation.arity, relation.logical_arity});
     }
-    // The predicate virtual nodes: the virtual index of every relation's predicate (ascending with the predicate's key
-    // relation) and the key of every virtual index.
+    // The predicate virtual nodes: the virtual index of every relation's predicate (its rank by predicate name) and
+    // the key relation of every virtual index.
     std::vector<u32> relation_virtual, virtual_relation;
     if (own->options().predicate_virtual_nodes)
     {
-        std::vector<i32> keys;
+        virtual_relation.assign(own->num_virtual_predicates(), 0);
         for (u32 id = 0; id < own->num_relations(); ++id)
-            if (own->virtual_key(id) >= 0)
-                keys.push_back(own->virtual_key(id));
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-        for (i32 key : keys)
-            virtual_relation.push_back(static_cast<u32>(key));
-        for (u32 id = 0; id < own->num_relations(); ++id)
-            relation_virtual.push_back(own->virtual_key(id) < 0
-                                           ? detail::k_no_virtual
-                                           : static_cast<u32>(std::lower_bound(keys.begin(), keys.end(), own->virtual_key(id)) -
-                                                              keys.begin()));
+        {
+            const i32 rank = own->virtual_rank(id);
+            relation_virtual.push_back(rank < 0 ? detail::k_no_virtual : static_cast<u32>(rank));
+            if (rank >= 0)
+                virtual_relation[static_cast<u32>(rank)] = static_cast<u32>(own->virtual_key(id));
+        }
     }
     std::vector<InstanceRows> instances;
     instances.reserve(table->size());

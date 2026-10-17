@@ -167,10 +167,11 @@ the graph) for each predicate that one of its tuples has a relation of: the rela
 relation and its goal relations (`[+]on[g]`, `[+]on[g][sat]`, ...). A tuple of such a relation has the node as an
 extra argument right before the predicate's own arguments (after the goal entity of a goal tuple that has one);
 action tuples have no predicate slot. A node exists only if some tuple uses it, so a predicate without tuples in the
-graph has no node, and the nodes are numbered by ascending `entity_ref`, which is the id of the predicate's key
-relation: its plain state relation, or for a predicate without one (a static or derived predicate whose state
-relation is dropped) its first relation in the catalog (C++: `EncodingSchema::virtual_key`). The nullary atoms of a predicate are
-the tuple over its node and the auxiliary entity. Actions are not virtual-node predicates.
+graph has no node, and the nodes are numbered by the name of their predicate (ascending, bytewise), whatever relations
+the schema keeps. The node's `entity_ref` is the id of the predicate's key relation: its plain state relation, or for
+a predicate without one (a static or derived predicate whose state relation is dropped) its first relation in the
+catalog (C++: `EncodingSchema::virtual_key`). The nullary atoms of a predicate are the tuple over its node and the
+auxiliary entity. Actions are not virtual-node predicates.
 
 ## The batch
 

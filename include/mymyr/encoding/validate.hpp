@@ -29,8 +29,8 @@ namespace mymyr::encoding
 ///   cells' tuples in relation order); the action entities, one per tuple of an action relation, numbered the same way,
 ///   each the first argument of its tuple and referring to a row of the graph's expansion (a non-negative entity_ref);
 ///   the predicate virtual entities, one per predicate that has a tuple in the graph and none for the others, ascending
-///   in entity_ref (the key of the predicate, EncodingSchema::virtual_key), each the predicate slot of exactly the
-///   tuples of its predicate's relations;
+///   in the name of the predicate (EncodingSchema::virtual_rank; the entity_ref is the predicate's key,
+///   EncodingSchema::virtual_key), each the predicate slot of exactly the tuples of its predicate's relations;
 /// - the graph's targets are its goal entities in group 0, then, with action targets, its action entities in group 2.
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
 }

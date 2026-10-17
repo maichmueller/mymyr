@@ -531,7 +531,14 @@ TEST(EncoderActions, ASingleStateEqualsItsGraphInABatch)
     }
 }
 
-TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInCatalogOrder)
+/// The name of the predicate a relation belongs to: the relation's name without its goal sign and level.
+std::string predicate_name(const std::string& relation)
+{
+    const usize begin = relation.starts_with("[+]") || relation.starts_with("[-]") ? 3 : 0;
+    return relation.substr(begin, relation.find('[', begin) - begin);
+}
+
+TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInOrderOfTheirNames)
 {
     for (const Problem& p : k_problems)
     {
@@ -558,12 +565,15 @@ TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInCatalogOrder)
             std::set<i64> used;
             for (u32 r = 0; r < R; ++r)
                 if (counts[g * R + r] > 0 && schema.virtual_key(r) >= 0)
-                    used.insert(schema.virtual_key(r));
+                    used.emplace(predicate_name(schema.relation(r).name), schema.virtual_key(r));
+            std::vector<i64> expected_nodes;
+            for (const auto& [name, key] : used)
+                expected_nodes.push_back(key);
             std::vector<i64> nodes;
             for (i64 e = entity_offsets[g]; e < entity_offsets[g + 1]; ++e)
                 if (role[static_cast<usize>(e)] == static_cast<i64>(EntityRole::PredicateVirtual))
                     nodes.push_back(ref[static_cast<usize>(e)]);
-            EXPECT_EQ(std::vector<i64>(used.begin(), used.end()), nodes) << "graph " << g;
+            EXPECT_EQ(expected_nodes, nodes) << "graph " << g;
             std::set<i64> all;
             for (u32 r = 0; r < R; ++r)
                 if (schema.virtual_key(r) >= 0)
@@ -611,6 +621,43 @@ TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
             SCOPED_TRACE(std::string(layout == Layout::Graph ? "graph" : "relation") +
                          (wide ? " all relations" : " actions only"));
             FlatOptions options = action_options();
+TEST(EncoderVirtualNodes, PredicatesWithoutAStateRelationAreRankedByName)
+{
+    // `zz` is static and dropped from the state relations: its only relations are goal relations, sorted before `aa`
+    const std::filesystem::path directory = std::filesystem::path(::testing::TempDir());
+    const std::filesystem::path domain = directory / "ranks_domain.pddl";
+    const std::filesystem::path problem = directory / "ranks_problem.pddl";
+    std::ofstream(domain) << "(define (domain ranks) (:requirements :strips :typing) (:types item)\n"
+                             " (:predicates (aa ?x - item) (zz ?x - item))\n"
+                             " (:action make :parameters (?x - item) :precondition (zz ?x) :effect (aa ?x)))\n";
+    std::ofstream(problem) << "(define (problem p) (:domain ranks) (:objects a - item)\n"
+                              " (:init (zz a)) (:goal (and (aa a) (zz a))))\n";
+    const auto table = rl::TaskTable::single(Task::create(*frontend::load_task(domain, problem)));
+    std::filesystem::remove(domain);
+    std::filesystem::remove(problem);
+    FlatOptions options = test::encoder_options();
+    options.include_static = false;
+    options.include_derived = false;
+    options.predicate_virtual_nodes = true;
+    options.goal_derivations = {GoalDerivation::Plain};
+    const auto encoder = FlatEncoder::create(table, options);
+    const EncodingSchema& schema = encoder->schema();
+    const u32 aa = *schema.find("aa"), zz_goal = *schema.find("[+]zz[g]");
+    ASSERT_LT(zz_goal, aa);
+    EXPECT_EQ(schema.virtual_key(zz_goal), static_cast<i32>(zz_goal));
+    EXPECT_LT(schema.virtual_rank(aa), schema.virtual_rank(zz_goal));
+    const test::Rows rows = test::random_walk(*table, 0, 1, 1);
+    const auto batch = encoder->encode(input_of(rows));
+    validate(*batch, schema);
+    const auto role = ints(*batch, "entity_role");
+    const auto ref = ints(*batch, "entity_ref");
+    std::vector<i64> nodes;
+    for (usize e = 0; e < role.size(); ++e)
+        if (role[e] == static_cast<i64>(EntityRole::PredicateVirtual))
+            nodes.push_back(ref[e]);
+    EXPECT_EQ(nodes, (std::vector<i64>{aa, zz_goal}));
+}
+
             options.layout = layout;
             options.include_static = wide;
             options.include_derived = wide;
