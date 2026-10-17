@@ -53,14 +53,19 @@ public:
     /// relation, ascending), schema_arity (u32 [schemas]: the objects of each action schema's ground actions),
     /// relation_virtual (u32 [relations]: the virtual index of each relation's predicate, k_no_virtual for none) and
     /// virtual_relation (u32: the key relation of each virtual index); the last two are empty without predicate virtual
-    /// nodes. An instance's cells are sorted by relation id, at most one per relation; per-graph cell counts
-    /// (detail::count_graph) are per cell, in this order, not per relation. Every instance has a cell for each action
-    /// relation of the schema, whose tuples come from the expansion rows of a graph and not from its state.
+    /// nodes. An instance has two lists of cells, each sorted by relation id with at most one cell per relation: the
+    /// cells of a graph with the instance's goal, and the cells of a graph whose row has goal masks of its own (the two
+    /// lists share their state and action cells). Per-graph cell counts (detail::count_graph) are per cell, in the
+    /// order of the list the graph uses, not per relation. Every instance has a cell for each action relation of the
+    /// schema, whose tuples come from the expansion rows of a graph and not from its state.
     ///
     /// An instance's goal is its encoding goal (Task::encoding_goal()): a literal whose predicate has no goal relation
     /// in the schema (the equality and nullary predicates can be left out) is dropped, the others become mask bits or
-    /// constant tuples. A goal cell exists for each goal relation of a predicate that has atom slots in the instance or
-    /// a constant literal.
+    /// constant tuples. The goal is complete (the `goal_complete` column) unless a literal was dropped whose truth is
+    /// not fixed (one over a fluent or derived predicate). With the instance's goal a goal cell exists for each goal
+    /// relation of a predicate that has a goal literal over atom slots or a constant literal, over the slots from the
+    /// first to the last of those literals; with goals of the row, for each goal relation of a predicate that has atom
+    /// slots, over all of its slots.
     [[nodiscard]] const rl::ArrayBundle& arrays() const noexcept { return m_arrays; }
     /// The arrays as a POD view on the copy of the block that starts at `block` (the host block by default; a device
     /// copy of the same bytes gives a device view).

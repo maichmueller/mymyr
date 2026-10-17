@@ -10,6 +10,7 @@ from mymyr import encoding, rl
 from conftest import ROOT, text_task, walk
 
 GOALS = ROOT / "tests/data/pddl/goals"
+WIDE = ROOT / "tests/data/pddl/wide_predicates"
 GOAL_ROLE = 2
 AUXILIARY_ROLE = 8
 TEXT_TASKS = ["gripper__prob05", "blocks__probBLOCKS-8-0", "logistics00__probLOGISTICS-6-1", "philosophers__p03-phil4"]
@@ -24,7 +25,8 @@ def goals_task(problem):
 
 
 def cells(batch, graph):
-    """{relation name: (tuples of instance-local entity ids, ids of the tuples in the batch)} of one graph."""
+    """{relation name: (tuples of instance-local entity ids, indices of the tuples among the graph's tuples in
+    graph-major order)} of one graph."""
     relations = batch.num_relations
     graphs = batch.num_graphs
     names = batch.schema.relation_names
@@ -32,6 +34,7 @@ def cells(batch, graph):
     relation_major = batch.schema.options["layout"] == "relation"
     base = int(batch.entity_offsets[graph])
     out = {}
+    index = 0
     for relation, name in enumerate(names):
         cell = relation * graphs + graph if relation_major else graph * relations + relation
         count = int(batch.relation_counts[graph, relation])
@@ -39,8 +42,8 @@ def cells(batch, graph):
             continue
         begin, end = (int(x) for x in batch.relation_arg_offsets[cell : cell + 2])
         arguments = (batch.relation_args[begin:end] - base).reshape(count, arities[relation])
-        first = int(batch.relation_offsets[cell])
-        out[name] = ([tuple(int(x) for x in row) for row in arguments], list(range(first, first + count)))
+        out[name] = ([tuple(int(x) for x in row) for row in arguments], list(range(index, index + count)))
+        index += count
     return out
 
 
@@ -66,6 +69,15 @@ def goal_reference(task, state, literals, schema_names):
             if relation in schema_names:
                 out.setdefault(relation, set()).add(objects or (auxiliary,))
     return {name: sorted(tuples) for name, tuples in out.items()}
+
+
+def goal_is_complete(task, options):
+    """goal_complete of an instance: its goal could be expanded into literals and the options left out no literal whose
+    truth a state can change (a nullary literal with nullary=False; a static literal is fixed)."""
+    dropped = not options.get("nullary", True) and any(
+        not x.objects and x.predicate.kind != "static" for x in task.encoding_goal
+    )
+    return int(task.encoding_goal_complete and not dropped)
 
 
 def goal_cells(batch, graph, targets):
@@ -133,7 +145,7 @@ def test_the_goal_relations_equal_the_goal_literals_of_a_text_task(name, options
     check_goal_graphs(
         encoder, batch, states, lambda g, s, names: goal_reference(task, s, literals, names), targets
     )
-    assert batch.goal_complete.tolist() == [int(task.encoding_goal_complete)] * len(states)
+    assert batch.goal_complete.tolist() == [goal_is_complete(task, options)] * len(states)
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -146,6 +158,56 @@ def test_the_goal_relations_equal_the_goal_literals_of_a_pddl_goal(problem, layo
     literals = goal_literals(task)
     check_goal_graphs(encoder, batch, states, lambda g, s, names: goal_reference(task, s, literals, names), True)
     assert batch.goal_complete.tolist() == [int(task.encoding_goal_complete)] * len(states)
+
+
+def test_goal_relations_wider_than_every_fluent_relation_are_encoded_whole():
+    # wide_predicates: on/1 is the only fluent predicate, link/3 is static and trio/3 derived; a, b, c are objects 0, 1,
+    # 2. The goal is (link a b c) (not (link b b b)) (trio a b c) (not (trio b c a)) (on b); in the initial state (on a)
+    # holds and so do (trio a a a), the static link atoms and (not (trio b c a)).
+    task = mymyr.Task.from_pddl(WIDE / "domain.pddl", WIDE / "p01.pddl") if hasattr(mymyr, "Domain") else pytest.skip(
+        "built without the PDDL front end"
+    )
+    expected_goal = {
+        "[+]link[g]": [(0, 1, 2)], "[+]link[g][sat]": [(0, 1, 2)],
+        "[-]link[g]": [(1, 1, 1)], "[-]link[g][sat]": [(1, 1, 1)],
+        "[+]trio[g]": [(0, 1, 2)], "[+]trio[g][unsat]": [(0, 1, 2)],
+        "[-]trio[g]": [(1, 2, 0)], "[-]trio[g][sat]": [(1, 2, 0)],
+        "[+]on[g]": [(1,)], "[+]on[g][unsat]": [(1,)],
+    }
+    row_goal = {"[+]on[g]": [(0,)], "[+]on[g][sat]": [(0,)], "[-]on[g]": [(2,)], "[-]on[g][sat]": [(2,)],
+                "[+]trio[g]": [(0, 1, 0)], "[+]trio[g][unsat]": [(0, 1, 0)],
+                "[-]trio[g]": [(1, 2, 0)], "[-]trio[g][sat]": [(1, 2, 0)]}
+    metadata = rl.as_table(task).atom_metadata()
+    on = {int(metadata["atom_args"][slot][0]): slot for slot in range(len(metadata["atom_pred"]))}
+    derived = {
+        tuple(int(x) for x in metadata["derived_args"][slot]): slot for slot in range(len(metadata["derived_pred"]))
+    }
+    words = max(1, (len(metadata["atom_pred"]) + 63) // 64)
+    pos, neg = np.zeros((1, words), np.uint64), np.zeros((1, words), np.uint64)
+    pos[0, on[0] // 64] |= np.uint64(1) << np.uint64(on[0] % 64)  # (on a)
+    neg[0, on[2] // 64] |= np.uint64(1) << np.uint64(on[2] % 64)  # (not (on c))
+    dwords = max(1, (len(metadata["derived_pred"]) + 63) // 64)
+    dpos, dneg = np.zeros((1, dwords), np.uint64), np.zeros((1, dwords), np.uint64)
+    slot = derived[(0, 1, 0)]
+    dpos[0, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)  # (trio a b a)
+    slot = derived[(1, 2, 0)]
+    dneg[0, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)  # (not (trio b c a))
+    for layout in ("graph", "relation"):
+        for include_static in (True, False):
+            for include_derived in (True, False):
+                encoder = encoding.FlatRelationEncoder(
+                    task, layout=layout, include_static=include_static, include_derived=include_derived,
+                    goal_derivations=("plain", "satisfied", "unsatisfied"),
+                )
+                for goals, expected in ((None, expected_goal), ((pos, neg, dpos, dneg), row_goal)):
+                    batch = encoder.encode([task.initial_state], goals=goals)
+                    got = {n: sorted(t) for n, (t, _) in cells(batch, 0).items()}
+                    state_cells = {n: t for n, t in got.items() if "[g]" not in n}
+                    assert {n: t for n, t in got.items() if "[g]" in n} == expected
+                    assert state_cells.get("on") == [(0,)]
+                    assert state_cells.get("link") == ([(0, 1, 2), (2, 1, 0)] if include_static else None)
+                    assert state_cells.get("trio") == ([(0, 0, 0)] if include_derived else None)
+                    assert batch.goal_complete.tolist() == [1]
 
 
 def test_a_forall_goal_is_expanded_and_goal_complete_is_per_instance():
@@ -352,9 +414,7 @@ def test_single_states_equal_the_batch():
         got, entities, _ = goal_cells(one, 0, True)
         want, wanted_entities, _ = goal_cells(batch, graph, True)
         assert got == want
-        base_one = int(one.relation_offsets[0])
-        base_batch = int(batch.relation_offsets[graph * batch.num_relations])
-        assert [(e, i - base_one) for e, i in entities] == [(e, i - base_batch) for e, i in wanted_entities]
+        assert entities == wanted_entities
 
 
 def test_the_fingerprint_depends_on_the_targets():

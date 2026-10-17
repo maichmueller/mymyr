@@ -49,10 +49,10 @@ std::vector<i64> ints(const rl::ArrayBundle& bundle, const char* name)
 struct Graph
 {
     std::vector<std::vector<Tuple>> tuples;  // [relation][tuple]
-    std::vector<std::vector<i64>> tuple_ids;  // [relation][tuple]: the batch id of the tuple (layout order)
+    std::vector<std::vector<i64>> tuple_ids;  // [relation][tuple]: the index of the tuple among the graph's tuples
+                                              // in graph-major order (the cells in relation order)
     std::vector<i64> role, ref;               // per entity
     i64 num_objects = 0;
-    i64 first_tuple = 0;
 };
 
 std::vector<Graph> decode(const rl::ArrayBundle& bundle, const EncodingSchema& schema)
@@ -79,7 +79,7 @@ std::vector<Graph> decode(const rl::ArrayBundle& bundle, const EncodingSchema& s
             graph.role.push_back(role[e]);
             graph.ref.push_back(ref[e]);
         }
-        graph.first_tuple = offsets[relation_major ? g : g * R];
+        i64 index = 0;
         for (u64 r = 0; r < R; ++r)
         {
             const u64 s = relation_major ? r * G + g : g * R + r;
@@ -90,7 +90,7 @@ std::vector<Graph> decode(const rl::ArrayBundle& bundle, const EncodingSchema& s
                 for (u32 k = 0; k < arity; ++k)
                     tuple.push_back(args[arg_offsets[s] + t * arity + k] - entity_offsets[g]);
                 graph.tuples[r].push_back(tuple);
-                graph.tuple_ids[r].push_back(offsets[s] + t);
+                graph.tuple_ids[r].push_back(index++);
             }
         }
     }
@@ -329,6 +329,20 @@ struct Tally
     u64 plain = 0, satisfied = 0, unsatisfied = 0, negative = 0, derived = 0;
 };
 
+/// Whether the goal of `task` stays complete under `options`: it was complete, and no literal was dropped whose truth a
+/// state can change (a nullary literal over a fluent or derived predicate under nullary = false; a dropped static or
+/// equality literal has a fixed truth).
+bool stays_complete(const Task& task, const FlatOptions& options)
+{
+    if (!task.encoding_goal_complete())
+        return false;
+    for (const formalism::Literal& literal : task.encoding_goal())
+        if (!options.nullary && task.compiled().arity[literal.pred.v] == 0 &&
+            task.data().predicates[literal.pred.v].kind != formalism::PredKind::Static)
+            return false;
+    return true;
+}
+
 Tally expect_instance_goals(const FlatOptions& options)
 {
     Tally tally;
@@ -358,7 +372,7 @@ Tally expect_instance_goals(const FlatOptions& options)
         const auto complete = ints(*bundle, "goal_complete");
         EXPECT_EQ(complete.size(), rows.size());
         for (const i64 c : complete)
-            EXPECT_EQ(c, table->task(0)->encoding_goal_complete() ? 1 : 0);
+            EXPECT_EQ(c, stays_complete(*table->task(0), options) ? 1 : 0);
     }
     return tally;
 }
@@ -644,11 +658,7 @@ TEST(EncoderGoals, SingleEqualsBatchForMixedInstances)
         Graph a = alone[0], b = graphs[g];
         EXPECT_EQ(a.tuples, b.tuples) << g;
         EXPECT_EQ(a.role, b.role) << g;
-        for (usize e = 0; e < a.ref.size(); ++e)  // a goal entity's ref is a batch id: compare it within the graph
-            if (a.role[e] == 2)
-                EXPECT_EQ(a.ref[e] - a.first_tuple, b.ref[e] - b.first_tuple) << g;
-            else
-                EXPECT_EQ(a.ref[e], b.ref[e]) << g;
+        EXPECT_EQ(a.ref, b.ref) << g;
     }
 }
 
@@ -661,8 +671,8 @@ TEST(EncoderGoals, LayoutsHoldTheSameGraphs)
     const auto a = graph_encoder->encode(input_of(rows));
     const auto b = relation_encoder->encode(input_of(rows));
     validate(*b, relation_encoder->schema());
-    for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "relation_counts", "goal_complete",
-                             "target_offsets", "target_entity", "target_group"})
+    for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref",
+                             "relation_counts", "goal_complete", "target_offsets", "target_entity", "target_group"})
         EXPECT_EQ(ints(*a, name), ints(*b, name)) << name;
     const auto ga = decode(*a, graph_encoder->schema());
     const auto gb = decode(*b, relation_encoder->schema());
@@ -671,6 +681,7 @@ TEST(EncoderGoals, LayoutsHoldTheSameGraphs)
     {
         EXPECT_EQ(ga[g].tuples, gb[g].tuples);
         EXPECT_EQ(ga[g].role, gb[g].role);
+        EXPECT_EQ(ga[g].ref, gb[g].ref);
     }
 }
 
@@ -755,32 +766,6 @@ TEST(EncoderGoals, TheFingerprintSeparatesTargets)
     EXPECT_FALSE(without->has_targets());
 }
 
-/// A copy of `bundle` whose array `name` has `delta` added to the entry at `index`.
-rl::ArrayBundle with_change(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 delta)
-{
-    rl::ArrayBundle::Builder out;
-    for (const rl::ArrayInfo& info : bundle.arrays())
-    {
-        const auto* first = static_cast<const std::byte*>(bundle.data(info));
-        std::vector<std::byte> bytes(first, first + info.elements() * rl::dtype_bytes(info.dtype));
-        if (info.name == name)
-        {
-            std::byte* at = bytes.data() + index * rl::dtype_bytes(info.dtype);
-            switch (info.dtype)
-            {
-                case rl::DType::U8: at[0] = static_cast<std::byte>(std::to_integer<i64>(at[0]) + delta); break;
-                case rl::DType::I32: { i32 v; std::memcpy(&v, at, 4); v += static_cast<i32>(delta); std::memcpy(at, &v, 4); break; }
-                case rl::DType::I64: { i64 v; std::memcpy(&v, at, 8); v += delta; std::memcpy(at, &v, 8); break; }
-                default: ADD_FAILURE() << "unexpected dtype of " << name;
-            }
-        }
-        out.add_bytes(info.name, info.dtype, info.shape, std::move(bytes), info.words);
-    }
-    for (const auto& [scalar, value] : bundle.scalars())
-        out.scalar(scalar, value);
-    return out.build();
-}
-
 TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
 {
     const auto table = goals_table();
@@ -792,7 +777,10 @@ TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
     const auto goal = static_cast<u64>(std::find(roles.begin(), roles.end(), 2) - roles.begin());
     ASSERT_LT(goal, roles.size());
     const auto rejected = [&](const char* array, u64 index, i64 delta)
-    { EXPECT_THROW(validate(with_change(*batch, array, index, delta), encoder->schema()), std::invalid_argument) << array; };
+    {
+        EXPECT_THROW(validate(test::with_change(*batch, array, index, delta), encoder->schema()), std::invalid_argument)
+            << array;
+    };
     rejected("goal_complete", 0, 2);
     rejected("entity_ref", goal, 1);
     rejected("entity_role", goal, -2);
@@ -800,4 +788,261 @@ TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
     rejected("target_group", 0, 1);
     rejected("target_offsets", 1, 1);
 }
+
+TEST(EncoderGoals, AGoalTupleRepeatingTheObjectsOfItsPredecessorIsRejected)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 4, 3);
+    const auto encoder = FlatEncoder::create(table, goal_options());
+    const EncodingSchema& schema = encoder->schema();
+    const auto batch = encoder->encode(input_of(rows));
+    ASSERT_NO_THROW(validate(*batch, schema));
+    const u64 R = schema.num_relations();
+    const auto counts = ints(*batch, "relation_counts");
+    const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+    const auto args = ints(*batch, "relation_args");
+    bool found = false;
+    for (u64 g = 0; g < rows.size() && !found; ++g)
+        for (u32 r = 0; r < R && !found; ++r)
+        {
+            const u32 arity = schema.relation(r).arity;
+            if (schema.slot_roles(r).front() != SlotRole::GoalTarget || arity < 2 || counts[g * R + r] < 2)
+                continue;
+            found = true;
+            // the second tuple keeps its goal entity and takes the objects of the first
+            const u64 first = static_cast<u64>(arg_offsets[g * R + r]), second = first + arity;
+            rl::ArrayBundle corrupted = test::with_value(*batch, "relation_args", second + 1, args[first + 1]);
+            for (u32 k = 2; k < arity; ++k)
+                corrupted = test::with_value(corrupted, "relation_args", second + k, args[first + k]);
+            EXPECT_THROW(validate(corrupted, schema), std::invalid_argument) << schema.relation(r).name;
+        }
+    ASSERT_TRUE(found);
+}
+
+TEST(EncoderGoals, MoreGoalTuplesThanGoalEntitiesAreRejectedBeforeAReferenceIsRead)
+{
+    const auto table = goals_table();
+    const test::Rows rows = mixed_rows(*table, 2, 5);
+    const auto encoder = FlatEncoder::create(table, goal_options());
+    const auto batch = encoder->encode(input_of(rows));
+    ASSERT_NO_THROW(validate(*batch, encoder->schema()));
+    // drop the batch's last entity, a goal entity, from its graph and from the targets: its tuple has no entity left
+    const auto entity_offsets = ints(*batch, "entity_offsets");
+    const auto target_offsets = ints(*batch, "target_offsets");
+    const u64 G = rows.size(), E = static_cast<u64>(entity_offsets[G]), T = static_cast<u64>(target_offsets[G]);
+    ASSERT_GT(T, 0u);
+    ASSERT_EQ(ints(*batch, "entity_role")[E - 1], 2);
+    rl::ArrayBundle corrupted = test::with_value(*batch, "entity_offsets", G, static_cast<i64>(E) - 1);
+    corrupted = test::with_value(corrupted, "target_offsets", G, static_cast<i64>(T) - 1);
+    corrupted = test::with_value(corrupted, "target_entity", T - 1, 0);
+    corrupted = test::with_value(corrupted, "entity_role", E - 1, 0);
+    corrupted = test::with_value(corrupted, "entity_ref", E - 1, 0);
+    try
+    {
+        validate(corrupted, encoder->schema());
+        ADD_FAILURE() << "the batch was accepted";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("has an entity outside its graph"), std::string::npos)
+            << error.what();
+    }
+}
+
+TEST(EncoderGoals, TheFillRefusesAnyInputThatTheCountDidNotSee)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("goals", "conjunctive"));
+    const auto encoder = FlatEncoder::create(table, goal_options(Layout::Graph, false));
+    const test::Rows rows = test::random_walk(*table, 0, 5, 3);
+    const u32 words = table->words(), derived_words = std::max(1u, table->derived_words());
+    std::vector<u64> pos(2 * words, 0), neg(2 * words, 0), dpos(2 * derived_words, 0), dneg(2 * derived_words, 0);
+    std::vector<u64> other_neg = neg, other_dpos = dpos, other_dneg = dneg;
+    EncodeInput in = input_of(rows);
+    in.goal_pos = pos.data();
+    in.goal_neg = neg.data();
+    in.goal_stride = 0;
+    in.goal_words = words;
+    in.goal_derived_pos = dpos.data();
+    in.goal_derived_neg = dneg.data();
+    in.goal_derived_stride = 0;
+    in.goal_derived_words = derived_words;
+    ThreadPool pool(1);
+    EncodeScratch scratch;
+    const FlatSizes sizes = encoder->count(in, pool, scratch);
+    const u64 G = rows.size(), R = encoder->schema().num_relations();
+    std::vector<i32> task_ids(G), num_objects(G), entity_offsets(G + 1), counts(G * R), offsets(G * R + 1),
+        arg_offsets(G * R + 1), args(sizes.args), refs(sizes.entities);
+    std::vector<u8> roles(sizes.entities), complete(G);
+    const FlatBuffers out{task_ids.data(), num_objects.data(), entity_offsets.data(), roles.data(), refs.data(),
+                          counts.data(),   offsets.data(),     arg_offsets.data(),    args.data(),  complete.data()};
+    auto refused = [&](const EncodeInput& other)
+    { EXPECT_THROW(encoder->fill(other, sizes, out, pool, scratch), std::invalid_argument); };
+    EncodeInput changed = in;
+    changed.goal_neg = other_neg.data();
+    refused(changed);
+    changed = in;
+    changed.goal_derived_pos = other_dpos.data();
+    refused(changed);
+    changed = in;
+    changed.goal_derived_neg = other_dneg.data();
+    refused(changed);
+    changed = in;
+    changed.goal_stride = words;
+    refused(changed);
+    changed = in;
+    changed.goal_derived_stride = derived_words;
+    refused(changed);
+    changed = in;
+    changed.goal_words = words + 1;
+    refused(changed);
+    changed = in;
+    changed.goal_derived_words = derived_words + 1;
+    refused(changed);
+    changed = in;
+    changed.states.stride = words + 1;
+    refused(changed);
+    EXPECT_NO_THROW(encoder->fill(in, sizes, out, pool, scratch));
+}
+
+TEST(EncoderGoals, SlicesOfABatchKeepTheirEntityReferences)
+{
+    const auto table = goals_table();
+    const test::Rows rows = mixed_rows(*table, 4, 17);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+    {
+        const auto encoder = FlatEncoder::create(table, goal_options(layout));
+        const auto batch = encoder->encode(input_of(rows));
+        const auto entity_offsets = ints(*batch, "entity_offsets");
+        const auto role = ints(*batch, "entity_role");
+        const auto ref = ints(*batch, "entity_ref");
+        const u64 from = 3, to = 11;
+        test::Rows slice;
+        slice.words = rows.words;
+        slice.data.assign(rows.data.begin() + static_cast<std::ptrdiff_t>(from * rows.words),
+                          rows.data.begin() + static_cast<std::ptrdiff_t>(to * rows.words));
+        slice.task_ids.assign(rows.task_ids.begin() + static_cast<std::ptrdiff_t>(from),
+                              rows.task_ids.begin() + static_cast<std::ptrdiff_t>(to));
+        const auto part = encoder->encode(input_of(slice));
+        const auto part_role = ints(*part, "entity_role");
+        const auto part_ref = ints(*part, "entity_ref");
+        const auto first = static_cast<std::ptrdiff_t>(entity_offsets[from]);
+        const auto last = static_cast<std::ptrdiff_t>(entity_offsets[to]);
+        EXPECT_EQ(part_role, std::vector<i64>(role.begin() + first, role.begin() + last));
+        EXPECT_EQ(part_ref, std::vector<i64>(ref.begin() + first, ref.begin() + last));
+        EXPECT_NE(std::count(part_role.begin(), part_role.end(), 2), 0);
+    }
+}
+
+TEST(EncoderGoals, TheGoalIsIncompleteWhenALiteralWithoutAFixedTruthIsDropped)
+{
+    // goals/conjunctive has the nullary literal (done) over a derived predicate; blocks_flags/p01 has two over fluents
+    using Problem = std::pair<const char*, const char*>;
+    for (const auto& [domain, problem] : {Problem{"goals", "conjunctive"}, Problem{"blocks_flags", "p01"}})
+    {
+        SCOPED_TRACE(std::string(domain) + "/" + problem);
+        const auto table = rl::TaskTable::single(test::pddl_task(domain, problem));
+        const test::Rows rows = test::random_walk(*table, 0, 3, 2);
+        auto complete = [&](const FlatOptions& options)
+        { return ints(*FlatEncoder::create(table, options)->encode(input_of(rows)), "goal_complete"); };
+        FlatOptions options = goal_options();
+        ASSERT_TRUE(table->task(0)->encoding_goal_complete());
+        EXPECT_EQ(complete(options), (std::vector<i64>{1, 1, 1}));
+        options.nullary = false;
+        EXPECT_EQ(complete(options), (std::vector<i64>{0, 0, 0}));
+        // the equality predicate is static: dropping it leaves the goal as complete as it was
+        options.nullary = true;
+        options.equality = false;
+        EXPECT_EQ(complete(options), (std::vector<i64>{1, 1, 1}));
+    }
+}
+
+// ------------------------------------------------------------------------------- relations wider than the state's
+
+TEST(EncoderGoals, GoalRelationsWiderThanEveryStateRelationAreEncodedWhole)
+{
+    // wide_predicates: on/1 is the only fluent predicate; link/3 is static and trio/3 derived, with objects a b c = 0 1
+    // 2
+    const auto table = rl::TaskTable::single(test::pddl_task("wide_predicates", "p01"));
+    const Task& task = *table->task(0);
+    const u32 words = table->words(), derived_words = std::max(1u, table->derived_words());
+    const u32 on_a = test::atom_slot(task, AtomKind::Fluent, "on", {0});
+    const u32 on_b = test::atom_slot(task, AtomKind::Fluent, "on", {1});
+    const u32 on_c = test::atom_slot(task, AtomKind::Fluent, "on", {2});
+    test::Rows rows;
+    rows.words = words;
+    rows.data.assign(words, 0);
+    rows.task_ids = {0};
+    test::set_bit(rows.data, on_a);
+    test::set_bit(rows.data, on_b);
+    // goal: (link a b c) (not (link b b b)) (trio a b c) (not (trio b c a)) (on b); in the state {(on a) (on b)} the
+    // static literals and (on b) hold, (trio a b c) does not (c is not on), and (not (trio b c a)) holds
+    const Named instance_goal = {
+        {"[+]link[g]", {{0, 1, 2}}},        {"[+]link[g][sat]", {{0, 1, 2}}},
+        {"[-]link[g]", {{1, 1, 1}}},        {"[-]link[g][sat]", {{1, 1, 1}}},
+        {"[+]trio[g]", {{0, 1, 2}}},        {"[+]trio[g][unsat]", {{0, 1, 2}}},
+        {"[-]trio[g]", {{1, 2, 0}}},        {"[-]trio[g][sat]", {{1, 2, 0}}},
+        {"[+]on[g]", {{1}}},                {"[+]on[g][sat]", {{1}}}};
+    // goals of the row: (on a), (not (on c)), the derived (trio a b a) and (not (trio b c a)); all four hold
+    std::vector<u64> pos(words, 0), neg(words, 0), dpos(derived_words, 0), dneg(derived_words, 0);
+    test::set_bit(pos, on_a);
+    test::set_bit(neg, on_c);
+    test::set_bit(dpos, test::atom_slot(task, AtomKind::Derived, "trio", {0, 1, 0}));
+    test::set_bit(dneg, test::atom_slot(task, AtomKind::Derived, "trio", {1, 2, 0}));
+    const Named row_goal = {
+        {"[+]on[g]", {{0}}},
+        {"[+]on[g][sat]", {{0}}},
+        {"[-]on[g]", {{2}}},
+        {"[-]on[g][sat]", {{2}}},
+        {"[+]trio[g]", {{0, 1, 0}}},
+        {"[+]trio[g][sat]", {{0, 1, 0}}},
+        {"[-]trio[g]", {{1, 2, 0}}},
+        {"[-]trio[g][sat]", {{1, 2, 0}}}};
+    const std::vector<Tuple> on_tuples = {{0}, {1}};
+    const std::vector<Tuple> link_tuples = {{0, 1, 2}, {2, 1, 0}};
+    const std::vector<Tuple> trio_tuples = {{0, 0, 0}, {0, 0, 1}, {0, 1, 0}, {0, 1, 1},
+                                            {1, 0, 0}, {1, 0, 1}, {1, 1, 0}, {1, 1, 1}};
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+        for (const bool include_static : {true, false})
+            for (const bool include_derived : {true, false})
+            {
+                SCOPED_TRACE(std::string(layout == Layout::Graph ? "graph" : "relation") +
+                             (include_static ? "" : " without static") + (include_derived ? "" : " without derived"));
+                FlatOptions options = goal_options(layout, false);
+                options.include_static = include_static;
+                options.include_derived = include_derived;
+                const auto encoder = FlatEncoder::create(table, options);
+                const EncodingSchema& schema = encoder->schema();
+                EXPECT_EQ(encoder->context().max_arity(), 3u);
+                EXPECT_EQ(schema.find("link").has_value(), include_static);
+                EXPECT_EQ(schema.find("trio").has_value(), include_derived);
+                for (const bool row_goals : {false, true})
+                {
+                    EncodeInput in = input_of(rows);
+                    if (row_goals)
+                    {
+                        in.goal_pos = pos.data();
+                        in.goal_neg = neg.data();
+                        in.goal_words = words;
+                        in.goal_derived_pos = dpos.data();
+                        in.goal_derived_neg = dneg.data();
+                        in.goal_derived_words = derived_words;
+                    }
+                    const auto bundle = encoder->encode(in);
+                    validate(*bundle, schema);
+                    const auto graphs = decode(*bundle, schema);
+                    expect_goals(*bundle, schema, graphs, {row_goals ? row_goal : instance_goal});
+                    EXPECT_EQ(graphs[0].tuples[*schema.find("on")], on_tuples);
+                    if (include_static)
+                    {
+                        EXPECT_EQ(graphs[0].tuples[*schema.find("link")], link_tuples);
+                    }
+                    if (include_derived)
+                    {
+                        EXPECT_EQ(graphs[0].tuples[*schema.find("trio")], trio_tuples);
+                    }
+                    EXPECT_EQ(ints(*bundle, "goal_complete"), (std::vector<i64>{1}));
+                }
+            }
+}
+
 }  // namespace

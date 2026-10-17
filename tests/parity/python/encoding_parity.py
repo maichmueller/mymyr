@@ -219,7 +219,8 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     """Graph ``row`` of a batch of ``encoder``, restricted to the relations of the given lanes (``None``: all).
     ``tasks`` are the tasks of the batch's table, indexed by task id. A goal entity is named
     ``[+](predicate arguments)[g]`` after the plain goal tuple it stands for (the entity's reference is the tuple's
-    index in the batch). An action entity is named ``(action arguments)`` after the action tuples it leads."""
+    index among the graph's tuples in graph-major order). An action entity is named ``(action arguments)`` after the
+    action tuples it leads."""
     task = tasks[int(batch.task_ids[row])]
     role_names = batch.schema.entity_role_names
     begin, end = (int(x) for x in batch.entity_offsets[row : row + 2])
@@ -237,11 +238,13 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     entities = [None if role in ("goal", "action") else (role, entity_name(role, ref, task, names))
                 for role, ref in zip(roles, refs)]
     rows = {}
+    graph_tuples = 0
     for relation in range(relations):
         count = int(batch.relation_counts[row, relation])
         if not count:
             continue
         cell = segment(relation)
+        first_tuple, graph_tuples = graph_tuples, graph_tuples + count
         first, last = (int(x) for x in batch.relation_arg_offsets[cell : cell + 2])
         assert last - first == count * arities[relation]
         arguments = (batch.relation_args[first:last] - begin).reshape(count, arities[relation])
@@ -249,7 +252,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
         rows[relation] = [tuple(int(x) for x in key) for key in arguments]
         goal = GOAL_RELATION.match(names[relation])
         if goal and encoder.relation_lanes[relation] == "goal" and "goal" in roles:
-            identifiers = int(batch.relation_offsets[cell]) + np.arange(count)
+            identifiers = first_tuple + np.arange(count)
             for identifier, key in zip(identifiers, rows[relation]):
                 position = next(i for i, (role, ref) in enumerate(zip(roles, refs))
                                 if role == "goal" and ref == int(identifier))
@@ -451,12 +454,15 @@ def _nullary_over_auxiliary(expected, actual, context):
 
 def _action_subset(expected, actual, context):
     """The reference was given the actions of its record; the native encoder is given every applicable action. When
-    the record lists fewer, the native action entities that it does not list, and the tuples over them, are
-    projected away."""
+    the record lists fewer, the native action entities that it does not list, and the tuples over them, are projected
+    away, but only those the task says are applicable in the record's state (computed here, independently of the
+    native encoder): any other native action entity stays and is a mismatch."""
     if context.actions is None:
         return expected, actual
     given = set(context.actions)
-    dropped = {name for role, name in actual.entities if role == "action" and name not in given}
+    state = replay(context.task, context.state["path"])
+    applicable = {str(a) for a in context.task.applicable_actions(state)}
+    dropped = {name for role, name in actual.entities if role == "action" and name not in given and name in applicable}
     if not dropped:
         return expected, actual
     entities = [e for e in actual.entities if e[1] not in dropped or e[0] != "action"]
@@ -494,7 +500,7 @@ REGISTRY = (
         "A record's reference encoding was given the actions listed in its inputs, which can be fewer than the "
         "applicable ones; the native encoder is given every applicable action.",
         "the action entities that the record does not list, and the tuples over them, only when the record lists "
-        "fewer actions than the state has",
+        "fewer actions than the state has and the task says the entity's action is applicable in the state",
         (("f03", "C3"), ("f04", "C3"), ("f06", "C3"), ("f07", "C3")),
         _action_subset,
     ),
@@ -540,7 +546,7 @@ REGISTRY = (
     ),
     Difference(
         "predicate_virtual_order",
-        "Predicate virtual nodes are numbered by the id of the predicate's relation among the used predicates; "
+        "Predicate virtual nodes are numbered by the name of the predicate among the used predicates; "
         "mifrost numbers them in the order of their first use.",
         "the entities of role predicate_virtual: compared in name order",
         (("f01", "C3"),),

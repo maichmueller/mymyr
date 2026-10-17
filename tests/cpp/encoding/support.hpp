@@ -5,9 +5,13 @@
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/rl/task_table.hpp"
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -75,5 +79,80 @@ inline Rows random_walk(const rl::TaskTable& table, u32 instance, u64 n, u64 see
         }
     }
     return rows;
+}
+
+/// The slot of the atom `name(objects)` (object ids) among the fluent or derived atoms of `task`; a test failure if the
+/// task has none.
+inline u32 atom_slot(const Task& task, AtomKind kind, const std::string& name, const std::vector<i64>& objects)
+{
+    const u32 slots = kind == AtomKind::Fluent ? task.atoms().fluent_slots() : task.atoms().derived_slots();
+    for (u32 slot = 0; slot < slots; ++slot)
+    {
+        const u32* record = task.atoms().record(kind, slot);
+        if (task.data().str(task.data().predicates[record[0]].name) != name)
+            continue;
+        std::vector<i64> found;
+        for (u32 k = 0; k < task.compiled().arity[record[0]]; ++k)
+            found.push_back(record[1 + k]);
+        if (found == objects)
+            return slot;
+    }
+    ADD_FAILURE() << name << " has no such atom slot";
+    return 0;
+}
+
+inline void set_bit(std::vector<u64>& words, u32 slot) { words[slot >> 6] |= u64{1} << (slot & 63); }
+
+/// A copy of `bundle` whose entry `index` of array `name` has `change(old value)` in its place.
+template<class Change>
+rl::ArrayBundle with_edit(const rl::ArrayBundle& bundle, const char* name, u64 index, Change change)
+{
+    rl::ArrayBundle::Builder out;
+    for (const rl::ArrayInfo& info : bundle.arrays())
+    {
+        const auto* first = static_cast<const std::byte*>(bundle.data(info));
+        std::vector<std::byte> bytes(first, first + info.elements() * rl::dtype_bytes(info.dtype));
+        if (info.name == name)
+        {
+            std::byte* at = bytes.data() + index * rl::dtype_bytes(info.dtype);
+            switch (info.dtype)
+            {
+                case rl::DType::U8: at[0] = static_cast<std::byte>(change(std::to_integer<i64>(at[0]))); break;
+                case rl::DType::I32:
+                {
+                    i32 v;
+                    std::memcpy(&v, at, 4);
+                    v = static_cast<i32>(change(v));
+                    std::memcpy(at, &v, 4);
+                    break;
+                }
+                case rl::DType::I64:
+                {
+                    i64 v;
+                    std::memcpy(&v, at, 8);
+                    v = change(v);
+                    std::memcpy(at, &v, 8);
+                    break;
+                }
+                default: ADD_FAILURE() << "unexpected dtype of " << name;
+            }
+        }
+        out.add_bytes(info.name, info.dtype, info.shape, std::move(bytes), info.words);
+    }
+    for (const auto& [scalar, value] : bundle.scalars())
+        out.scalar(scalar, value);
+    return out.build();
+}
+
+/// A copy of `bundle` whose array `name` has `delta` added to the entry at `index`.
+inline rl::ArrayBundle with_change(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 delta)
+{
+    return with_edit(bundle, name, index, [delta](i64 v) { return v + delta; });
+}
+
+/// A copy of `bundle` whose entry `index` of array `name` is `value`.
+inline rl::ArrayBundle with_value(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 value)
+{
+    return with_edit(bundle, name, index, [value](i64) { return value; });
 }
 }  // namespace mymyr::test

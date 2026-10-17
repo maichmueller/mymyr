@@ -318,6 +318,24 @@ def test_a_record_that_lists_fewer_actions_excuses_only_the_unlisted_ones():
     assert ("tuple", name) in {(m.kind, m.where) for m in compare(expected, dropped, context)}
 
 
+def test_a_native_action_that_is_not_applicable_is_a_mismatch_even_when_the_record_lists_fewer_actions():
+    expected, actual, context = goal_case("C3")
+    assert compare(expected, actual, context) == []
+    fake = "(bogus x y)"
+    entity = copy(actual)
+    entity.entities.append(("action", fake))
+    assert {m.kind for m in compare(expected, entity, context)} == {"entity"}
+    name = next(n for n, ts in actual.tuples.items() if any(t[0] in context.actions for t in ts))
+    with_tuple = copy(entity)
+    with_tuple.tuples[name] = with_tuple.tuples[name] + [(fake,) + actual.tuples[name][0][1:]]
+    assert {m.kind for m in compare(expected, with_tuple, context)} >= {"entity", "tuple"}
+    # an applicable action that the record does not list is excused, but the same entity under a name that is not an
+    # applicable action is not
+    unlisted = next(i for i, (r, n) in enumerate(actual.entities) if r == "action" and n not in context.actions)
+    renamed = copy(actual)
+    renamed.entities[unlisted] = ("action", fake)
+    assert {m.kind for m in compare(expected, renamed, context)} >= {"entity"}
+
 
 def test_the_goal_given_with_a_record_is_the_goal_of_its_graph():
     expected, actual, context = goal_case("C3", "s1")

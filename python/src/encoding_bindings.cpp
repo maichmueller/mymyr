@@ -632,11 +632,27 @@ void import_rows(ImportedRows& rows, const encoding::FlatEncoder& encoder, State
         if (made_over.schema_names() != table.schema_names() || made_over.schema_arities() != table.schema_arities())
             throw nb::value_error("mymyr: encoding: actions were expanded over another domain than the encoder's");
         for (u64 row = 0; row < states.view.rows; ++row)
-            if (rows.actions.task_ids[row] != (ids ? ids[row] : 0))
+        {
+            const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
+            if (rows.actions.task_ids[row] != static_cast<i32>(instance))
                 throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
                                        " were expanded for instance " + std::to_string(rows.actions.task_ids[row]) +
-                                       ", the batch has instance " + std::to_string(ids ? ids[row] : 0))
+                                       ", the batch has instance " + std::to_string(instance))
                                           .c_str());
+            // the rows' bindings and schemas are those of the instance they were expanded for: it must be the encoder's
+            if (instance >= made_over.size())
+                throw nb::value_error(("mymyr: encoding: the actions were expanded over a table without instance " +
+                                       std::to_string(instance))
+                                          .c_str());
+            const Task& expected = *table.task(instance);
+            const Task& given = *made_over.task(instance);
+            if (given.uid() != expected.uid() && (given.fingerprint() != expected.fingerprint() ||
+                                                  given.encoding_fingerprint() != expected.encoding_fingerprint()))
+                throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
+                                       " were expanded over another task than instance " + std::to_string(instance) +
+                                       " of the encoder's table: it differs in fingerprint or atom encoding")
+                                          .c_str());
+        }
         input.actions = &rows.actions.view;
     }
 }
@@ -695,9 +711,10 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "uint8 [E]: the role of each entity, an index into entity_role_names. Absent when the entity arrays are implicit "
      "(FlatBatch.implicit_entities)."},
     {"entity_ref",
-     "index [E]: an object's instance-local id; a goal entity's tuple (its position in all tuples in layout order); an "
-     "action entity's first row in the expansion given as `actions`; a predicate virtual node's key (the id of its "
-     "predicate's state relation); -1 for the auxiliary entity. Absent when implicit."},
+     "index [E]: an object's instance-local id; a goal entity's tuple (its index among the graph's tuples in "
+     "graph-major order); an action entity's first row among its graph's rows of the expansion given as `actions` "
+     "(the expansion row is actions.offsets[g] + entity_ref); a predicate virtual node's key (the id of its "
+     "predicate's state relation); -1 for the auxiliary entity. The same in both layouts. Absent when implicit."},
     {"relation_counts",
      "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
      "emit_counts=False."},
@@ -708,7 +725,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"relation_args", "index [A]: the entities of the tuples, tuple after tuple, `arity` per tuple of the relation."},
     {"goal_complete",
      "uint8 [G]: 1 iff the goal relations of the graph hold its whole goal: its instance's goal when every conjunct could "
-     "be expanded into literals (Task.encoding_goal_complete), always for a goal given with `goals`. Absent when the "
+     "be expanded into literals (Task.encoding_goal_complete) and no literal whose truth a state can change was left "
+     "out by the options (a nullary literal with nullary=False), always for a goal given with `goals`. Absent when the "
      "schema has no goal relations."},
     {"target_offsets",
      "index [G + 1]: graph g's targets are [target_offsets[g], target_offsets[g + 1]). Absent without target_sources."},
@@ -929,12 +947,17 @@ void bind_encoding(nb::module_& parent)
              "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
              "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
              "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "`rl.goal_masks` gives the instance's goal over fluent slots only, no derived masks, so that a "
+             "call with them equals a call without `goals` only for an instance whose complete goal has no literal "
+             "over a static or derived predicate or over an atom without a slot. "
              "actions: the mymyr.rl.Expansion of the same states over the same table (rl.expand(table, states, "
              "task_ids)): the action relations then hold one tuple (action entity, objects...) per distinct ground "
              "action among the expansion rows of each state, in lexicographic order of the objects, and "
-             "`entity_ref` of an action entity is the index of its first row in the expansion (apply that action "
-             "with expansion.succ[row]). Without it the action relations are empty. The rows must be in canonical "
-             "order (rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
+             "`entity_ref` of an action entity is the index of its first row among the rows of its own state "
+             "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]). Without it the "
+             "action relations are empty. The expansion must be over the encoder's own table or over tasks that "
+             "have, per instance, the same fingerprint and atom encoding. The rows must be in canonical order "
+             "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
