@@ -307,8 +307,8 @@ def test_pickle_heuristics(kind):
     assert q.kind == "perfect"
     for i in range(space.num_states):
         assert q(s2.state(i)) == p(space.state(i)) == space.unit_goal_distance(i)
-    stats = pickle.loads(pickle.dumps(h.stats))
-    assert public(stats) == public(h.stats)
+    counters = pickle.loads(pickle.dumps(h.counters))
+    assert public(counters) == public(h.counters)
 
 
 @needs_frontend

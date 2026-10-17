@@ -75,10 +75,9 @@ std::unique_ptr<H::Heuristic> make(const Task& task, H::Kind k, H::Costs costs, 
 TEST(LandmarkHeuristics, KindNamesAndRefusals)
 {
     EXPECT_EQ(H::parse_kind("lmcut"), H::Kind::LmCut);
-    EXPECT_EQ(H::parse_kind("lm_cut"), H::Kind::LmCut);
     EXPECT_EQ(H::parse_kind("lmcount"), H::Kind::LmCount);
-    EXPECT_EQ(H::parse_kind("lm_count"), H::Kind::LmCount);
-    EXPECT_EQ(H::parse_kind("landmark_count"), H::Kind::LmCount);
+    for (const char* other : {"lm_cut", "lm_count", "landmark_count"})
+        EXPECT_THROW((void)H::parse_kind(other), std::invalid_argument) << other;
     EXPECT_STREQ(H::to_string(H::Kind::LmCut), "lmcut");
     EXPECT_STREQ(H::to_string(H::Kind::LmCount), "lmcount");
 

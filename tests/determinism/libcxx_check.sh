@@ -8,13 +8,15 @@
 # 3. Runs tests/python/test_determinism.py five times (its hashes were written with GCC 16 and libstdc++), then the
 #    whole Python suite, with that module.
 #
-#   WORK=<dir for libc++> CLANG=/usr/lib/llvm-22/bin OUT=<scratch dir> tests/determinism/libcxx_check.sh
+#   WORK=<dir for libc++> CLANG=/usr/lib/llvm-22/bin OUT=<scratch dir> JOBS=<parallel compiles, default 8> \
+#     tests/determinism/libcxx_check.sh
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=${WORK:-$ROOT/.work}
 CLANG=${CLANG:-/usr/lib/llvm-22/bin}
 OUT=${OUT:-$ROOT/build/libcxx-check}
 PYTHON=${PYTHON:-$ROOT/.venv/bin/python}
+JOBS=${JOBS:-8}
 V=22.1.8
 LCX=$WORK/libcxx-22
 mkdir -p "$OUT"
@@ -27,7 +29,7 @@ if [ ! -f "$LCX/lib/libc++.so" ]; then
     -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF \
     -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
     -DLIBCXXABI_USE_LLVM_UNWINDER=OFF > "$OUT/libcxx-cfg.log" 2>&1 || { echo "libc++ configure failed"; exit 1; }
-  ninja -C build-libcxx -j 16 install-cxx install-cxxabi > "$OUT/libcxx-build.log" 2>&1 || { echo "libc++ build failed"; exit 1; }
+  ninja -C build-libcxx -j "$JOBS" install-cxx install-cxxabi > "$OUT/libcxx-build.log" 2>&1 || { echo "libc++ build failed"; exit 1; }
 fi
 cd "$ROOT" || exit 1
 FLAGS="-nostdinc++ -isystem $LCX/include/c++/v1 -D_LIBCPP_DEBUG_RANDOMIZE_UNSPECIFIED_STABILITY"
@@ -37,7 +39,7 @@ cmake -S . -B build/libcxx-py -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMP
   -DCMAKE_MODULE_LINKER_FLAGS="$LINK" -DCMAKE_EXE_LINKER_FLAGS="$LINK" -DMYMYR_FRONTEND=OFF -DMYMYR_PYTHON=ON \
   -DMYMYR_TESTS=OFF -DMYMYR_BENCH=OFF -DMYMYR_PY_STUBS=OFF -DMYMYR_PY_TEST_EXT=OFF -DPython_EXECUTABLE="$PYTHON" \
   > "$OUT/mymyr-cfg.log" 2>&1 || { echo "mymyr configure failed"; exit 1; }
-cmake --build build/libcxx-py -j 16 > "$OUT/mymyr-build.log" 2>&1 || { echo "mymyr build failed"; exit 1; }
+cmake --build build/libcxx-py -j "$JOBS" > "$OUT/mymyr-build.log" 2>&1 || { echo "mymyr build failed"; exit 1; }
 echo "build: $(grep -c 'warning:' "$OUT/mymyr-build.log") warnings"
 # the package: the Python sources plus the libc++ module, ahead of the regular install on the path
 rm -rf "$OUT/pkg" && mkdir -p "$OUT/pkg" && cp -r python/mymyr "$OUT/pkg/mymyr" && rm -f "$OUT"/pkg/mymyr/_core*.so

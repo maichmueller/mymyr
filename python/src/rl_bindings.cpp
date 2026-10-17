@@ -266,7 +266,7 @@ struct PaddedResult
 {
     std::shared_ptr<Block> block;
     u64 rows = 0;
-    u32 K = 0, words = 0, label_width = 0, numeric_words = 0;
+    u32 k = 0, words = 0, label_width = 0, numeric_words = 0;
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
     bool has_goal = false, has_derived = false, overflow = false;
@@ -274,12 +274,12 @@ struct PaddedResult
     WordEncoding enc;
 };
 
-PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding enc)
+PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding enc)
 {
     PaddedResult p;
     BlockLayout lay;
     p.rows = f.rows;
-    p.K = K;
+    p.k = k;
     p.words = f.words;
     p.numeric_words = f.numeric_words;
     p.label_width = f.label_width;
@@ -288,7 +288,7 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
-    const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
+    const u64 NK = checked_mul({f.rows, k}, "a padded expansion (rows x k)");
     p.off_index = lay.add(NK, sizeof(i32));
     p.off_mask = lay.add(NK, 1);
     p.off_count = lay.add(f.rows, sizeof(i32));
@@ -300,7 +300,7 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     p.block = Block::make(lay.bytes);
     std::byte* b = p.block->data();
     rl::PaddedExpansion out;
-    out.K = K;
+    out.K = k;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);
@@ -321,7 +321,7 @@ PaddedResult make_padded(const FlatResult& f, u32 K, Framework fw, WordEncoding 
     return p;
 }
 
-u32 auto_K(const FlatResult& f)
+u32 auto_k(const FlatResult& f)
 {
     const i32* off = f.at<i32>(f.off_offsets);
     i32 m = 1;
@@ -462,13 +462,13 @@ using ExpansionOut = Arg<std::variant<PyExpansion, ann::Any>>;
 using ResultDict = nb::typed<nb::dict, std::string, ann::Any>;
 using BundleDict = nb::typed<nb::dict, std::string, ann::Any>;
 
-ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, SizeArg capacity, SizeArg words, SizeArg K,
+ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, SizeArg capacity, SizeArg words, SizeArg k,
                     bool goal, bool derived, bool canonical, bool witness, PoolArg pool, IntArg threads_in, FrameworkArg framework,
                     bool validate, StreamArg stream, ContextArg ctx)
 {
     if (device_hooks().expand && is_cuda_array(states))
         return device_hooks().expand(
-            {table, states, task_ids, capacity, words, K, goal, derived, canonical, witness, framework, validate, stream, ctx});
+            {table, states, task_ids, capacity, words, k, goal, derived, canonical, witness, framework, validate, stream, ctx});
     const u32 threads = threads_arg(threads_in);
     SuiteRef ref = suite_of(table);
     const rl::TaskSuite& tt = *ref.suite;
@@ -482,7 +482,7 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     const u32 L = tt.label_width();
     const std::optional<u64> fixed_cap = opt_int_arg<u64>(capacity, "capacity", 0, rl::k_max_rows);
     const std::optional<u32> fixed_words = opt_int_arg<u32>(words, "words");
-    const std::optional<u32> fixed_K = opt_int_arg<u32>(K, "K");
+    const std::optional<u32> fixed_k = opt_int_arg<u32>(k, "k", 1);
     std::atomic<u32>& branching = ref.branching();
     u64 cap = fixed_cap ? *fixed_cap : std::min(N * branching.load(std::memory_order_relaxed) + 16, rl::k_max_rows);
     // the batch's width: its rows' widest instance's, whatever the input's width (its words past a row's instance
@@ -527,8 +527,8 @@ ExpansionOut expand(SuiteArg table, StatesLike states, TaskIdsArg task_ids, Size
     if (ids.ptr && tt.size() > 1)
         e.task_ids.assign(ids.ptr, ids.ptr + N);
     e.single = in.single;
-    if (fixed_K)
-        e.padded = make_padded(e.flat, *fixed_K == 0 ? auto_K(e.flat) : *fixed_K, fw, enc);
+    if (fixed_k)
+        e.padded = make_padded(e.flat, *fixed_k, fw, enc);
     return nb::cast(std::move(e), nb::rv_policy::move);
 }
 
@@ -1672,42 +1672,42 @@ void bind_rl(nb::module_& parent)
     nb::class_<PaddedResult>(m, "PaddedExpansion",
                              "The padded [N, K] view of an expansion: successor k of state i, with a validity mask and "
                              "the true counts (count > K is an overflow).")
-        .def_prop_ro("K", [](const PaddedResult& p) { return p.K; },
-                     "The padded successor count per state (the second dimension).")
+        .def_prop_ro("k", [](const PaddedResult& p) { return p.k; },
+                     "The padded successor count per state (the second dimension, K).")
         .def_prop_ro("overflow", [](const PaddedResult& p) { return p.overflow; },
                      "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const PaddedResult& p) {
-            return ArrayOut(padded_array(p, p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.K}));
+            return ArrayOut(padded_array(p, p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.k}));
         }, "[N, K] int32: row of the flat arrays, -1 = none")
         .def_prop_ro("mask", [](const PaddedResult& p) {
-            return ArrayOut(padded_array(p, p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.K}));
+            return ArrayOut(padded_array(p, p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.k}));
         }, "[N, K] bool")
         .def_prop_ro("count", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_count, rl::DType::I32, {static_cast<i64>(p.rows)}));
         }, "[N] int32 true successor counts")
         .def_prop_ro("succ", [](const PaddedResult& p) {
             return ArrayOut(padded_array(p, p.off_succ, rl::DType::U64,
-                                {static_cast<i64>(p.rows), p.K, static_cast<i64>(p.words) + p.numeric_words}, true));
+                                {static_cast<i64>(p.rows), p.k, static_cast<i64>(p.words) + p.numeric_words}, true));
         }, "[N, K, W] state words (zero padding); numeric tables: [N, K, W + NN], the numeric words last")
         .def_prop_ro("schema", [](const PaddedResult& p) {
-            return ArrayOut(padded_array(p, p.off_schema, rl::DType::I32, {static_cast<i64>(p.rows), p.K}));
+            return ArrayOut(padded_array(p, p.off_schema, rl::DType::I32, {static_cast<i64>(p.rows), p.k}));
         }, "[N, K] int32, -1 padding")
         .def_prop_ro("binding", [](const PaddedResult& p) {
-            return ArrayOut(padded_array(p, p.off_binding, rl::DType::I32, {static_cast<i64>(p.rows), p.K, p.label_width}));
+            return ArrayOut(padded_array(p, p.off_binding, rl::DType::I32, {static_cast<i64>(p.rows), p.k, p.label_width}));
         }, "[N, K, L] int32 objects (of the row's instance), -1 padding")
         .def_prop_ro("goal", [](const PaddedResult& p) -> ArrayOut {
             if (!p.has_goal)
                 return nb::none();
-            return padded_array(p, p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.K});
+            return padded_array(p, p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] bool goal flags (if requested)")
         .def_prop_ro("derived", [](const PaddedResult& p) -> ArrayOut {
             if (!p.has_derived)
                 return nb::none();
             return padded_array(p, p.off_derived, rl::DType::U64,
-                                {static_cast<i64>(p.rows), p.K, static_cast<i64>(p.derived_words)}, true);
+                                {static_cast<i64>(p.rows), p.k, static_cast<i64>(p.derived_words)}, true);
         }, "[N, K, D] derived words of the successors (zero padding), if requested")
         .def("__repr__", [](const PaddedResult& p) {
-            return "PaddedExpansion(states=" + std::to_string(p.rows) + ", K=" + std::to_string(p.K) +
+            return "PaddedExpansion(states=" + std::to_string(p.rows) + ", k=" + std::to_string(p.k) +
                    (p.overflow ? ", overflow" : "") + ")";
         });
 
@@ -1790,10 +1790,13 @@ void bind_rl(nb::module_& parent)
             if (!e.padded)
                 return nb::none();
             return nb::cast(*e.padded);
-        }, "The padded view, if expand() was called with K")
+        }, "The padded view, if expand() was called with k")
         .def("pad",
-             [](const PyExpansion& e, IntArg K_in) { const u32 K = int_arg<u32>(K_in, "K"); return make_padded(e.flat, K == 0 ? auto_K(e.flat) : K, e.fw, e.enc); },
-             "K"_a = 0, "The padded [N, K] view (K = 0: the next power of two at or above the largest count).")
+             [](const PyExpansion& e, IntArg k_in) {
+                 const std::optional<u32> k = opt_int_arg<u32>(k_in, "k", 1);
+                 return make_padded(e.flat, k ? *k : auto_k(e.flat), e.fw, e.enc);
+             },
+             "k"_a = nb::none(), "The padded [N, k] view (None: k is the next power of two at or above the largest count).")
         .def("action",
              [](const PyExpansion& e, IntArg j_in) {
                  const u64 j = int_arg<u64>(j_in, "row");
@@ -1823,7 +1826,7 @@ void bind_rl(nb::module_& parent)
         .def("__repr__", &words_repr);
 
     m.def("expand", &expand, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "capacity"_a = nb::none(),
-          "words"_a = nb::none(), "K"_a = nb::none(), "goal"_a = false, "derived"_a = false, "canonical_order"_a = true, "witness_pruning"_a = false,
+          "words"_a = nb::none(), "k"_a = nb::none(), "goal"_a = false, "derived"_a = false, "canonical_order"_a = true, "witness_pruning"_a = false,
           "pool"_a = nb::none(), "threads"_a = 1, "framework"_a = nb::none(), "validate"_a = true,
           "stream"_a = nb::none(), "ctx"_a = nb::none(), "Expands a batch of states [N, W] (see mymyr.rl.expand).");
     m.def("expand_into", &expand_into, "table"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(),

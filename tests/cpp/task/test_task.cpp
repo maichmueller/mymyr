@@ -232,7 +232,7 @@ TEST(Task, ReachabilityBudgetFallsBackToDenseSlots)
     EXPECT_EQ(t->atoms().mode(), AtomMode::Dense);
     o.atoms = TaskOptions::Atoms::Reachable;
     EXPECT_THROW((void)Task::from_text_file(path, o), std::length_error);
-    o.reachability_budget = 0;  // unbounded
+    o.reachability_budget = ~u64{0};  // unbounded
     EXPECT_TRUE(Task::from_text_file(path, o)->info().reachability_complete);
 }
 

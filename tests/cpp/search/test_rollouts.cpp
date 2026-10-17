@@ -483,7 +483,7 @@ TEST(RolloutIw, BudgetsAndBounds)
         RolloutIwOptions o;
         o.max_rollouts = 1;
         const RolloutIwResult r = rollout_iw(*task, o);
-        EXPECT_EQ(r.status, SearchStatus::Failed);
+        EXPECT_EQ(r.status, SearchStatus::OutOfStates);
         EXPECT_EQ(r.message, "rollout budget expired");
         EXPECT_EQ(r.rollout.rollouts, 1u);
     }
@@ -644,7 +644,7 @@ void expect_same_rollout(const RolloutResult& a, const RolloutResult& b, const s
         EXPECT_EQ(a.search.passes[i].generated, b.search.passes[i].generated) << what;
         EXPECT_EQ(a.search.passes[i].generated_in_tree, b.search.passes[i].generated_in_tree) << what;
     }
-    EXPECT_EQ(a.num_states, b.num_states) << what;
+    EXPECT_EQ(a.num_created_states, b.num_created_states) << what;
     EXPECT_EQ(a.reached_fluent_atoms, b.reached_fluent_atoms) << what;
     EXPECT_EQ(a.reached_derived_atoms, b.reached_derived_atoms) << what;
     ASSERT_EQ(a.landing_states.size(), b.landing_states.size()) << what;
@@ -783,7 +783,7 @@ TEST(ParallelRollouts, RandomizedLayersFollowTheSeed)
         EXPECT_TRUE(reaches_goal(*task, x.search.plan, [&](StateView s) { return bits::test(s.w, s.nw, far_slot); }));
         plans.insert(x.search.plan);
         // tracker invariants
-        EXPECT_GE(x.num_states, x.landing_states.size());
+        EXPECT_GE(x.num_created_states, x.landing_states.size());
         EXPECT_EQ(x.landing_state_by_atom.size(), x.reached_fluent_atoms.size());
         for (const auto& [atom, idx] : x.landing_state_by_atom)
         {

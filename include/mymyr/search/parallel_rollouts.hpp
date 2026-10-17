@@ -17,7 +17,7 @@
 // of every expanded state, pruned or not, across all passes, the start state included, and for a solved rollout
 // every successor of every non-goal plan state, which the plan extraction creates; that adds states only where
 // a truncated layer cut a plan state's enumeration short):
-//   - reached fluent and derived atoms, num_states (distinct states);
+//   - reached fluent and derived atoms, num_created_states (distinct states);
 //   - landing states (report_landing_states): per fluent atom, the first created state holding it; distinct states,
 //     each with its atoms and whether it has no applicable action (a direct dead end);
 //   - co-occurrence (report_co_occurrence): per fluent atom, the union of the atoms of the created states holding it.
@@ -69,7 +69,7 @@ struct RolloutResult
     IwResult search;  // status, plan, passes of the rollout's ladder
     std::vector<CanonicalAtom> reached_fluent_atoms;   // ascending
     std::vector<CanonicalAtom> reached_derived_atoms;  // ascending
-    u64 num_states = 0;
+    u64 num_created_states = 0;  // distinct states the rollout created
     std::vector<LandingState> landing_states;                          // in order of their smallest first-achieved atom
     std::vector<std::pair<CanonicalAtom, u32>> landing_state_by_atom;  // (atom, index into landing_states), ascending
     std::vector<std::pair<CanonicalAtom, std::vector<CanonicalAtom>>> co_occurrence;  // (atom, row), ascending

@@ -18,7 +18,7 @@
 //   - SOLVED propagates to a parent whose actions are materialized and whose children all exist and are SOLVED.
 // Rollouts run until a goal is found, the root is SOLVED (Exhausted: the width-1 space is exhausted, relative to the
 // depth and incumbent bounds when those cut anything) or a budget stops the search: max_seconds (OutOfTime), cancel or
-// SearchCoordination::cancel (Cancelled), max_states (OutOfStates), max_rollouts (Failed, "rollout
+// SearchCoordination::cancel (Cancelled), max_states (OutOfStates), max_rollouts (OutOfStates, "rollout
 // budget expired"). With SearchControl::coordination the incumbent bound is also the published incumbent length and
 // every materialization adds one expansion.
 //

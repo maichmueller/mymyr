@@ -189,7 +189,7 @@ public:
                     r.message = "state budget expired";
                     break;
                 case Interrupt::Rollouts:
-                    r.status = SearchStatus::Failed;
+                    r.status = SearchStatus::OutOfStates;
                     r.message = "rollout budget expired";
                     break;
                 case Interrupt::None:

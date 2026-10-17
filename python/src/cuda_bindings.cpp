@@ -639,7 +639,7 @@ struct DevicePadded
     std::shared_ptr<cuda::DeviceBuffer> buf;
     OpStream os;
     u64 rows = 0;
-    u32 K = 0, words = 0, label_width = 0, numeric_words = 0;
+    u32 k = 0, words = 0, label_width = 0, numeric_words = 0;
     u64 off_index = 0, off_mask = 0, off_count = 0, off_succ = 0, off_schema = 0, off_binding = 0, off_goal = 0, off_derived = 0;
     u32 derived_words = 0;
     bool has_goal = false, has_derived = false, overflow = false;
@@ -668,7 +668,7 @@ struct PyDeviceExpansion
     }
 };
 
-u32 device_auto_K(const DeviceFlat& f)
+u32 device_auto_k(const DeviceFlat& f)
 {
     const std::vector<i32> off = f.host_offsets();
     i32 m = 1;
@@ -677,13 +677,13 @@ u32 device_auto_K(const DeviceFlat& f)
     return std::bit_ceil(static_cast<u32>(m));
 }
 
-DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, const DeviceFlat& f, u32 K, Framework fw, WordEncoding enc)
+DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, const DeviceFlat& f, u32 k, Framework fw, WordEncoding enc)
 {
     DevicePadded p;
     BlockLayout lay;
     p.os = f.os;
     p.rows = f.rows;
-    p.K = K;
+    p.k = k;
     p.words = f.words;
     p.numeric_words = f.numeric_words;
     p.label_width = f.label_width;
@@ -692,7 +692,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.derived_words = f.derived_words;
     p.fw = fw;
     p.enc = enc;
-    const u64 NK = checked_mul({f.rows, K}, "a padded expansion (rows x K)");
+    const u64 NK = checked_mul({f.rows, k}, "a padded expansion (rows x k)");
     p.off_index = lay.add(NK, sizeof(i32));
     p.off_mask = lay.add(NK, 1);
     p.off_count = lay.add(f.rows, sizeof(i32));
@@ -704,7 +704,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.buf = device_output(*c, lay.bytes, f.os);
     auto* b = static_cast<std::byte*>(p.buf->data());
     rl::PaddedExpansion out;
-    out.K = K;
+    out.K = k;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);
@@ -747,7 +747,7 @@ nb::object device_expand(const ExpandArgs& a)
     const rl::ExpandOptions opt{a.canonical, a.witness, a.validate};
     const std::optional<u64> fixed_cap = opt_int_arg<u64>(a.capacity, "capacity", 0, rl::k_max_rows);
     const std::optional<u32> fixed_words = opt_int_arg<u32>(a.words, "words", 0);
-    const std::optional<u32> K = opt_int_arg<u32>(a.K, "K");
+    const std::optional<u32> k = opt_int_arg<u32>(a.k, "k", 1);
     const u32 L = tt.label_width();
     DeviceFlat f;
     {
@@ -787,8 +787,8 @@ nb::object device_expand(const ExpandArgs& a)
     e.fw = fw;
     e.enc = enc;
     e.ref = std::move(ref);
-    if (K)
-        e.padded = make_device_padded(e.ref, c, e.flat, *K == 0 ? device_auto_K(e.flat) : *K, fw, enc);
+    if (k)
+        e.padded = make_device_padded(e.ref, c, e.flat, *k, fw, enc);
     return nb::cast(std::move(e), nb::rv_policy::move);
 }
 
@@ -1446,43 +1446,43 @@ void bind_cuda(nb::module_& parent)
 
     nb::class_<DevicePadded>(m, "DevicePaddedExpansion",
                              "The padded [N, K] view of a device expansion (rl.PaddedExpansion's arrays, on the device).")
-        .def_prop_ro("K", [](const DevicePadded& p) { return p.K; },
-                     "The padded successor count per state (the second dimension).")
+        .def_prop_ro("k", [](const DevicePadded& p) { return p.k; },
+                     "The padded successor count per state (the second dimension, K).")
         .def_prop_ro("words", [](const DevicePadded& p) { return p.words; }, "Atom words per row (W).")
         .def_prop_ro("numeric_words", [](const DevicePadded& p) { return p.numeric_words; },
                      "Numeric words per row after the atom words (0 for classical tables).")
         .def_prop_ro("overflow", [](const DevicePadded& p) { return p.overflow; },
                      "Whether some state has more than K successors (count > K): those were not written.")
         .def_prop_ro("index", [](const DevicePadded& p) -> ArrayOut {
-            return p.array(p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.K});
+            return p.array(p.off_index, rl::DType::I32, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] int32: row of the flat arrays, -1 = none")
         .def_prop_ro("mask", [](const DevicePadded& p) -> ArrayOut {
-            return p.array(p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.K});
+            return p.array(p.off_mask, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] bool")
         .def_prop_ro("count", [](const DevicePadded& p) -> ArrayOut {
             return p.array(p.off_count, rl::DType::I32, {static_cast<i64>(p.rows)});
         }, "[N] int32 true successor counts")
         .def_prop_ro("succ", [](const DevicePadded& p) -> ArrayOut {
-            return p.array(p.off_succ, rl::DType::U64, {static_cast<i64>(p.rows), p.K, static_cast<i64>(p.words) + p.numeric_words}, true);
+            return p.array(p.off_succ, rl::DType::U64, {static_cast<i64>(p.rows), p.k, static_cast<i64>(p.words) + p.numeric_words}, true);
         }, "[N, K, W + numeric_words] state rows in the task's CPU encoding (zero padding)")
         .def_prop_ro("schema", [](const DevicePadded& p) -> ArrayOut {
-            return p.array(p.off_schema, rl::DType::I32, {static_cast<i64>(p.rows), p.K});
+            return p.array(p.off_schema, rl::DType::I32, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] int32, -1 padding")
         .def_prop_ro("binding", [](const DevicePadded& p) -> ArrayOut {
-            return p.array(p.off_binding, rl::DType::I32, {static_cast<i64>(p.rows), p.K, p.label_width});
+            return p.array(p.off_binding, rl::DType::I32, {static_cast<i64>(p.rows), p.k, p.label_width});
         }, "[N, K, L] int32 objects, -1 padding")
         .def_prop_ro("goal", [](const DevicePadded& p) -> MaybeArray {
             if (!p.has_goal)
                 return nb::none();
-            return p.array(p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.K});
+            return p.array(p.off_goal, rl::DType::Bool, {static_cast<i64>(p.rows), p.k});
         }, "[N, K] bool goal flags (if requested)")
         .def_prop_ro("derived", [](const DevicePadded& p) -> MaybeArray {
             if (!p.has_derived)
                 return nb::none();
-            return p.array(p.off_derived, rl::DType::U64, {static_cast<i64>(p.rows), p.K, static_cast<i64>(p.derived_words)}, true);
+            return p.array(p.off_derived, rl::DType::U64, {static_cast<i64>(p.rows), p.k, static_cast<i64>(p.derived_words)}, true);
         }, "[N, K, D] derived words of the successors (zero padding), if requested")
         .def("__repr__", [](const DevicePadded& p) {
-            return "DevicePaddedExpansion(states=" + std::to_string(p.rows) + ", K=" + std::to_string(p.K) +
+            return "DevicePaddedExpansion(states=" + std::to_string(p.rows) + ", k=" + std::to_string(p.k) +
                    (p.overflow ? ", overflow" : "") + ")";
         });
 
@@ -1563,13 +1563,13 @@ void bind_cuda(nb::module_& parent)
             if (!e.padded)
                 return nb::none();
             return nb::cast(*e.padded);
-        }, "The padded view, if expand() was called with K")
+        }, "The padded view, if expand() was called with k")
         .def("pad",
-             [](const PyDeviceExpansion& e, IntArg K_in) {
-                 const u32 K = int_arg<u32>(K_in, "K");
-                 return make_device_padded(e.ref, e.ctx, e.flat, K == 0 ? device_auto_K(e.flat) : K, e.fw, e.enc);
+             [](const PyDeviceExpansion& e, IntArg k_in) {
+                 const std::optional<u32> k = opt_int_arg<u32>(k_in, "k", 1);
+                 return make_device_padded(e.ref, e.ctx, e.flat, k ? *k : device_auto_k(e.flat), e.fw, e.enc);
              },
-             "K"_a = 0, "The padded [N, K] view on the device (K = 0: the next power of two at or above the largest count).")
+             "k"_a = nb::none(), "The padded [N, k] view on the device (None: k is the next power of two at or above the largest count).")
         .def("action",
              [](const PyDeviceExpansion& e, IntArg j_in) {
                  const u64 j = int_arg<u64>(j_in, "row");
@@ -1664,7 +1664,7 @@ void bind_cuda(nb::module_& parent)
                      "Why the search stopped early (empty when it ran to its end).")
         .def_prop_ro("exhausted", [](const PyDeviceBrfs& x) { return x.r.result.exhausted; },
                      "The whole reachable space was expanded (with stop_at_goal=False also when solved).")
-        .def_prop_ro("num_goal_states", [](const PyDeviceBrfs& x) { return x.r.result.goal_states; },
+        .def_prop_ro("num_goal_states", [](const PyDeviceBrfs& x) { return x.r.result.num_goal_states; },
                      "Goal states expanded.")
         .def_prop_ro("layers", [](const PyDeviceBrfs& x) { return x.r.result.layers; }, "Layers expanded.")
         .def_prop_ro("store", [](const PyDeviceBrfs& x) { return x.r.result.store; }, "The state store used.")

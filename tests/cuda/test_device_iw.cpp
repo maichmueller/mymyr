@@ -106,7 +106,7 @@ void expect_same(const search::IwResult& d, const search::IwResult& c, const std
     for (usize k = 0; k < c.passes.size(); ++k)
     {
         SCOPED_TRACE("pass " + std::to_string(k));
-        EXPECT_EQ(d.passes[k].arity, c.passes[k].arity);
+        EXPECT_EQ(d.passes[k].width, c.passes[k].width);
         EXPECT_EQ(d.passes[k].status, c.passes[k].status);
         EXPECT_EQ(d.passes[k].placeholder, c.passes[k].placeholder);
         EXPECT_EQ(d.passes[k].expanded, c.passes[k].expanded);
@@ -114,9 +114,9 @@ void expect_same(const search::IwResult& d, const search::IwResult& c, const std
         EXPECT_EQ(d.passes[k].generated_in_tree, c.passes[k].generated_in_tree);
         EXPECT_EQ(d.passes[k].skipped, c.passes[k].skipped);
     }
-    EXPECT_EQ(d.total.expanded, c.total.expanded);
-    EXPECT_EQ(d.total.generated, c.total.generated);
-    EXPECT_EQ(d.total.states, c.total.states);
+    EXPECT_EQ(d.stats.expanded, c.stats.expanded);
+    EXPECT_EQ(d.stats.generated, c.stats.generated);
+    EXPECT_EQ(d.stats.states, c.stats.states);
     EXPECT_TRUE(d.plan == c.plan) << "plans differ: " << d.plan.size() << " vs " << c.plan.size() << " steps";
     EXPECT_EQ(d.cost, c.cost);
     ASSERT_EQ(d.goal_state.has_value(), c.goal_state.has_value());
@@ -200,10 +200,10 @@ void check_against_cpu(const TaskPtr& task, const std::vector<State>& starts, co
         const search::IwResult c = search::iw(*task, co);
         if (std::getenv("MYMYR_DEVICE_IW_DEBUG") && i < 3)
             std::printf("start %zu: cpu status %d expanded %llu generated %llu plan %zu msg '%s' | device status %d expanded %llu generated %llu plan %zu msg '%s'\n",
-                        i, static_cast<int>(c.status), static_cast<unsigned long long>(c.total.expanded),
-                        static_cast<unsigned long long>(c.total.generated), c.plan.size(), c.message.c_str(),
-                        static_cast<int>(d[i].status), static_cast<unsigned long long>(d[i].total.expanded),
-                        static_cast<unsigned long long>(d[i].total.generated), d[i].plan.size(), d[i].message.c_str());
+                        i, static_cast<int>(c.status), static_cast<unsigned long long>(c.stats.expanded),
+                        static_cast<unsigned long long>(c.stats.generated), c.plan.size(), c.message.c_str(),
+                        static_cast<int>(d[i].status), static_cast<unsigned long long>(d[i].stats.expanded),
+                        static_cast<unsigned long long>(d[i].stats.generated), d[i].plan.size(), d[i].message.c_str());
         expect_same(d[i], c, what + ", start " + std::to_string(i));
         solved += c.status == search::SearchStatus::Solved;
         if (::testing::Test::HasFailure())

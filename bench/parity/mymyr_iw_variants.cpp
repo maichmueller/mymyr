@@ -316,7 +316,7 @@ std::string rollout_json(const Names& names, const RolloutResult& r, u64 seed, b
     u64 h = 0xcbf29ce484222325ULL;
     for (const std::string& x : reached)
         h = fnv1a(x + "\n", h);
-    o += ",\"num_states\":" + std::to_string(r.num_states) + ",\"reached_fluent\":" + std::to_string(reached.size()) + ",\"reached_fluent_hash\":\"" +
+    o += ",\"num_states\":" + std::to_string(r.num_created_states) + ",\"reached_fluent\":" + std::to_string(reached.size()) + ",\"reached_fluent_hash\":\"" +
          hex(h) + "\",\"reached_derived\":" + std::to_string(r.reached_derived_atoms.size());
     if (report)
     {

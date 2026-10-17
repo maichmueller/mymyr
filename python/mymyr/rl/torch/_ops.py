@@ -29,7 +29,7 @@ the states again; required on a device).
   device's general path), tagged ``cudagraph_unsafe``.
 - ``mymyr::random_actions(env, draws, count, first_env, max_actions)``: the random policy's next choices [N] int64
   (the counter-based RNG at the draw counters; no step).
-- ``mymyr::expand(table, states, task_ids, K, witness_pruning)``: the padded expansion [N, K] (succ, schema, binding,
+- ``mymyr::expand(table, states, task_ids, k, witness_pruning)``: the padded expansion [N, k] (succ, schema, binding,
   goal, mask, count).
 - ``mymyr::expand_flat(table, states, task_ids, capacity, witness_pruning)``: the flat expansion (succ, parent, schema,
   binding, goal, offsets). ``capacity=None`` sizes the outputs by the data: the row count M is an unbacked symbolic
@@ -287,7 +287,7 @@ def step_impl(
     return out
 
 
-def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: int) -> Tensor:
+def random_actions_impl(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: Optional[int]) -> Tensor:
     """The body of ``mymyr::random_actions``."""
     e, info = _env_info(env)
     dev = info[0]
@@ -452,9 +452,9 @@ def _(
 
 
 @_op("mymyr::random_actions", mutates_args=())
-def random_actions(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: int) -> Tensor:
+def random_actions(env: int, draws: Tensor, count: Tensor, first_env: int, max_actions: Optional[int]) -> Tensor:
     """``mymyr::random_actions``: the random policy's next choices [N] int64 at the draw counters (no step);
-    ``max_actions`` > 0 caps the choice at that many actions, 0 does not."""
+    ``max_actions`` (at least 1) caps the choice at that many actions, None does not."""
     return random_actions_impl(env, draws, count, first_env, max_actions)
 
 
@@ -468,38 +468,38 @@ def _(env, draws, count, first_env, max_actions):
 
 @_op("mymyr::expand", mutates_args=(), tags=_unsafe)
 def expand(
-    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness_pruning: bool = False
+    table: int, states: Tensor, task_ids: Optional[Tensor], k: int, witness_pruning: bool = False
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """``mymyr::expand``: the padded expansion of ``states`` [N, row_words] over the registered table ``table``:
-    (succ [N, K, row_words], schema [N, K], binding [N, K, label_width], goal [N, K], mask [N, K], count [N]). ``K``
+    (succ [N, k, row_words], schema [N, k], binding [N, k, label_width], goal [N, k], mask [N, k], count [N]). ``k``
     > 0 is the padded width; ``witness_pruning`` as in ``rl.expand``."""
     t = lookup(table)
-    if K <= 0:
-        raise ValueError("mymyr: expand needs K > 0 (the padded width is a static shape)")
+    if k <= 0:
+        raise ValueError("mymyr: expand needs k > 0 (the padded width is a static shape)")
     words = states.shape[1] - t.numeric_words
     x = mymyr.rl.expand(
-        t, states, task_ids, words=words, K=K, goal=True, witness_pruning=witness_pruning, stream=_stream(states)
+        t, states, task_ids, words=words, k=k, goal=True, witness_pruning=witness_pruning, stream=_stream(states)
     )
     p = x.padded
     return p.succ, p.schema, p.binding, p.goal, p.mask, p.count
 
 
-def _padded_outputs(table: int, states: Tensor, K: int) -> tuple[Tensor, ...]:
+def _padded_outputs(table: int, states: Tensor, k: int) -> tuple[Tensor, ...]:
     t = lookup(table)
     n, rw = states.shape
     return (
-        states.new_empty((n, K, rw)),
-        states.new_empty((n, K), dtype=torch.int32),
-        states.new_empty((n, K, t.label_width), dtype=torch.int32),
-        states.new_empty((n, K), dtype=torch.bool),
-        states.new_empty((n, K), dtype=torch.bool),
+        states.new_empty((n, k, rw)),
+        states.new_empty((n, k), dtype=torch.int32),
+        states.new_empty((n, k, t.label_width), dtype=torch.int32),
+        states.new_empty((n, k), dtype=torch.bool),
+        states.new_empty((n, k), dtype=torch.bool),
         states.new_empty(n, dtype=torch.int32),
     )
 
 
 @expand.register_fake
-def _(table, states, task_ids, K, witness_pruning=False):
-    return _padded_outputs(table, states, K)
+def _(table, states, task_ids, k, witness_pruning=False):
+    return _padded_outputs(table, states, k)
 
 
 @_op("mymyr::expand_flat", mutates_args=(), tags=_unsafe)
@@ -554,16 +554,16 @@ def _(table, states, task_ids, capacity=None, witness_pruning=False):
 
 @_op("mymyr::expand_derived", mutates_args=(), tags=_unsafe)
 def expand_derived(
-    table: int, states: Tensor, task_ids: Optional[Tensor], K: int, witness_pruning: bool = False
+    table: int, states: Tensor, task_ids: Optional[Tensor], k: int, witness_pruning: bool = False
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """``mymyr::expand_derived``: :func:`expand` with the successors' derived words as a seventh result, int64 [N, K,
+    """``mymyr::expand_derived``: :func:`expand` with the successors' derived words as a seventh result, int64 [N, k,
     table.derived_words]."""
     t = lookup(table)
-    if K <= 0:
-        raise ValueError("mymyr: expand_derived needs K > 0 (the padded width is a static shape)")
+    if k <= 0:
+        raise ValueError("mymyr: expand_derived needs k > 0 (the padded width is a static shape)")
     words = states.shape[1] - t.numeric_words
     x = mymyr.rl.expand(
-        t, states, task_ids, words=words, K=K, goal=True, derived=True, witness_pruning=witness_pruning,
+        t, states, task_ids, words=words, k=k, goal=True, derived=True, witness_pruning=witness_pruning,
         stream=_stream(states),
     )
     p = x.padded
@@ -571,9 +571,9 @@ def expand_derived(
 
 
 @expand_derived.register_fake
-def _(table, states, task_ids, K, witness_pruning=False):
+def _(table, states, task_ids, k, witness_pruning=False):
     n = states.shape[0]
-    return (*_padded_outputs(table, states, K), states.new_empty((n, K, lookup(table).derived_words)))
+    return (*_padded_outputs(table, states, k), states.new_empty((n, k, lookup(table).derived_words)))
 
 
 @_op("mymyr::expand_flat_derived", mutates_args=(), tags=_unsafe)

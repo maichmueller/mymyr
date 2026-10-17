@@ -314,7 +314,7 @@ def test_heuristic_object(gripper):
     assert pref and set(map(str, pref)) <= set(map(str, gripper.applicable_actions(s)))
     h2 = search.Heuristic(gripper, "add", share=h)
     assert h2(s) >= search.Heuristic(gripper, "max")(s)
-    assert h.stats.evaluations >= 3 and h.kind == "ff"
+    assert h.counters.evaluations >= 3 and h.kind == "ff"
     r = search.gbfs(gripper, heuristic=h)  # a Heuristic object as the search's evaluator
     assert r.status == Status.SOLVED
 

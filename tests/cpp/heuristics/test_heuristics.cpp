@@ -105,10 +105,12 @@ bool relaxed_plan_reaches_goal(const Task& task, const H::RelaxedTask& R, StateV
 
 TEST(Heuristics, KindNames)
 {
-    EXPECT_EQ(H::parse_kind("set_additive"), H::Kind::SetAdditive);
-    EXPECT_EQ(H::parse_kind("hsa"), H::Kind::SetAdditive);
-    EXPECT_EQ(H::parse_kind("setadd"), H::Kind::SetAdditive);
-    EXPECT_EQ(H::parse_kind("h2"), H::Kind::H2);
+    // one name per kind: parse_kind inverts to_string
+    for (const H::Kind k : {H::Kind::Blind, H::Kind::GoalCount, H::Kind::Max, H::Kind::Add, H::Kind::FF,
+                            H::Kind::SetAdditive, H::Kind::H2, H::Kind::LmCut, H::Kind::LmCount})
+        EXPECT_EQ(H::parse_kind(H::to_string(k)), k);
+    for (const char* other : {"gc", "goalcount", "hmax", "h_max", "hadd", "h_add", "hff", "h_ff", "hsa", "setadd"})
+        EXPECT_THROW((void)H::parse_kind(other), std::invalid_argument) << other;
     EXPECT_STREQ(H::to_string(H::Kind::SetAdditive), "set_additive");
     EXPECT_STREQ(H::to_string(H::Kind::H2), "h2");
     EXPECT_STREQ(H::to_string(H::Kind::Perfect), "perfect");

@@ -139,7 +139,7 @@ TEST_P(CudaBrfsSuite, CountsAndIdsEqualTheCpu)
     const BrfsResult& r = d.result;
     EXPECT_EQ(r.states, st.states);
     EXPECT_EQ(r.generated, st.generated);
-    EXPECT_EQ(r.goal_states, st.goal_states);
+    EXPECT_EQ(r.num_goal_states, st.goal_states);
     EXPECT_EQ(r.expanded, st.states);
     EXPECT_TRUE(r.exhausted);
     const BrfsResult c = brfs(*task, {.threads = 2, .stop_at_goal = false, .fingerprint = true});
@@ -264,7 +264,7 @@ TEST(CudaBrfs, CandidateBudgetKeepsTheIds)
                 const cuda::DeviceBrfsResult d = b.run();
                 std::vector<u64> rows = device_rows(b);
                 EXPECT_EQ(d.result.states, suite_task(name).states);
-                EXPECT_EQ(d.result.goal_states, suite_task(name).goal_states);
+                EXPECT_EQ(d.result.num_goal_states, suite_task(name).goal_states);
                 if (ref.empty())
                 {
                     ref = std::move(rows);
@@ -301,7 +301,7 @@ TEST(CudaBrfs, StopAtGoalReturnsTheCpuPlan)
             EXPECT_EQ(d.result.states, c.states);
             EXPECT_EQ(d.result.expanded, c.expanded);
             EXPECT_EQ(d.result.generated, c.generated);
-            EXPECT_EQ(d.result.goal_states, c.goal_states);
+            EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
             EXPECT_EQ(d.result.layers, c.layers);
             EXPECT_EQ(d.result.fingerprint, c.fingerprint);
             EXPECT_EQ(d.result.plan.size(), c.plan.size());
@@ -349,7 +349,7 @@ TEST(CudaBrfs, BudgetStopsAtTheStateThatFillsTheStoreAsTheCpu)
                     EXPECT_EQ(dev.states, cpu.states) << what;
                     EXPECT_EQ(dev.expanded, cpu.expanded) << what;
                     EXPECT_EQ(dev.generated, cpu.generated) << what;
-                    EXPECT_EQ(dev.goal_states, cpu.goal_states) << what;
+                    EXPECT_EQ(dev.num_goal_states, cpu.num_goal_states) << what;
                     EXPECT_EQ(dev.solved, cpu.solved) << what;
                     EXPECT_EQ(dev.exhausted, cpu.exhausted) << what;
                     EXPECT_EQ(dev.fingerprint, cpu.fingerprint) << what;

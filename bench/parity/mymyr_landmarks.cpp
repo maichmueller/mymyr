@@ -144,7 +144,7 @@ struct Args
     std::string task_file, domain, problem, mode, dump;
     int reps = 1;
     u32 queries = 0;
-    usize disj_size = 0, disj_depth = 0;
+    usize disj_size = 0, disj_depth = ~usize{0};
     landmarks::FirstAchievers first_achievers = landmarks::FirstAchievers::HMax;
     bool derived = false;
     landmarks::LiftedFactLandmarkOptions lifted;

@@ -56,15 +56,17 @@ def test_expand_equals_the_per_state_api(name, atoms):
 
 def test_padded_view(blocks):
     states = walk(blocks, steps=15, seed=9)
-    exp = rl.expand(blocks, states, K=0, goal=True)
-    p = exp.padded
+    exp = rl.expand(blocks, states, goal=True)
+    assert exp.padded is None
+    p = exp.pad()
+    assert rl.expand(blocks, states, goal=True, k=p.k).padded.k == p.k
     counts = exp.counts
-    assert p.K == 1 << int(np.ceil(np.log2(max(counts.max(), 1)))) and not p.overflow
-    assert p.succ.shape == (len(states), p.K, exp.words) and p.binding.shape == (len(states), p.K, exp.label_width)
+    assert p.k == 1 << int(np.ceil(np.log2(max(counts.max(), 1)))) and not p.overflow
+    assert p.succ.shape == (len(states), p.k, exp.words) and p.binding.shape == (len(states), p.k, exp.label_width)
     assert np.array_equal(p.count, counts)
-    assert np.array_equal(p.mask, np.arange(p.K)[None, :] < counts[:, None])
+    assert np.array_equal(p.mask, np.arange(p.k)[None, :] < counts[:, None])
     for i in range(len(states)):
-        for k in range(p.K):
+        for k in range(p.k):
             j = p.index[i, k]
             if p.mask[i, k]:
                 assert j == exp.offsets[i] + k

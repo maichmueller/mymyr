@@ -122,7 +122,7 @@ void record_plan_extraction(detail::Env& env, detail::StateTracker& tr, const St
 /// Converts a rollout's tracked states to the portable result.
 void collect(const Task& task, Successors& succ, const detail::StateTracker& tr, bool landing, bool co, RolloutResult& r)
 {
-    r.num_states = tr.num_states();
+    r.num_created_states = tr.num_states();
     ReachedOrder order(task, tr.reached());
     r.reached_fluent_atoms.reserve(order.size());
     for (u32 i = 0; i < order.size(); ++i)

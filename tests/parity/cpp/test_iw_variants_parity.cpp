@@ -313,7 +313,7 @@ void run_row(const Task& task, const json::Value& row)
             {
                 EXPECT_EQ(x.search.plan.size(), num(y["plan_len"])) << w;
             }
-            EXPECT_EQ(x.num_states, num(y["num_states"])) << w;
+            EXPECT_EQ(x.num_created_states, num(y["num_states"])) << w;
             EXPECT_EQ(x.reached_fluent_atoms.size(), num(y["reached_fluent"])) << w;
             EXPECT_EQ(x.reached_derived_atoms.size(), num(y["reached_derived"])) << w;
             EXPECT_EQ(x.landing_states.size(), num(y["landing_states"])) << w;

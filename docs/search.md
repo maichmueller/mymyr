@@ -316,8 +316,9 @@ Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=
 `max_seconds=`. `max_states=` counts the states a search stores, the start state included (IW: the nodes of a
 pass): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
 never stores more ([API conventions](conventions.md)); the deadline and the cancellation are checked inside
-expansions as well (device BrFS stops at the same state as the CPU's; the other GPU searches check `max_states`,
-the deadline and the cancellation between chunks). On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
+expansions as well (device BrFS and the numeric device A* and GBFS stop at the same state as the CPU's; the other
+GPU searches check `max_states`, the deadline and the cancellation between chunks, and stop once a chunk's new states
+reach `max_states`). On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
 `mymyr.formalism.GroundCondition`, or a sequence of goals. Each goal in that sequence is a `GroundCondition` or a
 sequence of ground atoms and literals; any one that holds ends the search. See [Formula values](formulas.md) for
 construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
@@ -339,7 +340,8 @@ costs: with a negative one, reopening a state can lower its g value without end 
 on every lap). They check every transition and stop with `FAILED` at the first one that lowers the metric value,
 naming both values in `message`. Greedy best-first search, the heuristic beam, enforced hill-climbing and the
 layer-based searches close each state once, so they terminate on such tasks; the plan they return is valid, and its
-`cost` is the metric value it reaches, which may be negative. The device A* and GBFS assume non-negative costs.
+`cost` is the metric value it reaches, which may be negative. The device A* and GBFS need non-negative costs: both
+stop with `FAILED` and a `message` at the first action of negative cost they generate.
 
 ```python
 domain = """(define (domain d) (:requirements :strips :negative-preconditions :action-costs)

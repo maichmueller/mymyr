@@ -72,8 +72,8 @@ def test_torch_outputs(torch, batch):
     same_expansion(exp, ref, lambda x: x.numpy())
     a, b = exp.succ, exp.succ
     assert a.data_ptr() == b.data_ptr() and a.data_ptr() % 64 == 0  # views of the block, no copy per access
-    p = exp.pad(0)
-    assert isinstance(p.succ, torch.Tensor) and p.succ.shape[:2] == (len(states), p.K) and p.mask.dtype == torch.bool
+    p = exp.pad()
+    assert isinstance(p.succ, torch.Tensor) and p.succ.shape[:2] == (len(states), p.k) and p.mask.dtype == torch.bool
     assert torch.equal(p.count, torch.diff(exp.offsets))
     # NumPy in, torch out, and the other way around
     t = rl.expand(task, u64, framework="torch", goal=True)
@@ -160,8 +160,8 @@ def test_jax_inputs_are_read_in_place(jax, batch):
     same_expansion(exp, ref, np.asarray)
     a, b = exp.succ, exp.succ
     assert a.unsafe_buffer_pointer() == b.unsafe_buffer_pointer() and a.unsafe_buffer_pointer() % 64 == 0
-    p = exp.pad(0)
-    assert p.succ.shape == (len(states), p.K, 2 * ref.words) and np.array_equal(np.asarray(p.count), np.diff(ref.offsets))
+    p = exp.pad()
+    assert p.succ.shape == (len(states), p.k, 2 * ref.words) and np.array_equal(np.asarray(p.count), np.diff(ref.offsets))
     # JAX in, NumPy / torch-free defaults out; NumPy in, JAX out
     n = rl.expand(task, j, framework="numpy")
     assert n.succ.dtype == np.uint64 and np.array_equal(n.succ, ref.succ)

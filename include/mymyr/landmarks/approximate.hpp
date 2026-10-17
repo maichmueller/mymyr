@@ -25,7 +25,7 @@
 //   3. Disjunctive landmarks (max_disjunctive_landmark_size > 0): for every expanded atom and every predicate for which
 //      every first achiever has a positive fluent precondition, the union of those preconditions, if it has at most
 //      max_disjunctive_landmark_size members; members are expanded in turn, up to max_disjunctive_landmark_depth layers
-//      (0: unbounded). Sets holding a fact landmark are dropped.
+//      (~usize{0}: unbounded; 0: none). Sets holding a fact landmark are dropped.
 //   4. Achiever index: per atom every ground action with an operator adding it (whether or not the operator ever fires),
 //      the first achievers' ground actions (PossiblyBefore: for the atoms step 2 and 3 expanded only), and per ground
 //      action the landmarks it achieves, first-achieves and uniquely achieves (as the only achiever at all).
@@ -56,7 +56,7 @@ struct ApproximateFactLandmarkOptions
     bool include_positive_goal_facts = true;
     bool compute_greedy_necessary_orderings = true;
     usize max_disjunctive_landmark_size = 0;   // 0: no disjunctive landmarks
-    usize max_disjunctive_landmark_depth = 0;  // 0: unbounded
+    usize max_disjunctive_landmark_depth = ~usize{0};  // ~usize{0}: unbounded
     heuristics::GroundingBudget budget = {};   // the Task overload's grounding
     FirstAchievers first_achievers = FirstAchievers::HMax;
     bool include_derived_atoms = false;  // derived atoms as landmarks too (see above)

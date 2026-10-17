@@ -210,11 +210,11 @@ search::IwResult MultiIwBatch::result(u32 i, const Task& task, const State& star
     for (const search::IwPassStatistics& p : r.passes)
     {
         const search::SearchStatistics s = p.stats();
-        r.total.expanded += s.expanded;
-        r.total.generated += s.generated;
-        r.total.states += s.states;
-        r.total.pruned += s.pruned;
-        r.total.seconds += s.seconds;
+        r.stats.expanded += s.expanded;
+        r.stats.generated += s.generated;
+        r.stats.states += s.states;
+        r.stats.pruned += s.pruned;
+        r.stats.seconds += s.seconds;
     }
     r.effective_width = effective_width.at(i);
     r.message = message;
@@ -867,7 +867,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     if (optimize)
     {
         search::IwPassStatistics p;
-        p.arity = 0;
+        p.width = 0;
         p.placeholder = true;
         push_all(p);
     }
@@ -876,7 +876,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
     {
         // a statically false goal ends the first pass as UNSOLVABLE before anything is expanded
         search::IwPassStatistics p;
-        p.arity = first;
+        p.width = first;
         p.status = search::SearchStatus::Unsolvable;
         push_all(p);
         for (u32 id : pending)
@@ -917,7 +917,7 @@ void DeviceMultiIw::Impl::run_group(DeviceStarts starts, u32 g0, u32 count, std:
         for (u32 id : pending)
         {
             search::IwPassStatistics p;
-            p.arity = k;
+            p.width = k;
             p.status = host_status(codes[id]);
             p.expanded = counters[id];
             p.generated = counters[count + id];

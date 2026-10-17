@@ -238,6 +238,7 @@ def op_cases(env, task, dev):
         (torch.ops.mymyr.step_sync.default, base + (a, None, 0, True)),
         (torch.ops.mymyr.refresh_sync.default, refresh),
         (torch.ops.mymyr.random_actions.default, (env.handle, env.draws, env.count, 0, 3)),
+        (torch.ops.mymyr.random_actions.default, (env.handle, env.draws, env.count, 0, None)),
         (torch.ops.mymyr.expand.default, (h, s, ids, 8, False)),
         (torch.ops.mymyr.expand_flat.default, (h, s, ids, 64, False)),
         (torch.ops.mymyr.expand_flat.default, (h, s, ids, None, False)),
@@ -622,6 +623,8 @@ def test_rand_action_is_the_counter_random_policy(blocks, max_actions):
             assert torch.equal(env.batched.states, twin.states) and torch.equal(env.batched.draws, twin.draws)
         with pytest.raises(ValueError, match="max_actions must be None or positive"):
             twin.random_actions(0)
+        with pytest.raises(ValueError, match=r"max_actions must be None or an int in \[1, 4294967295\], got 0"):
+            torch.ops.mymyr.random_actions(twin.handle, twin.draws, twin.count, twin.first_env, 0)
         # a rollout without a policy follows the same streams after set_seed
         env.set_seed(9)
         twin.set_seed(9)

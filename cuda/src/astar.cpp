@@ -36,6 +36,22 @@ using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 double s_since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
 
+/// A negative action cost on a transition (Ctl::error k_err_negative): best_first() reports it as status Failed.
+struct NegativeCost : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+/// A search that fails before it starts or on a negative cost: status Failed with `message`.
+DeviceBestFirstResult failed(bool greedy, std::string message)
+{
+    DeviceBestFirstResult out;
+    out.result.algorithm = greedy ? "gbfs_eager (device)" : "astar_eager (device)";
+    out.result.status = search::SearchStatus::Failed;
+    out.result.message = std::move(message);
+    return out;
+}
+
 /// Row width of the device state rows: the fixed row-width buckets (as the device BrFS).
 u32 bucket(u32 words)
 {
@@ -117,9 +133,17 @@ std::string best_first_unsupported(const Task& task, const DeviceBestFirstOption
         if (std::string why = DeviceHeuristic::unsupported(task, ho); !why.empty())
             return why;
     }
-    const heuristics::ActionCosts costs(task);
-    if (!task.numeric_slots() && !costs.unit() && (!costs.state_independent() || !costs.integral()))
-        return costs.state_independent() ? "action costs that are not integral" : "action costs that depend on the state";
+    std::unique_ptr<heuristics::ActionCosts> costs;
+    try
+    {
+        costs = std::make_unique<heuristics::ActionCosts>(task);
+    }
+    catch (const std::invalid_argument&)
+    {
+        return {};  // a negative or undefined constant cost: the search fails (status Failed), as on the CPU
+    }
+    if (!task.numeric_slots() && !costs->unit() && (!costs->state_independent() || !costs->integral()))
+        return costs->state_independent() ? "action costs that are not integral" : "action costs that depend on the state";
     return {};
 }
 
@@ -210,9 +234,13 @@ struct Driver
         sync();
         if (hc->label_error)
             throw std::logic_error("mymyr: device best-first search: a sorted segment found no scratch (internal error)");
+        if (hc->error & bfk::k_err_negative)
+            throw NegativeCost(greedy ? "mymyr gbfs_eager (device): the device GBFS needs non-negative action costs, and an "
+                                        "applicable action has a negative cost; the CPU GBFS accepts negative costs"
+                                      : "mymyr astar_eager (device): A* needs non-negative action costs, and an applicable "
+                                        "action has a negative cost");
         if (hc->error & bfk::k_err_cost)
-            throw std::domain_error("mymyr: device best-first search: an applicable action's cost is undefined, negative or "
-                                    "2^31 or more");
+            throw std::domain_error("mymyr: device best-first search: an applicable action's cost is undefined or 2^31 or more");
         if (hc->error & bfk::k_err_overflow)
             throw std::overflow_error("mymyr: device best-first search: a g or f value does not fit 32 bits");
         if (hc->eval_flags[1])
@@ -1144,10 +1172,25 @@ DeviceBestFirstResult best_first(ContextPtr ctx, TaskPtr task, const DeviceBestF
     if (options.expected_states > state_set::k_max_states)
         throw std::invalid_argument("mymyr: device best-first search: expected_states above the state id limit (" +
                                     std::to_string(state_set::k_max_states) + ")");
+    try
+    {
+        (void)heuristics::ActionCosts(*task);
+    }
+    catch (const std::invalid_argument& e)
+    {
+        return failed(greedy, e.what());  // a constant cost that is negative or undefined, as on the CPU
+    }
     if (task->numeric_slots())
         return numeric_best_first(std::move(ctx), std::move(task), options, greedy);
-    Driver d(std::move(ctx), std::move(task), options, greedy);
-    return d.run();
+    try
+    {
+        Driver d(std::move(ctx), std::move(task), options, greedy);
+        return d.run();
+    }
+    catch (const NegativeCost& e)
+    {
+        return failed(greedy, e.what());
+    }
 }
 }  // namespace detail
 

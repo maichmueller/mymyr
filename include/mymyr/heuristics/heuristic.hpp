@@ -145,9 +145,8 @@ enum class Evaluation : u8
 };
 
 [[nodiscard]] const char* to_string(Kind k) noexcept;
-/// "blind", "goal_count" (or "gc"), "max" (or "hmax"), "add" (or "hadd"), "ff" (or "hff"), "set_additive" (or "hsa",
-/// "setadd"), "h2", "lmcut" (or "lm_cut"), "lmcount" (or "lm_count", "landmark_count"). Throws std::invalid_argument
-/// for other names, including "perfect" (made by heuristics::perfect).
+/// "blind", "goal_count", "max", "add", "ff", "set_additive", "h2", "lmcut", "lmcount" (to_string's names). Throws
+/// std::invalid_argument for other names, including "perfect" (made by heuristics::perfect).
 [[nodiscard]] Kind parse_kind(std::string_view name);
 
 struct Options

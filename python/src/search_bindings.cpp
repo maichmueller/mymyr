@@ -1221,7 +1221,7 @@ nb::tuple enc(const Owner& o, const search::RolloutResult& r)
         by_atom.append(nb::make_tuple(c, i));
     for (const auto& [c, row] : r.co_occurrence)
         rows.append(nb::make_tuple(c, enc_atoms(row)));
-    return nb::make_tuple(enc(o, r.search), enc_atoms(r.reached_fluent_atoms), enc_atoms(r.reached_derived_atoms), r.num_states,
+    return nb::make_tuple(enc(o, r.search), enc_atoms(r.reached_fluent_atoms), enc_atoms(r.reached_derived_atoms), r.num_created_states,
                           enc_list(r.landing_states, [&](const auto& x) { return enc(o, x); }), by_atom, rows);
 }
 search::RolloutResult dec_rollout(const Owner& o, nb::handle h)
@@ -1233,7 +1233,7 @@ search::RolloutResult dec_rollout(const Owner& o, nb::handle h)
     r.search = dec_iw(o, f.next());
     r.reached_fluent_atoms = dec_atoms(T, f.next(), what);
     r.reached_derived_atoms = dec_atoms(T, f.next(), what);
-    r.num_states = f.get<u64>();
+    r.num_created_states = f.get<u64>();
     r.landing_states = dec_list<search::LandingState>(f.next(), what, [&](nb::handle x) { return dec_landing(o, x); });
     auto atom = [&](Fields& p)
     {
@@ -1467,11 +1467,11 @@ search::ActionOrdering parse_ordering(nb::handle h)
         return search::ActionOrdering::InOrder;
     if (s == "randomized")
         return search::ActionOrdering::Randomized;
-    if (s == "direct_goal_achiever_first" || s == "dgaf")
+    if (s == "direct_goal_achiever_first")
         return search::ActionOrdering::DirectGoalAchieverFirst;
-    if (s == "goal_regression_relevance" || s == "regression")
+    if (s == "goal_regression_relevance")
         return search::ActionOrdering::GoalRegressionRelevance;
-    if (s == "mixed_regression_random" || s == "mixed")
+    if (s == "mixed_regression_random")
         return search::ActionOrdering::MixedRegressionRandom;
     throw nb::value_error("mymyr: ordering must be an ActionOrdering or one of 'in_order', 'randomized', "
                           "'direct_goal_achiever_first', 'goal_regression_relevance', 'mixed_regression_random'");
@@ -2295,7 +2295,7 @@ void bind_search(nb::module_& parent)
         });
 
     auto heuristic_stats = nb::class_<heuristics::HeuristicStats>(
-        m, "HeuristicStatistics", "The counts of a heuristic's evaluator (Heuristic.stats, BestFirstResult.heuristic).");
+        m, "HeuristicStatistics", "The counts of a heuristic's evaluator (Heuristic.counters, BestFirstResult.heuristic).");
     bind_stats_pickle(heuristic_stats, [](const heuristics::HeuristicStats& x) { return enc(x); }, dec_heuristic_stats);
     heuristic_stats.def_ro("evaluations", &heuristics::HeuristicStats::evaluations, "States evaluated.")
         .def_ro("grounded", &heuristics::HeuristicStats::grounded, "Evaluations by the grounded relaxation.")
@@ -2538,8 +2538,9 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("reached_derived_atoms",
                      [](const PyRolloutResult& x) { return atom_list(x.o, x.get().reached_derived_atoms); },
                      "The derived atoms true in some state the rollout created (ascending by canonical id).")
-        .def_prop_ro("num_states", [](const PyRolloutResult& x) { return x.get().num_states; },
-                     "Distinct states the rollout created.")
+        .def_prop_ro("num_created_states", [](const PyRolloutResult& x) { return x.get().num_created_states; },
+                     "Distinct states the rollout created: every successor of every expanded state, pruned or not, "
+                     "across all passes, the start state included (stats.states counts the states the passes stored).")
         .def_prop_ro("landing_states",
                      [](const PyRolloutResult& x) {
                          nb::typed<nb::list, PyLandingState> out{nb::list()};
@@ -2564,7 +2565,7 @@ void bind_search(nb::module_& parent)
         .def("__repr__", [](const PyRolloutResult& x) {
             const search::RolloutResult& r = x.get();
             return "RolloutResult(seed=" + std::to_string(x.seed) + ", status=" + search::to_string(r.search.status) +
-                   ", num_states=" + std::to_string(r.num_states) + ", reached_fluent_atoms=" +
+                   ", num_created_states=" + std::to_string(r.num_created_states) + ", reached_fluent_atoms=" +
                    std::to_string(r.reached_fluent_atoms.size()) + ", landing_states=" +
                    std::to_string(r.landing_states.size()) + ")";
         });
@@ -2707,10 +2708,9 @@ void bind_search(nb::module_& parent)
 
     // heuristics ------------------------------------------------------------------------------------------------------
     nb::class_<PyHeuristic>(m, "Heuristic",
-                            "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count' "
-                            "('gc'), 'max' ('hmax'), 'add' ('hadd'), 'ff' ('hff'), 'set_additive' ('hsa', 'setadd'), "
-                            "'h2', 'lmcut' ('lm_cut': LM-cut, admissible), 'lmcount' ('lm_count', 'landmark_count': "
-                            "LAMA's landmark count, path-dependent); the perfect heuristic h* comes from "
+                            "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count', "
+                            "'max', 'add', 'ff', 'set_additive', 'h2', 'lmcut' (LM-cut, admissible), 'lmcount' "
+                            "(LAMA's landmark count, path-dependent); the perfect heuristic h* comes from "
                             "a state space: Heuristic.perfect(space).\n\ncosts: 'auto' (the default: the task's objective, i.e. 'unit' "
                             "for a task without action costs and metric, else 'real'), 'unit' (every action 1) or "
                             "'real' (the task's action costs: zero and fractional costs exact up to 6 decimal places, "
@@ -2902,8 +2902,8 @@ void bind_search(nb::module_& parent)
                                                      costs_name(self.options.costs), evaluation_name(self.options.evaluation)));
             },
             "A heuristic pickles as its specification and is built again when unpickled (its grounding included); "
-            "a perfect heuristic as its state space. stats start from zero.")
-        .def_prop_ro("stats", [](PyHeuristic& self) {
+            "a perfect heuristic as its state space. counters start from zero.")
+        .def_prop_ro("counters", [](PyHeuristic& self) {
             heuristics::HeuristicStats st;
             {
                 nb::gil_scoped_release release;  // never block on the mutex while attached
@@ -3804,9 +3804,9 @@ void bind_search(nb::module_& parent)
                      "rollouts from the root over a tree of action sequences, pruned by the minimum depth of each "
                      "fluent atom, until a goal is found (the goal is tested on generation), the root is solved "
                      "(EXHAUSTED; root_solved) or a budget stops it.\n\nordering: an ActionOrdering or its name "
-                     "('in_order', 'randomized', 'direct_goal_achiever_first' / 'dgaf', 'goal_regression_relevance' / "
-                     "'regression', 'mixed_regression_random' / 'mixed'); seed: of the randomized orderings (a "
-                     "SplitMix64; the same seed gives the same run on every platform); max_rollouts (FAILED when hit); "
+                     "('in_order', 'randomized', 'direct_goal_achiever_first', 'goal_regression_relevance', "
+                     "'mixed_regression_random'); seed: of the randomized orderings (a "
+                     "SplitMix64; the same seed gives the same run on every platform); max_rollouts (OUT_OF_STATES when hit); "
                      "incumbent_bound: a plan of this length is known elsewhere. max_states counts generated tree "
                      "nodes; there is no max_expanded. ",
                     k_control_doc,

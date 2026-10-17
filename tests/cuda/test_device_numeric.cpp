@@ -153,7 +153,7 @@ TEST_P(DeviceNumeric, BrfsEqualsCpu)
         cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.stop_at_goal = false; options.chunk_states = 17;
         const auto actual = cuda::brfs(ctx, task, options).result;
         EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
-        EXPECT_EQ(actual.expanded, expected.expanded); EXPECT_EQ(actual.goal_states, expected.goal_states);
+        EXPECT_EQ(actual.expanded, expected.expanded); EXPECT_EQ(actual.num_goal_states, expected.num_goal_states);
         EXPECT_EQ(actual.fingerprint, expected.fingerprint);
     }
 }
@@ -512,7 +512,7 @@ TEST(DeviceNumericRules, ExhaustiveCountsOnFiniteTasks)
         EXPECT_TRUE(actual.exhausted) << name;
         EXPECT_EQ(actual.states, expected.states) << name;
         EXPECT_EQ(actual.generated, expected.generated) << name;
-        EXPECT_EQ(actual.goal_states, expected.goal_states) << name;
+        EXPECT_EQ(actual.num_goal_states, expected.num_goal_states) << name;
         EXPECT_EQ(actual.fingerprint, expected.fingerprint) << name;
     }
 }
@@ -557,7 +557,7 @@ TEST_P(DeviceNumericPddl, ExpandBrfsAndIwEqualCpu)
     cuda::DeviceBrfsOptions options; options.max_depth = 4; options.fingerprint = true; options.stop_at_goal = false;
     const auto actual = cuda::brfs(ctx, task, options).result;
     EXPECT_EQ(actual.states, expected.states); EXPECT_EQ(actual.generated, expected.generated);
-    EXPECT_EQ(actual.goal_states, expected.goal_states); EXPECT_EQ(actual.fingerprint, expected.fingerprint);
+    EXPECT_EQ(actual.num_goal_states, expected.num_goal_states); EXPECT_EQ(actual.fingerprint, expected.fingerprint);
     cuda::MultiIwOptions iw; iw.max_width = 2; iw.budget.max_states = 20000;
     const auto results = cuda::multi_iw(ctx, task, std::span(states).first(4), iw);
     search::IwOptions reference; reference.max_width = 2; reference.control.budget.max_states = 20000;
@@ -999,7 +999,7 @@ TEST(DeviceNumericRules, OnlyEffectsThatFireConflictAndAssignDefines)
         EXPECT_TRUE(r.exhausted);
         EXPECT_EQ(r.states, 8u);
         EXPECT_EQ(r.generated, 14u);
-        EXPECT_EQ(r.goal_states, 2u);
+        EXPECT_EQ(r.num_goal_states, 2u);
     }
 }
 
@@ -1022,7 +1022,7 @@ TEST(DeviceGoals, AtomsNoStateHolds)
         const BrfsResult r = cuda::brfs(ctx, task, whole).result;
         EXPECT_TRUE(r.exhausted);
         EXPECT_EQ(r.states, 2u);
-        EXPECT_EQ(r.goal_states, goals);
+        EXPECT_EQ(r.num_goal_states, goals);
         const search::BestFirstResult cpu = search::astar_eager(*task);
         const cuda::DeviceBestFirstResult a = cuda::astar(ctx, task, {});
         EXPECT_EQ(a.result.status, cpu.status);
@@ -1072,7 +1072,7 @@ TEST(DeviceNumericRules, NumericSemanticsWithoutSlotsAreRefused)
     EXPECT_TRUE(device.exhausted);
     EXPECT_EQ(device.states, cpu.states);
     EXPECT_EQ(device.generated, cpu.generated);
-    EXPECT_EQ(device.goal_states, cpu.goal_states);
+    EXPECT_EQ(device.num_goal_states, cpu.num_goal_states);
 }
 
 namespace

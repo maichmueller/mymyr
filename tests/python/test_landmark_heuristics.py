@@ -47,12 +47,13 @@ def action(task, state, name):
 
 def test_kind_names(depot):
     s = depot.initial_state
-    for kind, aliases in (("lmcut", ("lm_cut",)), ("lmcount", ("lm_count", "landmark_count"))):
+    for kind, others in (("lmcut", ("lm_cut",)), ("lmcount", ("lm_count", "landmark_count"))):
         h = search.Heuristic(depot, kind)
         assert h.kind == kind and h.grounded
         assert h.path_dependent == (kind == "lmcount")
-        for a in aliases:
-            assert search.Heuristic(depot, a)(s) == h(s)
+        for other in others:
+            with pytest.raises(ValueError, match="unknown heuristic"):
+                search.Heuristic(depot, other)
         with pytest.raises(ValueError, match="lifted"):
             search.Heuristic(depot, kind, evaluation="lifted")
     assert search.Heuristic(depot, "lmcut").initial_status(s) == b""

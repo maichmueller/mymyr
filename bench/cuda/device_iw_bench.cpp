@@ -69,7 +69,7 @@ u64 batch_fp(const cuda::MultiIwBatch& b)
         add(x);
     for (const auto& x : b.pass_stats)
     {
-        add(x.arity);
+        add(x.width);
         add(static_cast<u64>(x.status));
         add(x.expanded);
         add(x.generated);
@@ -338,8 +338,8 @@ int main(int argc, char** argv)
             {
                 const search::IwResult& x = one[i];
                 const i32 len = x.status == search::SearchStatus::Solved ? static_cast<i32>(x.plan.size()) : -1;
-                equal = equal && batch.status[i] == x.status && batch.plan_length[i] == len && batch.expanded(i) == x.total.expanded &&
-                        batch.generated(i) == x.total.generated;
+                equal = equal && batch.status[i] == x.status && batch.plan_length[i] == len && batch.expanded(i) == x.stats.expanded &&
+                        batch.generated(i) == x.stats.generated;
             }
         }
         for (u32 i = 0; i < batch.n; ++i)

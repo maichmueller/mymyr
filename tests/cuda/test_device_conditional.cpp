@@ -216,7 +216,7 @@ TEST_P(DeviceConditionalEffectsSuite, BrfsEqualsTheCpu)
         EXPECT_EQ(d.result.states, c.states);
         EXPECT_EQ(d.result.expanded, c.expanded);
         EXPECT_EQ(d.result.generated, c.generated);
-        EXPECT_EQ(d.result.goal_states, c.goal_states);
+        EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
         EXPECT_EQ(d.result.layers, c.layers);
         EXPECT_TRUE(d.result.exhausted);
         EXPECT_EQ(d.result.fingerprint, c.fingerprint) << "device ids differ from the CPU's deterministic ids";
@@ -248,7 +248,7 @@ TEST_P(DeviceConditionalEffectsSuite, StopAtGoalReturnsTheCpuPlan)
     EXPECT_EQ(d.result.states, c.states);
     EXPECT_EQ(d.result.expanded, c.expanded);
     EXPECT_EQ(d.result.generated, c.generated);
-    EXPECT_EQ(d.result.goal_states, c.goal_states);
+    EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
     EXPECT_EQ(d.result.layers, c.layers);
     EXPECT_EQ(d.result.fingerprint, c.fingerprint);
     EXPECT_TRUE(d.result.plan == c.plan);
@@ -439,7 +439,7 @@ TEST(DeviceConditionalEffects, DerivedAtomsFirstMetOnTheDevice)
         EXPECT_GT(d.stats.axiom_reruns, 0u);
         const BrfsResult c = brfs(*task, {.threads = 2, .stop_at_goal = false, .fingerprint = true});
         EXPECT_EQ(d.result.states, c.states);
-        EXPECT_EQ(d.result.goal_states, c.goal_states);
+        EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
         EXPECT_EQ(d.result.fingerprint, c.fingerprint);
     }
 }
@@ -552,7 +552,7 @@ TEST(DeviceConditionalEffects, ForcedForwardCheckingEqualsTheCpu)
                 const BrfsResult c = brfs(*task, {.threads = 2, .canonical_order = canonical, .stop_at_goal = false, .fingerprint = true});
                 EXPECT_EQ(d.result.states, c.states);
                 EXPECT_EQ(d.result.generated, c.generated);
-                EXPECT_EQ(d.result.goal_states, c.goal_states);
+                EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
                 EXPECT_EQ(d.result.fingerprint, c.fingerprint);
                 EXPECT_EQ(d.stats.host_schemas, 0u);
             }
@@ -593,8 +593,8 @@ TEST(DeviceConditionalEffects, MultiIwEqualsTheCpu)
                     const search::IwResult c = search::iw(*task, co);
                     EXPECT_EQ(d[i].status, c.status);
                     EXPECT_EQ(d[i].effective_width, c.effective_width);
-                    EXPECT_EQ(d[i].total.expanded, c.total.expanded);
-                    EXPECT_EQ(d[i].total.generated, c.total.generated);
+                    EXPECT_EQ(d[i].stats.expanded, c.stats.expanded);
+                    EXPECT_EQ(d[i].stats.generated, c.stats.generated);
                     EXPECT_TRUE(d[i].plan == c.plan) << d[i].plan.size() << " vs " << c.plan.size() << " steps";
                     ASSERT_EQ(d[i].goal_state.has_value(), c.goal_state.has_value());
                     if (c.goal_state)
