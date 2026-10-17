@@ -9,11 +9,16 @@ encoder.stream() and encoder.mutable_stream() collect rows over time and encode 
 (FlatStream, FlatMutableStream); encoder.entity_names(batch, g) and encoder.describe(batch, g) name the entities and
 tuples of one graph. An encoder pickles as its table and options.
 
+The rows of an encoding can carry subgoal layers and a history (``encode(..., subgoals=..., history=...)``, also on the
+streams): arrays of masks over the atom slots, which ``subgoal_masks`` and ``history_masks`` build from lists of
+literals.
+
 EncodingSchema is the relation catalog of an encoding: the relations a batch holds, sorted by name, with their
 arities, lanes and slot roles, and a fingerprint. It is a function of the domain and the options alone.
 """
 
 from mymyr._core._encoding import EncodingSchema, FlatBatch, FlatMutableStream, FlatRelationEncoder, FlatStream
+from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
 
 __all__ = [
@@ -23,4 +28,6 @@ __all__ = [
     "FlatRelationEncoder",
     "FlatStream",
     "GraphDescription",
+    "history_masks",
+    "subgoal_masks",
 ]

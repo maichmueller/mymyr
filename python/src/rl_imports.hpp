@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -106,6 +107,55 @@ public:
         auto* p = static_cast<u64*>(im.data);
         keep.push_back(std::move(im.keep));
         return p;
+    }
+
+    /// An integer array of `shape` (-1: any extent; the extents go to *ext) as int32 values: read where it is when it
+    /// holds int32, else (any other integer width) converted into `copy`; a value outside int32 raises ValueError.
+    /// Null for None.
+    const i32* ints32(nb::handle obj, const char* name, std::initializer_list<i64> shape, std::vector<i32>& copy,
+                      std::vector<i64>* ext = nullptr)
+    {
+        if (obj.is_none())
+            return nullptr;
+        dl::Imported im = take(obj, name, false);
+        const bool is_int = (im.dtype.code == dl::k_int || im.dtype.code == dl::k_uint) && im.dtype.lanes == 1;
+        if (!is_int || (im.dtype.bits != 32 && im.dtype.bits != 64 && im.dtype.bits != 16 && im.dtype.bits != 8))
+            throw nb::type_error((quoted(name) + " must hold integers").c_str());
+        check_shape(im, name, shape);
+        if (ext)
+            *ext = im.shape;
+        i64 count = 1;
+        for (const i64 e : im.shape)
+            count *= e;
+        if (im.dtype.bits == 32 && im.dtype.code == dl::k_int)
+        {
+            const auto* p = static_cast<const i32*>(im.data);
+            keep.push_back(std::move(im.keep));
+            return p;
+        }
+        copy.resize(static_cast<usize>(count));
+        for (i64 k = 0; k < count; ++k)
+        {
+            i64 v = 0;
+            const bool is_signed = im.dtype.code == dl::k_int;
+            switch (im.dtype.bits)
+            {
+                case 8: v = is_signed ? i64{static_cast<const i8*>(im.data)[k]} : i64{static_cast<const u8*>(im.data)[k]}; break;
+                case 16: v = is_signed ? i64{static_cast<const i16*>(im.data)[k]} : i64{static_cast<const u16*>(im.data)[k]}; break;
+                case 32: v = i64{static_cast<const u32*>(im.data)[k]}; break;
+                default:
+                {
+                    const u64 raw = static_cast<const u64*>(im.data)[k];
+                    v = is_signed ? static_cast<i64>(raw)
+                                  : (raw > static_cast<u64>(std::numeric_limits<i64>::max()) ? std::numeric_limits<i64>::max()
+                                                                                              : static_cast<i64>(raw));
+                }
+            }
+            if (v < std::numeric_limits<i32>::lowest() || v > std::numeric_limits<i32>::max())
+                throw nb::value_error((quoted(name) + " has a value that int32 cannot hold").c_str());
+            copy[static_cast<usize>(k)] = static_cast<i32>(v);
+        }
+        return copy.data();
     }
 
     std::vector<std::shared_ptr<void>> keep;

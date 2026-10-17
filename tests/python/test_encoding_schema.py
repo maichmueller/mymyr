@@ -125,7 +125,7 @@ def test_helper_predicates_are_stable_with_quantified_actions_in_other_domains()
 
 def test_catalog_metadata_is_consistent():
     schema = EncodingSchema(text_task("philosophers__p03-phil4"), max_goal_level=1, goal_derivations=["plain", "unsatisfied"],
-                            target_sources=["goal", "subgoal", "history"], predicate_virtual_nodes=True)  # fmt: skip
+                            target_sources=["goal", "subgoal", "history"], history=True, predicate_virtual_nodes=True)  # fmt: skip
     n = schema.num_relations
     columns = [
         schema.relation_names, schema.relation_arities, schema.relation_logical_arities, schema.relation_lanes,
@@ -188,9 +188,11 @@ def test_nullary_and_derived_predicates_follow_the_options():
 
 def test_options_round_trip_and_normalize():
     task = text_task("gripper__prob05")
-    schema = EncodingSchema(task, goal_derivations=("satisfied", "plain", "satisfied"), target_sources=["history", "goal"])
+    schema = EncodingSchema(task, goal_derivations=("satisfied", "plain", "satisfied"), target_sources=["history", "goal"],
+                            history=True, history_max_steps=3)
     assert schema.options["goal_derivations"] == ("plain", "satisfied")
     assert schema.options["target_sources"] == ("goal", "history")
+    assert schema.options["history"] is True and schema.options["history_max_steps"] == 3
     assert schema.options["horizon_mode"] is None and schema.options["root_policy"] is None
     again = EncodingSchema(task, **schema.options)
     assert again.schema_fingerprint == schema.schema_fingerprint and again.relation_names == schema.relation_names
@@ -200,7 +202,7 @@ def test_options_round_trip_and_normalize():
 
 
 # ------------------------------------------------------------------------------------------------ fingerprint
-PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0x1A9BE3C01D8DC4E2, 0xEA8A7B999672E433, 0xCCB27EEFA062F265
+PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0x1A9BE3C01D8DC4E2, 0x2F5279FDFE082E1C, 0xCCB27EEFA062F265
 FINGERPRINT_VARIANTS = {
     "goal_derivations": {"goal_derivations": ["plain"]},
     "goal_derivations_unsat": {"goal_derivations": ["plain", "satisfied", "unsatisfied"]},
@@ -213,7 +215,9 @@ FINGERPRINT_VARIANTS = {
     "include_actions": {"include_actions": False},
     "target_goal": {"target_sources": ["goal"]},
     "target_action": {"target_sources": ["action"]},
-    "target_history": {"target_sources": ["history"]},
+    "target_history": {"history": True, "target_sources": ["history"]},
+    "history": {"history": True},
+    "history_max_steps": {"history": True, "history_max_steps": 3},
     "target_subgoal": {"max_goal_level": 1, "target_sources": ["subgoal"]},
     "layout": {"layout": "relation"},
     "index_dtype": {"index_dtype": "int64"},
@@ -259,7 +263,7 @@ def test_fingerprint_values_are_pinned():
                            predicate_virtual_nodes=True)  # fmt: skip
     assert delta.schema_fingerprint == PIN_DELTA
     targets = EncodingSchema(gripper, max_goal_level=2, target_sources=["goal", "subgoal", "history", "action"],
-                             layout="relation", index_dtype="int64")  # fmt: skip
+                             history=True, layout="relation", index_dtype="int64")  # fmt: skip
     assert targets.schema_fingerprint == PIN_TARGETS
     exclude = EncodingSchema(gripper, horizon_mode="full", root_policy="exclude", parent_relation=True)
     assert exclude.schema_fingerprint == PIN_EXCLUDE

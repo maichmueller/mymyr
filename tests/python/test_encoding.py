@@ -401,8 +401,6 @@ def test_the_default_options_encode_the_goal_relations():
 @pytest.mark.parametrize(
     "options, match",
     [
-        ({"max_goal_level": 1}, "max_goal_level is not supported"),
-        ({"target_sources": ("history",)}, "subgoal and history targets is not supported"),
         ({"horizon_mode": "full"}, "horizon is not supported"),
     ],
 )
@@ -419,6 +417,9 @@ def test_options_the_encoder_does_not_encode_raise_value_error(options, match):
         ({"max_goal_level": 1, "target_sources": ("goal", "subgoal"), "goal_derivations": ("satisfied",)},
          "plain goal derivation"),
         ({"horizon_mode": "full", "target_sources": ("action",)}, "horizon"),
+        ({"target_sources": ("history",)}, "history targets need history"),
+        ({"history_max_steps": 2}, "history_max_steps needs history"),
+        ({"history": True, "horizon_mode": "full"}, "history cannot be combined with a horizon mode"),
     ],
 )
 def test_invalid_combinations_give_the_error_of_the_schema(options, match):

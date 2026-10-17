@@ -26,7 +26,7 @@ assert np.array_equal(encoder.encode(state).relation_args, batch.relation_args)
 
 `FlatRelationEncoder(table_or_task, *, <options>)` takes a `Task`, a `TaskHandle` or a one-domain `rl.TaskTable` and the
 options of the [schema](#encoding-schema).
-`encoder.encode(states, task_ids=None, *, derived=None, goals=None, actions=None, framework=None, threads=1, pool=None, capacities=None)`
+`encoder.encode(states, task_ids=None, *, derived=None, goals=None, actions=None, subgoals=None, history=None, framework=None, threads=1, pool=None, capacities=None)`
 returns a `FlatBatch`. It is reentrant: one encoder serves any number of concurrent calls.
 
 - **`states`:**
@@ -64,6 +64,19 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   lacks raises `ValueError`. `actions` needs the action relations
   (`include_actions=True`, the default) and applies to every row of the call. An expansion that `rl.expand` pruned
   (a witness expansion, which keeps the rows of a subset of the actions) encodes exactly the rows it has.
+- **`subgoals`:** the subgoal layers of every row, `(pos, neg)` or `(pos, neg, derived_pos, derived_neg)`: masks over the
+  fluent (derived) atom slots, `[N, L, W]` (`[N, L, D]` for the derived pair) with `L` at most `max_goal_level`, or
+  `[1, L, W]` for layers that every row shares; u64 words or u32 halves. Layer `l` fills the relations of level `l + 1`
+  ([Subgoals](#subgoals)). A row may have fewer layers than the schema has levels (the missing ones are empty). It
+  needs `max_goal_level >= 1` and goal relations. Masks narrower than the instance, or with a bit the instance does not
+  have, raise `ValueError`, as for `goals`.
+  `mymyr.encoding.subgoal_masks(encoder, layers, task_ids=None)` builds the arrays from lists of literals.
+- **`history`:** the history of every row, `(pos, neg, dt)`, `(pos, neg, dt, count)` or `(pos, neg, dt, count,
+  derived_pos, derived_neg)`: masks `[N, H, W]` (`[N, H, D]`) of the steps of a row, oldest first, `dt` an integer array
+  `[N, H]` (the time of each step relative to the state, as the caller defines it; the encoder only stores it) and `count`
+  an integer array `[N]` with the valid steps of each row, a prefix of its `H` (`None`: all `H`). Steps past a row's count
+  are padding and never read. It needs `history=True` ([History](#history)).
+  `mymyr.encoding.history_masks(encoder, steps, task_ids=None)` builds the arrays from lists of `(dt, literals)`.
 - **`framework`:** `"numpy"`, `"torch"`, `"jax"` or `"dlpack"`; by default the framework of `states` (NumPy for `State`s).
 - **`threads`:** the threads that encode the batch (default 1; 0 means the hardware threads). The result does not depend
   on it: a batch is byte-identical for every thread count. Threads pay off for large batches only: waking a thread
@@ -75,17 +88,18 @@ second parse of the same file), and refused with a `ValueError` naming the row a
 - **`pool`:** a `mymyr.rl.ThreadPool` that you hold, like `rl.expand`'s: it is used instead of `threads` and shared by
   the calls that name it (one batch runs on it at a time).
 - **`capacities`:** `None` (default) sizes every array to the batch. A dict with the keys `entities`, `tuples` and
-  `args` (and `targets` when the schema has targets) gives the capacity of the variable-size arrays instead:
+  `args` (and `targets` when the schema has targets, `history` when it has history) gives the capacity of the
+  variable-size arrays instead:
   `entity_role` and `entity_ref` have `entities` entries, `relation_args` has `args` entries, `target_entity` and
-  `target_group` have `targets` entries; the offset arrays keep their sizes (`G + 1`, `G * R + 1`) and `tuples`
-  bounds the total number of tuples. The batch fills the first entries of each array and the rest is zero, so batches
+  `target_group` have `targets` entries, `history_entity` and `history_dt` have `history` entries; the offset arrays
+  keep their sizes (`G + 1`, `G * R + 1`) and `tuples` bounds the total number of tuples. The batch fills the first entries of each array and the rest is zero, so batches
   of different sizes share array shapes (for example under `jax.jit`). A batch that does not fit (a capacity too small,
   or an index type too narrow) leaves every array zero and sets `batch.sizes['overflow']`; `sizes['capacity_overflow']`
-  and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']` and `['targets']` are the
-  true sizes.
+  and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']`, `['targets']` and
+  (with history) `['history']` are the true sizes.
 
-Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `max_goal_level`
-above 0, subgoal and history targets and `horizon_mode`. Numeric tasks raise as well.
+Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `horizon_mode`.
+Numeric tasks raise as well.
 Every other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed
 `derived` array) raises `ValueError` too; a batch that needs more indices than the index type holds raises
 `OverflowError` (`index_dtype='int64'` lifts the limit).
@@ -93,8 +107,8 @@ Every other invalid input (a task id out of range, a missing `task_ids`, a `Stat
 ## Lanes
 
 A graph has the objects of its instance as entities, in the task's object order, then the auxiliary entity, the goal
-entities, the action entities and the predicate virtual nodes, each when the options and the state give it one. Its
-relations hold:
+entities, the subgoal entities, the action entities, the history step entities, the history target entities and the
+predicate virtual nodes, each when the options and the inputs give it one. Its relations hold:
 
 - the tuples of the **fluent** atoms of the row, the **derived** atoms (from `derived` or evaluated), and the **static**
   atoms of the instance, each atom in the relation of its predicate, with its arguments as the tuple. The types are
@@ -105,10 +119,12 @@ relations hold:
   `nullary=False` there are no nullary relations and no auxiliary entity.
 
 - the **goal** relations, below.
+- the **subgoal** relations, from `subgoals`: the goal relations of the levels 1 to 3, below.
 - the **action** relations, from `actions`: one tuple per action of the state, below.
+- the **history** relations, from `history`: the literals of the steps of the row's history, below.
 
-A graph contains nothing that its state and instance do not have: no entity or tuple stands for something absent.
-The history relations of the schema have no tuples in a batch.
+A graph contains nothing that its inputs and instance do not have: no entity or tuple stands for something absent.
+A call without `subgoals` and `history` has no tuples in their relations.
 
 ### Goals
 
@@ -143,6 +159,44 @@ counts `relation_counts[g, 0]`, `relation_counts[g, 1]`, ... from `entity_ref` u
 `(g, r)`, and the tuple is `relation_offsets[r * G + g] + j`. The batch lists the goal entities as targets:
 `target_offsets` `[G + 1]`, `target_entity` `[T]` and `target_group` `[T]` (0: goal, an index into
 `encoder.target_group_names`).
+
+### Subgoals
+
+With `max_goal_level = L` the schema has, for every predicate and sign, goal relations of the levels 1 to `L` besides the
+goal's: `[+]on[sg]`, `[+]on[ssg]`, `[+]on[sssg]` and their `[sat]` and `[unsat]` variants, as `goal_derivations` says.
+Layer `l` of a row's `subgoals` (`l = 0, 1, ...`) fills the relations of level `l + 1`. A level holds the literals
+of its layer **minus every literal of the goal and of the lower layers**: a literal is encoded once, at the lowest level
+that has it. A literal that the goal has is only in the goal relations, one that layers 0 and 2 both have is only in
+level 1, and so is one that layers 0 and 1 both have. The layers of a row are masks, so a literal listed twice in one
+layer is one tuple. The `[sat]` and `[unsat]` variants are the literals of the level that hold, or do not hold, in the
+row's state. A row's own `goals`, when given, are the goal that is subtracted instead of the instance's.
+
+With `target_sources` including `"subgoal"` (it needs the plain goal derivation and `max_goal_level >= 1`) every tuple
+of a plain subgoal relation gets a **subgoal entity** (entity role 3, after the goal entities), numbered in the order of
+the plain subgoal relations (relation id, then tuple), the first argument of its tuple, with the tuple's index among the
+graph's tuples in graph-major order as `entity_ref`, exactly as a goal entity. The batch lists them as targets of group 1,
+after the goal entities of their graph.
+
+Nullary literals in a layer are unary tuples over the auxiliary entity, which the graph then has.
+
+### History
+
+With `history=True` the history relations `[+]on[hist]` and `[-]on[hist]` of the schema hold the literals of the steps of
+a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (0, the default: all of
+them). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
+oldest first; the batch lists them in `history_offsets` `[G + 1]`, `history_entity` `[S]` (the entity of each step) and
+`history_dt` int32 `[S]` (its `dt`). The `entity_ref` of a step entity is the step's index among the row's valid steps
+(not among the encoded ones: step `entity_ref` of the row's `history` is `history[2][g, entity_ref]` for its `dt` and
+`history[0][g, entity_ref]` for its positive mask, whatever `history_max_steps` is).
+
+A history tuple is `(history step, [predicate node,] o_1, ..., o_k)`, and with `target_sources` including `"history"` it
+starts with a **history target entity** (entity role 6, after the history steps) of its own: `(history target, history
+step, ...)`. The tuples of a cell are in the order of the steps, then of the atom slots (which is the lexicographic order of
+the objects). History target entities are numbered in the order of the history relations (relation id, then tuple) and
+their `entity_ref` is the tuple's index among the graph's tuples in graph-major order. That is the order in which the
+tuples are filled, not the order of the steps, so the target of a literal is found through its tuple. The batch lists
+them as targets of group 3, after the action targets of their graph. A literal over a nullary predicate is the tuple over
+the auxiliary entity.
 
 ### Actions
 
@@ -186,16 +240,19 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `task_ids` | int32 `[G]` | the instance of each row |
 | `num_objects` | I `[G]` | the objects of the instance (the auxiliary entity is not counted) |
 | `entity_offsets` | I `[G + 1]` | graph `g`'s entities are `[entity_offsets[g], entity_offsets[g + 1])` |
-| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 1 predicate virtual node, 2 goal, 4 action, 8 auxiliary; omitted when implicit |
-| `entity_ref` | I `[E]` | an object's instance-local id; a goal entity's tuple index within its graph (graph-major order); an action entity's row within its graph's rows of `actions`; a virtual node's key relation id; -1 for the auxiliary entity; omitted like `entity_role` |
+| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 1 predicate virtual node, 2 goal, 3 subgoal, 4 action, 5 history step, 6 history target, 8 auxiliary; omitted when implicit |
+| `entity_ref` | I `[E]` | an object's instance-local id; a goal, subgoal or history target entity's tuple index within its graph (graph-major order); an action entity's row within its graph's rows of `actions`; a history step's index among the row's valid steps; a virtual node's key relation id; -1 for the auxiliary entity; omitted like `entity_role` |
 | `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)`, in both layouts; omitted with `emit_counts=False` |
 | `relation_offsets` | I `[G * R + 1]` | segment `s` holds the tuples `[offsets[s], offsets[s + 1])`; cell `(g, r)` is `s = g * R + r`, or `r * G + g` in the relation layout |
 | `relation_arg_offsets` | I `[G * R + 1]` | the same offsets into `relation_args` |
 | `relation_args` | I `[A]` | the entities of the tuples, tuple after tuple, `relation_arities[r]` per tuple |
 | `goal_complete` | uint8 `[G]` | 1 iff the goal relations hold the whole goal; present iff the schema has goal relations |
 | `target_offsets` | I `[G + 1]` | graph `g`'s targets are `[target_offsets[g], target_offsets[g + 1])`; present iff the schema has targets |
-| `target_entity` | I `[T]` | the entity of each target, graph after graph |
-| `target_group` | uint8 `[T]` | the group of each target (0: goal, 2: action) |
+| `target_entity` | I `[T]` | the entity of each target, graph after graph, in entity order |
+| `target_group` | uint8 `[T]` | the group of each target (0: goal, 1: subgoal, 2: action, 3: history) |
+| `history_offsets` | I `[G + 1]` | graph `g`'s history steps are `[history_offsets[g], history_offsets[g + 1])`; present iff the schema has history |
+| `history_entity` | I `[S]` | the entity of each history step, graph after graph, oldest first |
+| `history_dt` | int32 `[S]` | the `dt` of each history step |
 
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),
@@ -268,7 +325,7 @@ assert mutable.flush().num_graphs == 1       # the rows are kept
 assert len(mutable) == 1
 ```
 
-- **`FlatStream.append(states, task_ids=None, *, derived=None, goals=None, actions=None)`** takes the arguments of
+- **`FlatStream.append(states, task_ids=None, *, derived=None, goals=None, actions=None, subgoals=None, history=None)`** takes the arguments of
   `encode` and adds the rows. `flush(*, framework=None, threads=1, pool=None, capacities=None)` takes the remaining
   arguments of `encode`, encodes the rows in the order of the appends and **empties** the stream. A flush that
   raises, or whose batch overflowed its `capacities`, keeps the rows. `clear()` drops the rows, `len(stream)` counts
@@ -280,6 +337,10 @@ assert len(mutable) == 1
   graph `j` of the batch is the row of `indices()[j]`; `index in stream` tells whether a row is held. An index that is
   repeated within a call or already held raises `ValueError` on `append`; an index that is not held raises `KeyError`
   on `update` and `remove`. A call that raises changes nothing.
+- **Subgoals and history.** `subgoals` and `history` are as in `encode` and are optional per row: a row without them has
+  empty layers and no history, the same batch as `encode` gives for it. A stream stores `max_goal_level` layers per row
+  and the valid steps of each history, and a flush pads the histories to the longest, so rows with histories of every
+  length can share a stream.
 - **Per-row inputs.** `derived`, `goals` and `actions` are as in `encode`, with one rule: every row of a stream gives
   the same inputs. The first rows appended to a stream without rows decide (a stream with `goals` keeps a goal for every
   row, a stream with `actions` the action rows of every state, a single `[1, W]` goal is copied for every row), and a
@@ -316,7 +377,10 @@ The name of an entity follows its role:
 | object | its name in the task (`task.objects[entity_ref]`) |
 | auxiliary | `auxiliary` |
 | goal | `[+](on c b)[g]` or `[-](clear a)[g]`: the sign, then the predicate and objects of the plain goal tuple the entity stands for; a nullary literal is `[+](handempty)[g]` |
+| subgoal | `[+](on c b)[sg]`: like a goal, with the level of its relation (`[sg]`, `[ssg]`, `[sssg]`) |
 | action | `(unstack a b)`: the action schema, then the objects of its action tuple |
+| history step | `history:-2#0`: the `dt` of the step and its index among the graph's encoded steps (`history_entity`), counted from 0 |
+| history target | `history:-2#0:[+](on c b)`: the step, then the sign, predicate and objects of the history tuple |
 | predicate virtual node | `predicate:on` |
 
 The names are a function of the batch and the task: they do not depend on the layout, the process or the hash seed.
@@ -356,21 +420,23 @@ relations. An encoder has the same properties.
 - **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
   `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
-  targets together with a horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
+  targets together with a horizon mode; history targets or `history_max_steps` without `history`; `history` together with a
+  horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
   `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
-  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
+  shape the output but not the catalog (target sources, layout, index type, history and `history_max_steps`, horizon
+  mode and root policy). It does not
   depend on declaration order, on predicate ids, on the process or on the build.
 
 ## C++
 
 `mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
-encoder, and `encode(EncodeInput{states, task_ids, derived, derived_stride, goal_pos, goal_neg, goal_stride, goal_words, ...})`
+encoder, and `encode(EncodeInput{states, task_ids, derived, derived_stride, goal_pos, goal_neg, goal_stride, goal_words, ..., actions, subgoals, history})`
 returns the batch as an `rl::ArrayBundle` with the arrays and scalars above. `mymyr/encoding/validate.hpp` checks a
 batch against the contract. `encode(in, pool, scratch)` takes a `ThreadPool` (the batch is encoded by up to
 `ceil(graphs / k_graphs_per_member)` of its members, on the calling thread alone for a small batch, byte-identically for
 any pool) and a reusable `EncodeScratch`. `count(in, pool, scratch)` returns the `FlatSizes` of a batch (entities,
-tuples, args, targets); `fill(in, sizes, buffers, pool, scratch)` then writes it into caller-provided `FlatBuffers`, and
+tuples, args, targets, history); `fill(in, sizes, buffers, pool, scratch)` then writes it into caller-provided `FlatBuffers`, and
 `encode_into(in, capacities, buffers, pool, scratch)` does both within `FlatCapacities`, reporting `overflow` in the
 sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scratch, sizes)` returns a bundle whose
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The encoder is not a
