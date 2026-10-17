@@ -364,6 +364,37 @@ TEST(EncoderActions, ARunThatIsNotInCanonicalOrderIsRefused)
     for (i32 row = expanded->offsets[g] + 1; row < expanded->offsets[g + 1]; ++row)
         if (expanded->schema[static_cast<usize>(row)] == expanded->schema[static_cast<usize>(row) - 1])
         {
+TEST(EncoderActions, AnActionTupleRepeatingTheObjectsOfItsPredecessorIsRejected)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 8, 3);
+    const auto expanded = expand_rows(*table, rows);
+    const auto encoder = FlatEncoder::create(table, action_options());
+    const EncodingSchema& schema = encoder->schema();
+    const auto batch = encoder->encode(input_of(rows, expanded.get()));
+    ASSERT_NO_THROW(validate(*batch, schema));
+    const u64 R = schema.num_relations();
+    const auto counts = ints(*batch, "relation_counts");
+    const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+    const auto args = ints(*batch, "relation_args");
+    bool found = false;
+    for (u64 g = 0; g < rows.size() && !found; ++g)
+        for (u32 r = 0; r < R && !found; ++r)
+        {
+            const u32 arity = schema.relation(r).arity;
+            if (schema.slot_roles(r).front() != SlotRole::Action || arity < 2 || counts[g * R + r] < 2)
+                continue;
+            found = true;
+            // the second tuple keeps its action entity and takes the objects of the first
+            const u64 first = static_cast<u64>(arg_offsets[g * R + r]), second = first + arity;
+            rl::ArrayBundle corrupted = test::with_value(*batch, "relation_args", second + 1, args[first + 1]);
+            for (u32 k = 2; k < arity; ++k)
+                corrupted = test::with_value(corrupted, "relation_args", second + k, args[first + k]);
+            EXPECT_THROW(validate(corrupted, schema), std::invalid_argument) << schema.relation(r).name;
+        }
+    ASSERT_TRUE(found);
+}
+
             for (u32 k = 0; k < L; ++k)
                 std::swap(expanded->binding[static_cast<usize>(row) * L + k], expanded->binding[static_cast<usize>(row - 1) * L + k]);
             break;

@@ -249,9 +249,14 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
             const bool goal_target = roles.front() == SlotRole::GoalTarget;
             const bool action = roles.front() == SlotRole::Action;
+            // the tuples of a goal-target or action relation start with their own entity, which is ascending by
+            // construction, so that the tuples are compared past it
+            const u32 lead = goal_target || action ? 1u : 0u;
             for (u64 t = 0; t < n; ++t)
             {
                 const u64 at = static_cast<u64>(arg_offsets[cell]) + t * arity;
+                if ((goal_target || action) && (args[at] < first || args[at] >= last))
+                    fail("a tuple of " + where + " has an entity outside its graph");
                 if (goal_target)
                 {
                     const i64 entity = args[at];
@@ -300,7 +305,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 }
                 if (t > 0)
                 {
-                    u32 k = 0;
+                    u32 k = lead;
                     while (k < arity && args[at + k] == args[at - arity + k])
                         ++k;
                     if (k == arity)

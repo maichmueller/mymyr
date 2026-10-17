@@ -5,11 +5,13 @@
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/rl/task_arrays.hpp"
 #include "mymyr/rl/task_table.hpp"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -100,4 +102,57 @@ inline u32 atom_slot(const Task& task, AtomKind kind, const std::string& name, c
 }
 
 inline void set_bit(std::vector<u64>& words, u32 slot) { words[slot >> 6] |= u64{1} << (slot & 63); }
+
+/// A copy of `bundle` whose entry `index` of array `name` has `change(old value)` in its place.
+template<class Change>
+rl::ArrayBundle with_edit(const rl::ArrayBundle& bundle, const char* name, u64 index, Change change)
+{
+    rl::ArrayBundle::Builder out;
+    for (const rl::ArrayInfo& info : bundle.arrays())
+    {
+        const auto* first = static_cast<const std::byte*>(bundle.data(info));
+        std::vector<std::byte> bytes(first, first + info.elements() * rl::dtype_bytes(info.dtype));
+        if (info.name == name)
+        {
+            std::byte* at = bytes.data() + index * rl::dtype_bytes(info.dtype);
+            switch (info.dtype)
+            {
+                case rl::DType::U8: at[0] = static_cast<std::byte>(change(std::to_integer<i64>(at[0]))); break;
+                case rl::DType::I32:
+                {
+                    i32 v;
+                    std::memcpy(&v, at, 4);
+                    v = static_cast<i32>(change(v));
+                    std::memcpy(at, &v, 4);
+                    break;
+                }
+                case rl::DType::I64:
+                {
+                    i64 v;
+                    std::memcpy(&v, at, 8);
+                    v = change(v);
+                    std::memcpy(at, &v, 8);
+                    break;
+                }
+                default: ADD_FAILURE() << "unexpected dtype of " << name;
+            }
+        }
+        out.add_bytes(info.name, info.dtype, info.shape, std::move(bytes), info.words);
+    }
+    for (const auto& [scalar, value] : bundle.scalars())
+        out.scalar(scalar, value);
+    return out.build();
+}
+
+/// A copy of `bundle` whose array `name` has `delta` added to the entry at `index`.
+inline rl::ArrayBundle with_change(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 delta)
+{
+    return with_edit(bundle, name, index, [delta](i64 v) { return v + delta; });
+}
+
+/// A copy of `bundle` whose entry `index` of array `name` is `value`.
+inline rl::ArrayBundle with_value(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 value)
+{
+    return with_edit(bundle, name, index, [value](i64) { return value; });
+}
 }  // namespace mymyr::test

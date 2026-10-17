@@ -766,32 +766,6 @@ TEST(EncoderGoals, TheFingerprintSeparatesTargets)
     EXPECT_FALSE(without->has_targets());
 }
 
-/// A copy of `bundle` whose array `name` has `delta` added to the entry at `index`.
-rl::ArrayBundle with_change(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 delta)
-{
-    rl::ArrayBundle::Builder out;
-    for (const rl::ArrayInfo& info : bundle.arrays())
-    {
-        const auto* first = static_cast<const std::byte*>(bundle.data(info));
-        std::vector<std::byte> bytes(first, first + info.elements() * rl::dtype_bytes(info.dtype));
-        if (info.name == name)
-        {
-            std::byte* at = bytes.data() + index * rl::dtype_bytes(info.dtype);
-            switch (info.dtype)
-            {
-                case rl::DType::U8: at[0] = static_cast<std::byte>(std::to_integer<i64>(at[0]) + delta); break;
-                case rl::DType::I32: { i32 v; std::memcpy(&v, at, 4); v += static_cast<i32>(delta); std::memcpy(at, &v, 4); break; }
-                case rl::DType::I64: { i64 v; std::memcpy(&v, at, 8); v += delta; std::memcpy(at, &v, 8); break; }
-                default: ADD_FAILURE() << "unexpected dtype of " << name;
-            }
-        }
-        out.add_bytes(info.name, info.dtype, info.shape, std::move(bytes), info.words);
-    }
-    for (const auto& [scalar, value] : bundle.scalars())
-        out.scalar(scalar, value);
-    return out.build();
-}
-
 TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
 {
     const auto table = goals_table();
@@ -803,7 +777,10 @@ TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
     const auto goal = static_cast<u64>(std::find(roles.begin(), roles.end(), 2) - roles.begin());
     ASSERT_LT(goal, roles.size());
     const auto rejected = [&](const char* array, u64 index, i64 delta)
-    { EXPECT_THROW(validate(with_change(*batch, array, index, delta), encoder->schema()), std::invalid_argument) << array; };
+    {
+        EXPECT_THROW(validate(test::with_change(*batch, array, index, delta), encoder->schema()), std::invalid_argument)
+            << array;
+    };
     rejected("goal_complete", 0, 2);
     rejected("entity_ref", goal, 1);
     rejected("entity_role", goal, -2);
@@ -811,10 +788,35 @@ TEST(EncoderGoals, CorruptedGoalEntitiesAndTargetsAreRejected)
     rejected("target_group", 0, 1);
     rejected("target_offsets", 1, 1);
 }
-/// A copy of `bundle` whose entry `index` of array `name` is `value`.
-rl::ArrayBundle with_value(const rl::ArrayBundle& bundle, const char* name, u64 index, i64 value)
+
+TEST(EncoderGoals, AGoalTupleRepeatingTheObjectsOfItsPredecessorIsRejected)
 {
-    return with_change(bundle, name, index, value - ints(bundle, name)[index]);
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 4, 3);
+    const auto encoder = FlatEncoder::create(table, goal_options());
+    const EncodingSchema& schema = encoder->schema();
+    const auto batch = encoder->encode(input_of(rows));
+    ASSERT_NO_THROW(validate(*batch, schema));
+    const u64 R = schema.num_relations();
+    const auto counts = ints(*batch, "relation_counts");
+    const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+    const auto args = ints(*batch, "relation_args");
+    bool found = false;
+    for (u64 g = 0; g < rows.size() && !found; ++g)
+        for (u32 r = 0; r < R && !found; ++r)
+        {
+            const u32 arity = schema.relation(r).arity;
+            if (schema.slot_roles(r).front() != SlotRole::GoalTarget || arity < 2 || counts[g * R + r] < 2)
+                continue;
+            found = true;
+            // the second tuple keeps its goal entity and takes the objects of the first
+            const u64 first = static_cast<u64>(arg_offsets[g * R + r]), second = first + arity;
+            rl::ArrayBundle corrupted = test::with_value(*batch, "relation_args", second + 1, args[first + 1]);
+            for (u32 k = 2; k < arity; ++k)
+                corrupted = test::with_value(corrupted, "relation_args", second + k, args[first + k]);
+            EXPECT_THROW(validate(corrupted, schema), std::invalid_argument) << schema.relation(r).name;
+        }
+    ASSERT_TRUE(found);
 }
 
 TEST(EncoderGoals, MoreGoalTuplesThanGoalEntitiesAreRejectedBeforeAReferenceIsRead)
@@ -830,11 +832,11 @@ TEST(EncoderGoals, MoreGoalTuplesThanGoalEntitiesAreRejectedBeforeAReferenceIsRe
     const u64 G = rows.size(), E = static_cast<u64>(entity_offsets[G]), T = static_cast<u64>(target_offsets[G]);
     ASSERT_GT(T, 0u);
     ASSERT_EQ(ints(*batch, "entity_role")[E - 1], 2);
-    rl::ArrayBundle corrupted = with_value(*batch, "entity_offsets", G, static_cast<i64>(E) - 1);
-    corrupted = with_value(corrupted, "target_offsets", G, static_cast<i64>(T) - 1);
-    corrupted = with_value(corrupted, "target_entity", T - 1, 0);
-    corrupted = with_value(corrupted, "entity_role", E - 1, 0);
-    corrupted = with_value(corrupted, "entity_ref", E - 1, 0);
+    rl::ArrayBundle corrupted = test::with_value(*batch, "entity_offsets", G, static_cast<i64>(E) - 1);
+    corrupted = test::with_value(corrupted, "target_offsets", G, static_cast<i64>(T) - 1);
+    corrupted = test::with_value(corrupted, "target_entity", T - 1, 0);
+    corrupted = test::with_value(corrupted, "entity_role", E - 1, 0);
+    corrupted = test::with_value(corrupted, "entity_ref", E - 1, 0);
     try
     {
         validate(corrupted, encoder->schema());
@@ -842,7 +844,7 @@ TEST(EncoderGoals, MoreGoalTuplesThanGoalEntitiesAreRejectedBeforeAReferenceIsRe
     }
     catch (const std::invalid_argument& error)
     {
-        EXPECT_NE(std::string(error.what()).find("does not have the next goal entity"), std::string::npos)
+        EXPECT_NE(std::string(error.what()).find("has an entity outside its graph"), std::string::npos)
             << error.what();
     }
 }
