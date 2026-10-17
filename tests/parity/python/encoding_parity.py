@@ -454,12 +454,15 @@ def _nullary_over_auxiliary(expected, actual, context):
 
 def _action_subset(expected, actual, context):
     """The reference was given the actions of its record; the native encoder is given every applicable action. When
-    the record lists fewer, the native action entities that it does not list, and the tuples over them, are
-    projected away."""
+    the record lists fewer, the native action entities that it does not list, and the tuples over them, are projected
+    away, but only those the task says are applicable in the record's state (computed here, independently of the
+    native encoder): any other native action entity stays and is a mismatch."""
     if context.actions is None:
         return expected, actual
     given = set(context.actions)
-    dropped = {name for role, name in actual.entities if role == "action" and name not in given}
+    state = replay(context.task, context.state["path"])
+    applicable = {str(a) for a in context.task.applicable_actions(state)}
+    dropped = {name for role, name in actual.entities if role == "action" and name not in given and name in applicable}
     if not dropped:
         return expected, actual
     entities = [e for e in actual.entities if e[1] not in dropped or e[0] != "action"]
@@ -497,7 +500,7 @@ REGISTRY = (
         "A record's reference encoding was given the actions listed in its inputs, which can be fewer than the "
         "applicable ones; the native encoder is given every applicable action.",
         "the action entities that the record does not list, and the tuples over them, only when the record lists "
-        "fewer actions than the state has",
+        "fewer actions than the state has and the task says the entity's action is applicable in the state",
         (("f03", "C3"), ("f04", "C3"), ("f06", "C3"), ("f07", "C3")),
         _action_subset,
     ),
