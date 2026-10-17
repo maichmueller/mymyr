@@ -695,6 +695,7 @@ TEST(EncoderGoals, EveryThreadCountGivesTheSameBytes)
 
 TEST(EncoderGoals, TheCapacityFormKeepsTheGoalArrays)
 {
+    test::dirty_recycled_blocks();
     const auto table = goals_table();
     const test::Rows rows = mixed_rows(*table, 3, 17);
     const auto encoder = FlatEncoder::create(table, goal_options());

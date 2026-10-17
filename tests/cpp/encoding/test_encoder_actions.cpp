@@ -352,6 +352,7 @@ TEST(EncoderActions, ForeignLabelsAndMismatchedStatesAreRefused)
 
 TEST(EncoderActions, LayoutsThreadsAndCapacitiesAgree)
 {
+    test::dirty_recycled_blocks();
     const auto table = rl::TaskTable::create({test::pddl_task("blocks", "smedium"), test::pddl_task("blocks", "probBLOCKS-8-0")});
     test::Rows rows;
     rows.words = table->words();
