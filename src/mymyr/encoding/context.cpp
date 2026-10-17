@@ -44,9 +44,9 @@ struct GoalRelations
 };
 
 /// Bits of the per-instance flags that tell whether the derived atoms of a row are needed.
-constexpr u8 k_needs_state = 1;          // the instance has a derived state cell
-constexpr u8 k_needs_instance_goal = 2;  // its own goal has a derived literal that a satisfied / unsatisfied cell lists
-constexpr u8 k_needs_row_goal = 4;       // it has a derived cell of satisfied / unsatisfied goal literals
+constexpr u8 k_needs_state = detail::k_needs_state_derived;
+constexpr u8 k_needs_instance_goal = detail::k_needs_goal_derived;
+constexpr u8 k_needs_row_goal = detail::k_needs_row_goal_derived;
 
 /// What one instance contributes to the arrays.
 struct InstanceRows
@@ -471,7 +471,6 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
 
     auto context = std::shared_ptr<EncodingContext>(new EncodingContext());
     context->m_max_arity = max_arity;
-    context->m_needs_derived.assign(instances.size(), 0);
     std::vector<u64> inst;
     std::vector<u32> cells;
     std::vector<i32> slot_args, derived_args, static_args, goal_args;
@@ -523,8 +522,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_goal_offset] = goal_words.size();
         columns[detail::k_goal_args_offset] = goal_args.size() / max_arity;
         columns[detail::k_goal_complete] = rows.goal_complete;
+        columns[detail::k_needs_derived] = rows.needs;
         inst.insert(inst.end(), std::begin(columns), std::end(columns));
-        context->m_needs_derived[i] = rows.needs;
         if (rows.needs != 0)
             context->m_max_derived_words = std::max(context->m_max_derived_words, static_cast<u32>(rows.derived_words));
         slot_args.insert(slot_args.end(), rows.slot_args.begin(), rows.slot_args.end());
@@ -546,6 +545,10 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     builder.add("schema_arity", rl::DType::U32, {static_cast<i64>(schema_arity.size())}, schema_arity);
     builder.add("relation_virtual", rl::DType::U32, {static_cast<i64>(relation_virtual.size())}, relation_virtual);
     builder.add("virtual_relation", rl::DType::U32, {static_cast<i64>(virtual_relation.size())}, virtual_relation);
+    std::vector<u32> relation_arity;
+    for (u32 id = 0; id < own->num_relations(); ++id)
+        relation_arity.push_back(own->relation(id).arity);
+    builder.add("relation_arity", rl::DType::U32, {static_cast<i64>(relation_arity.size())}, relation_arity);
     context->m_num_virtual = static_cast<u32>(virtual_relation.size());
     context->m_arrays = builder.build();
     context->m_table = std::move(table);
@@ -557,7 +560,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
-    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation
+    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
@@ -578,6 +581,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
         v.virtual_relation = reinterpret_cast<const u32*>(at(10));
         v.num_virtual = m_num_virtual;
     }
+    v.relation_arity = reinterpret_cast<const u32*>(at(11));
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;
