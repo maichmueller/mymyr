@@ -1027,35 +1027,47 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
     return fill_cell_dispatch<I, true>(v, c, in, entity_base, auxiliary, pred, dst);
 }
 
-/// Writes one tuple of a goal cell to `dst` (the goal entity `target_id` first when `target`, then the predicate entity
-/// `pred` unless it is k_no_entity; the tuple of a nullary predicate is the entity `auxiliary`) and returns the position
-/// after it.
-template<class I>
-MYMYR_HD I* emit_goal_tuple(I* dst, const i32* row, u32 arity, u64 entity_base, u64 auxiliary, bool target,
-                            u64 target_id, u64 pred)
-{
-    if (target)
-        *dst++ = static_cast<I>(target_id);
-    return emit_state_tuple<I>(dst, row, arity, entity_base, auxiliary, pred);
-}
-
-/// Writes the arguments of the tuples of goal cell `c` in this graph to `dst`, in lexicographic order of their objects,
-/// and returns the number of tuples: the cell's mask tuples (ascending slots) merged with its constant rows (the
-/// instance's goal only). With goal targets (GoalMode::PlainTarget) each tuple starts with its goal entity, the ids
-/// `first_target`, `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it.
-/// Writes count * c.arity entries.
-template<class I>
-MYMYR_HD u32 fill_goal_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
-                            u64 first_target, u64 pred, I* dst)
+/// Writes the arguments of the tuples of goal cell `c` in this graph to `dst` for a goal cell of K objects (K ==
+/// k_any_arity: of c.logical_arity objects), with goal targets when Target, and returns the number of tuples: the
+/// cell's mask tuples (ascending slots) merged with its constant rows (the instance's goal only), in lexicographic order
+/// of their objects. With goal targets each tuple starts with its goal entity, the ids `first_target`, `first_target +
+/// 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a nullary predicate
+/// is the entity `auxiliary`. Writes count * c.arity entries.
+template<class I, u32 K, bool Target>
+MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
+                               u64 auxiliary, u64 first_target, u64 pred, I* dst)
 {
     const GoalWords g = goal_words(v, in);
     const u64 A = v.max_arity;
-    const u32 arity = c.logical_arity;
-    const bool target = goal_op_mode(c.op) == GoalMode::PlainTarget;
+    const u32 arity = K == k_any_arity ? c.logical_arity : K;
     const i32* table = goal_op_derived(c.op) ? v.derived_args : v.slot_args;
     const i32* constant = v.goal_args + static_cast<u64>(c.c) * A;
     u32 constants_left = g.constants ? c.d - c.c : 0u;
     u32 n = 0;
+    auto emit = [&](const i32* row)
+    {
+        if constexpr (Target)
+            *dst++ = static_cast<I>(first_target + n);
+        ++n;
+        if (pred != k_no_entity)
+            *dst++ = static_cast<I>(pred);
+        if constexpr (K == 0)
+            *dst++ = static_cast<I>(auxiliary);
+        else if constexpr (K == k_any_arity)
+        {
+            if (arity == 0)
+                *dst++ = static_cast<I>(auxiliary);
+            else
+                for (u32 k = 0; k < arity; ++k)
+                    *dst++ = static_cast<I>(entity_base + static_cast<u64>(row[k]));
+        }
+        else
+        {
+            for (u32 k = 0; k < K; ++k)
+                dst[k] = static_cast<I>(entity_base + static_cast<u64>(row[k]));
+            dst += K;
+        }
+    };
     if (c.a < c.b)
         for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
         {
@@ -1067,17 +1079,45 @@ MYMYR_HD u32 fill_goal_cell(const InstanceView& v, const Cell& c, const RowInput
                 const i32* row = table + s * A;
                 while (constants_left && tuple_before(constant, row, arity))
                 {
-                    dst = emit_goal_tuple<I>(dst, constant, arity, entity_base, auxiliary, target, first_target + n++,
-                                             pred);
+                    emit(constant);
                     constant += A;
                     --constants_left;
                 }
-                dst = emit_goal_tuple<I>(dst, row, arity, entity_base, auxiliary, target, first_target + n++, pred);
+                emit(row);
             }
         }
     for (; constants_left; --constants_left, constant += A)
-        dst = emit_goal_tuple<I>(dst, constant, arity, entity_base, auxiliary, target, first_target + n++, pred);
+        emit(constant);
     return n;
+}
+
+template<class I, bool Target>
+MYMYR_HD u32 fill_goal_cell_dispatch(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
+                                     u64 auxiliary, u64 first_target, u64 pred, I* dst)
+{
+    switch (c.logical_arity)
+    {
+    case 0: return fill_goal_cell_of<I, 0, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    case 1: return fill_goal_cell_of<I, 1, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    case 2: return fill_goal_cell_of<I, 2, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    case 3: return fill_goal_cell_of<I, 3, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    case 4: return fill_goal_cell_of<I, 4, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    default: return fill_goal_cell_of<I, k_any_arity, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    }
+}
+
+/// Writes the arguments of the tuples of goal cell `c` in this graph to `dst`, in lexicographic order of their objects,
+/// and returns the number of tuples: the cell's mask tuples (ascending slots) merged with its constant rows (the
+/// instance's goal only). With goal targets (GoalMode::PlainTarget) each tuple starts with its goal entity, the ids
+/// `first_target`, `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it.
+/// Writes count * c.arity entries.
+template<class I>
+MYMYR_HD u32 fill_goal_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
+                            u64 first_target, u64 pred, I* dst)
+{
+    if (goal_op_mode(c.op) == GoalMode::PlainTarget)
+        return fill_goal_cell_dispatch<I, true>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    return fill_goal_cell_dispatch<I, false>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
 }
 
 /// Where the goal and action entities of a graph go: the blocks, the number of each written so far (the cells are filled
