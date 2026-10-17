@@ -28,11 +28,27 @@
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace mymyr
 {
+/// The shared count of a store of at most `limit` states (ConcurrentStateStore::insert_bounded). `stored` counts the
+/// published states; `claimed` counts them plus the new states that threads are publishing right now, each of which
+/// either becomes a stored state or is released as a duplicate of a state another thread published first.
+struct StoreCount
+{
+    std::atomic<u64> stored{0};
+    std::atomic<u64> claimed{0};
+    /// Sets both counts to `n` (no insert may run).
+    void reset(u64 n) noexcept
+    {
+        stored.store(n, std::memory_order_relaxed);
+        claimed.store(n, std::memory_order_relaxed);
+    }
+};
+
 class ConcurrentStateStore
 {
 public:
@@ -66,11 +82,13 @@ public:
         return *insert_impl<false>(t, w, n, key, num, nullptr, 0);
     }
 
-    /// insert() into a store of at most `limit` states: `count` is the number of states stored, shared by every
-    /// thread (all inserts go through insert_bounded with the same counter). A state that is new when `count` has
-    /// reached `limit` is not stored: nullopt. Duplicates are found whatever the count.
+    /// insert() into a store of at most `limit` states: `count` is shared by every thread (all inserts go through
+    /// insert_bounded with the same count). A new state is not stored once `limit` states are: nullopt. The limit is
+    /// exact on every thread count: a state that finds every unit claimed waits until the claims are resolved, so it
+    /// is refused only when `limit` states are stored, never because of a claim that turns out to be a duplicate.
+    /// Duplicates are found whatever the count.
     std::optional<std::pair<Handle, bool>> insert_bounded(u32 t, const u64* w, u32 n, u64 key, const u64* num,
-                                                          std::atomic<u64>& count, u64 limit)
+                                                          StoreCount& count, u64 limit)
     {
         return insert_impl<true>(t, w, n, key, num, &count, limit);
     }
@@ -78,7 +96,7 @@ public:
 private:
     template<bool Bounded>
     std::optional<std::pair<Handle, bool>> insert_impl(u32 t, const u64* w, u32 n, u64 key, const u64* num,
-                                                       std::atomic<u64>* count, u64 limit)
+                                                       StoreCount* count, u64 limit)
     {
         n = bits::trimmed_size(w, n);
         const u64 h = hash::state(w, n, num, m_nn);
@@ -88,7 +106,7 @@ private:
         std::atomic<u64>* S = m_tab;
         const u64 mask = m_cap - 1;
         u64 probes = 0;
-        [[maybe_unused]] bool reserved = false;  // Bounded: one unit of `count` taken for this state
+        [[maybe_unused]] bool claimed = false;  // Bounded: one unit of count->claimed taken for this state
         for (u64 j = h & mask;; j = (j + 1) & mask)
         {
             u64 v = S[j].load(std::memory_order_acquire);
@@ -96,16 +114,26 @@ private:
             {
                 if constexpr (Bounded)
                 {
-                    // the state is new so far: take a unit of the count before publishing it
-                    if (!reserved)
+                    // the state is new so far: claim a unit of the count before publishing it. With every unit
+                    // claimed, the store is full only once that many states are stored; until then another thread's
+                    // claim is pending and may be released as a duplicate
+                    if (!claimed)
                     {
-                        u64 c = count->load(std::memory_order_relaxed);
-                        do
+                        u64 c = count->claimed.load(std::memory_order_relaxed);
+                        for (;;)
                         {
-                            if (c >= limit)
+                            if (c < limit)
+                            {
+                                if (count->claimed.compare_exchange_weak(c, c + 1, std::memory_order_relaxed))
+                                    break;
+                                continue;
+                            }
+                            if (count->stored.load(std::memory_order_acquire) >= limit)
                                 return std::nullopt;
-                        } while (!count->compare_exchange_weak(c, c + 1, std::memory_order_relaxed));
-                        reserved = true;
+                            std::this_thread::yield();
+                            c = count->claimed.load(std::memory_order_relaxed);
+                        }
+                        claimed = true;
                     }
                 }
                 if (!written)
@@ -118,6 +146,8 @@ private:
                 if (S[j].compare_exchange_strong(v, nv, std::memory_order_acq_rel, std::memory_order_acquire))
                 {
                     A.commit();
+                    if constexpr (Bounded)
+                        count->stored.fetch_add(1, std::memory_order_release);
                     if (++A.local_new == 64)
                     {
                         m_approx.fetch_add(64, std::memory_order_relaxed);
@@ -129,13 +159,18 @@ private:
             if (static_cast<u32>(v >> 32) == tag && equal(static_cast<Handle>(v), w, n, num))
             {
                 if constexpr (Bounded)
-                    if (reserved)  // another thread published the same state first
-                        count->fetch_sub(1, std::memory_order_relaxed);
+                    if (claimed)  // another thread published the same state first
+                        count->claimed.fetch_sub(1, std::memory_order_relaxed);
                 on_duplicate(static_cast<Handle>(v), key);
                 return std::pair<Handle, bool>{static_cast<Handle>(v), false};
             }
             if (++probes > mask)
+            {
+                if constexpr (Bounded)
+                    if (claimed)
+                        count->claimed.fetch_sub(1, std::memory_order_relaxed);
                 throw std::length_error("ConcurrentStateStore: table full");
+            }
         }
     }
 

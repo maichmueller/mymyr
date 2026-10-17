@@ -352,7 +352,7 @@ std::vector<PyDeviceGeneration> generate_many(nb::handle table, const Common& a,
 const char* k_options_doc =
     "\n\nKeyword arguments:\n"
     "    max_states, max_seconds, remove_if_unsolvable, labels: as in mymyr.datasets.state_space (the generation "
-    "fails at max(max_states, 2) states or more).\n"
+    "fails at max(max_states, 1) states or more).\n"
     "    threads: host threads for the host-side work (state-dependent costs, host output); 0: one per hardware "
     "thread.\n"
     "    chunk_states, view_bytes, expected_states: the parents per chunk, the view memory per chunk and the "

@@ -25,7 +25,11 @@ option names, defaults and result shape. A function documents only where it depa
 The thread count never changes a result unless the function says so (the relaxed survivors-only beam does). Seeds are
 integers in `[0, 2**64)`. `max_states` and `max_expanded` end a search with `OUT_OF_STATES`, `max_seconds` with
 `OUT_OF_TIME`; `max_depth` leaves deeper states unexpanded, so a search that runs out of shallower ones ends with
-`EXHAUSTED`. Boolean options name the feature they switch on (`canonical_order=`, `witness_pruning=`,
+`EXHAUSTED`. A budget stops a search when it is reached, exactly: the new state that makes the store hold
+`max_states` states stops the search inside its parent's expansion, so a stopped search holds exactly
+`max(max_states, 1)` states (the start state always counts), and `max_expanded` stops it before the expansion after
+that many, on every store, thread count and device. State-space generation follows the same rule: it fails with
+`OUT_OF_STATES` when the space has `max(max_states, 1)` states or more, and reports that limit as its `stats.states`. Boolean options name the feature they switch on (`canonical_order=`, `witness_pruning=`,
 `stop_at_goal=`).
 
 ## Results

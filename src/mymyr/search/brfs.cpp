@@ -1157,7 +1157,7 @@ public:
         const auto t0 = Clock::now();
         const State& s0 = m_ctl.start_state();
         m_loc.push_back(m_store.insert(0, s0.data(), s0.size_words(), ~u64{0}, s0.numeric().data()).first);
-        m_stored.store(1, std::memory_order_relaxed);
+        m_stored.reset(1);
         m_ctl.start(s0.view());
         m_store.begin_layer();
         m_layer_lo = 0;
@@ -1391,7 +1391,7 @@ private:
                 bool fresh;
                 if (bounded)
                 {
-                    // at most max_states states: the one that fills the store stops the search
+                    // at most max_states states, exactly: the one that fills the store stops the search
                     const auto ins = m_store.insert_bounded(t, w.next.data(), nn, (id << 24) | kk, d.num, m_stored,
                                                             m_o.max_states);
                     if (!ins)
@@ -1404,7 +1404,7 @@ private:
                 if (w.obs)  // ids are assigned when the layer ends
                     w.obs->on_generate(id, action_of(succ, s, b), ~u64{0},
                                        {w.next.data(), nn, d.num, m_task.numeric_words()}, fresh);
-                if (fresh && bounded && m_stored.load(std::memory_order_relaxed) >= m_o.max_states)
+                if (fresh && bounded && m_stored.stored.load(std::memory_order_relaxed) >= m_o.max_states)
                     return halt(search::SearchStatus::OutOfStates);
                 return true;
             },
@@ -1548,7 +1548,7 @@ private:
     std::atomic<u64> m_goal{~u64{0}};  // the smallest id of a goal state expanded
     std::atomic<u8> m_halt{0};  // 0, or 1 + the SearchStatus that stopped the search (time, token, on_progress, states)
     std::atomic<u64> m_expansions{0};  // expansions begun, when max_expanded is finite
-    std::atomic<u64> m_stored{0};  // states stored, when max_states is finite (ConcurrentStateStore::insert_bounded)
+    StoreCount m_stored;  // states stored, when max_states is finite (ConcurrentStateStore::insert_bounded)
     std::vector<u64> m_pend_lo, m_pend_hi, m_partial;
     std::unique_ptr<std::atomic<u32>[]> m_cursor;
     u64 m_cursor_cap = 0;

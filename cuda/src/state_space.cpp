@@ -900,7 +900,7 @@ private:
         const u64 cap0 = expected ? expected + expected / 8 + 1024 : u64{1} << 14;
         reserve_states(w, cap0);
         alloc_table(w, expected ? std::bit_ceil(std::max<u64>(u64{1} << 16, 4 * expected)) : u64{1} << 16);
-        const u64 limit = std::max<u64>(m_o.space.max_states, 2);
+        const u64 limit = std::max<u64>(m_o.space.max_states, 1);
         const bool timed = std::isfinite(m_o.space.max_seconds);
         u32 next = first;
         // admission: members are consecutive table ids; an instance whose goal is statically false is Unsolvable at
@@ -948,20 +948,18 @@ private:
             if (all_dead && next >= I)
                 break;
             const auto ns = static_cast<u32>(std::min<u64>({m_o.chunk_states, w.count - b, chunk_cap}));
-            const ChunkStart at{b, w.count, w.edges, w.icount};
             const u32 done = expand(w, b, ns);
             b += done;
             ++m_st.chunks;
-            // budgets: max_states (fails iff the space has max(M, 2) states or more; `states` is the count after
-            // the parent whose expansion reached it) and max_seconds (checked between chunks)
-            ChunkTail tail;
+            // budgets: max_states (fails iff the space has max(M, 1) states or more; `states` is then the limit, the
+            // count at which the CPU generator stops) and max_seconds (checked between chunks)
             for (u32 m = 0; m < w.k; ++m)
             {
                 if (w.dead[m])
                     continue;
                 if (w.icount[m] >= limit)
                 {
-                    w.icount[m] = failure_count(w, m, at, done, limit, tail);
+                    w.icount[m] = static_cast<u32>(limit);
                     kill(w, m, StateSpaceStatus::OutOfStates);
                 }
                 else if (timed && b <= w.last[m] && s_since(w.t0[m]) > m_o.space.max_seconds)
@@ -983,60 +981,6 @@ private:
         if (!m_multi)
             m_gen.reset();
         return m_multi ? next : first + 1;
-    }
-
-    /// A chunk's start: its first parent, the wave's states and transitions, and each member's count then.
-    struct ChunkStart
-    {
-        u64 b = 0, count = 0, edges = 0;
-        std::vector<u32> icount;
-    };
-    /// The chunk's transitions on the host, downloaded once for the members that failed in it.
-    struct ChunkTail
-    {
-        bool loaded = false;
-        std::vector<u64> off;                  // per parent of the chunk, and its end: absolute edge offsets
-        std::vector<u32> targets;              // the chunk's transitions
-        std::vector<u32> parent_inst, new_inst;  // multi: the parents' members and the new states' members
-    };
-
-    /// The CPU generator's `states` when member m fails with OutOfStates in the chunk that expanded `done` parents
-    /// from `at`: the CPU generator (one thread, as the instance pool) expands a parent completely and fails after
-    /// the parent whose successors made the count reach `limit`; its count then. The new states of a chunk are
-    /// numbered in (parent, canonical index) order, so those m holds after parent p are the ones up to the largest
-    /// target of m's parents up to p.
-    u32 failure_count(Wave& w, u32 m, const ChunkStart& at, u32 done, u64 limit, ChunkTail& t)
-    {
-        if (!t.loaded)
-        {
-            download(w.off.data() + at.b, u64{done} + 1, t.off, m_s);
-            download(w.targets.data() + at.edges, w.edges - at.edges, t.targets, m_s);
-            if (m_multi)
-            {
-                download(w.inst.data() + at.b, done, t.parent_inst, m_s);
-                download(w.inst.data() + at.count, w.count - at.count, t.new_inst, m_s);
-            }
-            sync(m_s);
-            t.loaded = true;
-        }
-        u64 top = 0;   // 1 + the largest target so far
-        u64 seen = 0;  // new states (ids at.count + j) below `top`
-        u64 held = 0;  // those of member m
-        u64 count = at.icount[m];
-        for (u32 p = 0; p < done; ++p)
-        {
-            if (m_multi && t.parent_inst[p] != m)
-                continue;
-            for (u64 e = t.off[p] - at.edges; e < t.off[u64{p} + 1] - at.edges; ++e)
-                top = std::max<u64>(top, u64{t.targets[e]} + 1);
-            for (; at.count + seen < top && at.count + seen < w.count; ++seen)
-                if (!m_multi || t.new_inst[seen] == m)
-                    ++held;
-            count = at.icount[m] + held;
-            if (count >= limit)
-                return static_cast<u32>(count);
-        }
-        return w.icount[m];  // (not reached: the member's count after the chunk is at least the limit)
     }
 
     [[nodiscard]] bool unsatisfiable(u32 id) const

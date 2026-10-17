@@ -867,7 +867,7 @@ const char* k_space_doc =
     "arrays() exports them zero-copy. The initial state is id 0.";
 
 const char* k_options_doc =
-    "Options: threads (0: one per hardware thread; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
+    "Options: threads (0: one per hardware thread; 1: sequential), max_states (fail when the space has max(max_states, 1) states "
     "or more), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
     "labels (keep (schema, binding) per transition). State words are the same for every thread count (a task with lazy atom slots has none).";
 

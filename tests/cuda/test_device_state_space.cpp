@@ -524,14 +524,7 @@ TEST(DeviceStateSpaces, SetsTogetherEqualSinglesAndCpu)
             std::vector<StateSpaceResult> cpu;
             for (const TaskPtr& t : set.tasks)
             {
-                cpu.push_back(generate_state_space(t, so));
-                if (cpu.back().status == StateSpaceStatus::OutOfStates)
-                {
-                    // the count at the failure: the host's one-thread generator's (the instance pool's)
-                    StateSpaceOptions one = so;
-                    one.threads = 1;
-                    cpu.back() = generate_state_space(t, one);
-                }
+                cpu.push_back(generate_state_space(t, so));  // a failure's count is the limit on every thread count
             }
             u32 ok = 0;
             for (const auto& r : cpu)

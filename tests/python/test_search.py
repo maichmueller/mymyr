@@ -128,9 +128,12 @@ def test_brfs_takes_the_common_start_blocked_and_budget_options(store):
     r = search.brfs(task, max_depth=2, **kw)
     assert r.status == Status.EXHAUSTED and r.layers <= 2
     assert search.brfs(task, max_depth=len(full.plan) + 1, **kw).solved  # the goal state is expanded
-    # max_expanded stops it before the next expansion
+    # max_expanded stops it before the next expansion, max_states at the state that fills the store: exactly
     r = search.brfs(task, max_expanded=5, **kw)
-    assert r.status == Status.OUT_OF_STATES and r.stats.expanded <= 5 and r.plan == [] and r.goal_state is None
+    assert r.status == Status.OUT_OF_STATES and r.stats.expanded == 5 and r.plan == [] and r.goal_state is None
+    for limit in (1, 2, 50, 1000):
+        r = search.brfs(task, max_states=limit, stop_at_goal=False, **kw)
+        assert r.status == Status.OUT_OF_STATES and r.stats.states == limit, (limit, r.stats)
 
 
 def test_every_search_result_has_the_common_fields(blocks):

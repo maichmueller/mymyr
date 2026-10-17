@@ -648,7 +648,7 @@ public:
           m_width(max_arity(m_task))
     {
         m_timed = std::isfinite(o.max_seconds);
-        m_limit = std::max<u64>(o.max_states, 2);  // fails iff the space has max(M, 2) states or more
+        m_limit = std::max<u64>(o.max_states, 1);  // fails iff the space has max(M, 1) states or more
         m_store.emplace(T, m_task.numeric_words());
         m_team.run(
             [&](u32 t)
@@ -681,6 +681,13 @@ public:
         m_layer_hi = 1;
         m_goal.assign(1, 0);
         u32 depth = 0;
+        if (m_layer_hi >= m_limit)  // the initial state fills the store
+        {
+            r.status = StateSpaceStatus::OutOfStates;
+            r.states = m_limit;
+            r.seconds = seconds_since(t0);
+            return r;
+        }
         while (m_layer_lo < m_layer_hi)
         {
             m_depth = depth++;
@@ -700,7 +707,8 @@ public:
             if (const u8 s = m_stop.load(std::memory_order_relaxed))
             {
                 r.status = s == static_cast<u8>(Stop::Timeout) ? StateSpaceStatus::Timeout : StateSpaceStatus::OutOfStates;
-                r.states = std::max<u64>(m_layer_hi, m_store->approx_size());
+                // out of states: the store reached the limit (the count at that point, whatever the threads)
+                r.states = s == static_cast<u8>(Stop::Timeout) ? std::max<u64>(m_layer_hi, m_store->approx_size()) : m_limit;
                 r.seconds = seconds_since(t0);
                 return r;
             }
@@ -709,7 +717,7 @@ public:
             if (m_layer_hi >= m_limit)
             {
                 r.status = StateSpaceStatus::OutOfStates;
-                r.states = m_layer_hi;
+                r.states = m_limit;
                 r.seconds = seconds_since(t0);
                 return r;
             }
@@ -1057,12 +1065,19 @@ public:
         const bool labels = m_o.labels;
         const u32 K = m_width;
         const u32 NN = m_task.numeric_words();
-        const u64 limit = std::max<u64>(m_o.max_states, 2);  // fails iff the space has max(M, 2) states or more
+        const u64 limit = std::max<u64>(m_o.max_states, 1);  // fails iff the space has max(M, 1) states or more
         FlatStateStore store(std::max<u32>(1, m_task.words()), 10, NN);
         const WorkspaceLease lease = m_task.workspace();
         Successors& succ = lease->successors();
         const State& s0 = m_task.initial_state();
         store.insert(s0.data(), s0.size_words(), s0.numeric().data());
+        if (store.size() >= limit)  // the initial state fills the store
+        {
+            r.status = StateSpaceStatus::OutOfStates;
+            r.states = limit;
+            r.seconds = seconds_since(t0);
+            return r;
+        }
         std::vector<u32> depth{0};
         std::vector<u8> goal;
         std::vector<u64> offsets{0};
@@ -1114,7 +1129,7 @@ public:
             if (full)
             {
                 r.status = StateSpaceStatus::OutOfStates;
-                r.states = store.size();
+                r.states = limit;  // the store reached the limit (the parent's later successors are not counted)
                 r.seconds = seconds_since(t0);
                 return r;
             }

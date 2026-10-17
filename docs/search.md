@@ -315,8 +315,9 @@ translator produces; mymyr works on the PDDL atoms. This accounts for most of th
 Common search options include `start=`, `goal=`, `blocked_states=`, `max_states=`, `max_expanded=`, `max_depth=` and
 `max_seconds=`. `max_states=` counts the states a search stores, the start state included (IW: the nodes of a
 pass): the search stops with `OUT_OF_STATES` at the new state that fills them, inside its parent's expansion, so it
-never stores more; the deadline and the cancellation are checked inside expansions as well (the GPU searches check
-budgets between chunks). On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
+never stores more ([API conventions](conventions.md)); the deadline and the cancellation are checked inside
+expansions as well (device BrFS stops at the same state as the CPU's; the other GPU searches check `max_states`,
+the deadline and the cancellation between chunks). On CPU, `goal=` accepts the task goal (`None`), a callable `state -> bool`, one
 `mymyr.formalism.GroundCondition`, or a sequence of goals. Each goal in that sequence is a `GroundCondition` or a
 sequence of ground atoms and literals; any one that holds ends the search. See [Formula values](formulas.md) for
 construction examples. CUDA multi-IW, batched IW(1) and rollouts accept `GroundCondition` goals with fluent/derived
