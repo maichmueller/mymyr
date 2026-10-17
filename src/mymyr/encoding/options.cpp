@@ -83,6 +83,12 @@ FlatOptions normalized(const FlatOptions& options)
     if ((out.targets.contains(TargetSource::Goal) || out.targets.contains(TargetSource::Subgoal)) &&
         !out.goal_derivations.contains(GoalDerivation::Plain))
         invalid("goal and subgoal targets need the plain goal derivation: only its relations carry the target slot");
+    if (!out.history && out.targets.contains(TargetSource::History))
+        invalid("history targets need history");
+    if (!out.history && out.history_max_steps != 0)
+        invalid("history_max_steps needs history");
+    if (out.history && horizon)
+        invalid("history cannot be combined with a horizon mode");
     if (horizon && !out.targets.empty())
         invalid("target sources cannot be combined with a horizon mode: the state nodes of a horizon are its targets");
     if (out.horizon.mode == HorizonMode::Action && !out.include_actions)

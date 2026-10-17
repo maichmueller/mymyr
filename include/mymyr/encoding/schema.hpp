@@ -208,7 +208,8 @@ public:
 
     /// Whether a batch of this schema omits `entity_role` and `entity_ref`: the options say `entity_arrays = auto` and
     /// configure nothing that makes an entity of another role than object or auxiliary: no target sources, no predicate
-    /// virtual nodes, no action relations (their ground actions are entities) and no horizon mode. Every entity of
+    /// virtual nodes, no action relations (their ground actions are entities), no history (its steps are entities) and no
+    /// horizon mode. Every entity of
     /// every graph is then an object or the auxiliary entity. The omitted arrays are then implicit: the entity with
     /// local index j of graph g (entity id entity_offsets[g] + j) has role Object and ref j if j < num_objects[g], and
     /// otherwise role Auxiliary and ref -1 (it is the graph's last and only entity past the objects).
@@ -221,9 +222,15 @@ public:
     /// at least one target source.
     [[nodiscard]] bool has_targets() const noexcept { return !m_options.targets.empty(); }
 
+    /// Whether a batch stores the history arrays `history_offsets`, `history_entity` and `history_dt`
+    /// (FlatOptions::history).
+    [[nodiscard]] bool has_history() const noexcept { return m_options.history; }
+    /// Whether the schema has subgoal relations: goal relations of a level above 0.
+    [[nodiscard]] bool has_subgoals() const noexcept { return m_subgoals; }
+
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
     /// the encoded arrays beyond the catalog: the layout, the index type, whether relation_counts and the entity arrays
-    /// are stored, the target sources and the horizon mode and root policy. It does not depend on the declaration order
+    /// are stored, the target sources, the history lane with its step limit, and the horizon mode and root policy. It does not depend on the declaration order
     /// of the domain, on predicate or schema ids, or on the process or the build.
     [[nodiscard]] u64 fingerprint() const noexcept { return m_fingerprint; }
 
@@ -240,6 +247,7 @@ private:
     u32 m_num_virtual_predicates = 0;
     bool m_implicit_entities = false;
     bool m_goal_complete = false;
+    bool m_subgoals = false;
     u64 m_fingerprint = 0;
 };
 }

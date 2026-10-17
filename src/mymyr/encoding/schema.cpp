@@ -456,9 +456,12 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     schema->m_goal_complete = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });
+    schema->m_subgoals = std::ranges::any_of(
+        schema->m_relations, [](const Relation& r)
+        { return (r.lane == Lane::Goal || r.lane == Lane::GoalDerivation) && r.level.value_or(0) > 0; });
     const FlatOptions& o = schema->m_options;
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
-                                  !o.predicate_virtual_nodes && !o.include_actions &&
+                                  !o.predicate_virtual_nodes && !o.include_actions && !o.history &&
                                   o.horizon.mode == HorizonMode::None;
     Hasher hasher;
     hasher.text("mymyr.encoding.schema");
@@ -472,6 +475,11 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     if (schema->m_implicit_entities)
         hasher.text("omit entity_role, entity_ref");
     hasher.integer(o.targets.bits());
+    if (o.history)
+    {
+        hasher.text("history");
+        hasher.integer(o.history_max_steps);
+    }
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));
     hasher.integer(schema->m_relations.size());

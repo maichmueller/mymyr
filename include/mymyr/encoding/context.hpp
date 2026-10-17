@@ -56,7 +56,10 @@ public:
     /// nodes. An instance has two lists of cells, each sorted by relation id with at most one cell per relation: the
     /// cells of a graph with the instance's goal, and the cells of a graph whose row has goal masks of its own (the two
     /// lists share their state and action cells). Per-graph cell counts (detail::count_graph) are per cell, in the
-    /// order of the list the graph uses, not per relation. Every instance has a cell for each action relation of the
+    /// order of the list the graph uses, not per relation. With history or subgoal levels in the schema, an instance has twelve more lists (columns
+    /// k_ext_lists of inst): the four lists plus the cells of the subgoal layers (the relations of the levels above 0 over
+    /// each predicate's slots), of the history steps (the history relations), or of both, which a graph with such rows uses
+    /// (detail::cell_list). Every instance has a cell for each action relation of the
     /// schema, whose tuples come from the expansion rows of a graph and not from its state.
     ///
     /// An instance's goal is its encoding goal (Task::encoding_goal()): a literal whose predicate has no goal relation
@@ -80,11 +83,14 @@ public:
     /// Whether the graphs of the instance read the derived atoms of the state: it has a derived state cell, or a
     /// derived literal in its own goal that a satisfied or unsatisfied goal relation lists. With the goals of the rows
     /// (`row_goals`) the instance's own goal does not count, and only a goal over derived slots (`row_derived_goals`)
-    /// reads them, in the satisfied and unsatisfied relations of the instance's derived predicates.
-    [[nodiscard]] bool needs_derived(u32 instance, bool row_goals = false, bool row_derived_goals = false) const noexcept
+    /// reads them, in the satisfied and unsatisfied relations of the instance's derived predicates. Subgoal layers over
+    /// derived slots (`layer_derived_goals`) read them in the same relations of the subgoal levels.
+    [[nodiscard]] bool needs_derived(u32 instance, bool row_goals = false, bool row_derived_goals = false,
+                                     bool layer_derived_goals = false) const noexcept
     {
         const u8 flags = m_needs_derived[instance];
-        return (flags & 1) != 0 || (row_goals ? (row_derived_goals && (flags & 4) != 0) : (flags & 2) != 0);
+        return (flags & 1) != 0 || (row_goals ? (row_derived_goals && (flags & 4) != 0) : (flags & 2) != 0) ||
+               (layer_derived_goals && (flags & 4) != 0);
     }
 
 private:

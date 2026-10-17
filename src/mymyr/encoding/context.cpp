@@ -43,6 +43,22 @@ struct GoalRelations
     [[nodiscard]] i32 at(u32 predicate, u32 sign, u32 variant) const { return id[(u64{predicate} * 2 + sign) * 3 + variant]; }
 };
 
+/// The subgoal and history relations of the schema, by predicate: for each of the levels 1 to 3 the relations of the goal
+/// variants of each sign (plain, satisfied, unsatisfied), and the history relation of each sign (-1: the schema has none).
+struct LayerRelations
+{
+    std::vector<i32> subgoal;  // [level - 1, predicate, sign, variant]
+    std::vector<i32> history;  // [predicate, sign]
+    std::vector<u8> target;    // [relation]: the plain subgoal / history relation carries a target slot
+
+    [[nodiscard]] i32 subgoal_at(u32 level, u32 predicate, u32 sign, u32 variant) const
+    {
+        const u64 per_level = subgoal.size() / 3;
+        return subgoal[u64{level - 1} * per_level + (u64{predicate} * 2 + sign) * 3 + variant];
+    }
+    [[nodiscard]] i32 history_at(u32 predicate, u32 sign) const { return history[u64{predicate} * 2 + sign]; }
+};
+
 /// Bits of the per-instance flags that tell whether the derived atoms of a row are needed.
 constexpr u8 k_needs_state = 1;          // the instance has a derived state cell
 constexpr u8 k_needs_instance_goal = 2;  // its own goal has a derived literal that a satisfied / unsatisfied cell lists
@@ -54,6 +70,10 @@ struct InstanceRows
     std::vector<Cell> cells;      // with the instance's goal: the goal cells that can hold a tuple, narrowed
     std::vector<Cell> row_cells;  // with the goals of a row: the goal cells of every predicate that has slots
     std::vector<Cell> plain_cells, plain_row_cells;  // the same two lists without the action cells
+    std::array<std::vector<Cell>, 12> extended;      // the four lists with the cells of subgoal layers, of history steps,
+                                                     // and of both: index (e - 1) * 4 + k for e (1: layers, 2: history,
+                                                     // 3: both) and the list k of {cells, row_cells, plain_cells,
+                                                     // plain_row_cells}
     std::vector<i32> slot_args, derived_args, static_args;  // rows of max_arity objects, -1 padded
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
     std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
@@ -130,8 +150,8 @@ std::optional<u32> find_slot(std::span<const i32> padded, u32 width, u32 begin, 
 }
 
 InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::vector<i32>& state_relation,
-                            const GoalRelations& goal_relations, const std::vector<Cell>& action_cells,
-                            const EncodingSchema& schema, u32 max_arity)
+                            const GoalRelations& goal_relations, const LayerRelations& layer_relations,
+                            const std::vector<Cell>& action_cells, const EncodingSchema& schema, u32 max_arity)
 {
     const rl::TaskTable::Instance& instance = table.instance(index);
     const Task& task = *instance.task;
@@ -361,6 +381,63 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
          {std::pair{&out.cells, &out.plain_cells}, std::pair{&out.row_cells, &out.plain_row_cells}})
         std::ranges::copy_if(*list, std::back_inserter(*plain),
                              [](const Cell& c) { return !detail::is_action_op(c.op); });
+    // The cells of subgoal layers and history steps: one per relation of a predicate that has slots, over all of its
+    // slots; they come from the rows, so every graph that has such rows uses them whichever goal it has.
+    std::vector<Cell> layer_cells, history_cells;
+    for (u32 ip = 0; ip < predicates; ++ip)
+    {
+        const u32 tp = instance.pred_map[ip];
+        if (tp >= table.num_domain_predicates() || kind[ip] == rl::k_pred_static)
+            continue;
+        const bool derived = kind[ip] == rl::k_pred_derived;
+        const u32 a = static_cast<u32>(derived ? derived_offsets[ip] : fluent_offsets[ip]);
+        const u32 b = static_cast<u32>(derived ? derived_offsets[ip + 1] : fluent_offsets[ip + 1]);
+        if (a == b)
+            continue;
+        const u32 logical = static_cast<u32>(arity[ip]);
+        for (u32 level = 1; level <= schema.options().max_goal_level; ++level)
+            for (u32 sign = 0; sign < 2; ++sign)
+                for (u32 variant = 0; variant < 3; ++variant)
+                {
+                    const i32 id = layer_relations.subgoal_at(level, tp, sign, variant);
+                    if (id < 0)
+                        continue;
+                    const detail::GoalMode mode =
+                        variant == 0 ? (layer_relations.target[static_cast<u32>(id)] ? detail::GoalMode::PlainTarget
+                                                                                     : detail::GoalMode::Plain)
+                        : variant == 1 ? detail::GoalMode::Satisfied
+                                       : detail::GoalMode::Unsatisfied;
+                    layer_cells.push_back({static_cast<u32>(id), detail::goal_op(derived, sign == 1, mode, level), a, b,
+                                           schema.relation(static_cast<u32>(id)).arity, logical});
+                    if (derived && variant > 0)
+                        out.needs |= k_needs_row_goal;
+                }
+        if (schema.options().history)
+            for (u32 sign = 0; sign < 2; ++sign)
+            {
+                const i32 id = layer_relations.history_at(tp, sign);
+                if (id >= 0)
+                    history_cells.push_back(
+                        {static_cast<u32>(id),
+                         detail::history_op(derived, sign == 1, layer_relations.target[static_cast<u32>(id)] != 0), a, b,
+                         schema.relation(static_cast<u32>(id)).arity, logical});
+            }
+    }
+    {
+        const std::array<const std::vector<Cell>*, 4> bases = {&out.cells, &out.row_cells, &out.plain_cells,
+                                                               &out.plain_row_cells};
+        for (u32 extension = 1; extension <= 3; ++extension)
+            for (u32 k = 0; k < 4; ++k)
+            {
+                std::vector<Cell>& list = out.extended[(extension - 1) * 4 + k];
+                list = *bases[k];
+                if (extension & 1u)
+                    list.insert(list.end(), layer_cells.begin(), layer_cells.end());
+                if (extension & 2u)
+                    list.insert(list.end(), history_cells.begin(), history_cells.end());
+                std::sort(list.begin(), list.end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
+            }
+    }
     append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
     append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
     return out;
@@ -409,6 +486,38 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
             continue;
         state_relation.at(static_cast<u32>(relation.predicate)) = static_cast<i32>(id);
         max_arity = std::max(max_arity, relation.logical_arity);
+    }
+    // The subgoal and history relations: cells over a predicate's slots read rows of the predicate's arity too.
+    LayerRelations layer_relations;
+    layer_relations.subgoal.assign(u64{3} * table->num_domain_predicates() * 6, -1);
+    layer_relations.history.assign(u64{table->num_domain_predicates()} * 2, -1);
+    layer_relations.target.assign(own->num_relations(), 0);
+    for (u32 id = 0; id < own->num_relations(); ++id)
+    {
+        const Relation& relation = own->relation(id);
+        const u32 sign = relation.sign > 0 ? 0 : 1;
+        if (relation.lane == Lane::History)
+        {
+            max_arity = std::max(max_arity, relation.logical_arity);
+            layer_relations.history[u64{static_cast<u32>(relation.predicate)} * 2 + sign] = static_cast<i32>(id);
+            if (own->slot_roles(id).front() == SlotRole::HistoryTarget)
+                layer_relations.target[id] = 1;
+            continue;
+        }
+        const bool plain = relation.lane == Lane::Goal && !relation.derivation;
+        const bool derivation =
+            relation.lane == Lane::GoalDerivation &&
+            (relation.derivation == GoalDerivation::Satisfied || relation.derivation == GoalDerivation::Unsatisfied);
+        if (relation.level.value_or(0) == 0 || !(plain || derivation))
+            continue;
+        max_arity = std::max(max_arity, relation.logical_arity);
+        const u32 variant = plain ? 0 : relation.derivation == GoalDerivation::Satisfied ? 1 : 2;
+        const u32 level = *relation.level;
+        const u64 per_level = u64{table->num_domain_predicates()} * 6;
+        layer_relations.subgoal[(level - 1) * per_level + (u64{static_cast<u32>(relation.predicate)} * 2 + sign) * 3 + variant] =
+            static_cast<i32>(id);
+        if (plain && own->slot_roles(id).front() == SlotRole::SubgoalTarget)
+            layer_relations.target[id] = 1;
     }
     GoalRelations goal_relations;
     goal_relations.id.assign(u64{table->num_domain_predicates()} * 6, -1);
@@ -467,7 +576,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     std::vector<InstanceRows> instances;
     instances.reserve(table->size());
     for (u32 i = 0; i < table->size(); ++i)
-        instances.push_back(build_instance(*table, i, state_relation, goal_relations, action_cells, *schema, max_arity));
+        instances.push_back(build_instance(*table, i, state_relation, goal_relations, layer_relations, action_cells, *schema, max_arity));
 
     auto context = std::shared_ptr<EncodingContext>(new EncodingContext());
     context->m_max_arity = max_arity;
@@ -487,14 +596,16 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_derived_slots] = rows.derived_slots;
         // each list of cells is stored once: a list equal to an earlier one of the instance shares its rows
         const auto same_cell = [](const Cell& x, const Cell& y) { return std::memcmp(&x, &y, sizeof(Cell)) == 0; };
-        const std::array<const std::vector<Cell>*, 4> lists = {&rows.cells, &rows.row_cells, &rows.plain_cells,
-                                                               &rows.plain_row_cells};
+        std::array<const std::vector<Cell>*, 16> lists = {&rows.cells, &rows.row_cells, &rows.plain_cells,
+                                                          &rows.plain_row_cells};
+        for (usize k = 0; k < rows.extended.size(); ++k)
+            lists[4 + k] = &rows.extended[k];
         constexpr std::array<std::pair<detail::InstanceColumn, detail::InstanceColumn>, 4> list_columns = {
             std::pair{detail::k_num_cells, detail::k_cell_offset},
             std::pair{detail::k_num_row_cells, detail::k_row_cell_offset},
             std::pair{detail::k_num_plain_cells, detail::k_plain_cell_offset},
             std::pair{detail::k_num_plain_row_cells, detail::k_plain_row_cell_offset}};
-        std::array<u64, 4> list_offset{};
+        std::array<u64, 16> list_offset{};
         u64 next_offset = cells.size() / 8;
         for (usize k = 0; k < lists.size(); ++k)
         {
@@ -513,8 +624,16 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
                          {cell.relation, cell.op, cell.a, cell.b, cell.arity, cell.logical_arity, cell.c, cell.d})
                         cells.push_back(value);
             }
-            columns[list_columns[k].first] = lists[k]->size();
-            columns[list_columns[k].second] = list_offset[k];
+            if (k < 4)
+            {
+                columns[list_columns[k].first] = lists[k]->size();
+                columns[list_columns[k].second] = list_offset[k];
+            }
+            else
+            {
+                columns[detail::k_ext_lists + 2 * (k - 4)] = lists[k]->size();
+                columns[detail::k_ext_lists + 2 * (k - 4) + 1] = list_offset[k];
+            }
         }
         columns[detail::k_slot_args_offset] = slot_args.size() / max_arity;
         columns[detail::k_derived_args_offset] = derived_args.size() / max_arity;
