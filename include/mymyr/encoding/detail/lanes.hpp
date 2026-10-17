@@ -938,23 +938,46 @@ MYMYR_HD I* emit_state_tuple(I* dst, const i32* row, u32 arity, u64 entity_base,
     return emit_tuple<I>(dst, row, arity, entity_base);
 }
 
-/// Writes the arguments of the tuples of cell `c` in this graph to `dst`, in tuple order, and returns the number of
-/// tuples (the cell's count). Object ids become entity ids by adding `entity_base`; the tuple of a nullary cell is
-/// the entity `auxiliary`; each tuple starts with the entity `pred` unless it is k_no_entity. Writes count * c.arity
-/// entries; the caller places `dst`.
-template<class I>
-MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary, u64 pred,
-                       I* dst)
+/// The arity of a state cell that fill_cell_of instantiates for: 0 to 4 objects, or any other (k_any_arity, the arity
+/// read from the cell).
+inline constexpr u32 k_any_arity = ~u32{0};
+
+/// Writes the arguments of the tuples of cell `c` in this graph to `dst` for a state cell of K objects (K ==
+/// k_any_arity: of c.logical_arity objects); with Pred each tuple starts with the entity `pred`. Returns the number of
+/// tuples. The arity is a template argument so that the loops over the tuples have no per-tuple dispatch.
+template<class I, u32 K, bool Pred>
+MYMYR_HD u32 fill_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
+                          u64 pred, I* dst)
 {
     const u64 A = v.max_arity;
-    const u32 arity = c.logical_arity;
+    const u32 arity = K == k_any_arity ? c.logical_arity : K;
+    auto emit = [&](const i32* row)
+    {
+        if constexpr (Pred)
+            *dst++ = static_cast<I>(pred);
+        if constexpr (K == 0)
+            *dst++ = static_cast<I>(auxiliary);
+        else if constexpr (K == k_any_arity)
+        {
+            if (arity == 0)
+                *dst++ = static_cast<I>(auxiliary);
+            else
+                for (u32 k = 0; k < arity; ++k)
+                    *dst++ = static_cast<I>(entity_base + static_cast<u64>(row[k]));
+        }
+        else
+            for (u32 k = 0; k < K; ++k)
+                dst[k] = static_cast<I>(entity_base + static_cast<u64>(row[k]));
+        if constexpr (K != 0 && K != k_any_arity)
+            dst += K;
+    };
     u32 n = 0;
     if (c.op == static_cast<u32>(CellOp::Static))
     {
         n = c.b - c.a;
         const i32* row = v.static_args + static_cast<u64>(c.a) * A;
         for (u32 s = 0; s < n; ++s, row += A)
-            dst = emit_state_tuple<I>(dst, row, arity, entity_base, auxiliary, pred);
+            emit(row);
         return n;
     }
     const bool fluent = c.op == static_cast<u32>(CellOp::Fluent);
@@ -970,10 +993,38 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
             const u64 s = static_cast<u64>(w) * 64u + lowest_bit64(bits);
             bits &= bits - 1u;
             ++n;
-            dst = emit_state_tuple<I>(dst, table + s * A, arity, entity_base, auxiliary, pred);
+            emit(table + s * A);
         }
     }
     return n;
+}
+
+template<class I, bool Pred>
+MYMYR_HD u32 fill_cell_dispatch(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
+                                u64 auxiliary, u64 pred, I* dst)
+{
+    switch (c.logical_arity)
+    {
+    case 0: return fill_cell_of<I, 0, Pred>(v, c, in, entity_base, auxiliary, pred, dst);
+    case 1: return fill_cell_of<I, 1, Pred>(v, c, in, entity_base, auxiliary, pred, dst);
+    case 2: return fill_cell_of<I, 2, Pred>(v, c, in, entity_base, auxiliary, pred, dst);
+    case 3: return fill_cell_of<I, 3, Pred>(v, c, in, entity_base, auxiliary, pred, dst);
+    case 4: return fill_cell_of<I, 4, Pred>(v, c, in, entity_base, auxiliary, pred, dst);
+    default: return fill_cell_of<I, k_any_arity, Pred>(v, c, in, entity_base, auxiliary, pred, dst);
+    }
+}
+
+/// Writes the arguments of the tuples of cell `c` in this graph to `dst`, in tuple order, and returns the number of
+/// tuples (the cell's count). Object ids become entity ids by adding `entity_base`; the tuple of a nullary cell is
+/// the entity `auxiliary`; each tuple starts with the entity `pred` unless it is k_no_entity. Writes count * c.arity
+/// entries; the caller places `dst`.
+template<class I>
+MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary, u64 pred,
+                       I* dst)
+{
+    if (pred == k_no_entity)
+        return fill_cell_dispatch<I, false>(v, c, in, entity_base, auxiliary, pred, dst);
+    return fill_cell_dispatch<I, true>(v, c, in, entity_base, auxiliary, pred, dst);
 }
 
 /// Writes one tuple of a goal cell to `dst` (the goal entity `target_id` first when `target`, then the predicate entity
