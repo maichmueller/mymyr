@@ -1019,8 +1019,8 @@ MYMYR_HD u32 fill_cell_dispatch(const InstanceView& v, const Cell& c, const RowI
 /// the entity `auxiliary`; each tuple starts with the entity `pred` unless it is k_no_entity. Writes count * c.arity
 /// entries; the caller places `dst`.
 template<class I>
-MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary, u64 pred,
-                       I* dst)
+MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
+                       u64 pred, I* dst)
 {
     if (pred == k_no_entity)
         return fill_cell_dispatch<I, false>(v, c, in, entity_base, auxiliary, pred, dst);
@@ -1029,10 +1029,10 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
 
 /// Writes the arguments of the tuples of goal cell `c` in this graph to `dst` for a goal cell of K objects (K ==
 /// k_any_arity: of c.logical_arity objects), with goal targets when Target, and returns the number of tuples: the
-/// cell's mask tuples (ascending slots) merged with its constant rows (the instance's goal only), in lexicographic order
-/// of their objects. With goal targets each tuple starts with its goal entity, the ids `first_target`, `first_target +
-/// 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a nullary predicate
-/// is the entity `auxiliary`. Writes count * c.arity entries.
+/// cell's mask tuples (ascending slots) merged with its constant rows (the instance's goal only), in lexicographic
+/// order of their objects. With goal targets each tuple starts with its goal entity, the ids `first_target`,
+/// `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a
+/// nullary predicate is the entity `auxiliary`. Writes count * c.arity entries.
 template<class I, u32 K, bool Target>
 MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
                                u64 auxiliary, u64 first_target, u64 pred, I* dst)
@@ -1102,7 +1102,8 @@ MYMYR_HD u32 fill_goal_cell_dispatch(const InstanceView& v, const Cell& c, const
     case 2: return fill_goal_cell_of<I, 2, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
     case 3: return fill_goal_cell_of<I, 3, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
     case 4: return fill_goal_cell_of<I, 4, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
-    default: return fill_goal_cell_of<I, k_any_arity, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
+    default:
+        return fill_goal_cell_of<I, k_any_arity, Target>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
     }
 }
 
