@@ -3,6 +3,7 @@
 //
 //   mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W [--n 16384] [--rounds 20]
 //                               [--replays 10] [--device 0]
+//                               [--lanes 4|8|32] [--fill auto|thread|warp]
 //
 // FILE holds the state rows, little-endian u64 [rows, W]; they are tiled to --n graphs. For each of the graph-major and
 // the relation-major layout the encode of the batch is captured into a CUDA graph on a stream and replayed --replays
@@ -35,7 +36,7 @@ namespace
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W "
-                 "[--n N] [--rounds R] [--replays K] [--device I]\n",
+                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|warp]\n",
                  message);
     std::exit(2);
 }
@@ -47,6 +48,7 @@ struct Args
     u64 n = 16384;
     u32 rounds = 20, replays = 10;
     int device = 0;
+    cuda::LaunchConfig launch;
 };
 
 Args parse(int argc, char** argv)
@@ -77,6 +79,20 @@ Args parse(int argc, char** argv)
             a.replays = static_cast<u32>(std::stoul(value()));
         else if (flag == "--device")
             a.device = std::stoi(value());
+        else if (flag == "--lanes")
+            a.launch.count_lanes = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--fill")
+        {
+            const std::string mode = value();
+            if (mode == "auto")
+                a.launch.fill = cuda::FillMode::Auto;
+            else if (mode == "thread")
+                a.launch.fill = cuda::FillMode::Thread;
+            else if (mode == "warp")
+                a.launch.fill = cuda::FillMode::Warp;
+            else
+                usage("--fill takes auto, thread or warp");
+        }
         else
             usage(("unknown flag " + flag).c_str());
     }
@@ -145,9 +161,11 @@ struct Session
     u64 cells = 0;
     bool sizes_match = false;
 
+    cuda::LaunchConfig launch;
+
     Session(const cuda::ContextPtr& ctx, cudaStream_t stream, TaskPtr task, encoding::Layout l, const std::vector<u64>& rows,
-            u32 words, u64 n)
-        : layout(l)
+            u32 words, u64 n, const cuda::LaunchConfig& config)
+        : layout(l), launch(config)
     {
         encoding::FlatOptions options;
         options.goal_derivations = {};
@@ -174,7 +192,7 @@ struct Session
         input.state_stride = words;
         input.state_words = words;
         // an eager encode first, outside any capture, for the sizes
-        device->encode(input, output, stream);
+        device->encode(input, output, stream, launch);
         encoding::FlatSizes device_sizes;
         cuda::check(cudaMemcpyAsync(&device_sizes, output.sizes, sizeof device_sizes, cudaMemcpyDeviceToHost, stream), "sizes");
         cuda::check(cudaStreamSynchronize(stream), "sizes");
@@ -187,7 +205,7 @@ struct Session
         work.emplace(device->acquire(stream));
         cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin capture");
         std::exception_ptr error;
-        try { device->encode(*work, input, output); }
+        try { device->encode(*work, input, output, launch); }
         catch (...) { error = std::current_exception(); }
         cuda::check(cudaStreamEndCapture(stream, &graph), "end capture");
         if (error)
@@ -229,7 +247,7 @@ double replay_us(cudaStream_t stream, const Session& s, u32 replays)
 double eager_us(cudaStream_t stream, const Session& s)
 {
     const auto t0 = std::chrono::steady_clock::now();
-    s.device->encode(s.input, s.output, stream);
+    s.device->encode(s.input, s.output, stream, s.launch);
     cuda::check(cudaStreamSynchronize(stream), "eager encode");
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -268,8 +286,8 @@ int main(int argc, char** argv)
         options.max_bytes = u64{3} << 30;
         const cuda::ContextPtr ctx = cuda::DeviceContext::create(a.device, options);
         cuda::Stream stream;
-        Session graph_major(ctx, stream, task, encoding::Layout::Graph, rows, a.words, a.n);
-        Session relation_major(ctx, stream, task, encoding::Layout::Relation, rows, a.words, a.n);
+        Session graph_major(ctx, stream, task, encoding::Layout::Graph, rows, a.words, a.n, a.launch);
+        Session relation_major(ctx, stream, task, encoding::Layout::Relation, rows, a.words, a.n, a.launch);
         std::vector<double> graph_times, relation_times, eager_times;
         for (u32 r = 0; r < a.rounds; ++r)
         {

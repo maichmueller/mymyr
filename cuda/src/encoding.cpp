@@ -624,7 +624,7 @@ void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInpu
     const u32 lanes = launch.count_lanes ? launch.count_lanes : count_lanes_for(m_bounds.words);
     bool warp = launch.fill == FillMode::Warp;
     if (launch.fill == FillMode::Auto)
-        warp = m_bounds.words > 8 || m_bounds.cells > 128 ||
+        warp = m_bounds.words > 8 || m_bounds.cells > 128 || m_bounds.args > 1024 ||
                detail::fill_shared_bytes(virtual_nodes, static_cast<u32>(R), false, relation_major) > detail::k_shared_limit;
     if (detail::count_shared_bytes(virtual_nodes, lanes) > detail::k_shared_limit ||
         detail::fill_shared_bytes(virtual_nodes, static_cast<u32>(R), warp, relation_major) > detail::k_shared_limit)

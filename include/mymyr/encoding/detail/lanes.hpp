@@ -757,6 +757,17 @@ MYMYR_HD u32 goal_cell_count(const Cell& c, const GoalWords& g, const RowInput& 
     return n;
 }
 
+/// The words of a fluent or derived cell from which on the lanes of a group count the cell together.
+inline constexpr u32 k_shared_count_words = 4;
+
+/// Whether the lanes of a group count the cell together (a fluent or derived cell over many words) and not the one lane
+/// that owns the cell.
+MYMYR_HD bool counted_by_group(const Cell& c, const RowInput& in)
+{
+    const bool words = c.op == static_cast<u32>(CellOp::Fluent) || (c.op == static_cast<u32>(CellOp::Derived) && in.derived);
+    return words && c.a < c.b && ((c.b - 1u) >> 6) - (c.a >> 6) + 1u >= k_shared_count_words;
+}
+
 /// The tuples of one cell in this graph.
 MYMYR_HD u32 cell_count(const InstanceView& v, const Cell& c, const RowInput& in)
 {
@@ -889,14 +900,30 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
         grp.sync();
     }
     const CellList list = cell_list(v, in);
-    for (u32 i = lane; i < list.count; i += lanes)
+    for (u32 i = 0; i < list.count; ++i)
     {
-        const u32 n = cell_count(v, list.cells[i], in);
-        sink(i, list.cells[i], n);
-        accumulate_cell(t, list.cells[i], n);
+        const Cell& c = list.cells[i];
+        u32 n = 0;
+        bool mine = i % lanes == lane;
+        if (counted_by_group(c, in))
+        {
+            // the lanes share the cell's words; lane 0 reports it
+            const u64* words = c.op == static_cast<u32>(CellOp::Fluent) ? in.atoms : in.derived;
+            u32 own = 0;
+            for (u32 w = (c.a >> 6) + lane; w <= ((c.b - 1u) >> 6); w += lanes)
+                own += popcount64(range_word(words, w, c.a, c.b));
+            n = grp.sum(own);
+            mine = lane == 0;
+        }
+        else if (mine)
+            n = cell_count(v, c, in);
+        if (!mine)
+            continue;
+        sink(i, c, n);
+        accumulate_cell(t, c, n);
         if (virtual_nodes && n)
         {
-            const u32 p = v.relation_virtual[list.cells[i].relation];
+            const u32 p = v.relation_virtual[c.relation];
             if (p != k_no_virtual)
                 virtual_scratch[p] = 1;
         }
@@ -1218,9 +1245,14 @@ MYMYR_HD u32 fill_cell_of(const InstanceView& v, const Cell& c, const RowInput& 
         return 0;
     for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
     {
-        const u64 bits = range_word(words, w, c.a, c.b);
-        n += popcount64(bits);
-        dst = emit_word_tuples<I, K, Pred>(write, table, A, w, bits, dst);
+        u64 bits = range_word(words, w, c.a, c.b);
+        while (bits)
+        {
+            const u64 s = static_cast<u64>(w) * 64u + lowest_bit64(bits);
+            bits &= bits - 1u;
+            ++n;
+            dst = write(dst, table + s * A);
+        }
     }
     return n;
 }

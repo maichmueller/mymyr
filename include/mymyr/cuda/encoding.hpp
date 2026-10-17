@@ -214,7 +214,7 @@ struct DeviceEncodeInput
 
 enum class FillMode : u8
 {
-    Auto,  // a thread per graph for rows of at most 8 words and at most 128 cells, else a warp per graph
+    Auto,  // a thread per graph for rows of at most 8 words, 128 cells and 1024 argument entries, else a warp per graph
     Thread,
     Warp,
 };

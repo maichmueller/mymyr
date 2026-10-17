@@ -21,6 +21,11 @@ rounds per mode.
     Every device run is built and warmed outside any capture, and only one is alive at a time. They are skipped with
     the reason "not supported on the device" while `encode` takes no device rows; on a build that has a device
     encode path the harness cannot drive, the run fails.
+  - With --device-bench PATH the three device_encode modes come from the C++ driver mymyr_device_encoding_bench instead
+    (the build's bench/cuda/device_encoding_bench.cpp): the harness writes the walk rows of the task to a file, the
+    driver encodes the rows tiled to the largest environment size on the device, captures one encode per layout into a
+    CUDA graph, replays it between events and returns the times of every round, the nodes of the captured graph and
+    the scratch of its workspace. The records carry them, and the device-launches and device-scratch gates read them.
 
 Every record carries the bytes written per encoded state, measured on the batch that mode times. The JSON output has
 the environment (GPU, driver, CUDA, mymyr version and commit, CPU count, load), the targets as data, the recorded
@@ -49,6 +54,7 @@ import random
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -183,11 +189,11 @@ TARGETS = [
          gate="<= 1.25 x the standalone encoder's added ns in a step x (bytes written / its bytes)",
          goal="<= bytes / 150 GB/s + 3 ns", soft=True),
     dict(id="device-launches", what="launches and sync", gate="<= 4 kernels per width class, no host sync, no allocation after "
-         "reserve, capturable", goal=None, soft=True, needs="the device encoder's reserve and a profiler"),
+         "reserve, capturable", goal=None, soft=True, needs="the device encoding bench (--device-bench)"),
     dict(id="device-vs-cpu", what="device against the CPU encoder at N >= 4096", gate=">= 10x one thread and >= 3x 8 threads",
          goal=">= 20x / >= 5x", soft=True),
-    dict(id="device-scratch", what="scratch", gate="<= 16 B per graph + 4 B per cell + CUB temp", goal=None, soft=True,
-         needs="the device encoder's bytes_needed"),
+    dict(id="device-scratch", what="scratch", gate="<= 16 B per graph + 4 B per cell + CUB temp (+ 256 B of flags and alignment)",
+         goal=None, soft=True, needs="the device encoding bench (--device-bench)"),
     dict(id="device-hgraph", what="HGraph view", gate="zero-copy, or <= 1.3x relation-major", goal="<= 1.1x", soft=True,
          needs="the HGraph view"),
     dict(id="device-simple", what="Simple on the device", gate="<= 2.5x the flat core", goal=None, soft=True,
@@ -218,6 +224,18 @@ def load_task(key, data=None):
         if (base / "domain.pddl").is_file() and (base / f"{problem}.pddl").is_file():
             return mymyr.Task.from_pddl(base / "domain.pddl", base / f"{problem}.pddl"), None
     return None, f"no PDDL for {directory}/{problem} under " + ", ".join(str(r) for r in ipc_roots(data))
+
+
+def task_files(key, data=None):
+    """(domain, problem) PDDL paths of a task of the benchmark set, or None."""
+    if key not in TASKS:
+        return None
+    directory, problem = TASKS[key]
+    for root in ipc_roots(data):
+        base = root / directory / "test"
+        if (base / "domain.pddl").is_file() and (base / f"{problem}.pddl").is_file():
+            return base / "domain.pddl", base / f"{problem}.pddl"
+    return None
 
 
 def walk_rows(task, count, seed, depth=64, patience=100):
@@ -346,6 +364,9 @@ def cpu_modes(rows, big, pool, encoders, wants):
 # ------------------------------------------------------------------------------------------------ the GPU side
 
 
+DEVICE_MODE_NAMES = ("device_encode_graph", "device_encode_rel", "device_encode_graph_eager")
+
+
 class Gpu:
     """torch and the device, when usable."""
 
@@ -435,6 +456,68 @@ class DeviceRun:
     def close(self):
         self.encoder = self.states = None
         self.gpu.sync()
+
+
+def run_device_bench(binary, files, rows, n, rounds, device):
+    """The result of one run of the C++ device encoding bench on `rows` tiled to `n` graphs, as a dict. Raises
+    RuntimeError with the reason when it fails."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "rows.u64"
+        np.ascontiguousarray(rows, dtype=np.uint64).tofile(path)
+        command = [str(binary), "--domain", str(files[0]), "--problem", str(files[1]), "--rows", str(path), "--words",
+                   str(rows.shape[1]), "--n", str(n), "--rounds", str(rounds), "--replays", str(REPLAYS), "--device",
+                   str(device)]
+        done = subprocess.run(command, capture_output=True, text=True, check=False)
+    lines = done.stdout.strip().splitlines()
+    try:
+        result = json.loads(lines[-1])
+    except (ValueError, IndexError):
+        raise RuntimeError(f"the device bench produced no result ({done.stderr.strip()[:200]})") from None
+    if done.returncode != 0 or "error" in result:
+        raise RuntimeError(result.get("error", f"the device bench failed with status {done.returncode}"))
+    return result
+
+
+def device_bench_modes(binary, args, rows, files, encoders, wants):
+    """The device_encode modes of one task that `wants` selects, measured by the C++ driver at the largest environment
+    size. Their times are the driver's rounds; the records also carry what the device-launches and device-scratch gates
+    read."""
+    selected = [spec for spec in DEVICE_MODES if wants(spec[0])]
+    if not selected:
+        return []
+    n = max(args.env_sizes)
+    fields = {name: dict(layout=layout, N=n, timing="eager" if eager else "replay") for name, layout, eager in selected}
+
+    if files is None:
+        return [Mode(name, "device", **fields[name]).skipped("the device bench needs the task's PDDL files", True)
+                for name, _, _ in selected]
+    try:
+        result = run_device_bench(binary, files, rows, n, args.rounds, args.device)
+    except (OSError, RuntimeError) as error:
+        return [_failed(Mode(name, "device", **fields[name]), describe(error)) for name, _, _ in selected]
+    modes = []
+    tiled = tile(rows, n)
+    for name, layout, eager in selected:
+        mode = Mode(name, "device", units=n if eager else n * REPLAYS, **fields[name])
+        mode.times = [t / mode.units for t in result["times_us"]["eager" if eager else layout]]
+        info = result[layout]
+        mode.fields.update(kernels=info["kernels"], memsets=info["memsets"], other_nodes=info["other_nodes"],
+                           scratch_bytes=info["scratch_bytes"], cub_bytes=info["cub_bytes"], cells=info["cells"],
+                           relations=info["relations"], wide_totals=info["wide"], device_bench=True)
+        encoder, reason = encoders[layout]
+        if encoder is None:
+            mode.skipped(f"layout {layout} unavailable: {reason}", True)
+        else:
+            mode.stats = (encoder, tiled)
+            if not info["sizes_match"]:
+                mode.error = "the device's sizes differ from the host encoder's"
+        modes.append(mode)
+    return modes
+
+
+def _failed(mode, reason):
+    mode.error = reason
+    return mode
 
 
 def time_graph_replays(gpu, graph, replays):
@@ -809,6 +892,34 @@ def gate_device_vs_cpu(index, task):
     return outcome(verdict(s1 >= 10 and s8 >= 3), value=[s1, s8], limit=[10, 3])
 
 
+SCRATCH_SLACK = 256  # bytes of flags and alignment next to the totals, the counts and the scan's storage
+
+
+def gate_device_launches(index, task):
+    """At most 4 kernels per captured encode (one width class per task), nothing else in the graph but memsets: a capture
+    holds no host synchronization, allocation or copy."""
+    records = [index.rec[(task, m)] for m in ("device_encode_graph", "device_encode_rel")]
+    kernels, others = max(r["kernels"] for r in records), sum(r["other_nodes"] for r in records)
+    return outcome(verdict(kernels <= 4 and others == 0), value=kernels, limit=4, other_nodes=others)
+
+
+def gate_device_scratch(index, task):
+    """The scratch of the reserved workspace of each layout: 16 bytes per graph (four totals of G + 1 entries) and 4 bytes
+    per cell (graph-major: the counts of G graphs of `cells` cells; relation-major: the segment row of G * R cells) plus
+    the scan's temporary storage, with a few hundred bytes of flags and alignment."""
+    worst = None
+    for mode in ("device_encode_graph", "device_encode_rel"):
+        r = index.rec[(task, mode)]
+        n = r["N"]
+        cells = n * (r["relations"] if r["layout"] == "relation" else r["cells"])
+        limit = 16 * (n + 1) + 4 * cells + r["cub_bytes"] + SCRATCH_SLACK
+        found = outcome(verdict(r["scratch_bytes"] <= limit), value=r["scratch_bytes"], limit=limit, layout=r["layout"],
+                        per_graph=r["scratch_bytes"] / n)
+        if worst is None or found["status"] == "fail":
+            worst = found
+    return worst
+
+
 def gate_device_in_step(index, task):
     """The largest environment size with an encode-in-step record: the added time per environment of the encode."""
     sizes = [r["N"] for r in index.modes_of(task, "env_step_encode_n")]
@@ -844,6 +955,8 @@ GATES = {
     "device-relation-major": (lambda task: None, ("device_encode_graph", "device_encode_rel"), gate_device_relation_major),
     "device-in-step": (_no_baseline(STANDALONE_DEVICE_IN_STEP_NS), None, gate_device_in_step),
     "device-vs-cpu": (lambda task: None, ("device_encode_graph", "cpu_batch_all", "cpu_batch_all_t8"), gate_device_vs_cpu),
+    "device-launches": (lambda task: None, ("device_encode_graph", "device_encode_rel"), gate_device_launches),
+    "device-scratch": (lambda task: None, ("device_encode_graph", "device_encode_rel"), gate_device_scratch),
 }
 
 
@@ -997,15 +1110,24 @@ def run_task(key, args, gpu, pool):
     def wants(name):
         return wanted(name, selection)
 
+    def wants_python(name):
+        """The modes the Python device path times: the device_encode modes belong to the C++ driver with --device-bench."""
+        return wants(name) and not (args.device_bench and name in DEVICE_MODE_NAMES)
+
     info = dict(**base, words=task.words, objects=len(task.objects))
     encoders = {"graph": make_encoder(task), "relation": make_encoder(task, layout="relation")}
     modes = []
-    if group_wanted("cpu", selection):
+    external = bool(args.device_bench) and any(wants(name) for name in DEVICE_MODE_NAMES)
+    rows = None
+    if group_wanted("cpu", selection) or external:
         rows = walk_rows(task, args.rows, args.seed)
         info["n_rows"] = len(rows)
+    if group_wanted("cpu", selection):
         modes += cpu_modes(rows, tile(rows, max(len(rows), args.min_batch)), pool, encoders, wants)
     resources = Resources(gpu)
-    modes += device_modes(task, gpu, args.env_sizes, wants, encoders, resources)
+    modes += device_modes(task, gpu, args.env_sizes, wants_python, encoders, resources)
+    if external:
+        modes += device_bench_modes(args.device_bench, args, rows, task_files(key, args.data), encoders, wants)
     time_rounds(modes, args.rounds)
 
     stats = {}
@@ -1056,6 +1178,8 @@ def parse_args(argv):
     p.add_argument("--seed", type=int, default=0, help="seed of the random walks")
     p.add_argument("--min-batch", type=int, default=MIN_BATCH, help="rows of the all-rows batches, tiled up to this")
     p.add_argument("--env-sizes", default=",".join(map(str, ENV_SIZES)), help="environment counts N")
+    p.add_argument("--device-bench", metavar="PATH", help="the mymyr_device_encoding_bench binary: it times the device_encode "
+                   "modes (C++ replays of captured encodes) and measures their launches and scratch")
     p.add_argument("--quick", action="store_true", help="a smoke configuration: one small task, few rows and rounds")
     args = p.parse_args(argv)
     if args.rounds < 1:
