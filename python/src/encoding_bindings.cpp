@@ -796,7 +796,7 @@ void bind_encoding(nb::module_& parent)
              "`entity_ref` of an action entity is the index of its first row among the rows of its own state "
              "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]). Without it the "
              "action relations are empty. The rows must be in canonical "
-             "order (rl.expand's default); an expansion made with witness=True gives the pruned set of actions. "
+             "order (rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
