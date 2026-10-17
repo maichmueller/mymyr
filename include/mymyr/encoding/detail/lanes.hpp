@@ -510,38 +510,39 @@ MYMYR_HD u32 check_actions(const InstanceView& v, const ActionRows& a)
     const i32* parent = a.parent;
     const bool state_fits = a.state <= 0x7FFFFFFFu;
     const i32 state = static_cast<i32>(a.state);
-    u32 row = 0;
-    if (state_fits)
-    {
-        for (u32 s = 0; s < S; ++s)
-        {
-            starts[s] = row;
-            if (parent)
-                while (row < count && static_cast<u32>(schema[row]) == s && parent[row] == state)
-                    ++row;
-            else
-                while (row < count && static_cast<u32>(schema[row]) == s)
-                    ++row;
-        }
-    }
-    if (row != count || !state_fits)
-    {
-        for (u32 s = 0; s <= S; ++s)
-            starts[s] = 0;
-        return !state_fits ? k_graph_bad_action_label : action_row_fault(v, a);
-    }
-    starts[S] = count;
     const u32 L = a.label_width;
     const u32 objects = v.num_objects;
     const u32 bits = bit_length(objects ? objects - 1u : 0u);
     u32 outside = 0, unordered = 0;
-    for (u32 s = 0; s < S; ++s)
+    // the runs of the rows, one per schema that has rows: `next` is the first schema whose start is not set yet
+    u32 row = 0, next = 0;
+    while (row < count)
     {
-        const u32 n = starts[s + 1] - starts[s];
-        if (n == 0)
-            continue;
+        const u32 s = static_cast<u32>(schema[row]);
+        if (!state_fits || s < next || s >= S || (parent && parent[row] != state))
+        {
+            for (u32 t = 0; t <= S; ++t)
+                starts[t] = 0;
+            return !state_fits ? k_graph_bad_action_label : action_row_fault(v, a);
+        }
+        for (; next <= s; ++next)
+            starts[next] = row;
+        const u32 begin = row;
+        if (parent)
+        {
+            do
+                ++row;
+            while (row < count && static_cast<u32>(schema[row]) == s && parent[row] == state);
+        }
+        else
+        {
+            do
+                ++row;
+            while (row < count && static_cast<u32>(schema[row]) == s);
+        }
+        const u32 n = row - begin;
         const u32 arity = v.schema_arity[s];
-        const i32* rows = a.binding + static_cast<u64>(starts[s]) * L;
+        const i32* rows = a.binding + static_cast<u64>(begin) * L;
         if (arity > L)
         {
             outside = 1;
@@ -562,6 +563,8 @@ MYMYR_HD u32 check_actions(const InstanceView& v, const ActionRows& a)
         default: check_run_wide(rows, L, n, arity, objects, outside, unordered);
         }
     }
+    for (; next <= S; ++next)
+        starts[next] = count;
     return outside ? k_graph_bad_action_label : unordered ? k_graph_bad_action_order : 0u;
 }
 

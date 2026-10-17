@@ -9,10 +9,11 @@
 // tuple arguments of the batch. faults_per_call is the minor page faults of one timed encode, averaged over the timed
 // encodes. goals selects the goal relations: off (none, the default), on (the plain and satisfied relations of the
 // instance goal) or targets (plain, satisfied and unsatisfied, with the goal entities as targets).
-// single_us_per_call is one encode per state of the first min(N, singles) states (one row per call; singles = 0 skips it). actions selects the
-// action lane: off (no expansion is given, so the action relations are empty, the default), on (the expansion of the
-// states is given), targets (and every action tuple's entity is a target) or virtual (and the predicates get virtual
-// nodes); the expansion is made before the timing and its time is not part of the line.
+// single_us_per_call is one encode per state of the first min(N, singles) states (one row per call; null for
+// singles = 0). actions selects the action lane: off (no expansion is given, so the action relations are empty, the
+// default), on (the expansion of the states is given), targets (and every action tuple's entity is a target) or
+// virtual (and the predicates get virtual nodes); the expansion is made before the timing and its time is not part of
+// the line.
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -242,13 +243,19 @@ int main(int argc, char** argv)
         const auto* offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_offsets")));
         const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
         const u64 cells = n * encoder->schema().num_relations();
-        std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"goals\": \"%s\", \"actions\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
+        // the time of a call on one state is null when no single states were encoded
+        char single_us[32] = "null";
+        if (singles)
+            std::snprintf(single_us, sizeof single_us, "%.3f", best_single * 1e6 / static_cast<double>(singles));
+        std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"goals\": \"%s\", "
+                    "\"actions\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"single_us_per_call\": %.3f, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
+                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), goals.c_str(), actions.c_str(), threads, best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), best_single * 1e6 / static_cast<double>(std::max<u64>(singles, 1)), faults_per_call, offsets[cells], arg_offsets[cells]);
+                    best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call, offsets[cells],
+                    arg_offsets[cells]);
     }
     catch (const std::exception& error)
     {

@@ -107,10 +107,12 @@ def test_a_single_state_equals_its_slice_of_a_batch():
 def test_threads_and_layouts_give_the_same_action_graphs(threads, layout):
     task = text_task("blocks__probBLOCKS-8-0")
     states = walk(task, steps=10, walks=3)
+    states = states * (2500 // len(states) + 1)  # more graphs than one thread encodes alone (1024)
+    assert len(states) > 1024
     expansion = expand(task, states)
     reference = encoding.FlatRelationEncoder(task, **OPTIONS).encode(states, actions=expansion)
     batch = encoding.FlatRelationEncoder(task, layout=layout, **OPTIONS).encode(states, actions=expansion, threads=threads)
-    for graph in range(len(states)):
+    for graph in range(0, len(states), 7):
         assert graph_cells(batch, graph) == graph_cells(reference, graph)
     assert np.array_equal(batch.entity_ref, reference.entity_ref)
     assert np.array_equal(batch.entity_role, reference.entity_role)
@@ -158,8 +160,6 @@ def test_the_expansion_argument_is_validated():
         encoder.encode([state], actions=expand(other, [other.initial_state]))
 
 
-def test_actions_need_action_relations():
-    task = text_task("gripper__prob05")
 def test_the_expansion_must_be_over_the_encoders_own_task():
     """An expansion over another problem of the same domain has the same schemas but other objects: it is refused,
     while one over an equal task loaded again is accepted."""
@@ -177,6 +177,8 @@ def test_the_expansion_must_be_over_the_encoders_own_task():
     assert np.array_equal(batch.relation_args, reference.relation_args)
 
 
+def test_actions_need_action_relations():
+    task = text_task("gripper__prob05")
     state = task.initial_state
     encoder = encoding.FlatRelationEncoder(task, include_actions=False)
     with pytest.raises(ValueError, match="^mymyr: encoding: .*action"):

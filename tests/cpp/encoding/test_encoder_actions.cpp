@@ -300,8 +300,8 @@ TEST(EncoderActions, SchemasOfOneNameAreMergedAndDuplicatesDropped)
     EXPECT_EQ(*refs.begin(), 0);
 }
 
-/// A domain of 73 action schemas: `go` has a disjunctive precondition over 33 predicates (33 schemas of one name, so one
-/// action relation merges 33 runs) and `step0` ... `step39` one precondition each.
+/// A domain of 73 action schemas: `go` has a disjunctive precondition over 33 predicates (33 schemas of one name, so
+/// one action relation merges 33 runs) and `step0` ... `step39` one precondition each.
 rl::TaskTablePtr many_schemas_table()
 {
     const std::filesystem::path directory = std::filesystem::path(::testing::TempDir());
@@ -364,29 +364,6 @@ TEST(EncoderActions, ManySchemasAndWideSplitRelationsAreEncoded)
     }
 }
 
-TEST(EncoderActions, ARunThatIsNotInCanonicalOrderIsRefused)
-{
-    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-    const auto encoder = FlatEncoder::create(table, action_options());
-    const test::Rows rows = test::random_walk(*table, 0, 8, 4);
-    auto expanded = expand_rows(*table, rows);
-    ASSERT_NO_THROW((void)encoder->encode(input_of(rows, expanded.get())));
-    // a state with two rows of one schema: swap their bindings
-    u64 g = 0;
-    auto has_pair = [&](u64 state)
-    {
-        for (i32 row = expanded->offsets[state] + 1; row < expanded->offsets[state + 1]; ++row)
-            if (expanded->schema[static_cast<usize>(row)] == expanded->schema[static_cast<usize>(row) - 1])
-                return true;
-        return false;
-    };
-    while (g < rows.size() && !has_pair(g))
-        ++g;
-    ASSERT_LT(g, rows.size());
-    const u32 L = expanded->x.label_width;
-    for (i32 row = expanded->offsets[g] + 1; row < expanded->offsets[g + 1]; ++row)
-        if (expanded->schema[static_cast<usize>(row)] == expanded->schema[static_cast<usize>(row) - 1])
-        {
 TEST(EncoderActions, AnActionTupleRepeatingTheObjectsOfItsPredecessorIsRejected)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
@@ -418,6 +395,29 @@ TEST(EncoderActions, AnActionTupleRepeatingTheObjectsOfItsPredecessorIsRejected)
     ASSERT_TRUE(found);
 }
 
+TEST(EncoderActions, ARunThatIsNotInCanonicalOrderIsRefused)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const auto encoder = FlatEncoder::create(table, action_options());
+    const test::Rows rows = test::random_walk(*table, 0, 8, 4);
+    auto expanded = expand_rows(*table, rows);
+    ASSERT_NO_THROW((void)encoder->encode(input_of(rows, expanded.get())));
+    // a state with two rows of one schema: swap their bindings
+    u64 g = 0;
+    auto has_pair = [&](u64 state)
+    {
+        for (i32 row = expanded->offsets[state] + 1; row < expanded->offsets[state + 1]; ++row)
+            if (expanded->schema[static_cast<usize>(row)] == expanded->schema[static_cast<usize>(row) - 1])
+                return true;
+        return false;
+    };
+    while (g < rows.size() && !has_pair(g))
+        ++g;
+    ASSERT_LT(g, rows.size());
+    const u32 L = expanded->x.label_width;
+    for (i32 row = expanded->offsets[g] + 1; row < expanded->offsets[g + 1]; ++row)
+        if (expanded->schema[static_cast<usize>(row)] == expanded->schema[static_cast<usize>(row) - 1])
+        {
             for (u32 k = 0; k < L; ++k)
                 std::swap(expanded->binding[static_cast<usize>(row) * L + k], expanded->binding[static_cast<usize>(row - 1) * L + k]);
             break;
@@ -585,7 +585,7 @@ TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInOrderOfTheirNames)
         bool some_unused = false;
         for (u64 g = 0; g < rows.size(); ++g)
         {
-            std::set<i64> used;
+            std::map<std::string, i64> used;  // the key of each used predicate by its name
             for (u32 r = 0; r < R; ++r)
                 if (counts[g * R + r] > 0 && schema.virtual_key(r) >= 0)
                     used.emplace(predicate_name(schema.relation(r).name), schema.virtual_key(r));
@@ -621,29 +621,6 @@ TEST(EncoderVirtualNodes, TheKeyIsThePredicatesStateRelationWhenThereIsOne)
         EXPECT_EQ(schema->virtual_key(*schema->find(std::string("[+]") + name + "[g]")), static_cast<i32>(state));
     }
 }
-TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
-{
-    // wide_predicates: set/1 and join/4 over the objects a b c = 0 1 2, with the predicates on/1, link/3 and trio/3;
-    // the state {(on a), (on b)} has the actions set a, set b, set c and join (a b c w), join (c b a w) for every w
-    const auto table = rl::TaskTable::single(test::pddl_task("wide_predicates", "p01"));
-    const Task& task = *table->task(0);
-    std::vector<u64> state(table->words(), 0);
-    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {0}));
-    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {1}));
-    test::Rows rows;
-    rows.words = table->words();
-    rows.task_ids = {0, 0};  // two graphs of one state: the second graph's rows are not the expansion's first rows
-    rows.data = state;
-    rows.data.insert(rows.data.end(), state.begin(), state.end());
-    const auto expanded = expand_rows(*table, rows);
-    ASSERT_EQ(expanded->offsets[1], 9);
-    ASSERT_EQ(expanded->offsets[2], 18);
-    for (const Layout layout : {Layout::Graph, Layout::Relation})
-        for (const bool wide : {false, true})
-        {
-            SCOPED_TRACE(std::string(layout == Layout::Graph ? "graph" : "relation") +
-                         (wide ? " all relations" : " actions only"));
-            FlatOptions options = action_options();
 TEST(EncoderVirtualNodes, PredicatesWithoutAStateRelationAreRankedByName)
 {
     // `zz` is static and dropped from the state relations: its only relations are goal relations, sorted before `aa`
@@ -681,6 +658,29 @@ TEST(EncoderVirtualNodes, PredicatesWithoutAStateRelationAreRankedByName)
     EXPECT_EQ(nodes, (std::vector<i64>{aa, zz_goal}));
 }
 
+TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
+{
+    // wide_predicates: set/1 and join/4 over the objects a b c = 0 1 2, with the predicates on/1, link/3 and trio/3;
+    // the state {(on a), (on b)} has the actions set a, set b, set c and join (a b c w), join (c b a w) for every w
+    const auto table = rl::TaskTable::single(test::pddl_task("wide_predicates", "p01"));
+    const Task& task = *table->task(0);
+    std::vector<u64> state(table->words(), 0);
+    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {0}));
+    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {1}));
+    test::Rows rows;
+    rows.words = table->words();
+    rows.task_ids = {0, 0};  // two graphs of one state: the second graph's rows are not the expansion's first rows
+    rows.data = state;
+    rows.data.insert(rows.data.end(), state.begin(), state.end());
+    const auto expanded = expand_rows(*table, rows);
+    ASSERT_EQ(expanded->offsets[1], 9);
+    ASSERT_EQ(expanded->offsets[2], 18);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+        for (const bool wide : {false, true})
+        {
+            SCOPED_TRACE(std::string(layout == Layout::Graph ? "graph" : "relation") +
+                         (wide ? " all relations" : " actions only"));
+            FlatOptions options = action_options();
             options.layout = layout;
             options.include_static = wide;
             options.include_derived = wide;
