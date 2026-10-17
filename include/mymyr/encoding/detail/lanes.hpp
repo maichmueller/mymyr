@@ -59,7 +59,14 @@
 // the relation-major one (cell_segment). Graph-major positions are a prefix over the graph's own cells and need nothing
 // but the graph's base (fill_graph). Relation-major positions come from an exclusive scan over all G * R segments in
 // segment order (the cells' counts, as count_graph reports them), written to relation_offsets and relation_arg_offsets
-// before the fill; fill_graph_relation_major reads its cells' positions from the two arrays.
+// before the fill; fill_graph_relation_major reads its cells' positions from the two arrays. A kernel that does not
+// keep those arrays gives fill_graph_positioned a position policy instead (args(segment, relation) and count(segment)).
+//
+// Lane groups. A graph can be served by a group of lanes (threads of one warp, or a single thread) that split its cells
+// and its entities between them: the group forms (count_graph_group_into, fill_graph_group,
+// fill_graph_positioned_group) take an object with the lane's rank and size, a sum, a bit-or and an exclusive scan over
+// the group, and a barrier. They compute the same sizes and write the same bytes as the plain forms, for any group
+// size; SoloGroup is the group of one lane.
 
 #include "mymyr/core/types.hpp"
 

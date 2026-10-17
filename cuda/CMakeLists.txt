@@ -63,9 +63,7 @@ target_sources(mymyr_cuda PRIVATE src/device_table.cpp src/table_launch.cpp src/
 target_sources(mymyr_cuda PRIVATE src/state_space.cu src/state_space.cpp)
 # IW over task tables (cuda/multi_iw.hpp: the searches grouped by instance)
 target_sources(mymyr_cuda PRIVATE src/multi_iw_table.cpp)
-# the per-graph functions of the relational encoding (encoding/detail/lanes.hpp) compiled as device code
-target_sources(mymyr_cuda PRIVATE src/encoding_lanes.cu)
-# the context of the relational encoder and the encoder's memory on the device (cuda/encoding.hpp)
+# the relational encoder on the device: its context, scratch and kernels (cuda/encoding.hpp)
 target_sources(mymyr_cuda PRIVATE src/encoding.cpp src/encoding.cu)
 # task suites (several domains) on the device: the suite expand and the domain split of a batch
 target_sources(mymyr_cuda PRIVATE src/suite.cu src/suite_expand.cpp)
@@ -133,6 +131,9 @@ if(MYMYR_BENCH)
         target_compile_definitions(mymyr_table_bench PRIVATE
             MYMYR_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
             MYMYR_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data")
+        # the device relational encoder on the rows of a task: captured replays, nodes of the graph, scratch
+        add_executable(mymyr_device_encoding_bench ${PROJECT_SOURCE_DIR}/bench/cuda/device_encoding_bench.cpp)
+        target_link_libraries(mymyr_device_encoding_bench PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend mymyr_warnings)
         # device state spaces against the host (one large space; many small instances of a table)
         add_executable(mymyr_device_state_space_bench ${PROJECT_SOURCE_DIR}/bench/cuda/device_state_space_bench.cpp)
         target_link_libraries(mymyr_device_state_space_bench PRIVATE mymyr::cuda mymyr::frontend mymyr_warnings)
