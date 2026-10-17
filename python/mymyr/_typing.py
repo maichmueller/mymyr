@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from mymyr import State
+    from mymyr.encoding import GraphDescription as GraphDescription
     from mymyr.rl import InstanceSampler as InstanceSampler
 
 __all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack"]
