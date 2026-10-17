@@ -146,21 +146,22 @@ counts `relation_counts[g, 0]`, `relation_counts[g, 1]`, ... from `entity_ref` u
 
 ### Actions
 
-Given `actions`, the applicable actions of each state are the rows of its expansion. An action of schema `name` with
-the binding `(o_1, ..., o_k)` is the tuple `(o_1, ..., o_k)` of the action relation `name`; a schema with no parameters
-is a unary tuple over its own **action entity** and takes no auxiliary entity. A schema that the front end split in
+Given `actions`, the applicable actions of each state are the rows of its expansion. Every distinct action of the state
+is one tuple of the action relation of its schema `name`, and the tuple is always `(action entity, o_1, ..., o_k)`: the
+**action entity** (entity role 4, after the goal entities) followed by the binding `(o_1, ..., o_k)`. A schema with no
+parameters has the unary tuple `(action entity)` and takes no auxiliary entity. A schema that the front end split in
 several (a disjunctive precondition) shares one relation, and an action that two of its schemas both give is one tuple:
-the relation lists each binding once. One action relation gathers at most 32 schemas (a task with more raises `ValueError`).
+the relation lists each binding once. There is no limit on the schemas of a relation.
 
-With `target_sources=("action",)` (or `("action", "goal")`) every distinct action tuple gets an **action entity** (entity
-role 4, after the goal entities), numbered in the order of the action relations (relation id, then tuple), and it is
-the first argument of its tuple. The entity's `entity_ref` is the row of the action among the rows of its own state in
-the expansion (the position among the state's rows, the first one for a binding listed by several schemas), the same in
-either layout and whatever the graph's place in the batch. The row of the expansion is `actions.offsets[g] +
-entity_ref`, so `actions.action(row)` is the action and `actions.succ[row]` its successor: a policy that picks an action
-entity picks that row. The batch lists
-the action entities as targets of group 2 (`encoder.target_group_names`), after the goal entities of their graph. A
-batch has no action entities for a call without `actions`.
+The action entities exist whenever the batch has action tuples, with or without `target_sources=("action",)`. They are
+numbered in the order of the action relations (relation id, then tuple). The entity's `entity_ref` is the row of the
+action among the rows of its own state in the expansion (the position among the state's rows, the first one for a
+binding listed by several schemas), the same in either layout and whatever the graph's place in the batch. The row of
+the expansion is `actions.offsets[g] + entity_ref`, so `actions.action(row)` is the action and `actions.succ[row]` its
+successor: a policy that picks an action entity picks that row. With `target_sources=("action",)` (or `("action",
+"goal")`) the batch also lists the action entities as targets of group 2 (`encoder.target_group_names`), after the goal
+entities of their graph; without it they are entities and tuple arguments only. A call without `actions` has no action
+tuples and no action entities.
 
 ### Predicate virtual nodes
 

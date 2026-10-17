@@ -229,6 +229,29 @@ TEST(EncoderActions, NoExpansionMeansNoActionTuples)
     EXPECT_EQ(std::count(role.begin(), role.end(), static_cast<i64>(EntityRole::Action)), 0);
 }
 
+TEST(EncoderActions, ActionEntitiesExistWithoutActionTargets)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 16, 1);
+    const auto expanded = expand_rows(*table, rows);
+    FlatOptions options = test::encoder_options();
+    const auto encoder = FlatEncoder::create(table, options);
+    ASSERT_TRUE(options.targets.empty());
+    const auto batch = encoder->encode(input_of(rows, expanded.get()));
+    validate(*batch, encoder->schema());
+    EXPECT_EQ(batch->find("target_entity"), nullptr);
+    const auto role = ints(*batch, "entity_role");
+    const auto counts = ints(*batch, "relation_counts");
+    const EncodingSchema& schema = encoder->schema();
+    i64 tuples = 0;
+    for (u64 g = 0; g < rows.size(); ++g)
+        for (u32 r = 0; r < schema.num_relations(); ++r)
+            if (schema.relation(r).lane == Lane::Action)
+                tuples += counts[g * schema.num_relations() + r];
+    EXPECT_GT(tuples, 0);
+    EXPECT_EQ(std::count(role.begin(), role.end(), static_cast<i64>(EntityRole::Action)), tuples);
+}
+
 /// A domain whose action has a disjunctive precondition, so that the front end splits it into two schemas of one name.
 rl::TaskTablePtr disjunction_table()
 {
