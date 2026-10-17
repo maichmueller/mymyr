@@ -510,7 +510,7 @@ WordsLayout words_layout(const void* data, u8 code, u8 bits, u16 lanes, usize nd
     const usize last = ndim - 1;
     const i64 cols = shape[last];
     const i64 rows = ndim == 2 ? shape[0] : 1;
-    if (cols > 1 && strides[last] != 1)
+    if (rows > 0 && cols > 1 && strides[last] != 1)
         throw nb::type_error("mymyr: the words of a state must be contiguous (last-dimension stride 1)");
     i64 row_stride = ndim == 2 ? strides[0] : cols;
     if (row_stride < 0)

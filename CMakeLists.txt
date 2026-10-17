@@ -177,7 +177,7 @@ target_sources(mymyr_core PRIVATE
 )
 
 add_library(mymyr_encoding STATIC src/mymyr/encoding/options.cpp src/mymyr/encoding/schema.cpp
-    src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/validate.cpp)
+    src/mymyr/encoding/context.cpp src/mymyr/encoding/encoder.cpp src/mymyr/encoding/validate.cpp src/mymyr/encoding/stream.cpp)
 add_library(mymyr::encoding ALIAS mymyr_encoding)
 set_target_properties(mymyr_encoding PROPERTIES EXPORT_NAME encoding)
 target_link_libraries(mymyr_encoding PUBLIC mymyr::core PRIVATE $<BUILD_INTERFACE:mymyr_warnings>)
