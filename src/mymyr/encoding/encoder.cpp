@@ -89,12 +89,7 @@ struct EncodeScratch::Impl
 {
     // The input count() saw, so that fill() can refuse another one.
     bool counted = false;
-    const u64* counted_data = nullptr;
-    const i32* counted_ids = nullptr;
-    const u64* counted_derived = nullptr;
-    const u64* counted_goal = nullptr;
-    const rl::Expansion* counted_actions = nullptr;
-    u64 counted_rows = 0;
+    EncodeInput counted_input;
     FlatSizes sizes;
 
     std::vector<u32> arity;          // [R] the arguments per tuple of each relation
@@ -110,6 +105,18 @@ EncodeScratch::~EncodeScratch() = default;
 namespace
 {
 using Scratch = EncodeScratch::Impl;
+
+/// Whether two inputs read the same buffers with the same shape: every pointer, stride and width equal.
+bool same_input(const EncodeInput& a, const EncodeInput& b)
+{
+    return a.states.data == b.states.data && a.states.rows == b.states.rows && a.states.words == b.states.words &&
+           a.states.stride == b.states.stride && a.states.numeric_words == b.states.numeric_words &&
+           a.task_ids == b.task_ids && a.derived == b.derived && a.derived_stride == b.derived_stride &&
+           a.goal_pos == b.goal_pos && a.goal_neg == b.goal_neg && a.goal_stride == b.goal_stride &&
+           a.goal_words == b.goal_words && a.goal_derived_pos == b.goal_derived_pos &&
+           a.goal_derived_neg == b.goal_derived_neg && a.goal_derived_stride == b.goal_derived_stride &&
+           a.goal_derived_words == b.goal_derived_words && a.actions == b.actions;
+}
 
 /// What the passes of one call share.
 struct Pass
@@ -157,7 +164,6 @@ struct Pass
                            x.parent ? x.parent + first : nullptr,
                            x.label_width,
                            static_cast<u32>(x.offsets[g + 1] - x.offsets[g]),
-                           first,
                            g};
         }
         return row;
@@ -208,7 +214,8 @@ void count_range(const Pass& p, u32 t)
             continue;
         }
         const detail::InstanceView v = detail::instance_view(p.view, instance);
-        if ((p.in.goal_pos && p.in.goal_words < v.words) || (p.in.goal_derived_pos && p.in.goal_derived_words < v.derived_words))
+        if ((p.in.goal_pos && p.in.goal_words < v.words) ||
+            (p.in.goal_derived_pos && p.in.goal_derived_words < v.derived_words))
         {
             m.narrow_goal = std::min(m.narrow_goal, g);
             continue;
@@ -231,11 +238,12 @@ void count_range(const Pass& p, u32 t)
                 std::copy_n(engine.derived(), bits::words_for(task.atoms().derived_slots()), dst);
             }
         }
+        const detail::CellList cells = detail::cell_list(v, input);
         u32* cell_counts = nullptr;
         if (p.relation_major)
         {
             const usize at = m.cell_counts.size();
-            m.cell_counts.resize(at + v.num_cells);
+            m.cell_counts.resize(at + cells.count);
             cell_counts = m.cell_counts.data() + at;
         }
         detail::GraphTotals& totals = m.totals[g - lo];
@@ -258,8 +266,8 @@ void count_range(const Pass& p, u32 t)
         m.args += totals.args;
         m.targets += totals.targets;
         if (p.relation_major)
-            for (u32 i = 0; i < v.num_cells; ++i)
-                m.tally[v.cells[i].relation] += cell_counts[i];
+            for (u32 i = 0; i < cells.count; ++i)
+                m.tally[cells.cells[i].relation] += cell_counts[i];
     }
 }
 
@@ -319,10 +327,12 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const u32* next = cell_counts;
         for (u64 j = 0; j < width; ++j)
         {
-            const detail::InstanceView v = detail::instance_view(p.view, p.instance_of(first + j));
-            for (u32 i = 0; i < v.num_cells; ++i)
-                m.tile_counts[v.cells[i].relation * k_scan_tile + j] = next[i];
-            next += v.num_cells;
+            const u32 instance = p.instance_of(first + j);
+            const detail::CellList cells =
+                detail::cell_list(detail::instance_view(p.view, instance), p.row_input(first + j, instance));
+            for (u32 i = 0; i < cells.count; ++i)
+                m.tile_counts[cells.cells[i].relation * k_scan_tile + j] = next[i];
+            next += cells.count;
         }
         // the exclusive scan in segment order r * G + g, written in runs of `width` per relation
         for (u32 r = 0; r < p.R; ++r)
@@ -353,7 +363,9 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         for (u64 j = 0; j < width; ++j)
         {
             fill_one(first + j, graph_counts);
-            graph_counts += detail::instance_view(p.view, p.instance_of(first + j)).num_cells;
+            const u32 instance = p.instance_of(first + j);
+            graph_counts +=
+                detail::cell_list(detail::instance_view(p.view, instance), p.row_input(first + j, instance)).count;
         }
         cell_counts = next;
     }
@@ -540,17 +552,13 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     sizes.args = args;
     sizes.targets = targets;
     const u64 limit = index_limit(index);
-    if (entities > limit || tuples > limit || args > limit || targets > limit || graphs * R + 1 > limit || graphs + 1 > limit)
+    if (entities > limit || tuples > limit || args > limit || targets > limit || graphs * R + 1 > limit ||
+        graphs + 1 > limit)
         sizes.overflow |= k_overflow_index;
 
     s.sizes = sizes;
     s.counted = true;
-    s.counted_data = states.data;
-    s.counted_ids = in.task_ids;
-    s.counted_derived = in.derived;
-    s.counted_goal = in.goal_pos;
-    s.counted_actions = in.actions;
-    s.counted_rows = graphs;
+    s.counted_input = in;
     return sizes;
 }
 
@@ -558,10 +566,8 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
                        EncodeScratch& scratch) const
 {
     Scratch& s = scratch.impl();
-    if (!s.counted || s.counted_rows != in.states.rows || s.counted_data != in.states.data ||
-        s.counted_ids != in.task_ids || s.counted_derived != in.derived || s.counted_goal != in.goal_pos || s.counted_actions != in.actions ||
-        s.sizes.entities != sizes.entities || s.sizes.tuples != sizes.tuples || s.sizes.args != sizes.args ||
-        s.sizes.targets != sizes.targets)
+    if (!s.counted || !same_input(s.counted_input, in) || s.sizes.entities != sizes.entities ||
+        s.sizes.tuples != sizes.tuples || s.sizes.args != sizes.args || s.sizes.targets != sizes.targets)
         invalid("fill needs the scratch and the sizes of count() on the same input");
     if (sizes.overflow != 0)
         invalid("the batch does not fit: its sizes overflow");
@@ -749,7 +755,8 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = in.states.rows;
     const bool fits = !sizes.overflowed();
-    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args, capacities.targets));
+    auto bundle =
+        std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args, capacities.targets));
     const FlatBuffers out = buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(),
                                        m_schema->has_goal_complete(), m_schema->has_targets());
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;

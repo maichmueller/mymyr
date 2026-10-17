@@ -25,7 +25,10 @@
 //     (unsatisfied), plus the constant literals that hold / do not hold.
 // The goal of a graph is its instance's goal (masks over the instance's fluent and derived slots, and the constant
 // part: the literals of static predicates and of atoms without a slot, whose truth is fixed) or, when the row brings its
-// own masks (RowInput::goal_pos), exactly those masks with no constant part.
+// own masks (RowInput::goal_pos), exactly those masks with no constant part. An instance has two lists of cells for the
+// two cases (cell_list): the goal cells of the instance's goal are only those that can hold a tuple, each narrowed to
+// the slots between the first and the last literal of its mask, and the goal cells of row goals are those of every
+// predicate that has slots, over the predicate's whole slot range.
 //   - Action cell: one tuple (action entity, objects...) per distinct ground action of the cell's action relation in the
 //     graph's expansion rows (RowInput::actions), in lexicographic order of the objects. A relation is the one of
 //     several action schemas when the front end split an action over a disjunction: their rows are merged, and a ground
@@ -33,14 +36,16 @@
 // Every predicate relation (state, goal, goal derivation) of a context with predicate virtual nodes has one more slot,
 // after its leading slots and before its arguments: the virtual entity of the relation's predicate.
 // Entities of a graph, in this order (local index; ids written to the arrays are batch-global: the graph's entity base
-// plus the local index):
-//   - the instance's objects (local index = object id);
-//   - one auxiliary entity (local index num_objects) iff some nullary tuple exists;
+// plus the local index). Every `entity_ref` is graph-local or intrinsic to the catalog, so it is the same in both
+// layouts and in every slice of a batch:
+//   - the instance's objects (local index = object id); `entity_ref` is the object id;
+//   - one auxiliary entity (local index num_objects) iff some nullary tuple exists; `entity_ref` is -1;
 //   - one goal entity per tuple of a plain goal cell with goal targets, in the order the plain goal cells are filled
-//     (relation, then tuple); its `entity_ref` is the batch-global id of its tuple (its position in the concatenation of
-//     all cells in layout order);
-//   - one action entity per tuple of an action cell, in fill order (relation, then tuple); its `entity_ref` is the
-//     row of the graph's first expansion row that has the ground action, counted over the whole expansion;
+//     (relation, then tuple); its `entity_ref` is the index of its tuple among the graph's tuples in graph-major order
+//     (the tuples of the graph's cells in relation order, the cell's first tuple at the sum of the counts of the cells
+//     before it);
+//   - one action entity per tuple of an action cell, in fill order (relation, then tuple); its `entity_ref` is the row
+//     of the graph's first expansion row that has the ground action, counted from the graph's first row;
 //   - one virtual entity per predicate that has a tuple in the graph, in the order of the predicates' keys (the id of the
 //     predicate's plain state relation, else of its first relation); its `entity_ref` is that key. Predicates without a
 //     tuple have no entity, so the entities of a graph depend on its own tuples only.
@@ -114,7 +119,8 @@ struct Cell
     u32 relation;       // relation id
     u32 op;             // CellOp
     u32 a, b;           // Fluent / Derived: the slot range [a, b); Static: the rows [a, b) of the instance's static tuples;
-                        // a goal cell: the slot range of its predicate's atoms in the goal masks (empty for a static one);
+                        // a goal cell: the slots of its predicate's atoms that the goal masks can set (empty for a
+                        // static predicate);
                         // an action cell: the entries [a, b) of the context's action schema list
     u32 arity;          // encoded arity: the logical arity, or 1 for a nullary predicate, plus the slots of the other roles
     u32 logical_arity;  // the predicate's arity
@@ -130,8 +136,10 @@ enum InstanceColumn : u32
     k_fluent_slots,         // atom slots: the state bits at or beyond it must be clear
     k_derived_words,
     k_derived_slots,
-    k_num_cells,
-    k_cell_offset,          // first row of the instance's cells in `cells`
+    k_num_cells,            // the cells of a graph with the instance's goal
+    k_cell_offset,          // first row of those cells in `cells`
+    k_num_row_cells,        // the cells of a graph with goals of its own
+    k_row_cell_offset,      // first row of those cells in `cells`
     k_slot_args_offset,     // first row of the instance's fluent slots in `slot_args`
     k_derived_args_offset,  // the same for derived slots in `derived_args`
     k_static_args_offset,   // the same for static tuples in `static_args`
@@ -170,8 +178,11 @@ struct ContextView
 /// One instance of a context, resolved to pointers and counts.
 struct InstanceView
 {
-    u32 num_objects, words, fluent_slots, derived_words, derived_slots, num_cells;
+    u32 num_objects, words, fluent_slots, derived_words, derived_slots;
+    u32 num_cells;      // the cells of a graph with the instance's goal, sorted by relation
+    u32 num_row_cells;  // the cells of a graph with goals of its own, sorted by relation
     const Cell* cells;
+    const Cell* row_cells;
     const i32* slot_args;
     const i32* derived_args;
     const i32* static_args;
@@ -200,7 +211,9 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.derived_words = static_cast<u32>(row[k_derived_words]);
     v.derived_slots = static_cast<u32>(row[k_derived_slots]);
     v.num_cells = static_cast<u32>(row[k_num_cells]);
+    v.num_row_cells = static_cast<u32>(row[k_num_row_cells]);
     v.cells = c.cells + row[k_cell_offset];
+    v.row_cells = c.cells + row[k_row_cell_offset];
     v.slot_args = c.slot_args + row[k_slot_args_offset] * c.max_arity;
     v.derived_args = c.derived_args + row[k_derived_args_offset] * c.max_arity;
     v.static_args = c.static_args + row[k_static_args_offset] * c.max_arity;
@@ -224,8 +237,8 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
 
 /// The expansion rows of one graph's state: the labels of its successors, in canonical order (by schema, then
 /// lexicographically by binding). `schema`, `binding` (rows of `label_width` objects, -1 past the schema's arity) and
-/// `parent` (the batch index of the expanded state; null: not checked) point at the state's first row; `first_row` is that
-/// row's index in the whole expansion and `state` the graph's index in the batch.
+/// `parent` (the batch index of the expanded state; null: not checked) point at the state's first row, and `state` is
+/// the graph's index in the batch.
 struct ActionRows
 {
     const i32* schema = nullptr;
@@ -233,7 +246,6 @@ struct ActionRows
     const i32* parent = nullptr;
     u32 label_width = 0;
     u32 count = 0;
-    u64 first_row = 0;
     u64 state = 0;
     const u32* starts = nullptr;  // [num_schemas + 1]: the first row with a schema of at least s (null: searched for)
 };
@@ -256,6 +268,20 @@ struct RowInput
     const u64* goal_derived_neg = nullptr;
     ActionRows actions{};
 };
+
+/// The cells of a graph: those of the instance's goal, or, when the row has goal masks of its own, those of row goals.
+struct CellList
+{
+    const Cell* cells;
+    u32 count;
+};
+
+MYMYR_HD CellList cell_list(const InstanceView& v, const RowInput& in)
+{
+    if (in.goal_pos)
+        return {v.row_cells, v.num_row_cells};
+    return {v.cells, v.num_cells};
+}
 
 /// The goal a graph encodes: the row's masks, or the instance's with its constant part.
 struct GoalWords
@@ -650,7 +676,8 @@ MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInpu
 MYMYR_HD bool has_virtual_nodes(const InstanceView& v) { return v.relation_virtual != nullptr; }
 
 /// The sizes of one graph. With `cell_counts` non-null it also writes the counts of the instance's cells: one entry
-/// per cell, in cell order (num_cells entries, not one per relation; the relation of entry i is cells[i].relation).
+/// per cell, in the order of cell_list(v, given) (one entry per cell, not one per relation; the relation of entry i is
+/// the relation of the list's cell i).
 /// Atom words past the instance's `words` are never read. With predicate virtual nodes `virtual_scratch` must hold
 /// v.num_virtual words (it is overwritten); the totals then count the predicates that have a tuple. The expansion rows
 /// of the graph are checked: a violation sets k_graph_bad_action_order or k_graph_bad_action_label, and the counts of
@@ -688,8 +715,9 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& given, u
         for (u32 p = 0; p < v.num_virtual; ++p)
             virtual_scratch[p] = 0;
     t.flags |= action_flags;
-    const u32 num_cells = v.num_cells;
-    const Cell* cells = v.cells;
+    const CellList list = cell_list(v, in);
+    const u32 num_cells = list.count;
+    const Cell* cells = list.cells;
     for (u32 i = 0; i < num_cells; ++i)
     {
         const u32 n = cell_count(v, cells[i], in);
@@ -718,12 +746,13 @@ MYMYR_HD u32 virtual_ranks(const InstanceView& v, const RowInput& in, const u32*
     const u32 P = v.num_virtual;
     for (u32 p = 0; p < P; ++p)
         rank[p] = 0;
-    for (u32 i = 0; i < v.num_cells; ++i)
+    const CellList list = cell_list(v, in);
+    for (u32 i = 0; i < list.count; ++i)
     {
-        const u32 p = v.relation_virtual[v.cells[i].relation];
+        const u32 p = v.relation_virtual[list.cells[i].relation];
         if (p == k_no_virtual || rank[p])
             continue;
-        if (cell_counts ? cell_counts[i] != 0 : cell_count(v, v.cells[i], in) != 0)
+        if (cell_counts ? cell_counts[i] != 0 : cell_count(v, list.cells[i], in) != 0)
             rank[p] = 1;
     }
     u32 used = 0;
@@ -970,6 +999,13 @@ MYMYR_HD u32 fill_goal_cell(const InstanceView& v, const Cell& c, const RowInput
 /// in relation order, so the running count is the position among the graph's entities of that kind), where the graph's
 /// targets start in the target arrays, the graph's goal entities (the action targets follow them), and the virtual rank
 /// of each predicate (null without virtual nodes).
+///
+/// A fill that writes the cells of one graph on several lanes (one lane per cell, or per run of cells) gives each lane
+/// its own cursor and seeds it from the counts of count_graph (cell_counts, in cell order): `goals_written` is the sum
+/// of the counts of the plain goal cells with goal targets before the lane's first cell, `actions_written` the sum of
+/// the counts of the action cells before it, and the `graph_tuple` of fill_cell_at the sum of the counts of all cells
+/// before it. The sums are exclusive prefix sums over the graph's cells in cell order, so the lanes need no
+/// communication.
 struct FillCursor
 {
     EntityBlocks blocks;
@@ -992,8 +1028,8 @@ MYMYR_HD u64 predicate_entity(const InstanceView& v, const FillCursor& cursor, u
     return cursor.blocks.virtual_nodes + cursor.rank[p];
 }
 
-/// Writes the entity of one ground action: its role, its reference (`row`: the first expansion row that has it, counted
-/// over the whole expansion) and, for an action target, its entry in the target arrays.
+/// Writes the entity of one ground action: its role, its reference (`row`: the first row of the graph's expansion rows
+/// that has it, counted from the graph's first row) and, for an action target, its entry in the target arrays.
 template<class I>
 MYMYR_HD void write_action_entity(const GraphOut<I>& out, const FillCursor& cursor, bool target, u64 entity, u64 row)
 {
@@ -1041,7 +1077,6 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
             target_group = out.target_group + at;
         }
         const i32* binding = a.binding + static_cast<u64>(begin) * a.label_width;
-        const u64 first_ref = a.first_row + begin;
         for (u32 k = 0; k < n; ++k, binding += a.label_width)
         {
             const u64 entity = first + k;
@@ -1051,7 +1086,7 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
             if (role)
             {
                 role[k] = k_role_action;
-                ref[k] = static_cast<I>(first_ref + k);
+                ref[k] = static_cast<I>(begin + k);
             }
             if (target_entity)
             {
@@ -1071,7 +1106,7 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
             *dst++ = static_cast<I>(entity);
             if (arity)
                 dst = emit_tuple<I>(dst, a.binding + static_cast<u64>(row) * a.label_width, arity, entity_base);
-            write_action_entity<I>(out, cursor, target, entity, a.first_row + row);
+            write_action_entity<I>(out, cursor, target, entity, row);
             ++n;
         }
     }
@@ -1081,11 +1116,12 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
 
 /// Writes one cell of a graph: its tuples' arguments to `dst` (like fill_cell, fill_goal_cell for a goal cell and
 /// fill_action_cell for an action cell) and, for a plain goal cell with goal targets, the entities of its tuples and
-/// their target entries. `tuple_id` is the batch-global position of the cell's first tuple in layout order (the
-/// `entity_ref` of its first goal entity). Returns the number of tuples.
+/// their target entries. `graph_tuple` is the index of the cell's first tuple among the graph's tuples in graph-major
+/// order, the sum of the counts of the graph's cells before it (the `entity_ref` of its first goal entity), whatever
+/// the layout. Returns the number of tuples.
 template<class I>
 MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
-                          u64 tuple_id, FillCursor& cursor, const GraphOut<I>& out, I* dst)
+                          u64 graph_tuple, FillCursor& cursor, const GraphOut<I>& out, I* dst)
 {
     if (is_action_op(c.op))
         return fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst);
@@ -1101,7 +1137,7 @@ MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& 
             if (out.entity_role)
             {
                 out.entity_role[entity] = k_role_goal;
-                out.entity_ref[entity] = static_cast<I>(tuple_id + k);
+                out.entity_ref[entity] = static_cast<I>(graph_tuple + k);
             }
             if (out.target_entity)
             {
@@ -1152,8 +1188,9 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
     FillCursor cursor = begin_graph<I>(v, in, g, entity_base, totals, out, target_base, nullptr, virtual_scratch);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
-    const u32 num_cells = v.num_cells;
-    const Cell* cells = v.cells;
+    const CellList list = cell_list(v, in);
+    const u32 num_cells = list.count;
+    const Cell* cells = list.cells;
     I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
     I* offsets = out.relation_offsets + g * R;
     I* arg_offsets = out.relation_arg_offsets + g * R;
@@ -1173,7 +1210,8 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
         }
         offsets[r] = static_cast<I>(tuples);
         arg_offsets[r] = static_cast<I>(args);
-        const u32 n = fill_cell_at<I>(v, c, in, entity_base, auxiliary, tuples, cursor, out, args_out + args);
+        const u32 n =
+            fill_cell_at<I>(v, c, in, entity_base, auxiliary, tuples - tuple_base, cursor, out, args_out + args);
         if (counts)
             counts[r] = static_cast<I>(n);
         tuples += n;
@@ -1191,8 +1229,9 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
 
 /// Writes graph `g` of a relation-major batch: like fill_graph, except that a cell's position is read from the scanned
 /// segment arrays (out.relation_offsets and out.relation_arg_offsets at the cell's segment, scanned
-/// beforehand) and not computed from a local prefix. The counts, if stored, are [G, R] indexed (g, r). `cell_counts`
-/// are the graph's cell counts from count_graph (null: they are recounted when virtual nodes need them).
+/// beforehand) and not computed from a local prefix. The `entity_ref` of a goal entity is the same as in fill_graph.
+/// The counts, if stored, are [G, R] indexed (g, r). `cell_counts` are the graph's cell counts from count_graph (null:
+/// they are recounted when virtual nodes need them).
 template<class I>
 MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& given, u64 g, u64 entity_base,
                                         const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
@@ -1205,9 +1244,11 @@ MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& g
         begin_graph<I>(v, in, g, entity_base, totals, out, target_base, cell_counts, virtual_scratch);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
-    const u32 num_cells = v.num_cells;
-    const Cell* cells = v.cells;
+    const CellList list = cell_list(v, in);
+    const u32 num_cells = list.count;
+    const Cell* cells = list.cells;
     I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
+    u64 graph_tuple = 0;  // the tuples of the graph's cells before this one: the cells are filled in cell order
     u32 r = 0;
     for (u32 i = 0; i < num_cells; ++i)
     {
@@ -1216,8 +1257,9 @@ MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& g
             for (; r < c.relation; ++r)
                 counts[r] = static_cast<I>(0);
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
-        const u32 n = fill_cell_at<I>(v, c, in, entity_base, auxiliary, static_cast<u64>(out.relation_offsets[segment]),
-                                      cursor, out, out.relation_args + out.relation_arg_offsets[segment]);
+        const u32 n = fill_cell_at<I>(v, c, in, entity_base, auxiliary, graph_tuple, cursor, out,
+                                      out.relation_args + out.relation_arg_offsets[segment]);
+        graph_tuple += n;
         if (counts)
         {
             counts[c.relation] = static_cast<I>(n);

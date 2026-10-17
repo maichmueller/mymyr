@@ -94,8 +94,8 @@ struct Fixture
             row[k_num_objects] = objects;
             row[k_words] = words;
             row[k_fluent_slots] = slots;
-            row[k_num_cells] = cell_count;
-            row[k_cell_offset] = cells.size();
+            row[k_num_cells] = row[k_num_row_cells] = cell_count;  // no goal cells: the cells of row goals are the same
+            row[k_cell_offset] = row[k_row_cell_offset] = cells.size();
             row[k_slot_args_offset] = slot_offset;
             row[k_static_args_offset] = static_offset;
             inst.insert(inst.end(), std::begin(row), std::end(row));
@@ -420,7 +420,7 @@ TEST(EncodingLanes, AStaticTupleOfANullaryPredicateIsTheAuxiliaryTuple)
     Fixture fixture;
     // instance 1 gets a nullary static cell on relation 3
     fixture.cells.push_back({3, static_cast<u32>(CellOp::Static), 0, 1, 1, 0});
-    fixture.inst[k_instance_columns + k_num_cells] = 3;
+    fixture.inst[k_instance_columns + k_num_cells] = fixture.inst[k_instance_columns + k_num_row_cells] = 3;
     fixture.static_args.insert(fixture.static_args.end(), {-1, -1});
     const ContextView view = fixture.view();
     const InstanceView v = instance_view(view, 1);

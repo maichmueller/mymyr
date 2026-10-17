@@ -25,11 +25,12 @@ namespace mymyr::encoding
 ///   the schema has targets, and target_offsets is a valid offset array;
 /// - the entities of a graph past its objects are, in this order: the auxiliary entity; the goal entities, one per tuple of
 ///   the plain goal relations with a goal target, numbered in the order of those relations and tuples, each the first
-///   argument of its tuple and referring to the tuple's batch id (the position of the tuple in layout order); the action
-///   entities, one per tuple of an action relation, numbered the same way, each the first argument of its tuple and
-///   referring to an expansion row (a non-negative entity_ref); the predicate virtual entities, one per predicate that has
-///   a tuple in the graph and none for the others, ascending in entity_ref (the key of the predicate,
-///   EncodingSchema::virtual_key), each the predicate slot of exactly the tuples of its predicate's relations;
+///   argument of its tuple and referring to the tuple by its index among the graph's tuples in graph-major order (the
+///   cells' tuples in relation order); the action entities, one per tuple of an action relation, numbered the same way,
+///   each the first argument of its tuple and referring to a row of the graph's expansion (a non-negative entity_ref);
+///   the predicate virtual entities, one per predicate that has a tuple in the graph and none for the others, ascending
+///   in entity_ref (the key of the predicate, EncodingSchema::virtual_key), each the predicate slot of exactly the
+///   tuples of its predicate's relations;
 /// - the graph's targets are its goal entities in group 0, then, with action targets, its action entities in group 2.
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
 }

@@ -7,6 +7,8 @@
 #include "mymyr/rl/expand.hpp"
 #include "mymyr/rl/task_table.hpp"
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <random>
 #include <string>
@@ -76,4 +78,26 @@ inline Rows random_walk(const rl::TaskTable& table, u32 instance, u64 n, u64 see
     }
     return rows;
 }
+
+/// The slot of the atom `name(objects)` (object ids) among the fluent or derived atoms of `task`; a test failure if the
+/// task has none.
+inline u32 atom_slot(const Task& task, AtomKind kind, const std::string& name, const std::vector<i64>& objects)
+{
+    const u32 slots = kind == AtomKind::Fluent ? task.atoms().fluent_slots() : task.atoms().derived_slots();
+    for (u32 slot = 0; slot < slots; ++slot)
+    {
+        const u32* record = task.atoms().record(kind, slot);
+        if (task.data().str(task.data().predicates[record[0]].name) != name)
+            continue;
+        std::vector<i64> found;
+        for (u32 k = 0; k < task.compiled().arity[record[0]]; ++k)
+            found.push_back(record[1 + k]);
+        if (found == objects)
+            return slot;
+    }
+    ADD_FAILURE() << name << " has no such atom slot";
+    return 0;
+}
+
+inline void set_bit(std::vector<u64>& words, u32 slot) { words[slot >> 6] |= u64{1} << (slot & 63); }
 }  // namespace mymyr::test

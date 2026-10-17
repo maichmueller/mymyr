@@ -1105,6 +1105,18 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode derived relations"), std::string::npos)
             << e.what();
     }
+    // goal relations, which the default options have
+    try
+    {
+        const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+        cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, encoding::FlatOptions{}));
+        ADD_FAILURE() << "goal relations were accepted";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("the device does not encode goal relations"), std::string::npos)
+            << e.what();
+    }
     // without them the same table is fine
     encoding::FlatOptions options = test::encoder_options();
     options.include_derived = false;

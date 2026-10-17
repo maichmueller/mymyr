@@ -3,6 +3,8 @@
 #include "mymyr/core/bitset.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <span>
@@ -47,7 +49,8 @@ constexpr u8 k_needs_row_goal = 4;       // it has a derived cell of satisfied /
 /// What one instance contributes to the arrays.
 struct InstanceRows
 {
-    std::vector<Cell> cells;
+    std::vector<Cell> cells;      // with the instance's goal: the goal cells that can hold a tuple, narrowed
+    std::vector<Cell> row_cells;  // with the goals of a row: the goal cells of every predicate that has slots
     std::vector<i32> slot_args, derived_args, static_args;  // rows of max_arity objects, -1 padded
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
     std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
@@ -67,6 +70,29 @@ struct ConstantLiteral
 bool before(const std::vector<i32>& a, const std::vector<i32>& b)
 {
     return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
+}
+
+/// Narrows the slot range [begin, end) to the slots from the first to the last set bit of `mask` in it ([0, 0) if there
+/// is none).
+void narrow_to_set_bits(const u64* mask, u32& begin, u32& end)
+{
+    u32 first = end, last = begin;
+    for (u32 w = begin >> 6; begin < end && w <= ((end - 1) >> 6); ++w)
+    {
+        const u64 bits = detail::range_word(mask, w, begin, end);
+        if (!bits)
+            continue;
+        if (first == end)
+            first = w * 64u + detail::lowest_bit64(bits);
+        last = w * 64u + static_cast<u32>(std::bit_width(bits));
+    }
+    if (first == end)
+        begin = end = 0;
+    else
+    {
+        begin = first;
+        end = last;
+    }
 }
 
 /// The objects of every slot of `pred` / `padded`, as rows of max_arity entries.
@@ -216,12 +242,21 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
     for (const formalism::Literal& literal : task.encoding_goal())
     {
         const u32 ip = literal.pred.v;
+        // A literal the encoding leaves out (a predicate without a goal relation: nullary and equality predicates can
+        // be left out) makes the goal incomplete, unless its truth is fixed (a static predicate).
         if (ip >= predicates || instance.pred_map[ip] >= table.num_domain_predicates())
+        {
+            out.goal_complete = 0;
             continue;
+        }
         const u32 tp = instance.pred_map[ip];
         const u32 sign = literal.positive ? 0 : 1;
         if (goal_relations.at(tp, sign, 0) < 0 && goal_relations.at(tp, sign, 1) < 0 && goal_relations.at(tp, sign, 2) < 0)
-            continue;  // the schema has no goal relation of this predicate (nullary and equality can be left out)
+        {
+            if (kind[ip] != rl::k_pred_static)
+                out.goal_complete = 0;
+            continue;
+        }
         std::vector<i32> objects;
         for (formalism::Term term : data.terms_of(literal))
             objects.push_back(static_cast<i32>(formalism::term_object(term).v));
@@ -257,6 +292,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                                [](const ConstantLiteral& x, const ConstantLiteral& y) { return x.objects == y.objects; }),
                    rows.end());
     }
+    out.row_cells = out.cells;
     u32 goal_rows = 0;
     for (u32 ip = 0; ip < predicates; ++ip)
     {
@@ -291,21 +327,33 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                         ++goal_rows;
                     }
                 cell.d = goal_rows;
-                if (cell.a == cell.b && cell.c == cell.d)
-                    continue;
-                const detail::GoalMode mode = variant == 0 ? (goal_relations.target[static_cast<u32>(id)] ? detail::GoalMode::PlainTarget
-                                                                                                  : detail::GoalMode::Plain)
-                                      : variant == 1 ? detail::GoalMode::Satisfied
-                                                     : detail::GoalMode::Unsatisfied;
+                const detail::GoalMode mode =
+                    variant == 0 ? (goal_relations.target[static_cast<u32>(id)] ? detail::GoalMode::PlainTarget
+                                                                                : detail::GoalMode::Plain)
+                    : variant == 1 ? detail::GoalMode::Satisfied
+                                   : detail::GoalMode::Unsatisfied;
                 cell.op = detail::goal_op(derived, sign == 1, mode);
-                if (derived && variant > 0 && cell.a != cell.b)
-                    out.needs |= k_needs_row_goal;
+                if (cell.a != cell.b)
+                {
+                    // the goals of a row have masks over the predicate's whole slot range and no constant part
+                    Cell row_cell = cell;
+                    row_cell.c = row_cell.d = 0;
+                    out.row_cells.push_back(row_cell);
+                    if (derived && variant > 0)
+                        out.needs |= k_needs_row_goal;
+                    narrow_to_set_bits(masks[derived ? 1 : 0][sign], cell.a, cell.b);
+                }
+                if (cell.a == cell.b && cell.c == cell.d)
+                    continue;  // the instance's goal has no tuple here
                 out.cells.push_back(cell);
             }
         }
     }
-    out.cells.insert(out.cells.end(), action_cells.begin(), action_cells.end());
-    std::sort(out.cells.begin(), out.cells.end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
+    for (std::vector<Cell>* list : {&out.cells, &out.row_cells})
+    {
+        list->insert(list->end(), action_cells.begin(), action_cells.end());
+        std::sort(list->begin(), list->end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
+    }
     append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
     append_slot_rows(out.derived_args, derived_pred, derived_padded, derived_width, arity, max_arity);
     return out;
@@ -343,6 +391,9 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         throw std::invalid_argument("mymyr: encoding: the schema is not the schema of the table's domain");
     // The relation of each domain predicate's state atoms, and the widest of them.
     std::vector<i32> state_relation(table->num_domain_predicates(), -1);
+    // The rows of the object arrays are as wide as the widest predicate that has a cell: a state or goal cell reads a
+    // row of its predicate's arity, whether the predicate's state relation is in the schema or only its goal relations.
+    // (An action relation reads the expansion's bindings and no row.)
     u32 max_arity = 1;
     for (u32 id = 0; id < own->num_relations(); ++id)
     {
@@ -364,6 +415,7 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
             (relation.derivation == GoalDerivation::Satisfied || relation.derivation == GoalDerivation::Unsatisfied);
         if (relation.level.value_or(1) != 0 || !(plain || derivation))
             continue;
+        max_arity = std::max(max_arity, relation.logical_arity);
         const u32 variant = plain ? 0 : relation.derivation == GoalDerivation::Satisfied ? 1 : 2;
         goal_relations.id[(u64{static_cast<u32>(relation.predicate)} * 2 + (relation.sign > 0 ? 0 : 1)) * 3 + variant] =
             static_cast<i32>(id);
@@ -435,8 +487,14 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_fluent_slots] = rows.fluent_slots;
         columns[detail::k_derived_words] = rows.derived_words;
         columns[detail::k_derived_slots] = rows.derived_slots;
+        // the cells of row goals are stored only if they differ from the others
+        const auto same_cell = [](const Cell& x, const Cell& y) { return std::memcmp(&x, &y, sizeof(Cell)) == 0; };
+        const bool shared_cells = std::equal(rows.cells.begin(), rows.cells.end(), rows.row_cells.begin(),
+                                             rows.row_cells.end(), same_cell);
         columns[detail::k_num_cells] = rows.cells.size();
         columns[detail::k_cell_offset] = cells.size() / 8;
+        columns[detail::k_num_row_cells] = rows.row_cells.size();
+        columns[detail::k_row_cell_offset] = shared_cells ? cells.size() / 8 : (cells.size() / 8 + rows.cells.size());
         columns[detail::k_slot_args_offset] = slot_args.size() / max_arity;
         columns[detail::k_derived_args_offset] = derived_args.size() / max_arity;
         columns[detail::k_static_args_offset] = static_args.size() / max_arity;
@@ -445,10 +503,14 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         columns[detail::k_goal_args_offset] = goal_args.size() / max_arity;
         columns[detail::k_goal_complete] = rows.goal_complete;
         inst.insert(inst.end(), std::begin(columns), std::end(columns));
-        for (const Cell& cell : rows.cells)
+        for (const std::vector<Cell>* list : {&rows.cells, &rows.row_cells})
         {
-            for (u32 value : {cell.relation, cell.op, cell.a, cell.b, cell.arity, cell.logical_arity, cell.c, cell.d})
-                cells.push_back(value);
+            if (shared_cells && list == &rows.row_cells)
+                break;
+            for (const Cell& cell : *list)
+                for (u32 value :
+                     {cell.relation, cell.op, cell.a, cell.b, cell.arity, cell.logical_arity, cell.c, cell.d})
+                    cells.push_back(value);
         }
         context->m_needs_derived[i] = rows.needs;
         if (rows.needs != 0)

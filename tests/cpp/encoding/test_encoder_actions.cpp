@@ -104,7 +104,8 @@ EncodeInput input_of(const test::Rows& rows, const Expanded* expanded = nullptr)
 
 using Binding = std::vector<i32>;
 
-/// The distinct ground actions of state g by action relation, each with the first expansion row that has it.
+/// The distinct ground actions of state g by action relation, each with the first row of the state's slice of the
+/// expansion that has it (counted from the slice's first row).
 std::vector<std::map<Binding, i32>> expected_actions(const FlatEncoder& encoder, const Expanded& e, u64 g)
 {
     const auto& relation_of = encoder.schema().schema_relations();
@@ -115,7 +116,7 @@ std::vector<std::map<Binding, i32>> expected_actions(const FlatEncoder& encoder,
         const u32 schema = static_cast<u32>(e.schema[static_cast<usize>(row)]);
         Binding b(e.binding.begin() + static_cast<std::ptrdiff_t>(static_cast<u64>(row) * L),
                   e.binding.begin() + static_cast<std::ptrdiff_t>(static_cast<u64>(row) * L + encoder.table().schema_arities()[schema]));
-        out[static_cast<usize>(relation_of[schema])].emplace(std::move(b), row);
+        out[static_cast<usize>(relation_of[schema])].emplace(std::move(b), row - e.offsets[g]);
     }
     return out;
 }
@@ -153,7 +154,7 @@ void expect_actions_match(const FlatEncoder& encoder, const test::Rows& rows, co
                 // the objects, in ascending order of the binding
                 for (u32 k = 0; k + 1 < arity; ++k)
                     ASSERT_EQ(tuple[1 + k] - base, it->first[k]) << schema.relation(r).name;
-                // the action entity refers to the first row that has the ground action
+                // the action entity refers to the first row of the state's slice that has the ground action
                 EXPECT_EQ(ref[static_cast<usize>(tuple[0])], it->second);
                 ++total_actions;
             }
@@ -428,16 +429,10 @@ TEST(EncoderActions, ASingleStateEqualsItsGraphInABatch)
         for (i64 a : slice)
             rebased.push_back(a - batch_entities[g]);
         EXPECT_EQ(rebased, args);
-        // the batch's references count rows over the whole expansion; the single's over its own
+        // the references count rows from the state's own slice, in a batch and alone
         const auto ref = ints(*alone, "entity_ref");
-        const auto alone_role = ints(*alone, "entity_role");
-        for (usize e = 0; e < ref.size(); ++e)
-        {
-            if (alone_role[e] == static_cast<i64>(EntityRole::Action))
-            {
-                EXPECT_EQ(batch_ref[static_cast<usize>(batch_entities[g]) + e], ref[e] + expanded->offsets[g]);
-            }
-        }
+        const auto first = batch_ref.begin() + batch_entities[g];
+        EXPECT_EQ(std::vector<i64>(first, batch_ref.begin() + batch_entities[g + 1]), ref);
     }
 }
 
@@ -498,4 +493,93 @@ TEST(EncoderVirtualNodes, TheKeyIsThePredicatesStateRelationWhenThereIsOne)
         EXPECT_EQ(schema->virtual_key(*schema->find(std::string("[+]") + name + "[g]")), static_cast<i32>(state));
     }
 }
+TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
+{
+    // wide_predicates: set/1 and join/4 over the objects a b c = 0 1 2, with the predicates on/1, link/3 and trio/3;
+    // the state {(on a), (on b)} has the actions set a, set b, set c and join (a b c w), join (c b a w) for every w
+    const auto table = rl::TaskTable::single(test::pddl_task("wide_predicates", "p01"));
+    const Task& task = *table->task(0);
+    std::vector<u64> state(table->words(), 0);
+    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {0}));
+    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {1}));
+    test::Rows rows;
+    rows.words = table->words();
+    rows.task_ids = {0, 0};  // two graphs of one state: the second graph's rows are not the expansion's first rows
+    rows.data = state;
+    rows.data.insert(rows.data.end(), state.begin(), state.end());
+    const auto expanded = expand_rows(*table, rows);
+    ASSERT_EQ(expanded->offsets[1], 9);
+    ASSERT_EQ(expanded->offsets[2], 18);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+        for (const bool wide : {false, true})
+        {
+            SCOPED_TRACE(std::string(layout == Layout::Graph ? "graph" : "relation") +
+                         (wide ? " all relations" : " actions only"));
+            FlatOptions options = action_options();
+            options.layout = layout;
+            options.include_static = wide;
+            options.include_derived = wide;
+            const auto encoder = FlatEncoder::create(table, options);
+            const EncodingSchema& schema = encoder->schema();
+            EXPECT_EQ(encoder->context().max_arity(), wide ? 3u : 1u);
+            const auto batch = encoder->encode(input_of(rows, expanded.get()));
+            validate(*batch, schema);
+            const auto entity_offsets = ints(*batch, "entity_offsets");
+            const auto counts = ints(*batch, "relation_counts");
+            const auto offsets = ints(*batch, "relation_offsets");
+            const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+            const auto args = ints(*batch, "relation_args");
+            const auto ref = ints(*batch, "entity_ref");
+            const u64 G = rows.size(), R = schema.num_relations();
+            const u32 join = *schema.find("join"), set = *schema.find("set");
+            for (u64 g = 0; g < G; ++g)
+            {
+                auto tuples = [&](u32 r)
+                {
+                    const u64 cell = layout == Layout::Graph ? g * R + r : r * G + g;
+                    std::vector<std::vector<i64>> out;
+                    const u32 arity = schema.relation(r).arity;
+                    for (i64 t = 0; t < offsets[cell + 1] - offsets[cell]; ++t)
+                    {
+                        std::vector<i64> tuple;
+                        for (u32 k = 0; k < arity; ++k)
+                            tuple.push_back(args[static_cast<u64>(arg_offsets[cell] + t * arity + k)] -
+                                            entity_offsets[g]);
+                        out.push_back(tuple);
+                    }
+                    return out;
+                };
+                EXPECT_EQ(counts[g * R + join], 6) << g;
+                EXPECT_EQ(counts[g * R + set], 3) << g;
+                // the action entities follow the three objects, relation after relation
+                const std::vector<std::vector<i64>> want_join = {{3, 0, 1, 2, 0}, {4, 0, 1, 2, 1}, {5, 0, 1, 2, 2},
+                                                                  {6, 2, 1, 0, 0}, {7, 2, 1, 0, 1}, {8, 2, 1, 0, 2}};
+                const std::vector<std::vector<i64>> want_set = {{9, 0}, {10, 1}, {11, 2}};
+                EXPECT_EQ(tuples(join), want_join) << g;
+                EXPECT_EQ(tuples(set), want_set) << g;
+                // each entity refers to its row relative to the graph's own rows, whatever the graph's place in the
+                // batch
+                const u32 L = expanded->x.label_width;
+                std::set<i64> rows_seen;
+                for (const auto& tuple : tuples(join))
+                {
+                    const i64 row = ref[static_cast<u64>(entity_offsets[g] + tuple[0])];
+                    rows_seen.insert(row);
+                    const u64 at = static_cast<u64>(expanded->offsets[g] + row);
+                    EXPECT_EQ(schema.schema_relations()[static_cast<u64>(expanded->schema[at])],
+                              static_cast<i32>(join));
+                    for (u32 k = 0; k < 4; ++k)
+                        EXPECT_EQ(expanded->binding[at * L + k], tuple[1 + k]) << g;
+                }
+                for (const auto& tuple : tuples(set))
+                {
+                    const i64 row = ref[static_cast<u64>(entity_offsets[g] + tuple[0])];
+                    rows_seen.insert(row);
+                    EXPECT_EQ(expanded->binding[static_cast<u64>(expanded->offsets[g] + row) * L], tuple[1]) << g;
+                }
+                EXPECT_EQ(rows_seen, (std::set<i64>{0, 1, 2, 3, 4, 5, 6, 7, 8})) << g;
+            }
+        }
+}
+
 }  // namespace

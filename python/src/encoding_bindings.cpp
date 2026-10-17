@@ -660,9 +660,10 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "uint8 [E]: the role of each entity, an index into entity_role_names. Absent when the entity arrays are implicit "
      "(FlatBatch.implicit_entities)."},
     {"entity_ref",
-     "index [E]: an object's instance-local id; a goal entity's tuple (its position in all tuples in layout order); an "
-     "action entity's first row in the expansion given as `actions`; a predicate virtual node's key (the id of its "
-     "predicate's state relation); -1 for the auxiliary entity. Absent when implicit."},
+     "index [E]: an object's instance-local id; a goal entity's tuple (its index among the graph's tuples in "
+     "graph-major order); an action entity's first row among its graph's rows of the expansion given as `actions` "
+     "(the expansion row is actions.offsets[g] + entity_ref); a predicate virtual node's key (the id of its "
+     "predicate's state relation); -1 for the auxiliary entity. The same in both layouts. Absent when implicit."},
     {"relation_counts",
      "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
      "emit_counts=False."},
@@ -673,7 +674,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"relation_args", "index [A]: the entities of the tuples, tuple after tuple, `arity` per tuple of the relation."},
     {"goal_complete",
      "uint8 [G]: 1 iff the goal relations of the graph hold its whole goal: its instance's goal when every conjunct could "
-     "be expanded into literals (Task.encoding_goal_complete), always for a goal given with `goals`. Absent when the "
+     "be expanded into literals (Task.encoding_goal_complete) and no literal whose truth a state can change was left "
+     "out by the options (a nullary literal with nullary=False), always for a goal given with `goals`. Absent when the "
      "schema has no goal relations."},
     {"target_offsets",
      "index [G + 1]: graph g's targets are [target_offsets[g], target_offsets[g + 1]). Absent without target_sources."},
@@ -785,11 +787,15 @@ void bind_encoding(nb::module_& parent)
              "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
              "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
              "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "`rl.goal_masks` gives the instance's goal over fluent slots only, no derived masks, so that a "
+             "call with them equals a call without `goals` only for an instance whose complete goal has no literal "
+             "over a static or derived predicate or over an atom without a slot. "
              "actions: the mymyr.rl.Expansion of the same states over the same table (rl.expand(table, states, "
              "task_ids)): the action relations then hold one tuple (action entity, objects...) per distinct ground "
              "action among the expansion rows of each state, in lexicographic order of the objects, and "
-             "`entity_ref` of an action entity is the index of its first row in the expansion (apply that action "
-             "with expansion.succ[row]). Without it the action relations are empty. The rows must be in canonical "
+             "`entity_ref` of an action entity is the index of its first row among the rows of its own state "
+             "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]). Without it the "
+             "action relations are empty. The rows must be in canonical "
              "order (rl.expand's default); an expansion made with witness=True gives the pruned set of actions. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "

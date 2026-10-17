@@ -219,7 +219,8 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     """Graph ``row`` of a batch of ``encoder``, restricted to the relations of the given lanes (``None``: all).
     ``tasks`` are the tasks of the batch's table, indexed by task id. A goal entity is named
     ``[+](predicate arguments)[g]`` after the plain goal tuple it stands for (the entity's reference is the tuple's
-    index in the batch). An action entity is named ``(action arguments)`` after the action tuples it leads."""
+    index among the graph's tuples in graph-major order). An action entity is named ``(action arguments)`` after the
+    action tuples it leads."""
     task = tasks[int(batch.task_ids[row])]
     role_names = batch.schema.entity_role_names
     begin, end = (int(x) for x in batch.entity_offsets[row : row + 2])
@@ -237,11 +238,13 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
     entities = [None if role in ("goal", "action") else (role, entity_name(role, ref, task, names))
                 for role, ref in zip(roles, refs)]
     rows = {}
+    graph_tuples = 0
     for relation in range(relations):
         count = int(batch.relation_counts[row, relation])
         if not count:
             continue
         cell = segment(relation)
+        first_tuple, graph_tuples = graph_tuples, graph_tuples + count
         first, last = (int(x) for x in batch.relation_arg_offsets[cell : cell + 2])
         assert last - first == count * arities[relation]
         arguments = (batch.relation_args[first:last] - begin).reshape(count, arities[relation])
@@ -249,7 +252,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
         rows[relation] = [tuple(int(x) for x in key) for key in arguments]
         goal = GOAL_RELATION.match(names[relation])
         if goal and encoder.relation_lanes[relation] == "goal" and "goal" in roles:
-            identifiers = int(batch.relation_offsets[cell]) + np.arange(count)
+            identifiers = first_tuple + np.arange(count)
             for identifier, key in zip(identifiers, rows[relation]):
                 position = next(i for i, (role, ref) in enumerate(zip(roles, refs))
                                 if role == "goal" and ref == int(identifier))
