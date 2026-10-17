@@ -172,6 +172,20 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         target_group = static_cast<const u8*>(batch.data(*padded_array(batch, "target_group", rl::DType::U8, T, wide)));
         check_offsets(target_offsets, T, "target_offsets");
     }
+    const bool stored_history = schema.has_history();
+    if (stored_history != (batch.find("history_offsets") != nullptr) ||
+        stored_history != (batch.find("history_entity") != nullptr) ||
+        stored_history != (batch.find("history_dt") != nullptr))
+        fail(stored_history ? "a history array is missing" : "the history arrays must be omitted: the schema has no history");
+    Ints history_offsets, history_entity;
+    if (stored_history)
+    {
+        history_offsets = ints(*array(batch, "history_offsets", itype, {g_i64 + 1}));
+        const u64 S = static_cast<u64>(history_offsets[G]);
+        history_entity = ints(*padded_array(batch, "history_entity", itype, S, wide));
+        padded_array(batch, "history_dt", rl::DType::I32, S, false);
+        check_offsets(history_offsets, S, "history_offsets");
+    }
     check_offsets(entity_offsets, E, "entity_offsets");
     check_offsets(tuple_offsets, static_cast<u64>(tuple_offsets[G * R]), "relation_offsets");
     check_offsets(arg_offsets, total_args, "relation_arg_offsets");
@@ -179,7 +193,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     constexpr u8 k_object = static_cast<u8>(EntityRole::Object);
     constexpr u8 k_auxiliary = static_cast<u8>(EntityRole::Auxiliary);
     constexpr u8 k_goal = static_cast<u8>(EntityRole::Goal);
+    constexpr u8 k_subgoal = static_cast<u8>(EntityRole::Subgoal);
     constexpr u8 k_action = static_cast<u8>(EntityRole::Action);
+    constexpr u8 k_history = static_cast<u8>(EntityRole::History);
+    constexpr u8 k_history_target = static_cast<u8>(EntityRole::HistoryTarget);
     constexpr u8 k_virtual = static_cast<u8>(EntityRole::PredicateVirtual);
     const bool action_targets = schema.options().targets.contains(TargetSource::Action);
     for (u64 g = 0; g < G; ++g)
@@ -204,36 +221,67 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 fail("graph " + std::to_string(g) + " has an object after its objects");
         }
         u32 auxiliaries = 0;
-        i64 goal_entities = 0, action_entities = 0, virtual_entities = 0;
+        i64 goal_entities = 0, subgoal_entities = 0, action_entities = 0, history_entities = 0, history_targets = 0,
+            virtual_entities = 0;
         for (i64 e = first; e < last; ++e)
         {
             const u8 role = role_of(e);
             auxiliaries += role == k_auxiliary;
             goal_entities += role == k_goal;
+            subgoal_entities += role == k_subgoal;
             action_entities += role == k_action;
+            history_entities += role == k_history;
+            history_targets += role == k_history_target;
             virtual_entities += role == k_virtual;
         }
         if (auxiliaries > 1)
             fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
-        if (last - first != objects + auxiliaries + goal_entities + action_entities + virtual_entities)
-            fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary, goal, action nor predicate "
-                                               "virtual entities");
-        // The entities past the objects: the auxiliary entity, the goal entities, the action entities, the virtual entities.
+        if (last - first != objects + auxiliaries + goal_entities + subgoal_entities + action_entities +
+                                history_entities + history_targets + virtual_entities)
+            fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary, goal, subgoal, action, "
+                                               "history step, history target nor predicate virtual entities");
+        // The entities past the objects: the auxiliary entity, the goal entities, the subgoal entities, the action
+        // entities, the history step entities, the history target entities, the virtual entities.
         const i64 goal_start = first + objects + auxiliaries;
-        const i64 action_start = goal_start + goal_entities;
-        const i64 virtual_start = action_start + action_entities;
+        const i64 subgoal_start = goal_start + goal_entities;
+        const i64 action_start = subgoal_start + subgoal_entities;
+        const i64 history_start = action_start + action_entities;
+        const i64 history_target_start = history_start + history_entities;
+        const i64 virtual_start = history_target_start + history_targets;
         for (i64 e = goal_start; e < last; ++e)
         {
-            const u8 expected = e < action_start ? k_goal : e < virtual_start ? k_action : k_virtual;
+            const u8 expected = e < subgoal_start          ? k_goal
+                                : e < action_start         ? k_subgoal
+                                : e < history_start        ? k_action
+                                : e < history_target_start ? k_history
+                                : e < virtual_start        ? k_history_target
+                                                           : k_virtual;
             if (role_of(e) != expected)
                 fail("the entities of graph " + std::to_string(g) + " past its objects are not in the order auxiliary, goal, "
-                                                                  "action, predicate virtual");
+                                                                  "subgoal, action, history step, history target, "
+                                                                  "predicate virtual");
         }
+        if (stored_history)
+        {
+            const i64 steps = history_offsets[g + 1] - history_offsets[g];
+            if (steps != history_entities)
+                fail("graph " + std::to_string(g) + " has history_offsets that do not count its history step entities");
+            for (i64 j = 0; j < steps; ++j)
+            {
+                if (history_entity[static_cast<u64>(history_offsets[g] + j)] != history_start + j)
+                    fail("history_entity of graph " + std::to_string(g) + " does not list its history steps in order");
+                if (entity_role && j > 0 && entity_ref[history_start + j] <= entity_ref[history_start + j - 1])
+                    fail("the history steps of graph " + std::to_string(g) + " do not have ascending references");
+            }
+        }
+        else if (history_entities != 0 || history_targets != 0)
+            fail("graph " + std::to_string(g) + " has history entities, the schema has no history");
         // The goal entities follow the objects and the auxiliary entity, one per tuple of the plain goal relations with a
         // goal target, numbered in the order of those relations and of their tuples; each refers to its tuple, by the
         // index of the tuple among the graph's tuples in graph-major order. The action entities follow them, one per
         // tuple of an action relation, numbered the same way.
-        i64 goals = 0, actions = 0, graph_tuples = 0;
+        i64 goals = 0, subgoals = 0, actions = 0, history_target_count = 0, graph_tuples = 0;
+        const i64 target_start = stored_targets ? static_cast<i64>(target_offsets[g]) : 0;
         bool auxiliary_used = false;
         std::vector<bool> virtual_used(static_cast<usize>(virtual_entities), false);
         for (u64 r = 0; r < R; ++r)
@@ -248,14 +296,25 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
             const bool goal_target = roles.front() == SlotRole::GoalTarget;
+            const bool subgoal_target = roles.front() == SlotRole::SubgoalTarget;
+            const bool history_target = roles.front() == SlotRole::HistoryTarget;
             const bool action = roles.front() == SlotRole::Action;
-            // the tuples of a goal-target or action relation start with their own entity, which is ascending by
+            const bool leading = goal_target || subgoal_target || history_target || action;
+            // the tuples of a target or action relation start with their own entity, which is ascending by
             // construction, so that the tuples are compared past it
-            const u32 lead = goal_target || action ? 1u : 0u;
+            const u32 lead = leading ? 1u : 0u;
+            // checks that the target entry at `position` lists `entity` in `group`
+            auto check_target = [&](i64 position, i64 entity, TargetGroup group, const char* what)
+            {
+                if (stored_targets && (position >= target_offsets[g + 1] ||
+                                       target_entity[static_cast<u64>(position)] != entity ||
+                                       target_group[position] != static_cast<u8>(group)))
+                    fail("the targets of graph " + std::to_string(g) + " do not list its " + what + " entities in order");
+            };
             for (u64 t = 0; t < n; ++t)
             {
                 const u64 at = static_cast<u64>(arg_offsets[cell]) + t * arity;
-                if ((goal_target || action) && (args[at] < first || args[at] >= last))
+                if (leading && (args[at] < first || args[at] >= last))
                     fail("a tuple of " + where + " has an entity outside its graph");
                 if (goal_target)
                 {
@@ -264,11 +323,30 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         fail("a tuple of " + where + " does not have the next goal entity");
                     if (entity_role && entity_ref[entity] != graph_tuples + static_cast<i64>(t))
                         fail("the goal entity of a tuple of " + where + " does not refer to the tuple");
-                    if (stored_targets && (target_offsets[g] + goals >= target_offsets[g + 1] ||
-                                           target_entity[static_cast<u64>(target_offsets[g] + goals)] != entity ||
-                                           target_group[target_offsets[g] + goals] != 0))
-                        fail("the targets of graph " + std::to_string(g) + " do not list its goal entities in order");
+                    check_target(target_start + goals, entity, TargetGroup::Goal, "goal");
                     ++goals;
+                }
+                if (subgoal_target)
+                {
+                    const i64 entity = args[at];
+                    if (subgoals >= subgoal_entities || entity != subgoal_start + subgoals)
+                        fail("a tuple of " + where + " does not have the next subgoal entity");
+                    if (entity_role && entity_ref[entity] != graph_tuples + static_cast<i64>(t))
+                        fail("the subgoal entity of a tuple of " + where + " does not refer to the tuple");
+                    check_target(target_start + goal_entities + subgoals, entity, TargetGroup::Subgoal, "subgoal");
+                    ++subgoals;
+                }
+                if (history_target)
+                {
+                    const i64 entity = args[at];
+                    if (history_target_count >= history_targets || entity != history_target_start + history_target_count)
+                        fail("a tuple of " + where + " does not have the next history target entity");
+                    if (entity_role && entity_ref[entity] != graph_tuples + static_cast<i64>(t))
+                        fail("the history target entity of a tuple of " + where + " does not refer to the tuple");
+                    check_target(target_start + goal_entities + subgoal_entities + (action_targets ? action_entities : 0) +
+                                     history_target_count,
+                                 entity, TargetGroup::History, "history target");
+                    ++history_target_count;
                 }
                 if (action)
                 {
@@ -279,12 +357,8 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         fail("the action entity of a tuple of " + where +
                              " does not refer to a row of the graph's expansion");
                     if (action_targets)
-                    {
-                        const i64 position = target_offsets[g] + goal_entities + actions;
-                        if (position >= target_offsets[g + 1] || target_entity[static_cast<u64>(position)] != entity ||
-                            target_group[position] != static_cast<u8>(TargetGroup::Action))
-                            fail("the targets of graph " + std::to_string(g) + " do not list its action entities in order");
-                    }
+                        check_target(target_start + goal_entities + subgoal_entities + actions, entity,
+                                     TargetGroup::Action, "action");
                     ++actions;
                 }
                 for (u32 k = 0; k < arity; ++k)
@@ -316,11 +390,17 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             }
             graph_tuples += static_cast<i64>(n);
         }
-        const i64 expected_targets = goal_entities + (action_targets ? action_entities : 0);
+        const i64 expected_targets =
+            goal_entities + subgoal_entities + (action_targets ? action_entities : 0) + history_targets;
         if (stored_targets && target_offsets[g] + expected_targets != target_offsets[g + 1])
-            fail("graph " + std::to_string(g) + " has targets that are not its goal and action entities");
+            fail("graph " + std::to_string(g) +
+                 " has targets that are not its goal, subgoal, action and history target entities");
         if (goals != goal_entities)
             fail("graph " + std::to_string(g) + " has goal entities that no tuple of a plain goal relation starts with");
+        if (subgoals != subgoal_entities)
+            fail("graph " + std::to_string(g) + " has subgoal entities that no tuple of a plain subgoal relation starts with");
+        if (history_target_count != history_targets)
+            fail("graph " + std::to_string(g) + " has history target entities that no history tuple starts with");
         if (actions != action_entities)
             fail("graph " + std::to_string(g) + " has action entities that no action tuple starts with");
         for (i64 v = 0; v < virtual_entities; ++v)

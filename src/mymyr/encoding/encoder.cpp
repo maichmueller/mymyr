@@ -534,6 +534,41 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(TaskPtr task, const FlatO
     return create(rl::TaskTable::single(std::move(task)), options);
 }
 
+void FlatEncoder::check_layer_inputs(const EncodeInput& in) const
+{
+    const auto check_layers = [](const LayerInput& l, const char* what, bool rows_share)
+    {
+        if (l.layers == 0)
+            return;
+        if (!l.pos || !l.neg)
+            invalid(std::string(what) + " need both their positive and negative masks");
+        if ((l.derived_pos == nullptr) != (l.derived_neg == nullptr))
+            invalid(std::string(what) + " need both their positive and negative derived masks");
+        if (l.stride < u64{l.layers} * l.words && !(rows_share && l.stride == 0))
+            invalid(std::string("the row stride of the ") + what + " is smaller than their layers");
+        if (l.derived_pos && l.derived_stride < u64{l.layers} * l.derived_words &&
+            !(rows_share && l.derived_stride == 0))
+            invalid(std::string("the derived row stride of the ") + what + " is smaller than their layers");
+    };
+    if (in.subgoals.layers != 0)
+    {
+        if (!m_schema->has_subgoals())
+            invalid("subgoal layers are given, but the schema has no subgoal relations");
+        if (in.subgoals.layers > m_schema->options().max_goal_level)
+            invalid(std::to_string(in.subgoals.layers) + " subgoal layers are given, the schema has " +
+                    std::to_string(m_schema->options().max_goal_level) + " levels");
+        check_layers(in.subgoals, "subgoal layers", true);
+    }
+    if (in.history.masks.layers != 0)
+    {
+        if (!m_schema->has_history())
+            invalid("history steps are given, but the schema has no history relations");
+        if (!in.history.dt)
+            invalid("the history steps need their dt");
+        check_layers(in.history.masks, "history steps", false);
+    }
+}
+
 FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const
 {
     const EncodingContext& context = *m_context;
@@ -562,39 +597,7 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         invalid("the derived goal needs both goal_derived_pos and goal_derived_neg");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
-    {
-        const auto check_layers = [&](const LayerInput& l, const char* what, bool rows_share)
-        {
-            if (l.layers == 0)
-                return;
-            if (!l.pos || !l.neg)
-                invalid(std::string(what) + " need both their positive and negative masks");
-            if ((l.derived_pos == nullptr) != (l.derived_neg == nullptr))
-                invalid(std::string(what) + " need both their positive and negative derived masks");
-            if (l.stride < u64{l.layers} * l.words && !(rows_share && l.stride == 0))
-                invalid(std::string("the row stride of the ") + what + " is smaller than their layers");
-            if (l.derived_pos && l.derived_stride < u64{l.layers} * l.derived_words &&
-                !(rows_share && l.derived_stride == 0))
-                invalid(std::string("the derived row stride of the ") + what + " is smaller than their layers");
-        };
-        if (in.subgoals.layers != 0)
-        {
-            if (!m_schema->has_subgoals())
-                invalid("subgoal layers are given, but the schema has no subgoal relations");
-            if (in.subgoals.layers > m_schema->options().max_goal_level)
-                invalid(std::to_string(in.subgoals.layers) + " subgoal layers are given, the schema has " +
-                        std::to_string(m_schema->options().max_goal_level) + " levels");
-            check_layers(in.subgoals, "subgoal layers", true);
-        }
-        if (in.history.masks.layers != 0)
-        {
-            if (!m_schema->has_history())
-                invalid("history steps are given, but the schema has no history relations");
-            if (!in.history.dt)
-                invalid("the history steps need their dt");
-            check_layers(in.history.masks, "history steps", false);
-        }
-    }
+    check_layer_inputs(in);
     if (const rl::Expansion* x = in.actions)
     {
         if (!m_schema->options().include_actions)

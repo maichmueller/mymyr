@@ -257,13 +257,18 @@ public:
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in, ThreadPool& pool,
                                                                 EncodeScratch& scratch) const;
 
-    /// The capacity form into a new bundle whose variable-size arrays (the entity arrays, relation_args and the target
-    /// entity and group arrays) have the capacities' sizes. The arrays hold the batch in their first `sizes.entities` / `sizes.args` entries and are zero
-    /// beyond; if `sizes.overflow` is set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
+    /// The capacity form into a new bundle whose variable-size arrays (the entity arrays, relation_args, the target
+    /// entity and group arrays and the history entity and dt arrays) have the capacities' sizes. The arrays hold the batch
+    /// in their first `sizes.entities` / `sizes.args` / ... entries and are zero beyond; if `sizes.overflow` is set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
                                                                          const FlatCapacities& capacities,
                                                                          ThreadPool& pool, EncodeScratch& scratch,
                                                                          FlatSizes& sizes) const;
+
+    /// Throws std::invalid_argument for the subgoal layers and history steps of `in` that the input alone shows invalid:
+    /// given for a schema without subgoal or history relations, more layers than levels, a missing pair of masks or
+    /// dt, a row stride below the layers. The rows' words, bits and history counts are checked by count().
+    void check_layer_inputs(const EncodeInput& in) const;
 
     /// The capacity form, step one: checks the input (the exceptions of encode, except std::overflow_error), counts and
     /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not

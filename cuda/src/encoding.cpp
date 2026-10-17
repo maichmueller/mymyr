@@ -72,6 +72,9 @@ void check_schema(const encoding::EncodingSchema& schema)
     if (schema.has_goal_complete())
         throw std::invalid_argument("mymyr: encoding: the device does not encode goal relations: "
                                     "set goal_derivations = {}");
+    if (schema.has_history())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode history relations: "
+                                    "set history = false");
     if (schema.options().predicate_virtual_nodes)
         throw std::invalid_argument("mymyr: encoding: the device does not encode predicate virtual nodes: "
                                     "set predicate_virtual_nodes = false");

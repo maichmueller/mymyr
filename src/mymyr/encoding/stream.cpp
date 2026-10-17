@@ -69,7 +69,8 @@ class RowStore
 public:
     explicit RowStore(const FlatEncoder& encoder)
         : m_encoder(encoder), m_words(encoder.table().words()), m_derived_words(encoder.context().max_derived_words()),
-          m_label_width(encoder.table().label_width())
+          m_label_width(encoder.table().label_width()), m_subgoals(encoder.schema().has_subgoals()),
+          m_history(encoder.schema().has_history()), m_levels(encoder.schema().options().max_goal_level)
     {
     }
 
@@ -90,6 +91,7 @@ public:
         if (in.states.stride && in.states.stride < in.states.words)
             invalid("the state row stride is smaller than its width");
         table.check_task_ids(in.task_ids, n);
+        m_encoder.check_layer_inputs(in);
         Inputs given;
         if (in.derived && m_derived_words)
         {
@@ -150,6 +152,30 @@ public:
                     !zero_tail(in.goal_derived_neg + at, in.goal_derived_words, m_derived_words))
                     invalid("the derived goal of state " + std::to_string(g) + " sets an atom bit its instance does not have");
             }
+            if (const LayerInput& l = in.subgoals; l.layers != 0)
+            {
+                if (l.words < instance.words || (l.derived_pos && l.derived_words < instance.derived_words))
+                    invalid("the subgoal layers of state " + std::to_string(g) + " are narrower than its instance needs (" +
+                            std::to_string(instance.words) + " words, " + std::to_string(instance.derived_words) +
+                            " derived words)");
+                if (!zero_layer_tails(l, g, l.layers))
+                    invalid("the subgoal layers of state " + std::to_string(g) +
+                            " set an atom bit its instance does not have");
+            }
+            if (const LayerInput& l = in.history.masks; l.layers != 0)
+            {
+                const i64 steps = in.history.count ? in.history.count[g] : static_cast<i64>(l.layers);
+                if (steps < 0 || steps > static_cast<i64>(l.layers))
+                    invalid("the history count of state " + std::to_string(g) + " is " + std::to_string(steps) +
+                            ", outside [0, " + std::to_string(l.layers) + "]");
+                if (steps != 0 && (l.words < instance.words || (l.derived_pos && l.derived_words < instance.derived_words)))
+                    invalid("the history steps of state " + std::to_string(g) + " are narrower than its instance needs (" +
+                            std::to_string(instance.words) + " words, " + std::to_string(instance.derived_words) +
+                            " derived words)");
+                if (!zero_layer_tails(l, g, static_cast<u32>(steps)))
+                    invalid("the history steps of state " + std::to_string(g) +
+                            " set an atom bit its instance does not have");
+            }
             if (const rl::Expansion* x = in.actions)
             {
                 const i32 first = x->offsets[g], last = x->offsets[g + 1];
@@ -163,6 +189,25 @@ public:
             }
         }
         return given;
+    }
+
+    /// Whether the first `layers` layers of row g of `l` are zero beyond the words (derived words) of the table.
+    [[nodiscard]] bool zero_layer_tails(const LayerInput& l, u64 g, u32 layers) const noexcept
+    {
+        for (u32 k = 0; k < layers; ++k)
+        {
+            const u64 at = g * l.stride + u64{k} * l.words;
+            if (!zero_tail(l.pos + at, l.words, m_words) || !zero_tail(l.neg + at, l.words, m_words))
+                return false;
+            if (l.derived_pos)
+            {
+                const u64 derived_at = g * l.derived_stride + u64{k} * l.derived_words;
+                if (!zero_tail(l.derived_pos + derived_at, l.derived_words, m_derived_words) ||
+                    !zero_tail(l.derived_neg + derived_at, l.derived_words, m_derived_words))
+                    return false;
+            }
+        }
+        return true;
     }
 
     /// Throws std::invalid_argument unless rows that give `given` can join the rows held.
@@ -194,6 +239,15 @@ public:
             m_states.resize(m_slots * m_words);
             m_task_ids.resize(m_slots);
             m_spans.resize(m_slots);
+            if (m_subgoals)
+            {
+                m_sub_pos.resize(m_slots * m_levels * m_words);
+                m_sub_neg.resize(m_slots * m_levels * m_words);
+                m_sub_derived_pos.resize(m_slots * m_levels * m_derived_words);
+                m_sub_derived_neg.resize(m_slots * m_levels * m_derived_words);
+            }
+            if (m_history)
+                m_history_spans.resize(m_slots);
             if (m_inputs.derived)
                 m_derived.resize(m_slots * m_derived_words);
             if (m_inputs.goals)
@@ -233,6 +287,10 @@ public:
             copy_words(&m_goal_derived_neg[usize{slot} * m_derived_words], m_derived_words, in.goal_derived_neg + at,
                        in.goal_derived_words);
         }
+        if (m_subgoals)
+            write_subgoals(slot, in, g);
+        if (m_history)
+            write_history(slot, in, g);
         if (m_inputs.actions)
         {
             const rl::Expansion& x = *in.actions;
@@ -253,6 +311,7 @@ public:
     void release(u32 slot)
     {
         drop_actions(slot);
+        drop_history(slot);
         m_free.push_back(slot);
         if (--m_live == 0)
             reset();
@@ -273,8 +332,19 @@ public:
         m_spans.clear();
         m_schema.clear();
         m_binding.clear();
+        m_sub_pos.clear();
+        m_sub_neg.clear();
+        m_sub_derived_pos.clear();
+        m_sub_derived_neg.clear();
+        m_history_spans.clear();
+        m_history_pos.clear();
+        m_history_neg.clear();
+        m_history_derived_pos.clear();
+        m_history_derived_neg.clear();
+        m_history_dt.clear();
         m_free.clear();
         m_garbage = 0;
+        m_history_garbage = 0;
     }
 
     /// The input of the rows in the order `order` (null: slots 0 .. n - 1, which must be all slots, none free). It
@@ -323,14 +393,32 @@ public:
             gather(m_gather_goal_derived_neg, m_goal_derived_neg, m_derived_words, in.goal_derived_neg);
             in.goal_derived_stride = in.goal_derived_words = m_derived_words;
         }
+        if (m_subgoals)
+        {
+            gather(m_gather_sub_pos, m_sub_pos, m_levels * m_words, in.subgoals.pos);
+            gather(m_gather_sub_neg, m_sub_neg, m_levels * m_words, in.subgoals.neg);
+            in.subgoals.stride = u64{m_levels} * m_words;
+            in.subgoals.layers = m_levels;
+            in.subgoals.words = m_words;
+            if (m_derived_words)
+            {
+                gather(m_gather_sub_derived_pos, m_sub_derived_pos, m_levels * m_derived_words, in.subgoals.derived_pos);
+                gather(m_gather_sub_derived_neg, m_sub_derived_neg, m_levels * m_derived_words, in.subgoals.derived_neg);
+                in.subgoals.derived_stride = u64{m_levels} * m_derived_words;
+                in.subgoals.derived_words = m_derived_words;
+            }
+        }
+        if (m_history)
+            assemble_history(order, n, in);
         if (m_inputs.actions)
             assemble_actions(order, n, in);
         return in;
     }
 
-    /// Rewrites the action arena without the rows of freed or replaced slots once they outweigh the live ones.
+    /// Rewrites the arenas without the rows (steps) of freed or replaced slots once they outweigh the live ones.
     void compact_if_sparse()
     {
+        compact_history_if_sparse();
         if (!m_inputs.actions || m_garbage < k_compact_rows || m_garbage * 2 < m_schema.size())
             return;
         std::vector<i32> schema, binding;
@@ -351,6 +439,153 @@ public:
     }
 
 private:
+    /// Stores the subgoal layers of row g of `in` into `slot`: its layers, then zero layers up to the schema's levels.
+    void write_subgoals(u32 slot, const EncodeInput& in, u64 g)
+    {
+        const LayerInput& l = in.subgoals;
+        const u32 given = std::min(l.layers, m_levels);
+        const auto store = [&](std::vector<u64>& to, const u64* from, u32 width, u32 from_width, u64 at)
+        {
+            u64* dst = to.data() + usize{slot} * m_levels * width;
+            for (u32 k = 0; k < m_levels; ++k)
+                if (k < given && from)
+                    copy_words(dst + usize{k} * width, width, from + at + u64{k} * from_width, from_width);
+                else
+                    std::fill_n(dst + usize{k} * width, width, u64{0});
+        };
+        store(m_sub_pos, l.pos, m_words, l.words, g * l.stride);
+        store(m_sub_neg, l.neg, m_words, l.words, g * l.stride);
+        if (m_derived_words)
+        {
+            store(m_sub_derived_pos, l.derived_pos, m_derived_words, l.derived_words, g * l.derived_stride);
+            store(m_sub_derived_neg, l.derived_neg, m_derived_words, l.derived_words, g * l.derived_stride);
+        }
+    }
+
+    /// Stores the valid history steps of row g of `in` into the history arena as the slot's span.
+    void write_history(u32 slot, const EncodeInput& in, u64 g)
+    {
+        drop_history(slot);
+        const LayerInput& l = in.history.masks;
+        if (l.layers == 0)
+            return;
+        const u32 steps = in.history.count ? static_cast<u32>(in.history.count[g]) : l.layers;
+        if (steps == 0)
+            return;
+        const u64 begin = m_history_dt.size();
+        m_history_spans[slot] = {begin, steps};
+        const auto append = [&](std::vector<u64>& to, const u64* from, u32 width, u32 from_width, u64 at)
+        {
+            to.resize((begin + steps) * width);
+            for (u32 k = 0; k < steps; ++k)
+                copy_words(to.data() + (begin + k) * width, width, from + at + u64{k} * from_width, from_width);
+        };
+        append(m_history_pos, l.pos, m_words, l.words, g * l.stride);
+        append(m_history_neg, l.neg, m_words, l.words, g * l.stride);
+        if (m_derived_words)
+        {
+            append(m_history_derived_pos, l.derived_pos, m_derived_words, l.derived_words, g * l.derived_stride);
+            append(m_history_derived_neg, l.derived_neg, m_derived_words, l.derived_words, g * l.derived_stride);
+        }
+        m_history_dt.insert(m_history_dt.end(), in.history.dt + g * l.layers, in.history.dt + g * l.layers + steps);
+    }
+
+    /// Gives up the history steps of `slot`.
+    void drop_history(u32 slot)
+    {
+        if (!m_history)
+            return;
+        m_history_garbage += m_history_spans[slot].count;
+        m_history_spans[slot] = {};
+    }
+
+    /// The history of the rows in the order `order`, padded to the longest history: one set of masks per row, its steps
+    /// oldest first and zero past its count.
+    void assemble_history(const u32* order, u64 n, EncodeInput& in)
+    {
+        u32 longest = 0;
+        for (u64 i = 0; i < n; ++i)
+            longest = std::max(longest, m_history_spans[order ? order[i] : i].count);
+        if (longest == 0)
+            return;
+        m_gather_history_count.resize(n);
+        m_gather_history_dt.assign(n * longest, 0);
+        const auto pad = [&](std::vector<u64>& to, const std::vector<u64>& from, u32 width)
+        {
+            to.assign(n * longest * width, 0);
+            for (u64 i = 0; i < n; ++i)
+            {
+                const Span span = m_history_spans[order ? order[i] : i];
+                if (span.count && width)
+                    std::memcpy(&to[i * longest * width], &from[span.begin * width],
+                                usize{span.count} * width * sizeof(u64));
+            }
+        };
+        pad(m_gather_history_pos, m_history_pos, m_words);
+        pad(m_gather_history_neg, m_history_neg, m_words);
+        if (m_derived_words)
+        {
+            pad(m_gather_history_derived_pos, m_history_derived_pos, m_derived_words);
+            pad(m_gather_history_derived_neg, m_history_derived_neg, m_derived_words);
+        }
+        for (u64 i = 0; i < n; ++i)
+        {
+            const Span span = m_history_spans[order ? order[i] : i];
+            m_gather_history_count[i] = static_cast<i32>(span.count);
+            if (span.count)
+                std::copy_n(m_history_dt.begin() + static_cast<std::ptrdiff_t>(span.begin), span.count,
+                            m_gather_history_dt.begin() + static_cast<std::ptrdiff_t>(i * longest));
+        }
+        LayerInput& l = in.history.masks;
+        l.pos = m_gather_history_pos.data();
+        l.neg = m_gather_history_neg.data();
+        l.stride = u64{longest} * m_words;
+        l.layers = longest;
+        l.words = m_words;
+        if (m_derived_words)
+        {
+            l.derived_pos = m_gather_history_derived_pos.data();
+            l.derived_neg = m_gather_history_derived_neg.data();
+            l.derived_stride = u64{longest} * m_derived_words;
+            l.derived_words = m_derived_words;
+        }
+        in.history.dt = m_gather_history_dt.data();
+        in.history.count = m_gather_history_count.data();
+    }
+
+    void compact_history_if_sparse()
+    {
+        if (!m_history || m_history_garbage < k_compact_rows || m_history_garbage * 2 < m_history_dt.size())
+            return;
+        const auto keep = [&](std::vector<u64>& arena, u32 width)
+        {
+            std::vector<u64> next;
+            next.reserve((m_history_dt.size() - m_history_garbage) * width);
+            for (const Span& span : m_history_spans)
+                next.insert(next.end(), arena.begin() + static_cast<std::ptrdiff_t>(span.begin * width),
+                            arena.begin() + static_cast<std::ptrdiff_t>((span.begin + span.count) * width));
+            arena = std::move(next);
+        };
+        keep(m_history_pos, m_words);
+        keep(m_history_neg, m_words);
+        if (m_derived_words)
+        {
+            keep(m_history_derived_pos, m_derived_words);
+            keep(m_history_derived_neg, m_derived_words);
+        }
+        std::vector<i32> dt;
+        dt.reserve(m_history_dt.size() - m_history_garbage);
+        for (Span& span : m_history_spans)
+        {
+            const u64 begin = dt.size();
+            dt.insert(dt.end(), m_history_dt.begin() + static_cast<std::ptrdiff_t>(span.begin),
+                      m_history_dt.begin() + static_cast<std::ptrdiff_t>(span.begin + span.count));
+            span.begin = begin;
+        }
+        m_history_dt = std::move(dt);
+        m_history_garbage = 0;
+    }
+
     /// Gives up the action rows of `slot`.
     void drop_actions(u32 slot)
     {
@@ -429,6 +664,8 @@ private:
 
     const FlatEncoder& m_encoder;
     u32 m_words, m_derived_words, m_label_width;
+    bool m_subgoals, m_history;  // the schema has subgoal / history relations: the store holds the rows' layers / steps
+    u32 m_levels;                // the subgoal layers stored per row: the schema's levels
     Inputs m_inputs;
     u64 m_live = 0, m_slots = 0;
     std::vector<u32> m_free;
@@ -437,9 +674,19 @@ private:
     std::vector<Span> m_spans;
     std::vector<i32> m_schema, m_binding;  // the action arena: the schema of each row, and its binding [rows, label width]
     u64 m_garbage = 0;                     // rows of the arena that no slot owns
+    std::vector<u64> m_sub_pos, m_sub_neg, m_sub_derived_pos, m_sub_derived_neg;  // [slots, levels * words]
+    // the history arena: the steps of each slot's history one after the other (a slot's span), oldest first
+    std::vector<Span> m_history_spans;
+    std::vector<u64> m_history_pos, m_history_neg, m_history_derived_pos, m_history_derived_neg;  // [steps, words]
+    std::vector<i32> m_history_dt;                                                                // [steps]
+    u64 m_history_garbage = 0;  // steps of the arena that no slot owns
     // the buffers of a flush
     std::vector<u64> m_gather_states, m_gather_derived, m_gather_goal_pos, m_gather_goal_neg, m_gather_goal_derived_pos,
         m_gather_goal_derived_neg;
+    std::vector<u64> m_gather_sub_pos, m_gather_sub_neg, m_gather_sub_derived_pos, m_gather_sub_derived_neg;
+    std::vector<u64> m_gather_history_pos, m_gather_history_neg, m_gather_history_derived_pos,
+        m_gather_history_derived_neg;
+    std::vector<i32> m_gather_history_dt, m_gather_history_count;
     std::vector<i32> m_gather_ids, m_gather_schema, m_gather_binding, m_action_offsets;
     rl::Expansion m_expansion;
 };

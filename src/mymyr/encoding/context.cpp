@@ -498,6 +498,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         const u32 sign = relation.sign > 0 ? 0 : 1;
         if (relation.lane == Lane::History)
         {
+            if (!own->options().history)
+                continue;
             max_arity = std::max(max_arity, relation.logical_arity);
             layer_relations.history[u64{static_cast<u32>(relation.predicate)} * 2 + sign] = static_cast<i32>(id);
             if (own->slot_roles(id).front() == SlotRole::HistoryTarget)
