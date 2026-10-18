@@ -6,8 +6,10 @@
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/schema.hpp"
+#include "mymyr/encoding/stream.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -15,10 +17,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace mymyr::python::ann
@@ -39,6 +43,9 @@ struct EncodingGoals
 {
 };
 struct EncodingActions
+{
+};
+struct EncodingGraphDescription
 {
 };
 struct EncodingEntityArrays
@@ -74,6 +81,11 @@ struct type_caster<mymyr::python::ann::EncodingGoals>
     static constexpr auto Name = const_name(
         "tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, "
         "mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack]");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingGraphDescription>
+{
+    static constexpr auto Name = const_name("mymyr._typing.GraphDescription");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
@@ -562,20 +574,25 @@ void import_goals(rlimp::Imports& imports, nb::handle goals, u64 rows, encoding:
     }
 }
 
-PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
-                   GoalsArg goals_arg, ActionsArg actions_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
-                   CapacitiesArg capacities_in)
+/// The rows of one call, imported from the Python objects: the arrays are read where they are, and the members keep
+/// them alive.
+struct ImportedRows
 {
-    const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::FlatCapacities> capacities =
-        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema().has_targets()))
-                      : std::nullopt;
-
-    StateBatch states = import_states(state_arg, packed_words(state_arg));
+    StateBatch states;
     std::vector<i32> ids_copy;
     std::shared_ptr<void> ids_keep;
-    const rl::TaskTable& table = self.encoder->table();
-    const i32* ids = import_task_ids(task_ids, states.view.rows, table.size(), ids_copy, ids_keep);
+    rlimp::Imports imports{-1, dl::k_stream_default, false};
+    ExpansionBuffers actions;
+    encoding::EncodeInput input;
+};
+
+void import_rows(ImportedRows& rows, const encoding::FlatEncoder& encoder, StatesLike state_arg, TaskIdsArg task_ids,
+                 DerivedArg derived_arg, GoalsArg goals_arg, ActionsArg actions_arg)
+{
+    rows.states = import_states(state_arg, packed_words(state_arg));
+    const StateBatch& states = rows.states;
+    const rl::TaskTable& table = encoder.table();
+    const i32* ids = import_task_ids(task_ids, states.view.rows, table.size(), rows.ids_copy, rows.ids_keep);
     if (states.view.rows && table.size() > 1 && !ids)
         throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
     table.check_task_ids(ids, states.view.rows);
@@ -593,61 +610,95 @@ PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_id
                                   .c_str());
     }
 
-    rlimp::Imports imports(-1, dl::k_stream_default, false);
-    encoding::EncodeInput input;
+    encoding::EncodeInput& input = rows.input;
     input.states = states.view;
     input.task_ids = ids;
-    std::vector<i64> rows;
+    std::vector<i64> extents;
     u32 derived_words = 0;
-    input.derived =
-        imports.words_nd(derived_arg, "derived", {static_cast<i64>(states.view.rows)}, false, rows, derived_words);
+    input.derived = rows.imports.words_nd(derived_arg, "derived", {static_cast<i64>(states.view.rows)}, false, extents,
+                                          derived_words);
     input.derived_stride = derived_words;
     if (!goals_arg.is_none())
-        import_goals(imports, goals_arg, states.view.rows, input);
+        import_goals(rows.imports, goals_arg, states.view.rows, input);
 
-    ExpansionBuffers actions;
     if (!actions_arg.is_none())
     {
-        actions = expansion_buffers(actions_arg);
-        const rl::TaskTable& made_over = *actions.table;
-        if (actions.states != states.view.rows)
-            throw nb::value_error(("mymyr: encoding: actions expand " + std::to_string(actions.states) +
+        rows.actions = expansion_buffers(actions_arg);
+        const rl::TaskTable& made_over = *rows.actions.table;
+        if (rows.actions.states != states.view.rows)
+            throw nb::value_error(("mymyr: encoding: actions expand " + std::to_string(rows.actions.states) +
                                    " states, the batch has " + std::to_string(states.view.rows) + " rows")
                                       .c_str());
         if (made_over.schema_names() != table.schema_names() || made_over.schema_arities() != table.schema_arities())
             throw nb::value_error("mymyr: encoding: actions were expanded over another domain than the encoder's");
         for (u64 row = 0; row < states.view.rows; ++row)
-            if (actions.task_ids[row] != (ids ? ids[row] : 0))
+        {
+            const u32 instance = ids ? static_cast<u32>(ids[row]) : 0;
+            if (rows.actions.task_ids[row] != static_cast<i32>(instance))
                 throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
-                                       " were expanded for instance " + std::to_string(actions.task_ids[row]) +
-                                       ", the batch has instance " + std::to_string(ids ? ids[row] : 0))
+                                       " were expanded for instance " + std::to_string(rows.actions.task_ids[row]) +
+                                       ", the batch has instance " + std::to_string(instance))
                                           .c_str());
-        input.actions = &actions.view;
+            // the rows' bindings and schemas are those of the instance they were expanded for: it must be the encoder's
+            if (instance >= made_over.size())
+                throw nb::value_error(("mymyr: encoding: the actions were expanded over a table without instance " +
+                                       std::to_string(instance))
+                                          .c_str());
+            const Task& expected = *table.task(instance);
+            const Task& given = *made_over.task(instance);
+            if (given.uid() != expected.uid() && (given.fingerprint() != expected.fingerprint() ||
+                                                  given.encoding_fingerprint() != expected.encoding_fingerprint()))
+                throw nb::value_error(("mymyr: encoding: the actions of state " + std::to_string(row) +
+                                       " were expanded over another task than instance " + std::to_string(instance) +
+                                       " of the encoder's table: it differs in fingerprint or atom encoding")
+                                          .c_str());
+        }
+        input.actions = &rows.actions.view;
     }
+}
 
-    PyFlatBatch output;
-    output.framework = parse_framework(framework, state_arg);
-    output.schema = self.encoder->schema_ptr();
+/// Runs `work(pool)` on the pool of a call (`pool=`, else the encoder's own of `threads` members) with the GIL released.
+template<class Work>
+void run_on_pool(PyFlatEncoder& self, u32 threads, PoolArg pool_in, Work&& work)
+{
     PyPool* held = pool_arg(pool_in);
     std::shared_ptr<ThreadPool> own;
     if (!held)
         own = self.pool(threads == 0 ? hardware_threads() : threads);
+    nb::gil_scoped_release release;
+    std::unique_lock<std::mutex> hold;
+    if (held)
+        hold = std::unique_lock(held->mutex);
+    work(held ? *held->pool : *own);
+}
+
+PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
+                   GoalsArg goals_arg, ActionsArg actions_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
+                   CapacitiesArg capacities_in)
+{
+    const u32 threads = threads_arg(threads_in);
+    const std::optional<encoding::FlatCapacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema().has_targets()))
+                      : std::nullopt;
+    ImportedRows rows;
+    import_rows(rows, *self.encoder, state_arg, task_ids, derived_arg, goals_arg, actions_arg);
+
+    PyFlatBatch output;
+    output.framework = parse_framework(framework, state_arg);
+    output.schema = self.encoder->schema_ptr();
     thread_local encoding::EncodeScratch scratch;
-    {
-        nb::gil_scoped_release release;
-        std::unique_lock<std::mutex> hold;
-        if (held)
-            hold = std::unique_lock(held->mutex);
-        ThreadPool& pool = held ? *held->pool : *own;
-        if (capacities)
-        {
-            encoding::FlatSizes sizes;
-            output.arrays = self.encoder->encode_capacity(input, *capacities, pool, scratch, sizes);
-            output.sizes = sizes;
-        }
-        else
-            output.arrays = self.encoder->encode(input, pool, scratch);
-    }
+    run_on_pool(self, threads, pool_in,
+                [&](ThreadPool& pool)
+                {
+                    if (capacities)
+                    {
+                        encoding::FlatSizes sizes;
+                        output.arrays = self.encoder->encode_capacity(rows.input, *capacities, pool, scratch, sizes);
+                        output.sizes = sizes;
+                    }
+                    else
+                        output.arrays = self.encoder->encode(rows.input, pool, scratch);
+                });
     return output;
 }
 
@@ -660,9 +711,10 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "uint8 [E]: the role of each entity, an index into entity_role_names. Absent when the entity arrays are implicit "
      "(FlatBatch.implicit_entities)."},
     {"entity_ref",
-     "index [E]: an object's instance-local id; a goal entity's tuple (its position in all tuples in layout order); an "
-     "action entity's first row in the expansion given as `actions`; a predicate virtual node's key (the id of its "
-     "predicate's state relation); -1 for the auxiliary entity. Absent when implicit."},
+     "index [E]: an object's instance-local id; a goal entity's tuple (its index among the graph's tuples in "
+     "graph-major order); an action entity's first row among its graph's rows of the expansion given as `actions` "
+     "(the expansion row is actions.offsets[g] + entity_ref); a predicate virtual node's key (the id of its "
+     "predicate's state relation); -1 for the auxiliary entity. The same in both layouts. Absent when implicit."},
     {"relation_counts",
      "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
      "emit_counts=False."},
@@ -673,7 +725,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"relation_args", "index [A]: the entities of the tuples, tuple after tuple, `arity` per tuple of the relation."},
     {"goal_complete",
      "uint8 [G]: 1 iff the goal relations of the graph hold its whole goal: its instance's goal when every conjunct could "
-     "be expanded into literals (Task.encoding_goal_complete), always for a goal given with `goals`. Absent when the "
+     "be expanded into literals (Task.encoding_goal_complete) and no literal whose truth a state can change was left "
+     "out by the options (a nullary literal with nullary=False), always for a goal given with `goals`. Absent when the "
      "schema has no goal relations."},
     {"target_offsets",
      "index [G + 1]: graph g's targets are [target_offsets[g], target_offsets[g + 1]). Absent without target_sources."},
@@ -684,6 +737,115 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "uint8 [T]: the group of each target, an index into target_group_names (0: goal, 2: action). Absent like "
      "target_offsets."},
 };
+
+// ------------------------------------------------------------------------------------------------ streams
+
+using IndicesArg = Arg<std::variant<ann::ArrayLike, nb::typed<nb::sequence, int>, int>>;
+using Int64Array = nb::ndarray<nb::numpy, i64, nb::ndim<1>>;
+
+Int64Array int64_array(std::vector<i64> values)
+{
+    auto* owner = new std::vector<i64>(std::move(values));
+    nb::capsule capsule(owner, [](void* p) noexcept { delete static_cast<std::vector<i64>*>(p); });
+    const usize shape[1] = {owner->size()};
+    return Int64Array(owner->data(), 1, shape, capsule);
+}
+
+/// The indices of a call: an int, an integer array or a sequence of ints.
+std::vector<i64> index_list(nb::handle obj)
+{
+    if (nb::isinstance<nb::int_>(obj))
+        return {int_arg<i64>(obj, "index")};
+    using Array = nb::ndarray<const i64, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+    Array array;
+    if (!nb::isinstance<nb::sequence>(obj) && nb::try_cast(obj, array, true))
+        return std::vector<i64>(array.data(), array.data() + array.shape(0));
+    if (nb::isinstance<nb::str>(obj) || !nb::isinstance<nb::sequence>(obj))
+        throw nb::type_error("mymyr: encoding: indices must be an int, a sequence of ints or an integer array");
+    std::vector<i64> out;
+    for (nb::handle item : obj)
+        out.push_back(int_arg<i64>(item, "index"));
+    return out;
+}
+
+struct PyFlatStream
+{
+    nb::object encoder;  // the FlatRelationEncoder
+    Framework framework = Framework::Numpy;
+    std::unique_ptr<encoding::FlatStream> stream;
+    [[nodiscard]] PyFlatEncoder& owner() const { return *nb::inst_ptr<PyFlatEncoder>(encoder); }
+};
+
+struct PyFlatMutableStream
+{
+    nb::object encoder;
+    Framework framework = Framework::Numpy;
+    std::unique_ptr<encoding::FlatMutableStream> stream;
+    [[nodiscard]] PyFlatEncoder& owner() const { return *nb::inst_ptr<PyFlatEncoder>(encoder); }
+};
+
+/// The batch of the rows a stream holds. The encoding runs on the pool of the call, as `encode` does.
+template<class Py>
+PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
+                         CapacitiesArg capacities_in)
+{
+    PyFlatEncoder& encoder = self.owner();
+    const u32 threads = threads_arg(threads_in);
+    const std::optional<encoding::FlatCapacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in, encoder.encoder->schema().has_targets()))
+                      : std::nullopt;
+    PyFlatBatch output;
+    output.framework = framework.is_none() ? self.framework : parse_framework(framework);
+    output.schema = encoder.encoder->schema_ptr();
+    run_on_pool(encoder, threads, pool_in,
+                [&](ThreadPool& pool)
+                {
+                    if (capacities)
+                    {
+                        encoding::FlatSizes sizes;
+                        output.arrays = self.stream->flush(pool, *capacities, sizes);
+                        output.sizes = sizes;
+                    }
+                    else
+                        output.arrays = self.stream->flush(pool);
+                });
+    return output;
+}
+
+void append_to_stream(PyFlatStream& self, StatesLike states, TaskIdsArg task_ids, DerivedArg derived, GoalsArg goals,
+                      ActionsArg actions)
+{
+    ImportedRows rows;
+    import_rows(rows, *self.owner().encoder, states, task_ids, derived, goals, actions);
+    nb::gil_scoped_release release;
+    self.stream->append(rows.input);
+}
+
+/// append / update of a mutable stream: `change(stream, indices, input)`.
+template<class Change>
+void change_mutable_stream(PyFlatMutableStream& self, IndicesArg indices_arg, StatesLike states, TaskIdsArg task_ids,
+                           DerivedArg derived, GoalsArg goals, ActionsArg actions, Change change)
+{
+    const std::vector<i64> indices = index_list(indices_arg);
+    ImportedRows rows;
+    import_rows(rows, *self.owner().encoder, states, task_ids, derived, goals, actions);
+    try
+    {
+        nb::gil_scoped_release release;
+        change(*self.stream, std::span<const i64>(indices), rows.input);
+    }
+    catch (const std::out_of_range& e)
+    {
+        throw nb::key_error(e.what());
+    }
+}
+
+constexpr const char* k_row_inputs_doc =
+    "`states`, `task_ids`, `derived`, `goals` and `actions` are as in `FlatRelationEncoder.encode`, and the rows are "
+    "copied. All rows of a stream give the same inputs (a stream without rows takes any set of them with its first "
+    "rows): a stream with `goals` keeps a goal for every row, a stream with `actions` the action rows of every state. "
+    "With `actions`, the rows of the expansion belong to the states of this call, in order (`actions.num_states` equals "
+    "the number of rows): the stream keeps their schemas and bindings, graph by graph. ";
 }  // namespace
 
 void bind_encoding(nb::module_& parent)
@@ -785,12 +947,17 @@ void bind_encoding(nb::module_& parent)
              "(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg): masks over the fluent (derived) atom slots "
              "[N, W] ([N, D]), or [1, W] for one goal shared by all rows, as `rl.goal_masks` returns them; the "
              "goal relations then hold exactly these literals (no constant part), and goal_complete is 1. "
+             "`rl.goal_masks` gives the instance's goal over fluent slots only, no derived masks, so that a "
+             "call with them equals a call without `goals` only for an instance whose complete goal has no literal "
+             "over a static or derived predicate or over an atom without a slot. "
              "actions: the mymyr.rl.Expansion of the same states over the same table (rl.expand(table, states, "
              "task_ids)): the action relations then hold one tuple (action entity, objects...) per distinct ground "
              "action among the expansion rows of each state, in lexicographic order of the objects, and "
-             "`entity_ref` of an action entity is the index of its first row in the expansion (apply that action "
-             "with expansion.succ[row]). Without it the action relations are empty. The rows must be in canonical "
-             "order (rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
+             "`entity_ref` of an action entity is the index of its first row among the rows of its own state "
+             "(apply that action with expansion.succ[expansion.offsets[g] + entity_ref]). Without it the "
+             "action relations are empty. The expansion must be over the encoder's own table or over tasks that "
+             "have, per instance, the same fingerprint and atom encoding. The rows must be in canonical order "
+             "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "The arrays of the result are in `framework` (default: that of `states`; NumPy for States). Raises "
              "ValueError for invalid input. threads: graphs are split over this many threads (0: one per "
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
@@ -801,6 +968,169 @@ void bind_encoding(nb::module_& parent)
              "(the first sizes['entities'] / sizes['args'] / sizes['targets'] entries hold the encoding, the rest is "
              "zero) and `sizes` reports the true sizes. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
-             "set; nothing raises.");
+             "set; nothing raises.")
+        .def(
+            "stream",
+            [](PyFlatEncoder& self, Arg<ann::Framework> framework)
+            {
+                return PyFlatStream{nb::borrow(nb::find(&self)), parse_framework(framework),
+                                    std::make_unique<encoding::FlatStream>(self.encoder)};
+            },
+            nb::kw_only(), "framework"_a = nb::none(),
+            "An append-only stream of rows for this encoder (FlatStream). framework: the framework of the batches its "
+            "flushes return (default NumPy).")
+        .def(
+            "mutable_stream",
+            [](PyFlatEncoder& self, Arg<ann::Framework> framework)
+            {
+                return PyFlatMutableStream{nb::borrow(nb::find(&self)), parse_framework(framework),
+                                           std::make_unique<encoding::FlatMutableStream>(self.encoder)};
+            },
+            nb::kw_only(), "framework"_a = nb::none(),
+            "A stream of rows under indices you choose, whose rows can be replaced and removed (FlatMutableStream). "
+            "framework: the framework of the batches its flushes return (default NumPy).")
+        .def(
+            "entity_names",
+            [](nb::handle self, nb::typed<nb::handle, PyFlatBatch> batch, IntArg graph)
+            {
+                return nb::typed<nb::object, std::vector<std::string>>(
+                    nb::module_::import_("mymyr.encoding._names").attr("entity_names")(self, batch, graph));
+            },
+            "batch"_a, "graph"_a,
+            "The names of the entities of graph `graph` of `batch` (a batch of this encoder's schema), in entity order: "
+            "an object by its name in the task, the auxiliary entity `auxiliary`, a goal entity `[+](on a b)[g]` "
+            "(`[-]` for a negative literal; a nullary literal is `[+](handempty)[g]`), an action entity `(unstack a b)`, "
+            "a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
+            "`auxiliary`, a goal literal that two relations list) are told apart by position only. The names are built "
+            "from the batch's arrays and the task; nothing is stored in the batch.")
+        .def(
+            "describe",
+            [](nb::handle self, nb::typed<nb::handle, PyFlatBatch> batch, IntArg graph)
+            {
+                return nb::typed<nb::object, ann::EncodingGraphDescription>(
+                    nb::module_::import_("mymyr.encoding._names").attr("describe")(self, batch, graph));
+            },
+            "batch"_a, "graph"_a,
+            "A readable view of graph `graph` of `batch`: a GraphDescription with its entities (role and name, in entity "
+            "order) and, for each relation that has tuples, the tuples as tuples of entity names; `str(description)` "
+            "prints it.")
+        .def(
+            "__reduce__",
+            [](PyFlatEncoder& self)
+            {
+                return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_flat_encoder"),
+                                      nb::make_tuple(self.reference.obj, options_dict(self.encoder->schema().options()),
+                                                     self.encoder->schema().fingerprint()));
+            },
+            "An encoder pickles as its table and options with the schema fingerprint; loading builds the encoder again "
+            "and raises ValueError (\"mymyr: encoding: ...\") if its schema's fingerprint differs.");
+
+    nb::class_<PyFlatStream> stream_class(
+        module, "FlatStream",
+        "An append-only stream of rows (`FlatRelationEncoder.stream()`). `append` copies rows with their per-row "
+        "inputs; `flush` encodes everything appended since the last flush in one call, returns the FlatBatch "
+        "`FlatRelationEncoder.encode` returns for those rows in the order of the appends, and empties the stream. "
+        "Calls are safe from several threads (they take turns).");
+    stream_class
+        .def("append", &append_to_stream, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
+             "goals"_a = nb::none(), "actions"_a = nb::none(),
+             (std::string("Appends the rows `states`. ") + k_row_inputs_doc +
+              "A call that raises appends nothing. Errors that only the encoder sees (a state bit the instance has no "
+              "atom for, actions out of canonical order, labels of another instance) raise at the flush, which then keeps "
+              "the rows: `clear()` drops them.")
+                 .c_str())
+        .def(
+            "flush", &flush_stream<PyFlatStream>, nb::kw_only(), "framework"_a = nb::none(), "threads"_a = 1,
+            "pool"_a = nb::none(), "capacities"_a = nb::none(),
+            "Encodes the rows held, in the order they were appended, and empties the stream: the result equals "
+            "`encoder.encode(rows, ...)` over the same rows bit for bit. framework, threads, pool and capacities are "
+            "as in `encode`; `framework` defaults to the stream's. The graph g of the batch is the g-th appended row. "
+            "With `actions`, the action rows are those appended for each state, so `entity_ref` of an action "
+            "entity is what `encode` gives for the same expansion. If the "
+            "encoding raises (or, with `capacities`, overflows: `sizes['overflow']`), the rows are kept, so that the "
+            "flush can be repeated with larger capacities. A stream without rows flushes to a batch of no graphs.")
+        .def(
+            "clear", [](PyFlatStream& self) { self.stream->clear(); }, "Drops every row.")
+        .def("__len__", [](const PyFlatStream& self) { return self.stream->size(); }, "The rows held.")
+        .def_prop_ro("encoder", [](const PyFlatStream& self) { return nb::typed<nb::object, PyFlatEncoder>(self.encoder); },
+                     "The FlatRelationEncoder of the stream.");
+
+    nb::class_<PyFlatMutableStream> mutable_class(
+        module, "FlatMutableStream",
+        "A stream of rows under indices you choose (`FlatRelationEncoder.mutable_stream()`): `append` stores rows "
+        "under new indices, `update` replaces the rows under held indices, `remove` drops them. `flush` encodes "
+        "the rows held in ascending order of their indices, so the graph j of the batch is the row of `indices()[j]`, "
+        "and keeps the rows (`clear()` drops them). The batch equals `FlatRelationEncoder.encode` over the same rows "
+        "in that order, bit for bit. Calls are safe from several threads (they take turns).");
+    mutable_class
+        .def(
+            "append",
+            [](PyFlatMutableStream& self, IndicesArg indices, StatesLike states, TaskIdsArg task_ids, DerivedArg derived,
+               GoalsArg goals, ActionsArg actions)
+            {
+                change_mutable_stream(self, indices, states, task_ids, derived, goals, actions,
+                                      [](encoding::FlatMutableStream& stream, std::span<const i64> at,
+                                         const encoding::EncodeInput& in) { stream.append(at, in); });
+            },
+            "indices"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
+            "goals"_a = nb::none(), "actions"_a = nb::none(),
+            (std::string("Stores row k of `states` under `indices[k]` (an int, an integer array or a sequence of ints; "
+                         "any 64-bit integers, negative ones included). ") +
+             k_row_inputs_doc +
+             "Raises ValueError for an index that is held already or repeats; a call that raises changes nothing.")
+                .c_str())
+        .def(
+            "update",
+            [](PyFlatMutableStream& self, IndicesArg indices, StatesLike states, TaskIdsArg task_ids, DerivedArg derived,
+               GoalsArg goals, ActionsArg actions)
+            {
+                change_mutable_stream(self, indices, states, task_ids, derived, goals, actions,
+                                      [](encoding::FlatMutableStream& stream, std::span<const i64> at,
+                                         const encoding::EncodeInput& in) { stream.update(at, in); });
+            },
+            "indices"_a, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
+            "goals"_a = nb::none(), "actions"_a = nb::none(),
+            (std::string("Replaces the rows under `indices` with the rows `states`, with all their inputs. ") +
+             k_row_inputs_doc +
+             "Raises KeyError for an index that is not held and ValueError for one that repeats; a call that raises "
+             "changes nothing.")
+                .c_str())
+        .def(
+            "remove",
+            [](PyFlatMutableStream& self, IndicesArg indices_arg)
+            {
+                const std::vector<i64> indices = index_list(indices_arg);
+                try
+                {
+                    nb::gil_scoped_release release;
+                    self.stream->remove(indices);
+                }
+                catch (const std::out_of_range& e)
+                {
+                    throw nb::key_error(e.what());
+                }
+            },
+            "indices"_a,
+            "Removes the rows under `indices`. Raises KeyError for an index that is not held and ValueError for one that "
+            "repeats; a call that raises changes nothing.")
+        .def(
+            "flush", &flush_stream<PyFlatMutableStream>, nb::kw_only(), "framework"_a = nb::none(), "threads"_a = 1,
+            "pool"_a = nb::none(), "capacities"_a = nb::none(),
+            "Encodes the rows held in ascending order of their indices and keeps them. framework, threads, pool and "
+            "capacities are as in `encode`; `framework` defaults to the stream's. With `actions`, the action rows "
+            "are those given for each state, so `entity_ref` of an action entity is what `encode` gives for the same "
+            "expansion. A stream without rows flushes to a batch of no graphs.")
+        .def(
+            "clear", [](PyFlatMutableStream& self) { self.stream->clear(); }, "Drops every row.")
+        .def(
+            "indices", [](PyFlatMutableStream& self) { return int64_array(self.stream->indices()); },
+            "The indices of the rows held, ascending: the order of the graphs of a flush.")
+        .def(
+            "__contains__", [](const PyFlatMutableStream& self, i64 index) { return self.stream->contains(index); },
+            "index"_a, "Whether a row is held under `index`.")
+        .def("__len__", [](const PyFlatMutableStream& self) { return self.stream->size(); }, "The rows held.")
+        .def_prop_ro(
+            "encoder", [](const PyFlatMutableStream& self) { return nb::typed<nb::object, PyFlatEncoder>(self.encoder); },
+            "The FlatRelationEncoder of the stream.");
 }
 }

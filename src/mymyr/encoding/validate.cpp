@@ -230,9 +230,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                                                                   "action, predicate virtual");
         }
         // The goal entities follow the objects and the auxiliary entity, one per tuple of the plain goal relations with a
-        // goal target, numbered in the order of those relations and of their tuples; each refers to its tuple. The action
-        // entities follow them, one per tuple of an action relation, numbered the same way.
-        i64 goals = 0, actions = 0;
+        // goal target, numbered in the order of those relations and of their tuples; each refers to its tuple, by the
+        // index of the tuple among the graph's tuples in graph-major order. The action entities follow them, one per
+        // tuple of an action relation, numbered the same way.
+        i64 goals = 0, actions = 0, graph_tuples = 0;
         bool auxiliary_used = false;
         std::vector<bool> virtual_used(static_cast<usize>(virtual_entities), false);
         for (u64 r = 0; r < R; ++r)
@@ -248,15 +249,20 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
             const bool goal_target = roles.front() == SlotRole::GoalTarget;
             const bool action = roles.front() == SlotRole::Action;
+            // the tuples of a goal-target or action relation start with their own entity, which is ascending by
+            // construction, so that the tuples are compared past it
+            const u32 lead = goal_target || action ? 1u : 0u;
             for (u64 t = 0; t < n; ++t)
             {
                 const u64 at = static_cast<u64>(arg_offsets[cell]) + t * arity;
+                if ((goal_target || action) && (args[at] < first || args[at] >= last))
+                    fail("a tuple of " + where + " has an entity outside its graph");
                 if (goal_target)
                 {
                     const i64 entity = args[at];
-                    if (entity != goal_start + goals)
+                    if (goals >= goal_entities || entity != goal_start + goals)
                         fail("a tuple of " + where + " does not have the next goal entity");
-                    if (entity_role && entity_ref[entity] != tuple_offsets[cell] + static_cast<i64>(t))
+                    if (entity_role && entity_ref[entity] != graph_tuples + static_cast<i64>(t))
                         fail("the goal entity of a tuple of " + where + " does not refer to the tuple");
                     if (stored_targets && (target_offsets[g] + goals >= target_offsets[g + 1] ||
                                            target_entity[static_cast<u64>(target_offsets[g] + goals)] != entity ||
@@ -267,10 +273,11 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 if (action)
                 {
                     const i64 entity = args[at];
-                    if (entity != action_start + actions)
+                    if (actions >= action_entities || entity != action_start + actions)
                         fail("a tuple of " + where + " does not have the next action entity");
                     if (entity_role && entity_ref[entity] < 0)
-                        fail("the action entity of a tuple of " + where + " does not refer to an expansion row");
+                        fail("the action entity of a tuple of " + where +
+                             " does not refer to a row of the graph's expansion");
                     if (action_targets)
                     {
                         const i64 position = target_offsets[g] + goal_entities + actions;
@@ -298,7 +305,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 }
                 if (t > 0)
                 {
-                    u32 k = 0;
+                    u32 k = lead;
                     while (k < arity && args[at + k] == args[at - arity + k])
                         ++k;
                     if (k == arity)
@@ -307,6 +314,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         fail("the tuples of " + where + " are not ascending");
                 }
             }
+            graph_tuples += static_cast<i64>(n);
         }
         const i64 expected_targets = goal_entities + (action_targets ? action_entities : 0);
         if (stored_targets && target_offsets[g] + expected_targets != target_offsets[g + 1])
@@ -319,8 +327,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         {
             if (!virtual_used[static_cast<usize>(v)])
                 fail("graph " + std::to_string(g) + " has a virtual node of a predicate that has no tuple");
-            if (v > 0 && entity_ref[virtual_start + v] <= entity_ref[virtual_start + v - 1])
-                fail("the virtual nodes of graph " + std::to_string(g) + " are not in the order of their predicates' keys");
+            if (v > 0 && schema.virtual_rank(static_cast<u32>(entity_ref[virtual_start + v])) <=
+                             schema.virtual_rank(static_cast<u32>(entity_ref[virtual_start + v - 1])))
+                fail("the virtual nodes of graph " + std::to_string(g) +
+                     " are not in the order of their predicates' names");
         }
         if ((auxiliaries == 1) != auxiliary_used)
             fail("graph " + std::to_string(g) + (auxiliary_used ? " uses an auxiliary entity it does not have"

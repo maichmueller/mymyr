@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <span>
 #include <sstream>
 
 using namespace mymyr;
@@ -192,9 +193,19 @@ TEST(EncodingContext, AMixedTableHasConsistentOffsetsAndBuildsDeterministically)
         const u64* row = view.inst + i * lanes::k_instance_columns;
         EXPECT_EQ(row[lanes::k_cell_offset], cells);
         EXPECT_EQ(row[lanes::k_slot_args_offset], slots);
+        // the lists of an instance are stored once each, one after the other; a list equal to an earlier one shares it
+        u64 end = cells;
+        for (const auto& [count, offset] : {std::pair{lanes::k_num_cells, lanes::k_cell_offset},
+                                            std::pair{lanes::k_num_row_cells, lanes::k_row_cell_offset},
+                                            std::pair{lanes::k_num_plain_cells, lanes::k_plain_cell_offset},
+                                            std::pair{lanes::k_num_plain_row_cells, lanes::k_plain_row_cell_offset}})
+        {
+            EXPECT_GE(row[offset], cells);
+            end = std::max(end, row[offset] + row[count]);
+        }
         EXPECT_EQ(row[lanes::k_num_objects], table->instance(i).num_objects);
         EXPECT_EQ(row[lanes::k_encoding_fingerprint], table->task(i)->encoding_fingerprint());
-        cells += row[lanes::k_num_cells];
+        cells = end;
         slots += row[lanes::k_fluent_slots];
     }
     EXPECT_EQ(cells, context->arrays().find("cell")->shape[0]);
@@ -309,5 +320,94 @@ TEST(EncodingContext, DuplicateStaticAtomsGiveTheTuplesOfTheTaskWithoutThem)
     const auto actual = context_of(repeated, test::encoder_options());
     for (const char* name : {"cell", "static_args"})
         EXPECT_EQ(bytes_of(*actual, name), bytes_of(*expected, name)) << name;
+}
+TEST(EncodingContext, TheCellsOfTheInstanceGoalHoldOnlyTheSlotsItsMasksCanSetAndRowGoalsKeepEveryPredicateWhole)
+{
+    // the goal: seven positive literals over on/2 of the eight blocks
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "probBLOCKS-8-0"));
+    FlatOptions options = test::encoder_options();
+    options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied, GoalDerivation::Unsatisfied};
+    const auto context = context_of(table, options);
+    const EncodingSchema& schema = context->schema();
+    const lanes::InstanceView v = lanes::instance_view(context->view(), 0);
+    auto goal_cells = [](const Cell* cells, u32 count)
+    {
+        std::vector<Cell> out;
+        for (u32 i = 0; i < count; ++i)
+            if (lanes::is_goal_op(cells[i].op))
+                out.push_back(cells[i]);
+        return out;
+    };
+
+    // the instance's goal: only the goal relations of on/2 with a positive literal, over the slots from its first to
+    // its last
+    const std::vector<Cell> own = goal_cells(v.cells, v.num_cells);
+    ASSERT_EQ(own.size(), 3u);
+    const std::vector<Cell> state_cells_of_instance = cells_of(*context, 0);
+    const Cell& state_on = *std::ranges::find(state_cells_of_instance, *schema.find("on"), &Cell::relation);
+    for (const Cell& cell : own)
+    {
+        EXPECT_EQ(schema.relation(cell.relation).sign, 1) << schema.relation(cell.relation).name;
+        EXPECT_EQ(schema.relation(cell.relation).name.rfind("[+]on[g]", 0), 0u);
+        ASSERT_LT(cell.a, cell.b);
+        EXPECT_EQ(lanes::popcount_range(v.goal_pos, cell.a, cell.b), 7u);
+        EXPECT_EQ(lanes::popcount_range(v.goal_pos, cell.a, cell.a + 1), 1u);
+        EXPECT_EQ(lanes::popcount_range(v.goal_pos, cell.b - 1, cell.b), 1u);
+        EXPECT_GE(cell.a, state_on.a);
+        EXPECT_LE(cell.b, state_on.b);
+        EXPECT_LT(cell.b - cell.a, state_on.b - state_on.a);
+    }
+
+    // the goals of a row: every goal relation of every predicate with slots, over the predicate's whole range
+    const std::vector<Cell> whole = goal_cells(v.row_cells, v.num_row_cells);
+    EXPECT_EQ(whole.size(), 5u * 2u * 3u);  // clear, handempty, holding, on, ontable; both signs; three variants
+    for (const Cell& cell : whole)
+    {
+        const Relation& relation = schema.relation(cell.relation);
+        const u32 state_relation = *schema.find(table->predicate_names()[relation.predicate]);
+        const Cell& state = *std::ranges::find(state_cells_of_instance, state_relation, &Cell::relation);
+        EXPECT_EQ(cell.a, state.a) << relation.name;
+        EXPECT_EQ(cell.b, state.b) << relation.name;
+        EXPECT_EQ(cell.c, cell.d) << relation.name;
+    }
+    // the other cells are the same in both lists
+    std::vector<Cell> state_cells, row_state_cells;
+    for (u32 i = 0; i < v.num_cells; ++i)
+        if (!lanes::is_goal_op(v.cells[i].op))
+            state_cells.push_back(v.cells[i]);
+    for (u32 i = 0; i < v.num_row_cells; ++i)
+        if (!lanes::is_goal_op(v.row_cells[i].op))
+            row_state_cells.push_back(v.row_cells[i]);
+    ASSERT_EQ(state_cells.size(), row_state_cells.size());
+    EXPECT_EQ(std::memcmp(state_cells.data(), row_state_cells.data(), state_cells.size() * sizeof(Cell)), 0);
+    EXPECT_TRUE(std::ranges::is_sorted(std::span(v.cells, v.num_cells), {}, &Cell::relation));
+    EXPECT_TRUE(std::ranges::is_sorted(std::span(v.row_cells, v.num_row_cells), {}, &Cell::relation));
+}
+
+TEST(EncodingContext, ACellWithOnlyConstantGoalTuplesHasNoSlots)
+{
+    // (road a b) is static: its goal cells have constant tuples and no slot range, and row goals have no such cell
+    const auto table = rl::TaskTable::single(test::pddl_task("goals", "static_false"));
+    FlatOptions options = test::encoder_options();
+    options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied};
+    const auto context = context_of(table, options);
+    const lanes::InstanceView v = lanes::instance_view(context->view(), 0);
+    u32 constant_cells = 0;
+    for (u32 i = 0; i < v.num_cells; ++i)
+    {
+        if (lanes::is_goal_op(v.cells[i].op) && v.cells[i].a == v.cells[i].b)
+        {
+            EXPECT_LT(v.cells[i].c, v.cells[i].d) << context->schema().relation(v.cells[i].relation).name;
+            ++constant_cells;
+        }
+    }
+    EXPECT_GT(constant_cells, 0u);
+    for (u32 i = 0; i < v.num_row_cells; ++i)
+    {
+        if (lanes::is_goal_op(v.row_cells[i].op))
+        {
+            EXPECT_LT(v.row_cells[i].a, v.row_cells[i].b);
+        }
+    }
 }
 }  // namespace

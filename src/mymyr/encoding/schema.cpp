@@ -440,6 +440,18 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         }
         for (const Relation& relation : schema->m_relations)
             schema->m_virtual_key.push_back(relation.predicate < 0 ? -1 : key.at(relation.predicate));
+        // the rank of a predicate: its place among the predicates that have relations, ordered by name
+        std::vector<i32> predicates;
+        for (const auto& [predicate, relation] : key)
+            predicates.push_back(predicate);
+        std::ranges::sort(predicates, {},
+                          [&](i32 p) -> const std::string& { return domain.predicates[static_cast<usize>(p)].name; });
+        std::unordered_map<i32, i32> rank;
+        for (usize i = 0; i < predicates.size(); ++i)
+            rank.emplace(predicates[i], static_cast<i32>(i));
+        for (const Relation& relation : schema->m_relations)
+            schema->m_virtual_rank.push_back(relation.predicate < 0 ? -1 : rank.at(relation.predicate));
+        schema->m_num_virtual_predicates = static_cast<u32>(predicates.size());
     }
     schema->m_goal_complete = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)

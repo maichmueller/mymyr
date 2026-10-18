@@ -190,9 +190,16 @@ public:
     [[nodiscard]] std::span<const i32> schema_relations() const noexcept { return m_schema_relation; }
 
     /// The key of a relation's predicate for the predicate virtual nodes, a relation id: the predicate's plain state
-    /// relation, or its first relation if the schema has none; -1 for a relation without a predicate. A graph numbers
-    /// its virtual nodes in the order of these keys, and the entity_ref of a virtual node is its key.
+    /// relation, or its first relation if the schema has none; -1 for a relation without a predicate. The entity_ref
+    /// of a virtual node is its key.
     [[nodiscard]] i32 virtual_key(u32 relation) const { return m_virtual_key.at(relation); }
+
+    /// The rank of a relation's predicate among the predicates that have relations, by ascending name of the domain
+    /// predicate; -1 for a relation without a predicate. A graph numbers its virtual nodes in the order of these ranks.
+    [[nodiscard]] i32 virtual_rank(u32 relation) const { return m_virtual_rank.at(relation); }
+
+    /// The predicates that have relations (the distinct ranks).
+    [[nodiscard]] u32 num_virtual_predicates() const noexcept { return m_num_virtual_predicates; }
 
     /// The names of all entity roles and slot roles, indexed by role value. The codes are fixed: the auxiliary role is
     /// listed whether or not the schema has nullary relations.
@@ -229,6 +236,8 @@ private:
     std::vector<u32> m_role_offsets;
     std::vector<i32> m_schema_relation;
     std::vector<i32> m_virtual_key;
+    std::vector<i32> m_virtual_rank;
+    u32 m_num_virtual_predicates = 0;
     bool m_implicit_entities = false;
     bool m_goal_complete = false;
     u64 m_fingerprint = 0;

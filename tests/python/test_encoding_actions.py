@@ -7,8 +7,9 @@ import random
 import numpy as np
 import pytest
 
+import mymyr
 from mymyr import encoding, rl
-from conftest import text_task, walk
+from conftest import BLOCKS, text_task, walk
 
 GOAL_ROLE = 2
 ACTION_ROLE = 4
@@ -43,7 +44,7 @@ def graph_cells(batch, graph):
 
 
 def action_entities(batch, graph):
-    """(local id, expansion row) of each action entity of a graph."""
+    """(local id, row of the graph's slice of the expansion) of each action entity of a graph."""
     begin, end = (int(x) for x in batch.entity_offsets[graph : graph + 2])
     return [(i, int(batch.entity_ref[begin + i])) for i in range(end - begin) if batch.entity_role[begin + i] == ACTION_ROLE]
 
@@ -59,7 +60,7 @@ def test_action_tuples_and_entities_follow_the_expansion(name, layout):
     offsets = expansion.offsets
     lanes = encoder.relation_lanes
     for graph in range(len(states)):
-        rows = list(range(int(offsets[graph]), int(offsets[graph + 1])))
+        rows = list(range(int(offsets[graph + 1]) - int(offsets[graph])))
         entities = action_entities(batch, graph)
         assert sorted(row for _, row in entities) == rows
         ids = [i for i, _ in entities]
@@ -68,7 +69,7 @@ def test_action_tuples_and_entities_follow_the_expansion(name, layout):
         names = {n for n, lane in zip(encoder.relation_names, lanes) if lane == "action"}
         expected = {}
         for (entity, row) in entities:
-            action = expansion.action(row)
+            action = expansion.action(int(offsets[graph]) + row)
             expected.setdefault(action.name, []).append((entity, *action.label[1]))
         got = {n: t for n, t in cells.items() if n in names}
         assert {n: sorted(t) for n, t in got.items()} == {n: sorted(t) for n, t in expected.items()}
@@ -98,11 +99,7 @@ def test_a_single_state_equals_its_slice_of_a_batch():
         assert graph_cells(single, 0) == graph_cells(batch, graph)
         begin, end = (int(x) for x in batch.entity_offsets[graph : graph + 2])
         assert np.array_equal(single.entity_role, batch.entity_role[begin:end])
-        refs = batch.entity_ref[begin:end].copy()
-        roles = batch.entity_role[begin:end]
-        refs[roles == ACTION_ROLE] -= int(expand(task, states).offsets[graph])
-        keep = roles != GOAL_ROLE
-        assert np.array_equal(single.entity_ref[keep], refs[keep])
+        assert np.array_equal(single.entity_ref, batch.entity_ref[begin:end])
 
 
 @pytest.mark.parametrize("threads", [1, 3])
@@ -110,39 +107,43 @@ def test_a_single_state_equals_its_slice_of_a_batch():
 def test_threads_and_layouts_give_the_same_action_graphs(threads, layout):
     task = text_task("blocks__probBLOCKS-8-0")
     states = walk(task, steps=10, walks=3)
+    states = states * (2500 // len(states) + 1)  # more graphs than one thread encodes alone (1024)
+    assert len(states) > 1024
     expansion = expand(task, states)
     reference = encoding.FlatRelationEncoder(task, **OPTIONS).encode(states, actions=expansion)
     batch = encoding.FlatRelationEncoder(task, layout=layout, **OPTIONS).encode(states, actions=expansion, threads=threads)
-    for graph in range(len(states)):
+    for graph in range(0, len(states), 7):
         assert graph_cells(batch, graph) == graph_cells(reference, graph)
-    keep = np.asarray(batch.entity_role) != GOAL_ROLE
-    assert np.array_equal(batch.entity_ref[keep], reference.entity_ref[keep])
+    assert np.array_equal(batch.entity_ref, reference.entity_ref)
     assert np.array_equal(batch.entity_role, reference.entity_role)
 
 
 @pytest.mark.parametrize("name", ["gripper__prob05", "blocks__probBLOCKS-8-0", "logistics00__probLOGISTICS-6-1"])
 def test_picking_action_entities_walks_the_task(name):
-    """The reference of an action entity is its expansion row: following the entities a policy picks reproduces
-    Task.apply."""
+    """The reference of an action entity is its expansion row relative to its state's rows (`offsets[graph] + ref` is
+    the row of the expansion): following the entities a policy picks reproduces Task.apply."""
     task = text_task(name)
     encoder = encoding.FlatRelationEncoder(task, **OPTIONS)
     rng = random.Random(7)
-    state = task.initial_state
-    for _ in range(12):
-        expansion = expand(task, [state])
-        if not expansion.total:
-            break
-        batch = encoder.encode([state], actions=expansion)
-        begin, end = (int(x) for x in batch.target_offsets[:2])
+    states = walk(task, steps=6, walks=3)
+    expansion = expand(task, states)
+    batch = encoder.encode(states, actions=expansion)
+    checked = 0
+    for graph, state in enumerate(states):
+        count = int(expansion.offsets[graph + 1]) - int(expansion.offsets[graph])
+        begin, end = (int(x) for x in batch.target_offsets[graph : graph + 2])
         picks = [int(batch.target_entity[t]) for t in range(begin, end) if batch.target_group[t] == ACTION_GROUP]
-        assert len(picks) == expansion.total
+        assert len(picks) == count
+        if not picks:
+            continue
         entity = rng.choice(picks)
-        row = int(batch.entity_ref[entity])
+        row = int(expansion.offsets[graph]) + int(batch.entity_ref[entity])
         assert batch.entity_role[entity] == ACTION_ROLE
         action = expansion.action(row)
         successor = task.decode(expansion.succ[row : row + 1])[0]
         assert task.apply(state, action) == successor
-        state = successor
+        checked += 1
+    assert checked > 1
 
 
 # ------------------------------------------------------------------------------------------------ errors
@@ -157,6 +158,23 @@ def test_the_expansion_argument_is_validated():
         encoder.encode([state, state], actions=expand(task, [state]))
     with pytest.raises(ValueError, match="mymyr: encoding"):
         encoder.encode([state], actions=expand(other, [other.initial_state]))
+
+
+def test_the_expansion_must_be_over_the_encoders_own_task():
+    """An expansion over another problem of the same domain has the same schemas but other objects: it is refused,
+    while one over an equal task loaded again is accepted."""
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    task = mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl")
+    smaller = mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "smedium.pddl")
+    encoder = encoding.FlatRelationEncoder(task, **OPTIONS)
+    state = task.initial_state
+    with pytest.raises(ValueError, match="^mymyr: encoding: .*another task than instance 0"):
+        encoder.encode([state], actions=expand(smaller, [smaller.initial_state]))
+    again = mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / "probBLOCKS-8-0.pddl")
+    batch = encoder.encode([state], actions=expand(again, [again.initial_state]))
+    reference = encoder.encode([state], actions=expand(task, [state]))
+    assert np.array_equal(batch.relation_args, reference.relation_args)
 
 
 def test_actions_need_action_relations():
@@ -180,7 +198,7 @@ def test_an_overflowed_expansion_is_refused():
 # ------------------------------------------------------------------------------------------------ virtual nodes
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("name", TASKS)
-def test_each_used_predicate_has_one_virtual_node_in_key_order(name, layout):
+def test_each_used_predicate_has_one_virtual_node_in_name_order(name, layout):
     task = text_task(name)
     states = walk(task, steps=8, walks=2)
     encoder = encoding.FlatRelationEncoder(task, layout=layout, **OPTIONS)
@@ -191,7 +209,8 @@ def test_each_used_predicate_has_one_virtual_node_in_key_order(name, layout):
         roles = np.asarray(batch.entity_role[begin:end])
         refs = np.asarray(batch.entity_ref[begin:end])
         virtual = [int(r) for r, role in zip(refs, roles) if role == VIRTUAL_ROLE]
-        assert virtual == sorted(set(virtual))
+        names = [schema.relation_names[ref] for ref in virtual]
+        assert names == sorted(set(names))
         first = int(np.argmax(roles == VIRTUAL_ROLE)) if virtual else None
         cells = graph_cells(batch, graph)
         used = set()

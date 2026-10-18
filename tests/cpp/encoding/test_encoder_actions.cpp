@@ -104,7 +104,8 @@ EncodeInput input_of(const test::Rows& rows, const Expanded* expanded = nullptr)
 
 using Binding = std::vector<i32>;
 
-/// The distinct ground actions of state g by action relation, each with the first expansion row that has it.
+/// The distinct ground actions of state g by action relation, each with the first row of the state's slice of the
+/// expansion that has it (counted from the slice's first row).
 std::vector<std::map<Binding, i32>> expected_actions(const FlatEncoder& encoder, const Expanded& e, u64 g)
 {
     const auto& relation_of = encoder.schema().schema_relations();
@@ -115,7 +116,7 @@ std::vector<std::map<Binding, i32>> expected_actions(const FlatEncoder& encoder,
         const u32 schema = static_cast<u32>(e.schema[static_cast<usize>(row)]);
         Binding b(e.binding.begin() + static_cast<std::ptrdiff_t>(static_cast<u64>(row) * L),
                   e.binding.begin() + static_cast<std::ptrdiff_t>(static_cast<u64>(row) * L + encoder.table().schema_arities()[schema]));
-        out[static_cast<usize>(relation_of[schema])].emplace(std::move(b), row);
+        out[static_cast<usize>(relation_of[schema])].emplace(std::move(b), row - e.offsets[g]);
     }
     return out;
 }
@@ -153,7 +154,7 @@ void expect_actions_match(const FlatEncoder& encoder, const test::Rows& rows, co
                 // the objects, in ascending order of the binding
                 for (u32 k = 0; k + 1 < arity; ++k)
                     ASSERT_EQ(tuple[1 + k] - base, it->first[k]) << schema.relation(r).name;
-                // the action entity refers to the first row that has the ground action
+                // the action entity refers to the first row of the state's slice that has the ground action
                 EXPECT_EQ(ref[static_cast<usize>(tuple[0])], it->second);
                 ++total_actions;
             }
@@ -228,6 +229,29 @@ TEST(EncoderActions, NoExpansionMeansNoActionTuples)
     EXPECT_EQ(std::count(role.begin(), role.end(), static_cast<i64>(EntityRole::Action)), 0);
 }
 
+TEST(EncoderActions, ActionEntitiesExistWithoutActionTargets)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 16, 1);
+    const auto expanded = expand_rows(*table, rows);
+    FlatOptions options = test::encoder_options();
+    const auto encoder = FlatEncoder::create(table, options);
+    ASSERT_TRUE(options.targets.empty());
+    const auto batch = encoder->encode(input_of(rows, expanded.get()));
+    validate(*batch, encoder->schema());
+    EXPECT_EQ(batch->find("target_entity"), nullptr);
+    const auto role = ints(*batch, "entity_role");
+    const auto counts = ints(*batch, "relation_counts");
+    const EncodingSchema& schema = encoder->schema();
+    i64 tuples = 0;
+    for (u64 g = 0; g < rows.size(); ++g)
+        for (u32 r = 0; r < schema.num_relations(); ++r)
+            if (schema.relation(r).lane == Lane::Action)
+                tuples += counts[g * schema.num_relations() + r];
+    EXPECT_GT(tuples, 0);
+    EXPECT_EQ(std::count(role.begin(), role.end(), static_cast<i64>(EntityRole::Action)), tuples);
+}
+
 /// A domain whose action has a disjunctive precondition, so that the front end splits it into two schemas of one name.
 rl::TaskTablePtr disjunction_table()
 {
@@ -274,6 +298,101 @@ TEST(EncoderActions, SchemasOfOneNameAreMergedAndDuplicatesDropped)
             refs.insert(ref[e]);
     EXPECT_EQ(refs.size(), 3u);
     EXPECT_EQ(*refs.begin(), 0);
+}
+
+/// A domain of 73 action schemas: `go` has a disjunctive precondition over 33 predicates (33 schemas of one name, so
+/// one action relation merges 33 runs) and `step0` ... `step39` one precondition each.
+rl::TaskTablePtr many_schemas_table()
+{
+    const std::filesystem::path directory = std::filesystem::path(::testing::TempDir());
+    const std::filesystem::path domain = directory / "many_schemas_domain.pddl";
+    const std::filesystem::path problem = directory / "many_schemas_problem.pddl";
+    std::string text = "(define (domain many-schemas) (:requirements :strips :typing :disjunctive-preconditions)\n"
+                       " (:types item) (:predicates (done ?x - item) (moved ?x - item)";
+    for (int k = 0; k < 40; ++k)
+        text += " (p" + std::to_string(k) + " ?x - item)";
+    text += ")\n (:action go :parameters (?x - item) :precondition (or";
+    for (int k = 0; k < 33; ++k)
+        text += " (p" + std::to_string(k) + " ?x)";
+    text += ") :effect (done ?x))\n";
+    for (int k = 0; k < 40; ++k)
+        text += " (:action step" + std::to_string(k) + " :parameters (?x - item) :precondition (p" +
+                std::to_string(k) + " ?x) :effect (and (moved ?x) (not (p" + std::to_string(k) + " ?x))))\n";
+    text += ")\n";
+    std::ofstream(domain) << text;
+    std::string init;
+    for (int k = 0; k < 40; ++k)
+    {
+        init += " (p" + std::to_string(k) + " a)";
+        if (k % 3 != 0)
+            init += " (p" + std::to_string(k) + " b)";
+        if (k % 5 == 0)
+            init += " (p" + std::to_string(k) + " c)";
+    }
+    std::ofstream(problem) << "(define (problem m) (:domain many-schemas) (:objects a b c - item)\n (:init" << init
+                           << ") (:goal (and (done a) (done b) (done c))))\n";
+    const auto task = Task::create(*frontend::load_task(domain, problem));
+    std::filesystem::remove(domain);
+    std::filesystem::remove(problem);
+    return rl::TaskTable::single(task);
+}
+
+TEST(EncoderActions, ManySchemasAndWideSplitRelationsAreEncoded)
+{
+    const auto table = many_schemas_table();
+    ASSERT_GT(table->num_schemas(), 64u);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+    {
+        FlatOptions options = action_options();
+        options.layout = layout;
+        options.goal_derivations = {};
+        const auto encoder = FlatEncoder::create(table, options);
+        const EncodingSchema& schema = encoder->schema();
+        u32 widest = 0;
+        std::map<i32, u32> schemas_of;
+        for (const i32 relation : schema.schema_relations())
+            widest = std::max(widest, ++schemas_of[relation]);
+        ASSERT_GT(widest, 32u);
+        const test::Rows rows = test::random_walk(*table, 0, 24, 5);
+        const auto expanded = expand_rows(*table, rows);
+        const auto batch = encoder->encode(input_of(rows, expanded.get()));
+        validate(*batch, schema);
+        expect_actions_match(*encoder, rows, *expanded, *batch);
+        // the initial state applies `go` to every object through many disjuncts
+        const auto counts = ints(*batch, "relation_counts");
+        EXPECT_EQ(counts[*schema.find("go")], 3);
+    }
+}
+
+TEST(EncoderActions, AnActionTupleRepeatingTheObjectsOfItsPredecessorIsRejected)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 8, 3);
+    const auto expanded = expand_rows(*table, rows);
+    const auto encoder = FlatEncoder::create(table, action_options());
+    const EncodingSchema& schema = encoder->schema();
+    const auto batch = encoder->encode(input_of(rows, expanded.get()));
+    ASSERT_NO_THROW(validate(*batch, schema));
+    const u64 R = schema.num_relations();
+    const auto counts = ints(*batch, "relation_counts");
+    const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+    const auto args = ints(*batch, "relation_args");
+    bool found = false;
+    for (u64 g = 0; g < rows.size() && !found; ++g)
+        for (u32 r = 0; r < R && !found; ++r)
+        {
+            const u32 arity = schema.relation(r).arity;
+            if (schema.slot_roles(r).front() != SlotRole::Action || arity < 2 || counts[g * R + r] < 2)
+                continue;
+            found = true;
+            // the second tuple keeps its action entity and takes the objects of the first
+            const u64 first = static_cast<u64>(arg_offsets[g * R + r]), second = first + arity;
+            rl::ArrayBundle corrupted = test::with_value(*batch, "relation_args", second + 1, args[first + 1]);
+            for (u32 k = 2; k < arity; ++k)
+                corrupted = test::with_value(corrupted, "relation_args", second + k, args[first + k]);
+            EXPECT_THROW(validate(corrupted, schema), std::invalid_argument) << schema.relation(r).name;
+        }
+    ASSERT_TRUE(found);
 }
 
 TEST(EncoderActions, ARunThatIsNotInCanonicalOrderIsRefused)
@@ -428,20 +547,21 @@ TEST(EncoderActions, ASingleStateEqualsItsGraphInABatch)
         for (i64 a : slice)
             rebased.push_back(a - batch_entities[g]);
         EXPECT_EQ(rebased, args);
-        // the batch's references count rows over the whole expansion; the single's over its own
+        // the references count rows from the state's own slice, in a batch and alone
         const auto ref = ints(*alone, "entity_ref");
-        const auto alone_role = ints(*alone, "entity_role");
-        for (usize e = 0; e < ref.size(); ++e)
-        {
-            if (alone_role[e] == static_cast<i64>(EntityRole::Action))
-            {
-                EXPECT_EQ(batch_ref[static_cast<usize>(batch_entities[g]) + e], ref[e] + expanded->offsets[g]);
-            }
-        }
+        const auto first = batch_ref.begin() + batch_entities[g];
+        EXPECT_EQ(std::vector<i64>(first, batch_ref.begin() + batch_entities[g + 1]), ref);
     }
 }
 
-TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInCatalogOrder)
+/// The name of the predicate a relation belongs to: the relation's name without its goal sign and level.
+std::string predicate_name(const std::string& relation)
+{
+    const usize begin = relation.starts_with("[+]") || relation.starts_with("[-]") ? 3 : 0;
+    return relation.substr(begin, relation.find('[', begin) - begin);
+}
+
+TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInOrderOfTheirNames)
 {
     for (const Problem& p : k_problems)
     {
@@ -465,15 +585,18 @@ TEST(EncoderVirtualNodes, OneNodePerUsedPredicateInCatalogOrder)
         bool some_unused = false;
         for (u64 g = 0; g < rows.size(); ++g)
         {
-            std::set<i64> used;
+            std::map<std::string, i64> used;  // the key of each used predicate by its name
             for (u32 r = 0; r < R; ++r)
                 if (counts[g * R + r] > 0 && schema.virtual_key(r) >= 0)
-                    used.insert(schema.virtual_key(r));
+                    used.emplace(predicate_name(schema.relation(r).name), schema.virtual_key(r));
+            std::vector<i64> expected_nodes;
+            for (const auto& [name, key] : used)
+                expected_nodes.push_back(key);
             std::vector<i64> nodes;
             for (i64 e = entity_offsets[g]; e < entity_offsets[g + 1]; ++e)
                 if (role[static_cast<usize>(e)] == static_cast<i64>(EntityRole::PredicateVirtual))
                     nodes.push_back(ref[static_cast<usize>(e)]);
-            EXPECT_EQ(std::vector<i64>(used.begin(), used.end()), nodes) << "graph " << g;
+            EXPECT_EQ(expected_nodes, nodes) << "graph " << g;
             std::set<i64> all;
             for (u32 r = 0; r < R; ++r)
                 if (schema.virtual_key(r) >= 0)
@@ -498,4 +621,130 @@ TEST(EncoderVirtualNodes, TheKeyIsThePredicatesStateRelationWhenThereIsOne)
         EXPECT_EQ(schema->virtual_key(*schema->find(std::string("[+]") + name + "[g]")), static_cast<i32>(state));
     }
 }
+TEST(EncoderVirtualNodes, PredicatesWithoutAStateRelationAreRankedByName)
+{
+    // `zz` is static and dropped from the state relations: its only relations are goal relations, sorted before `aa`
+    const std::filesystem::path directory = std::filesystem::path(::testing::TempDir());
+    const std::filesystem::path domain = directory / "ranks_domain.pddl";
+    const std::filesystem::path problem = directory / "ranks_problem.pddl";
+    std::ofstream(domain) << "(define (domain ranks) (:requirements :strips :typing) (:types item)\n"
+                             " (:predicates (aa ?x - item) (zz ?x - item))\n"
+                             " (:action make :parameters (?x - item) :precondition (zz ?x) :effect (aa ?x)))\n";
+    std::ofstream(problem) << "(define (problem p) (:domain ranks) (:objects a - item)\n"
+                              " (:init (zz a)) (:goal (and (aa a) (zz a))))\n";
+    const auto table = rl::TaskTable::single(Task::create(*frontend::load_task(domain, problem)));
+    std::filesystem::remove(domain);
+    std::filesystem::remove(problem);
+    FlatOptions options = test::encoder_options();
+    options.include_static = false;
+    options.include_derived = false;
+    options.predicate_virtual_nodes = true;
+    options.goal_derivations = {GoalDerivation::Plain};
+    const auto encoder = FlatEncoder::create(table, options);
+    const EncodingSchema& schema = encoder->schema();
+    const u32 aa = *schema.find("aa"), zz_goal = *schema.find("[+]zz[g]");
+    ASSERT_LT(zz_goal, aa);
+    EXPECT_EQ(schema.virtual_key(zz_goal), static_cast<i32>(zz_goal));
+    EXPECT_LT(schema.virtual_rank(aa), schema.virtual_rank(zz_goal));
+    const test::Rows rows = test::random_walk(*table, 0, 1, 1);
+    const auto batch = encoder->encode(input_of(rows));
+    validate(*batch, schema);
+    const auto role = ints(*batch, "entity_role");
+    const auto ref = ints(*batch, "entity_ref");
+    std::vector<i64> nodes;
+    for (usize e = 0; e < role.size(); ++e)
+        if (role[e] == static_cast<i64>(EntityRole::PredicateVirtual))
+            nodes.push_back(ref[e]);
+    EXPECT_EQ(nodes, (std::vector<i64>{aa, zz_goal}));
+}
+
+TEST(EncoderActions, ActionRelationsWiderThanEveryPredicateAreEncodedWhole)
+{
+    // wide_predicates: set/1 and join/4 over the objects a b c = 0 1 2, with the predicates on/1, link/3 and trio/3;
+    // the state {(on a), (on b)} has the actions set a, set b, set c and join (a b c w), join (c b a w) for every w
+    const auto table = rl::TaskTable::single(test::pddl_task("wide_predicates", "p01"));
+    const Task& task = *table->task(0);
+    std::vector<u64> state(table->words(), 0);
+    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {0}));
+    test::set_bit(state, test::atom_slot(task, AtomKind::Fluent, "on", {1}));
+    test::Rows rows;
+    rows.words = table->words();
+    rows.task_ids = {0, 0};  // two graphs of one state: the second graph's rows are not the expansion's first rows
+    rows.data = state;
+    rows.data.insert(rows.data.end(), state.begin(), state.end());
+    const auto expanded = expand_rows(*table, rows);
+    ASSERT_EQ(expanded->offsets[1], 9);
+    ASSERT_EQ(expanded->offsets[2], 18);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+        for (const bool wide : {false, true})
+        {
+            SCOPED_TRACE(std::string(layout == Layout::Graph ? "graph" : "relation") +
+                         (wide ? " all relations" : " actions only"));
+            FlatOptions options = action_options();
+            options.layout = layout;
+            options.include_static = wide;
+            options.include_derived = wide;
+            const auto encoder = FlatEncoder::create(table, options);
+            const EncodingSchema& schema = encoder->schema();
+            EXPECT_EQ(encoder->context().max_arity(), wide ? 3u : 1u);
+            const auto batch = encoder->encode(input_of(rows, expanded.get()));
+            validate(*batch, schema);
+            const auto entity_offsets = ints(*batch, "entity_offsets");
+            const auto counts = ints(*batch, "relation_counts");
+            const auto offsets = ints(*batch, "relation_offsets");
+            const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+            const auto args = ints(*batch, "relation_args");
+            const auto ref = ints(*batch, "entity_ref");
+            const u64 G = rows.size(), R = schema.num_relations();
+            const u32 join = *schema.find("join"), set = *schema.find("set");
+            for (u64 g = 0; g < G; ++g)
+            {
+                auto tuples = [&](u32 r)
+                {
+                    const u64 cell = layout == Layout::Graph ? g * R + r : r * G + g;
+                    std::vector<std::vector<i64>> out;
+                    const u32 arity = schema.relation(r).arity;
+                    for (i64 t = 0; t < offsets[cell + 1] - offsets[cell]; ++t)
+                    {
+                        std::vector<i64> tuple;
+                        for (u32 k = 0; k < arity; ++k)
+                            tuple.push_back(args[static_cast<u64>(arg_offsets[cell] + t * arity + k)] -
+                                            entity_offsets[g]);
+                        out.push_back(tuple);
+                    }
+                    return out;
+                };
+                EXPECT_EQ(counts[g * R + join], 6) << g;
+                EXPECT_EQ(counts[g * R + set], 3) << g;
+                // the action entities follow the three objects, relation after relation
+                const std::vector<std::vector<i64>> want_join = {{3, 0, 1, 2, 0}, {4, 0, 1, 2, 1}, {5, 0, 1, 2, 2},
+                                                                  {6, 2, 1, 0, 0}, {7, 2, 1, 0, 1}, {8, 2, 1, 0, 2}};
+                const std::vector<std::vector<i64>> want_set = {{9, 0}, {10, 1}, {11, 2}};
+                EXPECT_EQ(tuples(join), want_join) << g;
+                EXPECT_EQ(tuples(set), want_set) << g;
+                // each entity refers to its row relative to the graph's own rows, whatever the graph's place in the
+                // batch
+                const u32 L = expanded->x.label_width;
+                std::set<i64> rows_seen;
+                for (const auto& tuple : tuples(join))
+                {
+                    const i64 row = ref[static_cast<u64>(entity_offsets[g] + tuple[0])];
+                    rows_seen.insert(row);
+                    const u64 at = static_cast<u64>(expanded->offsets[g] + row);
+                    EXPECT_EQ(schema.schema_relations()[static_cast<u64>(expanded->schema[at])],
+                              static_cast<i32>(join));
+                    for (u32 k = 0; k < 4; ++k)
+                        EXPECT_EQ(expanded->binding[at * L + k], tuple[1 + k]) << g;
+                }
+                for (const auto& tuple : tuples(set))
+                {
+                    const i64 row = ref[static_cast<u64>(entity_offsets[g] + tuple[0])];
+                    rows_seen.insert(row);
+                    EXPECT_EQ(expanded->binding[static_cast<u64>(expanded->offsets[g] + row) * L], tuple[1]) << g;
+                }
+                EXPECT_EQ(rows_seen, (std::set<i64>{0, 1, 2, 3, 4, 5, 6, 7, 8})) << g;
+            }
+        }
+}
+
 }  // namespace
