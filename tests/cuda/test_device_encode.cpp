@@ -1049,6 +1049,121 @@ TEST(DeviceEncode, TheWorkspaceFormEqualsTheStreamForm)
     expect_same_arrays(*host.bundle, by_stream);
 }
 
+/// The device's FlatSizes of a count() on `stream`, downloaded.
+encoding::FlatSizes count_sizes(const cuda::DeviceEncoder& device, const cuda::ContextPtr& ctx, cudaStream_t stream,
+                                const cuda::EncodingWorkspace& work, const cuda::DeviceEncodeInput& in,
+                                const cuda::LaunchConfig& launch = {})
+{
+    cuda::DeviceBuffer buffer(ctx, sizeof(encoding::FlatSizes), stream);
+    cuda::check(cudaMemsetAsync(buffer.data(), 0xff, buffer.size(), stream), "clear the sizes");
+    device.count(work, in, static_cast<encoding::FlatSizes*>(buffer.data()), launch);
+    encoding::FlatSizes sizes;
+    cuda::check(cudaMemcpyAsync(&sizes, buffer.data(), sizeof(sizes), cudaMemcpyDeviceToHost, stream), "download the sizes");
+    cuda::check(cudaStreamSynchronize(stream), "download the sizes");
+    return sizes;
+}
+
+/// Counting and then filling is encoding: the sizes of the count are the host's, the filled arrays are the host's bytes,
+/// in every configuration and layout.
+TEST(DeviceEncode, CountingThenFillingEqualsTheHostEncoderBitForBit)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const u64 n = 300;
+    u64 compared = 0;
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const Batch batch = make_batch(c.table, n, c.walk, 53);
+        const DeviceRows rows(ctx, stream, batch);
+        for (const Config& config : configs())
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                {
+                    const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, index));
+                    cuda::DeviceEncoder device(ctx, encoder);
+                    device.reserve(cuda::BatchShape{n, 0, 0, 0}, stream);
+                    const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+                    const cuda::BatchShape shape = shape_of(n, host.sizes);
+                    const auto input = rows.input(batch, n, config.inputs);
+                    const cuda::OutputLayout out_layout = device.output_layout(shape);
+                    cuda::DeviceBuffer block(ctx, out_layout.bytes, stream);
+                    cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), stream), "clear the output");
+                    const auto work = device.acquire(stream);
+                    const encoding::FlatSizes counted = count_sizes(device, ctx, stream, work, input);
+                    expect_sizes(host.sizes, counted);
+                    EXPECT_EQ(counted.reserved, 0u);
+                    device.fill(work, input, cuda::output_of(out_layout, shape, block.data()));
+                    DeviceResult result;
+                    result.layout = out_layout;
+                    result.block.resize(block.size());
+                    cuda::check(cudaMemcpyAsync(result.block.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream),
+                                "download the output");
+                    cuda::check(cudaStreamSynchronize(stream), "download the output");
+                    std::memcpy(&result.sizes, result.block.data() + out_layout.sizes, sizeof(encoding::FlatSizes));
+                    expect_sizes(host.sizes, result.sizes);
+                    expect_same_arrays(*host.bundle, result);
+                    ++compared;
+                    if (::testing::Test::HasFailure())
+                        return;
+                }
+        }
+    }
+    EXPECT_GT(compared, 0u);
+}
+
+/// A count reports the index and input flags and never the capacity flag; a fill with short capacities reports it and
+/// writes nothing.
+TEST(DeviceEncode, CountingReportsTheFlagsOfTheRowsAndFillingThoseOfTheCapacities)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];
+    const u64 n = 40;
+    Batch batch = make_batch(c.table, n, true, 59);
+    const Config config = configs()[1];
+    const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, encoding::Layout::Graph, encoding::IndexType::I32));
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(cuda::BatchShape{n, 0, 0, 0}, stream);
+    const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+    const cuda::BatchShape shape = shape_of(n, host.sizes);
+    {
+        const DeviceRows rows(ctx, stream, batch);
+        const auto input = rows.input(batch, n, config.inputs);
+        const auto work = device.acquire(stream);
+        const encoding::FlatSizes counted = count_sizes(device, ctx, stream, work, input);
+        EXPECT_EQ(counted.overflow, 0u);
+        // capacities one short: the fill reports it and writes no array
+        const cuda::OutputLayout layout = device.output_layout(shape);
+        cuda::DeviceBuffer block(ctx, layout.bytes, stream);
+        cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), stream), "clear the output");
+        cuda::DeviceOutput out = cuda::output_of(layout, shape, block.data());
+        out.capacities.args = host.sizes.args - 1;
+        device.fill(work, input, out);
+        std::vector<std::byte> bytes(block.size());
+        cuda::check(cudaMemcpyAsync(bytes.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "download");
+        cuda::check(cudaStreamSynchronize(stream), "download");
+        encoding::FlatSizes sizes;
+        std::memcpy(&sizes, bytes.data() + layout.sizes, sizeof(sizes));
+        EXPECT_EQ(sizes.overflow, encoding::k_overflow_capacity);
+        EXPECT_EQ(sizes.args, host.sizes.args);
+        for (u64 i = 0; i < layout.sizes; ++i)
+            ASSERT_EQ(bytes[i], std::byte{0}) << "byte " << i;
+    }
+    {
+        batch.task_ids[3] = static_cast<i32>(c.table->size());
+        const DeviceRows rows(ctx, stream, batch);
+        const auto input = rows.input(batch, n, config.inputs);
+        const auto work = device.acquire(stream);
+        const encoding::FlatSizes counted = count_sizes(device, ctx, stream, work, input);
+        EXPECT_EQ(counted.overflow, encoding::k_overflow_input);
+    }
+}
+
 TEST(DeviceEncode, EncodingAfterAGrowthOfTheTableUsesTheNewInstances)
 {
     SKIP_WITHOUT_GPU();

@@ -27,7 +27,8 @@ inline constexpr u32 k_overflow_input = 4;     // a row is invalid: a task id ou
                                                // calls report it here, host calls throw
 
 /// The true sizes of a batch (not clipped to any capacity) and whether the batch can be written. A POD, so that a
-/// device call can return it in the same form.
+/// device call can return it in the same form; its five 64-bit words are entities, tuples, args, targets and the
+/// overflow flags, and no byte of it is padding.
 struct FlatSizes
 {
     u64 entities = 0;
@@ -35,8 +36,10 @@ struct FlatSizes
     u64 args = 0;
     u64 targets = 0;
     u32 overflow = 0;  // k_overflow_* flags; 0: the batch fits
+    u32 reserved = 0;  // always 0: the flags fill a 64-bit word
     [[nodiscard]] bool overflowed() const noexcept { return overflow != 0; }
 };
+static_assert(sizeof(FlatSizes) == 5 * sizeof(u64));
 
 /// The destination arrays of a batch of G graphs and R relations, typed by the index type of the options (int32 or
 /// int64). The caller owns them. Arrays of size G, G + 1, G * R or G * R + 1 must have that size; relation_args,
