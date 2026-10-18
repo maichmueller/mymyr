@@ -238,6 +238,36 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
                 if (!exclude || (edge[0] != 0 && edge[1] != 0))
                     out.push_back(join({"s" + std::to_string(edge[0]), "s" + std::to_string(edge[1])}));
             break;
+        case Lane::Sibling:
+        case Lane::Cousin:
+        {
+            // from the definition: siblings share a parent, cousins have parents that are siblings
+            std::vector<std::set<u32>> parents(nodes);
+            for (const auto& edge : g.edges)
+                parents[static_cast<u32>(edge[1])].insert(static_cast<u32>(edge[0]));
+            auto siblings = [&](u32 a, u32 b)
+            {
+                if (a == b)
+                    return false;
+                return std::ranges::any_of(parents[a], [&](u32 p) { return parents[b].count(p) != 0; });
+            };
+            for (u32 a = 0; a < nodes; ++a)
+                for (u32 b = 0; b < nodes; ++b)
+                {
+                    if (a == b || (exclude && (a == 0 || b == 0)))
+                        continue;
+                    bool related = false;
+                    if (r.lane == Lane::Sibling)
+                        related = siblings(a, b);
+                    else
+                        for (const u32 p : parents[a])
+                            for (const u32 q : parents[b])
+                                related = related || siblings(p, q);
+                    if (related)
+                        out.push_back(join({"s" + std::to_string(a), "s" + std::to_string(b)}));
+                }
+            break;
+        }
         default: break;
     }
     std::sort(out.begin(), out.end());
@@ -378,6 +408,8 @@ TEST(Horizon, MatchesTheReference)
                     {
                         FlatOptions options = horizon_options(mode, root);
                         options.horizon.parent_relation = parent;
+                        options.horizon.sibling_relation = parent;
+                        options.horizon.cousin_relation = parent;
                         options.layout = layout;
                         options.index = parent ? IndexType::I64 : IndexType::I32;
                         SCOPED_TRACE(std::string(c.domain) + " " + std::string(to_string(mode)) + " " +
@@ -807,6 +839,113 @@ TEST(Horizon, InvalidInput)
     }
     // streams hold independent graphs
     EXPECT_THROW(FlatStream{encoder}, std::invalid_argument);
+}
+
+/// The graph used by the kinship tests: seven nodes, node 3 reached from two parents, a parallel edge, a back edge.
+///   0 -> 1, 0 -> 2, 0 -> 1 (parallel), 1 -> 3, 2 -> 3, 1 -> 4, 2 -> 5, 3 -> 6, 4 -> 0
+test::Horizon kinship_graph(const rl::TaskTable& table)
+{
+    const test::Rows roots = test::random_walk(table, 0, 1, 2);
+    test::Horizon h;
+    h.words = roots.words;
+    h.label_width = table.label_width();
+    h.task_ids = {0};
+    for (int node = 0; node < 7; ++node)
+        h.nodes.insert(h.nodes.end(), roots.data.begin(), roots.data.end());
+    const std::vector<std::array<i32, 2>> edges = {{0, 1}, {0, 2}, {0, 1}, {1, 3}, {2, 3}, {1, 4}, {2, 5}, {3, 6}, {4, 0}};
+    for (const auto& edge : edges)
+    {
+        h.edge_src.push_back(edge[0]);
+        h.edge_dst.push_back(edge[1]);
+        h.edge_schema.push_back(0);
+        h.edge_binding.insert(h.edge_binding.end(), h.label_width, 0);
+    }
+    h.node_offsets = {0, 7};
+    h.edge_offsets = {0, static_cast<i32>(edges.size())};
+    return h;
+}
+
+TEST(Horizon, KinshipOfADag)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Horizon h = kinship_graph(*table);
+    // by hand: siblings share a parent (node 3 has the parents 1 and 2), cousins have parents that are siblings
+    const std::vector<std::string> siblings = {"s1,s2", "s2,s1", "s3,s4", "s3,s5", "s4,s3", "s5,s3"};
+    const std::vector<std::string> cousins = {"s0,s6", "s3,s4", "s3,s5", "s4,s3", "s4,s5", "s5,s3", "s5,s4", "s6,s0"};
+    for (const RootPolicy root : k_roots)
+        for (const Layout layout : {Layout::Graph, Layout::Relation})
+            for (const IndexType index : {IndexType::I32, IndexType::I64})
+            {
+                FlatOptions options = horizon_options(HorizonMode::Full, root);
+                options.horizon.sibling_relation = true;
+                options.horizon.cousin_relation = true;
+                options.horizon.parent_relation = true;
+                options.include_actions = false;
+                options.layout = layout;
+                options.index = index;
+                const auto encoder = FlatEncoder::create(table, options);
+                const auto batch = encoder->encode(h.input());
+                EXPECT_NO_THROW(validate(*batch, encoder->schema()));
+                const Decoded decoded = decode(*batch, encoder->schema());
+                const bool exclude = root == RootPolicy::Exclude;
+                auto without_root = [&](std::vector<std::string> pairs)
+                {
+                    if (exclude)
+                        std::erase_if(pairs, [](const std::string& pair) { return pair.find("s0") != std::string::npos; });
+                    return pairs;
+                };
+                EXPECT_EQ(decoded[0].at("_sibling_"), without_root(siblings));
+                EXPECT_EQ(decoded[0].at("_cousin_"), without_root(cousins));
+                expect_reference(*encoder, h, *batch);
+            }
+    // the relations are symmetric, and either alone is allowed
+    FlatOptions options = horizon_options(HorizonMode::Action, RootPolicy::Include);
+    options.horizon.cousin_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    EXPECT_FALSE(encoder->schema().find("_sibling_"));
+    const Decoded decoded = decode(*encoder->encode(h.input()), encoder->schema());
+    EXPECT_EQ(decoded[0].at("_cousin_"), cousins);
+}
+
+TEST(Horizon, KinshipOfTrees)
+{
+    // a tree: the children of a node are its siblings, the children of its siblings the cousins of its children
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows roots = test::random_walk(*table, 0, 2, 5);
+    const test::Horizon h = test::horizon_of(*table, roots, 2, 3);
+    FlatOptions options = horizon_options(HorizonMode::Delta, RootPolicy::EncodeOnly);
+    options.horizon.sibling_relation = true;
+    options.horizon.cousin_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    const Decoded decoded = decode(*encoder->encode(h.input()), encoder->schema());
+    bool any_cousins = false;
+    for (u64 g = 0; g < h.graphs(); ++g)
+    {
+        std::map<u32, std::vector<u32>> children;
+        for (i32 e = h.edge_offsets[g]; e < h.edge_offsets[g + 1]; ++e)
+            children[static_cast<u32>(h.edge_src[static_cast<usize>(e)])].push_back(static_cast<u32>(h.edge_dst[static_cast<usize>(e)]));
+        std::set<std::string> siblings, cousins;
+        for (const auto& [parent, list] : children)
+            for (const u32 a : list)
+                for (const u32 b : list)
+                    if (a != b)
+                        siblings.insert("s" + std::to_string(a) + ",s" + std::to_string(b));
+        for (const auto& [p, list_p] : children)
+            for (const auto& [q, list_q] : children)
+            {
+                if (p == q || !std::ranges::any_of(children, [&](const auto& entry) {
+                        return std::ranges::count(entry.second, p) && std::ranges::count(entry.second, q);
+                    }))
+                    continue;
+                for (const u32 a : list_p)
+                    for (const u32 b : list_q)
+                        cousins.insert("s" + std::to_string(a) + ",s" + std::to_string(b));
+            }
+        EXPECT_EQ(std::set<std::string>(decoded[g].at("_sibling_").begin(), decoded[g].at("_sibling_").end()), siblings);
+        EXPECT_EQ(std::set<std::string>(decoded[g].at("_cousin_").begin(), decoded[g].at("_cousin_").end()), cousins);
+        any_cousins = any_cousins || !cousins.empty();
+    }
+    EXPECT_TRUE(any_cousins);
 }
 
 TEST(Horizon, CorruptBatchesAreRefused)

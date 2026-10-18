@@ -122,6 +122,13 @@ struct HorizonOptions
     RootPolicy root = RootPolicy::Include;
     /// Adds the relation `_parent_` (state slot, state slot) between a node and its parent. Needs a horizon mode.
     bool parent_relation = false;
+    /// Adds the relation `_sibling_` (state slot, state slot) between two nodes that some node has an edge to both of
+    /// (they share a parent), as the pair in both orders. Needs a horizon mode.
+    bool sibling_relation = false;
+    /// Adds the relation `_cousin_` (state slot, state slot) between two nodes whose parents are siblings: an edge from
+    /// p to the one, an edge from q to the other, p != q, and some node with an edge to both p and q. Both orders.
+    /// Needs a horizon mode.
+    bool cousin_relation = false;
 
     [[nodiscard]] friend constexpr bool operator==(const HorizonOptions&, const HorizonOptions&) noexcept = default;
 };
@@ -178,7 +185,7 @@ struct FlatOptions
 /// - added goal derivations without the delta horizon mode;
 /// - targets together with a horizon mode (the state nodes are the targets of a horizon);
 /// - the action horizon mode without action relations;
-/// - a parent relation, or a root policy other than Include, without a horizon mode.
+/// - a parent, sibling or cousin relation, or a root policy other than Include, without a horizon mode.
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",

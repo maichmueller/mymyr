@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace mymyr::encoding
@@ -41,6 +43,7 @@ struct Graph
     u32 edges;
     const i32* schema_relation;  // [schemas] the relation of each action schema (-1: none)
     bool exclude;                // the root has no entity
+    KinScratch* kin;             // the kinship of the graph, when the schema has a sibling or cousin relation
 };
 
 const u64* atoms_of(const Graph& h, u32 node) { return h.nodes + u64{node} * h.node_stride; }
@@ -131,6 +134,102 @@ u64 cell_word(const Cell& c, const Graph& h, u32 node, u32 w)
     }
 }
 
+/// Fills `k` with the kinship lists of a graph of `nodes` nodes and the `edges` edges src -> dst: the distinct edges by
+/// two stable counting sorts (destination, then source), the parents as their transpose, and for cousins the far lists.
+void build_kin(KinScratch& k, u32 nodes, u32 edges, const i32* src, const i32* dst, bool cousin)
+{
+    auto& cursor = k.child_offsets;
+    k.first.resize(edges);
+    k.second.resize(edges);
+    cursor.assign(u64{nodes} + 1, 0);
+    for (u32 e = 0; e < edges; ++e)
+        ++cursor[static_cast<u32>(dst[e]) + 1];
+    for (u32 n = 0; n < nodes; ++n)
+        cursor[n + 1] += cursor[n];
+    for (u32 e = 0; e < edges; ++e)
+        k.first[cursor[static_cast<u32>(dst[e])]++] = e;
+    cursor.assign(u64{nodes} + 1, 0);
+    for (u32 e = 0; e < edges; ++e)
+        ++cursor[static_cast<u32>(src[e]) + 1];
+    for (u32 n = 0; n < nodes; ++n)
+        cursor[n + 1] += cursor[n];
+    std::vector<u32> start(cursor.begin(), cursor.end());
+    for (u32 i = 0; i < edges; ++i)
+    {
+        const u32 e = k.first[i];
+        k.second[cursor[static_cast<u32>(src[e])]++] = static_cast<u32>(dst[e]);
+    }
+    // the children of a node are now ascending with repetitions: keep each once
+    k.children.clear();
+    k.child_offsets.assign(u64{nodes} + 1, 0);
+    for (u32 n = 0; n < nodes; ++n)
+    {
+        for (u32 i = start[n]; i < start[n + 1]; ++i)
+            if (i == start[n] || k.second[i] != k.second[i - 1])
+                k.children.push_back(k.second[i]);
+        k.child_offsets[n + 1] = static_cast<u32>(k.children.size());
+    }
+    k.parent_offsets.assign(u64{nodes} + 1, 0);
+    for (u32 child : k.children)
+        ++k.parent_offsets[child + 1];
+    for (u32 n = 0; n < nodes; ++n)
+        k.parent_offsets[n + 1] += k.parent_offsets[n];
+    k.parents.resize(k.children.size());
+    std::vector<u32> place(k.parent_offsets.begin(), k.parent_offsets.end() - 1);
+    for (u32 n = 0; n < nodes; ++n)
+        for (u32 i = k.child_offsets[n]; i < k.child_offsets[n + 1]; ++i)
+            k.parents[place[k.children[i]]++] = n;
+    k.cousin = cousin;
+    k.far.clear();
+    k.far_offsets.clear();
+    if (cousin)
+    {
+        k.far_offsets.assign(u64{nodes} + 1, 0);
+        std::vector<u32> siblings, gathered;
+        for (u32 p = 0; p < nodes; ++p)
+        {
+            siblings.clear();
+            for (u32 i = k.parent_offsets[p]; i < k.parent_offsets[p + 1]; ++i)
+            {
+                const u32 g = k.parents[i];
+                for (u32 j = k.child_offsets[g]; j < k.child_offsets[g + 1]; ++j)
+                    if (k.children[j] != p)
+                        siblings.push_back(k.children[j]);
+            }
+            std::sort(siblings.begin(), siblings.end());
+            siblings.erase(std::unique(siblings.begin(), siblings.end()), siblings.end());
+            gathered.clear();
+            for (u32 q : siblings)
+                gathered.insert(gathered.end(), k.children.begin() + k.child_offsets[q],
+                                k.children.begin() + k.child_offsets[q + 1]);
+            std::sort(gathered.begin(), gathered.end());
+            gathered.erase(std::unique(gathered.begin(), gathered.end()), gathered.end());
+            k.far.insert(k.far.end(), gathered.begin(), gathered.end());
+            if (k.far.size() > std::numeric_limits<u32>::max())
+                throw std::overflow_error("mymyr: encoding: a horizon graph has too many cousins");
+            k.far_offsets[p + 1] = static_cast<u32>(k.far.size());
+        }
+    }
+    k.view = KinView{nodes,
+                     k.child_offsets.data(),
+                     k.children.data(),
+                     k.parent_offsets.data(),
+                     k.parents.data(),
+                     cousin ? k.far_offsets.data() : nullptr,
+                     cousin ? k.far.data() : nullptr};
+    u32 room = 1;
+    for (u32 n = 0; n < nodes; ++n)
+    {
+        room = std::max(room, kin_total(k.view, false, n));
+        if (cousin)
+            room = std::max(room, kin_total(k.view, true, n));
+    }
+    k.out.resize(room);
+    k.work.resize(room);
+}
+
+bool kin_kind(HorizonKind kind) { return kind == HorizonKind::Sibling || kind == HorizonKind::Cousin; }
+
 bool edge_skipped(const Graph& h, const Cell& c, u32 e)
 {
     if (horizon_kind(c.op) == HorizonKind::Action)
@@ -148,6 +247,15 @@ u32 cell_count(const Cell& c, const Graph& h)
         for (u32 e = 0; e < h.edges; ++e)
             n += edge_skipped(h, c, e) ? 0u : 1u;
         return n;
+    }
+    if (kin_kind(kind))
+    {
+        u64 n = 0;
+        for (u32 node = h.exclude ? 1u : 0u; node < h.count; ++node)
+            n += kin_count(h.kin->view, kind == HorizonKind::Cousin, node, h.exclude, h.kin->out.data(), h.kin->work.data());
+        if (n > std::numeric_limits<u32>::max())
+            throw std::overflow_error("mymyr: encoding: a horizon graph has too many sibling or cousin tuples");
+        return static_cast<u32>(n);
     }
     const auto [first, last] = scope_of(c, h.count);
     if (kind == HorizonKind::Facts && horizon_low(c.op) == static_cast<u32>(CellOp::Static))
@@ -216,6 +324,17 @@ void emit_cell(const Cell& c, const Graph& h, Out& out)
                 out.put_pair(static_cast<u32>(h.src[e]), static_cast<u32>(h.dst[e]));
         return;
     }
+    if (kin_kind(kind))
+    {
+        for (u32 node = h.exclude ? 1u : 0u; node < h.count; ++node)
+        {
+            const u32 n = kin_row(h.kin->view, kind == HorizonKind::Cousin, node, h.exclude, h.kin->out.data(),
+                                  h.kin->work.data());
+            for (u32 i = 0; i < n; ++i)
+                out.put_pair(node, h.kin->out[i]);
+        }
+        return;
+    }
     const auto [first, last] = scope_of(c, h.count);
     const bool statics = kind == HorizonKind::Facts && horizon_low(c.op) == static_cast<u32>(CellOp::Static);
     for (u32 node = first; node < last; ++node)
@@ -232,7 +351,7 @@ void emit_cell(const Cell& c, const Graph& h, Out& out)
 bool over_auxiliary(const Cell& c)
 {
     const HorizonKind kind = horizon_kind(c.op);
-    return c.logical_arity == 0 && kind != HorizonKind::Action && kind != HorizonKind::Parent;
+    return c.logical_arity == 0 && kind != HorizonKind::Action && kind != HorizonKind::Parent && !kin_kind(kind);
 }
 
 /// Writes the entity ids of a cell's tuples.
@@ -286,6 +405,8 @@ struct HPass
     bool relation_major;
     bool evaluate;  // the derived words of the nodes are evaluated here, into s.derived
     bool edges_used;
+    bool kin;   // the schema has a sibling or cousin relation
+    bool far;   // ... a cousin relation
     bool actions;
     bool exclude;
     bool include_root_target;
@@ -318,7 +439,7 @@ struct HPass
         return in.derived ? in.derived + first_node(g) * s.derived_stride : s.derived.get() + first_node(g) * s.derived_stride;
     }
 
-    [[nodiscard]] Graph graph(u64 g, const InstanceView& v, RowLayers& layers) const noexcept
+    [[nodiscard]] Graph graph(u64 g, const InstanceView& v, RowLayers& layers, KinScratch* scratch) const noexcept
     {
         RowInput row{in.horizon.nodes.row(first_node(g)), nullptr};
         if (const LayerInput& l = in.subgoals; l.layers != 0)
@@ -367,6 +488,7 @@ struct HPass
         }
         out.schema_relation = schema_relation;
         out.exclude = exclude;
+        out.kin = kin ? scratch : nullptr;
         return out;
     }
 
@@ -489,7 +611,9 @@ void count_range(const HPass& p, u32 t)
             }
         }
         RowLayers layers;
-        const Graph h = p.graph(g, v, layers);
+        const Graph h = p.graph(g, v, layers, &m.kin);
+        if (h.kin)
+            build_kin(*h.kin, h.count, h.edges, h.src, h.dst, p.far);
         const RowInput& row = h.row;
         if (has_foreign_goal_bits(v, row))
         {
@@ -571,7 +695,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         const InstanceView v = instance_view(p.view, instance);
         const GraphTotals& totals = m.totals[g - lo];
         RowLayers layers;
-        const Graph h = p.graph(g, v, layers);
+        const Graph h = p.graph(g, v, layers, &m.kin);
+        if (h.kin)
+            build_kin(*h.kin, h.count, h.edges, h.src, h.dst, p.far);
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         // the entities: objects, the auxiliary entity, the state nodes, the predicate nodes
@@ -669,7 +795,7 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
                              predicate,
                              horizon_lead(c.op),
                              over_auxiliary(c),
-                             kind == HorizonKind::Parent ? 0u : c.logical_arity};
+                             kind == HorizonKind::Parent || kin_kind(kind) ? 0u : c.logical_arity};
             emit_cell(c, h, writer);
             const u64 n = static_cast<u64>(writer.dst - dst) / c.arity;
             assert(!graph_counts || n == graph_counts[i]);
@@ -713,7 +839,10 @@ HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& contex
                  static_cast<u32>(context.schema().num_relations()),
                  o.layout == Layout::Relation,
                  evaluate,
-                 o.include_actions || o.horizon.parent_relation,
+                 o.include_actions || o.horizon.parent_relation || o.horizon.sibling_relation ||
+                     o.horizon.cousin_relation,
+                 o.horizon.sibling_relation || o.horizon.cousin_relation,
+                 o.horizon.cousin_relation,
                  o.include_actions,
                  o.horizon.root == RootPolicy::Exclude,
                  o.horizon.root == RootPolicy::Include,
@@ -780,7 +909,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         if (!h.nodes.data)
             invalid("the node buffer is null");
     }
-    const bool edges_used = options.include_actions || options.horizon.parent_relation;
+    const bool edges_used = options.include_actions || options.horizon.parent_relation ||
+                            options.horizon.sibling_relation || options.horizon.cousin_relation;
     if (edges_used && edges)
     {
         if (!h.edge_src || !h.edge_dst)

@@ -4,6 +4,7 @@
 // the state of one pool member, the scratch of a call, and the loop of the fill pass over a member's graphs in either
 // layout. Not part of the interface.
 
+#include "mymyr/encoding/detail/horizon.hpp"
 #include "mymyr/encoding/encoder.hpp"
 
 #include <algorithm>
@@ -20,6 +21,16 @@ inline constexpr usize k_cache_line = 64;
 // strided writes (G entries apart) fill whole cache lines.
 inline constexpr u64 k_scan_tile = 128;
 inline constexpr u64 k_none = std::numeric_limits<u64>::max();
+
+/// The kinship lists of the graph a member is working on (detail/horizon.hpp KinView) and the room of kin_row.
+struct KinScratch
+{
+    std::vector<u32> child_offsets, children, parent_offsets, parents, far_offsets, far;
+    std::vector<u32> out, work;     // the room of kin_row: the most entries of any node
+    std::vector<u32> first, second; // the edges ordered by destination, then by source; gathered candidates
+    KinView view;
+    bool cousin = false;            // whether the far lists were built
+};
 
 /// The state of one pool member: it counts a contiguous slice of the graphs and later fills the same slice, so that the
 /// per-graph data of the slice stays with the member. Aligned so that members never share a cache line.
@@ -40,6 +51,7 @@ struct alignas(k_cache_line) Member
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 bad_edge = k_none;  // horizon: the first graph with an invalid edge
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
+    KinScratch kin;                    // horizon: the kinship of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice
                                                                                                 // starts in the batch

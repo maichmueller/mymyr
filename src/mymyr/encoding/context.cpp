@@ -773,10 +773,14 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
                 horizon_relations.edge_cells.push_back(
                     {id, detail::horizon_op(detail::HorizonKind::Action, detail::HorizonScope::All, true, false, 0), 0,
                      0, relation.arity, relation.logical_arity});
-            else if (relation.lane == Lane::Parent)
+            else if (relation.lane == Lane::Parent || relation.lane == Lane::Sibling || relation.lane == Lane::Cousin)
+            {
+                const detail::HorizonKind kind = relation.lane == Lane::Parent    ? detail::HorizonKind::Parent
+                                                 : relation.lane == Lane::Sibling ? detail::HorizonKind::Sibling
+                                                                                  : detail::HorizonKind::Cousin;
                 horizon_relations.edge_cells.push_back(
-                    {id, detail::horizon_op(detail::HorizonKind::Parent, detail::HorizonScope::All, true, false, 0), 0,
-                     0, relation.arity, 0});
+                    {id, detail::horizon_op(kind, detail::HorizonScope::All, true, false, 0), 0, 0, relation.arity, 0});
+            }
             if (relation.predicate >= 0)
                 max_arity = std::max(max_arity, relation.logical_arity);
             const auto described = describe_horizon(*own, id);
