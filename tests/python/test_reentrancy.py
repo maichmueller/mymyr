@@ -201,7 +201,7 @@ def test_a_searchs_heuristic_object_is_callable_from_its_observer(two_puts, kind
     assert done, "the search deadlocked on its heuristic object"
     assert not isinstance(got, Exception), got
     assert got.status == Status.SOLVED and plan_of(got) == plan_of(ref)
-    assert values and h.stats.evaluations >= len(values)
+    assert values and h.counters.evaluations >= len(values)
 
 
 def test_a_python_heuristic_may_call_the_heuristic_object_of_the_search(task):

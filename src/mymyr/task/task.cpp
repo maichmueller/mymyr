@@ -78,7 +78,7 @@ void Task::choose_atom_mode()
         if (L.total > CanonicalLayout::k_max_total)
             throw std::length_error("mymyr: the typed-dense canonical space of " + std::to_string(L.total) +
                                     " atoms exceeds 2^28 (the atom index takes at most 2^28)");
-        const u64 budget = m_options.reachability_budget ? m_options.reachability_budget : ~u64{0};
+        const u64 budget = m_options.reachability_budget;
         reachable = reachability::reachable_atoms(*this, budget);
         m_info.reachability_steps = reachable.steps;
         m_info.reachability_complete = reachable.complete;

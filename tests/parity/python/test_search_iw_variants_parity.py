@@ -190,7 +190,7 @@ def run_row(task, row):
             assert per_pass(x.passes) == y["per_pass"], w
             if x.solved:
                 assert len(x.plan) == y["plan_len"], w
-            assert x.num_states == y["num_states"], w
+            assert x.num_created_states == y["num_states"], w
             assert len(x.reached_fluent_atoms) == y["reached_fluent"], w
             assert len(x.reached_derived_atoms) == y["reached_derived"], w
             assert len(x.landing_states) == y["landing_states"], w
@@ -203,7 +203,7 @@ def run_row(task, row):
         orderings = []
         for s in filter(None, a["orderings"].split(",")):
             kind, _, seed = s.partition(":")
-            orderings.append((kind if kind != "dgaf" else "direct_goal_achiever_first", int(seed or 0)))
+            orderings.append((ORDERING[kind], int(seed or 0)))
         r = search.atomic_goal_portfolio(task, num_rollout_workers=a["workers"], threads=a["threads"],
                                          rollout_orderings=orderings, **kw)
         assert status_name(r.status, True) == e["status"], what

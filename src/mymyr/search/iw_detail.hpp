@@ -123,10 +123,10 @@ struct Context
     [[nodiscard]] bool out_of_time() const { return timed && Clock::now() >= deadline; }
 };
 
-/// The ladder: arities 0..max_arity from `root` (optimized IW(1) when max_arity == 1 and options.optimize_iw1),
+/// The ladder: arities 0..max_width from `root` (optimized IW(1) when max_width == 1 and options.optimize_iw1),
 /// or the single pass `only_arity` when set. Fills status, plan, goal_state, passes, total, effective_width,
 /// message, peak bytes; not cost, fluent_slots, nor the start/solution/end events.
-IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_arity, int only_arity = -1);
+IwResult run_ladder(Context& c, StateView root, const GoalTest& goal, u32 max_width, int only_arity = -1);
 
 void add_pass(SearchStatistics& total, const IwPassStatistics& p);
 

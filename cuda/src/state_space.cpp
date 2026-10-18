@@ -49,7 +49,7 @@ struct DeviceStateSpace::Storage
 namespace
 {
 using Clock = std::chrono::steady_clock;
-using datasets::StateSpaceStatus;
+using search::SearchStatus;
 
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 double s_since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
@@ -677,7 +677,7 @@ struct Wave
     std::vector<u32> icount;    // states per member (after the last chunk)
     std::vector<u64> last;      // an upper bound of the member's largest state id
     std::vector<u8> dead;
-    std::vector<StateSpaceStatus> status;
+    std::vector<search::SearchStatus> status;
     std::vector<Clock::time_point> t0;
     Clock::time_point start;
 
@@ -829,7 +829,7 @@ private:
             w.icount.push_back(1);
             w.last.push_back(w.count + j);
             w.dead.push_back(0);
-            w.status.push_back(StateSpaceStatus::Ok);
+            w.status.push_back(search::SearchStatus::Exhausted);
             w.t0.push_back(Clock::now());
         }
         reserve_states(w, w.count + n);
@@ -857,7 +857,7 @@ private:
     }
 
     /// Marks member m as no longer expanded.
-    void kill(Wave& w, u32 m, StateSpaceStatus why)
+    void kill(Wave& w, u32 m, search::SearchStatus why)
     {
         if (w.dead[m])
             return;
@@ -900,7 +900,7 @@ private:
         const u64 cap0 = expected ? expected + expected / 8 + 1024 : u64{1} << 14;
         reserve_states(w, cap0);
         alloc_table(w, expected ? std::bit_ceil(std::max<u64>(u64{1} << 16, 4 * expected)) : u64{1} << 16);
-        const u64 limit = std::max<u64>(m_o.space.max_states, 2);
+        const u64 limit = std::max<u64>(m_o.space.max_states, 1);
         const bool timed = std::isfinite(m_o.space.max_seconds);
         u32 next = first;
         // admission: members are consecutive table ids; an instance whose goal is statically false is Unsolvable at
@@ -948,24 +948,22 @@ private:
             if (all_dead && next >= I)
                 break;
             const auto ns = static_cast<u32>(std::min<u64>({m_o.chunk_states, w.count - b, chunk_cap}));
-            const ChunkStart at{b, w.count, w.edges, w.icount};
             const u32 done = expand(w, b, ns);
             b += done;
             ++m_st.chunks;
-            // budgets: max_states (fails iff the space has max(M, 2) states or more; `states` is the count after
-            // the parent whose expansion reached it) and max_seconds (checked between chunks)
-            ChunkTail tail;
+            // budgets: max_states (fails iff the space has max(M, 1) states or more; `states` is then the limit, the
+            // count at which the CPU generator stops) and max_seconds (checked between chunks)
             for (u32 m = 0; m < w.k; ++m)
             {
                 if (w.dead[m])
                     continue;
                 if (w.icount[m] >= limit)
                 {
-                    w.icount[m] = failure_count(w, m, at, done, limit, tail);
-                    kill(w, m, StateSpaceStatus::OutOfStates);
+                    w.icount[m] = static_cast<u32>(limit);
+                    kill(w, m, search::SearchStatus::OutOfStates);
                 }
                 else if (timed && b <= w.last[m] && s_since(w.t0[m]) > m_o.space.max_seconds)
-                    kill(w, m, StateSpaceStatus::Timeout);
+                    kill(w, m, search::SearchStatus::OutOfTime);
             }
             if (!m_multi && w.dead[0])
                 break;
@@ -985,60 +983,6 @@ private:
         return m_multi ? next : first + 1;
     }
 
-    /// A chunk's start: its first parent, the wave's states and transitions, and each member's count then.
-    struct ChunkStart
-    {
-        u64 b = 0, count = 0, edges = 0;
-        std::vector<u32> icount;
-    };
-    /// The chunk's transitions on the host, downloaded once for the members that failed in it.
-    struct ChunkTail
-    {
-        bool loaded = false;
-        std::vector<u64> off;                  // per parent of the chunk, and its end: absolute edge offsets
-        std::vector<u32> targets;              // the chunk's transitions
-        std::vector<u32> parent_inst, new_inst;  // multi: the parents' members and the new states' members
-    };
-
-    /// The CPU generator's `states` when member m fails with OutOfStates in the chunk that expanded `done` parents
-    /// from `at`: the CPU generator (one thread, as the instance pool) expands a parent completely and fails after
-    /// the parent whose successors made the count reach `limit`; its count then. The new states of a chunk are
-    /// numbered in (parent, canonical index) order, so those m holds after parent p are the ones up to the largest
-    /// target of m's parents up to p.
-    u32 failure_count(Wave& w, u32 m, const ChunkStart& at, u32 done, u64 limit, ChunkTail& t)
-    {
-        if (!t.loaded)
-        {
-            download(w.off.data() + at.b, u64{done} + 1, t.off, m_s);
-            download(w.targets.data() + at.edges, w.edges - at.edges, t.targets, m_s);
-            if (m_multi)
-            {
-                download(w.inst.data() + at.b, done, t.parent_inst, m_s);
-                download(w.inst.data() + at.count, w.count - at.count, t.new_inst, m_s);
-            }
-            sync(m_s);
-            t.loaded = true;
-        }
-        u64 top = 0;   // 1 + the largest target so far
-        u64 seen = 0;  // new states (ids at.count + j) below `top`
-        u64 held = 0;  // those of member m
-        u64 count = at.icount[m];
-        for (u32 p = 0; p < done; ++p)
-        {
-            if (m_multi && t.parent_inst[p] != m)
-                continue;
-            for (u64 e = t.off[p] - at.edges; e < t.off[u64{p} + 1] - at.edges; ++e)
-                top = std::max<u64>(top, u64{t.targets[e]} + 1);
-            for (; at.count + seen < top && at.count + seen < w.count; ++seen)
-                if (!m_multi || t.new_inst[seen] == m)
-                    ++held;
-            count = at.icount[m] + held;
-            if (count >= limit)
-                return static_cast<u32>(count);
-        }
-        return w.icount[m];  // (not reached: the member's count after the chunk is at least the limit)
-    }
-
     [[nodiscard]] bool unsatisfiable(u32 id) const
     {
         return m_multi ? m_table->instance(id).goal_unsatisfiable : m_tasks[id]->compiled().goal.unsatisfiable;
@@ -1050,7 +994,7 @@ private:
         w.icount.push_back(0);
         w.last.push_back(0);
         w.dead.push_back(1);
-        w.status.push_back(StateSpaceStatus::Unsolvable);
+        w.status.push_back(search::SearchStatus::Unsolvable);
         w.t0.push_back(Clock::now());
         w.host_live[w.k] = ssk::k_no_instance;
         if (m_multi)
@@ -1831,15 +1775,15 @@ private:
             const u32 id = w.first + m;
             DeviceStateSpaceResult& r = m_results[id];
             r.states = w.icount[m];
-            StateSpaceStatus st = w.status[m];
+            search::SearchStatus st = w.status[m];
             const u32 n_goal = stats[m * 3], n_unsolvable = stats[m * 3 + 1];
-            if (st == StateSpaceStatus::Ok && m_o.space.remove_if_unsolvable && (n_goal == 0 || root_unit[m] < 0))
-                st = StateSpaceStatus::Unsolvable;
-            if (st == StateSpaceStatus::Ok && bad[m])
+            if (st == search::SearchStatus::Exhausted && m_o.space.remove_if_unsolvable && (n_goal == 0 || root_unit[m] < 0))
+                st = search::SearchStatus::Unsolvable;
+            if (st == search::SearchStatus::Exhausted && bad[m])
                 throw std::domain_error("mymyr: the state space has a negative or NaN transition cost; goal distances by "
                                         "Dijkstra need non-negative costs");
             r.status = st;
-            if (st == StateSpaceStatus::Ok)
+            if (st == search::SearchStatus::Exhausted)
             {
                 auto space = std::make_shared<DeviceStateSpace>(
                     storage, parts[m], m_tasks[id], static_cast<u32>(P[m + 1] - P[m]), Q[m + 1] - Q[m], words[m], m_L, labels,
@@ -2005,7 +1949,7 @@ std::shared_ptr<const datasets::GeneralizedStateSpace> generalized_state_space(s
         host[i].states = r.states;
         host[i].seconds = r.seconds;
         host[i].space = r.host ? r.host : r.space ? r.space->to_host() : nullptr;
-        if (r.status == datasets::StateSpaceStatus::Ok && !host[i].space)
+        if (r.status == search::SearchStatus::Exhausted && !host[i].space)
             throw std::invalid_argument("mymyr: generalized_state_space: a successful result without a space");
     }
     return datasets::GeneralizedStateSpace::create(datasets::ordered_spaces(host, sort_ascending));

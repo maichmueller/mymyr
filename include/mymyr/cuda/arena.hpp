@@ -63,6 +63,8 @@ public:
     /// Pointer to records [device_size(), device_size() + n) for a kernel on stream() to fill; then commit(n).
     [[nodiscard]] std::byte* tail(u64 n);
     void commit(u64 n);
+    /// Drops the records [n, device_size()) (no-op when n >= device_size()); waits for the syncs in flight first.
+    void truncate(u64 n);
     /// Appends n records from host memory (H2D on stream(); `src` may be released when the call returns).
     void append_from_host(const void* src, u64 n);
     /// Appends n records from device memory written on `producer` (D2D on stream(), after producer's work).

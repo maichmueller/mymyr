@@ -83,7 +83,7 @@ TEST_P(SuiteCounts, MatchTheProbe)
     const BrfsResult r = brfs(*task, bo);
     EXPECT_TRUE(r.exhausted);
     EXPECT_EQ(r.states, p.task.states);
-    EXPECT_EQ(r.goal_states, p.task.goal_states);
+    EXPECT_EQ(r.num_goal_states, p.task.goal_states);
     EXPECT_EQ(r.expanded, p.task.states);
     if (p.config.witness)
         EXPECT_EQ(r.generated, p.task.generated);
@@ -163,21 +163,53 @@ TEST(Brfs, StopAtGoalReturnsAValidPlan)
         }
 }
 
-TEST(Brfs, MaxStatesStopsEarly)
+TEST(Brfs, MaxStatesStopsWhenTheStoreHoldsExactlyThatMany)
+{
+    // the state that fills the store stops the search: every store on every thread count holds max_states states
+    const auto task = Task::from_text_file(task_path("gripper__prob05"));
+    struct Case
+    {
+        BrfsOptions::Store store;
+        u32 threads;
+    };
+    for (const Case c : {Case{BrfsOptions::Store::Flat, 1}, Case{BrfsOptions::Store::Chunked, 1},
+                         Case{BrfsOptions::Store::Compact, 1}, Case{BrfsOptions::Store::Concurrent, 1},
+                         Case{BrfsOptions::Store::Concurrent, 2}, Case{BrfsOptions::Store::Concurrent, 4},
+                         Case{BrfsOptions::Store::Concurrent, 8}})
+        for (const u64 max_states : {u64{1}, u64{2}, u64{37}, u64{1000}})
+            for (int repeat = 0; repeat < (c.threads > 1 ? 20 : 1); ++repeat)
+            {
+                BrfsOptions bo;
+                bo.stop_at_goal = false;
+                bo.store = c.store;
+                bo.max_states = max_states;
+                bo.threads = c.threads;
+                const BrfsResult r = brfs(*task, bo);
+                const std::string what = r.store + " x" + std::to_string(c.threads) + " max_states " +
+                                         std::to_string(max_states);
+                EXPECT_EQ(r.status, search::SearchStatus::OutOfStates) << what;
+                EXPECT_FALSE(r.exhausted) << what;
+                EXPECT_EQ(r.states, max_states) << what;
+            }
+}
+
+TEST(Brfs, MaxExpandedStopsAfterExactlyThatManyExpansions)
 {
     const auto task = Task::from_text_file(task_path("gripper__prob05"));
-    for (auto store : {BrfsOptions::Store::Flat, BrfsOptions::Store::Chunked, BrfsOptions::Store::Concurrent})
-    {
-        BrfsOptions bo;
-        bo.stop_at_goal = false;
-        bo.store = store;
-        bo.max_states = 1000;
-        bo.threads = store == BrfsOptions::Store::Concurrent ? 2 : 1;
-        const BrfsResult r = brfs(*task, bo);
-        EXPECT_FALSE(r.exhausted);
-        EXPECT_GE(r.states, 1000u);
-        EXPECT_LT(r.states, 100000u);
-    }
+    for (const auto store : {BrfsOptions::Store::Flat, BrfsOptions::Store::Chunked, BrfsOptions::Store::Concurrent})
+        for (const u32 threads : {1u, 4u})
+        {
+            if (threads > 1 && store != BrfsOptions::Store::Concurrent)
+                continue;
+            BrfsOptions bo;
+            bo.stop_at_goal = false;
+            bo.store = store;
+            bo.threads = threads;
+            bo.max_expanded = 300;
+            const BrfsResult r = brfs(*task, bo);
+            EXPECT_EQ(r.status, search::SearchStatus::OutOfStates) << r.store;
+            EXPECT_EQ(r.expanded, 300u) << r.store << " x" << threads;
+        }
 }
 
 TEST(Brfs, SingleThreadedStoresRejectThreads)
@@ -391,7 +423,7 @@ TEST(Brfs, ObserverEventsEqualTheStatistics)
             const std::string where = std::string(r.store) + " T=" + std::to_string(threads)
                                       + (parallel ? " workers" : "") + (stop ? " stop" : "");
             // without make_worker the search runs on one thread and sends everything to the root
-            EXPECT_EQ(r.threads, parallel ? threads : 1u) << where;
+            EXPECT_EQ(r.threads_used, parallel ? threads : 1u) << where;
             EXPECT_EQ(o.workers.size(), parallel ? threads : 0u) << where;
             if (parallel)
             {

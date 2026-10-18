@@ -559,7 +559,7 @@ void run_task(const fs::path& file, Tally& total)
                 so.labels = false;
                 so.max_states = max_states;
                 auto space = datasets::generate_state_space(task, so);
-                if (space.status == datasets::StateSpaceStatus::Ok && space.space)
+                if (space.status == search::SearchStatus::Exhausted && space.space)
                 {
                     // the fork's perfect heuristic is the cost-goal distance (action costs), as mymyr's with real costs
                     hstar = heuristics::perfect(space.space, heuristics::Costs::Real);

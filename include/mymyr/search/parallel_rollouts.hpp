@@ -4,7 +4,7 @@
 // own Workspace).
 //
 //   mymyr::search::ParallelRolloutOptions o;
-//   o.iw.max_arity = 1;
+//   o.iw.max_width = 1;
 //   o.seeds = {1, 2, 3, 4};
 //   o.report_landing_states = true;
 //   auto r = mymyr::search::find_rollouts_parallel(*task, o);
@@ -17,7 +17,7 @@
 // of every expanded state, pruned or not, across all passes, the start state included, and for a solved rollout
 // every successor of every non-goal plan state, which the plan extraction creates; that adds states only where
 // a truncated layer cut a plan state's enumeration short):
-//   - reached fluent and derived atoms, num_states (distinct states);
+//   - reached fluent and derived atoms, num_created_states (distinct states);
 //   - landing states (report_landing_states): per fluent atom, the first created state holding it; distinct states,
 //     each with its atoms and whether it has no applicable action (a direct dead end);
 //   - co-occurrence (report_co_occurrence): per fluent atom, the union of the atoms of the created states holding it.
@@ -25,7 +25,7 @@
 // slots: for a given seed a rollout's result is identical at every thread count. Landing states are ordinary States
 // of the task; merge_landing_states deduplicates across rollouts.
 //
-// Threads: num_threads (0: the hardware's) capped at the number of rollouts; rollouts are handed out dynamically and
+// Threads: threads (0: the hardware's) capped at the number of rollouts; rollouts are handed out dynamically and
 // results are returned in seed order. Per-worker hooks (search/control.hpp, make_worker): a worker is
 // a rollout (index into seeds). With an observer, SearchObserver::make_worker(k) is called for every rollout on the
 // calling thread; rollout k sends its hot events (on_expand, on_generate, on_prune, on_transition, on_progress) to the
@@ -51,7 +51,7 @@ struct ParallelRolloutOptions
 {
     IwOptions iw;                        // the ladder of every rollout
     std::vector<u64> seeds;              // one rollout per seed
-    u32 num_threads = 0;                 // 0: std::thread::hardware_concurrency()
+    u32 threads = 1;                     // 0: std::thread::hardware_concurrency()
     u32 max_next_layer_states = ~u32{0};
     bool report_landing_states = false;
     bool report_co_occurrence = false;
@@ -69,7 +69,7 @@ struct RolloutResult
     IwResult search;  // status, plan, passes of the rollout's ladder
     std::vector<CanonicalAtom> reached_fluent_atoms;   // ascending
     std::vector<CanonicalAtom> reached_derived_atoms;  // ascending
-    u64 num_states = 0;
+    u64 num_created_states = 0;  // distinct states the rollout created
     std::vector<LandingState> landing_states;                          // in order of their smallest first-achieved atom
     std::vector<std::pair<CanonicalAtom, u32>> landing_state_by_atom;  // (atom, index into landing_states), ascending
     std::vector<std::pair<CanonicalAtom, std::vector<CanonicalAtom>>> co_occurrence;  // (atom, row), ascending

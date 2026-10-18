@@ -139,7 +139,7 @@ TEST_P(CudaBrfsSuite, CountsAndIdsEqualTheCpu)
     const BrfsResult& r = d.result;
     EXPECT_EQ(r.states, st.states);
     EXPECT_EQ(r.generated, st.generated);
-    EXPECT_EQ(r.goal_states, st.goal_states);
+    EXPECT_EQ(r.num_goal_states, st.goal_states);
     EXPECT_EQ(r.expanded, st.states);
     EXPECT_TRUE(r.exhausted);
     const BrfsResult c = brfs(*task, {.threads = 2, .stop_at_goal = false, .fingerprint = true});
@@ -264,7 +264,7 @@ TEST(CudaBrfs, CandidateBudgetKeepsTheIds)
                 const cuda::DeviceBrfsResult d = b.run();
                 std::vector<u64> rows = device_rows(b);
                 EXPECT_EQ(d.result.states, suite_task(name).states);
-                EXPECT_EQ(d.result.goal_states, suite_task(name).goal_states);
+                EXPECT_EQ(d.result.num_goal_states, suite_task(name).goal_states);
                 if (ref.empty())
                 {
                     ref = std::move(rows);
@@ -301,7 +301,7 @@ TEST(CudaBrfs, StopAtGoalReturnsTheCpuPlan)
             EXPECT_EQ(d.result.states, c.states);
             EXPECT_EQ(d.result.expanded, c.expanded);
             EXPECT_EQ(d.result.generated, c.generated);
-            EXPECT_EQ(d.result.goal_states, c.goal_states);
+            EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
             EXPECT_EQ(d.result.layers, c.layers);
             EXPECT_EQ(d.result.fingerprint, c.fingerprint);
             EXPECT_EQ(d.result.plan.size(), c.plan.size());
@@ -319,13 +319,42 @@ TEST(CudaBrfs, BudgetStopsAtAPrefixOfTheIds)
     const auto task = load("depot__p02", true);
     cuda::DeviceBrfs b(context(), task, {.max_states = 10000, .stop_at_goal = false, .chunk_states = 256});
     const cuda::DeviceBrfsResult d = b.run();
-    EXPECT_GE(d.result.states, 10000u);
-    EXPECT_LT(d.result.states, suite_task("depot__p02").states);
+    EXPECT_EQ(d.result.states, 10000u);
     EXPECT_FALSE(d.result.exhausted);
     const std::vector<u64> rows = device_rows(b);
     ASSERT_EQ(b.words(), full.words());
     ASSERT_LE(rows.size(), all.size());
     EXPECT_TRUE(std::equal(rows.begin(), rows.end(), all.begin()));
+}
+
+TEST(CudaBrfs, BudgetStopsAtTheStateThatFillsTheStoreAsTheCpu)
+{
+    SKIP_WITHOUT_GPU();
+    for (const char* name : {"depot__p02", "gripper__prob05", "blocks__probBLOCKS-8-0"})
+        for (const u64 max_states : {u64{1}, u64{2}, u64{37}, u64{1000}, u64{4321}})
+            for (const bool stop_at_goal : {false, true})
+                for (const u32 chunk : {u32{7}, u32{256}, u32{1} << 20})
+                {
+                    const auto task = load(name, true);
+                    BrfsOptions bo;
+                    bo.max_states = max_states;
+                    bo.stop_at_goal = stop_at_goal;
+                    bo.fingerprint = true;
+                    const BrfsResult cpu = brfs(*task, bo);
+                    const BrfsResult dev = cuda::brfs(context(), task, {.max_states = max_states, .stop_at_goal = stop_at_goal,
+                                                                         .fingerprint = true, .chunk_states = chunk})
+                                               .result;
+                    const std::string what = std::string(name) + " max_states " + std::to_string(max_states) +
+                                             (stop_at_goal ? " stop_at_goal" : "") + " chunk " + std::to_string(chunk);
+                    EXPECT_EQ(dev.states, cpu.states) << what;
+                    EXPECT_EQ(dev.expanded, cpu.expanded) << what;
+                    EXPECT_EQ(dev.generated, cpu.generated) << what;
+                    EXPECT_EQ(dev.num_goal_states, cpu.num_goal_states) << what;
+                    EXPECT_EQ(dev.solved, cpu.solved) << what;
+                    EXPECT_EQ(dev.exhausted, cpu.exhausted) << what;
+                    EXPECT_EQ(dev.fingerprint, cpu.fingerprint) << what;
+                    EXPECT_EQ(dev.plan.size(), cpu.plan.size()) << what;
+                }
 }
 
 TEST(CudaBrfs, RejectsUnsupportedOptions)

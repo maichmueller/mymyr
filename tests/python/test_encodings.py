@@ -105,7 +105,10 @@ def test_reachability_budget():
     assert over.options["reachability_budget"] == 10
     with pytest.raises(ValueError, match="reachability_budget"):
         text_task(name, atoms="reachable", reachability_budget=10)
-    assert text_task(name, atoms="reachable", reachability_budget=0).info["reachability_complete"]
+    unbounded = text_task(name, atoms="reachable", reachability_budget=None)
+    assert unbounded.info["reachability_complete"] and unbounded.options["reachability_budget"] is None
+    zero = text_task(name, reachability_budget=0)
+    assert zero.atom_mode == "dense" and not zero.info["reachability_complete"]
 
 
 def test_tables_built_on_one_and_eight_threads_are_equal(grippers):
@@ -229,7 +232,7 @@ def test_lazy_slots_stay_inside_their_task():
 
 def test_options_reach_the_table_loaders(grippers):
     domain = GRIPPER / "domain.pddl"
-    table = rl.TaskTable.from_pddl(domain, grippers, atoms="dense", matching="fc", reachability_budget=0)
+    table = rl.TaskTable.from_pddl(domain, grippers, atoms="dense", matching="fc", reachability_budget=None)
     assert all(t.atom_mode == "dense" and t.options["matching"] == "fc" for t in table.tasks)
     with pytest.raises(ValueError):
         rl.TaskTable.from_pddl(domain, grippers, atoms="lazy")

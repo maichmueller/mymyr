@@ -88,7 +88,7 @@ def assert_same_expansion(dev, cpu):
 
 
 def assert_same_padded(dev, cpu):
-    assert dev.K == cpu.K and dev.overflow == cpu.overflow
+    assert dev.k == cpu.k and dev.overflow == cpu.overflow
     for k in ("index", "mask", "count", "succ", "schema", "binding", "goal"):
         a, b = getattr(dev, k), getattr(cpu, k)
         if b is None:
@@ -175,9 +175,9 @@ def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
     t = torch.from_numpy(x.view(np.int64)).cuda()
     for kw in (
         dict(),
-        dict(goal=True, K=0),
+        dict(goal=True, k=8),
         dict(canonical_order=False),
-        dict(witness_pruning=True, K=4),
+        dict(witness_pruning=True, k=4),
         dict(capacity=17, goal=True),
         dict(words=1),
     ):
@@ -188,9 +188,10 @@ def test_expand_torch_cuda_is_byte_equal_to_the_cpu(ctx, name, atoms):
         assert isinstance(dev, mc.DeviceExpansion) and dev.framework == "torch"
         assert dev.succ.device.type == "cuda" and dev.succ.dtype == torch.int64
         assert_same_expansion(dev, cpu)
-        if "K" in kw:
+        if "k" in kw:
             assert_same_padded(dev.padded, cpu.padded)
         assert_same_padded(dev.pad(3), cpu.pad(3))
+        assert_same_padded(dev.pad(), cpu.pad())
         assert np.array_equal(host(dev.counts), cpu.counts)
         if cpu.total:
             j = min(cpu.total, cpu.capacity) - 1
@@ -310,10 +311,10 @@ def test_expand_dlarray_and_jax_inputs(ctx):
     task = text_task("logistics00__probLOGISTICS-6-1", atoms="dense")
     states = walk(task, steps=15, seed=2)
     x = words_of(states, task.words)
-    cpu = rl.expand(task, x, K=0)
+    cpu = rl.expand(task, x, k=16)
     # a mymyr DLArray on the device: outputs are DLArrays unless a framework is named
     d = mc.to_memory(x, "device", ctx)
-    dev = rl.expand(task, d, K=0)
+    dev = rl.expand(task, d, k=16)
     assert isinstance(dev.succ, mymyr.DLArray) and dev.succ.__dlpack_device__() == (2, 0)
     assert_same_expansion(dev, cpu)
     assert_same_padded(dev.padded, cpu.padded)

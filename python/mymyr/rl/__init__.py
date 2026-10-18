@@ -32,7 +32,8 @@ The primitive is :func:`expand`: a batch of states ``[N, W]`` in, the flat CSR e
     exp.offsets   # [N + 1] int32: state i's successors are rows offsets[i]:offsets[i+1]
     exp.goal      # [M] bool, with expand(..., goal=True)
     exp.derived   # [M, D] derived-atom words of the successors, with expand(..., derived=True) (D = table.derived_words)
-    exp.pad(K)    # the padded [N, K] view: succ [N, K, W], schema, binding, index, mask, count (count > K = overflow)
+    exp.pad(k)    # the padded [N, k] view: succ [N, k, W], schema, binding, index, mask, count (count > k = overflow);
+                  #   exp.pad() sizes k to the next power of two at or above the largest count; expand(..., k=k)
 
 Per state, successors come in canonical order (schema, then binding); witness pruning is off, so every applicable
 ground action is one row. Outputs are sized automatically (``capacity=`` fixes the size, at most 2**31 - 1 rows: rows

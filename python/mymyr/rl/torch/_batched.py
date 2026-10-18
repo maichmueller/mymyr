@@ -365,8 +365,7 @@ class BatchedEnv:
         torch.compile."""
         if max_actions is not None and int(max_actions) < 1:
             raise ValueError("mymyr: max_actions must be None or positive")
-        # the custom op takes 0 for no limit
-        args = (self.handle, self.draws, self.count, self.first_env, 0 if max_actions is None else int(max_actions))
+        args = (self.handle, self.draws, self.count, self.first_env, None if max_actions is None else int(max_actions))
         if torch.compiler.is_compiling():
             return torch.ops.mymyr.random_actions(*args)
         return _ops.random_actions_impl(*args)

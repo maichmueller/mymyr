@@ -210,7 +210,7 @@ TEST(NumericPddl, MetricWithoutTotalCostIsTheStateMetric)
     const BrfsResult r = brfs(*task, o);
     const std::vector<std::array<u64, 3>> want = {{1, 2, 2}, {2, 4, 3}, {3, 6, 4}};
     EXPECT_EQ(r.layer_counts, want);
-    EXPECT_EQ(r.goal_states, 1u);  // x = 3 at depth 2 (y doubled 0 times); depth-3 states are not expanded
+    EXPECT_EQ(r.num_goal_states, 1u);  // x = 3 at depth 2 (y doubled 0 times); depth-3 states are not expanded
 }
 
 TEST(NumericPddl, TransportOpt08SiwPlanCost)
@@ -219,7 +219,7 @@ TEST(NumericPddl, TransportOpt08SiwPlanCost)
     ASSERT_TRUE(std::filesystem::exists(dir / "p23.pddl")) << dir;
     const auto task = Task::create(*frontend::load_task(dir / "domain.pddl", dir / "p23.pddl"));
     search::SiwOptions o;
-    o.max_arity = 2;
+    o.max_width = 2;
     const search::SiwResult r = search::siw(*task, o);
     ASSERT_EQ(r.status, search::SearchStatus::Solved);
     EXPECT_EQ(r.plan.size(), 21u);
@@ -244,7 +244,7 @@ TEST(NumericPddl, TasksWithNumericFunctionsKeepTheirStateSpace)
         const BrfsResult r = brfs(*task, {.stop_at_goal = false});
         EXPECT_EQ(r.states, c.states) << c.dir;
         EXPECT_EQ(r.generated, c.generated) << c.dir;
-        EXPECT_EQ(r.goal_states, c.goals) << c.dir;
+        EXPECT_EQ(r.num_goal_states, c.goals) << c.dir;
     }
 }
 

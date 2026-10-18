@@ -44,7 +44,7 @@ def replay(task, plan, start=None):
 def rollout_key(r):
     """Everything a rollout reports, comparable across runs."""
     return (str(r.status), [(p.width, p.expanded, p.generated, p.generated_in_tree) for p in r.passes],
-            [str(a) for a in r.plan], r.num_states, [str(a) for a in r.reached_fluent_atoms],
+            [str(a) for a in r.plan], r.num_created_states, [str(a) for a in r.reached_fluent_atoms],
             [str(a) for a in r.reached_derived_atoms],
             [(tuple(map(str, s.atoms)), s.direct_dead_end, tuple(sorted(map(str, s.state.atoms())))) for s in r.landing_states],
             {str(a): i for a, i in r.landing_state_by_atom.items()},
@@ -71,7 +71,7 @@ def test_plans_replay(name):
     task = text_task(name)
     runs = [search.liw(task, max_width=1, landmarks="lifted", max_seconds=20),
             search.abstracted_iw(task, width=1), search.projective_iw(task, typed_projection=True),
-            search.rollout_iw(task, ordering="dgaf", max_seconds=20),
+            search.rollout_iw(task, ordering="direct_goal_achiever_first", max_seconds=20),
             search.atomic_goal_portfolio(task, threads=1, max_seconds=20)]
     runs += list(search.find_rollouts_parallel(task, [1, 2, 3], max_width=1, threads=2))
     for r in runs:
@@ -120,14 +120,16 @@ def test_rollout_iw_orderings(blocks):
     goal = [["(on h c)"]]
     for name, kind in (("in_order", ActionOrdering.IN_ORDER), ("randomized", ActionOrdering.RANDOMIZED),
                        ("direct_goal_achiever_first", ActionOrdering.DIRECT_GOAL_ACHIEVER_FIRST),
-                       ("regression", ActionOrdering.GOAL_REGRESSION_RELEVANCE),
-                       ("mixed", ActionOrdering.MIXED_REGRESSION_RANDOM)):
+                       ("goal_regression_relevance", ActionOrdering.GOAL_REGRESSION_RELEVANCE),
+                       ("mixed_regression_random", ActionOrdering.MIXED_REGRESSION_RANDOM)):
         a = search.rollout_iw(blocks, ordering=kind, seed=3, goal=goal)
         b = search.rollout_iw(blocks, ordering=name, seed=3, goal=goal)
         assert rollout_stats(a.rollout) == rollout_stats(b.rollout) and a.plan == b.plan, name
         assert not a.solved or "(on h c)" in {str(x) for x in a.goal_state.atoms()}
-        assert str(kind) in ("in_order", "randomized", "direct_goal_achiever_first", "goal_regression_relevance",
-                             "mixed_regression_random")
+        assert str(kind) == name
+    for other in ("dgaf", "regression", "mixed"):
+        with pytest.raises(ValueError, match="ordering must be"):
+            search.rollout_iw(blocks, ordering=other)
     # seeds matter for the randomized orderings only
     s = [rollout_stats(search.rollout_iw(blocks, ordering="randomized", seed=k).rollout) for k in range(4)]
     assert len({json.dumps(x, sort_keys=True) for x in s}) > 1
@@ -136,7 +138,8 @@ def test_rollout_iw_orderings(blocks):
     # incumbent bound and max_rollouts
     r = search.rollout_iw(blocks, incumbent_bound=3)
     assert r.rollout.incumbent_bound_prunings > 0
-    assert search.rollout_iw(blocks, max_rollouts=5).status == Status.FAILED
+    capped = search.rollout_iw(blocks, max_rollouts=5)
+    assert capped.status == Status.OUT_OF_STATES and capped.rollout.rollouts == 5 and not capped.solved
 
 
 # ------------------------------------------------------------------------------------------------ determinism
@@ -246,7 +249,7 @@ def test_observer_transition_events(blocks):
     assert sum(o.outcomes.values()) == r.stats.generated
     assert o.outcomes[TransitionOutcome.OPENED] == r.passes[0].generated_in_tree
     o = Obs()
-    r = search.rollout_iw(blocks, ordering="dgaf", goal=[["(on h c)"]], observer=o)
+    r = search.rollout_iw(blocks, ordering="direct_goal_achiever_first", goal=[["(on h c)"]], observer=o)
     assert r.solved and o.outcomes.get(TransitionOutcome.GOAL) == 1
     assert sum(o.outcomes.values()) == r.rollout.generated
 
@@ -378,7 +381,7 @@ def test_argument_errors(blocks, gripper):
     with pytest.raises(ValueError):
         search.iw(blocks, transition_ordering=search.LandmarkTransitionOrdering(g))
     with pytest.raises(ValueError):
-        search.atomic_goal_portfolio(blocks, rollout_orderings=[("dgaf", 1, 2)])
+        search.atomic_goal_portfolio(blocks, rollout_orderings=[("direct_goal_achiever_first", 1, 2)])
     # the C++'s own option checks: a FAILED result with a message
     g2 = search.FactLandmarkGraph(blocks, [], [["(on c a)", "(on b a)"]])
     r = search.liw(blocks, landmarks=g2, disjunctive=True, all_private=True, unshared_atoms=["(on a b)"])
@@ -421,6 +424,15 @@ def test_landmark_graphs(blocks, gripper):
         for lm in lifted.lifted:
             assert str(lm).startswith(lm.predicate + "(") and (lm.fact is not None) == lm.is_fact
             assert all(isinstance(m, mymyr.GroundAtom) for m in lm.members)
+    # max_disjunctive_landmark_depth: None expands every layer, 0 none, d the first d; max_seconds=None: no time bound
+    def disjunctive(**kw):
+        return {tuple(map(str, s)) for s in search.approximate_fact_landmarks(gripper, max_disjunctive_landmark_size=4,
+                                                                             **kw).disjunctive}
+    unbounded = disjunctive(max_disjunctive_landmark_depth=None, max_seconds=None)
+    assert unbounded == disjunctive() and unbounded and disjunctive(max_disjunctive_landmark_depth=0) == set()
+    assert set() < disjunctive(max_disjunctive_landmark_depth=1) < unbounded
+    with pytest.raises(ValueError, match="max_seconds"):
+        search.approximate_fact_landmarks(blocks, max_seconds=-1)
     # a graph from given atoms, normalized
     g = search.FactLandmarkGraph(blocks, ["(on a g)", "(on a g)", "(clear f)"], [["(on a g)", "(on b a)"],
                                                                                    ["(on c a)", "(on b a)"]],
@@ -499,7 +511,7 @@ def test_eight_threads_share_tasks():
         if i == 2:
             return iw_key(search.projective_iw(t, layer_order="randomized", seed=11))
         if i == 3:
-            r = search.rollout_iw(t, ordering="mixed", seed=5, max_states=20_000)
+            r = search.rollout_iw(t, ordering="mixed_regression_random", seed=5, max_states=20_000)
             return (str(r.status), rollout_stats(r.rollout), [str(a) for a in r.plan])
         if i == 4:
             b = search.find_rollouts_parallel(t, list(range(32)), max_width=2, threads=2,
