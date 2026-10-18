@@ -15,7 +15,7 @@ can store by reference (native nanobind functions cannot be pickled).
   KnowledgeBase as its tasks, options, state spaces, task indices and packed tuple graphs. Nothing is generated again.
 - A search result pickles as its task, the fingerprint and its fields: the plan as action labels (schema, objects),
   states as States, statistics and statuses as numbers; loading checks the labels and atoms against the task.
-- A mymyr.encoding.FlatRelationEncoder pickles as its table, its options and its schema's fingerprint; loading builds
+- A mymyr.encoding.FlatRelationEncoder or FlatHorizonEncoder pickles as its table, its options and its schema's fingerprint; loading builds
   the encoder again and checks the fingerprint.
 - A mymyr.search.Heuristic pickles as its specification (task, kind, costs, evaluation; a perfect heuristic: its state
   space and costs) and is built again when loaded.
@@ -72,8 +72,16 @@ def _restore_perfect_heuristic(space, costs):
     return _core._search.Heuristic.perfect(space, costs=costs)
 
 
+_HORIZON_OPTIONS = ("horizon_mode", "root_policy", "parent_relation")
+_HISTORY_OPTIONS = ("history", "history_max_steps")
+
+
 def _restore_flat_encoder(table, options, fingerprint):
-    encoder = _core._encoding.FlatRelationEncoder(table, **options)
+    # the options name the class: an encoder of horizons has a horizon_mode and no history
+    if options["horizon_mode"] is None:
+        encoder = _core._encoding.FlatRelationEncoder(table, **{k: v for k, v in options.items() if k not in _HORIZON_OPTIONS})
+    else:
+        encoder = _core._encoding.FlatHorizonEncoder(table, **{k: v for k, v in options.items() if k not in _HISTORY_OPTIONS})
     if encoder.schema_fingerprint != fingerprint:
         raise ValueError(
             f"mymyr: encoding: the pickled encoder's schema fingerprint is {fingerprint:#018x}, the schema rebuilt from "

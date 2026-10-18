@@ -54,6 +54,9 @@ struct EncodingHistory
 struct EncodingGraphDescription
 {
 };
+struct EncodingHorizonView
+{
+};
 struct EncodingEntityArrays
 {
 };
@@ -109,6 +112,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingGraphDescription>
 {
     static constexpr auto Name = const_name("mymyr._typing.GraphDescription");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingHorizonView>
+{
+    static constexpr auto Name = const_name("mymyr._typing.SupportsHorizonView");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
@@ -178,6 +186,12 @@ struct PyFlatEncoder
             cached = {std::make_shared<ThreadPool>(threads), threads, process};
         return cached.pool;
     }
+};
+
+/// The horizon encoder: the state of a FlatRelationEncoder (the two classes share it; the horizon encoder has no streams).
+struct PyFlatHorizonEncoder : PyFlatEncoder
+{
+    using PyFlatEncoder::PyFlatEncoder;
 };
 
 struct PyFlatBatch
@@ -325,39 +339,98 @@ constexpr const char* k_option_doc =
     "(cell (g, r) is segment r * G + g instead of g * R + r). emit_counts=False omits relation_counts (the tuples of "
     "a segment are the difference of two relation_offsets). entity_arrays='auto' omits entity_role and entity_ref "
     "when every entity is an object or the auxiliary entity (no target_sources, predicate_virtual_nodes, "
-    "include_actions, history or horizon_mode). horizon_mode, root_policy, parent_relation: the horizon variants "
-    "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid "
-    "combinations and for numeric tasks.";
+    "include_actions, history or horizon_mode). Raises ValueError for invalid combinations and for numeric tasks.";
+
+constexpr const char* k_horizon_option_doc =
+    " horizon_mode, root_policy, parent_relation: the horizon variants (root_policy defaults to 'include' and needs a "
+    "horizon_mode for any other value; see FlatHorizonEncoder).";
+
+/// Whether a class that is built from a table takes the horizon options: EncodingSchema takes them as options,
+/// FlatRelationEncoder does not take them, FlatHorizonEncoder requires `horizon_mode`.
+enum class HorizonArgs
+{
+    Optional,
+    Absent,
+    Required,
+};
+
+// the options other than the horizon's, in the order of the signatures
+#define MYMYR_ENCODING_ARGS                                                                                            \
+    TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived, \
+        bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions, TextSequenceArg target_sources, \
+        Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,                    \
+        Arg<ann::EncodingEntityArrays> entity_arrays
+#define MYMYR_ENCODING_DEFAULTS                                                                                        \
+    "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0, "include_static"_a = true,     \
+    "include_derived"_a = true, "nullary"_a = true, "equality"_a = false, "predicate_virtual_nodes"_a = false,          \
+    "include_actions"_a = true, "target_sources"_a = nb::tuple(), "layout"_a = "graph", "index_dtype"_a = "int32",      \
+    "emit_counts"_a = true, "entity_arrays"_a = "always"
 
 /// The constructor of the classes that are built from a table and the encoding options (EncodingSchema,
-/// FlatRelationEncoder): the keyword arguments are parsed here once. `make(self, reference, options)` constructs the
-/// object.
-template<class Py, class Make>
+/// FlatRelationEncoder, FlatHorizonEncoder): the keyword arguments are parsed here once. `make(self, reference,
+/// options)` constructs the object.
+template<HorizonArgs H, class Py, class Make>
 void define_init(nb::class_<Py>& cls, Make make, const char* doc)
 {
-    cls.def(
-        "__init__",
-        [make](Py* self, TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static,
-               bool include_derived, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
-               TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,
-               bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays,
-               Arg<ann::EncodingHorizonMode> horizon_mode, Arg<ann::EncodingRootPolicy> root_policy,
-               bool parent_relation, bool history, IntArg history_max_steps)
-        {
-            const TableRef reference = table_of(table);
-            const encoding::FlatOptions options = schema_options(
-                max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes,
-                include_actions, goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays,
-                horizon_mode, root_policy, parent_relation, history, history_max_steps);
-            make(self, reference, options);
-        },
-        "table"_a, nb::kw_only(), "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0,
-        "include_static"_a = true, "include_derived"_a = true, "nullary"_a = true, "equality"_a = false,
-        "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
-        "layout"_a = "graph", "index_dtype"_a = "int32", "emit_counts"_a = true, "entity_arrays"_a = "always",
-        "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(), "parent_relation"_a = false, "history"_a = false,
-        "history_max_steps"_a = 0, doc);
+    auto construct = [make](Py* self, MYMYR_ENCODING_ARGS, nb::handle horizon_mode, nb::handle root_policy,
+                            bool parent_relation, bool history, nb::handle history_max_steps)
+    {
+        const TableRef reference = table_of(table);
+        const encoding::FlatOptions options = schema_options(
+            max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
+            goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays, horizon_mode, root_policy,
+            parent_relation, history, history_max_steps);
+        make(self, reference, options);
+    };
+    if constexpr (H == HorizonArgs::Optional)
+    {
+        cls.def(
+            "__init__",
+            [construct](Py* self, MYMYR_ENCODING_ARGS, Arg<ann::EncodingHorizonMode> horizon_mode,
+                        Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation, bool history,
+                        IntArg history_max_steps)
+            {
+                construct(self, table, goal_derivations, max_goal_level, include_static, include_derived, nullary, equality,
+                          predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts,
+                          entity_arrays, horizon_mode, root_policy, parent_relation, history, history_max_steps);
+            },
+            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "horizon_mode"_a = nb::none(),
+            "root_policy"_a = nb::none(), "parent_relation"_a = false, "history"_a = false, "history_max_steps"_a = 0, doc);
+    }
+    else if constexpr (H == HorizonArgs::Absent)
+    {
+        cls.def(
+            "__init__",
+            [construct](Py* self, MYMYR_ENCODING_ARGS, bool history, IntArg history_max_steps)
+            {
+                construct(self, table, goal_derivations, max_goal_level, include_static, include_derived, nullary, equality,
+                          predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts,
+                          entity_arrays, nb::none(), nb::none(), false, history, history_max_steps);
+            },
+            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "history"_a = false, "history_max_steps"_a = 0, doc);
+    }
+    else
+    {
+        cls.def(
+            "__init__",
+            [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonMode> horizon_mode,
+                        TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived,
+                        bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
+                        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
+                        Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,
+                        Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingRootPolicy> root_policy,
+                        bool parent_relation)
+            {
+                construct(self, table, goal_derivations, max_goal_level, include_static, include_derived, nullary, equality,
+                          predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts,
+                          entity_arrays, horizon_mode, root_policy, parent_relation, false, nb::int_(0));
+            },
+            "table"_a, nb::kw_only(), "horizon_mode"_a, MYMYR_ENCODING_DEFAULTS, "root_policy"_a = nb::none(),
+            "parent_relation"_a = false, doc);
+    }
 }
+#undef MYMYR_ENCODING_ARGS
+#undef MYMYR_ENCODING_DEFAULTS
 
 // ------------------------------------------------------------------------------------------------ the catalog
 
@@ -717,7 +790,8 @@ void import_history(rlimp::Imports& imports, std::vector<i32>& dt_copy, std::vec
 struct ImportedRows
 {
     StateBatch states;
-    std::vector<i32> ids_copy, dt_copy, count_copy;
+    std::vector<i32> ids_copy, dt_copy, count_copy, edge_binding_copy;
+    std::vector<std::vector<i32>> horizon_copies;  // the converted offset and edge arrays of a horizon
     std::shared_ptr<void> ids_keep;
     rlimp::Imports imports{-1, dl::k_stream_default, false};
     ExpansionBuffers actions;
@@ -815,19 +889,12 @@ void run_on_pool(PyFlatEncoder& self, u32 threads, PoolArg pool_in, Work&& work)
     work(held ? *held->pool : *own);
 }
 
-PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
-                   GoalsArg goals_arg, ActionsArg actions_arg, SubgoalsArg subgoals_arg, HistoryArg history_arg,
-                   Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in, CapacitiesArg capacities_in)
+/// Encodes the imported rows on the pool of the call.
+PyFlatBatch run_encoding(PyFlatEncoder& self, ImportedRows& rows, Framework framework, u32 threads, PoolArg pool_in,
+                         const std::optional<encoding::FlatCapacities>& capacities)
 {
-    const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::FlatCapacities> capacities =
-        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
-                      : std::nullopt;
-    ImportedRows rows;
-    import_rows(rows, *self.encoder, state_arg, task_ids, derived_arg, goals_arg, actions_arg, subgoals_arg, history_arg);
-
     PyFlatBatch output;
-    output.framework = parse_framework(framework, state_arg);
+    output.framework = framework;
     output.schema = self.encoder->schema_ptr();
     thread_local encoding::EncodeScratch scratch;
     run_on_pool(self, threads, pool_in,
@@ -843,6 +910,137 @@ PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_id
                         output.arrays = self.encoder->encode(rows.input, pool, scratch);
                 });
     return output;
+}
+
+PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
+                   GoalsArg goals_arg, ActionsArg actions_arg, SubgoalsArg subgoals_arg, HistoryArg history_arg,
+                   Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in, CapacitiesArg capacities_in)
+{
+    const u32 threads = threads_arg(threads_in);
+    const std::optional<encoding::FlatCapacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
+                      : std::nullopt;
+    ImportedRows rows;
+    import_rows(rows, *self.encoder, state_arg, task_ids, derived_arg, goals_arg, actions_arg, subgoals_arg, history_arg);
+
+    return run_encoding(self, rows, parse_framework(framework, state_arg), threads, pool_in, capacities);
+}
+
+/// The nodes and edges of a horizon batch, imported from the attributes of `view` (see HorizonView): the node rows go to
+/// rows.states, the offsets and edges are read where they are or converted into the copies held by `rows`.
+void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb::handle view, DerivedArg derived_arg,
+                    GoalsArg goals_arg, SubgoalsArg subgoals_arg)
+{
+    auto field = [&](const char* name)
+    {
+        if (!PyObject_HasAttrString(view.ptr(), name))
+            throw nb::attribute_error(
+                (std::string("mymyr: encoding: the horizon view has no attribute '") + name +
+                 "' (nodes, node_offsets, edge_offsets, edge_src, edge_dst, edge_schema, edge_binding, task_ids)")
+                    .c_str());
+        return nb::getattr(view, name);
+    };
+    const nb::object nodes = field("nodes");
+    rows.states = import_states(nodes, packed_words(nodes));
+    const StateBatch& states = rows.states;
+    const rl::TaskTable& table = encoder.table();
+    encoding::HorizonInput& horizon = rows.input.horizon;
+    horizon.nodes = states.view;
+
+    rows.horizon_copies.resize(5);
+    std::vector<i64> extent;
+    const nb::object node_offsets = field("node_offsets");
+    if (node_offsets.is_none())
+        throw nb::type_error("mymyr: encoding: node_offsets must be an array, not None");
+    horizon.node_offsets = rows.imports.ints32(node_offsets, "node_offsets", {-1}, rows.horizon_copies[0], &extent);
+    if (extent[0] < 1)
+        throw nb::value_error("mymyr: encoding: node_offsets must have G + 1 entries (G graphs)");
+    horizon.graphs = static_cast<u64>(extent[0] - 1);
+    const nb::object edge_offsets = field("edge_offsets");
+    if (edge_offsets.is_none())
+        throw nb::type_error("mymyr: encoding: edge_offsets must be an array, not None");
+    horizon.edge_offsets = rows.imports.ints32(edge_offsets, "edge_offsets", {-1}, rows.horizon_copies[1], &extent);
+    if (static_cast<u64>(extent[0]) != horizon.graphs + 1)
+        throw nb::value_error(("mymyr: encoding: edge_offsets must have G + 1 = " + std::to_string(horizon.graphs + 1) +
+                               " entries (one more than graphs), got " + std::to_string(extent[0]))
+                                  .c_str());
+    const nb::object edge_src = field("edge_src");
+    horizon.edge_src = rows.imports.ints32(edge_src, "edge_src", {-1}, rows.horizon_copies[2]);
+    horizon.edge_dst = rows.imports.ints32(field("edge_dst"), "edge_dst", {-1}, rows.horizon_copies[3]);
+    // the edge arrays share one extent E
+    const i64 edges = horizon.edge_offsets[horizon.graphs];
+    for (const char* name : {"edge_src", "edge_dst", "edge_schema"})
+    {
+        const nb::object a = field(name);
+        if (!a.is_none() && nb::len(a) != static_cast<usize>(edges))
+            throw nb::value_error((std::string("mymyr: encoding: ") + name + " has " + std::to_string(nb::len(a)) +
+                                   " entries, edge_offsets ends at " + std::to_string(edges))
+                                      .c_str());
+    }
+    horizon.edge_schema = rows.imports.ints32(field("edge_schema"), "edge_schema", {-1}, rows.horizon_copies[4]);
+    std::vector<i64> binding_extent;
+    horizon.edge_binding =
+        rows.imports.ints32(field("edge_binding"), "edge_binding", {-1, -1}, rows.edge_binding_copy, &binding_extent);
+    if (horizon.edge_binding)
+    {
+        if (binding_extent[0] != edges)
+            throw nb::value_error(("mymyr: encoding: edge_binding has " + std::to_string(binding_extent[0]) +
+                                   " rows, edge_offsets ends at " + std::to_string(edges))
+                                      .c_str());
+        horizon.label_width = static_cast<u32>(binding_extent[1]);
+    }
+
+    const i32* ids = import_task_ids(field("task_ids"), horizon.graphs, table.size(), rows.ids_copy, rows.ids_keep);
+    if (horizon.graphs && table.size() > 1 && !ids)
+        throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
+    table.check_task_ids(ids, horizon.graphs);
+    rows.input.task_ids = ids;
+    // States given as objects belong to the task of their graph (the encoder reports offsets that are not valid)
+    if (!states.owner_tasks.empty())
+        for (u64 g = 0; g < horizon.graphs; ++g)
+        {
+            const i64 first = horizon.node_offsets[g], last = horizon.node_offsets[g + 1];
+            if (first < 0 || last < first || static_cast<u64>(last) > states.owner_tasks.size())
+                break;
+            const u32 instance = ids ? static_cast<u32>(ids[g]) : 0;
+            const Task& expected = *table.task(instance);
+            for (i64 node = first; node < last; ++node)
+            {
+                const Task& given = *states.owner_tasks[static_cast<usize>(node)];
+                if (given.uid() == expected.uid() ||
+                    (given.fingerprint() == expected.fingerprint() &&
+                     given.encoding_fingerprint() == expected.encoding_fingerprint()))
+                    continue;
+                throw nb::value_error(("mymyr: encoding: node " + std::to_string(node - first) + " of graph " +
+                                       std::to_string(g) + " is not a state of instance " + std::to_string(instance) +
+                                       " of the table (its task id): its task differs in fingerprint or atom encoding")
+                                          .c_str());
+            }
+        }
+
+    encoding::EncodeInput& input = rows.input;
+    u32 derived_words = 0;
+    std::vector<i64> lead;
+    input.derived = rows.imports.words_nd(derived_arg, "derived", {static_cast<i64>(states.view.rows)}, false, lead,
+                                          derived_words);
+    input.derived_stride = derived_words;
+    if (!goals_arg.is_none())
+        import_goals(rows.imports, goals_arg, horizon.graphs, input);
+    if (!subgoals_arg.is_none())
+        import_subgoals(rows.imports, subgoals_arg, horizon.graphs, input);
+}
+
+PyFlatBatch encode_horizon(PyFlatHorizonEncoder& self, Arg<ann::EncodingHorizonView> view, DerivedArg derived_arg,
+                           GoalsArg goals_arg, SubgoalsArg subgoals_arg, Arg<ann::Framework> framework,
+                           IntArg threads_in, PoolArg pool_in, CapacitiesArg capacities_in)
+{
+    const u32 threads = threads_arg(threads_in);
+    const std::optional<encoding::FlatCapacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
+                      : std::nullopt;
+    ImportedRows rows;
+    import_horizon(rows, *self.encoder, view, derived_arg, goals_arg, subgoals_arg);
+    return run_encoding(self, rows, parse_framework(framework, nb::getattr(view, "nodes")), threads, pool_in, capacities);
 }
 
 constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
@@ -999,6 +1197,56 @@ constexpr const char* k_row_inputs_doc =
     "the number of rows): the stream keeps their schemas and bindings, graph by graph. ";
 }  // namespace
 
+/// The members that the two encoder classes share: the catalog's properties, the table, the names of a graph's entities
+/// and pickling.
+template<class Py>
+void define_encoder_common(nb::class_<Py>& cls)
+{
+    define_schema_properties(cls, [](const Py& self) -> const encoding::EncodingSchema& { return self.encoder->schema(); });
+    cls.def_prop_ro("table", [](const Py& self) { return TableArg(self.reference.obj); },
+                    "The TaskTable (or TaskSuite) the encoder encodes states of.")
+        .def_prop_ro(
+            "schema", [](const Py& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
+            "The EncodingSchema of the encoder.")
+        .def(
+            "entity_names",
+            [](nb::handle self, nb::typed<nb::handle, PyFlatBatch> batch, IntArg graph)
+            {
+                return nb::typed<nb::object, std::vector<std::string>>(
+                    nb::module_::import_("mymyr.encoding._names").attr("entity_names")(self, batch, graph));
+            },
+            "batch"_a, "graph"_a,
+            "The names of the entities of graph `graph` of `batch` (a batch of this encoder's schema), in entity order: "
+            "an object by its name in the task, the auxiliary entity `auxiliary`, a goal entity `[+](on a b)[g]` "
+            "(`[-]` for a negative literal; a nullary literal is `[+](handempty)[g]`), a subgoal entity "
+            "`[+](on a b)[sg]` (`[ssg]`, `[sssg]` for the higher levels), an action entity `(unstack a b)`, a history "
+            "step `history:<dt>#<i>` (i counts the graph's history steps from 0), a history target "
+            "`history:<dt>#<i>:[+](on a b)`, a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
+            "`auxiliary`, a goal literal that two relations list) are told apart by position only. The names are built "
+            "from the batch's arrays and the task; nothing is stored in the batch.")
+        .def(
+            "describe",
+            [](nb::handle self, nb::typed<nb::handle, PyFlatBatch> batch, IntArg graph)
+            {
+                return nb::typed<nb::object, ann::EncodingGraphDescription>(
+                    nb::module_::import_("mymyr.encoding._names").attr("describe")(self, batch, graph));
+            },
+            "batch"_a, "graph"_a,
+            "A readable view of graph `graph` of `batch`: a GraphDescription with its entities (role and name, in entity "
+            "order) and, for each relation that has tuples, the tuples as tuples of entity names; `str(description)` "
+            "prints it.")
+        .def(
+            "__reduce__",
+            [](Py& self)
+            {
+                return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_flat_encoder"),
+                                      nb::make_tuple(self.reference.obj, options_dict(self.encoder->schema().options()),
+                                                     self.encoder->schema().fingerprint()));
+            },
+            "An encoder pickles as its table and options with the schema fingerprint; loading builds the encoder again "
+            "and raises ValueError (\"mymyr: encoding: ...\") if its schema's fingerprint differs.");
+}
+
 void bind_encoding(nb::module_& parent)
 {
     nb::module_ module = parent.def_submodule("_encoding", "Native classical relational encodings");
@@ -1010,8 +1258,8 @@ void bind_encoding(nb::module_& parent)
         "instances, so tables over the same domain agree on the relation ids.");
     static const std::string schema_doc =
         std::string("The catalog of the domain of `table` (a Task, TaskHandle or TaskTable) under the options. ") +
-        k_option_doc;
-    define_init(
+        k_option_doc + k_horizon_option_doc;
+    define_init<HorizonArgs::Optional>(
         schema_class,
         [](PyEncodingSchema* self, const TableRef& reference, const encoding::FlatOptions& options)
         { new (self) PyEncodingSchema{encoding::EncodingSchema::create(*reference.table, options)}; },
@@ -1074,21 +1322,16 @@ void bind_encoding(nb::module_& parent)
         "auxiliary entity when a nullary tuple exists) and, for every relation of the schema, the tuples of the state's "
         "fluent, derived and static atoms. A graph holds nothing that its state and instance do not have.");
     static const std::string encoder_doc =
-        std::string("The encoder of a Task, TaskHandle or one-domain TaskTable under the options of EncodingSchema. "
-                    "Options that this encoder does not encode (horizons) raise ValueError (\"mymyr: encoding: ...\"). ") +
+        std::string("The encoder of a Task, TaskHandle or one-domain TaskTable under the options of EncodingSchema, "
+                    "except the horizon options (FlatHorizonEncoder encodes horizons). ") +
         k_option_doc;
-    define_init(
+    define_init<HorizonArgs::Absent>(
         encoder_class,
         [](PyFlatEncoder* self, const TableRef& reference, const encoding::FlatOptions& options)
         { new (self) PyFlatEncoder{reference, encoding::FlatEncoder::create(reference.table, options)}; },
         encoder_doc.c_str());
-    define_schema_properties(encoder_class,
-                             [](const PyFlatEncoder& self) -> const encoding::EncodingSchema& { return self.encoder->schema(); });
-    encoder_class.def_prop_ro("table", [](const PyFlatEncoder& self) { return TableArg(self.reference.obj); },
-                              "The TaskTable (or TaskSuite) the encoder encodes states of.")
-        .def_prop_ro(
-            "schema", [](const PyFlatEncoder& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
-            "The EncodingSchema of the encoder.")
+    define_encoder_common(encoder_class);
+    encoder_class
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
              "goals"_a = nb::none(), "actions"_a = nb::none(), "subgoals"_a = nb::none(), "history"_a = nb::none(),
              "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(),
@@ -1153,43 +1396,48 @@ void bind_encoding(nb::module_& parent)
             nb::kw_only(), "framework"_a = nb::none(),
             "A stream of rows under indices you choose, whose rows can be replaced and removed (FlatMutableStream). "
             "framework: the framework of the batches its flushes return (default NumPy).")
-        .def(
-            "entity_names",
-            [](nb::handle self, nb::typed<nb::handle, PyFlatBatch> batch, IntArg graph)
-            {
-                return nb::typed<nb::object, std::vector<std::string>>(
-                    nb::module_::import_("mymyr.encoding._names").attr("entity_names")(self, batch, graph));
-            },
-            "batch"_a, "graph"_a,
-            "The names of the entities of graph `graph` of `batch` (a batch of this encoder's schema), in entity order: "
-            "an object by its name in the task, the auxiliary entity `auxiliary`, a goal entity `[+](on a b)[g]` "
-            "(`[-]` for a negative literal; a nullary literal is `[+](handempty)[g]`), a subgoal entity "
-            "`[+](on a b)[sg]` (`[ssg]`, `[sssg]` for the higher levels), an action entity `(unstack a b)`, a history "
-            "step `history:<dt>#<i>` (i counts the graph's history steps from 0), a history target "
-            "`history:<dt>#<i>:[+](on a b)`, a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
-            "`auxiliary`, a goal literal that two relations list) are told apart by position only. The names are built "
-            "from the batch's arrays and the task; nothing is stored in the batch.")
-        .def(
-            "describe",
-            [](nb::handle self, nb::typed<nb::handle, PyFlatBatch> batch, IntArg graph)
-            {
-                return nb::typed<nb::object, ann::EncodingGraphDescription>(
-                    nb::module_::import_("mymyr.encoding._names").attr("describe")(self, batch, graph));
-            },
-            "batch"_a, "graph"_a,
-            "A readable view of graph `graph` of `batch`: a GraphDescription with its entities (role and name, in entity "
-            "order) and, for each relation that has tuples, the tuples as tuples of entity names; `str(description)` "
-            "prints it.")
-        .def(
-            "__reduce__",
-            [](PyFlatEncoder& self)
-            {
-                return nb::make_tuple(nb::module_::import_("mymyr._pickle").attr("_restore_flat_encoder"),
-                                      nb::make_tuple(self.reference.obj, options_dict(self.encoder->schema().options()),
-                                                     self.encoder->schema().fingerprint()));
-            },
-            "An encoder pickles as its table and options with the schema fingerprint; loading builds the encoder again "
-            "and raises ValueError (\"mymyr: encoding: ...\") if its schema's fingerprint differs.");
+    ;
+
+    nb::class_<PyFlatHorizonEncoder> horizon_class(
+        module, "FlatHorizonEncoder",
+        "Encodes horizons into relational graphs: one graph per root state, holding the root and the nodes below it (a "
+        "node is a state reached from the root by a path of actions) as state entities, next to the instance's objects "
+        "(and the auxiliary entity when a nullary tuple exists). The relations hold the facts of the nodes (anchored by "
+        "their state entity), the goal literals of the root, the goal's satisfaction at the nodes, what a node adds to or "
+        "deletes from its root (the delta mode) and the edges of the horizon: one action tuple (the action relations, "
+        "with the action's objects) and, with parent_relation, one `_parent_` tuple per edge. The nodes and edges are "
+        "given as a HorizonView (mymyr.encoding.HorizonView; `rl.expand` rows have this form). Streams and the device "
+        "do not encode horizons.");
+    static const std::string horizon_doc =
+        std::string("The horizon encoder of a Task, TaskHandle or one-domain TaskTable. horizon_mode ('full', 'delta' or "
+                    "'action') is required; `history` is not an option of a horizon. ") +
+        k_option_doc + k_horizon_option_doc;
+    define_init<HorizonArgs::Required>(
+        horizon_class,
+        [](PyFlatHorizonEncoder* self, const TableRef& reference, const encoding::FlatOptions& options)
+        { new (self) PyFlatHorizonEncoder{reference, encoding::FlatEncoder::create(reference.table, options)}; },
+        horizon_doc.c_str());
+    define_encoder_common(horizon_class);
+    horizon_class.def(
+        "encode", &encode_horizon, "view"_a, nb::kw_only(), "derived"_a = nb::none(), "goals"_a = nb::none(),
+        "subgoals"_a = nb::none(), "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(),
+        "capacities"_a = nb::none(),
+        "Encodes the horizons of `view` (a HorizonView: its attributes `nodes`, `node_offsets`, `edge_offsets`, "
+        "`edge_src`, `edge_dst`, `edge_schema`, `edge_binding` and `task_ids`) into one graph each. nodes: the node rows "
+        "[M, W] (state words of any DLPack framework, u64 words or u32 halves [M, 2W], or a list of States); graph g's "
+        "nodes are the rows node_offsets[g] to node_offsets[g + 1] (node_offsets [G + 1] int32 from 0, strictly "
+        "ascending), its first row is the root and node k of the graph is row node_offsets[g] + k. The edges of graph "
+        "g are the entries edge_offsets[g] to edge_offsets[g + 1] of edge_src and edge_dst [E] (graph-local node "
+        "indices: the edge leads from node edge_src to node edge_dst), edge_schema [E] (the action schema) and "
+        "edge_binding [E, L] (the action's objects, L at least the table's label width): they give the action and "
+        "parent tuples one per edge, in the order of the edges, without sorting or removing duplicates; the arrays a "
+        "schema does not read may be None. task_ids: the instance of each graph [G] (required for a table of several "
+        "instances). derived: the derived atom words of each node row [M, D] (default: evaluated here). goals, "
+        "subgoals: as in FlatRelationEncoder.encode, but per graph [G, ...] (or one row shared by all graphs). "
+        "framework, threads, pool and capacities are as in FlatRelationEncoder.encode (capacities needs the key "
+        "'targets': the candidate nodes). A state entity's `entity_ref` is the node's index in its graph, so the row of "
+        "the node in `nodes` is node_offsets[g] + entity_ref. Raises ValueError (\"mymyr: encoding: ...\", naming the "
+        "graph) for invalid input.");
 
     nb::class_<PyFlatStream> stream_class(
         module, "FlatStream",

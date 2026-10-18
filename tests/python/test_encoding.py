@@ -398,15 +398,10 @@ def test_the_default_options_encode_the_goal_relations():
 
 
 # ------------------------------------------------------------------------------------------------ errors
-@pytest.mark.parametrize(
-    "options, match",
-    [
-        ({"horizon_mode": "full"}, "horizon is not supported"),
-    ],
-)
-def test_options_the_encoder_does_not_encode_raise_value_error(options, match):
-    with pytest.raises(ValueError, match=f"^mymyr: encoding: .*{match}"):
-        encoding.FlatRelationEncoder(text_task("gripper__prob05"), **{"goal_derivations": (), **options})
+@pytest.mark.parametrize("option", ["horizon_mode", "root_policy", "parent_relation"])
+def test_the_flat_encoder_has_no_horizon_options(option):
+    with pytest.raises(TypeError, match=option):
+        encoding.FlatRelationEncoder(text_task("gripper__prob05"), **{"goal_derivations": (), option: None})
 
 
 @pytest.mark.parametrize(
@@ -416,10 +411,8 @@ def test_options_the_encoder_does_not_encode_raise_value_error(options, match):
         ({"target_sources": ("action",), "include_actions": False}, "action targets need"),
         ({"max_goal_level": 1, "target_sources": ("goal", "subgoal"), "goal_derivations": ("satisfied",)},
          "plain goal derivation"),
-        ({"horizon_mode": "full", "target_sources": ("action",)}, "horizon"),
         ({"target_sources": ("history",)}, "history targets need history"),
         ({"history_max_steps": 2}, "history_max_steps needs history"),
-        ({"history": True, "horizon_mode": "full"}, "history cannot be combined with a horizon mode"),
     ],
 )
 def test_invalid_combinations_give_the_error_of_the_schema(options, match):
@@ -434,7 +427,7 @@ def test_invalid_combinations_give_the_error_of_the_schema(options, match):
 
 def test_horizon_mode_none_is_spelled_none_not_as_a_string():
     task = text_task("gripper__prob05")
-    for cls in (encoding.EncodingSchema, encoding.FlatRelationEncoder):
+    for cls in (encoding.EncodingSchema, encoding.FlatHorizonEncoder):
         with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
             cls(task, goal_derivations=(), horizon_mode="none")
 
