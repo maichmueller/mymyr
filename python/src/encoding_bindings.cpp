@@ -1199,7 +1199,7 @@ void bind_encoding(nb::module_& parent)
             "indices", [](PyFlatMutableStream& self) { return int64_array(self.stream->indices()); },
             "The indices of the rows held, ascending: the order of the graphs of a flush.")
         .def(
-            "__contains__", [](const PyFlatMutableStream& self, nb::handle index)
+            "__contains__", [](const PyFlatMutableStream& self, Arg<ann::Any> index)
             {
                 // a value that is not an integer, or not a 64-bit one, is no index of a row
                 i64 value = 0;
