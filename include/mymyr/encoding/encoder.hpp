@@ -12,10 +12,14 @@
 //   task_ids             i32 [G]       the instance of each row
 //   num_objects          I   [G]       the instance's objects (the auxiliary entity is not counted)
 //   entity_offsets       I   [G + 1]   graph g's entities are [entity_offsets[g], entity_offsets[g + 1])
-//   entity_role          u8  [E]       the EntityRole: 0 object, 2 goal, 8 auxiliary (omitted: see below)
-//   entity_ref           I   [E]       object: its instance-local id; goal: the batch id of its tuple (the position of
-//                                      the tuple in the concatenation of all cells in layout order); auxiliary: -1
+//   entity_role          u8  [E]       the EntityRole: 0 object, 1 predicate virtual node, 2 goal, 4 action, 8
+//   auxiliary
 //                                      (omitted: see below)
+//   entity_ref           I   [E]       object: its instance-local id; goal: the index of its tuple among the graph's
+//                                      tuples in graph-major order (the tuples of the graph's cells in relation order);
+//                                      action: the row of its ground action in the graph's expansion rows (counted from
+//                                      the graph's first row); predicate virtual node: the id of the predicate's key
+//                                      relation; auxiliary: -1 (omitted: see below)
 //   relation_counts      I   [G, R]    the tuples of cell (g, r), indexed (g, r) in both layouts (omitted: see below)
 //   relation_offsets     I   [G * R + 1]      cell (g, r) is segment s: its tuples are [offsets[s], offsets[s + 1])
 //   relation_arg_offsets I   [G * R + 1]      the same for the argument array
@@ -32,12 +36,18 @@
 //
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
-// layouts are a permutation of each other: task_ids, num_objects, entity_offsets, entity_role, relation_counts, the
-// target arrays, goal_complete and every cell's tuples (their order and their entity ids) are equal, and so is
-// entity_ref except the references of goal entities, which index the tuples in layout order; relation_offsets and relation_arg_offsets are
-// the exclusive prefix sums of the cells' tuple and argument counts in segment order, and relation_args is the
-// concatenation of the cells' arguments in segment order. So the cell at relation-major segment r * G + g is the cell
-// at graph-major segment g * R + r.
+// layouts are a permutation of each other: task_ids, num_objects, entity_offsets, entity_role, entity_ref,
+// relation_counts, the target arrays, goal_complete and every cell's tuples (their order and their entity ids) are
+// equal; relation_offsets and relation_arg_offsets are the exclusive prefix sums of the cells' tuple and argument
+// counts in segment order, and relation_args is the concatenation of the cells' arguments in segment order. So the cell
+// at relation-major segment r * G + g is the cell at graph-major segment g * R + r.
+//
+// Entity references. Every entity_ref is graph-local or intrinsic to the catalog, so it does not depend on the layout
+// or on the graph's place in the batch. The tuple of a goal entity with reference k in graph g is, in the graph-major
+// layout, tuple relation_offsets[g * R] + k; in the relation-major layout subtract the counts of the graph's cells
+// (relation_counts[g, 0], relation_counts[g, 1], ...) from k until the rest j falls into a cell (g, r), and the tuple
+// is relation_offsets[r * G + g] + j. The expansion row of an action entity with reference k is row offsets[g] + k of
+// the expansion given as `actions`.
 //
 // Omitted arrays. With FlatOptions::emit_counts = false a batch has no relation_counts: the tuples of segment s are
 // relation_offsets[s + 1] - relation_offsets[s]. When EncodingSchema::implicit_entity_arrays() holds, a batch has no
@@ -51,13 +61,14 @@
 // k-th plain goal tuple of a graph has local index num_objects + has_auxiliary + k. A graph contains nothing that its
 // row and instance do not have. Encoding a slice of a batch gives the slice of the batch's encoding, with the
 // offsets rebased (in the graph-major layout; the cells of a relation-major slice are the same cells, in the order of
-// their own segments).
+// their own segments); no entity_ref needs a rebase.
 //
 // Threads. The calls that take a ThreadPool split the graphs into one contiguous slice per member (ThreadPool::slice)
 // and run two parallel passes, count and fill, between which the members' sizes are scanned serially. Every position is
 // a sum over the graphs before it in batch order, so the output does not depend on the pool size.
 
 #include "mymyr/core/thread_pool.hpp"
+#include "mymyr/encoding/buffers.hpp"
 #include "mymyr/encoding/context.hpp"
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/rl/expand.hpp"
@@ -95,57 +106,6 @@ struct EncodeInput
     const rl::Expansion* actions = nullptr;
 };
 
-/// The capacities of the variable-size arrays of a batch, for the capacity form: how many entities (the entries of the
-/// entity arrays), tuples, tuple arguments (the entries of relation_args) and targets (the entries of target_entity and
-/// target_group) the caller's buffers hold. The arrays
-/// whose size follows from the number of graphs and relations are always large enough by contract (see FlatBuffers).
-struct FlatCapacities
-{
-    u64 entities = 0;
-    u64 tuples = 0;
-    u64 args = 0;
-    u64 targets = 0;
-};
-
-/// Flags of FlatSizes::overflow.
-inline constexpr u32 k_overflow_capacity = 1;  // some size exceeds its capacity
-inline constexpr u32 k_overflow_index = 2;     // some size or count does not fit the index type
-
-/// The true sizes of a batch (not clipped to any capacity) and whether the batch can be written. A POD, so that a
-/// device call can return it in the same form.
-struct FlatSizes
-{
-    u64 entities = 0;
-    u64 tuples = 0;
-    u64 args = 0;
-    u64 targets = 0;
-    u32 overflow = 0;  // k_overflow_* flags; 0: the batch fits
-    [[nodiscard]] bool overflowed() const noexcept { return overflow != 0; }
-};
-
-/// The destination arrays of a batch of G graphs and R relations, typed by the index type of the options (int32 or
-/// int64). The caller owns them. Arrays of size G, G + 1, G * R or G * R + 1 must have that size; relation_args,
-/// entity_role, entity_ref, target_entity and target_group must hold at least the sizes of the batch (FlatSizes).
-/// entity_role and entity_ref must be null iff the schema has implicit entity arrays, relation_counts iff it does not
-/// store counts, goal_complete iff it has no goal relations, the three target arrays iff it has no targets. Nothing is
-/// written past the sizes: the entries of the variable-size arrays beyond them keep their old values.
-struct FlatBuffers
-{
-    i32* task_ids = nullptr;
-    void* num_objects = nullptr;
-    void* entity_offsets = nullptr;
-    u8* entity_role = nullptr;
-    void* entity_ref = nullptr;
-    void* relation_counts = nullptr;
-    void* relation_offsets = nullptr;
-    void* relation_arg_offsets = nullptr;
-    void* relation_args = nullptr;
-    u8* goal_complete = nullptr;
-    void* target_offsets = nullptr;
-    void* target_entity = nullptr;
-    u8* target_group = nullptr;
-};
-
 /// The graphs a pool member should have at least: waking a member costs about as much as encoding several hundred
 /// graphs, so a batch is split over members only as far as each gets this many, and a batch of at most this many
 /// graphs is encoded on the calling thread whatever the size of the pool.
@@ -172,8 +132,7 @@ class FlatEncoder
 {
 public:
     /// Throws std::invalid_argument ("mymyr: encoding: ...") for invalid options and for options this encoder does not
-    /// encode: subgoal levels, subgoal and history targets, and horizons; and for a domain in which more than
-    /// detail::k_max_action_runs action schemas share one action relation.
+    /// encode: subgoal levels, subgoal and history targets, and horizons.
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(rl::TaskTablePtr table, const FlatOptions& options);
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(TaskPtr task, const FlatOptions& options);
 

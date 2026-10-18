@@ -1,0 +1,7 @@
+(define (domain wide-predicates)
+  (:requirements :strips :typing :negative-preconditions :derived-predicates)
+  (:types obj)
+  (:predicates (on ?x - obj) (link ?x ?y ?z - obj) (trio ?x ?y ?z - obj))
+  (:derived (trio ?x ?y ?z - obj) (and (on ?x) (on ?y) (on ?z)))
+  (:action set :parameters (?x - obj) :precondition (and) :effect (on ?x))
+  (:action join :parameters (?x ?y ?z ?w - obj) :precondition (link ?x ?y ?z) :effect (on ?w)))
