@@ -2,6 +2,7 @@
 // Test support of the relational encoder: PDDL tasks of tests/data/pddl, seeded random walks over a task table, and
 // options without goal relations.
 
+#include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
@@ -79,6 +80,102 @@ inline Rows random_walk(const rl::TaskTable& table, u32 instance, u64 n, u64 see
         }
     }
     return rows;
+}
+
+/// A batch of horizon graphs built by expanding roots breadth first: graph g is a root and, for each of `depth` levels,
+/// the successors (in canonical order, at most `max_children` of each node) of the nodes of the level before. Node
+/// order is the order of discovery, so a node's index is its row in the graph, and edge e of a graph leads to its node
+/// e + 1.
+struct Horizon
+{
+    std::vector<u64> nodes;     // [M, words]
+    std::vector<i32> task_ids;  // [G]
+    std::vector<i32> node_offsets{0}, edge_offsets{0}, edge_src, edge_dst, edge_schema, edge_binding;
+    u32 words = 0, label_width = 0;
+    [[nodiscard]] u64 graphs() const noexcept { return task_ids.size(); }
+    [[nodiscard]] u64 num_nodes() const noexcept { return words ? nodes.size() / words : 0; }
+    [[nodiscard]] encoding::HorizonInput view() const noexcept
+    {
+        encoding::HorizonInput h;
+        h.nodes = {nodes.data(), num_nodes(), words, 0, 0};
+        h.graphs = graphs();
+        h.node_offsets = node_offsets.data();
+        h.edge_offsets = edge_offsets.data();
+        h.edge_src = edge_src.data();
+        h.edge_dst = edge_dst.data();
+        h.edge_schema = edge_schema.data();
+        h.edge_binding = edge_binding.data();
+        h.label_width = label_width;
+        return h;
+    }
+    [[nodiscard]] encoding::EncodeInput input() const noexcept
+    {
+        encoding::EncodeInput in;
+        in.horizon = view();
+        in.task_ids = task_ids.data();
+        return in;
+    }
+};
+
+inline Horizon horizon_of(const rl::TaskTable& table, const Rows& roots, u32 depth, u64 max_children = ~u64{0})
+{
+    Horizon h;
+    h.words = roots.words;
+    h.label_width = table.label_width();
+    for (u64 g = 0; g < roots.size(); ++g)
+    {
+        const i32 id = roots.task_ids[g];
+        h.task_ids.push_back(id);
+        const u64 first = h.num_nodes();
+        h.nodes.insert(h.nodes.end(), roots.data.begin() + static_cast<std::ptrdiff_t>(g * roots.words),
+                       roots.data.begin() + static_cast<std::ptrdiff_t>((g + 1) * roots.words));
+        u64 level_begin = first, level_end = first + 1;
+        for (u32 level = 0; level < depth; ++level)
+        {
+            for (u64 node = level_begin; node < level_end; ++node)
+            {
+                const std::vector<u64> state(h.nodes.begin() + static_cast<std::ptrdiff_t>(node * h.words),
+                                             h.nodes.begin() + static_cast<std::ptrdiff_t>((node + 1) * h.words));
+                rl::Expansion out;
+                out.words = h.words;
+                out.label_width = h.label_width;
+                out.capacity = 256;
+                std::vector<u64> succ;
+                std::vector<i32> schema, binding, offsets(2);
+                for (;;)
+                {
+                    succ.assign(out.capacity * h.words, 0);
+                    schema.assign(out.capacity, 0);
+                    binding.assign(out.capacity * h.label_width, 0);
+                    out.succ = succ.data();
+                    out.schema = schema.data();
+                    out.binding = binding.data();
+                    out.offsets = offsets.data();
+                    rl::expand(table, {state.data(), 1, h.words, 0, 0}, &id, out);
+                    if (!out.overflow())
+                        break;
+                    out.capacity = out.total;
+                    out.words = std::max(out.words, out.words_needed);
+                }
+                const u64 children = std::min<u64>(out.total, max_children);
+                for (u64 c = 0; c < children; ++c)
+                {
+                    h.edge_src.push_back(static_cast<i32>(node - first));
+                    h.edge_dst.push_back(static_cast<i32>(h.num_nodes() - first));
+                    h.edge_schema.push_back(schema[c]);
+                    h.edge_binding.insert(h.edge_binding.end(), binding.begin() + static_cast<std::ptrdiff_t>(c * h.label_width),
+                                          binding.begin() + static_cast<std::ptrdiff_t>((c + 1) * h.label_width));
+                    h.nodes.insert(h.nodes.end(), succ.begin() + static_cast<std::ptrdiff_t>(c * h.words),
+                                   succ.begin() + static_cast<std::ptrdiff_t>((c + 1) * h.words));
+                }
+            }
+            level_begin = level_end;
+            level_end = h.num_nodes();
+        }
+        h.node_offsets.push_back(static_cast<i32>(h.num_nodes()));
+        h.edge_offsets.push_back(static_cast<i32>(h.edge_src.size()));
+    }
+    return h;
 }
 
 /// The slot of the atom `name(objects)` (object ids) among the fluent or derived atoms of `task`; a test failure if the

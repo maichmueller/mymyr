@@ -6,6 +6,9 @@
 // gathers it row by row, for a mutable stream) and the caller may reuse its buffers at once. The bundle of a flush is
 // the bundle encode() returns for the same rows in the same order, bit for bit, whatever the order of the appends.
 //
+// A stream takes the encoder of a flat schema; an encoder with a horizon mode is refused, because the nodes of a horizon
+// are rows of one graph and a stream's rows are independent graphs.
+//
 // Per-row inputs. The rows of a stream carry the same inputs: a stream without rows takes any set of them (derived
 // words, goals as a pair of masks or with the derived pair, actions) with its first append, and from then on each
 // append must give exactly that set. A stream that holds no rows again (after a clear or a flush of the append-only

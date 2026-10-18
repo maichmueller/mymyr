@@ -198,6 +198,10 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     constexpr u8 k_history = static_cast<u8>(EntityRole::History);
     constexpr u8 k_history_target = static_cast<u8>(EntityRole::HistoryTarget);
     constexpr u8 k_virtual = static_cast<u8>(EntityRole::PredicateVirtual);
+    constexpr u8 k_state = static_cast<u8>(EntityRole::State);
+    const bool horizon = schema.has_horizon();
+    const bool root_target = schema.options().horizon.root == RootPolicy::Include;
+    const bool root_entity = schema.options().horizon.root != RootPolicy::Exclude;
     const bool action_targets = schema.options().targets.contains(TargetSource::Action);
     for (u64 g = 0; g < G; ++g)
     {
@@ -222,7 +226,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         }
         u32 auxiliaries = 0;
         i64 goal_entities = 0, subgoal_entities = 0, action_entities = 0, history_entities = 0, history_targets = 0,
-            virtual_entities = 0;
+            state_entities = 0, virtual_entities = 0;
         for (i64 e = first; e < last; ++e)
         {
             const u8 role = role_of(e);
@@ -232,35 +236,45 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             action_entities += role == k_action;
             history_entities += role == k_history;
             history_targets += role == k_history_target;
+            state_entities += role == k_state;
             virtual_entities += role == k_virtual;
         }
         if (auxiliaries > 1)
             fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
         if (last - first != objects + auxiliaries + goal_entities + subgoal_entities + action_entities +
-                                history_entities + history_targets + virtual_entities)
+                                history_entities + history_targets + state_entities + virtual_entities)
             fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary, goal, subgoal, action, "
-                                               "history step, history target nor predicate virtual entities");
+                                               "history step, history target, state nor predicate virtual entities");
+        if (state_entities != 0 && !horizon)
+            fail("graph " + std::to_string(g) + " has state entities, the schema has no horizon");
         // The entities past the objects: the auxiliary entity, the goal entities, the subgoal entities, the action
-        // entities, the history step entities, the history target entities, the virtual entities.
+        // entities, the history step entities, the history target entities, the state entities, the virtual entities.
         const i64 goal_start = first + objects + auxiliaries;
         const i64 subgoal_start = goal_start + goal_entities;
         const i64 action_start = subgoal_start + subgoal_entities;
         const i64 history_start = action_start + action_entities;
         const i64 history_target_start = history_start + history_entities;
-        const i64 virtual_start = history_target_start + history_targets;
+        const i64 state_start = history_target_start + history_targets;
+        const i64 virtual_start = state_start + state_entities;
         for (i64 e = goal_start; e < last; ++e)
         {
             const u8 expected = e < subgoal_start          ? k_goal
                                 : e < action_start         ? k_subgoal
                                 : e < history_start        ? k_action
                                 : e < history_target_start ? k_history
-                                : e < virtual_start        ? k_history_target
+                                : e < state_start          ? k_history_target
+                                : e < virtual_start        ? k_state
                                                            : k_virtual;
             if (role_of(e) != expected)
                 fail("the entities of graph " + std::to_string(g) + " past its objects are not in the order auxiliary, goal, "
                                                                   "subgoal, action, history step, history target, "
-                                                                  "predicate virtual");
+                                                                  "state, predicate virtual");
         }
+        // The state entities of a horizon refer to their nodes: consecutively from the first node that has an entity.
+        for (i64 j = 0; j < state_entities; ++j)
+            if (entity_ref[state_start + j] != j + (root_entity ? 0 : 1))
+                fail("the state entities of graph " + std::to_string(g) + " do not refer to consecutive nodes from " +
+                     (root_entity ? "the root" : "the first node below the root"));
         if (stored_history)
         {
             const i64 steps = history_offsets[g + 1] - history_offsets[g];
@@ -300,6 +314,9 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             const bool history_target = roles.front() == SlotRole::HistoryTarget;
             const bool action = roles.front() == SlotRole::Action;
             const bool leading = goal_target || subgoal_target || history_target || action;
+            // the tuples of the edge relations of a horizon are in the order of the edges
+            const Lane lane = schema.relation(static_cast<u32>(r)).lane;
+            const bool edge_order = horizon && (lane == Lane::Action || lane == Lane::Parent);
             // the tuples of a target or action relation start with their own entity, which is ascending by
             // construction, so that the tuples are compared past it
             const u32 lead = leading ? 1u : 0u;
@@ -377,7 +394,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         virtual_used[static_cast<usize>(id - virtual_start)] = true;
                     }
                 }
-                if (t > 0)
+                if (t > 0 && !edge_order)
                 {
                     u32 k = lead;
                     while (k < arity && args[at + k] == args[at - arity + k])
@@ -390,8 +407,19 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             }
             graph_tuples += static_cast<i64>(n);
         }
+        const i64 candidates = root_target ? state_entities : (state_entities > 0 ? state_entities - (root_entity ? 1 : 0) : 0);
         const i64 expected_targets =
-            goal_entities + subgoal_entities + (action_targets ? action_entities : 0) + history_targets;
+            goal_entities + subgoal_entities + (action_targets ? action_entities : 0) + history_targets + candidates;
+        // the state targets: the candidate nodes' entities in order, the root's only with the root policy `include`
+        if (stored_targets && horizon)
+            for (i64 j = 0; j < candidates; ++j)
+            {
+                const i64 position = target_start + j;
+                const i64 entity = state_start + (state_entities - candidates) + j;
+                if (position >= target_offsets[g + 1] || target_entity[static_cast<u64>(position)] != entity ||
+                    target_group[position] != static_cast<u8>(TargetGroup::State))
+                    fail("the targets of graph " + std::to_string(g) + " do not list its candidate state entities in order");
+            }
         if (stored_targets && target_offsets[g] + expected_targets != target_offsets[g + 1])
             fail("graph " + std::to_string(g) +
                  " has targets that are not its goal, subgoal, action and history target entities");

@@ -458,7 +458,10 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });
     schema->m_subgoals = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
-        { return (r.lane == Lane::Goal || r.lane == Lane::GoalDerivation) && r.level.value_or(0) > 0; });
+        {
+            return (r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction) &&
+                   r.level.value_or(0) > 0;
+        });
     const FlatOptions& o = schema->m_options;
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
                                   !o.predicate_virtual_nodes && !o.include_actions && !o.history &&

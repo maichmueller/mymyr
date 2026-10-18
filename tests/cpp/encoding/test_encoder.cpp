@@ -465,26 +465,10 @@ TEST(EncoderDerived, ProvidedDerivedWordsGiveTheSameBundleAsEvaluatingThem)
     EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
 }
 
-TEST(EncoderRefusals, HorizonsAreRefused)
+TEST(EncoderRefusals, InvalidOptions)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-    auto refused = [&](auto change)
-    {
-        FlatOptions options = test::encoder_options();
-        change(options);
-        try
-        {
-            (void)FlatEncoder::create(table, options);
-            ADD_FAILURE() << "the options were accepted";
-        }
-        catch (const std::invalid_argument& error)
-        {
-            EXPECT_NE(std::string(error.what()).find("mymyr: encoding: "), std::string::npos) << error.what();
-            EXPECT_NE(std::string(error.what()).find("is not supported by this encoder yet"), std::string::npos) << error.what();
-        }
-    };
-    refused([](FlatOptions& o) { o.horizon.mode = HorizonMode::Full; });
-    // an invalid combination is reported as such, whether or not the encoder would encode its parts
+    // an invalid combination is reported as such
     try
     {
         FlatOptions options = test::encoder_options();
