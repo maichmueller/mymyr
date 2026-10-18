@@ -47,7 +47,7 @@ def test_the_classes_take_their_own_options(blocks):
         encoding.FlatHorizonEncoder(blocks)
     with pytest.raises(TypeError):
         encoding.FlatHorizonEncoder(blocks, horizon_mode="full", history=True)
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="horizon_mode is None"):
         encoding.FlatHorizonEncoder(blocks, horizon_mode=None)
     with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
         encoding.FlatHorizonEncoder(blocks, horizon_mode="none")
@@ -61,6 +61,7 @@ def test_a_view_has_the_documented_fields(blocks):
     _, view = horizon_of(blocks, depth=1)
     assert [name for name in view.__dataclass_fields__] == [
         "nodes", "node_offsets", "edge_offsets", "edge_src", "edge_dst", "edge_schema", "edge_binding", "task_ids",
+        "truncated",
     ]
     assert view.nodes.shape[0] == int(view.node_offsets[-1]) and len(view.edge_src) == int(view.edge_offsets[-1])
     with pytest.raises(TypeError, match="nodes must be given"):

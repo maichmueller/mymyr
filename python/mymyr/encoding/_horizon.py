@@ -1,15 +1,19 @@
-"""The input of FlatHorizonEncoder: the nodes and edges of a batch of horizons."""
+"""The input of FlatHorizonEncoder: the nodes and edges of a batch of horizons, and the builders of it."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mymyr._core import _encoding as _core
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mymyr import State
+    from mymyr import State, Task, TaskHandle
     from mymyr._typing import SupportsDLPack
+    from mymyr.datasets import StateSpace
+    from mymyr.rl import TaskTable, ThreadPool
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,8 @@ class HorizonView:
       ground action (the first arity-of-the-schema entries of a row are read; L at least the table's label width).
       ``rl.expand`` gives the schema and binding rows of a state's successors in exactly this form.
     - ``task_ids``: the instance of each graph, int32 [G]; None for a table of one instance.
+    - ``truncated``: uint8 [G], set where ``horizon`` stopped a graph at ``max_nodes``; None when not known. The encoders
+      do not read it.
 
     The edges are used as given: a node may have several incoming edges or none, and the encoder neither sorts nor
     merges them. An action relation holds one tuple per edge and a parent relation one tuple per edge, in the order of
@@ -45,8 +51,74 @@ class HorizonView:
     edge_schema: SupportsDLPack | None = None
     edge_binding: SupportsDLPack | None = None
     task_ids: SupportsDLPack | Sequence[int] | None = None
+    truncated: SupportsDLPack | None = None
 
     def __post_init__(self) -> None:
         for name in ("nodes", "node_offsets", "edge_offsets"):
             if getattr(self, name) is None:
                 raise TypeError(f"mymyr: encoding: HorizonView.{name} must be given")
+
+
+def horizon(
+    table: TaskTable | Task | TaskHandle,
+    roots: SupportsDLPack | Sequence[State],
+    depth: int = 1,
+    *,
+    task_ids: SupportsDLPack | Sequence[int] | None = None,
+    max_nodes: int | None = None,
+    truncate: bool = False,
+    merge: bool = True,
+    threads: int = 1,
+    pool: ThreadPool | None = None,
+) -> HorizonView:
+    """The horizons of the states ``roots`` (rows of one instance each, ``task_ids``): the states within ``depth``
+    actions of a root as nodes, and the actions between them as edges, as a HorizonView for
+    ``FlatHorizonEncoder.encode``. ``depth=0`` gives root-only graphs.
+
+    Each graph is built on its own, breadth first. The root is node 0; then, level by level, the successors of the nodes
+    of the level before, in node order, each node's successors in the canonical order of ``rl.expand`` (by action schema,
+    then by objects). A successor is a node when its state has not been reached in this graph before (``merge=True``,
+    first seen wins: the node's number is that of its first appearance), otherwise the edge leads to the node of that
+    state, so a state with several predecessors is one node with several incoming edges and a cycle is an edge to an
+    earlier node. The edges of a graph are ordered by source node, then canonically: one per (node, successor row), so
+    two actions that lead to the same state are two edges. The nodes of the deepest level are not expanded. With
+    ``merge=False`` every successor row is a node of its own and the graph is a tree. The graphs, their numbering and
+    their order do not depend on ``threads`` or ``pool`` nor on the process.
+
+    Memory. The result is held in memory: ``8 * W * nodes + 4 * (3 + L) * edges`` bytes for W state words per node and
+    L action label columns per edge, and ``8 * nodes`` more while the nodes are merged; expansion works in chunks, so
+    nothing else grows with the number of nodes. The number of nodes of a graph is at most the number of
+    states within ``depth`` actions of its root, which can grow exponentially with the depth. ``max_nodes`` bounds it:
+    a graph that would hold more nodes than ``max_nodes`` (the root included) raises ValueError, or with
+    ``truncate=True`` stops growing instead: a successor that is not yet a node is left out together with its edge
+    (successors that are nodes already still get their edges), and ``truncated`` of the result is 1 for that graph.
+    ``max_nodes=None`` is unbounded. A table of several instances needs ``task_ids``. ``threads`` (0: one per hardware
+    thread) or ``pool`` (a ``mymyr.rl.ThreadPool``, one batch at a time) split the expansion.
+
+    Raises ValueError ("mymyr: encoding: ...") for invalid states or task ids, a graph above ``max_nodes``, and more than
+    2^31 - 1 nodes or edges in the result; numeric tasks are not supported.
+    """
+    return HorizonView(**_core._build_horizon(
+        table, roots, task_ids, depth=depth, max_nodes=max_nodes, truncate=truncate, merge=merge, threads=threads,
+        pool=pool,
+    ))
+
+
+def horizon_of_space(
+    space: StateSpace,
+    roots: SupportsDLPack | Sequence[int] | None = None,
+    depth: int = 1,
+    *,
+    max_nodes: int | None = None,
+    truncate: bool = False,
+    merge: bool = True,
+) -> HorizonView:
+    """The horizons of states of a state space, by the same rules as ``horizon`` but over the space's recorded
+    transitions instead of expanding states: the graph of ``roots[g]`` (state ids of the space; None: every state, in id
+    order) has the states within ``depth`` transitions as nodes, in the order of the space's transitions of each state,
+    and one edge per transition with its action label. The space needs its transition labels
+    (``labels=True`` when generated) and its task is the one to encode with (``FlatHorizonEncoder(space.task)``);
+    ``max_nodes``, ``truncate``, ``merge`` and the memory are as in ``horizon``."""
+    return HorizonView(**_core._build_horizon_of_space(
+        space, roots, depth=depth, max_nodes=max_nodes, truncate=truncate, merge=merge,
+    ))
