@@ -279,7 +279,7 @@ batch lists them in `target_entity`, so the schema has targets (the capacity for
 gives it a state entity but does not list it as a target. `exclude` has no state entity for the root: the graph's
 entities are the nodes 1 and up, and the root's relations are the plain ones (no state slot): the root's atoms are
 tuples without a state argument, and an edge into or out of the root gives no action tuple and no `_parent_` tuple.
-(mifrost names that root `_root_state_`; here the root has no entity at all, and its relations say what it holds.)
+The root has no entity at all; its relations say what it holds.
 
 **Modes.** Every relation of a node has the node's state entity as its first argument (the slot role `state`):
 
@@ -299,8 +299,7 @@ tuples without a state argument, and an edge into or out of the root gives no ac
 
 **Nullary relations.** The atoms and goal literals of nullary predicates are tuples over the graph's auxiliary entity,
 in front of which stands the state entity (`handempty(node, auxiliary)`); the graph has the auxiliary entity exactly when
-a nullary tuple exists. With `nullary=False` they are absent. (mifrost leaves nullary relations out of horizon batches;
-the native encoder fills them as it does for a state graph.)
+a nullary tuple exists. With `nullary=False` they are absent.
 
 ```python
 import numpy as np
