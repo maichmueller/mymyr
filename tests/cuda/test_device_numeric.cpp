@@ -719,7 +719,7 @@ void mixed_expand(const cuda::ContextPtr& ctx, const rl::TaskSuitePtr& suite, co
         for (u32 extra : {0u, 2u})
         {
             std::vector<u64> padded(ids.size() * K * (RW + extra));
-            rl::PaddedExpansion hp; hp.K = K; hp.words = W + extra; hp.numeric_words = NN; hp.succ = padded.data();
+            rl::PaddedExpansion hp; hp.k = K; hp.words = W + extra; hp.numeric_words = NN; hp.succ = padded.data();
             rl::pad(cpu, ids.size(), hp);
             auto pd = test::to_device(ctx, std::vector<u64>(padded.size()), stream);
             rl::PaddedExpansion gd = hp; gd.succ = static_cast<u64*>(pd.data());
