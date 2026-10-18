@@ -317,7 +317,7 @@ class Mode:
 def capacities_of(encoder, rows):
     """The capacity dict that fits the batch `rows` exactly."""
     batch = encoder.encode(rows)
-    return dict(entities=int(batch.entity_offsets[-1]), tuples=int(batch.relation_offsets[-1]),
+    return dict(graphs=batch.num_graphs, entities=int(batch.entity_offsets[-1]),
                 args=int(batch.relation_arg_offsets[-1]))
 
 
@@ -477,6 +477,8 @@ def run_device_bench(binary, files, rows, n, rounds, device):
         command = [str(binary), "--domain", str(files[0]), "--problem", str(files[1]), "--rows", str(path), "--words",
                    str(rows.shape[1]), "--n", str(n), "--rounds", str(rounds), "--replays", str(REPLAYS), "--device",
                    str(device)]
+        if len(files) == 3:
+            command += ["--secondary-problem", str(files[2])]
         done = subprocess.run(command, capture_output=True, text=True, check=False)
     lines = done.stdout.strip().splitlines()
     try:
@@ -513,7 +515,8 @@ def device_bench_modes(binary, args, rows, files, encoders, wants):
         info = result[layout]
         mode.fields.update(kernels=info["kernels"], memsets=info["memsets"], other_nodes=info["other_nodes"],
                            scratch_bytes=info["scratch_bytes"], cub_bytes=info["cub_bytes"], cells=info["cells"],
-                           relations=info["relations"], wide_totals=info["wide"], device_bench=True)
+                           relations=info["relations"], wide_totals=info["wide"], device_bench=True,
+                           thread_fills=info.get("thread_fills"), warp_fills=info.get("warp_fills"))
         encoder, reason = encoders[layout]
         if encoder is None:
             mode.skipped(f"layout {layout} unavailable: {reason}", True)
@@ -1158,6 +1161,59 @@ def run_task(key, args, gpu, pool):
     return records
 
 
+def run_mixed_table(args, gpu, pool):
+    """Small rows from a table that also contains a wide instance, with both layouts timed by the C++ driver."""
+    key = "blocks-mixed-widths"
+    small, why = load_task("blocks-p01e", args.data)
+    wide, why_wide = load_task("blocks-p20m", args.data)
+    if small is None or wide is None:
+        return [dict(task=key, mode="*", status="skipped", reason=why or why_wide)]
+    if not args.device_bench:
+        return [dict(task=key, mode="*", status="skipped", reason="--mixed-widths requires --device-bench")]
+    table = rl.TaskTable([small, wide])
+    raw = walk_rows(small, args.rows, args.seed)
+    rows = np.zeros((len(raw), table.words), dtype=np.uint64)
+    rows[:, :raw.shape[1]] = raw
+    class FirstInstance:
+        def __init__(self, encoder):
+            self.encoder = encoder
+            self.ids = {}
+
+        def encode(self, data, **kwargs):
+            n = len(data)
+            ids = self.ids.get(n)
+            if ids is None:
+                ids = self.ids[n] = np.zeros(n, dtype=np.int32)
+            return self.encoder.encode(data, ids, **kwargs)
+
+    encoders = {}
+    for layout in ("graph", "relation"):
+        encoder, reason = make_encoder(table, layout=layout)
+        encoders[layout] = (None if encoder is None else FirstInstance(encoder), reason)
+    files = (*task_files("blocks-p01e", args.data), task_files("blocks-p20m", args.data)[1])
+    wants = lambda name: wanted(name, args.modes)
+    modes = device_bench_modes(args.device_bench, args, rows, files, encoders, wants)
+    if group_wanted("cpu", args.modes):
+        modes += cpu_modes(rows, tile(rows, max(len(rows), args.min_batch)), pool, encoders, wants)
+    time_rounds(modes, args.rounds)
+    records, cache = [], {}
+    for mode in modes:
+        record = dict(task=key, words=table.words, objects=len(small.objects), mode=mode.name, group=mode.group,
+                      unit=mode.unit, units=mode.units, **mode.fields)
+        if mode.error:
+            record.update(status="error", reason=mode.error)
+        elif mode.skip is not None:
+            record.update(status="skipped", reason=mode.skip)
+        else:
+            record.update(status="ok", **summarize(mode))
+            if mode.name.startswith("device_encode") and (mode.fields.get("thread_fills") != 1 or mode.fields.get("warp_fills") != 0):
+                record.update(status="error", reason="the small rows must use one thread fill")
+            if mode.stats is not None:
+                record["bytes_per_state"], record["ints_per_state"] = stats_of(mode, cache)
+        records.append(record)
+    return records
+
+
 def baselines():
     return dict(
         env_step_us=ENV_STEP_US, earlier_cpu_us={k: dict(zip(("single", "batch256", "threads8"), v))
@@ -1191,6 +1247,7 @@ def parse_args(argv):
     p.add_argument("--env-sizes", default=",".join(map(str, ENV_SIZES)), help="environment counts N")
     p.add_argument("--device-bench", metavar="PATH", help="the mymyr_device_encoding_bench binary: it times the device_encode "
                    "modes (C++ replays of captured encodes) and measures their launches and scratch")
+    p.add_argument("--mixed-widths", action="store_true", help="also time small rows in a table with a wide instance")
     p.add_argument("--quick", action="store_true", help="a smoke configuration: one small task, few rows and rounds")
     args = p.parse_args(argv)
     if args.rounds < 1:
@@ -1216,6 +1273,9 @@ def main(argv=None):
     pool = rl.ThreadPool(THREADS)
     for key in args.tasks:
         records += run_task(key, args, gpu, pool)
+    if args.mixed_widths:
+        records += run_mixed_table(args, gpu, pool)
+        args.tasks.append("blocks-mixed-widths")
     if gpu.ok:
         env["gpu"]["status_end"] = gpu_status(args.device)
     env["load_average_end"] = os.getloadavg()

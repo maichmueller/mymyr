@@ -509,3 +509,13 @@ the context with `device.context().acquire(stream)` outside capture, then call
 address is aligned to 256 bytes. Keep the acquisition and buffers alive through the last captured replay, and use
 separate scratch for concurrent calls. A workspace owns the same scratch and delegates to the same implementation.
 The scratch layout and workspace storage are private.
+
+Automatic device launches choose a width class from each instance's own word count, cell count and argument bound.
+A graph-major row uses a thread up to 8 words, 128 cells and 128 arguments; relation-major uses the same word and cell
+limits and up to 1,024 arguments. Wider work uses a warp. Count starts with four lanes and tries eight or 32 if its
+shared memory does not fit. The shared-memory budget includes static kernel storage. Class launches share scans in
+batch order, so a launch permutation changes the workers assigned to graphs and preserves every output position.
+
+`bench/python/bench_encoding_gpu.py --mixed-widths --device-bench PATH` also measures small rows in a table containing
+both small and wide instances. The C++ driver accepts `--secondary-problem PATH` for that table and reports the
+captured thread and warp fill launches.
