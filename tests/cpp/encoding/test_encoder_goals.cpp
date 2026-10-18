@@ -181,9 +181,14 @@ Named goal_reference(const EncodingSchema& schema, i64 num_objects, const std::v
         const bool holds = (atoms.count({literal.predicate, literal.objects}) != 0) == literal.positive;
         const std::string base = std::string(literal.positive ? "[+]" : "[-]") + literal.predicate + "[g]";
         const Tuple tuple = literal.objects.empty() ? Tuple{num_objects} : literal.objects;
-        for (const std::string& name : {base, base + (holds ? "[sat]" : "[unsat]")})
+        for (const bool status : {false, true})
+        {
+            std::string name = base;
+            if (status)
+                name += holds ? "[sat]" : "[unsat]";
             if (schema.find(name))
                 out[name].push_back(tuple);
+        }
     }
     for (auto& entry : out)
     {
