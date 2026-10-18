@@ -1175,6 +1175,28 @@ TEST(EncoderLayers, InputsTheSchemaOrTheInstanceCannotTakeAreRefused)
     }
 }
 
+TEST(EncoderLayers, AStreamRefusesTheHistoryCountsTheBatchRefuses)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows rows = test::random_walk(*table, 0, 2, 1);
+    const auto encoder = FlatEncoder::create(table, layer_options(0, true));
+    ThreadPool pool(1);
+    // no steps given, but a count of 2: both the batch and the stream refuse it
+    const std::vector<i32> counts = {2, 0};
+    EncodeInput in = input_of(rows);
+    in.history.count = counts.data();
+    EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+    FlatStream stream(encoder);
+    EXPECT_THROW(stream.append(in), std::invalid_argument);
+    FlatMutableStream mutable_stream(encoder);
+    const std::vector<i64> indices = {0, 1};
+    EXPECT_THROW(mutable_stream.append(indices, in), std::invalid_argument);
+    // counts of 0 are the same as no history
+    const std::vector<i32> zeros = {0, 0};
+    in.history.count = zeros.data();
+    EXPECT_NO_THROW(stream.append(in));
+}
+
 TEST(EncoderLayers, CorruptedHistoryAndSubgoalArraysAreRejected)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));

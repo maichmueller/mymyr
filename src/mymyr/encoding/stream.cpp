@@ -162,7 +162,7 @@ public:
                     invalid("the subgoal layers of state " + std::to_string(g) +
                             " set an atom bit its instance does not have");
             }
-            if (const LayerInput& l = in.history.masks; l.layers != 0)
+            if (const LayerInput& l = in.history.masks; l.layers != 0 || in.history.count)
             {
                 const i64 steps = in.history.count ? in.history.count[g] : static_cast<i64>(l.layers);
                 if (steps < 0 || steps > static_cast<i64>(l.layers))
@@ -241,6 +241,7 @@ public:
             m_spans.resize(m_slots);
             if (m_subgoals)
             {
+                m_has_layers.resize(m_slots, 0);
                 m_sub_pos.resize(m_slots * m_levels * m_words);
                 m_sub_neg.resize(m_slots * m_levels * m_words);
                 m_sub_derived_pos.resize(m_slots * m_levels * m_derived_words);
@@ -312,6 +313,7 @@ public:
     {
         drop_actions(slot);
         drop_history(slot);
+        mark_layers(slot, false);
         m_free.push_back(slot);
         if (--m_live == 0)
             reset();
@@ -336,6 +338,8 @@ public:
         m_sub_neg.clear();
         m_sub_derived_pos.clear();
         m_sub_derived_neg.clear();
+        m_has_layers.clear();
+        m_layered_rows = 0;
         m_history_spans.clear();
         m_history_pos.clear();
         m_history_neg.clear();
@@ -393,7 +397,7 @@ public:
             gather(m_gather_goal_derived_neg, m_goal_derived_neg, m_derived_words, in.goal_derived_neg);
             in.goal_derived_stride = in.goal_derived_words = m_derived_words;
         }
-        if (m_subgoals)
+        if (m_subgoals && m_layered_rows != 0)  // rows without layers need no layer input
         {
             gather(m_gather_sub_pos, m_sub_pos, m_levels * m_words, in.subgoals.pos);
             gather(m_gather_sub_neg, m_sub_neg, m_levels * m_words, in.subgoals.neg);
@@ -439,11 +443,24 @@ public:
     }
 
 private:
+    /// Records whether `slot` holds subgoal layers, and counts the rows that do.
+    void mark_layers(u32 slot, bool has)
+    {
+        if (!m_subgoals || m_has_layers[slot] == static_cast<u8>(has))
+            return;
+        m_has_layers[slot] = static_cast<u8>(has);
+        if (has)
+            ++m_layered_rows;
+        else
+            --m_layered_rows;
+    }
+
     /// Stores the subgoal layers of row g of `in` into `slot`: its layers, then zero layers up to the schema's levels.
     void write_subgoals(u32 slot, const EncodeInput& in, u64 g)
     {
         const LayerInput& l = in.subgoals;
         const u32 given = std::min(l.layers, m_levels);
+        mark_layers(slot, given != 0);
         const auto store = [&](std::vector<u64>& to, const u64* from, u32 width, u32 from_width, u64 at)
         {
             u64* dst = to.data() + usize{slot} * m_levels * width;
@@ -675,6 +692,8 @@ private:
     std::vector<i32> m_schema, m_binding;  // the action arena: the schema of each row, and its binding [rows, label width]
     u64 m_garbage = 0;                     // rows of the arena that no slot owns
     std::vector<u64> m_sub_pos, m_sub_neg, m_sub_derived_pos, m_sub_derived_neg;  // [slots, levels * words]
+    std::vector<u8> m_has_layers;  // [slots] whether the row holds subgoal layers
+    u64 m_layered_rows = 0;        // the live rows that do
     // the history arena: the steps of each slot's history one after the other (a slot's span), oldest first
     std::vector<Span> m_history_spans;
     std::vector<u64> m_history_pos, m_history_neg, m_history_derived_pos, m_history_derived_neg;  // [steps, words]
