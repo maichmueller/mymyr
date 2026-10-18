@@ -43,6 +43,14 @@ struct ScratchView
 
 [[nodiscard]] ScratchView scratch_view(const ScratchLayout& layout, void* block) noexcept;
 
+struct EncodingFacts
+{
+    GraphBounds bounds;
+    std::vector<encoding::detail::GraphWidth> widths;
+    std::array<bool, 3> reads_derived{};
+    u32 derived_words = 0;
+};
+
 struct EncodingExecution
 {
     const EncodingAcquisition& context;

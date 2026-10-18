@@ -165,7 +165,7 @@ __global__ void __launch_bounds__(k_block) count_kernel(const EncodeParams p)
     RowView r;
     ed::GraphTotals t = ed::empty_totals();
     bool ok = row_of(p, g, r);
-    if (p.classify && (ok ? warp_fill_for(ed::graph_width(r.v), p.relation_major) != p.warp_class : !p.first_class))
+    if (p.classify && (ok ? warp_fill_for(r.v, p.relation_major) != p.warp_class : !p.first_class))
         return;
     if (ok)
     {
@@ -387,7 +387,7 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
     RowView r;
     if (!row_of(p, g, r))
         return;  // not reached: an invalid row has set the input flag
-    if (p.classify && warp_fill_for(ed::graph_width(r.v), p.relation_major) != p.warp_class)
+    if (p.classify && warp_fill_for(r.v, p.relation_major) != p.warp_class)
         return;
     const u32 virtual_nodes = p.context.num_virtual;
     u32* virtual_scratch =

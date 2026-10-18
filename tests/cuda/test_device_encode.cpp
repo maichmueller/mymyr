@@ -1115,3 +1115,75 @@ TEST(DeviceEncode, GoalStridesAreCheckedOnBothBackends)
     EXPECT_THROW((void)run_device(device, ctx, stream, device_in, device.worst_case(33)), std::invalid_argument);
 }
 }
+
+namespace
+{
+TEST(DeviceEncode, CallerScratchKeepsTheAcquiredGenerationAcrossRefresh)
+{
+    SKIP_WITHOUT_GPU();
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain growing) (:requirements :strips) (:predicates (fixed ?x) (flag ?x))"
+        " (:action set :parameters (?x) :precondition (and) :effect (flag ?x)))");
+    const auto first = Task::create(*domain->instantiate_string(
+        "(define (problem small) (:domain growing) (:objects a) (:init) (:goal (and)))"));
+    const auto second = Task::create(*domain->instantiate_string(
+        "(define (problem larger) (:domain growing) (:objects a) (:init (fixed a)) (:goal (and)))"));
+    const auto small = encoding::FlatEncoder::create(rl::TaskTable::single(first), test::encoder_options());
+    const auto grown = encoding::FlatEncoder::create(rl::TaskTable::create({first, second}), test::encoder_options());
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, small);
+    const u64 n = 257;
+    const auto batch = make_batch(small->table_ptr(), n, true, 103);
+    const DeviceRows rows(ctx, stream, batch);
+    const auto input = rows.input(batch, n, {});
+    const auto reference = host_reference(*small, host_input(batch, n, {}));
+    const auto shape = shape_of(n, reference.sizes);
+    const auto context = device.context().acquire(stream);
+    const u64 bytes = device.scratch_bytes(context, shape);
+    const auto layout = device.output_layout(shape);
+    cuda::DeviceBuffer scratch(ctx, bytes, stream), block(ctx, layout.bytes, stream);
+    const auto out = cuda::output_of(layout, shape, block.data());
+    device.count(context, scratch.data(), bytes, shape, input, out);
+    ASSERT_TRUE(device.refresh(grown, stream));
+    EXPECT_GT(device.scratch_bytes(shape), bytes);
+    EXPECT_EQ(device.scratch_bytes(context, shape), bytes);
+    device.fill(context, scratch.data(), bytes, shape, input, out);
+    DeviceResult result;
+    result.layout = layout;
+    result.block.resize(block.size());
+    cuda::check(cudaMemcpyAsync(result.block.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "download");
+    cuda::check(cudaStreamSynchronize(stream), "download");
+    std::memcpy(&result.sizes, result.block.data() + layout.sizes, sizeof result.sizes);
+    expect_sizes(reference.sizes, result.sizes);
+    expect_same_arrays(*reference.bundle, result);
+    device.encode(context, scratch.data(), bytes, shape, input, out);
+    cuda::check(cudaStreamSynchronize(stream), "encode");
+}
+
+TEST(DeviceEncode, CallerScratchRejectsAForeignAcquisitionBeforeLaunch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto c = corpus().front();
+    const auto encoder = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder first(ctx, encoder), second(ctx, encoder);
+    const auto foreign = first.context().acquire(stream);
+    const auto shape = second.worst_case(0);
+    const auto layout = second.output_layout(shape);
+    cuda::DeviceBuffer scratch(ctx, second.scratch_bytes(shape), stream), block(ctx, layout.bytes, stream);
+    const auto out = cuda::output_of(layout, shape, block.data());
+    cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+    EXPECT_THROW((void)second.scratch_bytes(foreign, shape), std::invalid_argument);
+    EXPECT_THROW(second.encode(foreign, scratch.data(), scratch.size(), shape, {}, out), std::invalid_argument);
+    EXPECT_THROW(second.count(foreign, scratch.data(), scratch.size(), shape, {}, out), std::invalid_argument);
+    EXPECT_THROW(second.fill(foreign, scratch.data(), scratch.size(), shape, {}, out), std::invalid_argument);
+    cudaGraph_t graph = nullptr;
+    cuda::check(cudaStreamEndCapture(stream, &graph), "capture");
+    size_t nodes = 0;
+    cuda::check(cudaGraphGetNodes(graph, nullptr, &nodes), "nodes");
+    EXPECT_EQ(nodes, 0u);
+    cuda::check(cudaGraphDestroy(graph), "destroy");
+}
+}

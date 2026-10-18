@@ -519,3 +519,7 @@ batch order, so a launch permutation changes the workers assigned to graphs and 
 `bench/python/bench_encoding_gpu.py --mixed-widths --device-bench PATH` also measures small rows in a table containing
 both small and wide instances. The C++ driver accepts `--secondary-problem PATH` for that table and reports the
 captured thread and warp fill launches.
+
+`scratch_bytes(acquisition, shape)` sizes scratch for that acquired generation. Its bounds, launch classes and derived
+word requirements remain attached to the acquisition across refreshes. A split count/fill uses the same acquisition,
+scratch address and shape in both calls; a refresh between them preserves that layout.

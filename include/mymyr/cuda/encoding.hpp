@@ -25,7 +25,8 @@
 
 namespace mymyr::cuda
 {
-namespace detail { struct EncodingExecution; struct EncodingWorkspaceState; }
+namespace detail { struct EncodingExecution; struct EncodingFacts; struct EncodingWorkspaceState; }
+class DeviceEncodingContext;
 /// A device view and its owning generation, acquired together. Keep the stream alive until this object is released.
 /// Acquisitions on the same stream may overlap; callers order work on that stream. Move-only.
 class EncodingAcquisition
@@ -47,6 +48,10 @@ public:
     u64 number;
 
 private:
+    friend class DeviceEncodingContext;
+    friend class DeviceEncoder;
+    std::shared_ptr<const detail::EncodingFacts> m_facts;
+    const DeviceEncodingContext* m_owner = nullptr;
     std::shared_ptr<LastUse> m_last;
     cudaStream_t m_stream;
 };
@@ -82,11 +87,13 @@ public:
     [[nodiscard]] std::vector<std::byte> download(cudaStream_t stream = nullptr) const;
 
 private:
+    friend class DeviceEncoder;
     DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host);
     void copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream);
 
     ContextPtr m_ctx;
     std::shared_ptr<const encoding::EncodingContext> m_host;
+    std::shared_ptr<const detail::EncodingFacts> m_facts;
     std::shared_ptr<DeviceBuffer> m_block;
     encoding::detail::ContextView m_view;
     PinnedLease m_staging;
@@ -233,6 +240,8 @@ public:
     [[nodiscard]] u64 bytes_needed(u64 graphs) const;
     /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes.
     [[nodiscard]] u64 scratch_bytes(const BatchShape& shape) const;
+    /// The exact byte count for a held generation, including one held across refresh().
+    [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape) const;
 
     /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
     /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.
@@ -283,6 +292,8 @@ public:
     /// The caller-owned scratch forms. `shape.graphs` bounds the batch, and `bytes` is at least scratch_bytes(shape).
     /// Obtain the acquisition from context().acquire(stream) before capture. It holds the context generation; keep it,
     /// the scratch, inputs and outputs alive through the last replay. These forms allocate and synchronize nothing.
+    /// count() and fill() use the same acquisition, scratch address, shape, rows and launch configuration on one stream,
+    /// with no other use of that scratch between them. Refresh preserves the held generation's scratch requirements.
     void encode(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                 const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
     void count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
@@ -309,8 +320,6 @@ private:
     std::shared_ptr<const encoding::EncodingSchema> m_schema;
     std::shared_ptr<DeviceEncodingContext> m_context;
     GraphBounds m_bounds;
-    std::vector<encoding::detail::GraphWidth> m_widths;
-    std::array<bool, 3> m_reads_derived{};  // by the goals of the rows: none, over the fluent slots, also derived
     mutable std::shared_mutex m_state_mutex;
     mutable std::mutex m_workspace_mutex;
     mutable std::unordered_map<cudaStream_t, std::shared_ptr<Workspace>> m_workspaces;

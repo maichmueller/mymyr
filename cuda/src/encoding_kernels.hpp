@@ -69,7 +69,7 @@ struct LaunchShape
     u64 scan_length = 0;      // entries of the scanned array
     void* scan_temp = nullptr;
     u64 scan_temp_bytes = 0;
-    void* zero_begin = nullptr;  // cleared before the count: the flags and, relation-major, the cell row
+    void* zero_begin = nullptr;  // cleared before the count: the flags and scanned totals
     u64 zero_bytes = 0;
 };
 
@@ -84,6 +84,14 @@ __host__ __device__ inline bool warp_fill_for(const encoding::detail::GraphWidth
 {
     return width.words > 8u || width.cells > 128u ||
            width.args > (relation_major ? 1024u : 128u);
+}
+
+/// Word and cell bounds can select a warp without reading the cell lists for an argument bound.
+__host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceView& v, bool relation_major)
+{
+    const encoding::detail::GraphWidth rough{v.words > v.derived_words ? v.words : v.derived_words,
+        v.num_plain_cells > v.num_plain_row_cells ? v.num_plain_cells : v.num_plain_row_cells, 0};
+    return warp_fill_for(rough, relation_major) || warp_fill_for(encoding::detail::graph_width(v), relation_major);
 }
 
 /// The temporary storage of the scan of `length` entries, u64 entries when `wide`.
