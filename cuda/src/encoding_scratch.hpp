@@ -43,6 +43,15 @@ struct ScratchView
 
 [[nodiscard]] ScratchView scratch_view(const ScratchLayout& layout, void* block) noexcept;
 
+struct EncodingExecution
+{
+    const EncodingAcquisition& context;
+    void* block;
+    u64 bytes;
+    const BatchShape& shape;
+    const ScratchLayout& layout;
+};
+
 struct EncodingWorkspaceState
 {
     EncodingAcquisition context;

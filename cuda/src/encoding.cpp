@@ -595,11 +595,10 @@ namespace
 
 }  // namespace
 
-void DeviceEncoder::run(Phase phase, const EncodingAcquisition& context, void* block, u64 bytes,
-                        const BatchShape& scratch_shape, const detail::ScratchLayout& layout, const DeviceEncodeInput& in,
+void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution, const DeviceEncodeInput& in,
                         const DeviceOutput& out, const LaunchConfig& launch) const
 {
-    std::shared_lock lock(m_state_mutex);
+    const auto& [context, block, bytes, scratch_shape, layout] = execution;
     DeviceGuard guard(m_ctx->device());
     const encoding::EncodingSchema& schema = *m_schema;
     const encoding::FlatOptions& opts = schema.options();
@@ -768,20 +767,23 @@ void DeviceEncoder::run(Phase phase, const EncodingAcquisition& context, void* b
 void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                            const LaunchConfig& launch) const
 {
+    std::shared_lock lock(m_state_mutex);
     const auto& s = *work.m_state;
-    run(Phase::Whole, s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, in, out, launch);
+    run(Phase::Whole, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
 }
 void DeviceEncoder::count(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                           const LaunchConfig& launch) const
 {
+    std::shared_lock lock(m_state_mutex);
     const auto& s = *work.m_state;
-    run(Phase::Count, s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, in, out, launch);
+    run(Phase::Count, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
 }
 void DeviceEncoder::fill(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                          const LaunchConfig& launch) const
 {
+    std::shared_lock lock(m_state_mutex);
     const auto& s = *work.m_state;
-    run(Phase::Fill, s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, in, out, launch);
+    run(Phase::Fill, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
 }
 
 void DeviceEncoder::encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream,
@@ -793,22 +795,25 @@ void DeviceEncoder::encode(const DeviceEncodeInput& in, const DeviceOutput& out,
 void DeviceEncoder::encode(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
 {
+    std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    const auto layout = detail::scratch_layout(shape, bounds(), options().layout, schema().num_relations());
-    run(Phase::Whole, context, scratch, bytes, shape, layout, in, out, launch);
+    const auto layout = detail::scratch_layout(shape, m_bounds, options().layout, schema().num_relations());
+    run(Phase::Whole, {context, scratch, bytes, shape, layout}, in, out, launch);
 }
 void DeviceEncoder::count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
 {
+    std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    const auto layout = detail::scratch_layout(shape, bounds(), options().layout, schema().num_relations());
-    run(Phase::Count, context, scratch, bytes, shape, layout, in, out, launch);
+    const auto layout = detail::scratch_layout(shape, m_bounds, options().layout, schema().num_relations());
+    run(Phase::Count, {context, scratch, bytes, shape, layout}, in, out, launch);
 }
 void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
 {
+    std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    const auto layout = detail::scratch_layout(shape, bounds(), options().layout, schema().num_relations());
-    run(Phase::Fill, context, scratch, bytes, shape, layout, in, out, launch);
+    const auto layout = detail::scratch_layout(shape, m_bounds, options().layout, schema().num_relations());
+    run(Phase::Fill, {context, scratch, bytes, shape, layout}, in, out, launch);
 }
 }  // namespace mymyr::cuda

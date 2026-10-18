@@ -25,7 +25,7 @@
 
 namespace mymyr::cuda
 {
-namespace detail { struct ScratchLayout; struct EncodingWorkspaceState; }
+namespace detail { struct EncodingExecution; struct EncodingWorkspaceState; }
 /// A device view and its owning generation, acquired together. Keep the stream alive until this object is released.
 /// Acquisitions on the same stream may overlap; callers order work on that stream. Move-only.
 class EncodingAcquisition
@@ -269,7 +269,7 @@ public:
                 const LaunchConfig& launch = {}) const;
 
     /// encode() in two steps, for a caller that sizes its outputs by the batch: count() enqueues the clear, the count
-    /// kernel, the scan and a kernel that writes the true sizes of the rows to `sizes` (device memory; the capacity flag
+    /// kernel, the scan and a kernel that writes the true sizes of the rows to `out.sizes` (device memory; the capacity flag
     /// is never set, the index and input flags are), and nothing else. fill() then enqueues the fill kernel with the
     /// capacities of `out`, which writes `out.sizes` again and writes the batch unless a flag is set, as encode() does.
     /// fill() reads the counts that count() left in the workspace's scratch: it must follow a count() of the same
@@ -281,7 +281,7 @@ public:
               const LaunchConfig& launch = {}) const;
 
     /// The caller-owned scratch forms. `shape.graphs` bounds the batch, and `bytes` is at least scratch_bytes(shape).
-    /// The acquisition holds the context generation and selects the stream; acquire it before capture and keep it,
+    /// Obtain the acquisition from context().acquire(stream) before capture. It holds the context generation; keep it,
     /// the scratch, inputs and outputs alive through the last replay. These forms allocate and synchronize nothing.
     void encode(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                 const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
@@ -297,9 +297,8 @@ private:
         Count,
         Fill,
     };
-    void run(Phase phase, const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
-             const detail::ScratchLayout& layout, const DeviceEncodeInput& in, const DeviceOutput& out,
-             const LaunchConfig& launch) const;
+    void run(Phase phase, const detail::EncodingExecution& execution, const DeviceEncodeInput& in,
+             const DeviceOutput& out, const LaunchConfig& launch) const;
     struct Workspace;
     [[nodiscard]] std::shared_ptr<Workspace> workspace(cudaStream_t stream) const;
     void reserve_workspace(Workspace& workspace, const BatchShape& shape);
