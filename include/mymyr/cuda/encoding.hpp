@@ -308,7 +308,27 @@ public:
     void encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream = nullptr,
                 const LaunchConfig& launch = {}) const;
 
+    /// encode() in two steps, for a caller that sizes its outputs by the batch: count() enqueues the clear, the count
+    /// kernel, the scan and a kernel that writes the true sizes of the rows to `sizes` (device memory; the capacity flag
+    /// is never set, the index and input flags are), and nothing else. fill() then enqueues the fill kernel with the
+    /// capacities of `out`, which writes `out.sizes` again and writes the batch unless a flag is set, as encode() does.
+    /// fill() reads the counts that count() left in the workspace's scratch: it must follow a count() of the same
+    /// workspace, rows and launch configuration on the same stream with no other count() or encode() of that workspace in
+    /// between. Both have the checks of encode(); neither synchronizes.
+    void count(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, encoding::FlatSizes* sizes,
+               const LaunchConfig& launch = {}) const;
+    void fill(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
+              const LaunchConfig& launch = {}) const;
+
 private:
+    enum class Phase : u8
+    {
+        Whole,
+        Count,
+        Fill,
+    };
+    void run(Phase phase, const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
+             const LaunchConfig& launch) const;
     struct Workspace
     {
         BatchShape shape;

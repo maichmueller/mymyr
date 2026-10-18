@@ -272,23 +272,20 @@ __device__ u64 build_argument_table(const EncodeParams& p, const Totals& totals,
 
 __host__ __device__ constexpr u64 align8(u64 n) { return (n + 7) & ~u64{7}; }
 
-template<class I, bool Warp, bool RelationMajor>
-__global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
+/// The true sizes of the batch from the scanned totals and the flags, with the overflow flags of the capacities, the index
+/// type and the rows. A relation-major batch builds its argument table into `first` (shared memory, every thread of the
+/// block takes part) and returns the base of its cell row in `base`.
+template<bool RelationMajor>
+__device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& totals, u64* first, u64& base)
 {
-    extern __shared__ __align__(8) unsigned char shared_bytes[];
-    const Totals totals{p.totals, p.wide};
     const u64 G = p.graphs;
     const u32 R = p.context.num_relations;
     const u64 row = G + 1;
     const u64 segments = 2 * row;
-    u64* first = reinterpret_cast<u64*>(shared_bytes);
-    u32* virtual_base = reinterpret_cast<u32*>(shared_bytes + (RelationMajor ? align8(u64{R} * 8) : 0));
-
-    // the sizes, and whether the batch can be written at all
     enc::FlatSizes sizes;
     sizes.entities = totals.get(row - 1) - totals.get(0);
     sizes.targets = totals.get(row + G) - totals.get(row);
-    u64 base = 0;
+    base = 0;
     if constexpr (RelationMajor)
     {
         sizes.args = build_argument_table(p, totals, first);
@@ -309,6 +306,37 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
         sizes.overflow |= enc::k_overflow_index;
     if (p.flags[0] != 0)
         sizes.overflow |= enc::k_overflow_input;
+    return sizes;
+}
+
+/// One block writes the sizes of a counted batch: the second half of the counting, for a caller that sizes its outputs
+/// by them.
+template<bool RelationMajor>
+__global__ void __launch_bounds__(k_block) sizes_kernel(const EncodeParams p)
+{
+    extern __shared__ __align__(8) unsigned char shared_bytes[];
+    const Totals totals{p.totals, p.wide};
+    u64 base = 0;
+    const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, reinterpret_cast<u64*>(shared_bytes), base);
+    if (threadIdx.x == 0)
+        *p.sizes = sizes;
+}
+
+template<class I, bool Warp, bool RelationMajor>
+__global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
+{
+    extern __shared__ __align__(8) unsigned char shared_bytes[];
+    const Totals totals{p.totals, p.wide};
+    const u64 G = p.graphs;
+    const u32 R = p.context.num_relations;
+    const u64 row = G + 1;
+    const u64 segments = 2 * row;
+    u64* first = reinterpret_cast<u64*>(shared_bytes);
+    u32* virtual_base = reinterpret_cast<u32*>(shared_bytes + (RelationMajor ? align8(u64{R} * 8) : 0));
+
+    // the sizes, and whether the batch can be written at all
+    u64 base = 0;
+    const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, first, base);
     if (blockIdx.x == 0 && threadIdx.x == 0)
         *p.sizes = sizes;
     if (sizes.overflow != 0)
@@ -461,7 +489,10 @@ u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool rel
     return (relation_major ? align8(u64{relations} * 8) : 0) + graphs_in_flight * virtual_nodes * sizeof(u32);
 }
 
-cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+namespace
+{
+/// The clear, the count kernel and the scan: what both the whole encoding and the counting alone start with.
+cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
     cudaError_t error = cudaMemsetAsync(shape.zero_begin, 0, shape.zero_bytes, stream);
     if (error != cudaSuccess)
@@ -476,12 +507,35 @@ cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaS
     if (error != cudaSuccess)
         return error;
     size_t temp_bytes = shape.scan_temp_bytes;
-    error = p.wide ? cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u64*>(p.totals),
-                                                   scan_size(shape.scan_length), stream)
-                   : cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u32*>(p.totals),
-                                                   scan_size(shape.scan_length), stream);
+    return p.wide ? cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u64*>(p.totals),
+                                                  scan_size(shape.scan_length), stream)
+                  : cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u32*>(p.totals),
+                                                  scan_size(shape.scan_length), stream);
+}
+}  // namespace
+
+cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+{
+    const cudaError_t error = launch_counts(p, shape, stream);
     if (error != cudaSuccess)
         return error;
+    return p.index64 ? launch_fill_index<i64>(p, shape, stream) : launch_fill_index<i32>(p, shape, stream);
+}
+
+cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+{
+    const cudaError_t error = launch_counts(p, shape, stream);
+    if (error != cudaSuccess)
+        return error;
+    if (p.relation_major)
+        sizes_kernel<true><<<1, k_block, align8(u64{p.context.num_relations} * 8), stream>>>(p);
+    else
+        sizes_kernel<false><<<1, k_block, 0, stream>>>(p);
+    return cudaPeekAtLastError();
+}
+
+cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+{
     return p.index64 ? launch_fill_index<i64>(p, shape, stream) : launch_fill_index<i32>(p, shape, stream);
 }
 }  // namespace mymyr::cuda::detail

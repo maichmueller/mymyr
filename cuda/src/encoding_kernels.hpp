@@ -86,4 +86,9 @@ inline constexpr u64 k_shared_limit = 48 * 1024;
 
 /// Enqueues the encoding on `stream`: a clear of the flags (and cell row), the count kernel, the scan and the fill kernel.
 cudaError_t launch_encode(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
+/// The first half of the encoding: the clear, the count kernel and the scan, then a one-block kernel that writes the true
+/// sizes of the batch to `params.sizes` (the capacity flag against `params.capacities`).
+cudaError_t launch_count_sizes(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
+/// The second half: the fill kernel, over the scratch that launch_count_sizes left for the same rows.
+cudaError_t launch_fill(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
 }  // namespace mymyr::cuda::detail

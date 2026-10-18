@@ -566,8 +566,8 @@ namespace
 u32 count_lanes_for(u64 words) { return words <= 2 ? 4 : words <= 8 ? 8 : 32; }
 }  // namespace
 
-void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
-                           const LaunchConfig& launch) const
+void DeviceEncoder::run(Phase phase, const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
+                        const LaunchConfig& launch) const
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
@@ -601,21 +601,29 @@ void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInpu
         invalid("the device does not evaluate derived atoms: pass the derived words of the rows (derived)");
     const OutputArrays arrays = output_arrays(schema);
     const encoding::FlatBuffers& a = out.arrays;
-    if (!a.task_ids || !a.num_objects || !a.entity_offsets || !a.relation_offsets || !a.relation_arg_offsets || !out.sizes)
-        invalid("the output needs task_ids, num_objects, entity_offsets, relation_offsets, relation_arg_offsets and sizes");
-    if ((a.entity_role != nullptr) != arrays.entity_arrays || (a.entity_ref != nullptr) != arrays.entity_arrays)
-        invalid("entity_role and entity_ref must be given iff the schema stores entity arrays");
-    if ((a.relation_counts != nullptr) != arrays.counts)
-        invalid("relation_counts must be given iff the schema stores counts");
-    if ((a.goal_complete != nullptr) != arrays.goal_complete)
-        invalid("goal_complete must be given iff the schema has goal relations");
-    if ((a.target_offsets != nullptr) != arrays.targets || (a.target_entity != nullptr) != arrays.targets ||
-        (a.target_group != nullptr) != arrays.targets)
-        invalid("the target arrays must be given iff the schema has target sources");
-    if (out.capacities.args && !a.relation_args)
-        invalid("relation_args is null");
-    if (arrays.targets && out.capacities.targets && (!a.target_entity || !a.target_group))
-        invalid("the target arrays are null");
+    if (!out.sizes)
+        invalid("the output needs sizes");
+    if (phase != Phase::Count)
+    {
+        if (!a.task_ids || !a.num_objects || !a.entity_offsets || !a.relation_offsets || !a.relation_arg_offsets)
+            invalid("the output needs task_ids, num_objects, entity_offsets, relation_offsets, relation_arg_offsets and sizes");
+        // an array without entries may be null, so a batch of rows without objects needs no entity arrays
+        const bool entity_given = (a.entity_role != nullptr) || (a.entity_ref != nullptr);
+        if (!arrays.entity_arrays ? entity_given
+                                  : (out.capacities.entities && (!a.entity_role || !a.entity_ref)))
+            invalid("entity_role and entity_ref must be given iff the schema stores entity arrays");
+        if ((a.relation_counts != nullptr) != arrays.counts)
+            invalid("relation_counts must be given iff the schema stores counts");
+        if ((a.goal_complete != nullptr) != arrays.goal_complete)
+            invalid("goal_complete must be given iff the schema has goal relations");
+        if ((a.target_offsets != nullptr) != arrays.targets ||
+            (!arrays.targets && (a.target_entity != nullptr || a.target_group != nullptr)))
+            invalid("the target arrays must be given iff the schema has target sources");
+        if (out.capacities.args && !a.relation_args)
+            invalid("relation_args is null");
+        if (arrays.targets && out.capacities.targets && (!a.target_entity || !a.target_group))
+            invalid("the target arrays are null");
+    }
     if (launch.count_lanes != 0 && launch.count_lanes != 4 && launch.count_lanes != 8 && launch.count_lanes != 32)
         invalid("the count kernel runs 4, 8 or 32 lanes per graph");
 
@@ -652,9 +660,18 @@ void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInpu
     p.goal_derived_stride = in.goal_derived_stride;
     p.goal_derived_words = in.goal_derived_words;
     p.order = launch.order;
-    p.out = out.arrays;
     p.sizes = out.sizes;
-    p.capacities = out.capacities;
+    if (phase == Phase::Count)
+    {
+        // counting reports the sizes against no capacity
+        constexpr u64 unbounded = std::numeric_limits<u64>::max();
+        p.capacities = {unbounded, unbounded, unbounded, unbounded};
+    }
+    else
+    {
+        p.out = out.arrays;
+        p.capacities = out.capacities;
+    }
     p.index64 = index == encoding::IndexType::I64;
     p.relation_major = relation_major;
     if (mul(graphs, R) >= limit || graphs >= limit)
@@ -680,7 +697,29 @@ void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInpu
         const u64 entry = work.layout.wide ? 8 : 4;
         shape.zero_bytes = add(k_flag_bytes, mul(entry, shape.scan_length));
     }
-    check(detail::launch_encode(p, shape, work.stream()), "encoding kernels");
+    switch (phase)
+    {
+    case Phase::Whole: check(detail::launch_encode(p, shape, work.stream()), "encoding kernels"); break;
+    case Phase::Count: check(detail::launch_count_sizes(p, shape, work.stream()), "encoding kernels (count)"); break;
+    case Phase::Fill: check(detail::launch_fill(p, shape, work.stream()), "encoding kernels (fill)"); break;
+    }
+}
+void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
+                           const LaunchConfig& launch) const
+{
+    run(Phase::Whole, work, in, out, launch);
+}
+void DeviceEncoder::count(const EncodingWorkspace& work, const DeviceEncodeInput& in, encoding::FlatSizes* sizes,
+                          const LaunchConfig& launch) const
+{
+    DeviceOutput out;
+    out.sizes = sizes;
+    run(Phase::Count, work, in, out, launch);
+}
+void DeviceEncoder::fill(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
+                         const LaunchConfig& launch) const
+{
+    run(Phase::Fill, work, in, out, launch);
 }
 void DeviceEncoder::encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream,
                            const LaunchConfig& launch) const
