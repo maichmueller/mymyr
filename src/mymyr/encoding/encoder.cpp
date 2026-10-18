@@ -140,6 +140,8 @@ struct Pass
     bool relation_major;
     bool evaluate;  // the derived words of the rows are evaluated here, into s.derived
     u64 starts_stride;  // the words of run starts of one graph: num_schemas + 1 with expansion rows, else 0
+    // some row may have subgoal layers or history steps
+    bool layered = in.subgoals.layers != 0 || in.history.masks.layers != 0 || in.history.count != nullptr;
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
 
@@ -166,58 +168,71 @@ struct Pass
     }
     [[nodiscard]] u32 history_used(u64 g) const noexcept
     {
+        if (in.history.masks.layers == 0)
+            return 0;
         const u32 valid = history_valid(g);
         const u32 k = context.schema().options().history_max_steps;
         return k != 0 && valid > k ? k : valid;
     }
 
     /// The cells of graph g of `v`'s instance.
+    template<bool Layered>
     [[nodiscard]] detail::CellList cells_of(const detail::InstanceView& v, u64 g) const noexcept
     {
+        if (!Layered)
+            return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g));
         return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g), in.subgoals.layers != 0,
                                  history_used(g) != 0);
     }
 
+    /// Gives `row` the subgoal layers and history steps of graph g, stored in `layers`, when it has any. Out of line:
+    /// rows without layers are the hot ones.
+    [[gnu::noinline]] void attach_layers(u64 g, detail::RowLayers& layers, detail::RowInput& row) const noexcept
+    {
+        const u32 used = history_used(g);
+        if (in.subgoals.layers == 0 && used == 0)
+            return;
+        layers = {};
+        if (const LayerInput& l = in.subgoals; l.layers != 0)
+        {
+            const u64 at = g * l.stride;
+            const u64 derived_at = g * l.derived_stride;
+            layers.subgoals = {l.pos + at,
+                               l.neg + at,
+                               l.derived_pos ? l.derived_pos + derived_at : nullptr,
+                               l.derived_neg ? l.derived_neg + derived_at : nullptr,
+                               l.layers,
+                               l.words,
+                               l.derived_words};
+        }
+        if (used != 0)
+        {
+            const LayerInput& l = in.history.masks;
+            const u32 first = history_valid(g) - used;
+            const u64 at = g * l.stride + u64{first} * l.words;
+            const u64 derived_at = g * l.derived_stride + u64{first} * l.derived_words;
+            layers.history.masks = {l.pos ? l.pos + at : nullptr,
+                                    l.neg ? l.neg + at : nullptr,
+                                    l.derived_pos ? l.derived_pos + derived_at : nullptr,
+                                    l.derived_neg ? l.derived_neg + derived_at : nullptr,
+                                    used,
+                                    l.words,
+                                    l.derived_words};
+            layers.history.dt = in.history.dt + g * l.layers + first;
+            layers.history.first = first;
+        }
+        row.layers = &layers;
+    }
+
     /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff it
     /// has any).
+    template<bool Layered>
     [[nodiscard]] detail::RowInput row_input(u64 g, u32 instance, u32* starts, u32* cursors,
                                              detail::RowLayers& layers) const noexcept
     {
         detail::RowInput row{in.states.row(g), derived_of(g, instance)};
-        const u32 used = history_used(g);
-        if (in.subgoals.layers != 0 || used != 0)
-        {
-            layers = {};
-            if (const LayerInput& l = in.subgoals; l.layers != 0)
-            {
-                const u64 at = g * l.stride;
-                const u64 derived_at = g * l.derived_stride;
-                layers.subgoals = {l.pos + at,
-                                   l.neg + at,
-                                   l.derived_pos ? l.derived_pos + derived_at : nullptr,
-                                   l.derived_neg ? l.derived_neg + derived_at : nullptr,
-                                   l.layers,
-                                   l.words,
-                                   l.derived_words};
-            }
-            if (used != 0)
-            {
-                const LayerInput& l = in.history.masks;
-                const u32 first = history_valid(g) - used;
-                const u64 at = g * l.stride + u64{first} * l.words;
-                const u64 derived_at = g * l.derived_stride + u64{first} * l.derived_words;
-                layers.history.masks = {l.pos ? l.pos + at : nullptr,
-                                        l.neg ? l.neg + at : nullptr,
-                                        l.derived_pos ? l.derived_pos + derived_at : nullptr,
-                                        l.derived_neg ? l.derived_neg + derived_at : nullptr,
-                                        used,
-                                        l.words,
-                                        l.derived_words};
-                layers.history.dt = in.history.dt + g * l.layers + first;
-                layers.history.first = first;
-            }
-            row.layers = &layers;
-        }
+        if constexpr (Layered)
+            attach_layers(g, layers, row);
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -252,8 +267,35 @@ struct Pass
     }
 };
 
+/// Whether the subgoal layers or history steps of graph g cannot be encoded for its instance (`v`): a history count
+/// outside [0, H], or masks narrower than the instance. The first graph of each kind is recorded in the member.
+[[gnu::noinline]] bool refuse_layers(const Pass& p, Member& m, const detail::InstanceView& v, u64 g)
+{
+    if (p.in.history.count && (p.in.history.count[g] < 0 ||
+                               static_cast<u32>(p.in.history.count[g]) > p.in.history.masks.layers))
+    {
+        m.bad_history_count = std::min(m.bad_history_count, g);
+        return true;
+    }
+    if (p.in.subgoals.layers != 0 && (p.in.subgoals.words < v.words ||
+                                      (p.in.subgoals.derived_pos && p.in.subgoals.derived_words < v.derived_words)))
+    {
+        m.narrow_subgoals = std::min(m.narrow_subgoals, g);
+        return true;
+    }
+    if (p.history_used(g) != 0 &&
+        (p.in.history.masks.words < v.words ||
+         (p.in.history.masks.derived_pos && p.in.history.masks.derived_words < v.derived_words)))
+    {
+        m.narrow_history = std::min(m.narrow_history, g);
+        return true;
+    }
+    return false;
+}
+
 /// Pass one of a member: validates its graphs, evaluates their derived words, counts them, and (relation-major) tallies
 /// the tuples per relation. An invalid graph is recorded by kind and counts as empty.
+template<bool Layered>
 void count_range(const Pass& p, u32 t)
 {
     const auto [lo, hi] = ThreadPool::slice(p.graphs, t, p.members);
@@ -300,29 +342,12 @@ void count_range(const Pass& p, u32 t)
             m.narrow_goal = std::min(m.narrow_goal, g);
             continue;
         }
-        if (p.in.history.count && (p.in.history.count[g] < 0 ||
-                                   static_cast<u32>(p.in.history.count[g]) > p.in.history.masks.layers))
-        {
-            m.bad_history_count = std::min(m.bad_history_count, g);
+        if (Layered && refuse_layers(p, m, v, g))
             continue;
-        }
-        if (p.in.subgoals.layers != 0 &&
-            (p.in.subgoals.words < v.words || (p.in.subgoals.derived_pos && p.in.subgoals.derived_words < v.derived_words)))
-        {
-            m.narrow_subgoals = std::min(m.narrow_subgoals, g);
-            continue;
-        }
-        if (p.history_used(g) != 0 &&
-            (p.in.history.masks.words < v.words ||
-             (p.in.history.masks.derived_pos && p.in.history.masks.derived_words < v.derived_words)))
-        {
-            m.narrow_history = std::min(m.narrow_history, g);
-            continue;
-        }
         detail::RowLayers layers;
-        const detail::RowInput input =
-            p.row_input(g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
-                        m.action_cursors.data(), layers);
+        const detail::RowInput input = p.row_input<Layered>(
+            g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
+            m.action_cursors.data(), layers);
         const u64* row = input.atoms;
         const u64* derived = input.derived;
         if (derived && p.evaluate)
@@ -340,7 +365,7 @@ void count_range(const Pass& p, u32 t)
                 std::copy_n(engine.derived(), bits::words_for(task.atoms().derived_slots()), dst);
             }
         }
-        const detail::CellList cells = detail::cell_list(v, input);
+        const detail::CellList cells = detail::cell_list<Layered>(v, input);
         u32* cell_counts = nullptr;
         if (keep_counts)
         {
@@ -349,7 +374,7 @@ void count_range(const Pass& p, u32 t)
             cell_counts = m.cell_counts.data() + at;
         }
         detail::GraphTotals& totals = m.totals[g - lo];
-        totals = detail::count_graph(v, input, cell_counts, m.virtual_scratch.data());
+        totals = detail::count_graph<Layered>(v, input, cell_counts, m.virtual_scratch.data());
         if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal | detail::k_graph_bad_action_order |
                             detail::k_graph_bad_action_label | detail::k_graph_bad_layers | detail::k_graph_bad_history))
         {
@@ -379,7 +404,7 @@ void count_range(const Pass& p, u32 t)
 }
 
 /// Pass two of a member: the positions (relation-major) and the contents of its graphs.
-template<class I>
+template<class I, bool Layered>
 void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
 {
     const auto [lo, hi] = ThreadPool::slice(p.graphs, t, p.members);
@@ -410,22 +435,23 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const detail::InstanceView v = detail::instance_view(p.view, instance);
         const detail::GraphTotals& totals = m.totals[g - lo];
         detail::RowLayers layers;
-        const detail::RowInput row =
-            p.row_input(g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
-                        m.action_cursors.data(), layers);
+        const detail::RowInput row = p.row_input<Layered>(
+            g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
+            m.action_cursors.data(), layers);
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         if (p.relation_major)
-            detail::fill_graph_relation_major<I>(v, row, g, entity, totals, out, target, virtual_scratch, graph_counts,
-                                                 history);
+            detail::fill_graph_relation_major<I, Layered>(v, row, g, entity, totals, out, target, virtual_scratch,
+                                                          graph_counts, history);
         else
-            detail::fill_graph<I>(v, row, g, tuple, arg, entity, totals, out, target, virtual_scratch, graph_counts,
-                                  history);
+            detail::fill_graph<I, Layered>(v, row, g, tuple, arg, entity, totals, out, target, virtual_scratch,
+                                           graph_counts, history);
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
         target += totals.targets;
-        history += totals.history_steps;
+        if constexpr (Layered)
+            history += totals.history_steps;
     };
     if (!p.relation_major)
     {
@@ -434,7 +460,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         {
             fill_one(g, graph_counts);
             if (graph_counts)
-                graph_counts += p.cells_of(detail::instance_view(p.view, p.instance_of(g)), g).count;
+                graph_counts += p.cells_of<Layered>(detail::instance_view(p.view, p.instance_of(g)), g).count;
         }
         return;
     }
@@ -451,7 +477,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         for (u64 j = 0; j < width; ++j)
         {
             const u32 instance = p.instance_of(first + j);
-            const detail::CellList cells = p.cells_of(detail::instance_view(p.view, instance), first + j);
+            const detail::CellList cells = p.cells_of<Layered>(detail::instance_view(p.view, instance), first + j);
             for (u32 i = 0; i < cells.count; ++i)
                 m.tile_counts[cells.cells[i].relation * k_scan_tile + j] = next[i];
             next += cells.count;
@@ -485,7 +511,8 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         for (u64 j = 0; j < width; ++j)
         {
             fill_one(first + j, graph_counts);
-            graph_counts += p.cells_of(detail::instance_view(p.view, p.instance_of(first + j)), first + j).count;
+            graph_counts +=
+                p.cells_of<Layered>(detail::instance_view(p.view, p.instance_of(first + j)), first + j).count;
         }
         cell_counts = next;
     }
@@ -628,7 +655,14 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     const detail::ContextView view = context.view();
     const Pass pass{in, s, context, view, graphs, members, R, relation_major, evaluate,
                     in.actions ? u64{view.num_schemas} + 1 : 0};
-    run(pool, members, [&pass](u32 t) { count_range(pass, t); });
+    run(pool, members,
+        [&pass](u32 t)
+        {
+            if (pass.layered)
+                count_range<true>(pass, t);
+            else
+                count_range<false>(pass, t);
+        });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, narrow_history = k_none, bad_history_bits = k_none,
@@ -806,10 +840,14 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
                     options.layout == Layout::Relation,
                     evaluate,
                     in.actions ? u64{view.num_schemas} + 1 : 0};
-    if (options.index == IndexType::I64)
-        run(pool, members, [&pass, &out](u32 t) { fill_range<i64>(pass, out, t); });
-    else
-        run(pool, members, [&pass, &out](u32 t) { fill_range<i32>(pass, out, t); });
+    run(pool, members,
+        [&pass, &out, wide = options.index == IndexType::I64](u32 t)
+        {
+            if (pass.layered)
+                wide ? fill_range<i64, true>(pass, out, t) : fill_range<i32, true>(pass, out, t);
+            else
+                wide ? fill_range<i64, false>(pass, out, t) : fill_range<i32, false>(pass, out, t);
+        });
     const u64 cells = graphs * pass.R;
     auto close = [&]<class I>(I)
     {
