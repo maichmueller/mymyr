@@ -72,6 +72,14 @@ def _check(encoder, batch, graph):
     graph = int(graph)
     if not 0 <= graph < batch.num_graphs:
         raise IndexError(f"mymyr: encoding: graph {graph} is out of range for a batch of {batch.num_graphs} graphs")
+    # tables over one domain share the schema, so the batch's instance must be one of this encoder's table
+    tasks = _tasks_of(encoder)
+    task_id = int(np.asarray(batch.task_ids)[graph])
+    if not 0 <= task_id < len(tasks) or int(np.asarray(batch.num_objects)[graph]) != len(tasks[task_id].objects):
+        raise ValueError(
+            f"mymyr: encoding: graph {graph} of the batch is not an instance of this encoder's table (instance "
+            f"{task_id} has {int(np.asarray(batch.num_objects)[graph])} objects in the batch)"
+        )
     return graph
 
 

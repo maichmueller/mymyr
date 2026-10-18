@@ -11,6 +11,7 @@ import pytest
 import mymyr
 from mymyr import encoding, rl
 from conftest import ROOT, text_task, walk
+from entity_refs import check_entity_names
 from python_children import run_code
 
 GOAL_ROLE, ACTION_ROLE, VIRTUAL_ROLE, AUXILIARY_ROLE = 2, 4, 1, 8
@@ -19,8 +20,14 @@ OPTIONS = dict(goal_derivations=("plain", "satisfied"), target_sources=("goal", 
 
 
 def encode(task, states, **options):
+    encoder, batch, _ = encode_with_actions(task, states, **options)
+    return encoder, batch
+
+
+def encode_with_actions(task, states, **options):
     encoder = encoding.FlatRelationEncoder(task, **{**OPTIONS, **options})
-    return encoder, encoder.encode(states, actions=rl.expand(rl.as_table(task), states))
+    actions = rl.expand(rl.as_table(task), states)
+    return encoder, encoder.encode(states, actions=actions), actions
 
 
 def roles_of(batch, graph):
@@ -37,29 +44,28 @@ def atom_names(atom):
 def test_every_entity_role_is_named_by_its_rule(name, layout):
     task = text_task(name)
     states = walk(task, steps=5, walks=2)
-    encoder, batch = encode(task, states, layout=layout)
+    encoder, batch, actions = encode_with_actions(task, states, layout=layout)
     literals = {(x.positive, x.predicate.name, tuple(task.objects[o.index] for o in x.objects)) for x in task.encoding_goal}
+    goal_literals = sorted(
+        f"[{'+' if positive else '-'}]({' '.join((predicate, *objects))})[g]" for positive, predicate, objects in literals)
     schemas = {s.name for s in task.formalism.schemas}
     for graph, state in enumerate(states):
         names = encoder.entity_names(batch, graph)
         roles, refs = roles_of(batch, graph)
         assert len(names) == len(roles)
-        goal_names, virtual, action_names = [], [], []
+        virtual = []
         for entity, (role, ref, got) in enumerate(zip(roles, refs, names)):
             if role == 0:
                 assert got == task.objects[ref]
             elif role == AUXILIARY_ROLE:
                 assert got == "auxiliary" and ref == -1
-            elif role == GOAL_ROLE:
-                goal_names.append(got)
             elif role == VIRTUAL_ROLE:
                 virtual.append((ref, got))
-            elif role == ACTION_ROLE:
-                action_names.append(got)
-        assert sorted(goal_names) == sorted(
-            f"[{'+' if positive else '-'}]({' '.join((predicate, *objects))})[g]" for positive, predicate, objects in literals)
-        assert sorted(action_names) == sorted(str(a) for a in state.applicable_actions())
-        assert all(n.split()[0].strip("(") in schemas for n in action_names)
+        # each goal entity is the literal of the tuple its ref numbers, each action entity the action its ref points at
+        checked = check_entity_names(encoder, batch, graph, task.objects, actions, graph)
+        assert sorted(checked["goal"]) == goal_literals
+        assert len(checked["action"]) == len(state.applicable_actions())
+        assert all(n.split()[0].strip("(") in schemas for n in checked["action"])
         used = {a.predicate.name for a in [*state.atoms(), *state.derived_atoms(), *task.formalism.static_init]}
         used |= {x.predicate.name for x in task.encoding_goal}
         order = sorted(used, key=encoder.relation_id)
@@ -105,8 +111,7 @@ def test_a_nullary_goal_literal_and_a_negative_one_are_named_after_their_tuple()
     batch = encoder.encode([task.initial_state], goals=(pos, neg))
     names = encoder.entity_names(batch, 0)
     assert "[+](handempty)[g]" in names and "[-](clear o3)[g]" in names
-    roles, _ = roles_of(batch, 0)
-    assert sorted(n for n, r in zip(names, roles) if r == GOAL_ROLE) == ["[+](handempty)[g]", "[-](clear o3)[g]"]
+    assert sorted(check_entity_names(encoder, batch, 0, task.objects)["goal"]) == ["[+](handempty)[g]", "[-](clear o3)[g]"]
 
 
 def test_a_table_names_the_objects_of_each_rows_instance():
@@ -119,6 +124,30 @@ def test_a_table_names_the_objects_of_each_rows_instance():
     batch = encoder.encode([tasks[i].initial_state for i in ids], ids)
     for graph, instance in enumerate(ids):
         assert encoder.entity_names(batch, graph) == tasks[instance].objects
+
+
+def test_the_names_of_a_batch_of_another_table_are_refused():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    blocks = ROOT / "tests/data/pddl/blocks"
+    small, large = (mymyr.Task.from_pddl(blocks / "domain.pddl", blocks / f"{p}.pddl") for p in ("smedium", "probBLOCKS-8-0"))
+    assert len(small.objects) != len(large.objects)
+    options = dict(goal_derivations=())
+    of_small = encoding.FlatRelationEncoder(rl.TaskTable([small]), **options)
+    of_large = encoding.FlatRelationEncoder(rl.TaskTable([large]), **options)
+    both = encoding.FlatRelationEncoder(rl.TaskTable([small, large]), **options)
+    assert of_small.schema_fingerprint == of_large.schema_fingerprint  # tables over one domain share the schema
+    batch = of_large.encode([large.initial_state])
+    assert of_large.entity_names(batch, 0)[: len(large.objects)] == large.objects
+    for call in (of_small.entity_names, of_small.describe):
+        with pytest.raises(ValueError, match="mymyr: encoding: graph 0 of the batch is not an instance of this encoder's table"):
+            call(batch, 0)
+    # an instance number the table has not, and a table of two instances read by the encoder of one of them
+    mixed = both.encode([small.initial_state, large.initial_state], np.array([0, 1], np.int32))
+    assert both.entity_names(mixed, 1)[: len(large.objects)] == large.objects
+    assert of_small.entity_names(mixed, 0)[: len(small.objects)] == small.objects
+    with pytest.raises(ValueError, match="not an instance of this encoder's table"):
+        of_small.entity_names(mixed, 1)
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -224,8 +253,7 @@ def test_the_goals_of_a_pddl_task_with_negative_literals_are_named():
     encoder = encoding.FlatRelationEncoder(task, target_sources=("goal",), goal_derivations=("plain",))
     batch = encoder.encode(states)
     names = encoder.entity_names(batch, 0)
-    roles, _ = roles_of(batch, 0)
-    goal = sorted(n for n, r in zip(names, roles) if r == GOAL_ROLE)
+    goal = sorted(check_entity_names(encoder, batch, 0, task.objects)["goal"])
     expected = sorted(
         f"[{'+' if x.positive else '-'}]({' '.join([x.predicate.name] + [task.objects[o.index] for o in x.objects])})[g]"
         for x in task.encoding_goal)
