@@ -479,12 +479,12 @@ EhcResult ehc(const Task& task, const EhcOptions& o)
         r.dead_ends += f.dead_ends;
         r.store = f.store;
         r.queue = f.queue;
-        c->finish(out.states + f.stats.states, f.store_bytes);
+        c->finish(out.states + f.stats.states, f.stats.memory_bytes);
     }
     catch (const heuristics::Interrupted&)
     {
         r.status = c->interrupted_status();
-        c->finish(r.stats.states, r.store_bytes);
+        c->finish(r.stats.states, r.stats.memory_bytes);
     }
     catch (const std::exception& e)
     {

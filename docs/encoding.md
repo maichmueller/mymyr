@@ -271,6 +271,33 @@ batch's framework. NumPy arrays are read-only; do not mutate the shared buffers 
 cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
 `batch.schema` is its `EncodingSchema`.
 
+## Memory of batches
+
+A batch is one block of memory. Fresh memory costs a kernel page fault per 4 KiB page, which for a batch of tens of
+megabytes is several times the work of filling it, so released blocks are kept and handed out again with their pages
+still mapped. The same cache serves the other batch outputs (`mymyr.rl.expand`, table batches). It is bounded:
+
+| Block size | Served by | Bound |
+|---|---|---|
+| up to 128 KiB | the system allocator | not cached by mymyr |
+| up to 4 MiB | a cache private to the thread that releases the block | 4 blocks per thread |
+| above 4 MiB | a cache shared by all threads | 8 blocks and 512 MiB in all; a block above 256 MiB is never kept |
+
+A block returns to the cache of the thread that drops its last reference, whichever thread made it. Blocks are
+anonymous memory mappings, so dropping one gives its memory back to the operating system. A shared block that no
+acquire takes within the 256 acquires of blocks above 128 KiB that follow its release is dropped by itself, so a one-off
+huge batch does not stay resident. `mymyr.block_cache_bytes()` reports what the calling thread's cache and the shared
+cache hold, and `mymyr.trim_block_cache()` frees all of it; other threads' private caches are freed when those threads
+end. Arrays that a batch still owns keep their memory either way.
+
+```python
+big = encoder.encode([state] * 20000)  # a batch of several megabytes
+del big  # its block goes back to the cache
+assert mymyr.block_cache_bytes() > 0
+mymyr.trim_block_cache()  # and back to the system
+assert mymyr.block_cache_bytes() == 0
+```
+
 ## Layouts and omitted arrays
 
 `layout='graph'` (the default) stores the tuples graph by graph; `layout='relation'` stores them relation by relation

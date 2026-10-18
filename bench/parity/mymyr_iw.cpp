@@ -84,13 +84,13 @@ struct Sums
             return;
         if (!per_pass.empty())
             per_pass += ";";
-        per_pass += std::to_string(p.arity) + ":" + std::to_string(p.expanded) + "/" + std::to_string(p.generated) + "/" +
+        per_pass += std::to_string(p.width) + ":" + std::to_string(p.expanded) + "/" + std::to_string(p.generated) + "/" +
                     std::to_string(p.generated_in_tree);
         char buf[320];
         std::snprintf(buf, sizeof buf,
                       "%s{\"arity\":%u,\"status\":\"%s\",\"expanded\":%llu,\"generated\":%llu,\"generated_in_tree\":%llu,"
                       "\"skipped\":%llu,\"blocked\":%llu,\"placeholder\":%s,\"seconds\":%.6f}",
-                      list.empty() ? "" : ",", p.arity, to_string(p.status), static_cast<unsigned long long>(p.expanded),
+                      list.empty() ? "" : ",", p.width, to_string(p.status), static_cast<unsigned long long>(p.expanded),
                       static_cast<unsigned long long>(p.generated), static_cast<unsigned long long>(p.generated_in_tree),
                       static_cast<unsigned long long>(p.skipped), static_cast<unsigned long long>(p.blocked),
                       p.placeholder ? "true" : "false", p.seconds);
@@ -305,7 +305,7 @@ int main(int argc, char** argv)
     }
     if (task_file.empty() && (domain.empty() || problem.empty()))
         usage("missing task (task.txt or --domain/--problem)");
-    io.max_arity = k;
+    io.max_width = k;
     try
     {
         const auto t0 = std::chrono::steady_clock::now();
@@ -345,7 +345,7 @@ int main(int argc, char** argv)
         std::vector<Action> plan;
         double cost = 0;
         u32 fluent_slots = 0;
-        u64 table_bytes = 0, node_bytes = 0;
+        u64 memory_bytes = 0;
         const auto ts = std::chrono::steady_clock::now();
         if (algo == "iw" || algo == "iwpass")
         {
@@ -360,8 +360,7 @@ int main(int argc, char** argv)
             cost = r.cost;
             message = r.message;
             fluent_slots = r.fluent_slots;
-            table_bytes = r.peak_table_bytes;
-            node_bytes = r.peak_node_bytes;
+            memory_bytes = r.stats.memory_bytes;
             extra += ",\"effective_width\":" + std::to_string(r.effective_width);
         }
         else if (algo == "siw")
@@ -383,8 +382,7 @@ int main(int argc, char** argv)
             cost = r.cost;
             message = r.message;
             fluent_slots = r.fluent_slots;
-            table_bytes = r.peak_table_bytes;
-            node_bytes = r.peak_node_bytes;
+            memory_bytes = r.stats.memory_bytes;
             extra += ",\"num_subproblems\":" + std::to_string(solved) + ",\"all_subproblems\":" + std::to_string(r.subproblems.size()) +
                      ",\"max_effective_width\":" + std::to_string(solved ? static_cast<int>(r.max_effective_width) : -1);
         }
@@ -413,12 +411,12 @@ int main(int argc, char** argv)
         if (replay)
             std::printf(",\"order_misses\":{\"states\":%llu,\"actions\":%llu}", static_cast<unsigned long long>(replay->state_misses),
                         static_cast<unsigned long long>(replay->action_misses));
-        std::printf(",\"atoms\":\"%s\",\"F\":%u,\"dense_F\":%llu,\"witness\":%s,\"canonical\":%s,\"table_mb\":%.2f,\"tree_mb\":%.2f,"
+        std::printf(",\"atoms\":\"%s\",\"F\":%u,\"dense_F\":%llu,\"witness\":%s,\"canonical\":%s,\"memory_mb\":%.2f,"
                     "\"peak_rss_mb\":%.1f}\n",
                     atom_mode_name(task->atoms().mode()), fluent_slots,
                     static_cast<unsigned long long>(task->info().dense_fluent), io.witness_pruning ? "true" : "false",
-                    io.canonical_order ? "true" : "false", static_cast<double>(table_bytes) / 1048576.0,
-                    static_cast<double>(node_bytes) / 1048576.0, peak_rss_mb());
+                    io.canonical_order ? "true" : "false", static_cast<double>(memory_bytes) / 1048576.0,
+                    peak_rss_mb());
     }
     catch (const std::exception& e)
     {

@@ -303,8 +303,8 @@ def test_constructed_goals_give_the_plans_of_the_equivalent_forms():
     depot = text_task("depot__p02")
     goal = depot.goal_condition
     assert search.brfs(depot, stop_at_goal=True, goal=goal).plan == search.brfs(depot, stop_at_goal=True).plan
-    assert search.astar(depot, heuristic="hmax", goal=goal).plan == search.astar(depot, heuristic="hmax").plan
-    assert search.astar(depot, heuristic="hmax", goal=[goal.literals]).plan == search.astar(depot, heuristic="hmax").plan
+    assert search.astar(depot, heuristic="max", goal=goal).plan == search.astar(depot, heuristic="max").plan
+    assert search.astar(depot, heuristic="max", goal=[goal.literals]).plan == search.astar(depot, heuristic="max").plan
 
 
 def test_any_of_goals():

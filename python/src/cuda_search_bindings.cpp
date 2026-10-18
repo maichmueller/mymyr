@@ -114,7 +114,7 @@ cuda::MultiIwOptions options_of(u32 max_width, nb::handle width_zero, bool optim
                                 nb::handle max_depth, nb::handle max_seconds, nb::handle max_searches, nb::handle chunk_states)
 {
     cuda::MultiIwOptions o;
-    o.max_arity = max_width;
+    o.max_width = max_width;
     o.width_zero = width_zero_of(width_zero);
     o.optimize_iw1 = optimize_iw1;
     o.witness_pruning = witness_pruning;
@@ -447,7 +447,7 @@ void bind_cuda_search(nb::module_& m, ContextLookup lookup)
                 search::SearchStatistics s;
                 for (const search::IwPassStatistics& p : x.b.passes(checked_index(x, i)))
                 {
-                    const search::SearchStatistics q = p.statistics();
+                    const search::SearchStatistics q = p.stats();
                     s.expanded += q.expanded;
                     s.generated += q.generated;
                     s.states += q.states;

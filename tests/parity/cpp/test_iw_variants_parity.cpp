@@ -174,7 +174,7 @@ std::string per_pass(std::span<const IwPassStatistics> passes, std::optional<u32
 {
     std::string s;
     for (const IwPassStatistics& p : passes)
-        s += (s.empty() ? "" : ";") + std::to_string(arity ? *arity : p.arity) + ":" + std::to_string(p.expanded) + "/" + std::to_string(p.generated) +
+        s += (s.empty() ? "" : ";") + std::to_string(arity ? *arity : p.width) + ":" + std::to_string(p.expanded) + "/" + std::to_string(p.generated) +
              "/" + std::to_string(p.generated_in_tree);
     return s;
 }
@@ -260,7 +260,7 @@ void run_row(const Task& task, const json::Value& row)
         {
             LiwOptions o;
             o.control = control;
-            o.max_arity = a.k;
+            o.max_width = a.k;
             o.landmarks = lm;
             r = liw(task, o);
             EXPECT_EQ(per_pass(r.passes), e["per_pass"].str) << what;
@@ -280,7 +280,7 @@ void run_row(const Task& task, const json::Value& row)
         o.seed = a.seed;
         const RolloutIwResult r = rollout_iw(task, o);
         EXPECT_EQ(status_name(r.status, false), e["status"].str) << what;
-        expect_rollout_stats(r.statistics, e["rollout"], what);
+        expect_rollout_stats(r.rollout, e["rollout"], what);
         EXPECT_EQ(r.root_solved, e["root_solved"].b) << what;
         if (r.status == SearchStatus::Solved)
         {
@@ -291,8 +291,8 @@ void run_row(const Task& task, const json::Value& row)
     {
         ParallelRolloutOptions o;
         o.iw.control = control;
-        o.iw.max_arity = a.k;
-        o.num_threads = 4;  // the fork ran them serially: the result does not depend on the thread count
+        o.iw.max_width = a.k;
+        o.threads = 4;  // the fork ran them serially: the result does not depend on the thread count
         o.max_next_layer_states = a.max_next_layer_states;
         o.report_landing_states = true;
         o.report_co_occurrence = true;
@@ -313,7 +313,7 @@ void run_row(const Task& task, const json::Value& row)
             {
                 EXPECT_EQ(x.search.plan.size(), num(y["plan_len"])) << w;
             }
-            EXPECT_EQ(x.num_states, num(y["num_states"])) << w;
+            EXPECT_EQ(x.num_created_states, num(y["num_states"])) << w;
             EXPECT_EQ(x.reached_fluent_atoms.size(), num(y["reached_fluent"])) << w;
             EXPECT_EQ(x.reached_derived_atoms.size(), num(y["reached_derived"])) << w;
             EXPECT_EQ(x.landing_states.size(), num(y["landing_states"])) << w;
@@ -331,7 +331,7 @@ void run_row(const Task& task, const json::Value& row)
         PortfolioOptions o;
         o.control = control;
         o.num_rollout_workers = a.workers;
-        o.num_threads = a.threads;
+        o.threads = a.threads;
         std::istringstream in(a.orderings);
         std::string s;
         while (std::getline(in, s, ','))
@@ -348,8 +348,8 @@ void run_row(const Task& task, const json::Value& row)
         EXPECT_EQ(r.iw_completed_depth, num(e["iw_completed_depth"])) << what;
         EXPECT_EQ(r.iw_lower_bound, num(e["iw_lower_bound"])) << what;
         EXPECT_EQ(r.stats.expanded, num(e["total_expansions"])) << what;
-        EXPECT_EQ(r.certifier.total.expanded, num(e["expanded"])) << what;
-        EXPECT_EQ(r.certifier.total.generated, num(e["generated"])) << what;
+        EXPECT_EQ(r.certifier.stats.expanded, num(e["expanded"])) << what;
+        EXPECT_EQ(r.certifier.stats.generated, num(e["generated"])) << what;
         ASSERT_EQ(r.rollout_statistics.size(), e["rollout_statistics"].arr.size()) << what;
         for (usize i = 0; i < r.rollout_statistics.size(); ++i)
         {

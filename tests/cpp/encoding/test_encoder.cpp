@@ -401,6 +401,7 @@ TEST(EncoderBatches, ASliceOfABatchIsTheEncodingOfTheSlice)
 
 TEST(EncoderBatches, PaddingWordsAndRowStridesDoNotChangeTheOutput)
 {
+    test::dirty_recycled_blocks();
     const auto small = test::pddl_task("blocks", "smedium");
     const auto large = test::pddl_task("blocks", "probBLOCKS-8-0");
     const auto table = rl::TaskTable::create({small, large});
@@ -566,6 +567,7 @@ TEST(EncoderOverflow, IndexRangeIsCheckedForBothTypes)
 
 TEST(EncoderBatches, EncodingTwiceGivesEqualBytesAndAnEmptyBatchIsEmpty)
 {
+    test::dirty_recycled_blocks();
     const auto table = rl::TaskTable::single(test::pddl_task("logistics00", "probLOGISTICS-6-1"));
     const auto encoder = FlatEncoder::create(table, test::encoder_options());
     const test::Rows rows = test::random_walk(*table, 0, 32, 2);

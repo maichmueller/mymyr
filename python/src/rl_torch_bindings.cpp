@@ -68,6 +68,12 @@ using ContextArg = Arg<ann::Any>;
 using PathArg = Arg<ann::EnvPath>;
 using ArrayOut = Arg<ann::Any>;
 
+/// The random policy's cap on the successors it chooses from: None for no limit (~u32{0}), else at least 1.
+u32 max_actions_arg(nb::handle h)
+{
+    return opt_int_arg<u32>(h, "max_actions", 1).value_or(~u32{0});
+}
+
 // ------------------------------------------------------------------------------------------------ Env
 
 class PyEnv
@@ -348,7 +354,7 @@ public:
     }
 
     /// The random policy's next choices (rl::rng::successor_index at the current draw counters), limited to
-    /// max_actions successors (0: no limit), without stepping: out [N] int64 (0 where there is no successor).
+    /// max_actions successors (~u32{0}: no limit), without stepping: out [N] int64 (0 where there is no successor).
     void random_actions(nb::handle draws, nb::handle count, nb::handle out, u64 first_env, u32 max_actions,
                         nb::handle stream)
     {
@@ -366,9 +372,10 @@ public:
     }
 
     // draws, count, out
-    void random_actions_ptrs(u64 rows, const Ptrs& p, u64 first_env, u32 max_actions, StreamArg stream)
+    void random_actions_ptrs(u64 rows, const Ptrs& p, u64 first_env, IntArg max_actions_in, StreamArg stream)
     {
         check_ptrs(p, 3);
+        const u32 max_actions = max_actions_arg(max_actions_in);
         Call c(*this, stream);
         c.run([&] { run_random_actions(ptr<const u64>(p[0]), ptr<const i32>(p[1]), rows, first_env, max_actions, ptr<i64>(p[2])); });
     }
@@ -455,7 +462,7 @@ private:
         for (u64 i = 0; i < rows; ++i)
         {
             u32 k = cnt[i] > 0 ? static_cast<u32>(cnt[i]) : 0u;
-            if (max_actions && k > max_actions)
+            if (k > max_actions)
                 k = max_actions;
             o[i] = k ? i64{rl::rng::successor_index(seed, first_env + i, d[i], k)} : i64{0};
         }
@@ -771,18 +778,17 @@ void bind_rl_torch(nb::module_& parent)
              "next_task_ids, reward, terminated, truncated, count, final_states, schema, binding, invalid, goal, "
              "at_goal; 0: None) of checked tensors.")
         .def("_random_actions_ptrs", &PyEnv::random_actions_ptrs, "rows"_a, "ptrs"_a, "first_env"_a = 0,
-             "max_actions"_a = 0, "stream"_a = nb::none(),
+             "max_actions"_a = nb::none(), "stream"_a = nb::none(),
              "random_actions() on data pointers (draws, count, out) of checked tensors.")
         .def(
             "random_actions",
             [](PyEnv& e, ArrayArg draws, ArrayArg count, ArrayArg out, IntArg first_env_in, IntArg max_actions_in, StreamArg stream) {
                 const u64 first_env = int_arg<u64>(first_env_in, "first_env");
-                const u32 max_actions = int_arg<u32>(max_actions_in, "max_actions");
-                e.random_actions(draws, count, out, first_env, max_actions, stream);
+                e.random_actions(draws, count, out, first_env, max_actions_arg(max_actions_in), stream);
             },
-            "draws"_a, "count"_a, "out"_a, nb::kw_only(), "first_env"_a = 0, "max_actions"_a = 0, "stream"_a = nb::none(),
+            "draws"_a, "count"_a, "out"_a, nb::kw_only(), "first_env"_a = 0, "max_actions"_a = nb::none(), "stream"_a = nb::none(),
             "The random policy's next choices without stepping: out[i] = successor_indices(seed, first_env + i, "
-            "draws[i], min(count[i], max_actions)) (max_actions 0: no limit; 0 where there is no successor), int64 [N]. "
+            "draws[i], min(count[i], max_actions)) (max_actions None: no limit; 0 where there is no successor), int64 [N]. "
             "A step with these actions takes the same successors as the random policy's step (count <= max_actions).")
         .def("check_errors", &PyEnv::check_errors,
              "Device Env: waits for its work and raises RuntimeError if a fast-path step met a state its cache did not "

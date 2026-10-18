@@ -14,9 +14,8 @@
 // label_width()) and costs; the reverse CSR (per target, its incoming transitions in ascending forward edge order);
 // goal, unsolvable and alive flags; unit and cost goal distances; the initial state is id 0. The options are the
 // host's (datasets::StateSpaceOptions: max_states, max_seconds, remove_if_unsolvable, labels), with the host's
-// statuses per instance. The `states` of an instance that runs out of states is the host's count at the failure (its
-// one-thread generator's, after the parent whose successors reached max(max_states, 2), whatever the chunk);
-// max_seconds is checked between chunks.
+// statuses per instance. An instance runs out of states when its space has max(max_states, 1) states or more; its
+// `states` is then that limit, as the host's. max_seconds is checked between chunks.
 //
 // Generation. One pipeline expands the states of every instance of a wave (below) in first-in first-out chunks of
 // stored parents (a chunk may span layers and instances): the successor rows of a chunk come in (parent, canonical
@@ -193,9 +192,9 @@ using DeviceStateSpacePtr = std::shared_ptr<const DeviceStateSpace>;
 
 struct DeviceStateSpaceResult
 {
-    datasets::StateSpaceStatus status = datasets::StateSpaceStatus::Ok;
-    DeviceStateSpacePtr space;     // status Ok and device output
-    datasets::StateSpacePtr host;  // status Ok and host output
+    search::SearchStatus status = search::SearchStatus::Exhausted;
+    DeviceStateSpacePtr space;     // status Exhausted and device output
+    datasets::StateSpacePtr host;  // status Exhausted and host output
     u64 states = 0;                // states stored when the instance's generation ended (also when it failed)
     f64 seconds = 0;               // wall time from the instance's admission to its output
 };

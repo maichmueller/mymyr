@@ -118,7 +118,7 @@ TEST(BeamFork, IwAndBrfsEqualTheForks)
             if (r["algo"].str == "iw")
             {
                 IwOptions o;
-                o.max_arity = static_cast<u32>(r["k"].num);
+                o.max_width = static_cast<u32>(r["k"].num);
                 o.layers = ordering(r);
                 o.threads = threads;
                 const IwResult m = iw(task, o);
@@ -182,7 +182,7 @@ TEST(BeamFork, RelaxedBeamEqualsTheForksPerLayerSelection)
             tasks[name] = Task::from_text_file(test::task_path(name));
         const Task& task = *tasks[name];
         IwOptions o;
-        o.max_arity = 2;
+        o.max_width = 2;
         o.layers.kind = LayerOrdering::Kind::GoalCount;
         o.layers.prefer_more_satisfied_goals = r["order"].str == "goal_count";
         o.layers.beam_width = static_cast<u32>(r["beam"].num);

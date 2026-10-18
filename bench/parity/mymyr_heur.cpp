@@ -366,7 +366,7 @@ int main(int argc, char** argv)
         j.u("h_lifted", r.heuristic.lifted);
         j.str("store", r.store);
         j.str("queue", r.queue);
-        j.num("store_mb", static_cast<double>(r.store_bytes) / 1048576.0);
+        j.num("store_mb", static_cast<double>(r.stats.memory_bytes) / 1048576.0);
         j.u("fluent_slots", r.fluent_slots);
         if (!r.message.empty())
             j.str("message", r.message);

@@ -99,7 +99,7 @@ inline StateSpaceOptions ss_options(u32 threads = 1)
 inline StateSpacePtr space_of(TaskPtr task, const StateSpaceOptions& o)
 {
     StateSpaceResult r = generate_state_space(std::move(task), o);
-    EXPECT_EQ(r.status, StateSpaceStatus::Ok);
+    EXPECT_EQ(r.status, search::SearchStatus::Exhausted);
     return r.space;
 }
 

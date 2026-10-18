@@ -4,7 +4,7 @@
 //
 //   auto graph = mymyr::landmarks::approximate_fact_landmarks(*task);
 //   mymyr::search::IwOptions o;
-//   o.max_arity = 1;
+//   o.max_width = 1;
 //   o.transition_ordering = std::make_shared<mymyr::landmarks::LandmarkTransitionOrdering>(*task, graph);
 //   auto r = mymyr::search::iw(*task, o);
 //

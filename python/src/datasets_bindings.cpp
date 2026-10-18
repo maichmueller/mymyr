@@ -94,7 +94,7 @@ using SamplerSpace = Arg<PyStateSpace>;
 // one object (and pickles once).
 struct PyGenerationResult
 {
-    StateSpaceStatus status = StateSpaceStatus::Ok;
+    search::SearchStatus status = search::SearchStatus::Exhausted;
     nb::object space;  // a StateSpace, or None
     u64 states = 0;
     f64 seconds = 0;
@@ -867,7 +867,7 @@ const char* k_space_doc =
     "arrays() exports them zero-copy. The initial state is id 0.";
 
 const char* k_options_doc =
-    "Options: threads (0: one per hardware thread; 1: sequential), max_states (fail when the space has max(max_states, 2) states "
+    "Options: threads (0: one per hardware thread; 1: sequential), max_states (fail when the space has max(max_states, 1) states "
     "or more), max_seconds, remove_if_unsolvable (no space when the initial state cannot reach a goal), "
     "labels (keep (schema, binding) per transition). State words are the same for every thread count (a task with lazy atom slots has none).";
 
@@ -1018,7 +1018,7 @@ void bind_datasets(nb::module_& parent)
     nb::class_<PyGenerationResult>(m, "GenerationResult",
                                    "The outcome of a state space generation: its status, the state space when it is "
                                    "complete, and its counts. True when the space is complete.")
-        .def_prop_ro("status", [](const PyGenerationResult& r) { return search_status(r.status); },
+        .def_prop_ro("status", [](const PyGenerationResult& r) { return r.status; },
                      "How the generation ended (mymyr.search.Status): EXHAUSTED when every reachable state was "
                      "expanded (the space is complete), OUT_OF_STATES or OUT_OF_TIME when a budget stopped it, "
                      "UNSOLVABLE when the goal is statically false or, with remove_if_unsolvable, the initial state "
@@ -1035,7 +1035,7 @@ void bind_datasets(nb::module_& parent)
                                        nb::make_tuple(static_cast<int>(r.status), r.space, r.states, r.seconds));
              })
         .def("__repr__", [](const PyGenerationResult& r) {
-            return std::string("GenerationResult(status=") + search::to_string(search_status(r.status)) +
+            return std::string("GenerationResult(status=") + search::to_string(r.status) +
                    ", states=" + std::to_string(r.states) + ")";
         });
 
@@ -1679,11 +1679,14 @@ void bind_datasets(nb::module_& parent)
         "_restore_generation_result",
         [](int status, std::optional<Arg<PyStateSpace>> space_arg, u64 states, f64 seconds) {
             const nb::handle space = space_arg ? nb::handle(*space_arg) : nb::none();
-            if (status < 0 || status > static_cast<int>(StateSpaceStatus::Unsolvable) ||
-                space.is_none() == (status == static_cast<int>(StateSpaceStatus::Ok)) ||
+            using search::SearchStatus;
+            const auto is = [&](SearchStatus x) { return status == static_cast<int>(x); };
+            if (!(is(SearchStatus::Exhausted) || is(SearchStatus::OutOfStates) || is(SearchStatus::OutOfTime) ||
+                  is(SearchStatus::Unsolvable)) ||
+                space.is_none() == is(SearchStatus::Exhausted) ||
                 (!space.is_none() && !nb::isinstance<PyStateSpace>(space)))
                 throw nb::value_error("mymyr: corrupt generation result");
-            return PyGenerationResult{static_cast<StateSpaceStatus>(status), nb::borrow(space), states, seconds};
+            return PyGenerationResult{static_cast<search::SearchStatus>(status), nb::borrow(space), states, seconds};
         },
         "status"_a, "space"_a.none(), "states"_a, "seconds"_a);
 }

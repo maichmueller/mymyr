@@ -158,7 +158,7 @@ public:
     void step(rl::EnvBatch& b, const rl::StepOutputs& out, rl::Actions action = {}, const i32* next_task_ids = nullptr);
     /// The random policy's next choices without a step (TorchRL's rand_action): out[i] = the successor index step()
     /// would draw now for row i (draws, count [rows] device; the env's key, env id first_env + i), limited to
-    /// max_actions (0: no limit), 0 where count[i] is 0.
+    /// max_actions (~u32{0}: no limit), 0 where count[i] is 0.
     void random_actions(const u64* draws, const i32* count, u64 rows, u64 first_env, u32 max_actions, i64* out);
     /// Synchronizes the stream; throws std::logic_error if a fast-path step found a state whose cache did not match it
     /// (states written without refresh()), std::invalid_argument for task ids outside the suite (reset, next_task_ids).

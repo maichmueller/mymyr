@@ -12,6 +12,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <limits>
 #include <queue>
 #include <tuple>
@@ -205,7 +206,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
         r.stats.states = nodes.size();
         r.stats.seconds = std::chrono::duration<double>(Clock::now() - begin).count();
         r.fluent_slots = task->atoms().fluent_slots();
-        r.store_bytes = arena.size() + table.size() + nodes.size() * sizeof(Node) + open.size() * sizeof(Entry);
+        r.stats.memory_bytes = arena.size() + table.size() + nodes.size() * sizeof(Node) + open.size() * sizeof(Entry);
         st.steps = st.host_steps;
         st.max_batch = st.steps ? 1 : 0;
         st.uploads = gen.uploads();
@@ -280,6 +281,11 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
             continue;
         }
         ++r.stats.expanded;
+        if (nodes.size() >= budget.max_states)  // the start state alone fills the store
+        {
+            r.status = search::SearchStatus::OutOfStates;
+            break;
+        }
         ++st.host_steps;
         ++st.chunks;
         if (gen.needs_host(o.search.witness_pruning)) (void)load(parent);
@@ -353,6 +359,14 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
                           o.search.witness_pruning, o.search.canonical_order);
             if (at != T) throw std::logic_error("mymyr: numeric search fallback transition count differs");
         }
+        if (!greedy)
+            if (const auto low = std::ranges::find_if(gs, [&](f64 g) { return g < gp; }); low != gs.end())
+            {
+                r.status = search::SearchStatus::Failed;
+                r.message = "mymyr astar_eager: A* needs non-negative action costs, and a transition lowered the metric value from " +
+                            std::format("{}", gp) + " to " + std::format("{}", *low) + " (a negative action cost)";
+                break;
+            }
         std::vector<u8> goal(T);
         auto* dg = allocate<u8>(flags, ctx, T, s);
         if (task->has_axioms() && !gen.device_axioms())
@@ -391,7 +405,7 @@ DeviceBestFirstResult numeric_best_first(ContextPtr ctx, TaskPtr task, const Dev
         bool full = false;
         u32 generated = T;
         for (u32 i = 0; i < T; ++i)
-            if (ranks[i + 1] > ranks[i] && u64{base} + ranks[i + 1] > budget.max_states)
+            if (ranks[i + 1] > ranks[i] && u64{base} + ranks[i + 1] >= budget.max_states)
             {
                 nodes.resize(u64{base} + ranks[i + 1]);
                 generated = i + 1; full = true; break;

@@ -3,11 +3,11 @@
 //
 //   auto task = mymyr::Task::from_text_file("p.txt");
 //   mymyr::search::IwOptions o;
-//   o.max_arity = 2;
+//   o.max_width = 2;
 //   mymyr::search::IwResult r = mymyr::search::iw(*task, o);
 //
 // The ladder runs BrFS with a novelty pruning strategy per arity:
-//   - the ladder runs one pass per arity 0, 1, ..., max_arity, each from the start state with fresh novelty tables,
+//   - the ladder runs one pass per width 0, 1, ..., max_width, each from the start state with fresh novelty tables,
 //     until a pass solves the task or stops on a budget; if every pass exhausts its tree, the status is Exhausted;
 //   - within a pass, states are expanded breadth first in the order they were admitted, successors in the successor
 //     generator's order (canonical order by default); the goal is tested when a state is popped, so a goal
@@ -19,7 +19,7 @@
 //     start state itself enters the tree (duplicates count once per action in generated_in_tree,
 //     but are expanded once), and every such depth-1 state is expanded with all of its successors pruned. The
 //     alternative WidthZero::RootOnly goal-tests the depth-1 states without expanding them;
-//   - optimized IW(1) (`optimize_iw1`, the default, used when max_arity == 1): the width-0 pass is replaced
+//   - optimized IW(1) (`optimize_iw1`, the default, used when max_width == 1): the width-0 pass is replaced
 //     by an empty placeholder entry (arity 0, all zeros), and the width-1 pass admits every distinct successor of the
 //     start state; those that are not novel are goal-tested and counted as expanded but not expanded
 //     (IwPassStatistics::skipped counts them; expanded - skipped is the classical count);
@@ -75,9 +75,9 @@ enum class WidthZero : u8
 struct IwOptions
 {
     SearchControl control;
-    u32 max_arity = 2;  // the ladder runs arities 0..max_arity (at most novelty::k_max_arity)
+    u32 max_width = 2;  // the ladder runs widths 0..max_width (at most novelty::k_max_arity)
     WidthZero width_zero = WidthZero::ExpandDepthOne;
-    bool optimize_iw1 = true;       // optimized IW(1) when max_arity == 1 (see above)
+    bool optimize_iw1 = true;       // optimized IW(1) when max_width == 1 (see above)
     bool witness_pruning = false;   // off: every applicable action is a transition
     bool canonical_order = true;    // successors per state in (schema, binding) order
     novelty::TableOptions tables;   // dense/sparse budget of the novelty tables
@@ -101,7 +101,7 @@ struct IwOptions
 
 struct IwPassStatistics
 {
-    u32 arity = 0;
+    u32 width = 0;
     SearchStatus status = SearchStatus::Exhausted;
     u64 expanded = 0;           // popped non-goal states
     u64 generated = 0;          // transitions generated from expanded states
@@ -109,9 +109,9 @@ struct IwPassStatistics
     u64 skipped = 0;            // counted as expanded, successors not generated (optimized IW(1), RootOnly, max_depth)
     u64 blocked = 0;            // successors rejected because they are blocked
     double seconds = 0;
-    bool placeholder = false;   // the empty arity-0 entry of an optimized IW(1) ladder
+    bool placeholder = false;   // the empty width-0 entry of an optimized IW(1) ladder
 
-    [[nodiscard]] SearchStatistics statistics() const
+    [[nodiscard]] SearchStatistics stats() const
     {
         return {.expanded = expanded,
                 .generated = generated,
@@ -127,19 +127,17 @@ struct IwResult
     std::vector<Action> plan;
     double cost = 0;                 // the plan cost (see above); 0 unless solved
     std::optional<State> goal_state;
-    std::vector<IwPassStatistics> passes;  // one per arity run, index = arity
-    SearchStatistics total;                // sums over the passes
-    u32 effective_width = 0;               // arity of the pass that solved the task
+    std::vector<IwPassStatistics> passes;  // one per width run, index = width
+    SearchStatistics stats;                // sums over the passes (memory_bytes: the largest pass's)
+    u32 effective_width = 0;               // width of the pass that solved the task
     std::string message;                   // why the search could not run (status Failed)
     u32 fluent_slots = 0;                  // assigned fluent atom slots at the end
-    u64 peak_table_bytes = 0;              // largest novelty table of a pass
-    u64 peak_node_bytes = 0;               // largest tree (state words and plan records) of a pass
 };
 
-/// The IW ladder: arities 0..max_arity (optimized IW(1) when max_arity == 1 and optimize_iw1).
+/// The IW ladder: widths 0..max_width (optimized IW(1) when max_width == 1 and optimize_iw1).
 [[nodiscard]] IwResult iw(const Task& task, const IwOptions& options = {});
 
-/// One IW(k) pass alone (arity 0..k_max_arity), without the ladder and without the optimized-IW(1) root
+/// One IW(k) pass alone (width 0..k_max_arity), without the ladder and without the optimized-IW(1) root
 /// continuation: the width-k pass of a ladder, in isolation.
-[[nodiscard]] IwResult iw_pass(const Task& task, u32 arity, const IwOptions& options = {});
+[[nodiscard]] IwResult iw_pass(const Task& task, u32 width, const IwOptions& options = {});
 }  // namespace mymyr::search

@@ -377,7 +377,7 @@ __global__ void k_random_actions(const u64* draws, const i32* count, u64 rows, u
     for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
     {
         u32 c = count[i] > 0 ? static_cast<u32>(count[i]) : 0u;
-        if (max_actions && c > max_actions)
+        if (c > max_actions)
             c = max_actions;
         out[i] = c ? i64{rl::rng::successor_index(key, first_env + i, draws[i], c)} : i64{0};
     }

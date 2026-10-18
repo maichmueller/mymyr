@@ -447,7 +447,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
             "supporter rule on the CPU); inf for dead ends.")
         .def_prop_ro("kind", [](const PyDeviceHeuristic& self) { return std::string(heuristics::to_string(self.h->kind())); },
                      "The heuristic: 'max', 'add', 'ff', 'h2' or 'set_additive'.")
-        .def_prop_ro("stats", [](const PyDeviceHeuristic& self) { return heuristic_stats(self.h->stats()); },
+        .def_prop_ro("counters", [](const PyDeviceHeuristic& self) { return heuristic_stats(self.h->stats()); },
                      "evaluations, launches, CPU fallbacks, the grounding's size and the resolved launch configuration")
         .def("__repr__", [](const PyDeviceHeuristic& self) {
             const cuda::DeviceHeuristicStats& s = self.h->stats();
@@ -476,9 +476,7 @@ void bind_cuda_heuristics(nb::module_& m, ContextLookup lookup)
                      "The State the plan reaches (None without a plan).")
         .def_prop_ro("stats",
                      [](const PyDeviceSearchResult& x) {
-                         search::SearchStatistics s = x.r.result.stats;
-                         s.memory_bytes = std::max(s.memory_bytes, x.r.result.store_bytes);
-                         return s;
+                         return x.r.result.stats;
                      },
                      "The search's counts and time (mymyr.search.Statistics; memory_bytes: the device store).")
         .def_prop_ro("evaluations", [](const PyDeviceSearchResult& x) { return x.r.result.evaluations; },

@@ -55,7 +55,7 @@ def test_heuristic_equals_cpu(ctx, name, kind):
         cpu = mymyr.search.Heuristic(task, kind)
         assert ref == [cpu(s) for s in states]
     assert h.kind == kind
-    assert h.stats["evaluations"] >= len(states) and h.stats["operators"] > 0
+    assert h.counters["evaluations"] >= len(states) and h.counters["operators"] > 0
     # the launch configuration changes no value
     for kw in ({"variant": "frontier"}, {"warp_groups": True}, {"block_threads": 64, "force_global": True}, {"max_blocks": 1}):
         assert list(mc.Heuristic(task, kind, ctx=ctx, **kw).evaluate(states)) == ref, kw
@@ -193,6 +193,54 @@ def test_errors(ctx):
     assert mc.Heuristic(task, "max", ctx=ctx).evaluate([]).shape == (0,)
 
 
+NEGATIVE_COSTS = """(define (domain d) (:requirements :strips :negative-preconditions :action-costs)
+ (:predicates (a) (goal)) (:functions (total-cost) (c))
+ (:action on :parameters () :precondition (not (a)) :effect (and (a) (increase (total-cost) (c))))
+ (:action off :parameters () :precondition (a) :effect (and (not (a)) (increase (total-cost) (c))))
+ (:action finish :parameters () :precondition (a) :effect (and (goal) (increase (total-cost) 100))))"""
+CONSTANT_NEGATIVE = """(define (domain d) (:requirements :strips :action-costs)
+ (:predicates (goal)) (:functions (total-cost))
+ (:action finish :parameters () :precondition () :effect (and (goal) (increase (total-cost) -1))))"""
+FLUENT_NEGATIVE = """(define (domain d) (:requirements :numeric-fluents :action-costs)
+ (:predicates (goal)) (:functions (total-cost) (x))
+ (:action step :parameters () :precondition (< (x) 3) :effect (and (increase (x) 1) (increase (total-cost) (- 1 (x)))))
+ (:action finish :parameters () :precondition (>= (x) 3) :effect (and (goal) (increase (total-cost) 10))))"""
+
+
+def test_negative_costs_fail_as_on_the_cpu(ctx):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    failed = mymyr.search.Status.FAILED
+
+    def task_of(domain, init):
+        problem = f"(define (problem p) (:domain d) (:init {init}) (:goal (goal)) (:metric minimize (total-cost)))"
+        return mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+
+    # a cost of -1 from a static function: known on the transition
+    task = task_of(NEGATIVE_COSTS, "(= (total-cost) 0) (= (c) -1)")
+    assert mymyr.search.astar(task, heuristic="blind").status == failed
+    for batch in (1, 64):
+        a = mc.astar(task, ctx=ctx, heuristic="blind", batch=batch)
+        assert a.status == failed and a.plan == [] and a.goal_state is None
+        assert a.message.startswith("mymyr astar_eager (device): A* needs non-negative action costs"), a.message
+        g = mc.gbfs(task, ctx=ctx, heuristic="blind", batch=batch)
+        assert g.status == failed and g.plan == [] and "the CPU GBFS accepts negative costs" in g.message, g.message
+    assert mymyr.search.gbfs(task, heuristic="blind").solved
+    # a constant negative cost: before the search starts, with the CPU's message
+    task = task_of(CONSTANT_NEGATIVE, "(= (total-cost) 0)")
+    cpu = mymyr.search.astar(task, heuristic="blind")
+    assert cpu.status == failed and "negative action cost" in cpu.message
+    for search in (mc.astar, mc.gbfs):
+        r = search(task, ctx=ctx, heuristic="blind")
+        assert (r.status, r.message) == (failed, cpu.message)
+    # a cost that depends on a numeric fluent: the numeric device A* fails at the transition that lowers g, as the CPU
+    task = task_of(FLUENT_NEGATIVE, "(= (total-cost) 0) (= (x) 0)")
+    cpu = mymyr.search.astar(task, heuristic="blind")
+    dev = mc.astar(task, ctx=ctx, heuristic="blind")
+    assert cpu.status == failed and (dev.status, dev.message) == (failed, cpu.message)
+    assert mc.gbfs(task, ctx=ctx, heuristic="blind").cost == mymyr.search.gbfs(task, heuristic="blind").cost
+
+
 @pytest.mark.parametrize("kind", ["h2", "set_additive"])
 @pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "cs-counters"])
 def test_pair_heuristics_search_plans(ctx, kind, name):
@@ -211,18 +259,18 @@ def test_pair_heuristics_search_plans(ctx, kind, name):
                 assert result.cost == cpu.cost
 
 
-def test_pair_heuristic_aliases_and_scratch_budget(ctx):
+def test_pair_heuristic_names_and_scratch_budget(ctx):
     task = text_task("depot__p02")
-    expected = mc.Heuristic(task, "set_additive", ctx=ctx).evaluate(task.initial_state)
+    assert mc.Heuristic(task, "set_additive", ctx=ctx).kind == "set_additive"
     for kind in ("hsa", "setadd"):
-        h = mc.Heuristic(task, kind, ctx=ctx)
-        assert h.kind == "set_additive" and np.array_equal(h.evaluate(task.initial_state), expected)
+        with pytest.raises(ValueError, match="unknown heuristic"):
+            mc.Heuristic(task, kind, ctx=ctx)
     base = mc.Heuristic(task, "h2", ctx=ctx)
-    size = base.stats["group_bytes"]
+    size = base.counters["group_bytes"]
     with pytest.raises(ValueError, match=r"propositions.*limit is"):
         mc.Heuristic(task, "h2", ctx=ctx, max_scratch_bytes=size - 1)
     one = mc.Heuristic(task, "h2", ctx=ctx, max_scratch_bytes=size)
-    assert one.stats["blocks"] == 1 and not one.stats["shared"]
+    assert one.counters["blocks"] == 1 and not one.counters["shared"]
     assert np.array_equal(one.evaluate(task.initial_state), base.evaluate(task.initial_state))
 
 

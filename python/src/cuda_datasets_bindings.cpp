@@ -67,7 +67,7 @@ void bind_cuda_datasets(nb::module_& parent);
 
 namespace
 {
-using datasets::StateSpaceStatus;
+using search::SearchStatus;
 
 // ------------------------------------------------------------------------------------------------ argument types
 using TaskArg = Arg<std::variant<PyTask, PyHandle>>;
@@ -86,7 +86,7 @@ struct PyDeviceStateSpace
 
 struct PyDeviceGeneration
 {
-    StateSpaceStatus status = StateSpaceStatus::Ok;
+    search::SearchStatus status = search::SearchStatus::Exhausted;
     std::optional<PyDeviceStateSpace> space;
     std::optional<PyStateSpace> host;
     u64 states = 0;
@@ -352,7 +352,7 @@ std::vector<PyDeviceGeneration> generate_many(nb::handle table, const Common& a,
 const char* k_options_doc =
     "\n\nKeyword arguments:\n"
     "    max_states, max_seconds, remove_if_unsolvable, labels: as in mymyr.datasets.state_space (the generation "
-    "fails at max(max_states, 2) states or more).\n"
+    "fails at max(max_states, 1) states or more).\n"
     "    threads: host threads for the host-side work (state-dependent costs, host output); 0: one per hardware "
     "thread.\n"
     "    chunk_states, view_bytes, expected_states: the parents per chunk, the view memory per chunk and the "
@@ -456,7 +456,7 @@ void bind_cuda_datasets(nb::module_& parent)
     nb::class_<PyDeviceGeneration>(m, "DeviceGenerationResult",
                                    "The outcome of one device generation (mymyr.datasets.GenerationResult's fields): "
                                    "the device space and / or its host copy, per the output option.")
-        .def_prop_ro("status", [](const PyDeviceGeneration& g) { return search_status(g.status); },
+        .def_prop_ro("status", [](const PyDeviceGeneration& g) { return g.status; },
                      "How the generation ended (mymyr.search.Status), as GenerationResult.status: EXHAUSTED when the "
                      "space is complete.")
         .def_prop_ro("space", [](const PyDeviceGeneration& g) { return g.space; },
@@ -470,10 +470,10 @@ void bind_cuda_datasets(nb::module_& parent)
                      "Counters of the call that generated it (a dict, shared by a table's results): waves, chunks, "
                      "multi (1: the multi-instance kernels ran the table), states, transitions, generate_ms, post_ms, "
                      "output_ms, host_cost_ms, rehashes, widenings, device_bytes.")
-        .def("__bool__", [](const PyDeviceGeneration& g) { return g.status == StateSpaceStatus::Ok; },
+        .def("__bool__", [](const PyDeviceGeneration& g) { return g.status == search::SearchStatus::Exhausted; },
              "The space is complete.")
         .def("__repr__", [](const PyDeviceGeneration& g) {
-            return std::string("DeviceGenerationResult(status=") + search::to_string(search_status(g.status)) +
+            return std::string("DeviceGenerationResult(status=") + search::to_string(g.status) +
                    ", states=" + std::to_string(g.states) + ")";
         });
 

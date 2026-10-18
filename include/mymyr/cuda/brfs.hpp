@@ -19,10 +19,10 @@
 // needs the parents), the node records (parent id, index among the parent's successors) in a second one: a plan is
 // the chain of node records, replayed on the CPU (the index names the action in canonical order).
 //
-// Semantics follow the CPU BrFS: every expanded state is goal-tested (goal_states), and a search that expanded a goal
+// Semantics follow the CPU BrFS: every expanded state is goal-tested (num_goal_states), and a search that expanded a goal
 // state is solved with the plan to the first one (in id order); stop_at_goal (the default) expands the parents before
-// that state and stops. The max_states budget is checked before each chunk, so the store may exceed it by one chunk's
-// new states (the CPU searches stop at the state that fills it).
+// that state and stops. max_states stops it as the CPU BrFS: at the state that fills the store, with the same states,
+// ids and counts (the chunk that passes the budget is cut back to that state).
 
 #include "mymyr/cuda/arena.hpp"
 #include "mymyr/cuda/runtime.hpp"

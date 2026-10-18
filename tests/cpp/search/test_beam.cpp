@@ -436,7 +436,7 @@ TEST(BeamOracle, OptimizedIw1EqualsTheReference)
             ++compared;
             const std::string what = describe(name, sp);
             IwOptions o;
-            o.max_arity = 1;
+            o.max_width = 1;
             o.layers = beam(sp.width, sp.mode, sp.prefer_more);
             const IwResult r = iw(*task, o);
             ASSERT_EQ(r.passes.size(), 2u) << what;
@@ -501,7 +501,7 @@ TEST(BeamOracle, LiwWithoutLandmarksEqualsTheReference)
                     continue;
                 ++compared;
                 LiwOptions o;
-                o.max_arity = static_cast<u32>(k);
+                o.max_width = static_cast<u32>(k);
                 o.layers = beam(sp.width, sp.mode, sp.prefer_more);
                 const IwResult r = liw(*task, o);
                 if (r.status == SearchStatus::Solved && static_cast<int>(r.effective_width) < k)
@@ -674,7 +674,7 @@ TEST(BeamSemantics, RandomTiesAreDeterministicPerSeed)
         b.layers = o.layers;
         b.stop_at_goal = true;
         const BrfsResult br = brfs(*task, b);
-        return std::make_tuple(obs.order, r.total.expanded, br.expanded, br.plan.size());
+        return std::make_tuple(obs.order, r.stats.expanded, br.expanded, br.plan.size());
     };
     const auto plain = run(false, 0);
     EXPECT_TRUE(run(false, 7) == plain);  // without randomize_ties the seed changes nothing
@@ -753,7 +753,7 @@ TEST(BeamSemantics, BrfsModesAreTheSameAndSiwRuns)
     // SIW forwards the layers to the IW ladder of every subproblem
     const auto gripper = Task::from_text_file(task_path("gripper__prob05"));
     SiwOptions plain;
-    plain.max_arity = 2;
+    plain.max_width = 2;
     const SiwResult p = siw(*gripper, plain);
     ASSERT_EQ(p.status, SearchStatus::Solved);
     for (u32 width : {1u, 4u, 64u})
@@ -775,7 +775,7 @@ TEST(BeamSemantics, BrfsModesAreTheSameAndSiwRuns)
             }
             if (width == 1)
             {
-                EXPECT_NE(r.total.expanded, p.total.expanded) << what;
+                EXPECT_NE(r.stats.expanded, p.stats.expanded) << what;
             }
         }
 }
@@ -915,8 +915,8 @@ TEST(BeamConcurrency, BeamSearchesPerThreadOverOneTask)
     {
         EXPECT_EQ(out[i].status, ref[i].status) << i;
         EXPECT_EQ(out[i].plan, ref[i].plan) << i;
-        EXPECT_EQ(out[i].total.expanded, ref[i].total.expanded) << i;
-        EXPECT_EQ(out[i].total.generated, ref[i].total.generated) << i;
+        EXPECT_EQ(out[i].stats.expanded, ref[i].stats.expanded) << i;
+        EXPECT_EQ(out[i].stats.generated, ref[i].stats.generated) << i;
         EXPECT_EQ(bout[i].expanded, bref[i].expanded) << i;
         EXPECT_EQ(bout[i].plan, bref[i].plan) << i;
     }

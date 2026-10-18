@@ -2,6 +2,8 @@
 // Test support of the relational encoder: PDDL tasks of tests/data/pddl, seeded random walks over a task table, and
 // options without goal relations.
 
+#include "../support/dirty_blocks.hpp"
+
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"

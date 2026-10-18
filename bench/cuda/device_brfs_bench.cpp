@@ -128,7 +128,7 @@ int main(int argc, char** argv)
                     name.c_str(), atom_mode_name(task->atoms().mode()), o.witness_pruning ? "true" : "false",
                     o.canonical_order ? "true" : "false", o.chunk_states, static_cast<unsigned long long>(o.expected_states),
                     static_cast<unsigned long long>(r.states), static_cast<unsigned long long>(r.expanded),
-                    static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.goal_states), r.layers,
+                    static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.num_goal_states), r.layers,
                     r.exhausted ? "true" : "false", r.solved ? "true" : "false", r.plan.size(), median, ts.c_str(),
                     static_cast<double>(r.states) / median, static_cast<unsigned long long>(r.fingerprint), st.view_ms, st.gen_ms,
                     st.dedup_ms, st.host_ms, static_cast<unsigned long long>(st.chunks), static_cast<unsigned long long>(st.groups),
@@ -151,9 +151,9 @@ int main(int argc, char** argv)
             std::printf(",\"cpu_threads\":%u,\"cpu_states\":%llu,\"cpu_generated\":%llu,\"cpu_goal_states\":%llu,"
                         "\"cpu_layers\":%u,\"cpu_search_s\":%.4f,\"cpu_fp\":\"%016llx\",\"equal\":%s",
                         cpu_threads, static_cast<unsigned long long>(c.states), static_cast<unsigned long long>(c.generated),
-                        static_cast<unsigned long long>(c.goal_states), c.layers, c.search_s,
+                        static_cast<unsigned long long>(c.num_goal_states), c.layers, c.search_s,
                         static_cast<unsigned long long>(c.fingerprint),
-                        c.states == r.states && c.generated == r.generated && c.goal_states == r.goal_states &&
+                        c.states == r.states && c.generated == r.generated && c.num_goal_states == r.num_goal_states &&
                                 c.layers == r.layers && c.fingerprint == r.fingerprint
                             ? "true"
                             : "false");

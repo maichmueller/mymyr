@@ -128,7 +128,7 @@ def state_space(
     Otherwise a device ordinal or a mymyr.cuda.Context: on that device (a mymyr.cuda.DeviceStateSpace with the same ids
     and arrays, in device memory; threads: host threads for the host-side work, default 1; 0: one per hardware thread).
 
-    Options: max_states (fail when the space has max(max_states, 2) states or more), max_seconds, remove_if_unsolvable
+    Options: max_states (fail when the space has max(max_states, 1) states or more), max_seconds, remove_if_unsolvable
     (no space when the initial state cannot reach a goal), labels (keep (schema, binding) per transition).
     """
     if device is None:

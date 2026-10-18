@@ -185,7 +185,7 @@ def test_suite_errors(sets):
 def test_suite_expand_equals_domains_apart(sets, key, grouped):
     s = suite_of(sets, key)
     states, ids = suite_batch(s, grouped=grouped)
-    x = rl.expand(s, states, ids, goal=True, K=8)
+    x = rl.expand(s, states, ids, goal=True, k=8)
     check_against_domains(s, states, ids, x)
     assert x.table is s and x.num_objects == s.max_objects and x.num_schemas == s.num_schemas
     off = np.asarray(x.offsets)
@@ -238,10 +238,10 @@ def test_device_suite_expand_equals_host(sets):
         s = suite_of(sets, key)
         for grouped in (False, True):
             states, ids = suite_batch(s, per=6, seed=3, grouped=grouped)
-            host = rl.expand(s, states, ids, goal=True, K=16)
+            host = rl.expand(s, states, ids, goal=True, k=16)
             st = torch.from_numpy(states.view(np.int64)).to(dev)
             tid = torch.from_numpy(ids).to(dev)
-            d = rl.expand(s, st, tid, goal=True, K=16)
+            d = rl.expand(s, st, tid, goal=True, k=16)
             for f in ("succ", "parent", "schema", "binding", "goal", "offsets"):
                 got = getattr(d, f).cpu().numpy()
                 want = np.asarray(getattr(host, f))
@@ -417,7 +417,7 @@ def test_jax_suite_env_equals_host(sets, key):
             assert np.array_equal(rj.as_words(final.goal_pos), ref[-1]["goal_pos"])
         # the expansion of the final states
         rows = rj.as_words(final.states)
-        host = rl.expand(s, rows, np.asarray(final.task_id), goal=True, K=8)
+        host = rl.expand(s, rows, np.asarray(final.task_id), goal=True, k=8)
         p = env.expand(final.states, 8, final.task_id)
         assert np.array_equal(np.asarray(p.count), np.asarray(host.padded.count)), device
         assert np.array_equal(np.asarray(p.schema), np.asarray(host.padded.schema)), device

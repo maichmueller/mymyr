@@ -7,6 +7,7 @@
 #include "mymyr/core/threads.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/variant.h>
 
@@ -60,7 +61,8 @@ using StreamArg = Arg<std::variant<std::intptr_t, ann::CudaStream>>;
 // float_arg, so that a value out of range raises ValueError naming the parameter and its range (not nanobind's
 // overload error or a failed cast). A non-number raises TypeError.
 
-/// An int parameter (rendered as int), read with int_arg / opt_int_arg / threads_arg.
+/// An int parameter (rendered as int), read with int_arg / opt_int_arg / threads_arg. One that takes None with another
+/// default declares its argument with .none() (nanobind then renders int | None).
 using IntArg = Arg<std::uint64_t>;
 /// A float parameter (rendered as float), read with float_arg / opt_float_arg.
 using FloatArg = Arg<double>;

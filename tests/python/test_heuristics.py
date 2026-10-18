@@ -25,12 +25,11 @@ def depot_space(depot):
 
 def test_kind_names_and_aliases(depot):
     s = depot.initial_state
-    for kind, aliases in (("set_additive", ("hsa", "setadd")), ("h2", ())):
-        h = search.Heuristic(depot, kind)
-        assert h.kind == kind
-        for a in aliases:
-            assert search.Heuristic(depot, a).kind == kind
-            assert search.Heuristic(depot, a)(s) == h(s)
+    for kind in ("set_additive", "h2"):
+        assert search.Heuristic(depot, kind).kind == kind
+    for other in ("hsa", "setadd"):
+        with pytest.raises(ValueError, match="unknown heuristic"):
+            search.Heuristic(depot, other)
     hmax, hadd, hff = (search.Heuristic(depot, k)(s) for k in ("max", "add", "ff"))
     sa, h2 = search.Heuristic(depot, "set_additive")(s), search.Heuristic(depot, "h2")(s)
     assert hmax <= h2 and hff <= sa <= hadd

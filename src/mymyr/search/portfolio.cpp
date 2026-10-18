@@ -61,11 +61,11 @@ private:
     u32 m_worker = ~u32{0};
 };
 
-RolloutOrdering default_ordering_for(u32 offset, u64 base_seed)
+RolloutOrdering default_ordering_for(u32 offset, u64 seed)
 {
     static constexpr ActionOrdering k_cycle[] = {ActionOrdering::DirectGoalAchieverFirst, ActionOrdering::MixedRegressionRandom,
                                                  ActionOrdering::Randomized, ActionOrdering::GoalRegressionRelevance};
-    return {k_cycle[offset % 4], base_seed + offset};
+    return {k_cycle[offset % 4], seed + offset};
 }
 
 void accumulate(RolloutIwStatistics& a, const RolloutIwStatistics& b)
@@ -226,7 +226,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     auto run_rollout_worker = [&](u32 k)
     {
         const u32 offset = k - 1;
-        const RolloutOrdering cfg = o.rollout_orderings.empty() ? default_ordering_for(offset, o.base_seed)
+        const RolloutOrdering cfg = o.rollout_orderings.empty() ? default_ordering_for(offset, o.seed)
                                                                 : o.rollout_orderings[offset % o.rollout_orderings.size()];
         RolloutIwOptions ro;
         ro.control.budget = control.budget;
@@ -247,7 +247,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
             const u32 bound_before = coord.get_incumbent_length();
             ro.control.budget.max_seconds = remaining_seconds();
             const RolloutIwResult r = detail::run_rollout_iw(task, ro, hot, nullptr);
-            accumulate(result.rollout_statistics[offset], r.statistics);
+            accumulate(result.rollout_statistics[offset], r.rollout);
             result.rollout_statuses[offset] = r.status;
             ++result.rollout_rounds[offset];
             if (r.status != SearchStatus::Solved)
@@ -274,7 +274,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     };
     auto should_stop = [&] { return coord.is_cancelled() || control.cancel.requested() || out_of_time() || coord.get_total_expansions() >= control.budget.max_expanded; };
 
-    u32 T = resolve_threads(o.num_threads, "num_threads");
+    u32 T = resolve_threads(o.threads, "threads");
     T = std::min(T, W);
     if (!safe)
         T = 1;
@@ -346,13 +346,13 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
         if (!serial_note.empty())
             result.message += " (" + serial_note + ")";
     };
-    SearchStatistics total = result.certifier.total;
+    SearchStatistics total = result.certifier.stats;
     for (const RolloutIwStatistics& s : result.rollout_statistics)
-        add_stats(total, s.statistics());
+        add_stats(total, s.stats());
     total.seconds = std::chrono::duration<double>(detail::Clock::now() - t0).count();
     result.stats = total;
     result.stats.expanded = coord.get_total_expansions();
-    result.stats.memory_bytes = result.certifier.total.memory_bytes;
+    result.stats.memory_bytes = result.certifier.stats.memory_bytes;
     if (snap.length == SearchCoordination::k_no_incumbent)
     {
         const SearchStatus cs = result.certifier_ran ? result.certifier_status : (control.cancel.requested() ? SearchStatus::Cancelled
@@ -403,7 +403,7 @@ PortfolioResult atomic_goal_portfolio(const Task& task, const PortfolioOptions& 
     if (root)
     {
         for (const IwPassStatistics& p : result.certifier.passes)
-            root->on_pass(p.arity, p.statistics());
+            root->on_pass(p.width, p.stats());
         if (result.status == SearchStatus::Solved)
             root->on_solution(result.plan, result.cost);
         root->on_end(result.status, total);

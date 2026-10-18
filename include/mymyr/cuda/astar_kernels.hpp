@@ -53,9 +53,10 @@ enum : u32
 /// Error bits (Ctl::error).
 enum : u32
 {
-    k_err_cost = 1,      // an action whose cost is undefined
+    k_err_cost = 1,      // an action whose cost is undefined or 2^31 or more
     k_err_overflow = 2,  // g or f does not fit 32 bits
     k_err_scratch = 4,   // a sorted segment found no scratch (lifted::Labels::error; internal)
+    k_err_negative = 8,  // an action whose cost is negative
 };
 
 /// Ctl::status: why the search stopped (k_running: it did not).
@@ -201,9 +202,9 @@ cudaError_t launch_pop_finish(Pop p, Ctl* ctl, const u32* pos, cudaStream_t s);
 cudaError_t launch_gather_rows(const u64* arena, u32 words, const u32* ids, u32 n, const u32* count, u64* out, cudaStream_t s);
 
 /// Action costs on the device: the task's cost programs (mymyr/cuda/cost_program.hpp, instance 0) at the
-/// candidate's (schema, binding), any number of cost parameters and any static function key space. A cost that is
-/// undefined, negative or not below 2^31 sets k_err_cost (the searches take integral costs as u32; state-dependent and
-/// non-integral costs are refused).
+/// candidate's (schema, binding), any number of cost parameters and any static function key space. A negative cost
+/// sets k_err_negative, one that is undefined or not below 2^31 k_err_cost (the searches take integral costs as u32;
+/// state-dependent and non-integral costs are refused).
 struct Costs
 {
     costs::Program program;

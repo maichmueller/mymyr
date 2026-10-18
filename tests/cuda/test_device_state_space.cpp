@@ -150,7 +150,7 @@ void expect_device_equals(const cuda::ContextPtr& ctx, const TaskPtr& task, cons
 {
     const cuda::DeviceStateSpaceResult r = cuda::state_space(ctx, task, o);
     ASSERT_EQ(r.status, ref.status) << what << ": " << to_string(r.status) << " vs " << to_string(ref.status);
-    if (r.status != StateSpaceStatus::Ok)
+    if (r.status != search::SearchStatus::Exhausted)
         return;
     ASSERT_TRUE(r.host && r.space) << what;
     expect_equal(*ref.space, *r.host, words, what);
@@ -177,7 +177,7 @@ TEST(DeviceStateSpace, SuiteEqualsHost)
             const std::string what = t.name + (frozen ? " frozen" : " lazy");
             const auto cpu_task = Task::from_text_file(test::task_path(t.name), to);
             const StateSpaceResult ref = generate_state_space(cpu_task, cpu_options(false));
-            ASSERT_EQ(ref.status, StateSpaceStatus::Ok) << what;
+            ASSERT_EQ(ref.status, search::SearchStatus::Exhausted) << what;
             EXPECT_EQ(ref.space->num_states(), t.states) << what;
             // a fresh task: lazy slots intern in the device's order
             const auto task = frozen ? cpu_task : Task::from_text_file(test::task_path(t.name), to);
@@ -286,7 +286,7 @@ TEST(DeviceStateSpace, TransitionCostsEqualHost)
         {
             const TaskPtr cpu = pddl_task(kCountDomain, p.c_str(), atoms);
             const StateSpaceResult ref = generate_state_space(cpu, cpu_options());
-            ASSERT_EQ(ref.status, StateSpaceStatus::Ok);
+            ASSERT_EQ(ref.status, search::SearchStatus::Exhausted);
             ASSERT_FALSE(ref.space->unit_costs());
             const TaskPtr task = atoms == TaskOptions::Atoms::Dense ? cpu : pddl_task(kCountDomain, p.c_str(), atoms);
             expect_device_equals(ctx, task, ref, dev_options(cpu_options()), atoms == TaskOptions::Atoms::Dense, "ring costs");
@@ -313,7 +313,7 @@ TEST(DeviceStateSpace, TransitionCostsEqualHost)
     const TaskPtr dyn = pddl_task(cond, cond_p);
     ASSERT_FALSE(heuristics::ActionCosts(*dyn).state_independent());
     const StateSpaceResult ref = generate_state_space(dyn, cpu_options());
-    ASSERT_EQ(ref.status, StateSpaceStatus::Ok);
+    ASSERT_EQ(ref.status, search::SearchStatus::Exhausted);
     expect_device_equals(ctx, dyn, ref, dev_options(cpu_options()), true, "conditional costs");
     // The host's example: transitions c0 -> c3 and costs 1, 7, 10, 10 from state 0
     const TaskPtr count = pddl_task(kCountDomain, R"(
@@ -357,7 +357,7 @@ TEST(DeviceStateSpace, CostProgramsEqualHost)
             ASSERT_TRUE(costs.state_independent()) << what;
             ASSERT_EQ(costs.cost_parameters(0).size(), 5u) << what;
             cpu.push_back(generate_state_space(task, cpu_options()));
-            ASSERT_EQ(cpu.back().status, StateSpaceStatus::Ok) << what;
+            ASSERT_EQ(cpu.back().status, search::SearchStatus::Exhausted) << what;
             ASSERT_FALSE(cpu.back().space->unit_costs()) << what;
             expect_device_equals(ctx, task, cpu.back(), dev_options(cpu_options()), true, what);
             // on the device: no CPU cost regeneration
@@ -371,7 +371,7 @@ TEST(DeviceStateSpace, CostProgramsEqualHost)
         ASSERT_EQ(all.results.size(), 2u);
         for (usize i = 0; i < 2; ++i)
         {
-            ASSERT_EQ(all.results[i].status, StateSpaceStatus::Ok);
+            ASSERT_EQ(all.results[i].status, search::SearchStatus::Exhausted);
             ASSERT_TRUE(all.results[i].host);
             expect_equal(*cpu[i].space, *all.results[i].host, true, "wide table " + std::to_string(i));
         }
@@ -423,7 +423,7 @@ TEST(DeviceStateSpace, OptionsMatchHost)
  (:metric minimize (total-cost)))
 )");
     for (const bool remove : {true, false})
-        EXPECT_EQ(cuda::state_space(ctx, never, dev_options(cpu_options(remove))).status, StateSpaceStatus::Unsolvable);
+        EXPECT_EQ(cuda::state_space(ctx, never, dev_options(cpu_options(remove))).status, search::SearchStatus::Unsolvable);
     // without labels
     const TaskPtr spanner = small_task("spanner", "p15-easy.pddl");
     ASSERT_TRUE(spanner);
@@ -442,7 +442,7 @@ TEST(DeviceStateSpace, OptionsMatchHost)
     const auto depot = Task::from_text_file(test::task_path("depot__p02"));
     o = cpu_options();
     o.max_seconds = 0;
-    EXPECT_EQ(cuda::state_space(ctx, depot, dev_options(o)).status, StateSpaceStatus::Timeout);
+    EXPECT_EQ(cuda::state_space(ctx, depot, dev_options(o)).status, search::SearchStatus::OutOfTime);
     const TaskPtr numeric = pddl_task(R"(
 (define (domain counter)
  (:requirements :strips :numeric-fluents)
@@ -495,18 +495,18 @@ void expect_table_equals(const cuda::ContextPtr& ctx, const Set& set, const std:
     {
         const std::string w = what + " " + set.name + "[" + std::to_string(i) + "]";
         ASSERT_EQ(rs[i].status, cpu[i].status) << w << ": " << to_string(rs[i].status) << " vs " << to_string(cpu[i].status);
-        if (rs[i].status == StateSpaceStatus::OutOfStates)
+        if (rs[i].status == search::SearchStatus::OutOfStates)
         {
             EXPECT_EQ(rs[i].states, cpu[i].states) << w << ": the count at the failure";
         }
-        if (rs[i].status == StateSpaceStatus::Ok)
+        if (rs[i].status == search::SearchStatus::Exhausted)
         {
             ASSERT_TRUE(rs[i].host) << w;
             expect_equal(*cpu[i].space, *rs[i].host, true, w + " vs CPU");
         }
         const cuda::DeviceStateSpaceResult one = cuda::state_space(ctx, set.tasks[i], o);
         ASSERT_EQ(one.status, rs[i].status) << w;
-        if (one.status == StateSpaceStatus::Ok)
+        if (one.status == search::SearchStatus::Exhausted)
             expect_equal(*one.host, *rs[i].host, true, w + " vs single");
     }
 }
@@ -524,18 +524,11 @@ TEST(DeviceStateSpaces, SetsTogetherEqualSinglesAndCpu)
             std::vector<StateSpaceResult> cpu;
             for (const TaskPtr& t : set.tasks)
             {
-                cpu.push_back(generate_state_space(t, so));
-                if (cpu.back().status == StateSpaceStatus::OutOfStates)
-                {
-                    // the count at the failure: the host's one-thread generator's (the instance pool's)
-                    StateSpaceOptions one = so;
-                    one.threads = 1;
-                    cpu.back() = generate_state_space(t, one);
-                }
+                cpu.push_back(generate_state_space(t, so));  // a failure's count is the limit on every thread count
             }
             u32 ok = 0;
             for (const auto& r : cpu)
-                ok += r.status == StateSpaceStatus::Ok;
+                ok += r.status == search::SearchStatus::Exhausted;
             EXPECT_GT(ok, 0u) << set.name;
             const cuda::DeviceStateSpaceOptions o = dev_options(so);
             const cuda::DeviceStateSpaces all = cuda::state_spaces(ctx, set.table, o);
@@ -621,7 +614,7 @@ TEST(DeviceStateSpace, SamplersOverDeviceDistances)
 search::IwOptions iw_options(const cuda::MultiIwOptions& d, const State& start)
 {
     search::IwOptions o;
-    o.max_arity = d.max_arity;
+    o.max_width = d.max_width;
     o.optimize_iw1 = d.optimize_iw1;
     o.width_zero = d.width_zero;
     o.witness_pruning = d.witness_pruning;
@@ -675,7 +668,7 @@ TEST(DeviceStateSpaceIw, TablesEqualPerInstanceRunsAndCpu)
             if (arity == 2 && set.name != "gripper" && set.name != "miconic")
                 continue;
             cuda::MultiIwOptions o;
-            o.max_arity = arity;
+            o.max_width = arity;
             o.budget.max_states = sanitizer_size() ? 3000 : 20000;  // the large instances run out on both sides
             const std::string what = set.name + " IW(" + std::to_string(arity) + ")";
             // the table's batch from device rows (on a stream of its own), and from host states

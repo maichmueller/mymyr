@@ -471,7 +471,7 @@ TEST(TransitionOrdering, LayersAreAdmittedInPreferenceOrder)
         const auto ordering = std::make_shared<const landmarks::LandmarkTransitionOrdering>(*task, graph);
         LayerRecorder rec(*ordering);
         search::IwOptions o;
-        o.max_arity = 1;
+        o.max_width = 1;
         o.transition_ordering = ordering;
         o.control.observer = &rec;
         o.control.budget.max_expanded = 20000;
@@ -490,7 +490,7 @@ TEST(TransitionOrdering, LayersAreAdmittedInPreferenceOrder)
         EXPECT_GT(transitions, 0u);
         // any ordering keeps the pass sound
         search::IwOptions ro;
-        ro.max_arity = 1;
+        ro.max_width = 1;
         ro.transition_ordering = std::make_shared<const Reverse>();
         ro.control.budget.max_expanded = 20000;
         const auto rr = search::iw(*task, ro);

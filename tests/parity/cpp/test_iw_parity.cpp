@@ -95,14 +95,14 @@ TEST_P(IwGolden, PerPassEqualsTheFork)
         to.atoms = atoms;
         const auto task = Task::from_text_file(task_path(g.task), to);
         IwOptions o;
-        o.max_arity = g.k;
+        o.max_width = g.k;
         const IwResult r = iw(*task, o);
         EXPECT_EQ(r.status, g.status);
         EXPECT_EQ(r.plan.size(), g.plan_length);
         ASSERT_EQ(r.passes.size(), g.passes.size());
         for (usize i = 0; i < g.passes.size(); ++i)
         {
-            EXPECT_EQ(r.passes[i].arity, g.passes[i].arity) << "pass " << i;
+            EXPECT_EQ(r.passes[i].width, g.passes[i].arity) << "pass " << i;
             EXPECT_EQ(r.passes[i].expanded, g.passes[i].expanded) << "pass " << i;
             EXPECT_EQ(r.passes[i].generated, g.passes[i].generated) << "pass " << i;
             EXPECT_EQ(r.passes[i].generated_in_tree, g.passes[i].in_tree) << "pass " << i;

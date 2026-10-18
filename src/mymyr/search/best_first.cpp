@@ -247,7 +247,6 @@ void Context::finish(u64 states, u64 bytes)
 {
     r.stats.states = states;
     r.stats.seconds = seconds_since(m_search_t0);
-    r.store_bytes = bytes;
     r.stats.memory_bytes = bytes;
     if (h)
         r.heuristic = h->stats();

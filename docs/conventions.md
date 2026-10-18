@@ -25,8 +25,23 @@ option names, defaults and result shape. A function documents only where it depa
 The thread count never changes a result unless the function says so (the relaxed survivors-only beam does). Seeds are
 integers in `[0, 2**64)`. `max_states` and `max_expanded` end a search with `OUT_OF_STATES`, `max_seconds` with
 `OUT_OF_TIME`; `max_depth` leaves deeper states unexpanded, so a search that runs out of shallower ones ends with
-`EXHAUSTED`. Boolean options name the feature they switch on (`canonical_order=`, `witness_pruning=`,
-`stop_at_goal=`).
+`EXHAUSTED`. A budget stops a search when it is reached, exactly: the new state that makes the store hold
+`max_states` states stops the search inside its parent's expansion, so a stopped search holds exactly
+`max(max_states, 1)` states (the start state always counts), and `max_expanded` stops it before the expansion after
+that many, on every store, thread count and device. State-space generation follows the same rule: it fails with
+`OUT_OF_STATES` when the space has `max(max_states, 1)` states or more, and reports that limit as its `stats.states`.
+
+`None` is the only "no limit": a limit of `0` is a limit of zero (`reachability_budget=0` gives the analysis no steps,
+`max_disjunctive_landmark_depth=0` expands no layer), and a limit that cannot be zero refuses it with `ValueError`.
+Boolean options name the feature they switch on (`canonical_order=`, `witness_pruning=`, `stop_at_goal=`).
+
+## Names
+
+Names are lower case (`k=`, `PaddedExpansion.k`), and a string option value has exactly one spelling: heuristics are
+`"blind"`, `"goal_count"`, `"max"`, `"add"`, `"ff"`, `"set_additive"`, `"h2"`, `"lmcut"` and `"lmcount"`, action
+orderings the names of `search.ActionOrdering` (`"direct_goal_achiever_first"`, ...); other spellings raise
+`ValueError`. The C++ API uses the same names: `threads`, `seed`, `max_width` and `width` in its options, `stats` (a
+`search::SearchStatistics`) in its results, and `search::SearchStatus` as its one status enum.
 
 ## Results
 
@@ -45,8 +60,8 @@ Every search result, on the CPU and on the device, has the same fields:
 `search.Statistics` has `expanded`, `generated`, `states` (stored), `pruned`, `seconds` (wall time) and
 `memory_bytes` (the peak bytes of the search's state store, `0` where a search does not measure it). A search adds its
 own fields beside these (`passes` for IW, `rollout` for Rollout IW, `num_goal_states` for BrFS, ...); device results add
-`counters`, a dict of device counters and times. Counts are integers, times are seconds as floats unless the name says
-otherwise (`*_ms`).
+`counters`, a dict of device counters and times, as do heuristics (`Heuristic.counters`: their evaluations). Counts
+are integers, times are seconds as floats unless the name says otherwise (`*_ms`).
 
 `search.Status` is the one status enum, also used by `datasets` (state-space generation):
 
@@ -54,7 +69,7 @@ otherwise (`*_ms`).
 | --- | --- |
 | `SOLVED` | a goal state was reached; `plan` leads to it |
 | `EXHAUSTED` | every reachable state was expanded (a generated space is complete) |
-| `OUT_OF_STATES` | `max_states` or `max_expanded` was hit |
+| `OUT_OF_STATES` | `max_states`, `max_expanded` or another work budget (`max_rollouts`) was hit |
 | `OUT_OF_TIME` | `max_seconds` was hit |
 | `CANCELLED` | the `CancelToken` was set or an observer stopped the search |
 | `FAILED` | the search cannot run on this task; `message` says why |

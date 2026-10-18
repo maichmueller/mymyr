@@ -208,7 +208,7 @@ void adopt_lazy_slots(const Task& task, std::span<const u64> slots, const char* 
 #define MYMYR_TASK_OPTION_ARGS                                                                                         \
     nb::kw_only(), "atoms"_a = "auto", "matching"_a = "auto", "fc_free_params"_a = 4, "numeric_storage"_a = "auto",     \
         "numeric_quantum"_a = 0.0, "numeric_tolerant"_a = false,                                                        \
-        "reachability_budget"_a = ::mymyr::TaskOptions::k_reachability_budget
+        "reachability_budget"_a.none() = ::mymyr::TaskOptions::k_reachability_budget
 
 void bind_task(nb::module_& m);
 void bind_rl(nb::module_& m);
