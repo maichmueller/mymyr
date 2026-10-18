@@ -316,7 +316,10 @@ assert len(mutable) == 1
   canonical) are raised by `flush`, which keeps the rows.
 - **Action rows.** The action rows of the appended expansions are copied and joined in row order, so a flushed batch is
   that of one expansion over all rows: the `entity_ref` of an action entity is what `encode` gives for the same states
-  and action rows.
+  and action rows. The row of an action entity in the expansion it was appended with is `x.offsets[k] + entity_ref`,
+  where `x` is the expansion given to the `append` (or `update`) that stored the state and `k` is the state's row in
+  that call, so `x.action(x.offsets[k] + entity_ref)` is the entity's action. The flushed batch does not number its
+  graphs as `x` does: graph `j` of a flush is the `j`-th row appended, and of a mutable flush the row of `indices()[j]`.
 - **Threads.** The methods of one stream take turns (a flush holds the stream until its batch is encoded); a stream is
   not a way to encode concurrently, use one stream per producer or `encode` itself.
 
@@ -469,8 +472,9 @@ relations. An encoder has the same properties.
   targets together with a horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
   `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
-  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
-  depend on declaration order, on predicate ids, on the process or on the build.
+  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy), and which
+  arrays are omitted: `relation_counts` (`emit_counts=False`) and `entity_role` / `entity_ref` (implicit entity
+  arrays); an encoding that stores every array has one fingerprint however it was asked for. It does not depend on declaration order, on predicate ids, on the process or on the build.
 
 ## C++
 
@@ -498,4 +502,4 @@ the arrays.
 and `flush(pool)` (or `flush(pool, capacities, sizes)`), and `FlatMutableStream(encoder)` with
 `append(indices, input)`, `update(indices, input)`, `remove(indices)`, `contains(index)`, `indices()` and the same
 `flush`. They throw `std::invalid_argument` for invalid rows or indices and `std::out_of_range` for an index that is not
-held; their methods take a mutex, and each stream has its own `EncodeScratch`.
+held; their methods take a mutex, and a flush encodes with the calling thread's `EncodeScratch`, which it keeps between calls.
