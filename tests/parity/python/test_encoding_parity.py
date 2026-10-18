@@ -868,3 +868,19 @@ def test_the_edge_arrays_give_the_action_and_parent_tuples_one_per_edge_in_order
     assert graph.tuples["_parent_"] == [("target:2", "target:4"), ("target:0", "target:2"), ("target:0", "target:1"),
                                         ("target:1", "target:3")]
     assert graph.unordered == ()
+
+
+@pytest.mark.parametrize("path, config", [c for c in case_params() if c.values[1].startswith("C7")])
+def test_the_candidate_nodes_are_the_targets_of_the_horizon_graph(path, config):
+    fixture, task = load(path)
+    records = [r for r in fixture["encodings"] if r["config"] == config]
+    for record, placed in zip(records, encode_records(task, config, None, records)):
+        graph = native_graph(placed.encoder, placed.batch, placed.row, [task], lanes_of(config))
+        batch, row = placed.batch, placed.row
+        first, last = (int(x) for x in batch.target_offsets[row : row + 2])
+        base = int(batch.entity_offsets[row])
+        names = [graph.entities[int(e) - base][1] for e in batch.target_entity[first:last]]
+        groups = {placed.encoder.target_group_names[int(g)] for g in batch.target_group[first:last]}
+        recorded = record["outputs"]["targets"]
+        assert names == recorded["names"], (record["state"], names)
+        assert groups <= set(recorded["groups"]) | set()
