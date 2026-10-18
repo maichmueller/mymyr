@@ -349,6 +349,23 @@ def _make(torch: Any, shape: tuple[int, ...], dtype: Any, device: Any, zero: boo
     return make(1, dtype=dtype, device=device)[:0].reshape(shape)
 
 
+def _check_outputs(out: dict[str, Any], layout: _Layout, graphs: int) -> None:
+    """Refuses, before any launch, outputs whose per-graph arrays do not hold the batch's graphs: the kernels write one
+    entry per graph (and one cell per graph and relation) into them."""
+    r = layout.relations
+    per_graph = {"task_ids": graphs, "num_objects": graphs, "entity_offsets": graphs + 1,
+                 "relation_offsets": graphs * r + 1, "relation_arg_offsets": graphs * r + 1}
+    if layout.counts:
+        per_graph["relation_counts"] = graphs * r
+    if layout.goal_complete:
+        per_graph["goal_complete"] = graphs
+    if layout.targets:
+        per_graph["target_offsets"] = graphs + 1
+    for name, entries in per_graph.items():
+        if out[name].numel() != entries:
+            raise _error(f"the output '{name}' has {out[name].numel()} entries, a batch of {graphs} graphs needs {entries}")
+
+
 def encode_arrays(
     encoder: Any,
     states: Any,
@@ -372,6 +389,7 @@ def encode_arrays(
         specs = layout.specs(torch, rows.graphs, entities, args, targets)
         for name, (shape, dtype) in specs.items():
             out[name] = _make(torch, shape, dtype, device, True)
+        _check_outputs(out, layout, rows.graphs)
         native.encode(stream, rows.fields, _pointers(out), [entities, tuples, args, targets])
     else:
 
@@ -379,6 +397,7 @@ def encode_arrays(
             specs = layout.specs(torch, rows.graphs, entities, args, targets)
             for name, (shape, dtype) in specs.items():
                 out[name] = _make(torch, shape, dtype, device, name == "sizes")
+            _check_outputs(out, layout, rows.graphs)
             return _pointers(out)
 
         native.encode_exact(stream, rows.fields, allocate)

@@ -681,16 +681,29 @@ void run_on_pool(PyFlatEncoder& self, u32 threads, PoolArg pool_in, Work&& work)
     work(held ? *held->pool : *own);
 }
 
-/// Whether an argument of `encode` is a CUDA device array (the goals: one of their masks).
-bool on_device(nb::handle value)
+/// A NumPy array, which is never on the device: the check that keeps host encodes at their cost.
+bool is_numpy_array(nb::handle value)
 {
-    if (value.is_none())
+    static const nb::handle ndarray = nb::object(nb::module_::import_("numpy").attr("ndarray")).release();
+    return value.type().ptr() == ndarray.ptr();
+}
+
+/// An array object that lives in CUDA memory: DLPack's device, or a __cuda_array_interface__.
+bool is_device_array(nb::handle value)
+{
+    if (value.is_none() || is_numpy_array(value) || nb::isinstance<PyState>(value))
         return false;
-    if (is_cuda_array(value) || PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__"))
-        return true;
+    return is_cuda_array(value) || PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__");
+}
+
+/// Whether an argument of `encode` is a CUDA device array; with `masks`, a tuple of the goal masks of which one is.
+bool on_device(nb::handle value, bool masks = false)
+{
+    if (!masks)
+        return is_device_array(value);
     if (nb::isinstance<nb::tuple>(value) || nb::isinstance<nb::list>(value))
         for (nb::handle item : value)
-            if (is_cuda_array(item) || PyObject_HasAttrString(item.ptr(), "__cuda_array_interface__"))
+            if (is_device_array(item))
                 return true;
     return false;
 }
@@ -700,7 +713,7 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
                   ActionsArg actions_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
                   CapacitiesArg capacities_in)
 {
-    if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg))
+    if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg, true))
         return Arg<ann::EncodingBatch>(
             nb::module_::import_("mymyr.encoding._device")
                 .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,

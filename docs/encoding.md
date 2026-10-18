@@ -366,7 +366,9 @@ sources). It returns the list of 14 tensors that `DeviceFlatBatch.array_names` n
 batch table and `sizes` last; an array the schema does not store is an empty tensor, and
 `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch. The op waits for nothing, allocates only
 its outputs and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
-traces it without a graph break. The registry keeps the encoder alive until `unregister(handle)`.
+traces it without a graph break. The registry keeps the encoder alive until `unregister(handle)`. A compiled function
+holds its handle and capacities as constants: compile one function per encoder, since one that is called with another
+handle is traced again with symbolic integers, which the fake implementation cannot resolve to an encoder.
 
 To capture the op (or `encode` with capacities) in a `torch.cuda.CUDAGraph`, reserve the workspace on the capture
 stream first, since a reservation allocates and a capture cannot: `encoder.reserve_device(max_rows, stream=capture_stream)`.

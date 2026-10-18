@@ -75,6 +75,7 @@ def bench_task(key, n, rounds, data):
         return torch.ops.mymyr.encode_flat(handle, states, None, None, None, None, None, None, caps["entities"],
                                            caps["tuples"], caps["args"], 0)
 
+    torch._dynamo.reset()  # a function compiled for another handle would retrace with symbolic handles and capacities
     compiled = torch.compile(lambda states: op(states), fullgraph=True, backend="eager")
     stream = torch.cuda.Stream(device)
     encoder.reserve_device(n, stream=stream)

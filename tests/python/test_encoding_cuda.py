@@ -736,3 +736,26 @@ def test_encoders_still_pickle_and_free_their_device_state(cases):
     del encoder
     gc.collect()
     assert ref() is None
+
+
+def test_outputs_that_do_not_hold_the_graphs_are_refused_before_any_launch(cases, monkeypatch):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source)
+    rows = to_device(case.rows, dev)
+    caps = exact_capacities(host_encode(encoder, case))
+    layout = encoding._device.layout_of(encoder)
+    real = type(layout).specs
+
+    def short(self, torch_, graphs, entities, args, targets):
+        return real(self, torch_, graphs - 1, entities, args, targets)
+
+    monkeypatch.setattr(type(layout), "specs", short)
+    launched = []
+    native = encoding._device._device_encoder(encoder, 0)
+    monkeypatch.setattr(type(native), "encode", lambda *a: launched.append(a), raising=False)
+    with pytest.raises(ValueError, match="^mymyr: encoding: the output 'task_ids' has"):
+        encoder.encode(rows, capacities=caps)
+    with pytest.raises(ValueError, match="^mymyr: encoding: the output 'task_ids' has"):
+        encoder.encode(rows)
+    assert not launched
