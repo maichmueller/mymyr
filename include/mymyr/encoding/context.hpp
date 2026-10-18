@@ -53,9 +53,9 @@ public:
     /// relation, ascending), schema_arity (u32 [schemas]: the objects of each action schema's ground actions),
     /// relation_virtual (u32 [relations]: the virtual index of each relation's predicate, k_no_virtual for none) and
     /// virtual_relation (u32: the key relation of each virtual index), both empty without predicate virtual nodes, and
-    /// relation_arity (u32 [relations]: the encoded arity of each relation). An instance has two lists of cells, each sorted by relation id with at most one cell per relation: the
-    /// cells of a graph with the instance's goal, and the cells of a graph whose row has goal masks of its own (the two
-    /// lists share their state and action cells). Per-graph cell counts (detail::count_graph) are per cell, in the
+    /// relation_arity (u32 [relations]: the encoded arity of each relation). An instance has two lists of cells, each
+    /// sorted by relation id with at most one cell per relation: the cells of a graph with the instance's goal, and the
+    /// cells of a graph whose row has goal masks of its own (the two lists share their state and action cells). Per-graph cell counts (detail::count_graph) are per cell, in the
     /// order of the list the graph uses, not per relation. Every instance has a cell for each action relation of the
     /// schema, whose tuples come from the expansion rows of a graph and not from its state.
     ///
