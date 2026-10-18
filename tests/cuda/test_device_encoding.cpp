@@ -1120,9 +1120,24 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         EXPECT_NE(std::string(e.what()).find("the device does not encode goal relations"), std::string::npos)
             << e.what();
     }
-    // without them the same table is fine
+    // history relations
     encoding::FlatOptions options = test::encoder_options();
     options.include_derived = false;
+    {
+        encoding::FlatOptions with_history = options;
+        with_history.history = true;
+        try
+        {
+            cuda::DeviceEncoder refused(ctx, encoding::FlatEncoder::create(table, with_history));
+            ADD_FAILURE() << "history relations were accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find("the device does not encode history relations"), std::string::npos)
+                << e.what();
+        }
+    }
+    // without them the same table is fine
     const cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, options));
     EXPECT_EQ(device.context().num_instances(), 1u);
     EXPECT_TRUE(device.context().download() == host_bytes(device.encoder()->context()));
