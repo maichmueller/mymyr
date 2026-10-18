@@ -86,6 +86,8 @@
 // the group, and a barrier. They compute the same sizes and write the same bytes as the plain forms, for any group
 // size; SoloGroup is the group of one lane.
 
+#include <cassert>
+
 #include "mymyr/core/types.hpp"
 
 #if defined(__CUDACC__)
@@ -424,6 +426,10 @@ MYMYR_HD CellList cell_list(const InstanceView& v, const RowInput& in)
                          in.layers->history.masks.layers != 0);
     return cell_list(v, in.goal_pos != nullptr, in.actions.count != 0);
 }
+
+/// The precondition of the forms for the lanes of a group: the row has no subgoal layers and no history steps (they are
+/// counted and filled by count_graph and fill_graph).
+MYMYR_HD void expect_no_layers([[maybe_unused]] const RowInput& in) { assert(in.layers == nullptr); }
 
 /// The goal a graph encodes: the row's masks, or the instance's with its constant part.
 struct GoalWords
@@ -1094,11 +1100,13 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32*
 /// partial totals are summed, so every lane returns the totals count_graph returns. The count of cell i is reported to
 /// `sink(i, cell, n)` by the lane that counted it. The graph's expansion rows are not read (a graph with expansion
 /// rows is counted by count_graph). With predicate virtual nodes `virtual_scratch` (v.num_virtual words, shared by the
-/// lanes) is overwritten. The group may be a part of a warp; all of its lanes call this function together.
+/// lanes) is overwritten. The group may be a part of a warp; all of its lanes call this function together. The row has
+/// no subgoal layers or history steps (expect_no_layers).
 template<class Group, class Sink>
 MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView& v, const RowInput& in,
                                             const Sink& sink, u32* virtual_scratch)
 {
+    expect_no_layers(in);
     const u32 lane = grp.lane(), lanes = grp.size();
     GraphTotals t = empty_totals();
     const bool virtual_nodes = has_virtual_nodes(v) && virtual_scratch;
@@ -1109,7 +1117,7 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
             virtual_scratch[p] = 0;
         grp.sync();
     }
-    const CellList list = cell_list(v, in);
+    const CellList list = cell_list<false>(v, in);
     for (u32 i = 0; i < list.count; ++i)
     {
         const Cell& c = list.cells[i];
@@ -1175,8 +1183,9 @@ MYMYR_HD GraphTotals count_graph_group(const Group& grp, const InstanceView& v, 
 template<class CountOf>
 MYMYR_HD GraphTotals totals_from_counts(const InstanceView& v, const RowInput& in, const CountOf& count)
 {
+    expect_no_layers(in);
     GraphTotals t = empty_totals();
-    const CellList list = cell_list(v, in);
+    const CellList list = cell_list<false>(v, in);
     for (u32 i = 0; i < list.count; ++i)
         accumulate_cell(t, list.cells[i], count(i, list.cells[i]));
     return t;
@@ -2092,7 +2101,8 @@ MYMYR_HD void advance_cursor(FillCursor& cursor, const Cell& c, u32 n)
 }
 
 /// begin_graph for the lanes of a group: the lanes share the header, the objects and the virtual entities, and the
-/// ranks of the virtual predicates (virtual_ranks into `scratch`, which the lanes share) are computed by lane 0.
+/// ranks of the virtual predicates (virtual_ranks into `scratch`, which the lanes share) are computed by lane 0. The
+/// row has no subgoal layers or history steps (expect_no_layers).
 template<class I, class Group>
 MYMYR_HD FillCursor begin_graph_group(const Group& grp, const InstanceView& v, const RowInput& in, u64 g,
                                       u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out,
@@ -2105,12 +2115,13 @@ MYMYR_HD FillCursor begin_graph_group(const Group& grp, const InstanceView& v, c
         fill_objects<I>(o, o + 1, entity_base, out);
     if (lane == 0 && (totals.flags & k_graph_auxiliary))
         fill_auxiliary_entity<I>(v.num_objects, entity_base, out);
-    FillCursor cursor{entity_blocks(v, totals, entity_base), 0, 0, target_base, totals.goal_entities, nullptr};
+    expect_no_layers(in);
+    FillCursor cursor{entity_blocks<false>(v, totals, entity_base), 0, 0, target_base, totals.goal_entities, nullptr};
     if (has_virtual_nodes(v) && scratch)
     {
         grp.sync();
         if (lane == 0)
-            virtual_ranks(v, in, cell_counts, scratch);
+            virtual_ranks<false>(v, in, cell_counts, scratch);
         grp.sync();
         cursor.rank = scratch;
         for (u32 p = lane; p < v.num_virtual; p += lanes)
@@ -2223,7 +2234,7 @@ MYMYR_HD void fill_graph_group(const Group& grp, const InstanceView& v, const Ro
         begin_graph_group<I>(grp, v, in, g, entity_base, totals, out, target_base, cell_counts, virtual_scratch);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
-    const CellList list = cell_list(v, in);
+    const CellList list = cell_list<false>(v, in);
     I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
     I* offsets = out.relation_offsets + g * R;
     I* arg_offsets = out.relation_arg_offsets + g * R;
@@ -2263,7 +2274,7 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
         begin_graph_group<I>(grp, v, in, g, entity_base, totals, out, target_base, cell_counts, virtual_scratch);
     const u64 auxiliary = entity_base + v.num_objects;
     const u32 R = v.num_relations;
-    const CellList list = cell_list(v, in);
+    const CellList list = cell_list<false>(v, in);
     I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
     u64 graph_tuple = 0;
     u32 r = 0;
