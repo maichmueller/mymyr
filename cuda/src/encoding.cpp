@@ -1,5 +1,7 @@
 #include "mymyr/cuda/encoding.hpp"
 
+#include "encoding_kernels.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -24,6 +26,8 @@ u64 mul(u64 a, u64 b)
     return a * b;
 }
 u64 round_up(u64 n) { return add(n, 63) & ~u64{63}; }
+/// The flags at the front of the scratch, cleared with the cell row before each batch.
+constexpr u64 k_flag_bytes = 64;
 
 void finish_use(const std::shared_ptr<LastUse>& last, cudaStream_t stream) noexcept
 {
@@ -65,53 +69,60 @@ void check_extension(const encoding::EncodingContext& current, const encoding::E
 }
 void check_schema(const encoding::EncodingSchema& schema)
 {
-    for (const auto& relation : schema.relations())
-        if (schema.options().include_derived && relation.lane == encoding::Lane::Derived)
-            throw std::invalid_argument("mymyr: encoding: the device does not encode derived relations: "
-                                        "set include_derived = false");
-    if (schema.has_goal_complete())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode goal relations: "
-                                    "set goal_derivations = {}");
-    if (schema.options().predicate_virtual_nodes)
-        throw std::invalid_argument("mymyr: encoding: the device does not encode predicate virtual nodes: "
-                                    "set predicate_virtual_nodes = false");
     if (schema.options().targets.contains(encoding::TargetSource::Action))
         throw std::invalid_argument("mymyr: encoding: the device does not encode action targets: "
                                     "remove 'action' from target_sources");
-    if (schema.options().layout != encoding::Layout::Graph)
-        throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
 }
-// The state, static and nullary lanes; the goal, target and virtual-node lanes must add their bounds here.
-GraphBounds graph_bounds(const encoding::EncodingContext& host)
+
+/// What the device needs to know about a context: the bounds of its graphs, and whether the graphs of some instance read
+/// derived words, by the goals of the rows (none, over the fluent slots, also over the derived slots).
+struct ContextFacts
 {
-    const auto v = host.view();
     GraphBounds bounds;
+    std::array<bool, 3> reads_derived{};
+};
+ContextFacts context_facts(const encoding::EncodingContext& host)
+{
+    namespace ed = encoding::detail;
+    const auto v = host.view();
+    ContextFacts facts;
+    GraphBounds& bounds = facts.bounds;
     for (u32 i = 0; i < host.table().size(); ++i)
     {
-        const auto inst = encoding::detail::instance_view(v, i);
-        GraphBounds b;
-        b.cells = inst.num_cells;
-        bool nullary = false;
-        for (u32 c = 0; c < inst.num_cells; ++c)
+        const ed::InstanceView inst = ed::instance_view(v, i);
+        bounds.words = std::max<u64>(bounds.words, std::max(inst.words, inst.derived_words));
+        facts.reads_derived[0] = facts.reads_derived[0] || ed::reads_derived(inst, false, false);
+        facts.reads_derived[1] = facts.reads_derived[1] || ed::reads_derived(inst, true, false);
+        facts.reads_derived[2] = facts.reads_derived[2] || ed::reads_derived(inst, true, true);
+        // the graph of a row has the cells of the instance's goal or of the row's own goal, and no action cells
+        for (const ed::CellList list : {ed::cell_list(inst, false, false), ed::cell_list(inst, true, false)})
         {
-            const auto& cell = inst.cells[c];
-            if (encoding::detail::is_action_op(cell.op))  // the device has no action input: such a cell has no tuple
-                continue;
-            b.tuples = add(b.tuples, cell.b - cell.a);
-            b.args = add(b.args, mul(cell.b - cell.a, cell.arity));
-            nullary = nullary || cell.logical_arity == 0;
+            u64 tuples = 0, args = 0, targets = 0;
+            bool nullary = false;
+            for (u32 c = 0; c < list.count; ++c)
+            {
+                const ed::Cell& cell = list.cells[c];
+                const u64 n = u64{cell.b - cell.a} + (ed::is_goal_op(cell.op) ? cell.d - cell.c : 0u);
+                tuples = add(tuples, n);
+                args = add(args, mul(n, cell.arity));
+                if (ed::is_goal_op(cell.op) && ed::goal_op_mode(cell.op) == ed::GoalMode::PlainTarget)
+                    targets = add(targets, n);
+                nullary = nullary || (n > 0 && cell.logical_arity == 0);
+            }
+            // objects, the auxiliary entity, one entity per goal target and one per predicate virtual node
+            const u64 entities = add(add(inst.num_objects, nullary ? 1 : 0), add(targets, inst.num_virtual));
+            bounds.entities = std::max(bounds.entities, entities);
+            bounds.tuples = std::max(bounds.tuples, tuples);
+            bounds.args = std::max(bounds.args, args);
+            bounds.targets = std::max(bounds.targets, targets);
+            bounds.cells = std::max<u64>(bounds.cells, list.count);
         }
-        b.entities = add(inst.num_objects, nullary ? 1 : 0);
-        bounds.entities = std::max(bounds.entities, b.entities);
-        bounds.tuples = std::max(bounds.tuples, b.tuples);
-        bounds.args = std::max(bounds.args, b.args);
-        bounds.cells = std::max(bounds.cells, b.cells);
     }
-    return bounds;
+    return facts;
 }
 BatchShape worst_shape(u64 graphs, const GraphBounds& bounds)
 {
-    return {graphs, mul(graphs, bounds.entities), mul(graphs, bounds.args)};
+    return {graphs, mul(graphs, bounds.entities), mul(graphs, bounds.args), mul(graphs, bounds.targets)};
 }
 }  // namespace
 
@@ -251,11 +262,22 @@ std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) cons
     return out;
 }
 
-OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations)
+OutputArrays output_arrays(const encoding::EncodingSchema& schema)
+{
+    OutputArrays arrays;
+    arrays.entity_arrays = !schema.implicit_entity_arrays();
+    arrays.counts = schema.emits_counts();
+    arrays.goal_complete = schema.has_goal_complete();
+    arrays.targets = schema.has_targets();
+    return arrays;
+}
+
+OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations, const OutputArrays& arrays)
 {
     const u64 I = index == encoding::IndexType::I32 ? 4 : 8;
-    const u64 G = shape.graphs, E = shape.entities, A = shape.args, GR = mul(G, relations);
+    const u64 G = shape.graphs, E = shape.entities, A = shape.args, T = shape.targets, GR = mul(G, relations);
     OutputLayout out;
+    out.arrays = arrays;
     u64 at = 0;
     auto place = [&](u64& offset, u64 bytes)
     {
@@ -265,31 +287,70 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.task_ids, mul(4, G));
     place(out.num_objects, mul(I, G));
     place(out.entity_offsets, mul(I, add(G, 1)));
-    place(out.entity_role, E);
-    place(out.entity_ref, mul(I, E));
-    place(out.relation_counts, mul(I, GR));
+    place(out.entity_role, arrays.entity_arrays ? E : 0);
+    place(out.entity_ref, arrays.entity_arrays ? mul(I, E) : 0);
+    place(out.relation_counts, arrays.counts ? mul(I, GR) : 0);
     place(out.relation_offsets, mul(I, add(GR, 1)));
     place(out.relation_arg_offsets, mul(I, add(GR, 1)));
     place(out.relation_args, mul(I, A));
+    place(out.goal_complete, arrays.goal_complete ? G : 0);
+    place(out.target_offsets, arrays.targets ? mul(I, add(G, 1)) : 0);
+    place(out.target_entity, arrays.targets ? mul(I, T) : 0);
+    place(out.target_group, arrays.targets ? T : 0);
+    place(out.sizes, sizeof(encoding::FlatSizes));
     out.bytes = at;
     return out;
 }
-ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds, encoding::Layout layout)
+DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void* block)
 {
-    if (layout != encoding::Layout::Graph)
-        throw std::invalid_argument("mymyr: encoding: device scratch needs graph-major layout");
+    auto* base = static_cast<std::byte*>(block);
+    auto at = [&](u64 offset, bool present) -> void* { return present ? base + offset : nullptr; };
+    const OutputArrays& a = layout.arrays;
+    DeviceOutput out;
+    encoding::FlatBuffers& b = out.arrays;
+    b.task_ids = static_cast<i32*>(at(layout.task_ids, true));
+    b.num_objects = at(layout.num_objects, true);
+    b.entity_offsets = at(layout.entity_offsets, true);
+    b.entity_role = static_cast<u8*>(at(layout.entity_role, a.entity_arrays));
+    b.entity_ref = at(layout.entity_ref, a.entity_arrays);
+    b.relation_counts = at(layout.relation_counts, a.counts);
+    b.relation_offsets = at(layout.relation_offsets, true);
+    b.relation_arg_offsets = at(layout.relation_arg_offsets, true);
+    b.relation_args = at(layout.relation_args, true);
+    b.goal_complete = static_cast<u8*>(at(layout.goal_complete, a.goal_complete));
+    b.target_offsets = at(layout.target_offsets, a.targets);
+    b.target_entity = at(layout.target_entity, a.targets);
+    b.target_group = static_cast<u8*>(at(layout.target_group, a.targets));
+    out.capacities = {shape.entities, shape.args, shape.args, shape.targets};
+    out.sizes = static_cast<encoding::FlatSizes*>(at(layout.sizes, true));
+    return out;
+}
+
+u64 ScratchLayout::scanned(u64 graphs) const
+{
+    if (!relation_major)
+        return mul(4, add(graphs, 1));
+    return add(add(mul(2, add(graphs, 1)), mul(graphs, relations)), 1);
+}
+ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds, encoding::Layout layout, u64 relations)
+{
     ScratchLayout out;
+    out.relation_major = layout == encoding::Layout::Relation;
+    out.relations = relations;
     const u64 G = shape.graphs;
-    const u64 scanned = add(add(mul(G, bounds.entities), mul(G, bounds.tuples)), mul(G, bounds.args));
+    // the largest value of the scan: the sum of the totals of every row (the argument row only graph-major)
+    u64 scanned = add(add(mul(G, bounds.entities), mul(G, bounds.targets)), mul(G, bounds.tuples));
+    if (!out.relation_major)
+        scanned = add(scanned, mul(G, bounds.args));
     out.wide = scanned > std::numeric_limits<u32>::max();
-    const u64 row = mul(out.wide ? 8 : 4, add(G, 1));
-    out.tuples = row;
-    out.args = mul(2, row);
-    out.scan_length = mul(3, add(G, 1));
-    out.cell_counts = round_up(mul(3, row));
-    out.cell_entries = mul(G, bounds.cells);
+    out.scan_length = out.scanned(G);
+    out.flags = 0;
+    out.totals = k_flag_bytes;
+    out.cell_counts = round_up(add(k_flag_bytes, mul(out.wide ? 8 : 4, out.scan_length)));
+    out.cell_stride = bounds.cells;
+    out.cell_entries = out.relation_major ? 0 : mul(G, bounds.cells);
     out.scan_temp = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
-    out.scan_temp_bytes = totals_scan_temp_bytes(out.scan_length, out.wide);
+    out.scan_temp_bytes = detail::totals_scan_temp_bytes(out.scan_length, out.wide);
     out.bytes = add(out.scan_temp, round_up(out.scan_temp_bytes));
     return out;
 }
@@ -303,20 +364,14 @@ ScratchView EncodingWorkspace::scratch_view() const noexcept
 {
     auto* base = static_cast<std::byte*>(scratch->data());
     ScratchView out;
-    out.totals = base + layout.entities;
-    out.totals_stride = shape.graphs + 1;
-    out.scan_length = layout.scan_length;
+    out.flags = reinterpret_cast<u32*>(base + layout.flags);
+    out.totals = base + layout.totals;
     out.cell_counts = reinterpret_cast<u32*>(base + layout.cell_counts);
-    out.cell_entries = layout.cell_entries;
+    out.cell_stride = layout.cell_stride;
     out.scan_temp = base + layout.scan_temp;
     out.scan_temp_bytes = layout.scan_temp_bytes;
     out.wide = layout.wide;
     return out;
-}
-cudaError_t EncodingWorkspace::scan_totals() const
-{
-    const ScratchView v = scratch_view();
-    return launch_totals_scan(v.totals, v.scan_length, v.wide, v.scan_temp, v.scan_temp_bytes, stream());
 }
 
 DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder)
@@ -326,7 +381,9 @@ DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::Fla
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
     m_schema = m_encoder->schema_ptr();
     check_schema(*m_schema);
-    m_bounds = graph_bounds(m_encoder->context());
+    const ContextFacts facts = context_facts(m_encoder->context());
+    m_bounds = facts.bounds;
+    m_reads_derived = facts.reads_derived;
     m_context = DeviceEncodingContext::upload(m_ctx, m_encoder->context_ptr());
 }
 std::shared_ptr<const encoding::FlatEncoder> DeviceEncoder::encoder() const
@@ -340,25 +397,29 @@ GraphBounds DeviceEncoder::bounds() const
     return m_bounds;
 }
 BatchShape DeviceEncoder::worst_case(u64 graphs) const { return worst_shape(graphs, bounds()); }
+OutputLayout DeviceEncoder::output_layout(const BatchShape& shape) const
+{
+    return cuda::output_layout(shape, options().index, schema().num_relations(), output_arrays(schema()));
+}
 ScratchLayout DeviceEncoder::scratch_layout(const BatchShape& shape) const
 {
     DeviceGuard guard(m_ctx->device());
-    return cuda::scratch_layout(shape, bounds(), options().layout);
+    return cuda::scratch_layout(shape, bounds(), options().layout, schema().num_relations());
 }
 u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    const auto output = output_layout(shape, options().index, schema().num_relations());
-    return add(cuda::scratch_layout(shape, m_bounds, options().layout).bytes, output.bytes);
+    const auto output = output_layout(shape);
+    return add(cuda::scratch_layout(shape, m_bounds, options().layout, schema().num_relations()).bytes, output.bytes);
 }
 u64 DeviceEncoder::bytes_needed(u64 graphs) const
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
     const auto shape = worst_shape(graphs, m_bounds);
-    return add(cuda::scratch_layout(shape, m_bounds, options().layout).bytes,
-               output_layout(shape, options().index, schema().num_relations()).bytes);
+    return add(cuda::scratch_layout(shape, m_bounds, options().layout, schema().num_relations()).bytes,
+               output_layout(shape).bytes);
 }
 
 std::shared_ptr<DeviceEncoder::Workspace> DeviceEncoder::workspace(cudaStream_t stream) const
@@ -371,12 +432,10 @@ void DeviceEncoder::reserve_workspace(Workspace& work, const BatchShape& shape)
 {
     std::lock_guard lock(work.mutex);
     const BatchShape want{std::max(shape.graphs, work.shape.graphs), std::max(shape.entities, work.shape.entities),
-                          std::max(shape.args, work.shape.args)};
-    (void)output_layout(want, options().index, schema().num_relations());
-    const auto layout = cuda::scratch_layout(want, m_bounds, options().layout);
-    if (!work.scratch || layout.bytes != work.layout.bytes || layout.wide != work.layout.wide ||
-        layout.tuples != work.layout.tuples || layout.cell_counts != work.layout.cell_counts ||
-        layout.scan_temp != work.layout.scan_temp)
+                          std::max(shape.args, work.shape.args), std::max(shape.targets, work.shape.targets)};
+    (void)output_layout(want);
+    const auto layout = cuda::scratch_layout(want, m_bounds, options().layout, schema().num_relations());
+    if (!work.scratch || layout != work.layout)
     {
         auto scratch = std::make_shared<DeviceBuffer>(m_ctx, layout.bytes);
         auto last = std::make_shared<LastUse>(m_ctx->device());
@@ -393,7 +452,7 @@ void DeviceEncoder::reserve_locked(const BatchShape& shape, cudaStream_t stream)
     if (!stream)
         stream = m_ctx->stream();
     // Validate output sizes as well, before any device allocation.
-    (void)output_layout(shape, options().index, schema().num_relations());
+    (void)output_layout(shape);
     auto work = workspace(stream);
     if (!work)
     {
@@ -438,10 +497,7 @@ u64 DeviceEncoder::reserved_bytes(cudaStream_t stream) const
     std::lock_guard lock(work->mutex);
     return work->scratch ? work->scratch->size() : 0;
 }
-OutputLayout DeviceEncoder::reserved_layout(cudaStream_t stream) const
-{
-    return output_layout(reserved(stream), options().index, schema().num_relations());
-}
+OutputLayout DeviceEncoder::reserved_layout(cudaStream_t stream) const { return output_layout(reserved(stream)); }
 EncodingWorkspace DeviceEncoder::acquire(cudaStream_t stream) const
 {
     std::shared_lock lock(m_state_mutex);
@@ -453,9 +509,8 @@ EncodingWorkspace DeviceEncoder::acquire(cudaStream_t stream) const
     if (!work)
         throw std::invalid_argument("mymyr: encoding: reserve scratch on this stream before acquire");
     std::lock_guard work_lock(work->mutex);
-    const auto needed = cuda::scratch_layout(work->shape, m_bounds, options().layout);
-    if (!work->scratch || needed.bytes != work->layout.bytes || needed.wide != work->layout.wide ||
-        needed.scan_temp != work->layout.scan_temp)
+    const auto needed = cuda::scratch_layout(work->shape, m_bounds, options().layout, schema().num_relations());
+    if (!work->scratch || needed != work->layout)
         throw std::invalid_argument("mymyr: encoding: reserve scratch again after a failed refresh");
     work->ready.wait_on(stream);
     return {m_context->acquire(stream, work->last), work->scratch, work->shape, work->layout};
@@ -486,10 +541,11 @@ bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, 
     if (grown->schema().fingerprint() != m_schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the grown encoder has another schema or options");
     check_schema(grown->schema());
-    const auto bounds = graph_bounds(grown->context());
+    const ContextFacts facts = context_facts(grown->context());
     const bool copied = m_context->refresh(grown->context_ptr(), stream);
     m_encoder = std::move(grown);
-    m_bounds = bounds;
+    m_bounds = facts.bounds;
+    m_reads_derived = facts.reads_derived;
     std::vector<std::shared_ptr<Workspace>> workspaces;
     {
         std::lock_guard map_lock(m_workspace_mutex);
@@ -500,5 +556,136 @@ bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, 
     for (const auto& work : workspaces)
         reserve_workspace(*work, {});
     return copied;
+}
+
+namespace
+{
+[[noreturn]] void invalid(const std::string& why) { throw std::invalid_argument("mymyr: encoding: " + why); }
+
+/// The lanes of the count kernel for rows of at most `words` words.
+u32 count_lanes_for(u64 words) { return words <= 2 ? 4 : words <= 8 ? 8 : 32; }
+}  // namespace
+
+void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
+                           const LaunchConfig& launch) const
+{
+    std::shared_lock lock(m_state_mutex);
+    DeviceGuard guard(m_ctx->device());
+    const encoding::EncodingSchema& schema = *m_schema;
+    const encoding::FlatOptions& opts = schema.options();
+    const u64 graphs = in.graphs;
+    const u64 R = schema.num_relations();
+    const bool relation_major = opts.layout == encoding::Layout::Relation;
+
+    // what can be checked without reading device memory
+    if (graphs > work.shape.graphs)
+        invalid("the batch has " + std::to_string(graphs) + " graphs, more than the " +
+                std::to_string(work.shape.graphs) + " the workspace was reserved for");
+    if (work.layout.relation_major != relation_major || work.layout.relations != R)
+        invalid("the workspace does not belong to this encoder");
+    if (graphs && !in.states)
+        invalid("the state buffer is null");
+    if (in.state_stride < in.state_words)
+        invalid("the state row stride is smaller than its width");
+    if (in.derived && in.derived_stride < m_encoder->context().max_derived_words())
+        invalid("the derived row stride is smaller than the derived words of an instance");
+    if (in.goal_pos && !schema.has_goal_complete())
+        invalid("goals are given, but the schema has no goal relations");
+    if ((in.goal_pos == nullptr) != (in.goal_neg == nullptr))
+        invalid("the goal needs both goal_pos and goal_neg");
+    if ((in.goal_derived_pos == nullptr) != (in.goal_derived_neg == nullptr))
+        invalid("the derived goal needs both goal_derived_pos and goal_derived_neg");
+    if (in.goal_derived_pos && !in.goal_pos)
+        invalid("the derived goal masks need the goal masks over the fluent slots");
+    if (!in.derived && m_reads_derived[in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0])
+        invalid("the device does not evaluate derived atoms: pass the derived words of the rows (derived)");
+    const OutputArrays arrays = output_arrays(schema);
+    const encoding::FlatBuffers& a = out.arrays;
+    if (!a.task_ids || !a.num_objects || !a.entity_offsets || !a.relation_offsets || !a.relation_arg_offsets || !out.sizes)
+        invalid("the output needs task_ids, num_objects, entity_offsets, relation_offsets, relation_arg_offsets and sizes");
+    if ((a.entity_role != nullptr) != arrays.entity_arrays || (a.entity_ref != nullptr) != arrays.entity_arrays)
+        invalid("entity_role and entity_ref must be given iff the schema stores entity arrays");
+    if ((a.relation_counts != nullptr) != arrays.counts)
+        invalid("relation_counts must be given iff the schema stores counts");
+    if ((a.goal_complete != nullptr) != arrays.goal_complete)
+        invalid("goal_complete must be given iff the schema has goal relations");
+    if ((a.target_offsets != nullptr) != arrays.targets || (a.target_entity != nullptr) != arrays.targets ||
+        (a.target_group != nullptr) != arrays.targets)
+        invalid("the target arrays must be given iff the schema has target sources");
+    if (out.capacities.args && !a.relation_args)
+        invalid("relation_args is null");
+    if (arrays.targets && out.capacities.targets && (!a.target_entity || !a.target_group))
+        invalid("the target arrays are null");
+    if (launch.count_lanes != 0 && launch.count_lanes != 4 && launch.count_lanes != 8 && launch.count_lanes != 32)
+        invalid("the count kernel runs 4, 8 or 32 lanes per graph");
+
+    // how it is launched
+    const u32 virtual_nodes = work.view().num_virtual;
+    const u32 lanes = launch.count_lanes ? launch.count_lanes : count_lanes_for(m_bounds.words);
+    bool warp = launch.fill == FillMode::Warp;
+    if (launch.fill == FillMode::Auto)
+        warp = m_bounds.words > 8 || m_bounds.cells > 128 || m_bounds.args > 1024 ||
+               detail::fill_shared_bytes(virtual_nodes, static_cast<u32>(R), false, relation_major) > detail::k_shared_limit;
+    if (detail::count_shared_bytes(virtual_nodes, lanes) > detail::k_shared_limit ||
+        detail::fill_shared_bytes(virtual_nodes, static_cast<u32>(R), warp, relation_major) > detail::k_shared_limit)
+        invalid("the schema has too many predicate virtual nodes or relations for the device kernels");
+
+    const ScratchView scratch = work.scratch_view();
+    const encoding::IndexType index = opts.index;
+    const u64 limit = index == encoding::IndexType::I64 ? static_cast<u64>(std::numeric_limits<i64>::max())
+                                                       : static_cast<u64>(std::numeric_limits<i32>::max());
+    detail::EncodeParams p;
+    p.context = work.view();
+    p.graphs = graphs;
+    p.states = in.states;
+    p.state_stride = in.state_stride;
+    p.state_words = in.state_words;
+    p.task_ids = in.task_ids;
+    p.derived = in.derived;
+    p.derived_stride = in.derived_stride;
+    p.goal_pos = in.goal_pos;
+    p.goal_neg = in.goal_neg;
+    p.goal_stride = in.goal_stride;
+    p.goal_words = in.goal_words;
+    p.goal_derived_pos = in.goal_derived_pos;
+    p.goal_derived_neg = in.goal_derived_neg;
+    p.goal_derived_stride = in.goal_derived_stride;
+    p.goal_derived_words = in.goal_derived_words;
+    p.order = launch.order;
+    p.out = out.arrays;
+    p.sizes = out.sizes;
+    p.capacities = out.capacities;
+    p.index64 = index == encoding::IndexType::I64;
+    p.relation_major = relation_major;
+    if (mul(graphs, R) >= limit || graphs >= limit)
+        p.static_overflow |= encoding::k_overflow_index;
+    p.totals = scratch.totals;
+    p.wide = scratch.wide;
+    p.segments = mul(2, add(graphs, 1));
+    p.flags = scratch.flags;
+    p.cell_counts = scratch.cell_counts;
+    p.cell_stride = scratch.cell_stride;
+
+    detail::LaunchShape shape;
+    shape.lanes = lanes;
+    shape.warp_fill = warp;
+    shape.scan_length = work.layout.scanned(graphs);
+    shape.scan_temp = scratch.scan_temp;
+    shape.scan_temp_bytes = scratch.scan_temp_bytes;
+    shape.zero_begin = scratch.flags;
+    shape.zero_bytes = k_flag_bytes;
+    if (relation_major)
+    {
+        // the flags and the zero-opened cell row, which the count kernel fills only where a graph has a cell
+        const u64 entry = work.layout.wide ? 8 : 4;
+        shape.zero_bytes = add(k_flag_bytes, mul(entry, shape.scan_length));
+    }
+    check(detail::launch_encode(p, shape, work.stream()), "encoding kernels");
+}
+void DeviceEncoder::encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream,
+                           const LaunchConfig& launch) const
+{
+    const EncodingWorkspace work = acquire(stream);
+    encode(work, in, out, launch);
 }
 }  // namespace mymyr::cuda

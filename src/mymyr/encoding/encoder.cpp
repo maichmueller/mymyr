@@ -137,9 +137,9 @@ struct Pass
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
 
-    [[nodiscard]] const u64* derived_of(u64 g, u32 instance) const noexcept
+    [[nodiscard]] const u64* derived_of(u64 g, const detail::InstanceView& v) const noexcept
     {
-        if (!context.needs_derived(instance, in.goal_pos != nullptr, in.goal_derived_pos != nullptr))
+        if (!detail::reads_derived(v, in.goal_pos != nullptr, in.goal_derived_pos != nullptr))
             return nullptr;
         return in.derived ? in.derived + g * s.derived_stride : s.derived.get() + g * s.derived_stride;
     }
@@ -158,9 +158,10 @@ struct Pass
         return detail::cell_list(v, in.goal_pos != nullptr, has_actions(g));
     }
 
-    [[nodiscard]] detail::RowInput row_input(u64 g, u32 instance, u32* starts, u32* cursors) const noexcept
+    [[nodiscard]] detail::RowInput row_input(u64 g, const detail::InstanceView& v, u32* starts,
+                                             u32* cursors) const noexcept
     {
-        detail::RowInput row{in.states.row(g), derived_of(g, instance)};
+        detail::RowInput row{in.states.row(g), derived_of(g, v)};
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -243,7 +244,7 @@ void count_range(const Pass& p, u32 t)
             continue;
         }
         const detail::RowInput input =
-            p.row_input(g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
+            p.row_input(g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
                         m.action_cursors.data());
         const u64* row = input.atoms;
         const u64* derived = input.derived;
@@ -323,7 +324,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const detail::InstanceView v = detail::instance_view(p.view, instance);
         const detail::GraphTotals& totals = m.totals[g - lo];
         const detail::RowInput row =
-            p.row_input(g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
+            p.row_input(g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
                         m.action_cursors.data());
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
