@@ -70,7 +70,8 @@ void check_extension(const encoding::EncodingContext& current, const encoding::E
 void check_schema(const encoding::EncodingSchema& schema)
 {
     if (schema.has_horizon())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode horizon relations: "
+        throw std::invalid_argument("mymyr: encoding: the device does not encode horizon relations (horizons, rooted "
+                                    "horizons, transitions, and their parent, sibling and cousin relations): "
                                     "set horizon_mode = None");
     if (schema.has_subgoals())
         throw std::invalid_argument("mymyr: encoding: the device does not encode subgoal relations: "
