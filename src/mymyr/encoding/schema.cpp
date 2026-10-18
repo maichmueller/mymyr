@@ -478,7 +478,7 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     if (o.history)
     {
         hasher.text("history");
-        hasher.integer(o.history_max_steps);
+        hasher.integer(o.history_max_steps.value_or(0));  // 0 (never a limit): all steps
     }
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));

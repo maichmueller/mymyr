@@ -303,6 +303,9 @@ def test_the_history_options_are_validated_and_reported():
         make(task, history=False, target_sources=("goal", "history"))
     with pytest.raises(ValueError, match="history_max_steps needs history"):
         make(task, history=False, history_max_steps=2, target_sources=("goal",))
+    assert make(task).options["history_max_steps"] is None
+    with pytest.raises(ValueError, match="history_max_steps"):
+        make(task, history_max_steps=0)
     other = make(task, history_max_steps=4)
     assert other.schema_fingerprint != encoder.schema_fingerprint
     assert make(task).schema_fingerprint == make(task).schema_fingerprint

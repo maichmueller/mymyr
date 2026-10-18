@@ -170,8 +170,8 @@ struct Pass
         if (in.history.masks.layers == 0)
             return 0;
         const u32 valid = history_valid(g);
-        const u32 k = context.schema().options().history_max_steps;
-        return k != 0 && valid > k ? k : valid;
+        const std::optional<u32> k = context.schema().options().history_max_steps;
+        return k && valid > *k ? *k : valid;
     }
 
     /// The cells of graph g of `v`'s instance.

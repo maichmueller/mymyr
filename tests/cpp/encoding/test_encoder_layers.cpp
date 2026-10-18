@@ -398,7 +398,8 @@ FlatOptions layer_options(u32 levels = 2, bool history = true, u32 max_steps = 0
     if (history)
     {
         options.history = true;
-        options.history_max_steps = max_steps;
+        if (max_steps != 0)
+            options.history_max_steps = max_steps;
         options.targets.insert(TargetSource::History);
     }
     options.include_actions = false;
@@ -1140,6 +1141,26 @@ TEST(EncoderLayers, InputsTheSchemaOrTheInstanceCannotTakeAreRefused)
     catch (const std::invalid_argument& error)
     {
         EXPECT_NE(std::string(error.what()).find("history_max_steps needs history"), std::string::npos);
+    }
+    try
+    {
+        FlatOptions options = layer_options(0, true);
+        options.history_max_steps = 0;
+        (void)FlatEncoder::create(table, options);
+        ADD_FAILURE() << "history_max_steps of 0";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("history_max_steps must be at least 1"), std::string::npos);
+    }
+    {
+        // all steps and the newest k steps are different schemas, and so are different k
+        FlatOptions all = layer_options(0, true), one = all, two = all;
+        one.history_max_steps = 1;
+        two.history_max_steps = 2;
+        const auto fingerprint = [&](const FlatOptions& o) { return FlatEncoder::create(table, o)->schema().fingerprint(); };
+        EXPECT_NE(fingerprint(all), fingerprint(one));
+        EXPECT_NE(fingerprint(one), fingerprint(two));
     }
     try
     {

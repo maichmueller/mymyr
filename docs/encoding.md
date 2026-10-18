@@ -182,8 +182,8 @@ Nullary literals in a layer are unary tuples over the auxiliary entity, which th
 ### History
 
 With `history=True` the history relations `[+]on[hist]` and `[-]on[hist]` of the schema hold the literals of the steps of
-a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (0, the default: all of
-them). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
+a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (`None`, the default: all of
+them; otherwise at least 1). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
 oldest first; the batch lists them in `history_offsets` `[G + 1]`, `history_entity` `[S]` (the entity of each step) and
 `history_dt` int32 `[S]` (its `dt`). The `entity_ref` of a step entity is the step's index among the row's valid steps
 (not among the encoded ones: step `entity_ref` of the row's `history` is `history[2][g, entity_ref]` for its `dt` and
@@ -447,7 +447,7 @@ relations. An encoder has the same properties.
 - **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
   `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
-  targets together with a horizon mode; history targets or `history_max_steps` without `history`; `history` together with a
+  targets together with a horizon mode; history targets or `history_max_steps` without `history`; a `history_max_steps` of 0; `history` together with a
   horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
   `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that

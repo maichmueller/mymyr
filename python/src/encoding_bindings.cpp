@@ -268,7 +268,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
             choice(root_policy, "root_policy", parse_root_policy, "'include', 'exclude', 'encode_only' or None");
     options.horizon.parent_relation = parent_relation;
     options.history = history;
-    options.history_max_steps = int_arg<u32>(history_max_steps, "history_max_steps", 0);
+    options.history_max_steps = opt_int_arg<u32>(history_max_steps, "history_max_steps", 1);
     return options;
 }
 
@@ -302,7 +302,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["root_policy"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.root)))) : nb::none();
     out["parent_relation"] = o.horizon.parent_relation;
     out["history"] = o.history;
-    out["history_max_steps"] = o.history_max_steps;
+    out["history_max_steps"] = o.history_max_steps ? nb::object(nb::cast(*o.history_max_steps)) : nb::none();
     return out;
 }
 
@@ -311,7 +311,7 @@ constexpr const char* k_option_doc =
     "added_unsatisfied for the delta horizon). max_goal_level: subgoal levels beyond the goal (0 to 3): the "
     "relations `[sg]`, `[ssg]`, `[sssg]` of each level hold the literals of the `subgoals` layers of a row. history: "
     "the history relations `[+]p[hist]` / `[-]p[hist]` hold the literals of the `history` steps of a row; "
-    "history_max_steps: only the newest this many steps of a row are encoded (0: all). "
+    "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
     "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
     "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
@@ -356,7 +356,7 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
         "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
         "layout"_a = "graph", "index_dtype"_a = "int32", "emit_counts"_a = true, "entity_arrays"_a = "always",
         "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(), "parent_relation"_a = false, "history"_a = false,
-        "history_max_steps"_a = 0, doc);
+        "history_max_steps"_a.none() = nb::none(), doc);
 }
 
 // ------------------------------------------------------------------------------------------------ the catalog
