@@ -182,8 +182,9 @@ if(TARGET mymyr_cuda)
         target_link_libraries(mymyr_device_derived_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
         gtest_discover_tests(mymyr_device_derived_tests DISCOVERY_TIMEOUT 60
             PROPERTIES TIMEOUT 1800 LABELS cuda ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
-        # the relational encoder's context and memory on the device (cuda/encoding.hpp) against the host
+        # the relational encoder on the device (cuda/encoding.hpp): its context, memory and kernels against the host
         add_executable(mymyr_device_encoding_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encoding.cpp
+                                                   ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encode.cpp
                                                    ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend GTest::gtest_main)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr_warnings)

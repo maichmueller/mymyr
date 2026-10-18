@@ -373,7 +373,7 @@ def test_modes_outside_the_selection_build_nothing_on_the_device(bench):
     gpu = FakeGpu([])
     gpu.rt = types.SimpleNamespace(BatchedEnv=refuse)
     args = types.SimpleNamespace(data=None, modes={"cpu_batch256"}, rows=32, seed=0, min_batch=64, rounds=1,
-                                 env_sizes=(256, 1024))
+                                 env_sizes=(256, 1024), device_bench=None)
     records = bench.run_task("blocks-8", args, gpu, pool=None)
     assert [r["mode"] for r in records] == ["cpu_batch256"] and records[0]["status"] == "ok"
     assert gpu.calls[-1] == "empty_cache"
@@ -389,6 +389,93 @@ def test_the_bytes_of_a_record_come_from_the_batch_the_mode_timed(bench, device_
         per_state.append((nbytes / batch.num_graphs, nints / batch.num_graphs))
         assert bench.stats_of(bench.Mode("m", "cpu", stats=(real, data)), cache) == per_state[-1]
     assert per_state[0] != per_state[1]
+
+
+# ------------------------------------------------------------------------------------------------ the C++ device bench
+
+
+def device_record(mode, layout, **fields):
+    cells = 25 if layout == "relation" else 10
+    defaults = dict(group="device", N=16384, layout=layout, kernels=4, memsets=1, other_nodes=0, cells=10, relations=25,
+                    cub_bytes=1000, scratch_bytes=16 * 16385 + 4 * 16384 * cells + 1000 + 256)
+    return record("blocks-p01e", mode, 0.01, **{**defaults, **fields})
+
+
+def device_gate(bench, gate, graph=None, relation=None):
+    records = [device_record("device_encode_graph", "graph", **(graph or {})),
+               device_record("device_encode_rel", "relation", **(relation or {}))]  # fmt: skip
+    results, rows, _ = gate_rows(bench, records, ["blocks-p01e"])
+    return results[gate]["blocks-p01e"], rows[gate]
+
+
+def test_the_launch_gate_allows_four_kernels_and_nothing_but_memsets_besides(bench):
+    ok, row = device_gate(bench, "device-launches")
+    assert ok["status"] == "pass" and ok["value"] == 4 and row["status"] == "pass"
+    assert device_gate(bench, "device-launches", graph=dict(kernels=5))[0]["status"] == "fail"
+    assert device_gate(bench, "device-launches", relation=dict(other_nodes=1))[0]["status"] == "fail"
+
+
+def test_the_scratch_gate_counts_16_bytes_per_graph_and_4_per_cell_plus_the_scan(bench):
+    base = device_record("device_encode_graph", "graph")["scratch_bytes"]
+    rel = device_record("device_encode_rel", "relation")["scratch_bytes"]
+    assert device_gate(bench, "device-scratch")[0]["status"] == "pass"
+    assert device_gate(bench, "device-scratch", graph=dict(scratch_bytes=base + 1))[0]["status"] == "fail"
+    failed = device_gate(bench, "device-scratch", relation=dict(scratch_bytes=rel + 1))[0]
+    assert failed["status"] == "fail" and failed["layout"] == "relation"
+
+
+def fake_bench(tmp_path, payload, status=0):
+    script = tmp_path / "fake_bench.py"
+    script.write_text(f"#!{sys.executable}\nimport sys\nprint({json.dumps(json.dumps(payload))})\nsys.exit({status})\n")
+    script.chmod(0o755)
+    return script
+
+
+def bench_payload(**changes):
+    info = dict(kernels=4, memsets=1, other_nodes=0, scratch_bytes=5000, cub_bytes=100, cells=7, relations=9, wide=False,
+                sizes_match=True)
+    payload = dict(n=256, times_us=dict(graph=[100.0, 90.0], relation=[120.0, 110.0], eager=[50.0, 40.0]),
+                   graph=info, relation=dict(info, scratch_bytes=6000))
+    return {**payload, **changes}
+
+
+def test_the_device_bench_modes_take_the_drivers_rounds_nodes_and_scratch(tmp_path, bench, device_setup):
+    real, rows = device_setup
+    encoders = {"graph": (real, None), "relation": (real, None)}
+    args = types.SimpleNamespace(env_sizes=(256,), rounds=2, device=0)
+    files = (tmp_path / "domain.pddl", tmp_path / "problem.pddl")
+    binary = fake_bench(tmp_path, bench_payload())
+    modes = bench.device_bench_modes(binary, args, rows, files, encoders, lambda name: True)
+    by_name = {m.name: m for m in modes}
+    assert set(by_name) == {"device_encode_graph", "device_encode_rel", "device_encode_graph_eager"}
+    replay, eager = by_name["device_encode_graph"], by_name["device_encode_graph_eager"]
+    assert replay.times == [100.0 / (256 * bench.REPLAYS), 90.0 / (256 * bench.REPLAYS)]
+    assert eager.times == [50.0 / 256, 40.0 / 256]
+    assert by_name["device_encode_rel"].fields["scratch_bytes"] == 6000 and replay.fields["scratch_bytes"] == 5000
+    assert replay.fields["N"] == 256 and replay.fields["layout"] == "graph" and replay.fields["kernels"] == 4
+    assert replay.stats[0] is real and len(replay.stats[1]) == 256
+    # the modes outside the selection are not built
+    only = bench.device_bench_modes(binary, args, rows, files, encoders, lambda name: name == "device_encode_rel")
+    assert [m.name for m in only] == ["device_encode_rel"]
+    assert bench.device_bench_modes(binary, args, rows, files, encoders, lambda name: False) == []
+
+
+def test_the_device_bench_modes_report_a_failure_a_size_mismatch_and_missing_files(tmp_path, bench, device_setup):
+    real, rows = device_setup
+    encoders = {"graph": (real, None), "relation": (real, None)}
+    args = types.SimpleNamespace(env_sizes=(256,), rounds=2, device=0)
+    files = (tmp_path / "domain.pddl", tmp_path / "problem.pddl")
+    failing = fake_bench(tmp_path, dict(error="no device"), status=1)
+    modes = bench.device_bench_modes(failing, args, rows, files, encoders, lambda name: True)
+    assert len(modes) == 3 and all("no device" in m.error for m in modes)
+    wrong = bench_payload(graph=dict(bench_payload()["graph"], sizes_match=False))
+    modes = {m.name: m for m in bench.device_bench_modes(fake_bench(tmp_path, wrong), args, rows, files, encoders,
+                                                         lambda name: True)}  # fmt: skip
+    assert "sizes differ" in modes["device_encode_graph"].error and modes["device_encode_rel"].error is None
+    modes = bench.device_bench_modes(failing, args, rows, None, encoders, lambda name: True)
+    assert all(m.skip is not None and m.unavailable for m in modes)
+    missing = bench.device_bench_modes(tmp_path / "absent", args, rows, files, encoders, lambda name: True)
+    assert all(m.error for m in missing)
 
 
 def test_zero_rounds_are_rejected():

@@ -518,13 +518,12 @@ TEST(DeviceEncoder, AHeldAcquisitionIsEnoughToLaunchInsideACapture)
     const u32 kernels = captured_kernels(stream, [&]
     {
         const cuda::ScratchView scratch = work.scratch_view();
-        EXPECT_EQ(scratch.totals_stride, 65u);
-        EXPECT_EQ(scratch.scan_length, 3u * 65);
-        cuda::check(cudaMemsetAsync(scratch.cell_counts, 0, scratch.cell_entries * 4, work.stream()), "memset counts");
-        cuda::check(work.scan_totals(), "scan totals");
+        EXPECT_NE(scratch.flags, nullptr);
+        EXPECT_NE(scratch.totals, nullptr);
+        cuda::check(cudaMemsetAsync(scratch.flags, 0, 64, work.stream()), "memset flags");
         test::launch_context_probe(work.view(), 1, static_cast<u64*>(out.data()), work.stream());
     });
-    EXPECT_EQ(kernels, 3u);  // the scan's two and the probe
+    EXPECT_EQ(kernels, 1u);  // the probe; the memset is not a kernel node
 }
 
 TEST(DeviceEncoder, AcquireRefusesACapturingStream)
@@ -564,7 +563,8 @@ TEST(DeviceEncoder, OutputLayoutPinsTheBytesOfEveryArray)
     EXPECT_EQ(i32.relation_offsets, 1088u);
     EXPECT_EQ(i32.relation_arg_offsets, 1408u);
     EXPECT_EQ(i32.relation_args, 1728u);
-    EXPECT_EQ(i32.bytes, 5760u);
+    EXPECT_EQ(i32.sizes, 5760u);  // without goals and targets, the sizes follow the arguments
+    EXPECT_EQ(i32.bytes, 5824u);
     const cuda::OutputLayout i64 = cuda::output_layout(shape, encoding::IndexType::I64, 7);
     // 40, 80, 88, 100, 800, 560, 568, 568, 8000
     EXPECT_EQ(i64.num_objects, 64u);
@@ -575,129 +575,97 @@ TEST(DeviceEncoder, OutputLayoutPinsTheBytesOfEveryArray)
     EXPECT_EQ(i64.relation_offsets, 1856u);
     EXPECT_EQ(i64.relation_arg_offsets, 2432u);
     EXPECT_EQ(i64.relation_args, 3008u);
-    EXPECT_EQ(i64.bytes, 11008u);
-    // an empty batch has the offsets arrays of one entry
-    EXPECT_EQ(cuda::output_layout({}, encoding::IndexType::I32, 7).bytes, 64u * 3);
+    EXPECT_EQ(i64.bytes, 11072u);
+    // an empty batch has the offsets arrays of one entry and the sizes
+    EXPECT_EQ(cuda::output_layout({}, encoding::IndexType::I32, 7).bytes, 64u * 4);
 }
 
-TEST(DeviceEncoder, ScratchHoldsOneScanOfTheThreeTotals)
+TEST(DeviceEncoder, OutputLayoutHasTheArraysOfItsSchemaOnly)
+{
+    const cuda::BatchShape shape{10, 100, 1000, 50};
+    // every array: the goal flags (G = 10), the target offsets I (G + 1) = 44, the targets I T = 200 and T = 50
+    const cuda::OutputArrays all{true, true, true, true};
+    const cuda::OutputLayout full = cuda::output_layout(shape, encoding::IndexType::I32, 7, all);
+    EXPECT_EQ(full.goal_complete, 5760u);
+    EXPECT_EQ(full.target_offsets, 5824u);
+    EXPECT_EQ(full.target_entity, 5888u);
+    EXPECT_EQ(full.target_group, 6144u);
+    EXPECT_EQ(full.sizes, 6208u);
+    EXPECT_EQ(full.bytes, 6272u);
+    // implicit entity arrays and no counts take no bytes
+    const cuda::OutputLayout lean = cuda::output_layout(shape, encoding::IndexType::I32, 7, {false, false, false, false});
+    EXPECT_EQ(lean.entity_role, lean.entity_ref);
+    EXPECT_EQ(lean.entity_ref, lean.relation_counts);
+    EXPECT_EQ(lean.relation_counts, lean.relation_offsets);
+    EXPECT_EQ(lean.bytes, 5824u - 128 - 448 - 320);
+    // the arrays of a schema
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    auto options = test::encoder_options();
+    EXPECT_EQ(cuda::output_arrays(*encoding::EncodingSchema::create(*table, options)), (cuda::OutputArrays{true, true, false, false}));
+    options.goal_derivations = {encoding::GoalDerivation::Plain};
+    options.targets = {encoding::TargetSource::Goal};
+    options.emit_counts = false;
+    EXPECT_EQ(cuda::output_arrays(*encoding::EncodingSchema::create(*table, options)), (cuda::OutputArrays{true, false, true, true}));
+}
+
+TEST(DeviceEncoder, ScratchHoldsOneScanOfTheTotals)
 {
     SKIP_WITHOUT_GPU();
     for (const u64 graphs : {u64{1}, u64{10}, u64{1000}, u64{16384}})
         for (const u64 cells : {u64{0}, u64{6}, u64{170}})
         {
             const cuda::GraphBounds bounds{9, 97, 161, cells};
-            const auto narrow = cuda::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Graph);
+            const auto narrow = cuda::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Graph, 7);
             EXPECT_FALSE(narrow.wide);
-            EXPECT_EQ(narrow.entities, 0u);
-            EXPECT_EQ(narrow.tuples, 4 * (graphs + 1));
-            EXPECT_EQ(narrow.args, 8 * (graphs + 1));
-            EXPECT_EQ(narrow.scan_length, 3 * (graphs + 1));
-            EXPECT_EQ(narrow.cell_counts, round_up(12 * (graphs + 1)));
+            EXPECT_EQ(narrow.flags, 0u);
+            EXPECT_EQ(narrow.totals, 64u);
+            EXPECT_EQ(narrow.scan_length, 4 * (graphs + 1));
+            EXPECT_EQ(narrow.cell_counts, round_up(64 + 16 * (graphs + 1)));
             EXPECT_EQ(narrow.cell_entries, graphs * cells);
+            EXPECT_EQ(narrow.cell_stride, cells);
             EXPECT_EQ(narrow.scan_temp - narrow.cell_counts, round_up(4 * graphs * cells));
-            EXPECT_EQ(narrow.scan_temp_bytes, cuda::totals_scan_temp_bytes(3 * (graphs + 1), false));
+            EXPECT_GT(narrow.scan_temp_bytes, 0u);
             EXPECT_EQ(narrow.bytes - narrow.scan_temp, round_up(narrow.scan_temp_bytes));
-            if (graphs >= 64)
-            {
-                EXPECT_LE(narrow.scan_temp, 16 * graphs + round_up(4 * graphs * cells));
-            }
+            // 16 bytes per graph and 4 per cell, besides the flags and the scan's storage
+            EXPECT_LE(narrow.scan_temp, 64 + 63 + 16 * (graphs + 1) + 4 * graphs * cells + 63);
             // the width follows the bounds: larger output capacities never switch to u64
-            const auto roomy = cuda::scratch_layout({graphs, u64{1} << 40, u64{1} << 40}, bounds, encoding::Layout::Graph);
+            const auto roomy =
+                cuda::scratch_layout({graphs, u64{1} << 40, u64{1} << 40, u64{1} << 40}, bounds, encoding::Layout::Graph, 7);
             EXPECT_FALSE(roomy.wide);
             EXPECT_EQ(roomy.bytes, narrow.bytes);
-            // entities, tuples and arguments together decide it
+            // entities, targets, tuples and arguments together decide it
             const cuda::GraphBounds big{u64{1} << 32, 1, 1, cells};
-            const auto wide = cuda::scratch_layout({graphs, 0, 0}, big, encoding::Layout::Graph);
+            const auto wide = cuda::scratch_layout({graphs, 0, 0}, big, encoding::Layout::Graph, 7);
             EXPECT_TRUE(wide.wide);
-            EXPECT_EQ(wide.tuples, 8 * (graphs + 1));
-            EXPECT_EQ(wide.args, 16 * (graphs + 1));
-            EXPECT_EQ(wide.cell_counts, round_up(24 * (graphs + 1)));
-            EXPECT_EQ(wide.scan_temp_bytes, cuda::totals_scan_temp_bytes(3 * (graphs + 1), true));
+            EXPECT_EQ(wide.cell_counts, round_up(64 + 32 * (graphs + 1)));
+            // relation-major: the entity and target rows and the cell row; no cell counts
+            const auto rm = cuda::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Relation, 7);
+            EXPECT_FALSE(rm.wide);
+            EXPECT_TRUE(rm.relation_major);
+            EXPECT_EQ(rm.scan_length, 2 * (graphs + 1) + 7 * graphs + 1);
+            EXPECT_EQ(rm.cell_entries, 0u);
+            EXPECT_EQ(rm.scan_temp, rm.cell_counts);
+            EXPECT_LE(rm.scan_temp, 64 + 63 + 8 * (graphs + 1) + 4 * (7 * graphs + 1) + 63);
         }
-    const u64 third = std::numeric_limits<u32>::max() / 3;
-    EXPECT_FALSE(cuda::scratch_layout({1, 0, 0}, {third, third, third, 0}, encoding::Layout::Graph).wide);
-    EXPECT_TRUE(cuda::scratch_layout({1, 0, 0}, {third + 1, third + 1, third + 1, 0}, encoding::Layout::Graph).wide);
+    const u64 quarter = std::numeric_limits<u32>::max() / 4;
+    EXPECT_FALSE(cuda::scratch_layout({1, 0, 0}, {quarter, quarter, quarter, 0, quarter}, encoding::Layout::Graph).wide);
+    EXPECT_TRUE(cuda::scratch_layout({1, 0, 0}, {quarter + 1, quarter + 1, quarter + 1, 0, quarter + 1}, encoding::Layout::Graph).wide);
+    // the argument row is not scanned relation-major
+    EXPECT_FALSE(cuda::scratch_layout({1, 0, 0}, {quarter, quarter, u64{1} << 40, 0, quarter}, encoding::Layout::Relation, 1).wide);
 }
 
-/// The totals [3, G+1] with a zero entry closing every row, as the device scan receives them.
-template <class T>
-std::vector<T> random_totals(u64 graphs, u64 limit, std::mt19937_64& rng)
-{
-    std::vector<T> totals(3 * (graphs + 1));
-    for (u64 row = 0; row < 3; ++row)
-        for (u64 g = 0; g < graphs; ++g)
-            totals[row * (graphs + 1) + g] = static_cast<T>(rng() % (limit + 1));
-    return totals;
-}
-
-template <class T>
-void expect_one_scan_equals_three(const cuda::ContextPtr& ctx, cudaStream_t stream, u64 graphs, u64 limit, std::mt19937_64& rng)
-{
-    const bool wide = sizeof(T) == 8;
-    const u64 row = graphs + 1, length = 3 * row;
-    const std::vector<T> totals = random_totals<T>(graphs, limit, rng);
-    cuda::DeviceBuffer device(ctx, length * sizeof(T), stream);
-    cuda::DeviceBuffer temp(ctx, std::max<u64>(cuda::totals_scan_temp_bytes(length, wide), 1), stream);
-    cuda::check(cudaMemcpyAsync(device.data(), totals.data(), length * sizeof(T), cudaMemcpyHostToDevice, stream), "H2D");
-    cuda::check(cuda::launch_totals_scan(device.data(), length, wide, temp.data(), temp.size(), stream), "scan");
-    std::vector<T> scanned(length);
-    cuda::check(cudaMemcpyAsync(scanned.data(), device.data(), length * sizeof(T), cudaMemcpyDeviceToHost, stream), "D2H");
-    cuda::check(cudaStreamSynchronize(stream), "sync");
-    // three separate scans, with the bases of the earlier rows added back
-    T base = 0;
-    for (u64 r = 0; r < 3; ++r)
-    {
-        std::vector<T> separate(totals.begin() + r * row, totals.begin() + (r + 1) * row);
-        std::inclusive_scan(separate.begin(), separate.end(), separate.begin());
-        for (u64 g = 0; g < row; ++g)
-            ASSERT_EQ(scanned[r * row + g] - base, separate[g]) << "row " << r << " graph " << g;
-        base = scanned[r * row + graphs];
-    }
-}
-
-TEST(DeviceEncoder, OneScanOfTheTotalsGivesTheOffsetsOfThreeScans)
-{
-    SKIP_WITHOUT_GPU();
-    const auto ctx = device_context();
-    cuda::Stream stream;
-    std::mt19937_64 rng(7);
-    for (const u64 graphs : {u64{1}, u64{5}, u64{999}, u64{70000}})
-    {
-        SCOPED_TRACE(graphs);
-        expect_one_scan_equals_three<u32>(ctx, stream, graphs, std::numeric_limits<u32>::max() / (3 * (graphs + 1)), rng);
-        expect_one_scan_equals_three<u64>(ctx, stream, graphs, u64{1} << 36, rng);
-    }
-}
-
-TEST(DeviceEncoder, TheTotalsScanIsTwoKernels)
-{
-    SKIP_WITHOUT_GPU();
-    const auto ctx = device_context();
-    cuda::Stream stream;
-    for (const u64 graphs : {u64{1}, u64{64}, u64{1000}, u64{100000}})
-        for (const bool wide : {false, true})
-        {
-            const u64 length = 3 * (graphs + 1);
-            cuda::DeviceBuffer totals(ctx, length * (wide ? 8 : 4), stream);
-            cuda::DeviceBuffer temp(ctx, std::max<u64>(cuda::totals_scan_temp_bytes(length, wide), 1), stream);
-            EXPECT_EQ(captured_kernels(stream, [&]
-                      { cuda::check(cuda::launch_totals_scan(totals.data(), length, wide, temp.data(), temp.size(), stream), "scan"); }),
-                      2u)
-                << graphs << (wide ? " wide" : " narrow");
-        }
-}
-
-TEST(DeviceEncoder, OverflowAndUnsupportedLayoutsAreRejectedBeforeAllocation)
+TEST(DeviceEncoder, OverflowIsRejectedBeforeAllocation)
 {
     const u64 huge = std::numeric_limits<u64>::max();
     EXPECT_THROW((void)cuda::output_layout({huge, 0, 0}, encoding::IndexType::I32, 1), std::overflow_error);
     EXPECT_THROW((void)cuda::output_layout({1, huge, 0}, encoding::IndexType::I64, 1), std::overflow_error);
     EXPECT_THROW((void)cuda::output_layout({1, 0, huge}, encoding::IndexType::I32, 1), std::overflow_error);
+    EXPECT_THROW((void)cuda::output_layout({1, 0, 0, huge}, encoding::IndexType::I32, 1, {true, true, true, true}), std::overflow_error);
     EXPECT_THROW((void)cuda::output_layout({2, 0, 0}, encoding::IndexType::I64, huge), std::overflow_error);
-    EXPECT_THROW((void)cuda::scratch_layout({}, {}, encoding::Layout::Relation), std::invalid_argument);
     EXPECT_THROW((void)cuda::scratch_layout({huge, 0, 0}, {}, encoding::Layout::Graph), std::overflow_error);
+    EXPECT_THROW((void)cuda::scratch_layout({huge, 0, 0}, {}, encoding::Layout::Relation, 3), std::overflow_error);
     EXPECT_THROW((void)cuda::scratch_layout({2, 0, 0}, {0, 0, 0, huge}, encoding::Layout::Graph), std::overflow_error);
+    EXPECT_THROW((void)cuda::scratch_layout({u64{1} << 40, 0, 0}, {}, encoding::Layout::Relation, u64{1} << 40), std::overflow_error);
 }
 
 std::shared_ptr<const encoding::FlatEncoder> blocks_encoder(encoding::IndexType index)
@@ -718,8 +686,8 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         GTEST_SKIP() << "no PDDL data";
     const cuda::DeviceEncoder device(device_context(), encoder);
     const cuda::GraphBounds& b = device.bounds();
-    // the bounds recomputed from the context's cells; an action cell has no tuple on the device (it has no expansion
-    // input), but its count still takes a cell
+    // the bounds recomputed from the context's cells: the device has no expansion input, so its graphs have no action cell
+    // (these options have no goal, so the lists of the instance's goal and of a row's goal are the same)
     const auto view = encoder->context().view();
     cuda::GraphBounds expected;
     for (u32 i = 0; i < encoder->table().size(); ++i)
@@ -727,36 +695,60 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         const auto inst = encoding::detail::instance_view(view, i);
         u64 tuples = 0, args = 0;
         bool nullary = false;
-        for (u32 c = 0; c < inst.num_cells; ++c)
+        for (u32 c = 0; c < inst.num_plain_cells; ++c)
         {
-            if (encoding::detail::is_action_op(inst.cells[c].op))
-                continue;
-            tuples += inst.cells[c].b - inst.cells[c].a;
-            args += u64{inst.cells[c].b - inst.cells[c].a} * inst.cells[c].arity;
-            nullary = nullary || inst.cells[c].logical_arity == 0;
+            tuples += inst.plain_cells[c].b - inst.plain_cells[c].a;
+            args += u64{inst.plain_cells[c].b - inst.plain_cells[c].a} * inst.plain_cells[c].arity;
+            nullary = nullary || inst.plain_cells[c].logical_arity == 0;
         }
         expected.entities = std::max<u64>(expected.entities, inst.num_objects + nullary);
         expected.tuples = std::max(expected.tuples, tuples);
         expected.args = std::max(expected.args, args);
-        expected.cells = std::max<u64>(expected.cells, inst.num_cells);
+        expected.cells = std::max<u64>(expected.cells, inst.num_plain_cells);
+        expected.words = std::max<u64>(expected.words, inst.words);
     }
     EXPECT_EQ(b.entities, expected.entities);
     EXPECT_EQ(b.tuples, expected.tuples);
     EXPECT_EQ(b.args, expected.args);
     EXPECT_EQ(b.cells, expected.cells);
+    EXPECT_EQ(b.words, expected.words);
+    EXPECT_EQ(b.targets, 0u);
 
     const u64 G = 1000, R = encoder->schema().num_relations();
     const cuda::BatchShape worst = device.worst_case(G);
-    EXPECT_EQ(worst, (cuda::BatchShape{G, G * b.entities, G * b.args}));
-    // scratch + output, with the output in four-byte indices
+    EXPECT_EQ(worst, (cuda::BatchShape{G, G * b.entities, G * b.args, 0}));
+    // scratch + output, with the output in four-byte indices and the sizes
     const u64 output = round_up(4 * G) + round_up(4 * G) + round_up(4 * (G + 1)) + round_up(G * b.entities) +
                        round_up(4 * G * b.entities) + round_up(4 * G * R) + 2 * round_up(4 * (G * R + 1)) +
-                       round_up(4 * G * b.args);
+                       round_up(4 * G * b.args) + 64;
     EXPECT_EQ(device.bytes_needed(worst), device.scratch_layout(worst).bytes + output);
     EXPECT_EQ(device.bytes_needed(G), device.bytes_needed(worst));
     // a smaller batch needs less, a batch with fewer entities and arguments needs less
     EXPECT_LT(device.bytes_needed(G / 2), device.bytes_needed(G));
     EXPECT_LT(device.bytes_needed(cuda::BatchShape{G, 1, 1}), device.bytes_needed(G));
+}
+
+TEST(DeviceEncoder, BoundsCoverGoalsTargetsAndVirtualNodes)
+{
+    SKIP_WITHOUT_GPU();
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const auto plain = encoding::FlatEncoder::create(table, test::encoder_options());
+    encoding::FlatOptions options = test::encoder_options();
+    options.goal_derivations = {encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied,
+                                encoding::GoalDerivation::Unsatisfied};
+    options.targets = {encoding::TargetSource::Goal};
+    options.predicate_virtual_nodes = true;
+    const auto rich = encoding::FlatEncoder::create(table, options);
+    const auto ctx = device_context();
+    const cuda::DeviceEncoder base(ctx, plain), full(ctx, rich);
+    const auto inst = encoding::detail::instance_view(rich->context().view(), 0);
+    // goal cells add tuples, goal targets add entities and targets, virtual nodes add entities
+    EXPECT_GT(full.bounds().tuples, base.bounds().tuples);
+    EXPECT_GT(full.bounds().targets, 0u);
+    EXPECT_GE(full.bounds().entities, base.bounds().entities + full.bounds().targets + inst.num_virtual);
+    EXPECT_GT(full.bounds().cells, base.bounds().cells);
+    EXPECT_EQ(full.worst_case(10).targets, 10 * full.bounds().targets);
+    EXPECT_GT(full.bytes_needed(u64{1000}), base.bytes_needed(u64{1000}));
 }
 
 TEST(DeviceEncoder, PinnedBytesNeededOfBlocks)
@@ -769,10 +761,10 @@ TEST(DeviceEncoder, PinnedBytesNeededOfBlocks)
     EXPECT_EQ(device.bounds().entities, 9u);
     EXPECT_EQ(device.bounds().tuples, 97u);
     EXPECT_EQ(device.bounds().args, 161u);
-    EXPECT_EQ(device.bounds().cells, 10u);  // 6 state cells and 4 action cells
+    EXPECT_EQ(device.bounds().cells, 6u);
     EXPECT_EQ(encoder->schema().num_relations(), 25u);
     const auto scratch = device.scratch_layout(device.worst_case(1000));
-    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1053312u);
+    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1041472u);
 }
 
 TEST(DeviceEncoder, ReserveRetainsScratchAndOutputsBelongToTheCaller)
@@ -864,7 +856,7 @@ TEST(DeviceEncoder, RefreshResizesScratchWhenTheCellBoundGrows)
     EXPECT_EQ(device.reserved_bytes(stream), device.scratch_layout(device.reserved(stream)).bytes);
 }
 
-TEST(DeviceEncoder, DerivedRefusalDoesNotDependOnTheInstancesSlots)
+TEST(DeviceEncoder, DerivedRelationsAreAcceptedWhateverTheInstancesSlots)
 {
     SKIP_WITHOUT_GPU();
     const auto domain = frontend::Domain::from_string(
@@ -875,15 +867,13 @@ TEST(DeviceEncoder, DerivedRefusalDoesNotDependOnTheInstancesSlots)
         "(define (problem empty) (:domain derived) (:init) (:goal (and)))"));
     const auto populated = Task::create(*domain->instantiate_string(
         "(define (problem populated) (:domain derived) (:objects a) (:init) (:goal (and)))"));
-    auto options = test::encoder_options();
+    const auto options = test::encoder_options();
     const auto encoder = encoding::FlatEncoder::create(rl::TaskTable::single(empty), options);
     EXPECT_FALSE(encoder->context().needs_derived(0));
-    EXPECT_THROW(cuda::DeviceEncoder(device_context(), encoder), std::invalid_argument);
-    options.include_derived = false;
-    const auto without = encoding::FlatEncoder::create(rl::TaskTable::single(empty), options);
     const auto grown = encoding::FlatEncoder::create(rl::TaskTable::create({empty, populated}), options);
-    cuda::DeviceEncoder device(device_context(), without);
+    cuda::DeviceEncoder device(device_context(), encoder);
     EXPECT_TRUE(device.refresh(grown));
+    EXPECT_TRUE(grown->context().needs_derived(1));
 }
 
 TEST(DeviceEncoder, OversizedReservationsLeaveExistingScratchIntact)
@@ -1096,50 +1086,53 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
     const auto ctx = device_context();
     EXPECT_THROW(cuda::DeviceEncoder(nullptr, blocks_encoder()), std::invalid_argument);
     EXPECT_THROW(cuda::DeviceEncoder(ctx, nullptr), std::invalid_argument);
-    const auto table = rl::TaskTable::single(test::pddl_task("features", "p01"));
-    // derived relations of a table with derived atoms
-    try
-    {
-        cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, test::encoder_options()));
-        ADD_FAILURE() << "derived relations were accepted";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode derived relations"), std::string::npos)
-            << e.what();
-    }
-    // goal relations, which the default options have
-    try
-    {
-        const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-        cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, encoding::FlatOptions{}));
-        ADD_FAILURE() << "goal relations were accepted";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_NE(std::string(e.what()).find("the device does not encode goal relations"), std::string::npos)
-            << e.what();
-    }
-    // history relations
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    // action targets
     encoding::FlatOptions options = test::encoder_options();
-    options.include_derived = false;
+    options.targets = {encoding::TargetSource::Action};
+    try
     {
-        encoding::FlatOptions with_history = options;
-        with_history.history = true;
-        try
-        {
-            cuda::DeviceEncoder refused(ctx, encoding::FlatEncoder::create(table, with_history));
-            ADD_FAILURE() << "history relations were accepted";
-        }
-        catch (const std::invalid_argument& e)
-        {
-            EXPECT_NE(std::string(e.what()).find("the device does not encode history relations"), std::string::npos)
-                << e.what();
-        }
+        cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, options));
+        ADD_FAILURE() << "action targets were accepted";
     }
-    // without them the same table is fine
-    const cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, options));
-    EXPECT_EQ(device.context().num_instances(), 1u);
-    EXPECT_TRUE(device.context().download() == host_bytes(device.encoder()->context()));
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode action targets"),
+                  std::string::npos)
+            << e.what();
+    }
+    // subgoal and history relations
+    {
+        encoding::FlatOptions with_subgoals;
+        with_subgoals.max_goal_level = 1;
+        encoding::FlatOptions with_history;
+        with_history.history = true;
+        for (const auto& [refused_options, what] :
+             {std::pair{with_subgoals, "subgoal relations"}, std::pair{with_history, "history relations"}})
+            try
+            {
+                cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, refused_options));
+                ADD_FAILURE() << what << " were accepted";
+            }
+            catch (const std::invalid_argument& e)
+            {
+                EXPECT_NE(std::string(e.what()).find(std::string("the device does not encode ") + what),
+                          std::string::npos)
+                    << e.what();
+            }
+    }
+    // everything else is encoded: goal relations, goal targets, virtual nodes, derived relations, both layouts
+    const auto derived_table = rl::TaskTable::single(test::pddl_task("features", "p01"));
+    for (const auto& t : {table, derived_table})
+        for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+        {
+            encoding::FlatOptions accepted;
+            accepted.layout = layout;
+            accepted.targets = {encoding::TargetSource::Goal};
+            accepted.predicate_virtual_nodes = true;
+            const cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(t, accepted));
+            EXPECT_EQ(device.context().num_instances(), 1u);
+            EXPECT_TRUE(device.context().download() == host_bytes(device.encoder()->context()));
+        }
 }
 }  // namespace

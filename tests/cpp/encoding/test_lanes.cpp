@@ -148,19 +148,38 @@ struct Arrays
     std::vector<u8> role;
 };
 
+/// The positions of a relation-major batch from its segment arrays, as a fill with lanes reads them.
+template<class I>
+struct SegmentPositions
+{
+    const GraphOut<I>& out;
+
+    u64 args(u64 segment, u32 /*relation*/) const { return static_cast<u64>(out.relation_arg_offsets[segment]); }
+    u32 count(u64 segment) const
+    {
+        return static_cast<u32>(out.relation_offsets[segment + 1] - out.relation_offsets[segment]);
+    }
+};
+
+/// Encodes the rows with the per-graph functions; `group` takes the forms for the lanes of a group, with a group of one
+/// lane.
 template<class I>
 Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<u64>>>& rows,
-           std::vector<GraphTotals>* totals_out, bool relation_major = false)
+           std::vector<GraphTotals>* totals_out, bool relation_major = false, bool group = false)
 {
     const ContextView view = fixture.view();
     const u64 G = rows.size();
     std::vector<GraphTotals> totals;
+    std::vector<std::vector<u32>> cell_counts(G);
     u64 entities = 0, tuples = 0, args = 0;
     std::vector<u64> entity_base(G), tuple_base(G), arg_base(G);
     for (u64 g = 0; g < G; ++g)
     {
         const InstanceView v = instance_view(view, rows[g].first);
-        totals.push_back(count_graph(v, {rows[g].second.data(), nullptr}, nullptr));
+        const RowInput in{rows[g].second.data(), nullptr};
+        cell_counts[g].resize(v.num_cells);
+        totals.push_back(group ? count_graph_group(SoloGroup{}, v, in, cell_counts[g].data())
+                               : count_graph(v, in, cell_counts[g].data()));
         entity_base[g] = entities;
         tuple_base[g] = tuples;
         arg_base[g] = args;
@@ -176,13 +195,10 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
     if (relation_major)
     {
         // the scan: the first position of every relation, then the graphs in order
-        std::vector<std::vector<u32>> cell_counts(G);
         std::vector<u64> relation_tuples(Fixture::R, 0), run_tuples(Fixture::R, 0), run_args(Fixture::R, 0);
         for (u64 g = 0; g < G; ++g)
         {
             const InstanceView v = instance_view(view, rows[g].first);
-            cell_counts[g].resize(v.num_cells);
-            count_graph(v, {rows[g].second.data(), nullptr}, cell_counts[g].data());
             for (u32 i = 0; i < v.num_cells; ++i)
                 relation_tuples[v.cells[i].relation] += cell_counts[g][i];
         }
@@ -208,14 +224,30 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
                 run_args[r] += by_relation[r] * (r == 0 ? 2 : 1);
             }
         }
+        offsets[G * Fixture::R] = static_cast<I>(tuples);
+        arg_offsets[G * Fixture::R] = static_cast<I>(args);
         for (u64 g = 0; g < G; ++g)
-            fill_graph_relation_major<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g,
-                                         entity_base[g], totals[g], out);
+        {
+            const InstanceView v = instance_view(view, rows[g].first);
+            const RowInput in{rows[g].second.data(), nullptr};
+            if (group)
+                fill_graph_positioned_group<I>(SoloGroup{}, v, in, g, entity_base[g], totals[g], out,
+                                               SegmentPositions<I>{out}, 0, nullptr, nullptr);
+            else
+                fill_graph_relation_major<I>(v, in, g, entity_base[g], totals[g], out);
+        }
     }
     else
         for (u64 g = 0; g < G; ++g)
-            fill_graph<I>(instance_view(view, rows[g].first), {rows[g].second.data(), nullptr}, g, tuple_base[g],
-                          arg_base[g], entity_base[g], totals[g], out);
+        {
+            const InstanceView v = instance_view(view, rows[g].first);
+            const RowInput in{rows[g].second.data(), nullptr};
+            if (group)
+                fill_graph_group<I>(SoloGroup{}, v, in, g, tuple_base[g], arg_base[g], entity_base[g], totals[g], out,
+                                    0, nullptr, cell_counts[g].data());
+            else
+                fill_graph<I>(v, in, g, tuple_base[g], arg_base[g], entity_base[g], totals[g], out);
+        }
     offsets[G * Fixture::R] = static_cast<I>(tuples);
     arg_offsets[G * Fixture::R] = static_cast<I>(args);
     if (totals_out)
@@ -392,6 +424,37 @@ TEST(EncodingLanes, RelationMajorIsThePermutationOfGraphMajor)
             }
         EXPECT_EQ(relation_major.offsets.back(), tuples);
         EXPECT_EQ(relation_major.arg_offsets.back(), args);
+    }
+}
+
+TEST(EncodingLanes, TheFormsForALaneGroupOfOneLaneEqualThePlainForms)
+{
+    const Fixture fixture;
+    std::mt19937_64 rng(21);
+    for (int round = 0; round < 40; ++round)
+    {
+        const auto rows = random_rows(rng, 1 + static_cast<int>(rng() % 7));
+        for (const bool relation_major : {false, true})
+        {
+            std::vector<GraphTotals> plain_totals, group_totals;
+            const Arrays plain = run<i32>(fixture, rows, &plain_totals, relation_major, false);
+            const Arrays grouped = run<i32>(fixture, rows, &group_totals, relation_major, true);
+            ASSERT_EQ(plain_totals.size(), group_totals.size());
+            for (u64 g = 0; g < plain_totals.size(); ++g)
+            {
+                EXPECT_EQ(plain_totals[g].tuples, group_totals[g].tuples);
+                EXPECT_EQ(plain_totals[g].args, group_totals[g].args);
+                EXPECT_EQ(plain_totals[g].entities, group_totals[g].entities);
+                EXPECT_EQ(plain_totals[g].flags, group_totals[g].flags);
+            }
+            EXPECT_EQ(plain.num_objects, grouped.num_objects);
+            EXPECT_EQ(plain.counts, grouped.counts);
+            EXPECT_EQ(plain.offsets, grouped.offsets);
+            EXPECT_EQ(plain.arg_offsets, grouped.arg_offsets);
+            EXPECT_EQ(plain.args, grouped.args);
+            EXPECT_EQ(plain.ref, grouped.ref);
+            EXPECT_EQ(plain.role, grouped.role);
+        }
     }
 }
 

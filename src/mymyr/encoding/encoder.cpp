@@ -145,9 +145,9 @@ struct Pass
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
 
-    [[nodiscard]] const u64* derived_of(u64 g, u32 instance) const noexcept
+    [[nodiscard]] const u64* derived_of(u64 g, const detail::InstanceView& v) const noexcept
     {
-        if (!context.needs_derived(instance, in.goal_pos != nullptr, in.goal_derived_pos != nullptr,
+        if (!detail::reads_derived(v, in.goal_pos != nullptr, in.goal_derived_pos != nullptr,
                                    in.subgoals.layers != 0 && in.subgoals.derived_pos != nullptr))
             return nullptr;
         return in.derived ? in.derived + g * s.derived_stride : s.derived.get() + g * s.derived_stride;
@@ -227,10 +227,10 @@ struct Pass
     /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff it
     /// has any).
     template<bool Layered>
-    [[nodiscard]] detail::RowInput row_input(u64 g, u32 instance, u32* starts, u32* cursors,
+    [[nodiscard]] detail::RowInput row_input(u64 g, const detail::InstanceView& v, u32* starts, u32* cursors,
                                              detail::RowLayers& layers) const noexcept
     {
-        detail::RowInput row{in.states.row(g), derived_of(g, instance)};
+        detail::RowInput row{in.states.row(g), derived_of(g, v)};
         if constexpr (Layered)
             attach_layers(g, layers, row);
         if (in.goal_pos)
@@ -346,7 +346,7 @@ void count_range(const Pass& p, u32 t)
             continue;
         detail::RowLayers layers;
         const detail::RowInput input = p.row_input<Layered>(
-            g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
+            g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
             m.action_cursors.data(), layers);
         const u64* row = input.atoms;
         const u64* derived = input.derived;
@@ -436,7 +436,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const detail::GraphTotals& totals = m.totals[g - lo];
         detail::RowLayers layers;
         const detail::RowInput row = p.row_input<Layered>(
-            g, instance, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
+            g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
             m.action_cursors.data(), layers);
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
