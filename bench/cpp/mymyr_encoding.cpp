@@ -16,6 +16,10 @@
 // the line. subgoals is the number of subgoal layers per row (0 to 3, needs goals on or targets) and history the steps
 // of each row's history (the rows have 1 + i % history steps, so they differ); both give every row random literals
 // drawn from the states of the walk, and with goals = targets their entities are targets too.
+// horizon = off|full|delta|action turns the rows into root states of horizons (the options in argv[12], argv[13] and
+// argv[14]: depth = 1, max_children = 0 for all, root = include|encode_only|exclude): every graph is a root with the nodes
+// within depth actions, the line reports the time per graph and per node (the rows of the nodes make the batch), and the
+// subgoal and history options do not apply.
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -42,6 +46,28 @@ long minor_faults()
     rusage usage{};
     getrusage(RUSAGE_SELF, &usage);
     return usage.ru_minflt;
+}
+
+/// An FNV-1a hash over the arrays of a batch (the same batch always has the same hash, whatever the machine).
+std::string batch_hash(const rl::ArrayBundle& bundle)
+{
+    u64 hash = 14695981039346656037ull;
+    for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref", "relation_counts",
+                             "relation_offsets", "relation_arg_offsets", "relation_args", "goal_complete",
+                             "target_offsets", "target_entity", "target_group", "history_offsets", "history_entity",
+                             "history_dt"})
+    {
+        const rl::ArrayInfo* info = bundle.find(name);
+        if (!info)
+            continue;
+        const auto* bytes = static_cast<const unsigned char*>(bundle.data(*info));
+        const u64 size = info->elements() * rl::dtype_bytes(info->dtype);
+        for (u64 i = 0; i < size; ++i)
+            hash = (hash ^ bytes[i]) * 1099511628211ull;
+    }
+    char text[24];
+    std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(hash));
+    return text;
 }
 
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -81,6 +107,53 @@ std::shared_ptr<Expanded> expand_rows(const rl::TaskTable& table, const u64* row
         capacity = std::max(capacity * 2, e->x.total);
         words = std::max(words, e->x.words_needed);
     }
+}
+
+/// The nodes and edges of the horizons of `roots` (a root per graph), `depth` levels deep.
+struct Horizon
+{
+    std::vector<u64> nodes;
+    std::vector<i32> node_offsets{0}, edge_offsets{0}, edge_src, edge_dst, edge_schema, edge_binding;
+    u64 num_nodes(u32 words) const { return nodes.size() / words; }
+};
+
+Horizon build_horizon(const rl::TaskTable& table, const std::vector<u64>& roots, u64 count, u32 words, u32 depth,
+                      u64 max_children)
+{
+    Horizon h;
+    const u32 width = table.label_width();
+    for (u64 g = 0; g < count; ++g)
+    {
+        const u64 first = h.num_nodes(words);
+        h.nodes.insert(h.nodes.end(), roots.begin() + static_cast<std::ptrdiff_t>(g * words),
+                       roots.begin() + static_cast<std::ptrdiff_t>((g + 1) * words));
+        u64 begin = first, end = first + 1;
+        for (u32 level = 0; level < depth; ++level)
+        {
+            for (u64 node = begin; node < end; ++node)
+            {
+                const std::vector<u64> state(h.nodes.begin() + static_cast<std::ptrdiff_t>(node * words),
+                                             h.nodes.begin() + static_cast<std::ptrdiff_t>((node + 1) * words));
+                const auto e = expand_rows(table, state.data(), 1, words);
+                const u64 children = max_children ? std::min<u64>(e->x.total, max_children) : e->x.total;
+                for (u64 c = 0; c < children; ++c)
+                {
+                    h.edge_src.push_back(static_cast<i32>(node - first));
+                    h.edge_dst.push_back(static_cast<i32>(h.num_nodes(words) - first));
+                    h.edge_schema.push_back(e->schema[c]);
+                    h.edge_binding.insert(h.edge_binding.end(), e->binding.begin() + static_cast<std::ptrdiff_t>(c * width),
+                                          e->binding.begin() + static_cast<std::ptrdiff_t>((c + 1) * width));
+                    h.nodes.insert(h.nodes.end(), e->succ.begin() + static_cast<std::ptrdiff_t>(c * words),
+                                   e->succ.begin() + static_cast<std::ptrdiff_t>((c + 1) * words));
+                }
+            }
+            begin = end;
+            end = h.num_nodes(words);
+        }
+        h.node_offsets.push_back(static_cast<i32>(h.num_nodes(words)));
+        h.edge_offsets.push_back(static_cast<i32>(h.edge_src.size()));
+    }
+    return h;
 }
 }  // namespace
 
@@ -165,6 +238,64 @@ int main(int argc, char** argv)
         if (!parsed)
             throw std::invalid_argument("layout must be graph or relation");
         options.layout = *parsed;
+        const std::string horizon = argc > 12 ? argv[12] : "off";
+        if (horizon != "off")
+        {
+            const auto mode = encoding::parse_horizon_mode(horizon);
+            if (!mode || *mode == encoding::HorizonMode::None)
+                throw std::invalid_argument("horizon must be off, full, delta or action");
+            options.horizon.mode = *mode;
+            if (*mode == encoding::HorizonMode::Delta && goals != "off")
+                options.goal_derivations = {encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied,
+                                            encoding::GoalDerivation::AddedSatisfied,
+                                            encoding::GoalDerivation::AddedUnsatisfied};
+            const auto root = encoding::parse_root_policy(argc > 14 ? argv[14] : "include");
+            if (!root)
+                throw std::invalid_argument("root must be include, encode_only or exclude");
+            options.horizon.root = *root;
+            options.targets = {};
+            options.max_goal_level = 0;
+            options.history = false;
+            options.predicate_virtual_nodes = false;
+            const u32 depth = argc > 13 ? static_cast<u32>(std::strtoul(argv[13], nullptr, 10)) : 1;
+            const u64 max_children = argc > 15 ? std::strtoull(argv[15], nullptr, 10) : 0;
+            const auto encoder = encoding::FlatEncoder::create(table, options);
+            const Horizon h = build_horizon(*table, rows, n, words, depth, max_children);
+            encoding::EncodeInput in;
+            in.horizon = {{h.nodes.data(), h.num_nodes(words), words, 0, 0},
+                          n,
+                          h.node_offsets.data(),
+                          h.edge_offsets.data(),
+                          h.edge_src.data(),
+                          h.edge_dst.data(),
+                          h.edge_schema.data(),
+                          h.edge_binding.data(),
+                          table->label_width()};
+            ThreadPool pool(threads);
+            encoding::EncodeScratch scratch;
+            std::shared_ptr<const rl::ArrayBundle> bundle = encoder->encode(in, pool, scratch);
+            double best = 1e300;
+            const long faults0 = minor_faults();
+            for (int rep = 0; rep < 5; ++rep)
+            {
+                const double t0 = now_s();
+                bundle = encoder->encode(in, pool, scratch);
+                best = std::min(best, now_s() - t0);
+            }
+            const long faults_per_call = (minor_faults() - faults0) / 5;
+            const u64 nodes = h.num_nodes(words);
+            const u64 cells = n * encoder->schema().num_relations();
+            const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
+            std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"horizon\": \"%s\", \"root\": \"%s\", "
+                        "\"depth\": %u, \"nodes\": %llu, \"edges\": %zu, \"threads\": %u, \"us_per_graph\": %.3f, "
+                        "\"us_per_node\": %.3f, \"faults_per_call\": %ld, \"args\": %d, \"hash\": \"%s\"}\n",
+                        std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
+                        layout.c_str(), horizon.c_str(), std::string(encoding::to_string(options.horizon.root)).c_str(),
+                        depth, static_cast<unsigned long long>(nodes), h.edge_src.size(), threads,
+                        best * 1e6 / static_cast<double>(n), best * 1e6 / static_cast<double>(nodes), faults_per_call,
+                        arg_offsets[cells], batch_hash(*bundle).c_str());
+            return 0;
+        }
         const auto encoder = encoding::FlatEncoder::create(table, options);
         encoding::EncodeInput in;
         in.states = {rows.data(), n, words, 0, 0};
@@ -326,13 +457,13 @@ int main(int argc, char** argv)
                     "\"actions\": \"%s\", \"subgoals\": %u, \"history\": %u, \"threads\": %u, "
                     "\"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
+                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d, \"hash\": \"%s\"}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), goals.c_str(), actions.c_str(), levels, steps, threads,
                     best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
                     best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call, offsets[cells],
-                    arg_offsets[cells]);
+                    arg_offsets[cells], batch_hash(*bundle).c_str());
     }
     catch (const std::exception& error)
     {
