@@ -10,9 +10,9 @@ The floors are measured with the full test data. The tests that need torch, JAX,
 without them, so the floor depends on what the job installs:
   --runtimes none  no torch, JAX or gymnasium (pytest_min_passed_plain): the Linux 3.15t job, the macOS job, the wheel tests;
   --runtimes rl    ci/rl-requirements.txt installed (pytest_min_passed_rl): the Linux 3.14t job.
-Five tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
-with RLIMIT_AS and read /proc (4 + 1 cases). The floor on macOS is lower by that many; the platform defaults to
-the one running the check, as in check_ctest_log.py.
+Seven tests run only on Linux (pytest_linux_only_tests): the ones in test_threads.py that limit the address space
+with RLIMIT_AS and read /proc (4 + 1 cases), and two in test_block_cache.py that read the resident set from /proc. The
+floor on macOS is lower by that many; the platform defaults to the one running the check, as in check_ctest_log.py.
 """
 
 import argparse

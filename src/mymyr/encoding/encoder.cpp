@@ -3,7 +3,6 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/task/workspace.hpp"
 
-#include <cassert>
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -678,72 +677,41 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return encode(in, pool, scratch);
 }
 
-namespace
-{
-/// The arrays of a bundle that allocate() built, in the order it adds them: task_ids, num_objects, entity_offsets,
-/// [entity_role, entity_ref], [relation_counts], relation_offsets, relation_arg_offsets, relation_args,
-/// [goal_complete], [target_offsets, target_entity, target_group].
-FlatBuffers buffers_of(rl::ArrayBundle& bundle, bool entity_arrays, bool counts, bool goal_complete, bool targets)
-{
-    FlatBuffers out;
-    const auto& arrays = bundle.arrays();
-    usize next = 0;
-    auto take = [&](const char* name)
-    {
-        assert(arrays[next].name == name);
-        return bundle.mutable_data(arrays[next++]);
-    };
-    out.task_ids = static_cast<i32*>(take("task_ids"));
-    out.num_objects = take("num_objects");
-    out.entity_offsets = take("entity_offsets");
-    if (entity_arrays)
-    {
-        out.entity_role = static_cast<u8*>(take("entity_role"));
-        out.entity_ref = take("entity_ref");
-    }
-    if (counts)
-        out.relation_counts = take("relation_counts");
-    out.relation_offsets = take("relation_offsets");
-    out.relation_arg_offsets = take("relation_arg_offsets");
-    out.relation_args = take("relation_args");
-    if (goal_complete)
-        out.goal_complete = static_cast<u8*>(take("goal_complete"));
-    if (targets)
-    {
-        out.target_offsets = take("target_offsets");
-        out.target_entity = take("target_entity");
-        out.target_group = static_cast<u8*>(take("target_group"));
-    }
-    return out;
-}
-}  // namespace
-
-rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets) const
+FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets) const
 {
     const IndexType index = m_schema->options().index;
     const u64 R = m_schema->num_relations();
     const rl::DType itype = index == IndexType::I64 ? rl::DType::I64 : rl::DType::I32;
+    constexpr usize absent = std::numeric_limits<usize>::max();
     rl::ArrayBundle::Builder builder;
-    builder.add_uninitialized("task_ids", rl::DType::I32, shape1(graphs));
-    builder.add_uninitialized("num_objects", itype, shape1(graphs));
-    builder.add_uninitialized("entity_offsets", itype, shape1(graphs + 1));
+    usize count = 0;
+    auto reserve = [&](const char* name, rl::DType dtype, const rl::ArrayShape& shape)
+    {
+        builder.add_uninitialized(name, dtype, shape);
+        return count++;
+    };
+    const usize task_ids = reserve("task_ids", rl::DType::I32, shape1(graphs));
+    const usize num_objects = reserve("num_objects", itype, shape1(graphs));
+    const usize entity_offsets = reserve("entity_offsets", itype, shape1(graphs + 1));
+    usize entity_role = absent, entity_ref = absent, relation_counts = absent, goal_complete = absent,
+          target_offsets = absent, target_entity = absent, target_group = absent;
     if (!m_schema->implicit_entity_arrays())
     {
-        builder.add_uninitialized("entity_role", rl::DType::U8, shape1(entities));
-        builder.add_uninitialized("entity_ref", itype, shape1(entities));
+        entity_role = reserve("entity_role", rl::DType::U8, shape1(entities));
+        entity_ref = reserve("entity_ref", itype, shape1(entities));
     }
     if (m_schema->emits_counts())
-        builder.add_uninitialized("relation_counts", itype, shape2(graphs, R));
-    builder.add_uninitialized("relation_offsets", itype, shape1(graphs * R + 1));
-    builder.add_uninitialized("relation_arg_offsets", itype, shape1(graphs * R + 1));
-    builder.add_uninitialized("relation_args", itype, shape1(args));
+        relation_counts = reserve("relation_counts", itype, shape2(graphs, R));
+    const usize relation_offsets = reserve("relation_offsets", itype, shape1(graphs * R + 1));
+    const usize relation_arg_offsets = reserve("relation_arg_offsets", itype, shape1(graphs * R + 1));
+    const usize relation_args = reserve("relation_args", itype, shape1(args));
     if (m_schema->has_goal_complete())
-        builder.add_uninitialized("goal_complete", rl::DType::U8, shape1(graphs));
+        goal_complete = reserve("goal_complete", rl::DType::U8, shape1(graphs));
     if (m_schema->has_targets())
     {
-        builder.add_uninitialized("target_offsets", itype, shape1(graphs + 1));
-        builder.add_uninitialized("target_entity", itype, shape1(targets));
-        builder.add_uninitialized("target_group", rl::DType::U8, shape1(targets));
+        target_offsets = reserve("target_offsets", itype, shape1(graphs + 1));
+        target_entity = reserve("target_entity", itype, shape1(targets));
+        target_group = reserve("target_group", rl::DType::U8, shape1(targets));
     }
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
@@ -752,7 +720,24 @@ rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 ta
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
     builder.scalar("statics", 0);
-    return builder.build();
+    Allocation allocation{std::make_shared<rl::ArrayBundle>(builder.build()), {}};
+    rl::ArrayBundle& bundle = *allocation.bundle;
+    auto at = [&](usize i) -> void* { return i == absent ? nullptr : bundle.mutable_data(bundle.arrays()[i]); };
+    FlatBuffers& out = allocation.buffers;
+    out.task_ids = static_cast<i32*>(at(task_ids));
+    out.num_objects = at(num_objects);
+    out.entity_offsets = at(entity_offsets);
+    out.entity_role = static_cast<u8*>(at(entity_role));
+    out.entity_ref = at(entity_ref);
+    out.relation_counts = at(relation_counts);
+    out.relation_offsets = at(relation_offsets);
+    out.relation_arg_offsets = at(relation_arg_offsets);
+    out.relation_args = at(relation_args);
+    out.goal_complete = static_cast<u8*>(at(goal_complete));
+    out.target_offsets = at(target_offsets);
+    out.target_entity = at(target_entity);
+    out.target_group = static_cast<u8*>(at(target_group));
+    return allocation;
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in, ThreadPool& pool,
@@ -771,12 +756,9 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(graphs * R + 1, index, "relation cells");
         detail::check_index_range(graphs + 1, index, "graphs");
     }
-    auto bundle = std::make_shared<rl::ArrayBundle>(allocate(in.states.rows, sizes.entities, sizes.args, sizes.targets));
-    fill(in, sizes,
-         buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(), m_schema->has_goal_complete(),
-                    m_schema->has_targets()),
-         pool, scratch);
-    return bundle;
+    Allocation allocation = allocate(in.states.rows, sizes.entities, sizes.args, sizes.targets);
+    fill(in, sizes, allocation.buffers, pool, scratch);
+    return std::move(allocation.bundle);
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in,
@@ -789,10 +771,9 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = in.states.rows;
     const bool fits = !sizes.overflowed();
-    auto bundle =
-        std::make_shared<rl::ArrayBundle>(allocate(graphs, capacities.entities, capacities.args, capacities.targets));
-    const FlatBuffers out = buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(),
-                                       m_schema->has_goal_complete(), m_schema->has_targets());
+    Allocation allocation = allocate(graphs, capacities.entities, capacities.args, capacities.targets);
+    const FlatBuffers out = allocation.buffers;
+    const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
     // the entries a batch does not use are zero, and an overflowing batch is all zero
     auto zero = [](void* data, u64 from, u64 to, usize width)

@@ -29,9 +29,11 @@ from mymyr._core import (
     Task,
     TaskHandle,
     __version__,
+    block_cache_bytes,
     build_info,
     free_threaded_build,
     hash_rows,
+    trim_block_cache,
     write_pddl,
 )
 from mymyr._core._formalism import (
@@ -63,6 +65,7 @@ __all__ = [
     "TaskHandle",
     "Variable",
     "__version__",
+    "block_cache_bytes",
     "build_info",
     "datasets",
     "encoding",
@@ -73,6 +76,7 @@ __all__ = [
     "hash_rows",
     "rl",
     "search",
+    "trim_block_cache",
     "write_pddl",
 ]
 

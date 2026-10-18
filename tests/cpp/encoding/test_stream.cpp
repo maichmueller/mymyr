@@ -370,6 +370,7 @@ TEST(FlatStream, AFlushThatThrowsKeepsTheRows)
 
 TEST(FlatStream, TheCapacityFormDropsTheRowsOnlyWhenTheBatchFits)
 {
+    test::dirty_recycled_blocks();
     const Pool pool = make_pool(blocks_table(), 30, 4);
     const Flavor flavor{true, true, true, Layout::Graph};
     const auto encoder = FlatEncoder::create(pool.table, options_of(flavor));
