@@ -65,7 +65,7 @@ struct alignas(k_cache_line) Member
     // pass one
     std::vector<detail::GraphTotals> totals;  // the slice's graphs
     std::vector<u32> cell_counts;             // the slice's cells, graph after graph, in cell order (relation-major or
-                                              // with predicate virtual nodes)
+                                              // with predicate virtual nodes or layers)
     std::vector<u32> action_starts;           // [slice graphs, starts_stride] the run starts of each graph's rows
     std::vector<u32> action_cursors;          // [num_schemas] the cursors of the merge of one action relation's runs
     std::vector<u64> tally;                   // [R] tuples per relation in the slice (relation-major)
@@ -75,6 +75,7 @@ struct alignas(k_cache_line) Member
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none;
     u64 narrow_history = k_none, bad_history_bits = k_none, bad_history_count = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
+    std::vector<u64> effective;        // the subgoal levels of the row being counted or filled (effective_layers)
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice
@@ -223,6 +224,18 @@ struct Pass
         row.layers = &layers;
     }
 
+    /// Computes the subgoal levels of a row that has subgoal layers, into `storage`; the state words, and so the
+    /// derived words of the row, are final. Out of line, like attach_layers.
+    [[gnu::noinline]] void bind_levels(const detail::InstanceView& v, const detail::RowInput& row,
+                                       detail::RowLayers& layers, std::vector<u64>& storage) const noexcept
+    {
+        if (layers.subgoals.layers == 0)
+            return;
+        storage.resize(detail::effective_layer_words(v, layers.subgoals));
+        layers.levels = detail::effective_layers(v, detail::goal_words(v, row), layers.subgoals, row.atoms, row.derived,
+                                                 storage.data());
+    }
+
     /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff it
     /// has any).
     template<bool Layered>
@@ -230,8 +243,6 @@ struct Pass
                                              detail::RowLayers& layers) const noexcept
     {
         detail::RowInput row{in.states.row(g), derived_of(g, v)};
-        if constexpr (Layered)
-            attach_layers(g, layers, row);
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -255,6 +266,8 @@ struct Pass
                            starts,
                            cursors};
         }
+        if constexpr (Layered)
+            attach_layers(g, layers, row);
         return row;
     }
 
@@ -307,7 +320,7 @@ void count_range(const Pass& p, u32 t)
     m.narrow_subgoals = m.bad_subgoal_bits = m.narrow_history = m.bad_history_bits = m.bad_history_count = k_none;
     m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
-    const bool keep_counts = p.relation_major || p.view.num_virtual != 0;
+    const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.layered;
     if (p.starts_stride)
     {
         m.action_starts.resize((hi - lo) * p.starts_stride);
@@ -364,6 +377,8 @@ void count_range(const Pass& p, u32 t)
                 std::copy_n(engine.derived(), bits::words_for(task.atoms().derived_slots()), dst);
             }
         }
+        if (Layered && input.layers)
+            p.bind_levels(v, input, layers, m.effective);
         const detail::CellList cells = detail::cell_list<Layered>(v, input);
         u32* cell_counts = nullptr;
         if (keep_counts)
@@ -437,6 +452,8 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const detail::RowInput row = p.row_input<Layered>(
             g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
             m.action_cursors.data(), layers);
+        if (Layered && row.layers)
+            p.bind_levels(v, row, layers, m.effective);
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         if (p.relation_major)

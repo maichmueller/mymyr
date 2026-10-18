@@ -366,11 +366,21 @@ struct HistoryRows
     u32 first;
 };
 
-/// The subgoal layers and history steps of a row; a row without either has no RowLayers.
+/// The masks of the subgoal levels of a row (effective_layers), at op - k_goal_op_base for the op of a goal cell of the
+/// level: the literals its cell takes (the plain mask of the positive or negative literals over the fluent or derived
+/// slots of the level, or the part of it that the state satisfies or does not), null where there is none.
+struct LevelPlanes
+{
+    const u64* plane[64];
+};
+
+/// The subgoal layers and history steps of a row; a row without either has no RowLayers. `levels` are the subgoal
+/// levels (effective_layers); `subgoals` are the layers as given, which only the checks of the row read.
 struct RowLayers
 {
     MaskLayers subgoals;
     HistoryRows history;
+    LevelPlanes levels;
 };
 
 /// The words a graph's tuples come from. `derived` may be null for an instance without derived cells. `goal_pos` and
@@ -483,8 +493,14 @@ MYMYR_HD u32 popcount64(u64 x)
 {
 #if defined(__CUDA_ARCH__)
     return static_cast<u32>(__popcll(x));
-#else
+#elif defined(__POPCNT__)
     return static_cast<u32>(__builtin_popcountll(x));
+#else
+    // without a popcount instruction the builtin is a library call; the bit-parallel sum is inline
+    x -= (x >> 1) & 0x5555555555555555ull;
+    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0full;
+    return static_cast<u32>((x * 0x0101010101010101ull) >> 56);
 #endif
 }
 
@@ -855,81 +871,198 @@ MYMYR_HD u32 action_cell_count(const InstanceView& v, const Cell& c, const Actio
     return n;
 }
 
-/// Word `w` of the goal tuples a goal cell takes from its slot range: the cell's mask word (positive or negative literals,
-/// fluent or derived), for the satisfied and unsatisfied variants masked by the state word: a positive literal holds iff
-/// its bit is set, a negative one iff it is clear. A cell of a subgoal level (1 to 3) takes the mask of the row's layer
-/// of that level (none: no tuples), minus the literals of the same sign at the levels below it, the goal's included.
-template<bool Layered = true>
-MYMYR_HD u64 goal_word(const Cell& c, const GoalWords& g, const RowInput& in, u32 w)
+/// The 64-bit words `effective_layers` needs for the subgoal layers `raw` of an instance.
+MYMYR_HD u64 effective_layer_words(const InstanceView& v, const MaskLayers& raw)
 {
-    const bool derived = goal_op_derived(c.op);
-    const bool negative = goal_op_negative(c.op);
-    const GoalMode mode = goal_op_mode(c.op);
-    const u32 level = goal_op_level(c.op);
-    const u64* mask = derived ? (negative ? g.derived_neg : g.derived_pos) : (negative ? g.neg : g.pos);
-    u64 m;
-    if (!Layered || level == 0)
+    return u64{raw.layers} * 3u * (2u * v.words + (raw.derived_pos ? 2u * v.derived_words : 0u));
+}
+
+/// The levels of a row's subgoal layers: level l (layer l - 1) holds the literals of that layer that neither the goal
+/// nor a layer below it has with the same sign, over the instance's words (derived words). The goal is the row's own or
+/// the instance's (goal_words). For each level and sign, the plain mask, the part of it whose literals the state
+/// (`atoms`, `derived`: null is all clear) satisfies and the part it does not, written to `storage`
+/// (effective_layer_words). A mask without a literal, and one the layers lack, is null.
+MYMYR_HD LevelPlanes effective_layers(const InstanceView& v, const GoalWords& goal, const MaskLayers& raw,
+                                      const u64* atoms, const u64* derived, u64* storage)
+{
+    LevelPlanes out{};
+    const auto fill = [&](bool derived_slots, const u64* layer_pos, const u64* layer_neg, u32 layer_words, u32 words,
+                          const u64* goal_pos, const u64* goal_neg, const u64* state)
     {
-        if (!mask)
-            return 0;
-        m = range_word(mask, w, c.a, c.b);
-    }
-    else
+        for (u32 l = 0; l < raw.layers; ++l)
+            for (u32 sign = 0; sign < 2; ++sign)
+            {
+                const u64* layer = sign ? layer_neg : layer_pos;
+                const u64* lowest = sign ? goal_neg : goal_pos;
+                u64* plain = storage;
+                u64* satisfied = storage + words;
+                u64* unsatisfied = storage + 2u * u64{words};
+                storage += 3u * u64{words};
+                u64 any = 0, any_satisfied = 0, any_unsatisfied = 0;
+                for (u32 w = 0; w < words; ++w)
+                {
+                    u64 lower = lowest ? lowest[w] : u64{0};
+                    for (u32 k = 0; k < l; ++k)
+                        lower |= layer[u64{k} * layer_words + w];
+                    const u64 m = layer[u64{l} * layer_words + w] & ~lower;
+                    const u64 x = state ? state[w] : u64{0};
+                    // a positive literal holds iff its bit is set, a negative one iff it is clear
+                    plain[w] = m;
+                    satisfied[w] = m & (sign ? ~x : x);
+                    unsatisfied[w] = m & (sign ? x : ~x);
+                    any |= m;
+                    any_satisfied |= satisfied[w];
+                    any_unsatisfied |= unsatisfied[w];
+                }
+                const u32 kind = ((l + 1u) << 4) | (derived_slots ? 8u : 0u) | (sign ? 4u : 0u);
+                out.plane[kind | static_cast<u32>(GoalMode::Plain)] = any ? plain : nullptr;
+                out.plane[kind | static_cast<u32>(GoalMode::PlainTarget)] = any ? plain : nullptr;
+                out.plane[kind | static_cast<u32>(GoalMode::Satisfied)] = any_satisfied ? satisfied : nullptr;
+                out.plane[kind | static_cast<u32>(GoalMode::Unsatisfied)] = any_unsatisfied ? unsatisfied : nullptr;
+            }
+    };
+    if (raw.pos && raw.neg)
+        fill(false, raw.pos, raw.neg, raw.words, v.words, goal.pos, goal.neg, atoms);
+    if (raw.derived_pos && raw.derived_neg)
+        fill(true, raw.derived_pos, raw.derived_neg, raw.derived_words, v.derived_words, goal.derived_pos,
+             goal.derived_neg, derived);
+    return out;
+}
+
+/// The mask a goal cell takes its literals from: the positive or negative literals over the fluent or derived slots of
+/// the goal, or, for a cell of a subgoal level (1 to 3), of that level of the row's subgoal layers (effective_layers);
+/// null if there is none (no tuples).
+template<bool Layered = true>
+MYMYR_HD_HOT const u64* goal_cell_mask(const Cell& c, const GoalWords& g, const RowInput& in)
+{
+    const u32 kind = c.op - k_goal_op_base;
+    if (Layered && kind >= 16u)
+        return in.layers ? in.layers->levels.plane[kind & 63u] : nullptr;
+    return (kind & 8u) ? ((kind & 4u) ? g.derived_neg : g.derived_pos) : ((kind & 4u) ? g.neg : g.pos);
+}
+
+/// The words of the goal tuples a goal cell takes from its slot range, resolved once per cell: its mask
+/// (goal_cell_mask; null: no tuples), which the satisfied and unsatisfied variants cut down by the state words: a
+/// positive literal holds iff its bit is set, a negative one iff it is clear.
+struct GoalCellWords
+{
+    const u64* mask;
+    const u64* state;  // the state words of a satisfied or unsatisfied variant (null: all clear)
+    u64 first;         // the bits of the first word that are in the range, and of the last word
+    u64 last;
+    u64 flip;          // the satisfied and unsatisfied variants take the state word xor `flip`; the others all ones
+    u64 keep;          // all ones for a satisfied or unsatisfied variant, else zero
+    u32 first_word, last_word;
+
+    /// Word `w` of the range, w from first_word to last_word.
+    MYMYR_HD_HOT u64 word(u32 w) const
     {
-        if (!in.layers || level > in.layers->subgoals.layers)
-            return 0;
-        const MaskLayers& layers = in.layers->subgoals;
-        const u64* base = derived ? (negative ? layers.derived_neg : layers.derived_pos) : (negative ? layers.neg : layers.pos);
-        if (!base)
-            return 0;
-        const u32 stride = derived ? layers.derived_words : layers.words;
-        m = range_word(base + static_cast<u64>(level - 1u) * stride, w, c.a, c.b);
-        u64 lower = mask ? mask[w] : u64{0};
-        for (u32 l = 0; l + 1u < level; ++l)
-            lower |= base[static_cast<u64>(l) * stride + w];
-        m &= ~lower;
-    }
-    if (mode == GoalMode::Plain || mode == GoalMode::PlainTarget)
+        u64 m = mask[w];
+        if (w == first_word)
+            m &= first;
+        if (w == last_word)
+            m &= last;
+        if (keep)
+            m &= (state ? state[w] : u64{0}) ^ flip;
         return m;
-    const u64* x = derived ? in.derived : in.atoms;
-    const u64 xw = x ? x[w] : u64{0};
-    const bool wants_set = (mode == GoalMode::Satisfied) != negative;
-    return m & (wants_set ? xw : ~xw);
+    }
+};
+
+template<bool Layered = true>
+MYMYR_HD_HOT GoalCellWords goal_cell_words(const Cell& c, const GoalWords& g, const RowInput& in)
+{
+    const u32 kind = c.op - k_goal_op_base;
+    // the masks of a subgoal level are cut down by the state already
+    const bool plain = (kind & 3u) < 2u || (Layered && kind >= 16u);
+    const bool wants_set = ((kind & 3u) == static_cast<u32>(GoalMode::Satisfied)) != ((kind & 4u) != 0);
+    GoalCellWords out{c.a < c.b ? goal_cell_mask<Layered>(c, g, in) : nullptr,
+                      (kind & 8u) ? in.derived : in.atoms,
+                      ~u64{0} << (c.a & 63u),
+                      ~u64{0} >> (63u - ((c.b - 1u) & 63u)),
+                      wants_set ? u64{0} : ~u64{0},
+                      plain ? u64{0} : ~u64{0},
+                      c.a >> 6,
+                      (c.b - 1u) >> 6};
+    return out;
 }
 
 /// The tuples of a goal cell in this graph: those its masks give plus the cell's constant part (the instance's goal only).
 template<bool Layered = true>
 MYMYR_HD u32 goal_cell_count(const Cell& c, const GoalWords& g, const RowInput& in)
 {
+    if (Layered && c.op >= k_goal_op_base + 16u)  // a subgoal level has no constant part
+    {
+        const u64* mask = in.layers ? in.layers->levels.plane[(c.op - k_goal_op_base) & 63u] : nullptr;
+        if (!mask || c.a >= c.b)
+            return 0;
+        const u32 last = (c.b - 1u) >> 6;
+        const u64 head = ~u64{0} << (c.a & 63u), tail = ~u64{0} >> (63u - ((c.b - 1u) & 63u));
+        if ((c.a >> 6) == last)
+            return popcount64(mask[last] & head & tail);
+        u32 n = popcount64(mask[c.a >> 6] & head) + popcount64(mask[last] & tail);
+        for (u32 w = (c.a >> 6) + 1u; w < last; ++w)
+            n += popcount64(mask[w]);
+        return n;
+    }
     u32 n = g.constants ? c.d - c.c : 0u;
-    if (c.a < c.b)
-        for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
-            n += popcount64(goal_word<Layered>(c, g, in, w));
+    const GoalCellWords words = goal_cell_words<Layered>(c, g, in);
+    if (words.mask)
+        for (u32 w = c.a >> 6, last = (c.b - 1u) >> 6; w <= last; ++w)
+            if (const u64 m = words.word(w))
+                n += popcount64(m);
     return n;
 }
 
-/// The mask of history step `j` (of the row's used steps) that a history cell takes literals from: the positive or negative
-/// literals over the fluent or derived slots; null if the row has none.
-MYMYR_HD const u64* history_mask(const Cell& c, const HistoryRows& h, u32 j)
+/// The masks a history cell takes literals from, resolved once per cell: for each used step j of the row, the positive
+/// or negative literals over the fluent or derived slots in the cell's slot range [a, b), the words first_word to
+/// last_word of `base + j * stride` cut to the range. `base` is null if the row has no such masks, or the range is
+/// empty.
+struct HistoryCellWords
 {
+    const u64* base;
+    u32 stride;
+    u32 steps;
+    u32 first_word, last_word;
+    u64 head, tail;
+
+    /// Word `w` of step `j`.
+    MYMYR_HD_HOT u64 word(u32 j, u32 w) const
+    {
+        u64 m = base[static_cast<u64>(j) * stride + w];
+        if (w == first_word)
+            m &= head;
+        if (w == last_word)
+            m &= tail;
+        return m;
+    }
+};
+
+MYMYR_HD_HOT HistoryCellWords history_cell_words(const Cell& c, const RowInput& in)
+{
+    HistoryCellWords out{nullptr, 0, 0, c.a >> 6, (c.b - 1u) >> 6, ~u64{0} << (c.a & 63u),
+                         ~u64{0} >> (63u - ((c.b - 1u) & 63u))};
+    if (!in.layers || c.a >= c.b)
+        return out;
+    const MaskLayers& m = in.layers->history.masks;
     const bool derived = history_op_derived(c.op);
     const bool negative = history_op_negative(c.op);
-    const MaskLayers& m = h.masks;
-    const u64* base = derived ? (negative ? m.derived_neg : m.derived_pos) : (negative ? m.neg : m.pos);
-    return base ? base + static_cast<u64>(j) * (derived ? m.derived_words : m.words) : nullptr;
+    out.base = derived ? (negative ? m.derived_neg : m.derived_pos) : (negative ? m.neg : m.pos);
+    out.stride = derived ? m.derived_words : m.words;
+    out.steps = m.layers;
+    return out;
 }
 
 /// The tuples of a history cell in this graph: the literals of its predicate and sign in the slots [a, b) of the row's used
 /// steps, summed over the steps.
 MYMYR_HD u32 history_cell_count(const Cell& c, const RowInput& in)
 {
-    if (!in.layers || c.a >= c.b)
+    const HistoryCellWords words = history_cell_words(c, in);
+    if (!words.base)
         return 0;
-    const HistoryRows& h = in.layers->history;
     u32 n = 0;
-    for (u32 j = 0; j < h.masks.layers; ++j)
-        if (const u64* mask = history_mask(c, h, j))
-            n += popcount_range(mask, c.a, c.b);
+    for (u32 j = 0; j < words.steps; ++j)
+        for (u32 w = words.first_word; w <= words.last_word; ++w)
+            n += popcount64(words.word(j, w));
     return n;
 }
 
@@ -946,7 +1079,7 @@ MYMYR_HD bool counted_by_group(const Cell& c, const RowInput& in)
 
 /// The tuples of one cell in this graph. `Layered` false: the row has no subgoal layers or history steps.
 template<bool Layered = true>
-MYMYR_HD u32 cell_count(const InstanceView& v, const Cell& c, const RowInput& in)
+MYMYR_HD_HOT u32 cell_count(const InstanceView& v, const Cell& c, const RowInput& in)
 {
     if (c.op == static_cast<u32>(CellOp::Fluent))
         return popcount_range(in.atoms, c.a, c.b);
@@ -1078,13 +1211,16 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32*
     const Cell* cells = list.cells;
     for (u32 i = 0; i < num_cells; ++i)
     {
-        const u32 n = cell_count<Layered>(v, cells[i], in);
+        const Cell& c = cells[i];
+        const u32 n = cell_count<Layered>(v, c, in);
         if (cell_counts)
             cell_counts[i] = n;
-        accumulate_cell<Layered>(t, cells[i], n);
-        if (virtual_nodes && n)
+        if (n == 0)
+            continue;
+        accumulate_cell<Layered>(t, c, n);
+        if (virtual_nodes)
         {
-            const u32 p = v.relation_virtual[cells[i].relation];
+            const u32 p = v.relation_virtual[c.relation];
             if (p != k_no_virtual)
                 virtual_scratch[p] = 1;
         }
@@ -1585,10 +1721,10 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
             dst += K;
         }
     };
-    if (c.a < c.b)
+    if (const GoalCellWords words = goal_cell_words<Layered>(c, g, in); words.mask)
         for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
         {
-            u64 bits = goal_word<Layered>(c, g, in, w);
+            u64 bits = words.word(w);
             while (bits)
             {
                 const u64 s = static_cast<u64>(w) * 64u + lowest_bit64(bits);
@@ -1813,22 +1949,18 @@ template<class I>
 MYMYR_HD u32 fill_history_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                                u64 first_target, u64 first_step, u64 pred, I* dst)
 {
-    if (!in.layers || c.a >= c.b)
+    const HistoryCellWords words = history_cell_words(c, in);
+    if (!words.base)
         return 0;
-    const HistoryRows& h = in.layers->history;
     const bool target = history_op_target(c.op);
     const u64 A = v.max_arity;
     const u32 arity = c.logical_arity;
     const i32* table = history_op_derived(c.op) ? v.derived_args : v.slot_args;
     u32 n = 0;
-    for (u32 j = 0; j < h.masks.layers; ++j)
-    {
-        const u64* mask = history_mask(c, h, j);
-        if (!mask)
-            continue;
-        for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
+    for (u32 j = 0; j < words.steps; ++j)
+        for (u32 w = words.first_word; w <= words.last_word; ++w)
         {
-            u64 bits = range_word(mask, w, c.a, c.b);
+            u64 bits = words.word(j, w);
             while (bits)
             {
                 const u64 slot = static_cast<u64>(w) * 64u + lowest_bit64(bits);
@@ -1845,7 +1977,6 @@ MYMYR_HD u32 fill_history_cell(const InstanceView& v, const Cell& c, const RowIn
                 ++n;
             }
         }
-    }
     return n;
 }
 
@@ -1999,6 +2130,8 @@ MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u6
         arg_offsets[r] = static_cast<I>(args);
         const u32 n = is_action_op(c.op)
                           ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, args_out + args)
+                      : Layered && cell_counts && cell_counts[i] == 0
+                          ? 0u
                           : fill_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, tuples - tuple_base, cursor,
                                                      out, args_out + args);
         if (counts)
@@ -2057,6 +2190,8 @@ MYMYR_HD void fill_graph_positioned(const InstanceView& v, const RowInput& in, u
         I* dst = out.relation_args + positions.args(segment, c.relation);
         const u32 n = is_action_op(c.op)
                           ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst)
+                      : Layered && cell_counts && cell_counts[i] == 0
+                          ? 0u
                           : fill_cell_at<I, Layered>(v, c, in, entity_base, auxiliary, graph_tuple, cursor, out, dst);
         graph_tuple += n;
         if (counts)
