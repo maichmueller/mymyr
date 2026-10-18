@@ -262,9 +262,9 @@ public:
     void release(cudaStream_t stream = nullptr);
     bool refresh(std::shared_ptr<const encoding::FlatEncoder> grown, cudaStream_t stream = nullptr);
 
-    /// Encodes the rows into `out` on the workspace's stream: a clear, the count kernel, a scan (two kernels) and the
-    /// fill kernel, with no allocation, no synchronization and no stream or event operation, so it may be captured in a
-    /// CUDA graph (acquire the workspace before the capture and hold it through the last replay). The batch writes
+    /// Encodes the rows into `out` on the workspace's stream: a clear, a count and fill kernel per active width class,
+    /// and a shared scan (two kernels), with no allocation, synchronization or stream or event operation. It may be
+    /// captured in a CUDA graph (acquire the workspace before capture and hold it through the last replay). The batch writes
     /// `out.sizes` with its true sizes; if they exceed the capacities or the index type, or a row is invalid (a task id
     /// outside the table, a row or goal mask narrower than its instance, a bit its instance does not have), nothing of
     /// the batch is written and sizes.overflow says why. The rows, outputs and `launch.order` are device memory the

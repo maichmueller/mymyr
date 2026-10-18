@@ -1023,7 +1023,7 @@ TEST(DeviceEncode, InvalidLaunchIndicesSetTheInputFlagAndLeaveTheCanary)
     cuda::LaunchConfig launch;
     launch.order = static_cast<const u32*>(indices.data());
     const auto result = run_device(device, ctx, stream, rows.input(batch, 33, {}), device.worst_case(33), nullptr, launch, 0xa5);
-    EXPECT_NE(result.sizes.overflow & encoding::k_overflow_input, 0u);
+    EXPECT_EQ(result.sizes.overflow, encoding::k_overflow_input);
     for (u64 i = 0; i < result.layout.sizes; ++i)
         ASSERT_EQ(result.block[i], std::byte{0xa5}) << i;
 }

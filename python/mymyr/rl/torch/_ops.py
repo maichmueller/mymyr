@@ -622,10 +622,12 @@ def _(table, states, task_ids, capacity=None, witness_pruning=False):
 # ------------------------------------------------------------------------------------------------ encoding
 
 
-def _encode_flat_outputs(encoder: int, states: Tensor, entities: int, args: int, targets: int) -> list[Tensor]:
+def _encode_flat_outputs(encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int) -> list[Tensor]:
     layout = _device.layout_of(lookup(encoder))
-    graphs = states.shape[0] if states.ndim == 2 else 1
-    specs = layout.specs(torch, graphs, entities, args, targets)
+    n = states.shape[0] if states.ndim == 2 else 1
+    if n > graphs:
+        raise ValueError("mymyr: encoding: the batch has more graphs than the output capacity")
+    specs = layout.specs(torch, n, entities, args, targets)
     return [torch.empty(shape, dtype=dtype, device=states.device) for shape, dtype in specs.values()]
 
 
@@ -669,4 +671,4 @@ def _(
     encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, graphs, entities, args,
     targets,
 ):  # fmt: skip
-    return _encode_flat_outputs(encoder, states, entities, args, targets)
+    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets)

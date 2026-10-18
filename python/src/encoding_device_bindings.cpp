@@ -398,7 +398,7 @@ void bind_encoding_device(nb::module_& parent)
              "[graphs reserved, scratch bytes, reservations made, host waits made] of a stream.")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "Encodes the rows (15 integers: the graphs, then the pointers and strides of the arrays) into the 14 output "
-             "pointers, with the capacities (entities, tuples, args, targets), on `stream`. No host wait.")
+             "pointers, with the capacities (graphs, entities, args, targets), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets) for the 14 "
              "output pointers and fills them, on `stream`.");

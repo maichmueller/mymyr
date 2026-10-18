@@ -348,11 +348,11 @@ def test_capacities_and_pools_of_a_flush():
     sizes = exact.as_dict()
     stream = encoder.stream()
     stream.append(**given)
-    tight = {"entities": 1, "graphs": 10000, "args": 1, "targets": 1}
+    tight = {"entities": 1, "graphs": len(picks), "args": 1, "targets": 1}
     overflowed = stream.flush(capacities=tight)
     assert overflowed.sizes["overflow"] and overflowed.sizes["capacity_overflow"]
     assert len(stream) == 40
-    roomy = {"entities": overflowed.sizes["entities"] + 9, "graphs": 10000,
+    roomy = {"entities": overflowed.sizes["entities"] + 9, "graphs": len(picks),
              "args": overflowed.sizes["args"] + 9, "targets": overflowed.sizes["targets"] + 9}
     fitted = stream.flush(capacities=roomy, pool=rl.ThreadPool(2))
     assert not fitted.sizes["overflow"] and len(stream) == 0

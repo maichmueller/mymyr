@@ -191,7 +191,10 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
     }
     for threads in (1, 4):
         batch = encoder.encode(states, capacities=exact, threads=threads)
-        assert batch.sizes == {**{k: v for k, v in exact.items() if k != "graphs"}, "tuples": int(expected.relation_offsets[-1]), "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False}
+        assert batch.sizes == {
+            "entities": exact["entities"], "tuples": int(expected.relation_offsets[-1]), "args": exact["args"],
+            "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False,
+        }
         same_arrays(batch, expected)
         roomy = {"entities": exact["entities"] + 9, "graphs": exact["graphs"], "args": exact["args"] + 13}
         batch = encoder.encode(states, capacities=roomy, threads=threads)
@@ -202,11 +205,11 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
         assert np.array_equal(batch.entity_role[: exact["entities"]], expected.entity_role)
         assert not batch.entity_role[exact["entities"] :].any() and not batch.entity_ref[exact["entities"] :].any()
         assert np.array_equal(batch.relation_offsets, expected.relation_offsets)
-        for short in ({**exact, "entities": exact["entities"] - 1}, {**exact, "graphs": exact["graphs"] - 1},
+        for short in ({**exact, "entities": exact["entities"] - 1},
                       {**exact, "args": exact["args"] - 1}, {"graphs": len(states), "entities": 0, "args": 0}):
             batch = encoder.encode(states, capacities=short, threads=threads)
             assert batch.sizes["overflow"] is True and batch.sizes["index_overflow"] is False
-            assert {k: batch.sizes[k] for k in exact if k != "graphs"} == {k: v for k, v in exact.items() if k != "graphs"}  # the true sizes
+            assert {k: batch.sizes[k] for k in ("entities", "args")} == {k: exact[k] for k in ("entities", "args")}
             assert batch.relation_args.shape == (short["args"],)
             for key, value in batch.as_dict().items():
                 if isinstance(value, np.ndarray):

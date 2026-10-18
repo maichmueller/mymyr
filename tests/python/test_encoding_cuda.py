@@ -769,3 +769,13 @@ def test_graph_capacity_is_checked_before_device_encoding(cases):
     caps["graphs"] = len(case.rows) - 1
     with pytest.raises(ValueError, match="more graphs than the output capacity"):
         device_encode(encoder, case, dev, capacities=caps)
+    handle = rt.register(encoder)
+    rows, ids, derived, goals = op_inputs(case, dev)
+    try:
+        with pytest.raises(ValueError, match="more graphs than the output capacity"):
+            call_op(handle, rows, ids, derived, goals, caps)
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode() as mode, pytest.raises(ValueError, match="more graphs than the output capacity"):
+            call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
+    finally:
+        rt.unregister(handle)
