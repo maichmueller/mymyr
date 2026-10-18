@@ -1,7 +1,7 @@
 // mymyr_encoding: the relational encoder on states of a seeded random walk, one JSON line:
 //
 //   mymyr_encoding domain.pddl problem.pddl [N = 1024] [seed = 1] [layout = graph|relation] [threads = 1]
-//   [goals = off|on|targets] [actions = off|on|targets|virtual] [singles = 256]
+//   [goals = off|on|targets] [actions = off|on|targets|virtual] [singles = 256] [subgoals = 0] [history = 0]
 //
 // The walk starts at the initial state and restarts there at dead ends. The line reports the best of 5 timed encodes of
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
@@ -13,7 +13,9 @@
 // singles = 0). actions selects the action lane: off (no expansion is given, so the action relations are empty, the
 // default), on (the expansion of the states is given), targets (and every action tuple's entity is a target) or
 // virtual (and the predicates get virtual nodes); the expansion is made before the timing and its time is not part of
-// the line.
+// the line. subgoals is the number of subgoal layers per row (0 to 3, needs goals on or targets) and history the steps
+// of each row's history (the rows have 1 + i % history steps, so they differ); both give every row random literals
+// drawn from the states of the walk, and with goals = targets their entities are targets too.
 
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
@@ -149,6 +151,16 @@ int main(int argc, char** argv)
         else if (actions != "off" && actions != "on")
             throw std::invalid_argument("actions must be off, on, targets or virtual");
         options.predicate_virtual_nodes = actions == "virtual";
+        const u32 levels = argc > 10 ? static_cast<u32>(std::strtoul(argv[10], nullptr, 10)) : 0;
+        const u32 steps = argc > 11 ? static_cast<u32>(std::strtoul(argv[11], nullptr, 10)) : 0;
+        if (levels > 3 || (levels && goals == "off"))
+            throw std::invalid_argument("subgoals must be at most 3 and needs goals on or targets");
+        options.max_goal_level = levels;
+        options.history = steps > 0;
+        if (goals == "targets" && levels)
+            options.targets.insert(encoding::TargetSource::Subgoal);
+        if (goals == "targets" && steps)
+            options.targets.insert(encoding::TargetSource::History);
         const auto parsed = encoding::parse_layout(layout);
         if (!parsed)
             throw std::invalid_argument("layout must be graph or relation");
@@ -162,6 +174,56 @@ int main(int argc, char** argv)
             batch_actions = expand_rows(*table, rows.data(), n, words);
             in.actions = &batch_actions->x;
         }
+        // Random layers and history steps: literals of other states of the walk
+        std::vector<u64> layer_pos(n * levels * words), layer_neg(layer_pos.size()), step_pos(n * steps * words),
+            step_neg(step_pos.size());
+        std::vector<i32> step_dt(n * steps), step_count(n);
+        auto literals = [&](u64 row, u64 other, u64 negative, u64* pos, u64* neg)
+        {
+            for (u32 w = 0; w < words; ++w)
+            {
+                pos[w] = rows[row * words + w] & rng();
+                neg[w] = rows[((row + other + negative) % n) * words + w] & rng() & ~pos[w];
+            }
+        };
+        for (u64 i = 0; i < n; ++i)
+        {
+            for (u32 l = 0; l < levels; ++l)
+                literals(i, 7 + l, 0, &layer_pos[(i * levels + l) * words], &layer_neg[(i * levels + l) * words]);
+            step_count[i] = steps ? static_cast<i32>(1 + i % steps) : 0;
+            for (u32 k = 0; k < steps; ++k)
+            {
+                literals((i + k + 1) % n, 3 * k + 5, 0, &step_pos[(i * steps + k) * words],
+                         &step_neg[(i * steps + k) * words]);
+                step_dt[i * steps + k] = static_cast<i32>(k) - static_cast<i32>(steps);
+            }
+        }
+        auto subgoal_rows = [&](u64 first)
+        {
+            encoding::LayerInput x;
+            x.pos = layer_pos.data() + first * levels * words;
+            x.neg = layer_neg.data() + first * levels * words;
+            x.stride = levels * words;
+            x.layers = levels;
+            x.words = words;
+            return x;
+        };
+        auto history_rows = [&](u64 first)
+        {
+            encoding::HistoryInput x;
+            x.masks.pos = step_pos.data() + first * steps * words;
+            x.masks.neg = step_neg.data() + first * steps * words;
+            x.masks.stride = steps * words;
+            x.masks.layers = steps;
+            x.masks.words = words;
+            x.dt = step_dt.data() + first * steps;
+            x.count = step_count.data() + first;
+            return x;
+        };
+        if (levels)
+            in.subgoals = subgoal_rows(0);
+        if (steps)
+            in.history = history_rows(0);
         double best = 1e300;
         std::shared_ptr<const rl::ArrayBundle> bundle;
         ThreadPool pool(threads);
@@ -191,6 +253,10 @@ int main(int argc, char** argv)
                 one.states = {rows.data() + i * words, 1, words, 0, 0};
                 if (!single_actions.empty())
                     one.actions = &single_actions[i]->x;
+                if (levels)
+                    one.subgoals = subgoal_rows(i);
+                if (steps)
+                    one.history = history_rows(i);
                 one_bundle = encoder->encode(one, pool, scratch);
             }
             best_single = std::min(best_single, now_s() - t0);
@@ -204,6 +270,9 @@ int main(int argc, char** argv)
         const auto* targets_info = bundle->find("target_entity");
         std::vector<i32> target_offsets(targets_info ? n + 1 : 0), target_entity(targets_info ? targets_info->elements() : 0);
         std::vector<u8> target_group(target_entity.size());
+        const auto* history_info = bundle->find("history_entity");
+        std::vector<i32> history_offsets(history_info ? n + 1 : 0),
+            history_entity(history_info ? history_info->elements() : 0), history_dt(history_entity.size());
         encoding::FlatBuffers buffers{task_ids.data(),    num_objects.data(),  entity_offsets.data(),
                                       entity_role.data(), entity_ref.data(),   counts.data(),
                                       tuple_offsets.data(), arg_buffer.data(), args.data()};
@@ -215,8 +284,14 @@ int main(int argc, char** argv)
             buffers.target_entity = target_entity.data();
             buffers.target_group = target_group.data();
         }
+        if (history_info)
+        {
+            buffers.history_offsets = history_offsets.data();
+            buffers.history_entity = history_entity.data();
+            buffers.history_dt = history_dt.data();
+        }
         const encoding::FlatCapacities capacities{entity_ref.size(), args.size() + n * R, args.size(),
-                                                  target_entity.size()};
+                                                  target_entity.size(), history_entity.size()};
         double best_into = 1e300;
         for (int rep = 0; rep < 6; ++rep)
         {
@@ -248,11 +323,13 @@ int main(int argc, char** argv)
         if (singles)
             std::snprintf(single_us, sizeof single_us, "%.3f", best_single * 1e6 / static_cast<double>(singles));
         std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"goals\": \"%s\", "
-                    "\"actions\": \"%s\", \"threads\": %u, \"us_per_state\": %.3f, "
+                    "\"actions\": \"%s\", \"subgoals\": %u, \"history\": %u, \"threads\": %u, "
+                    "\"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
                     "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
-                    layout.c_str(), goals.c_str(), actions.c_str(), threads, best * 1e6 / static_cast<double>(n),
+                    layout.c_str(), goals.c_str(), actions.c_str(), levels, steps, threads,
+                    best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
                     best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call, offsets[cells],
                     arg_offsets[cells]);
