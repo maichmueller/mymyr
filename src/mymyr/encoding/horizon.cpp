@@ -611,7 +611,9 @@ void count_range(const HPass& p, u32 t)
             }
         }
         RowLayers layers;
-        const Graph h = p.graph(g, v, layers, &m.kin);
+        if (p.kin && !m.kin)
+            m.kin = std::make_unique<KinScratch>();
+        const Graph h = p.graph(g, v, layers, m.kin.get());
         if (h.kin)
             build_kin(*h.kin, h.count, h.edges, h.src, h.dst, p.far);
         const RowInput& row = h.row;
@@ -695,7 +697,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         const InstanceView v = instance_view(p.view, instance);
         const GraphTotals& totals = m.totals[g - lo];
         RowLayers layers;
-        const Graph h = p.graph(g, v, layers, &m.kin);
+        if (p.kin && !m.kin)
+            m.kin = std::make_unique<KinScratch>();
+        const Graph h = p.graph(g, v, layers, m.kin.get());
         if (h.kin)
             build_kin(*h.kin, h.count, h.edges, h.src, h.dst, p.far);
         entity_offsets[g] = static_cast<I>(entity);

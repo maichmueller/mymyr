@@ -19,9 +19,15 @@
 // horizon = off|full|delta|action turns the rows into root states of horizons (the options in argv[12], argv[13] and
 // argv[14]: depth = 1, max_children = 0 for all, root = include|encode_only|exclude): every graph is a root with the nodes
 // within depth actions, the line reports the time per graph and per node (the rows of the nodes make the batch), and the
-// subgoal and history options do not apply.
+// subgoal and history options do not apply. relations = none|<letters> (argv[16]: p parent, s sibling, c cousin; "psc" is
+// the rooted horizon) adds the relations of the edges and the kinship, and source = tree|builder|transitions
+// (argv[17]) says where the graphs come from: tree (the default) expands every node on its own and keeps equal states
+// apart, builder merges equal states (encoding::build_horizon_graphs, up to depth), transitions encodes the successors
+// of the rows (depth 1; expansion and encoding::transition_graphs). The line then also reports build_us_per_node, the
+// time to make the graphs per node of them.
 
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
 
@@ -259,19 +265,74 @@ int main(int argc, char** argv)
             options.predicate_virtual_nodes = false;
             const u32 depth = argc > 13 ? static_cast<u32>(std::strtoul(argv[13], nullptr, 10)) : 1;
             const u64 max_children = argc > 15 ? std::strtoull(argv[15], nullptr, 10) : 0;
+            const std::string relations = argc > 16 ? argv[16] : "none";
+            if (relations != "none")
+                for (const char letter : relations)
+                {
+                    if (letter != 'p' && letter != 's' && letter != 'c')
+                        throw std::invalid_argument("relations must be none or letters of psc");
+                    options.horizon.parent_relation |= letter == 'p';
+                    options.horizon.sibling_relation |= letter == 's';
+                    options.horizon.cousin_relation |= letter == 'c';
+                }
+            const std::string source = argc > 17 ? argv[17] : "tree";
+            if (source != "tree" && source != "builder" && source != "transitions")
+                throw std::invalid_argument("source must be tree, builder or transitions");
             const auto encoder = encoding::FlatEncoder::create(table, options);
-            const Horizon h = build_horizon(*table, rows, n, words, depth, max_children);
-            encoding::EncodeInput in;
-            in.horizon = {{h.nodes.data(), h.num_nodes(words), words, 0, 0},
-                          n,
-                          h.node_offsets.data(),
-                          h.edge_offsets.data(),
-                          h.edge_src.data(),
-                          h.edge_dst.data(),
-                          h.edge_schema.data(),
-                          h.edge_binding.data(),
-                          table->label_width()};
             ThreadPool pool(threads);
+            rl::ExpandScratch expand_scratch;
+            struct Graphs
+            {
+                Horizon tree;
+                encoding::HorizonGraphs built;
+                encoding::HorizonInput input;
+                u64 nodes = 0, edges = 0;
+            };
+            const auto make = [&]
+            {
+                Graphs g;
+                if (source == "tree")
+                {
+                    g.tree = build_horizon(*table, rows, n, words, depth, max_children);
+                    g.input = {{g.tree.nodes.data(), g.tree.num_nodes(words), words, 0, 0},
+                               n,
+                               g.tree.node_offsets.data(),
+                               g.tree.edge_offsets.data(),
+                               g.tree.edge_src.data(),
+                               g.tree.edge_dst.data(),
+                               g.tree.edge_schema.data(),
+                               g.tree.edge_binding.data(),
+                               table->label_width()};
+                    g.nodes = g.tree.num_nodes(words);
+                    g.edges = g.tree.edge_src.size();
+                }
+                else
+                {
+                    const rl::StateBatchView parents{rows.data(), n, words, 0, 0};
+                    if (source == "builder")
+                        g.built = encoding::build_horizon_graphs(*table, parents, nullptr, encoding::HorizonBuild{depth},
+                                                                 pool, expand_scratch);
+                    else
+                    {
+                        const auto e = expand_rows(*table, rows.data(), n, words);
+                        g.built = encoding::transition_graphs(*table, parents, nullptr, e->x);
+                    }
+                    g.input = g.built.input();
+                    g.nodes = g.built.num_nodes();
+                    g.edges = g.built.num_edges();
+                }
+                return g;
+            };
+            Graphs graphs = make();
+            double build_best = 1e300;
+            for (int rep = 0; rep < 3; ++rep)
+            {
+                const double t0 = now_s();
+                graphs = make();
+                build_best = std::min(build_best, now_s() - t0);
+            }
+            encoding::EncodeInput in;
+            in.horizon = graphs.input;
             encoding::EncodeScratch scratch;
             std::shared_ptr<const rl::ArrayBundle> bundle = encoder->encode(in, pool, scratch);
             double best = 1e300;
@@ -283,16 +344,18 @@ int main(int argc, char** argv)
                 best = std::min(best, now_s() - t0);
             }
             const long faults_per_call = (minor_faults() - faults0) / 5;
-            const u64 nodes = h.num_nodes(words);
+            const u64 nodes = graphs.nodes;
             const u64 cells = n * encoder->schema().num_relations();
             const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
             std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"horizon\": \"%s\", \"root\": \"%s\", "
                         "\"depth\": %u, \"nodes\": %llu, \"edges\": %zu, \"threads\": %u, \"us_per_graph\": %.3f, "
-                        "\"us_per_node\": %.3f, \"faults_per_call\": %ld, \"args\": %d, \"hash\": \"%s\"}\n",
+                        "\"us_per_node\": %.3f, \"source\": \"%s\", \"relations\": \"%s\", \"build_us_per_node\": %.3f, "
+                        "\"faults_per_call\": %ld, \"args\": %d, \"hash\": \"%s\"}\n",
                         std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                         layout.c_str(), horizon.c_str(), std::string(encoding::to_string(options.horizon.root)).c_str(),
-                        depth, static_cast<unsigned long long>(nodes), h.edge_src.size(), threads,
-                        best * 1e6 / static_cast<double>(n), best * 1e6 / static_cast<double>(nodes), faults_per_call,
+                        depth, static_cast<unsigned long long>(nodes), static_cast<size_t>(graphs.edges), threads,
+                        best * 1e6 / static_cast<double>(n), best * 1e6 / static_cast<double>(nodes), source.c_str(),
+                        relations.c_str(), build_best * 1e6 / static_cast<double>(nodes), faults_per_call,
                         arg_offsets[cells], batch_hash(*bundle).c_str());
             return 0;
         }

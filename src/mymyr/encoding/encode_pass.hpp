@@ -8,6 +8,7 @@
 #include "mymyr/encoding/encoder.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -51,7 +52,6 @@ struct alignas(k_cache_line) Member
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 bad_edge = k_none;  // horizon: the first graph with an invalid edge
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
-    KinScratch kin;                    // horizon: the kinship of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice
                                                                                                 // starts in the batch
@@ -59,6 +59,7 @@ struct alignas(k_cache_line) Member
     // pass two
     std::vector<u64> run_tuples, run_args;  // [R] the running positions
     std::vector<u32> tile_counts;           // [R, k_scan_tile] the counts of the tile being scanned
+    std::unique_ptr<KinScratch> kin;        // horizon: the kinship of one graph, made when the schema needs it
 };
 }  // namespace detail
 
