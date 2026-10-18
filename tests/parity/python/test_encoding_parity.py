@@ -444,6 +444,29 @@ def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that
     assert found
 
 
+def test_a_goal_literal_without_a_slot_that_a_layer_lists_is_compared_in_the_native_goal():
+    for prefix, config, state in (("f08", "C4_L1", "s3"), ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
+        expected, actual, context = goal_case(config, state, prefix)
+        assert compare(expected, actual, context) == []
+        goal = goal_literals(context)
+        slotless = [parse_literal(text) for kind, _, text in context.dropped
+                    if kind == "subgoal" and parse_literal(text) in goal]
+        assert slotless
+        for literal in slotless:
+            entity = literal_text(*literal) + "[g]"
+            relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[g]"
+            assert ("goal", entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
+            missing = copy(actual)
+            missing.entities.remove(("goal", entity))
+            assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
+            twice = copy(actual)
+            twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+            assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+            fewer = copy(actual)
+            fewer.tuples[relation] = [t for t in actual.tuples[relation] if t[0] != entity]
+            assert ("tuple", relation) in {(m.kind, m.where) for m in compare(expected, fewer, context)}
+
+
 def test_a_nullary_literal_of_a_layer_is_a_tuple_over_the_auxiliary_entity():
     exercised = 0
     for prefix, config in (("f01", "C5BN"), ("f08", "C4_L2N"), ("f10", "C5BN"), ("f10", "C4_L1N")):
