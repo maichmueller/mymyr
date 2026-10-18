@@ -42,11 +42,12 @@ struct EncodeParams
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    bool classify = false, warp_class = false, first_class = true;
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
     // the batch
     encoding::FlatBuffers out;
     encoding::FlatSizes* sizes = nullptr;
-    encoding::FlatCapacities capacities;
+    encoding::BatchShape capacities;
     u32 static_overflow = 0;  // the k_overflow_ flags that follow from the shape alone
     bool index64 = false;
     bool relation_major = false;
@@ -63,6 +64,7 @@ struct EncodeParams
 struct LaunchShape
 {
     u32 lanes = 4;            // lanes per graph of the count kernel: 4, 8 or 32
+    u32 fill_mask = 1;         // bit 0: thread fill, bit 1: warp fill
     bool warp_fill = false;   // a warp per graph in the fill kernel, else a thread
     u64 scan_length = 0;      // entries of the scanned array
     void* scan_temp = nullptr;
@@ -76,6 +78,14 @@ inline constexpr u32 k_encode_block = 128;
 /// The dynamic shared memory a launch may use without opting in.
 inline constexpr u64 k_shared_limit = 48 * 1024;
 
+/// Fill policy for the work of one instance. Graph-major cells benefit from cooperation sooner than relation-major
+/// cells, whose adjacent graphs write adjacent segments.
+__host__ __device__ inline bool warp_fill_for(const encoding::detail::GraphWidth& width, bool relation_major)
+{
+    return width.words > 8u || width.cells > 128u ||
+           width.args > (relation_major ? 1024u : 128u);
+}
+
 /// The temporary storage of the scan of `length` entries, u64 entries when `wide`.
 [[nodiscard]] u64 totals_scan_temp_bytes(u64 length, bool wide);
 
@@ -83,6 +93,8 @@ inline constexpr u64 k_shared_limit = 48 * 1024;
 /// the relation-major fill, the argument position of every relation.
 [[nodiscard]] u64 count_shared_bytes(u32 virtual_nodes, u32 lanes);
 [[nodiscard]] u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major);
+[[nodiscard]] u64 count_shared_required(u32 virtual_nodes, u32 lanes);
+[[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major, bool index64);
 
 /// Enqueues the encoding on `stream`: a clear of the flags (and cell row), the count kernel, the scan and the fill kernel.
 cudaError_t launch_encode(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);

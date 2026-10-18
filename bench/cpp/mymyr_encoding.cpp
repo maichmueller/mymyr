@@ -218,7 +218,7 @@ int main(int argc, char** argv)
             buffers.target_entity = target_entity.data();
             buffers.target_group = target_group.data();
         }
-        const encoding::FlatCapacities capacities{entity_ref.size(), args.size() + n * R, args.size(),
+        const encoding::BatchShape capacities{n, entity_ref.size(), args.size(),
                                                   target_entity.size()};
         double best_into = 1e300;
         for (int rep = 0; rep < 6; ++rep)

@@ -108,14 +108,11 @@ struct RowView
 __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
 {
     const i32 id = p.task_ids ? p.task_ids[g] : 0;
-    if (id < 0 || static_cast<u32>(id) >= p.context.num_instances)
+    if (ed::row_validity(p.context, id, p.state_words, p.goal_pos != nullptr, p.goal_words,
+                         p.goal_derived_pos != nullptr, p.goal_derived_words) != ed::RowValidity::Valid)
         return false;
     r.instance = static_cast<u32>(id);
     r.v = ed::instance_view(p.context, r.instance);
-    if (p.state_words < r.v.words)
-        return false;
-    if ((p.goal_pos && p.goal_words < r.v.words) || (p.goal_derived_pos && p.goal_derived_words < r.v.derived_words))
-        return false;
     r.in = ed::RowInput{p.states + g * p.state_stride, nullptr};
     if (p.derived && ed::reads_derived(r.v, p.goal_pos != nullptr, p.goal_derived_pos != nullptr))
         r.in.derived = p.derived + g * p.derived_stride;
@@ -157,12 +154,19 @@ __global__ void __launch_bounds__(k_block) count_kernel(const EncodeParams p)
         return;
     const LaneGroup<Lanes> grp;
     const u64 g = p.order ? p.order[gi] : gi;
+    if (g >= p.graphs)
+    {
+        atomicOr(p.flags, 1u);
+        return;
+    }
     const u32 virtual_nodes = p.context.num_virtual;
     u32* virtual_scratch =
         virtual_nodes ? reinterpret_cast<u32*>(shared_bytes) + (threadIdx.x / Lanes) * virtual_nodes : nullptr;
     RowView r;
     ed::GraphTotals t = ed::empty_totals();
     bool ok = row_of(p, g, r);
+    if (p.classify && (ok ? warp_fill_for(ed::graph_width(r.v), p.relation_major) != p.warp_class : !p.first_class))
+        return;
     if (ok)
     {
         if (p.relation_major)
@@ -299,7 +303,7 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
     }
     const u64 limit = p.index64 ? u64{0x7fffffffffffffffull} : u64{0x7fffffffu};
     sizes.overflow = p.static_overflow;
-    if (sizes.entities > p.capacities.entities || sizes.tuples > p.capacities.tuples || sizes.args > p.capacities.args ||
+    if (sizes.entities > p.capacities.entities || sizes.args > p.capacities.args ||
         sizes.targets > p.capacities.targets)
         sizes.overflow |= enc::k_overflow_capacity;
     if (sizes.entities > limit || sizes.tuples > limit || sizes.args > limit || sizes.targets > limit)
@@ -360,7 +364,7 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
     {
         // the scanned cell row becomes the two offset arrays, one entry per thread and round
         const u64 cells = G * R;
-        for (u64 s = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x; s <= cells;
+        for (u64 s = p.first_class ? static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x : cells + 1; s <= cells;
              s += static_cast<u64>(gridDim.x) * blockDim.x)
         {
             const u64 tuples = positions.tuples_before(s);
@@ -375,9 +379,16 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
     if (gi >= G)
         return;
     const u64 g = p.order ? p.order[gi] : gi;
+    if (g >= p.graphs)
+    {
+        atomicOr(p.flags, 1u);
+        return;
+    }
     RowView r;
     if (!row_of(p, g, r))
         return;  // not reached: an invalid row has set the input flag
+    if (p.classify && warp_fill_for(ed::graph_width(r.v), p.relation_major) != p.warp_class)
+        return;
     const u32 virtual_nodes = p.context.num_virtual;
     u32* virtual_scratch =
         virtual_nodes ? virtual_base + (Warp ? threadIdx.x / k_warp : threadIdx.x) * virtual_nodes : nullptr;
@@ -491,21 +502,61 @@ u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool rel
 
 namespace
 {
+template<class Kernel> u64 static_shared(Kernel kernel)
+{
+    cudaFuncAttributes attributes{};
+    cuda::check(cudaFuncGetAttributes(&attributes, kernel), "cudaFuncGetAttributes (encoding)");
+    return attributes.sharedSizeBytes;
+}
+template<class I, bool Warp, bool Relation> u64 fill_static()
+{
+    static const u64 bytes = static_shared(fill_kernel<I, Warp, Relation>);
+    return bytes;
+}
+}
+u64 count_shared_required(u32 virtual_nodes, u32 lanes)
+{
+    static const u64 a = static_shared(count_kernel<4>), b = static_shared(count_kernel<8>),
+                     c = static_shared(count_kernel<32>);
+    return count_shared_bytes(virtual_nodes, lanes) + (lanes == 4 ? a : lanes == 8 ? b : c);
+}
+u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp, bool relation, bool index64)
+{
+    const u64 bytes = index64 ? (warp ? (relation ? fill_static<i64, true, true>() : fill_static<i64, true, false>())
+                                     : (relation ? fill_static<i64, false, true>() : fill_static<i64, false, false>()))
+                             : (warp ? (relation ? fill_static<i32, true, true>() : fill_static<i32, true, false>())
+                                     : (relation ? fill_static<i32, false, true>() : fill_static<i32, false, false>()));
+    return fill_shared_bytes(virtual_nodes, relations, warp, relation) + bytes;
+}
+
+namespace
+{
 /// The clear, the count kernel and the scan: what both the whole encoding and the counting alone start with.
 cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
     cudaError_t error = cudaMemsetAsync(shape.zero_begin, 0, shape.zero_bytes, stream);
     if (error != cudaSuccess)
         return error;
-    switch (shape.lanes)
+    bool first = true;
+    for (u32 kind = 0; kind < 2; ++kind)
     {
-    case 4: error = launch_count<4>(p, stream); break;
-    case 8: error = launch_count<8>(p, stream); break;
-    case 32: error = launch_count<32>(p, stream); break;
-    default: return cudaErrorInvalidValue;
+        if (!(shape.fill_mask & (1u << kind)))
+            continue;
+        EncodeParams row = p;
+        row.classify = shape.fill_mask == 3;
+        row.warp_class = kind != 0;
+        row.first_class = first;
+        first = false;
+        switch (shape.lanes)
+        {
+        case 4: error = launch_count<4>(row, stream); break;
+        case 8: error = launch_count<8>(row, stream); break;
+        case 32: error = launch_count<32>(row, stream); break;
+        default: return cudaErrorInvalidValue;
+        }
+        if (error != cudaSuccess)
+            return error;
     }
-    if (error != cudaSuccess)
-        return error;
     size_t temp_bytes = shape.scan_temp_bytes;
     return p.wide ? cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u64*>(p.totals),
                                                   scan_size(shape.scan_length), stream)
@@ -519,7 +570,7 @@ cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaS
     const cudaError_t error = launch_counts(p, shape, stream);
     if (error != cudaSuccess)
         return error;
-    return p.index64 ? launch_fill_index<i64>(p, shape, stream) : launch_fill_index<i32>(p, shape, stream);
+    return launch_fill(p, shape, stream);
 }
 
 cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
@@ -536,6 +587,24 @@ cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, 
 
 cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
-    return p.index64 ? launch_fill_index<i64>(p, shape, stream) : launch_fill_index<i32>(p, shape, stream);
+    bool first = true;
+    for (u32 kind = 0; kind < 2; ++kind)
+    {
+        if (!(shape.fill_mask & (1u << kind)))
+            continue;
+        EncodeParams row = p;
+        row.classify = shape.fill_mask == 3;
+        row.warp_class = kind != 0;
+        row.first_class = first;
+        first = false;
+        LaunchShape launch = shape;
+        launch.warp_fill = kind != 0;
+        const cudaError_t error = p.index64 ? launch_fill_index<i64>(row, launch, stream)
+                                          : launch_fill_index<i32>(row, launch, stream);
+        if (error != cudaSuccess)
+            return error;
+    }
+    return cudaSuccess;
 }
+
 }  // namespace mymyr::cuda::detail

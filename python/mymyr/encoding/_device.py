@@ -283,20 +283,20 @@ class _Rows:
 
 
 def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int]:
-    """The (entities, tuples, args, targets) capacities of a ``capacities`` dict."""
+    """The (graphs, entities, args, targets) capacities of a ``capacities`` dict."""
     if not isinstance(value, dict):
         raise _error(f"capacities must be a dict, not {type(value).__name__}")
-    keys = {"entities", "tuples", "args", "targets"}
+    keys = {"entities", "graphs", "args", "targets"}
     unknown = set(value) - keys
     if unknown:
         raise _error(f"capacities has the unknown key '{sorted(unknown, key=str)[0]}'; the keys are 'entities', "
-                     f"'tuples', 'args' and 'targets'")
-    if not {"entities", "tuples", "args"} <= set(value):
-        raise _error("capacities needs the keys 'entities', 'tuples' and 'args'")
+                     f"'graphs', 'args' and 'targets'")
+    if not {"entities", "graphs", "args"} <= set(value):
+        raise _error("capacities needs the keys 'entities', 'graphs' and 'args'")
     if "targets" not in value and layout.targets:
         raise _error("the schema has targets: capacities needs the key 'targets' as well")
     out = []
-    for key in ("entities", "tuples", "args", "targets"):
+    for key in ("graphs", "entities", "args", "targets"):
         n = value.get(key, 0)
         if isinstance(n, bool) or not isinstance(n, int):
             if hasattr(n, "__index__") and not isinstance(n, bool):
@@ -385,12 +385,14 @@ def encode_arrays(
     stream = _stream_of(torch, device)
     out: dict[str, Any] = {}
     if capacities is not None:
-        entities, tuples, args, targets = capacities
+        graphs, entities, args, targets = capacities
+        if rows.graphs > graphs:
+            raise _error("the batch has more graphs than the output capacity")
         specs = layout.specs(torch, rows.graphs, entities, args, targets)
         for name, (shape, dtype) in specs.items():
             out[name] = _make(torch, shape, dtype, device, True)
         _check_outputs(out, layout, rows.graphs)
-        native.encode(stream, rows.fields, _pointers(out), [entities, tuples, args, targets])
+        native.encode(stream, rows.fields, _pointers(out), [rows.graphs, entities, args, targets])
     else:
 
         def allocate(entities: int, tuples: int, args: int, targets: int) -> list[int]:

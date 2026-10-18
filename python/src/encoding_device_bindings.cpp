@@ -123,7 +123,7 @@ cuda::DeviceEncodeInput input_of(const Rows& r)
 /// target_entity, target_group, sizes (0: the array is absent or has no entries).
 constexpr usize k_output_fields = 14;
 
-cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::FlatCapacities& capacities)
+cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities)
 {
     if (v.size() != k_output_fields)
         throw nb::value_error(("mymyr: expected " + std::to_string(k_output_fields) + " output pointers").c_str());
@@ -254,18 +254,18 @@ public:
         if (!slot)
             return {0, 0, 0, 0};
         std::lock_guard lock(slot->mutex);
-        return {slot->held ? slot->held->shape.graphs : 0, slot->held ? slot->held->scratch->size() : 0, slot->reservations,
+        return {slot->held ? slot->held->shape().graphs : 0, slot->held ? slot->held->scratch_bytes() : 0, slot->reservations,
                 slot->syncs};
     }
 
-    /// Encodes the rows into `out` with `capacities` {entities, tuples, args, targets}. No synchronization.
+    /// Encodes the rows into `out` with `capacities` {graphs, entities, args, targets}. No synchronization.
     void encode(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
                 const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities)
     {
         if (capacities.size() != 4)
             throw nb::value_error("mymyr: expected four capacities");
         const Rows rows = rows_of(row_fields);
-        const encoding::FlatCapacities caps{capacities[0], capacities[1], capacities[2], capacities[3]};
+        const encoding::BatchShape caps{capacities[0], capacities[1], capacities[2], capacities[3]};
         const cuda::DeviceOutput out = output_of(outputs, caps);
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
@@ -295,7 +295,10 @@ public:
             check_rows(rows);
             const cuda::DeviceEncodeInput in = input_of(rows);
             auto* device_sizes = static_cast<encoding::FlatSizes*>(slot->sizes->data());
-            m_device_encoder->count(*slot->held, in, device_sizes);
+            cuda::DeviceOutput counted;
+            counted.capacities.graphs = rows.graphs;
+            counted.sizes = device_sizes;
+            m_device_encoder->count(*slot->held, in, counted);
             cuda::DeviceGuard guard(m_device);
             cuda::check(cudaMemcpyAsync(slot->staging.data(0), device_sizes, sizeof(encoding::FlatSizes), cudaMemcpyDeviceToHost, s),
                         "cudaMemcpyAsync (sizes)");
@@ -312,7 +315,7 @@ public:
                     std::to_string(sizes.args) + ", targets " + std::to_string(sizes.targets) +
                     "): use index_dtype='int64'");
             outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets);  // takes the GIL itself
-            const encoding::FlatCapacities caps{sizes.entities, sizes.tuples, sizes.args, sizes.targets};
+            const encoding::BatchShape caps{rows.graphs, sizes.entities, sizes.args, sizes.targets};
             cuda::DeviceOutput out = output_of(outputs, caps);
             out.sizes = device_sizes;
             m_device_encoder->fill(*slot->held, in, out);
@@ -333,7 +336,7 @@ private:
     /// capture refuses that, naming the reservation that the caller makes before it.
     void ensure(StreamSlot& slot, cudaStream_t stream, u64 graphs)
     {
-        if (slot.held && slot.held->shape.graphs >= graphs)
+        if (slot.held && slot.held->shape().graphs >= graphs)
             return;
         if (capturing(m_device, stream))
             refuse("a CUDA graph capture needs the encoder's device workspace for at least " + std::to_string(graphs) +

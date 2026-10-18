@@ -714,7 +714,7 @@ TEST(EncoderGoals, TheCapacityFormKeepsTheGoalArrays)
     ThreadPool pool(1);
     EncodeScratch scratch;
     FlatSizes sizes;
-    const FlatCapacities fits{ints(*exact, "entity_ref").size() + 5, ints(*exact, "relation_args").size() + 7,
+    const BatchShape fits{rows.size(), ints(*exact, "entity_ref").size() + 5,
                               ints(*exact, "relation_args").size() + 7, ints(*exact, "target_entity").size() + 3};
     const auto padded = encoder->encode_capacity(input_of(rows), fits, pool, scratch, sizes);
     EXPECT_FALSE(sizes.overflowed());
@@ -722,7 +722,7 @@ TEST(EncoderGoals, TheCapacityFormKeepsTheGoalArrays)
     validate(*padded, encoder->schema());
     EXPECT_EQ(ints(*padded, "target_entity").size(), sizes.targets + 3);
     EXPECT_EQ(ints(*padded, "goal_complete"), ints(*exact, "goal_complete"));
-    FlatCapacities small = fits;
+    BatchShape small = fits;
     small.targets = sizes.targets - 1;
     const auto over = encoder->encode_capacity(input_of(rows), small, pool, scratch, sizes);
     EXPECT_TRUE(sizes.overflow & k_overflow_capacity);
