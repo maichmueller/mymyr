@@ -228,8 +228,14 @@ class FakeGpu:
             yield
             gpu.calls.append("capture_end")
 
+        @contextlib.contextmanager
+        def stream(s):
+            gpu.calls.append("stream_begin")
+            yield
+            gpu.calls.append("stream_end")
+
         self.torch = types.SimpleNamespace(
-            cuda=types.SimpleNamespace(CUDAGraph=Graph, Event=Event, graph=graph, Stream=lambda: object())
+            cuda=types.SimpleNamespace(CUDAGraph=Graph, Event=Event, graph=graph, stream=stream, Stream=lambda: object())
         )
 
     def sync(self):
@@ -242,6 +248,7 @@ class FakeGpu:
 class FakeStates:
     def __init__(self, rows):
         self.rows = rows
+        self.shape = rows.shape
 
     def cpu(self):
         return types.SimpleNamespace(numpy=lambda: self.rows)
@@ -252,6 +259,9 @@ class FakeDeviceEncoder:
 
     def __init__(self, real, calls):
         self.real, self.calls, self.capacities = real, calls, []
+
+    def reserve_device(self, graphs, stream=None):
+        self.calls.append(("reserve", graphs, stream is not None))
 
     def encode(self, states, capacities=None):
         if isinstance(states, FakeStates):
@@ -274,8 +284,10 @@ def test_a_captured_device_encode_is_built_outside_the_capture_and_timed_with_ev
     calls = []
     gpu, encoder = FakeGpu(calls), FakeDeviceEncoder(real, calls)
     with bench.encode_session(gpu, encoder, FakeStates(rows), eager=False) as run:
-        # warmed up (an encode and a synchronize) before the capture, one encode inside it
-        assert calls == ["encode", "sync", "capture_begin", "encode", "capture_end"]
+        # the capture stream's workspace is reserved and warmed up (an encode on that stream and a synchronize) before
+        # the capture, and one encode runs inside it
+        assert calls == [("reserve", 64, True), "stream_begin", "encode", "stream_end", "sync", "capture_begin", "encode",
+                         "capture_end"]
         calls.clear()
         assert run() == pytest.approx(50.0 * 1e3)
         assert calls == ["event"] + ["replay"] * bench.REPLAYS + ["event", "event_synchronize"]
@@ -291,7 +303,7 @@ def test_the_eager_device_encode_is_one_call_and_a_synchronize(bench, device_set
     with bench.encode_session(FakeGpu(calls), FakeDeviceEncoder(real, calls), FakeStates(rows), eager=True) as run:
         calls.clear()
         assert run() is None
-        assert calls == ["encode", "sync"]
+        assert calls == ["encode", "sync"]  # the workspace was reserved on the current stream at the start
 
 
 def test_a_mode_that_reports_its_time_is_divided_by_the_replayed_states(bench):
