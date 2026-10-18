@@ -118,7 +118,8 @@ bool same_input(const EncodeInput& a, const EncodeInput& b)
                x.derived_stride == y.derived_stride && x.derived_words == y.derived_words;
     };
     return same_layers(a.subgoals, b.subgoals) && same_layers(a.history.masks, b.history.masks) &&
-           a.history.dt == b.history.dt && a.history.count == b.history.count && a.states.data == b.states.data && a.states.rows == b.states.rows && a.states.words == b.states.words &&
+           a.history.dt == b.history.dt && a.history.count == b.history.count && a.states.data == b.states.data &&
+           a.states.rows == b.states.rows && a.states.words == b.states.words &&
            a.states.stride == b.states.stride && a.states.numeric_words == b.states.numeric_words &&
            a.task_ids == b.task_ids && a.derived == b.derived && a.derived_stride == b.derived_stride &&
            a.goal_pos == b.goal_pos && a.goal_neg == b.goal_neg && a.goal_stride == b.goal_stride &&
@@ -236,8 +237,8 @@ struct Pass
                                                  storage.data());
     }
 
-    /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff it
-    /// has any).
+    /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff
+    /// it has any).
     template<bool Layered>
     [[nodiscard]] detail::RowInput row_input(u64 g, const detail::InstanceView& v, u32* starts, u32* cursors,
                                              detail::RowLayers& layers) const noexcept
@@ -390,7 +391,8 @@ void count_range(const Pass& p, u32 t)
         detail::GraphTotals& totals = m.totals[g - lo];
         totals = detail::count_graph<Layered>(v, input, cell_counts, m.virtual_scratch.data());
         if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal | detail::k_graph_bad_action_order |
-                            detail::k_graph_bad_action_label | detail::k_graph_bad_layers | detail::k_graph_bad_history))
+                            detail::k_graph_bad_action_label | detail::k_graph_bad_layers |
+                            detail::k_graph_bad_history))
         {
             if (totals.flags & detail::k_graph_bad_row)
                 m.bad_bits = std::min(m.bad_bits, g);
@@ -1005,7 +1007,8 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = in.states.rows;
     const bool fits = !sizes.overflowed();
-    Allocation allocation = allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history);
+    Allocation allocation =
+        allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history);
     const FlatBuffers out = allocation.buffers;
     const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;

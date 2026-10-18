@@ -1,6 +1,6 @@
-// The subgoal layers and the history of the relational encoder: the levels as layers minus the goal and the lower levels,
-// the history steps and their truncation, the entities and targets of both, the layouts, thread counts, capacities,
-// streams, and the inputs that are refused.
+// The subgoal layers and the history of the relational encoder: the levels as layers minus the goal and the lower
+// levels, the history steps and their truncation, the entities and targets of both, the layouts, thread counts,
+// capacities, streams, and the inputs that are refused.
 
 #include "support.hpp"
 
@@ -217,8 +217,8 @@ Masks make_masks(const rl::TaskTable& table, const std::vector<u32>& instances,
             for (const Literal& literal : rows[r][l])
             {
                 const bool derived = is_derived_predicate(task, literal.predicate);
-                const u32 slot = test::atom_slot(task, derived ? AtomKind::Derived : AtomKind::Fluent, literal.predicate,
-                                                 literal.objects);
+                const u32 slot = test::atom_slot(task, derived ? AtomKind::Derived : AtomKind::Fluent,
+                                                 literal.predicate, literal.objects);
                 std::vector<u64>& words = derived ? (literal.positive ? m.derived_pos : m.derived_neg)
                                                   : (literal.positive ? m.pos : m.neg);
                 const u32 width = derived ? m.derived_words : m.words;
@@ -289,7 +289,10 @@ EncodeInput input_of(const test::Rows& rows)
     return in;
 }
 
-std::string level_suffix(u32 level) { return level == 0 ? "[g]" : level == 1 ? "[sg]" : level == 2 ? "[ssg]" : "[sssg]"; }
+std::string level_suffix(u32 level)
+{
+    return level == 0 ? "[g]" : level == 1 ? "[sg]" : level == 2 ? "[ssg]" : "[sssg]";
+}
 
 using Named = std::map<std::string, std::vector<Tuple>>;
 
@@ -310,7 +313,8 @@ Named subgoal_reference(const EncodingSchema& schema, i64 num_objects, const std
         for (const Literal& literal : level)
         {
             const bool holds = (atoms.count({literal.predicate, literal.objects}) != 0) == literal.positive;
-            const std::string base = std::string(literal.positive ? "[+]" : "[-]") + literal.predicate + level_suffix(l + 1);
+            const std::string base =
+                std::string(literal.positive ? "[+]" : "[-]") + literal.predicate + level_suffix(l + 1);
             const Tuple tuple = literal.objects.empty() ? Tuple{num_objects} : literal.objects;
             for (const std::string& name : {base, base + (holds ? "[sat]" : "[unsat]")})
                 if (schema.find(name))
@@ -344,7 +348,8 @@ HistoryNamed history_reference(const EncodingSchema& schema, i64 num_objects, co
         {
             const std::string name = std::string(literal.positive ? "[+]" : "[-]") + literal.predicate + "[hist]";
             if (schema.find(name))
-                out[name].push_back({static_cast<i64>(j), literal.objects.empty() ? Tuple{num_objects} : literal.objects});
+                out[name].push_back(
+                    {static_cast<i64>(j), literal.objects.empty() ? Tuple{num_objects} : literal.objects});
         }
     }
     for (auto& entry : out)
@@ -359,7 +364,8 @@ void expect_subgoals(const EncodingSchema& schema, const Graph& graph, const Nam
     for (u32 r = 0; r < schema.num_relations(); ++r)
     {
         const Relation& relation = schema.relation(r);
-        const bool level = (relation.lane == Lane::Goal || relation.lane == Lane::GoalDerivation) && relation.level.value_or(0) > 0;
+        const bool level =
+            (relation.lane == Lane::Goal || relation.lane == Lane::GoalDerivation) && relation.level.value_or(0) > 0;
         if (!level)
             continue;
         const bool target = schema.slot_roles(r).front() == SlotRole::SubgoalTarget;
@@ -455,8 +461,8 @@ TEST(EncoderLayers, SubgoalLevelsAreTheLayersMinusTheGoalAndTheLowerLevels)
     EXPECT_EQ(relation("[-]on[sg][sat]"), bare(relation("[-]on[sg]")));
     EXPECT_EQ(relation("[-]clear[sg][sat]"), bare(relation("[-]clear[sg]")));
     EXPECT_EQ(relation("[+]on[ssg][sat]"), bare(relation("[+]on[ssg]")));
-    // 3 objects, the auxiliary entity ((handempty) holds in the state), the goal entities 2, the subgoal entities: level 1
-    // has 4 tuples, level 2 has 2
+    // 3 objects, the auxiliary entity ((handempty) holds in the state), the goal entities 2, the subgoal entities:
+    // level 1 has 4 tuples, level 2 has 2
     EXPECT_EQ(g.role.size(), 3u + 1u + 2u + 6u);
     EXPECT_EQ(std::count(g.role.begin(), g.role.end(), 3), 6);
     // the subgoal entities follow the goal entities, in the order of their relations (sorted by name)
@@ -552,7 +558,8 @@ std::vector<Steps> random_steps(const Task& task, u64 rows, u32 max_steps, u64 s
         const u32 count = static_cast<u32>(rng() % (max_steps + 1));
         const auto layers = random_layers(task, count, 1, rng());
         for (u32 j = 0; j < count; ++j)
-            steps.push_back({static_cast<i32>(rng() % 9) - 8, layers[j].empty() ? std::vector<Literal>{} : layers[j][0]});
+            steps.push_back(
+                {static_cast<i32>(rng() % 9) - 8, layers[j].empty() ? std::vector<Literal>{} : layers[j][0]});
     }
     return out;
 }
@@ -602,7 +609,8 @@ TEST(EncoderLayers, LayersSharedByEveryRowAreOneSetOfMasks)
     const std::vector<std::vector<Literal>> layers = {{on("clear", true, {1}), on("handempty", true, {})},
                                                       {on("ontable", true, {2})}};
     const Masks one = make_masks(*table, {0}, {layers});
-    const Masks many = make_masks(*table, std::vector<u32>(6, 0), std::vector<std::vector<std::vector<Literal>>>(6, layers));
+    const Masks many =
+        make_masks(*table, std::vector<u32>(6, 0), std::vector<std::vector<std::vector<Literal>>>(6, layers));
     const auto encoder = FlatEncoder::create(table, layer_options(2, false));
     EncodeInput shared = input_of(rows), repeated = input_of(rows);
     shared.subgoals = layer_input(one);
@@ -634,7 +642,8 @@ TEST(EncoderLayers, NullaryLiteralsInALayerAreTuplesOverTheAuxiliaryEntity)
     EXPECT_EQ(g.role[3], 8);
     const u32 sg = *schema.find("[+]handempty[sg]");
     ASSERT_EQ(g.tuples[sg].size(), 1u);
-    EXPECT_EQ(g.tuples[sg][0], (Tuple{3 + 1 + 2, 3}));  // the subgoal entity after 3 objects, auxiliary, 2 goal entities
+    // the subgoal entity comes after 3 objects, the auxiliary entity and 2 goal entities
+    EXPECT_EQ(g.tuples[sg][0], (Tuple{3 + 1 + 2, 3}));
     EXPECT_EQ(g.tuples[*schema.find("[+]handempty[sg][sat]")], (std::vector<Tuple>{{3}}));
     options.nullary = false;
     const auto without = FlatEncoder::create(table, options);
@@ -658,8 +667,8 @@ TEST(EncoderLayers, HistoryStepsAreEntitiesInStepOrderAndTheirLiteralsTuples)
     const EncodingSchema& schema = encoder->schema();
     validate(*bundle, schema);
     const Graph g = decode(*bundle, schema)[0];
-    // entities: 3 objects, the auxiliary entity (handempty in a step, and in the state), 2 goal entities, 3 history steps,
-    // and a history target per literal: 3 + 2 + 2 = 7
+    // entities: 3 objects, the auxiliary entity (handempty in a step, and in the state), 2 goal entities, 3 history
+    // steps, and a history target per literal: 3 + 2 + 2 = 7
     ASSERT_EQ(g.role.size(), 3u + 1u + 2u + 3u + 7u);
     EXPECT_EQ(g.history_dt, (std::vector<i64>{-2, -1, 0}));
     const i64 step0 = 3 + 1 + 2;
@@ -676,7 +685,8 @@ TEST(EncoderLayers, HistoryStepsAreEntitiesInStepOrderAndTheirLiteralsTuples)
     EXPECT_EQ(relation("[+]clear[hist]"), (std::vector<Tuple>{{target0, step0, 1}, {target0 + 1, step0 + 1, 1}}));
     EXPECT_EQ(relation("[+]handempty[hist]"), (std::vector<Tuple>{{target0 + 2, step0, 3}}));
     EXPECT_EQ(relation("[+]on[hist]"),
-              (std::vector<Tuple>{{target0 + 3, step0, 1, 0}, {target0 + 4, step0 + 2, 0, 2}, {target0 + 5, step0 + 2, 1, 0}}));
+              (std::vector<Tuple>{
+                  {target0 + 3, step0, 1, 0}, {target0 + 4, step0 + 2, 0, 2}, {target0 + 5, step0 + 2, 1, 0}}));
     EXPECT_EQ(relation("[-]clear[hist]"), (std::vector<Tuple>{{target0 + 6, step0 + 1, 0}}));
     for (i64 k = 0; k < 7; ++k)
     {
@@ -913,8 +923,9 @@ TEST(EncoderLayers, TheCapacityFormKeepsTheHistoryArrays)
     FlatSizes sizes;
     const u64 entries = ints(*exact, "history_entity").size();
     ASSERT_EQ(entries, 10u);
-    FlatCapacities fits{ints(*exact, "entity_ref").size() + 3, ints(*exact, "relation_args").size() + 7,
-                        ints(*exact, "relation_args").size() + 7, ints(*exact, "target_entity").size() + 2, entries + 4};
+    FlatCapacities fits{ints(*exact, "entity_ref").size() + 3,    ints(*exact, "relation_args").size() + 7,
+                        ints(*exact, "relation_args").size() + 7, ints(*exact, "target_entity").size() + 2,
+                        entries + 4};
     const auto padded = encoder->encode_capacity(in, fits, pool, scratch, sizes);
     EXPECT_FALSE(sizes.overflowed());
     EXPECT_EQ(sizes.history, entries);
@@ -969,10 +980,10 @@ TEST(EncoderLayers, StreamsEqualTheBatchWithSubgoalsAndHistory)
         s->rows.data.assign(rows.data.begin() + static_cast<std::ptrdiff_t>(from * rows.words),
                             rows.data.begin() + static_cast<std::ptrdiff_t>(to * rows.words));
         s->rows.task_ids.assign(to - from, 0);
-        s->masks = make_masks(*table, std::vector<u32>(to - from, 0),
-                              {layers.begin() + static_cast<std::ptrdiff_t>(from), layers.begin() + static_cast<std::ptrdiff_t>(to)});
+        const auto first = static_cast<std::ptrdiff_t>(from), last = static_cast<std::ptrdiff_t>(to);
+        s->masks = make_masks(*table, std::vector<u32>(to - from, 0), {layers.begin() + first, layers.begin() + last});
         s->history = make_history(*table, std::vector<u32>(to - from, 0),
-                                  {per_row.begin() + static_cast<std::ptrdiff_t>(from), per_row.begin() + static_cast<std::ptrdiff_t>(to)});
+                                  {per_row.begin() + first, per_row.begin() + last});
         s->input = input_of(s->rows);
         s->input.subgoals = layer_input(s->masks);
         s->input.history = s->history.input();
@@ -1158,7 +1169,8 @@ TEST(EncoderLayers, InputsTheSchemaOrTheInstanceCannotTakeAreRefused)
         FlatOptions all = layer_options(0, true), one = all, two = all;
         one.history_max_steps = 1;
         two.history_max_steps = 2;
-        const auto fingerprint = [&](const FlatOptions& o) { return FlatEncoder::create(table, o)->schema().fingerprint(); };
+        const auto fingerprint = [&](const FlatOptions& o)
+        { return FlatEncoder::create(table, o)->schema().fingerprint(); };
         EXPECT_NE(fingerprint(all), fingerprint(one));
         EXPECT_NE(fingerprint(one), fingerprint(two));
     }

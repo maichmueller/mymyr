@@ -5,8 +5,8 @@ A batch stores no names. The naming rules, per entity role:
 - an object is named as in its task (``entity_ref`` is its index in ``task.objects``);
 - the auxiliary entity is ``auxiliary``;
 - a goal entity is named after the plain goal tuple it is the target of: ``[+](on c b)[g]``, ``[-](clear a)[g]``; a
-  nullary literal is ``[+](handempty)[g]``; a subgoal entity likewise with the level of its relation, ``[+](on c b)[sg]``,
-  ``[ssg]``, ``[sssg]``;
+  nullary literal is ``[+](handempty)[g]``; a subgoal entity likewise with the level of its relation,
+  ``[+](on c b)[sg]``, ``[ssg]``, ``[sssg]``;
 - an action entity is named after its action tuple: ``(unstack a b)``, the schema name followed by the objects;
 - a history step is ``history:<dt>#<i>``, with the dt of the step and ``i`` its position among the graph's history
   steps, counted from 0; a history target is ``history:<dt>#<i>:[+](on c b)``, after the step and the literal of the
@@ -25,7 +25,8 @@ _TARGET_RELATION = re.compile(r"^\[([+-])\](.+?)(\[g\]|\[sg\]|\[ssg\]|\[sssg\]|\
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 
 _OBJECT, _PREDICATE_VIRTUAL, _AUXILIARY = 0, 1, 8
-_ARGUMENT_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT, _SUBGOAL_TARGET_SLOT, _HISTORY_TARGET_SLOT, _HISTORY_SLOT = 0, 3, 4, 5, 6, 7
+_ARGUMENT_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT = 0, 3, 4
+_SUBGOAL_TARGET_SLOT, _HISTORY_TARGET_SLOT, _HISTORY_SLOT = 5, 6, 7
 
 
 @dataclass(frozen=True)

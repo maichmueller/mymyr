@@ -30,13 +30,13 @@
 // the slots between the first and the last literal of its mask, and the goal cells of row goals are those of every
 // predicate that has slots, over the predicate's whole slot range.
 //   - Subgoal cells (goal relations of a level above 0) have the cells of the goal's three variants, with the layer's
-//     masks in place of the goal's: layer l of the row's subgoals (RowInput::layers) fills level l + 1, minus every literal
-//     of the same sign at a lower level, the goal included, so that a literal appears once, at its lowest level. They
-//     have no constant part;
-//   - History cell `[+]p[hist]` / `[-]p[hist]`: for each used step of the row's history in order (the newest steps, oldest
-//     first), the step's positive (negative) literals of the cell's predicate in ascending slot order; a tuple is
-//     [history target]? + [history step] + [predicate]? + objects. With history targets each tuple has its own target
-//     entity.
+//     masks in place of the goal's: layer l of the row's subgoals (RowInput::layers) fills level l + 1, minus every
+//     literal of the same sign at a lower level, the goal included, so that a literal appears once, at its lowest
+//     level. They have no constant part;
+//   - History cell `[+]p[hist]` / `[-]p[hist]`: for each used step of the row's history in order (the newest steps,
+//     oldest first), the step's positive (negative) literals of the cell's predicate in ascending slot order; a tuple
+//     is [history target]? + [history step] + [predicate]? + objects. With history targets each tuple has its own
+//     target entity.
 //   - Action cell: one tuple (action entity, objects...) per distinct ground action of the cell's action relation in the
 //     graph's expansion rows (RowInput::actions), in lexicographic order of the objects. A relation is the one of
 //     several action schemas when the front end split an action over a disjunction: their rows are merged, and a ground
@@ -145,8 +145,8 @@ MYMYR_HD constexpr bool goal_op_negative(u32 op) { return ((op - k_goal_op_base)
 MYMYR_HD constexpr GoalMode goal_op_mode(u32 op) { return static_cast<GoalMode>((op - k_goal_op_base) & 3u); }
 MYMYR_HD constexpr u32 goal_op_level(u32 op) { return ((op - k_goal_op_base) >> 4) & 3u; }
 
-/// History cells have an op in [k_history_op_base, k_goal_op_base): the base, plus 1 for a derived predicate, plus 2 for
-/// the negative literals, plus 4 when each tuple has a history target.
+/// History cells have an op in [k_history_op_base, k_goal_op_base): the base, plus 1 for a derived predicate, plus 2
+/// for the negative literals, plus 4 when each tuple has a history target.
 inline constexpr u32 k_history_op_base = 8;
 
 MYMYR_HD constexpr u32 history_op(bool derived, bool negative, bool target)
@@ -344,8 +344,8 @@ struct ActionRows
 };
 
 /// Masks in layers, for one row: `layers` masks of `words` words each, one after the other (layer l starts at
-/// `pos + l * words`), and the same over the derived slots (`derived_words` each; null: none). The subgoals of a row are
-/// layers, and its history steps are, oldest first.
+/// `pos + l * words`), and the same over the derived slots (`derived_words` each; null: none). The subgoals of a row
+/// are layers, and its history steps are, oldest first.
 struct MaskLayers
 {
     const u64* pos;
@@ -357,8 +357,9 @@ struct MaskLayers
     u32 derived_words;
 };
 
-/// The history steps a row uses: `masks.layers` of them, the newest of its valid steps (`first` is the index of the first
-/// used one among the valid steps, so that the masks of used step j are those of step first + j), and the `dt` of each.
+/// The history steps a row uses: `masks.layers` of them, the newest of its valid steps (`first` is the index of the
+/// first used one among the valid steps, so that the masks of used step j are those of step first + j), and the `dt` of
+/// each.
 struct HistoryRows
 {
     MaskLayers masks;
@@ -387,8 +388,8 @@ struct RowLayers
 /// `goal_neg` (null: the instance's goal) are the row's own goal, masks over the fluent slots that replace the
 /// instance's goal and its constant part; `goal_derived_pos` and `goal_derived_neg` are the same over the derived slots
 /// (null: no derived goal literal). The goal masks are at least as wide as the instance's words (derived words).
-/// `actions` are the graph's expansion rows (none: no action tuples). `layers` (null: none) are the row's subgoal layers
-/// and history steps.
+/// `actions` are the graph's expansion rows (none: no action tuples). `layers` (null: none) are the row's subgoal
+/// layers and history steps.
 struct RowInput
 {
     const u64* atoms;
@@ -1052,8 +1053,8 @@ MYMYR_HD_HOT HistoryCellWords history_cell_words(const Cell& c, const RowInput& 
     return out;
 }
 
-/// The tuples of a history cell in this graph: the literals of its predicate and sign in the slots [a, b) of the row's used
-/// steps, summed over the steps.
+/// The tuples of a history cell in this graph: the literals of its predicate and sign in the slots [a, b) of the row's
+/// used steps, summed over the steps.
 MYMYR_HD u32 history_cell_count(const Cell& c, const RowInput& in)
 {
     const HistoryCellWords words = history_cell_words(c, in);
@@ -1096,9 +1097,10 @@ MYMYR_HD_HOT u32 cell_count(const InstanceView& v, const Cell& c, const RowInput
 
 
 /// Adds a cell with `n` tuples to the totals of its graph: tuples, arguments, the goal entities (the tuples of a plain
-/// goal cell with a goal target; the subgoal entities likewise), the action entities (the tuples of an action cell) and the auxiliary flag (a nullary
-/// cell with a tuple, goal cells included; an action relation has no auxiliary slot, its action entity is its only
-/// entity). The entity count, the used predicates and the bad-row flags are set by count_graph and finish_totals.
+/// goal cell with a goal target; the subgoal entities likewise), the action entities (the tuples of an action cell) and
+/// the auxiliary flag (a nullary cell with a tuple, goal cells included; an action relation has no auxiliary slot, its
+/// action entity is its only entity). The entity count, the used predicates and the bad-row flags are set by
+/// count_graph and finish_totals.
 template<bool Layered = true>
 MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
 {
@@ -1369,7 +1371,7 @@ struct GraphOut
     I* entity_ref;             // [E]
     u8* goal_complete = nullptr;  // [G]; null: not stored
     I* target_offsets = nullptr;  // [G + 1]; null: no target arrays (they are stored together)
-    I* target_entity = nullptr;   // [T] the target entities of the graphs (goal, subgoal, action, history), in entity order
+    I* target_entity = nullptr;   // [T] the graphs' target entities (goal, subgoal, action, history), in entity order
     u8* target_group = nullptr;   // [T] the group code of each target
     I* history_offsets = nullptr;  // [G + 1]; null: no history arrays (they are stored together)
     I* history_entity = nullptr;   // [S] the history step entities of the graphs, in step order
@@ -1468,9 +1470,9 @@ MYMYR_HD void fill_entities(const InstanceView& v, const RowInput& in, bool auxi
         fill_auxiliary_entity<I>(v.num_objects, entity_base, out);
 }
 
-/// Writes history_offsets[g] (`history_base` is the batch position of the graph's first history step) and, for each used
-/// step j of the graph, its entity at `blocks.history_step` + j (role and reference unless the entity arrays are not stored)
-/// and its entry of history_entity and history_dt. Does nothing without history arrays.
+/// Writes history_offsets[g] (`history_base` is the batch position of the graph's first history step) and, for each
+/// used step j of the graph, its entity at `blocks.history_step` + j (role and reference unless the entity arrays are
+/// not stored) and its entry of history_entity and history_dt. Does nothing without history arrays.
 template<class I>
 MYMYR_HD void fill_history_entities(const RowInput& in, const EntityBlocks& blocks, u64 g, u64 history_base,
                                     const GraphOut<I>& out)
@@ -1775,11 +1777,11 @@ MYMYR_HD u32 fill_goal_cell(const InstanceView& v, const Cell& c, const RowInput
     return fill_goal_cell_dispatch<I, false, Layered>(v, c, in, entity_base, auxiliary, first_target, pred, dst);
 }
 
-/// Where the goal, subgoal, action and history target entities of a graph go: the blocks, the number of each written so far
-/// (the cells are filled in relation order, so the running count is the position among the graph's entities of that
-/// kind), where the graph's targets start in the target arrays, the graph's goal and subgoal entities (the action targets
-/// follow them, then the history targets at `history_target_at`), and the virtual rank of each predicate (null without
-/// virtual nodes).
+/// Where the goal, subgoal, action and history target entities of a graph go: the blocks, the number of each written so
+/// far (the cells are filled in relation order, so the running count is the position among the graph's entities of that
+/// kind), where the graph's targets start in the target arrays, the graph's goal and subgoal entities (the action
+/// targets follow them, then the history targets at `history_target_at`), and the virtual rank of each predicate (null
+/// without virtual nodes).
 ///
 /// A fill that writes the cells of one graph on several lanes (one lane per cell, or per run of cells) gives each lane
 /// its own cursor and seeds it from the counts of count_graph (cell_counts, in cell order): `goals_written` is the sum
@@ -1929,7 +1931,8 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
             }
             if (target && out.target_entity)
             {
-                const u64 at = cursor.target_base + cursor.goal_entities + cursor.subgoal_entities + cursor.actions_written + n;
+                const u64 at =
+                    cursor.target_base + cursor.goal_entities + cursor.subgoal_entities + cursor.actions_written + n;
                 out.target_entity[at] = static_cast<I>(entity);
                 out.target_group[at] = k_target_group_action;
             }
@@ -1940,11 +1943,11 @@ MYMYR_HD u32 fill_action_cell(const InstanceView& v, const Cell& c, const RowInp
     return n;
 }
 
-/// Writes the tuples of history cell `c` in this graph to `dst`: for each used step in order, the literals of the cell's
-/// predicate and sign in the step's mask, in ascending slot order, as [history target]? + [history step] + [predicate]? +
-/// objects (the entity `auxiliary` for a nullary predicate). With a history target the tuples start with the entities
-/// `first_target`, `first_target + 1`, ...; step j is the entity `first_step + j`. Returns the number of tuples. Writes
-/// count * c.arity entries.
+/// Writes the tuples of history cell `c` in this graph to `dst`: for each used step in order, the literals of the
+/// cell's predicate and sign in the step's mask, in ascending slot order, as [history target]? + [history step] +
+/// [predicate]? + objects (the entity `auxiliary` for a nullary predicate). With a history target the tuples start with
+/// the entities `first_target`, `first_target + 1`, ...; step j is the entity `first_step + j`. Returns the number of
+/// tuples. Writes count * c.arity entries.
 template<class I>
 MYMYR_HD u32 fill_history_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                                u64 first_target, u64 first_step, u64 pred, I* dst)
@@ -2011,11 +2014,11 @@ MYMYR_NOINLINE u32 fill_history_cell_at(const InstanceView& v, const Cell& c, co
 }
 
 /// Writes one cell of a graph: its tuples' arguments to `dst` (like fill_cell, fill_goal_cell for a goal cell,
-/// fill_history_cell for a history cell and fill_action_cell for an action cell) and, for a plain goal or subgoal cell with
-/// targets and a history cell with history targets, the entities of its tuples and their target entries. `graph_tuple` is
-/// the index of the cell's first tuple among the graph's tuples in graph-major order, the sum of the counts of the
-/// graph's cells before it (the `entity_ref` of its first target entity), whatever the layout. Returns the number of
-/// tuples.
+/// fill_history_cell for a history cell and fill_action_cell for an action cell) and, for a plain goal or subgoal cell
+/// with targets and a history cell with history targets, the entities of its tuples and their target entries.
+/// `graph_tuple` is the index of the cell's first tuple among the graph's tuples in graph-major order, the sum of the
+/// counts of the graph's cells before it (the `entity_ref` of its first target entity), whatever the layout. Returns
+/// the number of tuples.
 template<class I, bool Layered = true>
 MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                           u64 graph_tuple, FillCursor& cursor, const GraphOut<I>& out, I* dst)
@@ -2033,7 +2036,8 @@ MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& 
     else if (!is_goal_op(c.op))
         return fill_cell<I>(v, c, in, entity_base, auxiliary, pred, dst);
     const bool subgoal = Layered && goal_op_level(c.op) != 0;
-    const u64 first = subgoal ? cursor.blocks.subgoal + cursor.subgoals_written : cursor.blocks.goal + cursor.goals_written;
+    const u64 first =
+        subgoal ? cursor.blocks.subgoal + cursor.subgoals_written : cursor.blocks.goal + cursor.goals_written;
     const u32 n = fill_goal_cell<I, Layered>(v, c, in, entity_base, auxiliary, first, pred, dst);
     if (goal_op_mode(c.op) == GoalMode::PlainTarget)
     {

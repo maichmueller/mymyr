@@ -155,9 +155,9 @@ public:
             if (const LayerInput& l = in.subgoals; l.layers != 0)
             {
                 if (l.words < instance.words || (l.derived_pos && l.derived_words < instance.derived_words))
-                    invalid("the subgoal layers of state " + std::to_string(g) + " are narrower than its instance needs (" +
-                            std::to_string(instance.words) + " words, " + std::to_string(instance.derived_words) +
-                            " derived words)");
+                    invalid("the subgoal layers of state " + std::to_string(g) +
+                            " are narrower than its instance needs (" + std::to_string(instance.words) + " words, " +
+                            std::to_string(instance.derived_words) + " derived words)");
                 if (!zero_layer_tails(l, g, l.layers))
                     invalid("the subgoal layers of state " + std::to_string(g) +
                             " set an atom bit its instance does not have");
@@ -168,10 +168,11 @@ public:
                 if (steps < 0 || steps > static_cast<i64>(l.layers))
                     invalid("the history count of state " + std::to_string(g) + " is " + std::to_string(steps) +
                             ", outside [0, " + std::to_string(l.layers) + "]");
-                if (steps != 0 && (l.words < instance.words || (l.derived_pos && l.derived_words < instance.derived_words)))
-                    invalid("the history steps of state " + std::to_string(g) + " are narrower than its instance needs (" +
-                            std::to_string(instance.words) + " words, " + std::to_string(instance.derived_words) +
-                            " derived words)");
+                if (steps != 0 &&
+                    (l.words < instance.words || (l.derived_pos && l.derived_words < instance.derived_words)))
+                    invalid("the history steps of state " + std::to_string(g) +
+                            " are narrower than its instance needs (" + std::to_string(instance.words) + " words, " +
+                            std::to_string(instance.derived_words) + " derived words)");
                 if (!zero_layer_tails(l, g, static_cast<u32>(steps)))
                     invalid("the history steps of state " + std::to_string(g) +
                             " set an atom bit its instance does not have");
@@ -406,8 +407,9 @@ public:
             in.subgoals.words = m_words;
             if (m_derived_words)
             {
-                gather(m_gather_sub_derived_pos, m_sub_derived_pos, m_levels * m_derived_words, in.subgoals.derived_pos);
-                gather(m_gather_sub_derived_neg, m_sub_derived_neg, m_levels * m_derived_words, in.subgoals.derived_neg);
+                const u32 per_row = m_levels * m_derived_words;
+                gather(m_gather_sub_derived_pos, m_sub_derived_pos, per_row, in.subgoals.derived_pos);
+                gather(m_gather_sub_derived_neg, m_sub_derived_neg, per_row, in.subgoals.derived_neg);
                 in.subgoals.derived_stride = u64{m_levels} * m_derived_words;
                 in.subgoals.derived_words = m_derived_words;
             }

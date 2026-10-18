@@ -327,7 +327,8 @@ def test_subgoal_tuples_and_subgoal_entities_are_compared():
     for i in subgoals:
         role, name = actual.entities[i]
         moved = copy(actual)
-        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if name.endswith("[sg]") else name.replace("[ssg]", "[sg]"))
+        higher = name.endswith("[sg]")
+        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if higher else name.replace("[ssg]", "[sg]"))
         assert {m.kind for m in compare(expected, moved, context)} == {"entity"}
         lost = copy(actual)
         del lost.entities[i]
@@ -340,7 +341,8 @@ def test_the_numbering_of_subgoal_entities_is_excused_but_their_names_are_not():
     swapped = copy(actual)
     swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
     assert compare(expected, swapped, context) == []
-    assert {m.kind for m in compare(expected, swapped, context, [n for n in NAMES if n != "subgoal_entity_order"])} == {"entity"}
+    strict = [n for n in NAMES if n != "subgoal_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, strict)} == {"entity"}
 
 
 def test_history_tuples_history_steps_and_history_targets_are_compared():

@@ -176,7 +176,8 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     if (stored_history != (batch.find("history_offsets") != nullptr) ||
         stored_history != (batch.find("history_entity") != nullptr) ||
         stored_history != (batch.find("history_dt") != nullptr))
-        fail(stored_history ? "a history array is missing" : "the history arrays must be omitted: the schema has no history");
+        fail(stored_history ? "a history array is missing"
+                            : "the history arrays must be omitted: the schema has no history");
     Ints history_offsets, history_entity;
     if (stored_history)
     {
@@ -238,8 +239,9 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             fail("graph " + std::to_string(g) + " has more than one auxiliary entity");
         if (last - first != objects + auxiliaries + goal_entities + subgoal_entities + action_entities +
                                 history_entities + history_targets + virtual_entities)
-            fail("graph " + std::to_string(g) + " has entities that are neither objects, auxiliary, goal, subgoal, action, "
-                                               "history step, history target nor predicate virtual entities");
+            fail("graph " + std::to_string(g) +
+                 " has entities that are neither objects, auxiliary, goal, subgoal, action, history step, history "
+                 "target nor predicate virtual entities");
         // The entities past the objects: the auxiliary entity, the goal entities, the subgoal entities, the action
         // entities, the history step entities, the history target entities, the virtual entities.
         const i64 goal_start = first + objects + auxiliaries;
@@ -309,7 +311,8 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 if (stored_targets && (position >= target_offsets[g + 1] ||
                                        target_entity[static_cast<u64>(position)] != entity ||
                                        target_group[position] != static_cast<u8>(group)))
-                    fail("the targets of graph " + std::to_string(g) + " do not list its " + what + " entities in order");
+                    fail("the targets of graph " + std::to_string(g) + " do not list its " + what +
+                         " entities in order");
             };
             for (u64 t = 0; t < n; ++t)
             {
@@ -339,12 +342,13 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                 if (history_target)
                 {
                     const i64 entity = args[at];
-                    if (history_target_count >= history_targets || entity != history_target_start + history_target_count)
+                    if (history_target_count >= history_targets ||
+                        entity != history_target_start + history_target_count)
                         fail("a tuple of " + where + " does not have the next history target entity");
                     if (entity_role && entity_ref[entity] != graph_tuples + static_cast<i64>(t))
                         fail("the history target entity of a tuple of " + where + " does not refer to the tuple");
-                    check_target(target_start + goal_entities + subgoal_entities + (action_targets ? action_entities : 0) +
-                                     history_target_count,
+                    check_target(target_start + goal_entities + subgoal_entities +
+                                     (action_targets ? action_entities : 0) + history_target_count,
                                  entity, TargetGroup::History, "history target");
                     ++history_target_count;
                 }
@@ -398,7 +402,8 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         if (goals != goal_entities)
             fail("graph " + std::to_string(g) + " has goal entities that no tuple of a plain goal relation starts with");
         if (subgoals != subgoal_entities)
-            fail("graph " + std::to_string(g) + " has subgoal entities that no tuple of a plain subgoal relation starts with");
+            fail("graph " + std::to_string(g) +
+                 " has subgoal entities that no tuple of a plain subgoal relation starts with");
         if (history_target_count != history_targets)
             fail("graph " + std::to_string(g) + " has history target entities that no history tuple starts with");
         if (actions != action_entities)
