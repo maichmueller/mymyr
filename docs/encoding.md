@@ -537,9 +537,9 @@ with optional derived words and positive/negative fluent and derived goal masks.
 construction; every append supplies the same columns. Without a derived column, the encoder evaluates axioms when
 its schema needs them. The mutable stream stays host-only.
 
-```python
+```python needs-torch skip-if-no-cuda
 ring = encoder.device_stream(1024, device=0)
-ring.append(cuda_rows, cuda_task_ids)
+ring.append(device_rows)
 batch = ring.flush(capacities=dict(graphs=1024, entities=32768, args=262144))
 ```
 

@@ -915,24 +915,24 @@ void bind_encoding(nb::module_& parent)
 {
     nb::module_ module = parent.def_submodule("_encoding", "Native classical relational encodings");
 
-    module.def("_collate", [](const std::vector<const PyFlatBatch*>& batches)
+    module.def("_collate", [](const std::vector<PyFlatBatch>& batches)
     {
         if (batches.empty())
             throw nb::value_error("mymyr: encoding: collate needs at least one batch");
         std::vector<std::shared_ptr<const rl::ArrayBundle>> arrays;
         arrays.reserve(batches.size());
-        for (const auto* b : batches)
+        for (const auto& b : batches)
         {
-            if (b->sizes && b->sizes->overflowed())
+            if (b.sizes && b.sizes->overflowed())
                 throw nb::value_error("mymyr: encoding: cannot collate an overflowed batch");
-            arrays.push_back(b->arrays);
+            arrays.push_back(b.arrays);
         }
         std::shared_ptr<const rl::ArrayBundle> result;
         {
             nb::gil_scoped_release release;
             result = encoding::collate(arrays);
         }
-        return PyFlatBatch{std::move(result), batches.front()->schema, batches.front()->framework, std::nullopt};
+        return PyFlatBatch{std::move(result), batches.front().schema, batches.front().framework, std::nullopt};
     }, "batches"_a, "Concatenates host batches of one schema and layout, shifting offsets and entity ids.");
 
     nb::class_<PyEncodingSchema> schema_class(

@@ -1108,6 +1108,22 @@ def test_device_collation_of_rollout_slices_equals_one_encode(cases, layout, ind
     caps = exact_capacities(host)
     batch = plan.encode(capacities=caps)
     same_batch(host, batch)
+    ample = exact_capacities(host, factor=2)
+    host_ample = encoder.encode(case.rows[:n], None if case.ids is None else case.ids[:n], capacities=ample)
+    same_batch(host_ample, plan.encode(capacities=ample))
+    short = plan.encode(capacities={**caps, "args": 0})
+    assert short.sizes["capacity_overflow"]
+    assert not torch.count_nonzero(short.entity_offsets).item()
+    assert not torch.count_nonzero(short.relation_offsets).item()
+    same_batch(encoder.encode(case.rows[:0], None if case.ids is None else case.ids[:0]),
+               encoding.collate([batches[1], batches[1]]))
+    with pytest.raises(ValueError, match="^mymyr: encoding: collate received mixed host and device"):
+        encoding.collate([host, batches[0]])
+    bad = encoder.encode(rows, ids, capacities={**caps, "args": 0})
+    invalid_plan = encoding.DeviceCollator([bad])
+    with pytest.raises(ValueError, match="^mymyr: encoding: cannot collate an overflowed batch"):
+        invalid_plan.encode()
+    assert invalid_plan.encode(capacities=caps).sizes["invalid_input"]
     stream = torch.cuda.current_stream()
     stream.synchronize()
     graph = torch.cuda.CUDAGraph()
