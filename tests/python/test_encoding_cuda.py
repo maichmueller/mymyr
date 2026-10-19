@@ -535,12 +535,21 @@ def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mod
     source = to_device(case.rows, dev)
     rows = torch.zeros_like(source)
     stream = torch.cuda.Stream(dev)
+    held_scratch = []
     torch.cuda.synchronize()
     try:
         with torch.cuda.stream(stream):
             encoder.encode(rows, capacities=caps)
         stream.synchronize()
         if wrong_stream:
+            allocate = encoding._device._scratch
+
+            def scratch(*args):
+                tensor = allocate(*args)
+                held_scratch.append(tensor)
+                return tensor
+
+            monkeypatch.setattr(encoding._device, "_scratch", scratch)
             monkeypatch.setattr(rt._ops, "_stream", lambda *a: 0)
         with torch.cuda.stream(stream):
             torch.cuda._sleep(200_000_000)
@@ -557,7 +566,7 @@ def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mod
         else:
             same_batch(host, batch)
     finally:
-        stream.synchronize()
+        torch.cuda.synchronize()
         rt.unregister(handle)
 
 
