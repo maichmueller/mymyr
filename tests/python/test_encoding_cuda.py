@@ -555,14 +555,19 @@ def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mod
 
     monkeypatch.setattr(encoding._device, "_scratch", scratch)
     warm = []
-    try:
-        # Warm both streams so a blocking first allocation cannot hide the delayed write.
+
+    def warm_stream():
         warm.append(encoder.encode(rows))
         warm.append(encoder.encode(rows, capacities=caps))
+        if mode == "op":
+            warm.append(call_op(handle, rows, None, None, [None] * 4, caps))
+
+    try:
+        # Warm allocations and operator dispatch on both streams before delaying the write.
+        warm_stream()
         torch.cuda.synchronize()
         with torch.cuda.stream(stream):
-            warm.append(encoder.encode(rows))
-            warm.append(encoder.encode(rows, capacities=caps))
+            warm_stream()
         torch.cuda.synchronize()
         warm.clear()
         if wrong_stream:
