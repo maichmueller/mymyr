@@ -1304,7 +1304,10 @@ TEST(DeviceEncoder, FillZerosUnusedTailsAndOverflowOutputsWhenRequested)
                 {
                     auto capacity = shape;
                     if (overflow)
+                    {
+                        ++capacity.graphs;
                         capacity.entities = capacity.args = capacity.targets = 1;
+                    }
                     const auto offsets = device.output_layout(capacity);
                     cuda::DeviceBuffer block(ctx, offsets.bytes, stream);
                     cuda::check(cudaMemsetAsync(block.data(), 0x5a, block.size(), stream), "dirty outputs");
@@ -1332,15 +1335,15 @@ TEST(DeviceEncoder, FillZerosUnusedTailsAndOverflowOutputsWhenRequested)
                     zeros(offsets.target_group, failed ? 0 : sizes.targets, capacity.targets, 1);
                     if (failed)
                     {
-                        const u64 cells = in.graphs * host->schema().num_relations();
-                        zeros(offsets.task_ids, 0, in.graphs, 4);
-                        zeros(offsets.num_objects, 0, in.graphs, I);
-                        zeros(offsets.entity_offsets, 0, in.graphs + 1, I);
+                        const u64 cells = capacity.graphs * host->schema().num_relations();
+                        zeros(offsets.task_ids, 0, capacity.graphs, 4);
+                        zeros(offsets.num_objects, 0, capacity.graphs, I);
+                        zeros(offsets.entity_offsets, 0, capacity.graphs + 1, I);
                         zeros(offsets.relation_counts, 0, cells, I);
                         zeros(offsets.relation_offsets, 0, cells + 1, I);
                         zeros(offsets.relation_arg_offsets, 0, cells + 1, I);
-                        zeros(offsets.goal_complete, 0, in.graphs, 1);
-                        zeros(offsets.target_offsets, 0, in.graphs + 1, I);
+                        zeros(offsets.goal_complete, 0, capacity.graphs, 1);
+                        zeros(offsets.target_offsets, 0, capacity.graphs + 1, I);
                     }
                 }
             }

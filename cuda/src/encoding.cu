@@ -348,15 +348,16 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     zero_tail(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets);
     if (overflow)
     {
-        const u64 cells = p.graphs * p.context.num_relations;
-        zero_tail(a.task_ids, 0, p.graphs);
-        zero_tail(static_cast<I*>(a.num_objects), 0, p.graphs);
-        zero_tail(static_cast<I*>(a.entity_offsets), 0, p.graphs + 1);
+        const u64 graphs = p.capacities.graphs;
+        const u64 cells = graphs * p.context.num_relations;
+        zero_tail(a.task_ids, 0, graphs);
+        zero_tail(static_cast<I*>(a.num_objects), 0, graphs);
+        zero_tail(static_cast<I*>(a.entity_offsets), 0, graphs + 1);
         zero_tail(static_cast<I*>(a.relation_counts), 0, cells);
         zero_tail(static_cast<I*>(a.relation_offsets), 0, cells + 1);
         zero_tail(static_cast<I*>(a.relation_arg_offsets), 0, cells + 1);
-        zero_tail(a.goal_complete, 0, p.graphs);
-        zero_tail(static_cast<I*>(a.target_offsets), 0, p.graphs + 1);
+        zero_tail(a.goal_complete, 0, graphs);
+        zero_tail(static_cast<I*>(a.target_offsets), 0, graphs + 1);
     }
 }
 
