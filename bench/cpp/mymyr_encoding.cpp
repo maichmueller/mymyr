@@ -16,9 +16,9 @@
 // the line. subgoals is the number of subgoal layers per row (0 to 3, needs goals on or targets) and history the steps
 // of each row's history (the rows have 1 + i % history steps, so they differ); both give every row random literals
 // drawn from the states of the walk, and with goals = targets their entities are targets too.
-// horizon = off|full|delta|action turns the rows into root states of horizons (the options in argv[12], argv[13] and
-// argv[14]: depth = 1, max_children = 0 for all, root = include|encode_only|exclude): every graph is a root with the nodes
-// within depth actions, the line reports the time per graph and per node (the rows of the nodes make the batch), and the
+// horizon = off|full|delta|action (argv[12]) turns the rows into root states of horizons (the options in argv[13], argv[14]
+// and argv[15]: depth = 1, root = include|encode_only|exclude, max_children = 0 for all): every graph is a root with the
+// nodes within depth actions, the line reports the time per graph and per node (the rows of the nodes make the batch), and the
 // subgoal and history options do not apply.
 
 #include "mymyr/encoding/encoder.hpp"
