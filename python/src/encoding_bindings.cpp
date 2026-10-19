@@ -1,4 +1,5 @@
 #include "arrays.hpp"
+#include "device_hooks.hpp"
 #include "py_expansion.hpp"
 #include "py_pool.hpp"
 #include "py_table.hpp"
@@ -52,6 +53,9 @@ struct EncodingHistory
 {
 };
 struct EncodingGraphDescription
+{
+};
+struct EncodingBatch
 {
 };
 struct EncodingEntityArrays
@@ -109,6 +113,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingGraphDescription>
 {
     static constexpr auto Name = const_name("mymyr._typing.GraphDescription");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingBatch>
+{
+    static constexpr auto Name = const_name("FlatBatch | mymyr._typing.DeviceFlatBatch");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
@@ -533,17 +542,17 @@ nb::object batch_array(const PyFlatBatch& batch, const char* name)
 using PoolArg = Arg<PyPool>;
 using CapacitiesArg = std::optional<nb::typed<nb::dict, std::string, std::uint64_t>>;
 
-encoding::FlatCapacities capacities_of(const nb::dict& value, const encoding::EncodingSchema& schema)
+encoding::BatchShape capacities_of(const nb::dict& value, const encoding::EncodingSchema& schema)
 {
-    encoding::FlatCapacities out;
-    bool entities = false, tuples = false, args = false, targets = false, history = false;
+    encoding::BatchShape out;
+    bool entities = false, graphs = false, args = false, targets = false, history = false;
     for (auto [key, item] : value)
     {
         const std::string name = text_of(key, "capacities key");
         if (name == "entities")
             out.entities = int_arg<u64>(item, "capacities['entities']"), entities = true;
-        else if (name == "tuples")
-            out.tuples = int_arg<u64>(item, "capacities['tuples']"), tuples = true;
+        else if (name == "graphs")
+            out.graphs = int_arg<u64>(item, "capacities['graphs']"), graphs = true;
         else if (name == "args")
             out.args = int_arg<u64>(item, "capacities['args']"), args = true;
         else if (name == "targets")
@@ -552,11 +561,11 @@ encoding::FlatCapacities capacities_of(const nb::dict& value, const encoding::En
             out.history = int_arg<u64>(item, "capacities['history']"), history = true;
         else
             throw nb::value_error(("mymyr: encoding: capacities has the unknown key '" + name +
-                                   "'; the keys are 'entities', 'tuples', 'args', 'targets' and 'history'")
+                                   "'; the keys are 'graphs', 'entities', 'args', 'targets' and 'history'")
                                       .c_str());
     }
-    if (!(entities && tuples && args))
-        throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'tuples' and 'args'");
+    if (!(entities && graphs && args))
+        throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'graphs' and 'args'");
     if (!targets && schema.has_targets())
         throw nb::value_error("mymyr: encoding: the schema has targets: capacities needs the key 'targets' as well");
     if (!history && schema.has_history())
@@ -818,12 +827,50 @@ void run_on_pool(PyFlatEncoder& self, u32 threads, PoolArg pool_in, Work&& work)
     work(held ? *held->pool : *own);
 }
 
-PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
-                   GoalsArg goals_arg, ActionsArg actions_arg, SubgoalsArg subgoals_arg, HistoryArg history_arg,
-                   Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in, CapacitiesArg capacities_in)
+/// A NumPy array, which is never on the device: the check that keeps host encodes at their cost.
+bool is_numpy_array(nb::handle value)
 {
+    static const nb::handle ndarray = nb::object(nb::module_::import_("numpy").attr("ndarray")).release();
+    return value.type().ptr() == ndarray.ptr();
+}
+
+/// An array object that lives in CUDA memory: DLPack's device, or a __cuda_array_interface__.
+bool is_device_array(nb::handle value)
+{
+    if (value.is_none() || is_numpy_array(value) || nb::isinstance<PyState>(value))
+        return false;
+    return is_cuda_array(value) || PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__");
+}
+
+/// Whether an argument of `encode` is a CUDA device array; with `masks`, a tuple of the goal masks of which one is.
+bool on_device(nb::handle value, bool masks = false)
+{
+    if (!masks)
+        return is_device_array(value);
+    if (nb::isinstance<nb::tuple>(value) || nb::isinstance<nb::list>(value))
+        for (nb::handle item : value)
+            if (is_device_array(item))
+                return true;
+    return false;
+}
+
+/// The rows of a call that has device arrays are encoded on the device (mymyr.encoding._device).
+Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
+                               GoalsArg goals_arg, ActionsArg actions_arg, SubgoalsArg subgoals_arg,
+                               HistoryArg history_arg, Arg<ann::Framework> framework, IntArg threads_in,
+                               PoolArg pool_in, CapacitiesArg capacities_in)
+{
+    if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg, true))
+    {
+        if (!subgoals_arg.is_none() || !history_arg.is_none())
+            throw nb::value_error("mymyr: encoding: subgoals and history are not encoded on the device");
+        return Arg<ann::EncodingBatch>(
+            nb::module_::import_("mymyr.encoding._device")
+                .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,
+                                threads_in, pool_in, capacities_in ? nb::object(*capacities_in) : nb::none()));
+    }
     const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::FlatCapacities> capacities =
+    const std::optional<encoding::BatchShape> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
                       : std::nullopt;
     ImportedRows rows;
@@ -846,7 +893,7 @@ PyFlatBatch encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_id
                     else
                         output.arrays = self.encoder->encode(rows.input, pool, scratch);
                 });
-    return output;
+    return Arg<ann::EncodingBatch>(nb::cast(std::move(output)));
 }
 
 constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
@@ -946,7 +993,7 @@ PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads
 {
     PyFlatEncoder& encoder = self.owner();
     const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::FlatCapacities> capacities =
+    const std::optional<encoding::BatchShape> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, encoder.encoder->schema()))
                       : std::nullopt;
     PyFlatBatch output;
@@ -1003,6 +1050,11 @@ constexpr const char* k_row_inputs_doc =
     "With `actions`, the rows of the expansion belong to the states of this call, in order (`actions.num_states` equals "
     "the number of rows): the stream keeps their schemas and bindings, graph by graph. ";
 }  // namespace
+
+std::shared_ptr<const encoding::FlatEncoder> flat_encoder_of(nb::handle obj)
+{
+    return nb::cast<const PyFlatEncoder&>(obj).encoder;
+}
 
 void bind_encoding(nb::module_& parent)
 {
@@ -1074,7 +1126,7 @@ void bind_encoding(nb::module_& parent)
         batch.def_prop_ro(name, [name = name](const PyFlatBatch& self) { return ArrayOut(batch_array(self, name)); }, doc);
 
     nb::class_<PyFlatEncoder> encoder_class(
-        module, "FlatRelationEncoder",
+        module, "FlatRelationEncoder", nb::is_weak_referenceable(),
         "Encodes states into relational graphs: one graph per state, with the instance's objects as entities (plus one "
         "auxiliary entity when a nullary tuple exists) and, for every relation of the schema, the tuples of the state's "
         "fluent, derived and static atoms. A graph holds nothing that its state and instance do not have.");
@@ -1130,15 +1182,37 @@ void bind_encoding(nb::module_& parent)
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
              "one pool of that size, rebuilt when the count changes. pool: a mymyr.rl.ThreadPool to use instead (it "
              "takes precedence over threads; one batch at a time runs on it). The result does not depend on either. "
-             "capacities: a dict with the keys 'entities', 'tuples', 'args' (and 'targets' with target_sources, "
-             "'history' with history); the "
-             "batch then has relation_args, the entity arrays, the target arrays and the history arrays of exactly the "
-             "capacities' sizes "
-             "(the first sizes['entities'] / sizes['args'] / sizes['targets'] / sizes['history'] entries hold the "
-             "encoding, the rest is "
+             "capacities: a dict with the keys 'graphs', 'entities', 'args' (and 'targets' with target_sources, "
+             "'history' with history); the batch then has relation_args, the entity arrays, the target arrays and the "
+             "history arrays of exactly the capacities' sizes (the first sizes['entities'] / sizes['args'] / "
+             "sizes['targets'] / sizes['history'] entries hold the encoding, the rest is "
              "zero) and `sizes` reports the true sizes. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
-             "set; nothing raises.")
+             "set; nothing raises. Rows (and task_ids, derived, goals) in CUDA memory are encoded on the device into "
+             "torch tensors: a DeviceFlatBatch is returned, actions, subgoals and history are refused, threads has no effect and pool is "
+             "refused.")
+        .def(
+            "reserve_device",
+            [](nb::handle self, IntArg graphs, Arg<ann::Any> device, StreamArg stream)
+            {
+                nb::module_::import_("mymyr.encoding._device").attr("reserve")(self, graphs, device, stream);
+            },
+            "graphs"_a, nb::kw_only(), "device"_a = nb::none(), "stream"_a = nb::none(),
+            "Makes the device workspace of `stream` (a torch.cuda.Stream or a cudaStream_t; default: torch's current "
+            "stream of `device`, default the current CUDA device) hold batches of up to `graphs` rows, uploading the "
+            "encoder's context to the device if that has not happened. Encoding rows on the device does this on demand "
+            "for the first call on a stream; call it before capturing a CUDA graph on a stream, since a capture cannot "
+            "allocate. Raises ValueError for options the device does not encode.")
+        .def(
+            "release_device",
+            [](nb::handle self, Arg<ann::Any> device, StreamArg stream)
+            {
+                nb::module_::import_("mymyr.encoding._device").attr("release")(self, device, stream);
+            },
+            nb::kw_only(), "device"_a = nb::none(), "stream"_a = nb::none(),
+            "Frees the device workspace of `stream`, or of every stream of `device` (default: the current CUDA device) "
+            "without one. The uploaded context stays with the encoder. Do not release a workspace that a captured CUDA "
+            "graph can still replay.")
         .def(
             "stream",
             [](PyFlatEncoder& self, Arg<ann::Framework> framework)

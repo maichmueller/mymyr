@@ -923,9 +923,8 @@ TEST(EncoderLayers, TheCapacityFormKeepsTheHistoryArrays)
     FlatSizes sizes;
     const u64 entries = ints(*exact, "history_entity").size();
     ASSERT_EQ(entries, 10u);
-    FlatCapacities fits{ints(*exact, "entity_ref").size() + 3,    ints(*exact, "relation_args").size() + 7,
-                        ints(*exact, "relation_args").size() + 7, ints(*exact, "target_entity").size() + 2,
-                        entries + 4};
+    BatchShape fits{5, ints(*exact, "entity_ref").size() + 3, ints(*exact, "relation_args").size() + 7,
+                    ints(*exact, "target_entity").size() + 2, entries + 4};
     const auto padded = encoder->encode_capacity(in, fits, pool, scratch, sizes);
     EXPECT_FALSE(sizes.overflowed());
     EXPECT_EQ(sizes.history, entries);

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from mymyr._core._encoding import FlatBatch
+from mymyr.encoding._device import DeviceFlatBatch, _Host
 
 _TARGET_RELATION = re.compile(r"^\[([+-])\](.+?)(\[g\]|\[sg\]|\[ssg\]|\[sssg\]|\[hist\])$")
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
@@ -56,9 +57,18 @@ def _tasks_of(encoder):
     return list(tasks) if tasks is not None else [table]
 
 
+def _host(batch):
+    """A device batch as host arrays (one copy of its arrays; waits for the device), any other batch as it is."""
+    if isinstance(batch, DeviceFlatBatch):
+        return _Host(batch)
+    return batch
+
+
 def _check(encoder, batch, graph):
-    if not isinstance(batch, FlatBatch):
-        raise TypeError(f"mymyr: encoding: batch must be a FlatBatch, not {type(batch).__name__}")
+    if not isinstance(batch, (FlatBatch, _Host)):
+        raise TypeError(
+            f"mymyr: encoding: batch must be a FlatBatch or a DeviceFlatBatch, not {type(batch).__name__}"
+        )
     if batch.schema.schema_fingerprint != encoder.schema_fingerprint:
         raise ValueError("mymyr: encoding: the batch was encoded with another schema than this encoder's")
     sizes = batch.sizes
@@ -168,12 +178,14 @@ def _names(encoder, batch, graph):
 
 def entity_names(encoder, batch, graph):
     """The names of the entities of graph ``graph`` of ``batch`` in entity order (see the module's naming rules)."""
+    batch = _host(batch)
     graph = _check(encoder, batch, graph)
     return _names(encoder, batch, graph)[1]
 
 
 def describe(encoder, batch, graph):
     """A GraphDescription of graph ``graph`` of ``batch``: its entities and its relations' tuples by name."""
+    batch = _host(batch)
     graph = _check(encoder, batch, graph)
     g, names = _names(encoder, batch, graph)
     entities = tuple((g.entity_role_names[int(role)], name) for role, name in zip(g.role.tolist(), names))

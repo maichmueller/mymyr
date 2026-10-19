@@ -721,7 +721,7 @@ private:
 
 /// The batch of `in`, and for the capacity form its sizes.
 std::shared_ptr<const rl::ArrayBundle> encode_rows(const FlatEncoder& encoder, const EncodeInput& in, ThreadPool& pool,
-                                                   EncodeScratch& scratch, const FlatCapacities* capacities,
+                                                   EncodeScratch& scratch, const BatchShape* capacities,
                                                    FlatSizes* sizes)
 {
     return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes) : encoder.encode(in, pool, scratch);
@@ -783,7 +783,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool)
     return out;
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const FlatCapacities& capacities, FlatSizes& sizes)
+std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const BatchShape& capacities, FlatSizes& sizes)
 {
     std::lock_guard lock(m_impl->mutex);
     RowStore& store = m_impl->store;
@@ -966,7 +966,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool
     return encode_rows(*s.encoder, in, pool, s.scratch, nullptr, nullptr);
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const FlatCapacities& capacities,
+std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const BatchShape& capacities,
                                                                 FlatSizes& sizes)
 {
     std::lock_guard lock(m_impl->mutex);

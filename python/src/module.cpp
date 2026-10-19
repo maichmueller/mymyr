@@ -44,6 +44,7 @@ void bind_encoding(nb::module_& parent);
 #if defined(MYMYR_HAS_CUDA)
 void bind_cuda(nb::module_& parent);
 void bind_cuda_datasets(nb::module_& parent);
+void bind_encoding_device(nb::module_& parent);
 #endif
 }  // namespace mymyr::python
 
@@ -146,6 +147,7 @@ NB_MODULE(_core, m)
 #if defined(MYMYR_HAS_CUDA)
     mymyr::python::bind_cuda(m);
     mymyr::python::bind_cuda_datasets(m);
+    mymyr::python::bind_encoding_device(m);
 #endif
     defer_refcounts(m);
 }

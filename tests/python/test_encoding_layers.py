@@ -176,10 +176,10 @@ def test_capacities_take_a_history_count():
     layers, history = rows_of(random.Random(3), states, 2, 3)
     args = dict(subgoals=encoding.subgoal_masks(encoder, layers), history=encoding.history_masks(encoder, history))
     exact = encoder.encode(states, **args)
-    roomy = dict(entities=4096, tuples=4096, args=16384, targets=1024, history=64)
+    roomy = dict(graphs=64, entities=4096, args=16384, targets=1024, history=64)
     sizes = encoder.encode(states, capacities=roomy, **args).sizes
     assert sizes["history"] == len(exact.history_entity) > 0 and not sizes["overflow"]
-    capacities = {k: sizes[k] for k in roomy}
+    capacities = {"graphs": 64, **{k: sizes[k] for k in ("entities", "args", "targets", "history")}}
     fitted = encoder.encode(states, capacities=capacities, **args)
     assert fitted.sizes["history"] == sizes["history"] and not fitted.sizes["overflow"]
     assert fitted.history_entity[: sizes["history"]].tolist() == exact.history_entity.tolist()

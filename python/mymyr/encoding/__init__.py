@@ -18,10 +18,12 @@ arities, lanes and slot roles, and a fingerprint. It is a function of the domain
 """
 
 from mymyr._core._encoding import EncodingSchema, FlatBatch, FlatMutableStream, FlatRelationEncoder, FlatStream
+from mymyr.encoding._device import DeviceFlatBatch
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
 
 __all__ = [
+    "DeviceFlatBatch",
     "EncodingSchema",
     "FlatBatch",
     "FlatMutableStream",
