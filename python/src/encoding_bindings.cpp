@@ -698,7 +698,8 @@ bool is_device_array(nb::handle value)
     const nb::handle cls = value.type();
     if (PyObject_HasAttrString(cls.ptr(), "__dlpack_device__"))
         return is_cuda_array(value);
-    return PyObject_HasAttrString(cls.ptr(), "__cuda_array_interface__");
+    return PyObject_HasAttrString(cls.ptr(), "__cuda_array_interface__") ||
+           PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__");
 }
 
 /// Whether an argument of `encode` is a CUDA device array; with `masks`, a tuple of the goal masks of which one is.
