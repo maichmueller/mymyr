@@ -906,4 +906,4 @@ def test_the_candidate_nodes_are_the_targets_of_the_horizon_graph(path, config):
         groups = {placed.encoder.target_group_names[int(g)] for g in batch.target_group[first:last]}
         recorded = record["outputs"]["targets"]
         assert names == recorded["names"], (record["state"], names)
-        assert groups <= set(recorded["groups"]) | set()
+        assert groups <= set(recorded["groups"])
