@@ -37,7 +37,6 @@ struct DeviceCollator::Impl
     Impl(ContextPtr ctx, std::vector<DeviceCollationBatch> batches, cudaStream_t s)
         : context(std::move(ctx)), stream(s ? s : context->stream())
     {
-        DeviceGuard guard(context->device());
         cudaStreamCaptureStatus capture;
         check(cudaStreamIsCapturing(stream, &capture), "query collation capture");
         if (capture != cudaStreamCaptureStatusNone) invalid("prepare the device collator outside capture");
@@ -69,9 +68,19 @@ struct DeviceCollator::Impl
         total_bytes = add(temp_offset, params.temp_bytes);
         slices = DeviceBuffer(context, mul(batches.size(), sizeof(detail::CollationSlice)), stream);
         params.slices = static_cast<const detail::CollationSlice*>(slices.data());
-        check(cudaMemcpyAsync(slices.data(), host, slices.size(), cudaMemcpyHostToDevice, stream), "upload collation slices");
-        uploaded.record(stream);
-        has_upload = true;
+        try
+        {
+            check(cudaMemcpyAsync(slices.data(), host, slices.size(), cudaMemcpyHostToDevice, stream),
+                  "upload collation slices");
+            uploaded.record(stream);
+            has_upload = true;
+        }
+        catch (...)
+        {
+            // Do not recycle pinned staging while a descriptor copy is outstanding.
+            (void)cudaStreamSynchronize(stream);
+            throw;
+        }
     }
 
     ~Impl()
@@ -118,6 +127,7 @@ struct DeviceCollator::Impl
 DeviceCollator::DeviceCollator(ContextPtr ctx, std::vector<DeviceCollationBatch> batches, cudaStream_t stream)
 {
     if (!ctx) invalid("device collate needs a context");
+    DeviceGuard guard(ctx->device());
     m_impl = std::make_unique<Impl>(std::move(ctx), std::move(batches), stream);
 }
 DeviceCollator::~DeviceCollator() = default;
