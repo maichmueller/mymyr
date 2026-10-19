@@ -5,6 +5,7 @@
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/stream.hpp"
 #include "mymyr/encoding/validate.hpp"
+#include "mymyr/task/workspace.hpp"
 
 #include <gtest/gtest.h>
 
@@ -61,19 +62,54 @@ struct RefLiteral
     bool positive;
 };
 
+RefAtom ref_atom(const Task& task, AtomKind kind, u32 slot)
+{
+    const u32* record = task.atoms().record(kind, slot);
+    RefAtom atom{std::string(task.data().str(task.data().predicates[record[0]].name)), {}};
+    for (u32 k = 0; k < task.compiled().arity[record[0]]; ++k)
+        atom.objects.push_back(static_cast<i32>(record[1 + k]));
+    return atom;
+}
+
 /// The fluent atoms a row sets.
 AtomSet fluent_atoms(const Task& task, const u64* row)
 {
     AtomSet out;
     for (u32 slot = 0; slot < task.atoms().fluent_slots(); ++slot)
         if ((row[slot >> 6] >> (slot & 63)) & 1)
-        {
-            const u32* record = task.atoms().record(AtomKind::Fluent, slot);
-            RefAtom atom{std::string(task.data().str(task.data().predicates[record[0]].name)), {}};
-            for (u32 k = 0; k < task.compiled().arity[record[0]]; ++k)
-                atom.objects.push_back(static_cast<i32>(record[1 + k]));
-            out.insert(std::move(atom));
-        }
+            out.insert(ref_atom(task, AtomKind::Fluent, slot));
+    return out;
+}
+
+/// The derived atoms that hold in a row, by the task's axioms.
+AtomSet derived_atoms(const Task& task, const u64* row, u32 words)
+{
+    AtomSet out;
+    if (task.atoms().derived_slots() == 0)
+        return out;
+    const WorkspaceLease workspace = task.workspace();
+    auto& engine = workspace->engine();
+    engine.set_state(row, words);
+    engine.build_view();
+    workspace->axioms().evaluate();
+    const u64* derived = engine.derived();
+    for (u32 slot = 0; slot < task.atoms().derived_slots(); ++slot)
+        if ((derived[slot >> 6] >> (slot & 63)) & 1)
+            out.insert(ref_atom(task, AtomKind::Derived, slot));
+    return out;
+}
+
+/// The static atoms of a task.
+AtomSet static_atoms(const Task& task)
+{
+    AtomSet out;
+    for (const formalism::GroundAtom& atom : task.data().static_init)
+    {
+        RefAtom ref{std::string(task.data().str(task.data().predicates[atom.pred.v].name)), {}};
+        for (const auto object : task.data().objects_of(atom))
+            ref.objects.push_back(static_cast<i32>(object.v));
+        out.insert(std::move(ref));
+    }
     return out;
 }
 
@@ -106,7 +142,8 @@ std::vector<RefLiteral> mask_goal(const Task& task, const std::vector<u64>& pos,
 /// One graph as the reference reads it.
 struct RefGraph
 {
-    std::vector<AtomSet> nodes;
+    AtomSet statics;             // the static atoms of the graph's task, which hold at every node
+    std::vector<AtomSet> nodes;  // the fluent and derived atoms of each node
     std::vector<std::array<i32, 2>> edges;       // (src, dst)
     std::vector<std::pair<std::string, std::vector<i32>>> actions;  // (relation of the edge's schema, objects)
     std::vector<RefLiteral> goal;
@@ -149,11 +186,11 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
         case Lane::Derived:
         case Lane::Static:
         {
-            if (r.lane != Lane::Fluent)
-                break;
+            // the static atoms are the root's alone; a static predicate has no delta and no state-anchored relation
+            const bool fixed = r.lane == Lane::Static;
             auto facts = [&](u32 node)
             {
-                for (const RefAtom& atom : g.nodes[node])
+                for (const RefAtom& atom : fixed ? g.statics : g.nodes[node])
                     if (atom.name == predicate)
                         tuple(state(node), atom.objects, true);
             };
@@ -162,15 +199,15 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
                 if (!r.state_anchored)
                 {
                     facts(0);
-                    if (full && !split)
+                    if (full && !split && !fixed)
                         for (u32 node = 1; node < nodes; ++node)
                             facts(node);
                 }
-                else
+                else if (!fixed)
                     for (u32 node = 1; node < nodes; ++node)
                         facts(node);
             }
-            else
+            else if (!fixed)
                 for (u32 node = 1; node < nodes; ++node)
                 {
                     const AtomSet& from = r.sign > 0 ? g.nodes[node] : g.nodes[0];
@@ -206,7 +243,8 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
                             scope.push_back(node);
                     for (const u32 node : scope)
                     {
-                        const bool holds = (g.nodes[node].count(literal.atom) != 0) == literal.positive;
+                        const bool present = g.nodes[node].count(literal.atom) != 0 || g.statics.count(literal.atom) != 0;
+                        const bool holds = present == literal.positive;
                         if (holds == (d == GoalDerivation::Satisfied))
                             tuple(state(node), literal.atom.objects, true);
                     }
@@ -225,19 +263,26 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
             break;
         }
         case Lane::Action:
+        {
+            // one tuple per distinct (destination, objects), however often and in whichever order the edges are given
+            std::set<std::pair<i32, std::vector<i32>>> distinct;
             for (usize e = 0; e < g.edges.size(); ++e)
-            {
-                if (exclude && g.edges[e][1] == 0)
-                    continue;
-                if (g.actions[e].first == r.name)
-                    tuple(state(static_cast<u32>(g.edges[e][1])), g.actions[e].second, false);
-            }
+                if (!(exclude && g.edges[e][1] == 0) && g.actions[e].first == r.name)
+                    distinct.emplace(g.edges[e][1], g.actions[e].second);
+            for (const auto& [destination, objects] : distinct)
+                tuple(state(static_cast<u32>(destination)), objects, false);
             break;
+        }
         case Lane::Parent:
+        {
+            std::set<std::array<i32, 2>> distinct;
             for (const auto& edge : g.edges)
                 if (!exclude || (edge[0] != 0 && edge[1] != 0))
-                    out.push_back(join({"s" + std::to_string(edge[0]), "s" + std::to_string(edge[1])}));
+                    distinct.insert(edge);
+            for (const auto& edge : distinct)
+                out.push_back(join({"s" + std::to_string(edge[0]), "s" + std::to_string(edge[1])}));
             break;
+        }
         default: break;
     }
     std::sort(out.begin(), out.end());
@@ -253,8 +298,14 @@ std::vector<RefGraph> reference_graphs(const rl::TaskTable& table, const Encodin
     {
         const Task& task = *table.instance(static_cast<u32>(h.task_ids[g])).task;
         RefGraph graph;
+        graph.statics = static_atoms(task);
         for (i32 row = h.node_offsets[g]; row < h.node_offsets[g + 1]; ++row)
-            graph.nodes.push_back(fluent_atoms(task, h.nodes.data() + static_cast<u64>(row) * h.words));
+        {
+            const u64* atoms = h.nodes.data() + static_cast<u64>(row) * h.words;
+            AtomSet node = fluent_atoms(task, atoms);
+            node.merge(derived_atoms(task, atoms, table.instance(static_cast<u32>(h.task_ids[g])).words));
+            graph.nodes.push_back(std::move(node));
+        }
         for (i32 e = h.edge_offsets[g]; e < h.edge_offsets[g + 1]; ++e)
         {
             graph.edges.push_back({h.edge_src[static_cast<usize>(e)], h.edge_dst[static_cast<usize>(e)]});
@@ -358,7 +409,12 @@ struct Case
     const char* domain;
     const char* problem;
 };
-const Case k_cases[] = {{"blocks", "smedium"}, {"blocks_flags", "p01"}, {"logistics00", "probLOGISTICS-6-1"}};
+// the last two have derived predicates, static atoms and nullary predicates (and derived and static goal literals)
+const Case k_cases[] = {{"blocks", "smedium"},
+                        {"blocks_flags", "p01"},
+                        {"logistics00", "probLOGISTICS-6-1"},
+                        {"features", "p01"},
+                        {"goals", "conjunctive"}};
 
 constexpr HorizonMode k_modes[] = {HorizonMode::Full, HorizonMode::Delta, HorizonMode::Action};
 constexpr RootPolicy k_roots[] = {RootPolicy::Include, RootPolicy::EncodeOnly, RootPolicy::Exclude};
@@ -375,14 +431,16 @@ TEST(Horizon, MatchesTheReference)
             for (const RootPolicy root : k_roots)
                 for (const bool parent : {false, true})
                     for (const Layout layout : {Layout::Graph, Layout::Relation})
+                        for (const bool statics : {false, true})
                     {
                         FlatOptions options = horizon_options(mode, root);
+                        options.include_static = statics;
                         options.horizon.parent_relation = parent;
                         options.layout = layout;
                         options.index = parent ? IndexType::I64 : IndexType::I32;
                         SCOPED_TRACE(std::string(c.domain) + " " + std::string(to_string(mode)) + " " +
                                      std::string(to_string(root)) + (parent ? " parent" : "") +
-                                     (layout == Layout::Relation ? " relation-major" : ""));
+                                     (layout == Layout::Relation ? " relation-major" : "") + (statics ? " statics" : ""));
                         const auto encoder = FlatEncoder::create(table, options);
                         expect_reference(*encoder, h, *encoder->encode(h.input()));
                     }
@@ -809,6 +867,222 @@ TEST(Horizon, InvalidInput)
     EXPECT_THROW(FlatStream{encoder}, std::invalid_argument);
 }
 
+// A dag over the `features` domain: node 2 is reached from two parents, an edge leads back to the root, node 1 has a
+// self-loop, and the edges 0 -> 1 `enable(b)` appear twice. The objects a and b are the ids `a` and `b`.
+struct DagEdge
+{
+    i32 src, dst;
+    const char* action;
+    std::vector<i32> objects;
+};
+
+test::Horizon features_dag(const rl::TaskTable& table, i32 a, i32 b, std::vector<DagEdge> edges)
+{
+    const Task& task = *table.instance(0).task;
+    test::Horizon h;
+    h.words = table.words();
+    h.label_width = table.label_width();
+    h.task_ids = {0};
+    auto node = [&](std::vector<u32> slots)
+    {
+        std::vector<u64> row(h.words, 0);
+        for (const u32 slot : slots)
+            test::set_bit(row, slot);
+        h.nodes.insert(h.nodes.end(), row.begin(), row.end());
+    };
+    const u32 flag_a = test::atom_slot(task, AtomKind::Fluent, "flag", {a});
+    const u32 flag_b = test::atom_slot(task, AtomKind::Fluent, "flag", {b});
+    const u32 ready = test::atom_slot(task, AtomKind::Fluent, "ready", {});
+    node({flag_a});
+    node({flag_a, flag_b});
+    node({flag_b});
+    node({flag_a, ready});
+    h.node_offsets.push_back(4);
+    for (const DagEdge& edge : edges)
+    {
+        h.edge_src.push_back(edge.src);
+        h.edge_dst.push_back(edge.dst);
+        const auto& names = table.schema_names();
+        h.edge_schema.push_back(static_cast<i32>(std::find(names.begin(), names.end(), edge.action) - names.begin()));
+        for (u32 k = 0; k < h.label_width; ++k)
+            h.edge_binding.push_back(k < edge.objects.size() ? edge.objects[k] : -1);
+    }
+    h.edge_offsets.push_back(static_cast<i32>(edges.size()));
+    return h;
+}
+
+TEST(Horizon, TheEdgeTuplesAreCanonicalWhateverTheEdges)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("features", "p01"));
+    const Task& task = *table->instance(0).task;
+    // the object ids: the static atom fixed(a) names a
+    i32 oa = -1;
+    for (const RefAtom& atom : static_atoms(task))
+        if (atom.name == "fixed")
+            oa = atom.objects[0];
+    ASSERT_GE(oa, 0);
+    const i32 ob = 1 - oa;
+    const std::vector<DagEdge> edges = {
+        {0, 1, "enable", {ob}},   {1, 2, "disable", {oa}}, {0, 3, "switch", {}},       {3, 2, "disable", {oa}},
+        {2, 0, "enable", {oa}},   {1, 1, "switch", {}},    {0, 1, "enable", {ob}},     {0, 1, "enable", {oa}},
+    };
+    const test::Horizon given = features_dag(*table, oa, ob, edges);
+    // the same graph with the edges reversed, rotated, and without the exact duplicate
+    std::vector<DagEdge> reversed(edges.rbegin(), edges.rend());
+    std::vector<DagEdge> rotated = edges;
+    std::rotate(rotated.begin(), rotated.begin() + 3, rotated.end());
+    std::vector<DagEdge> unique_edges = edges;
+    unique_edges.erase(unique_edges.begin() + 6);
+    const std::vector<test::Horizon> same = {features_dag(*table, oa, ob, reversed), features_dag(*table, oa, ob, rotated),
+                                             features_dag(*table, oa, ob, unique_edges)};
+    const auto o = [](i32 object) { return "o" + std::to_string(object); };
+    for (const HorizonMode mode : k_modes)
+        for (const RootPolicy root : k_roots)
+            for (const Layout layout : {Layout::Graph, Layout::Relation})
+            {
+                FlatOptions options = horizon_options(mode, root);
+                options.horizon.parent_relation = true;
+                options.layout = layout;
+                SCOPED_TRACE(std::string(to_string(mode)) + " " + std::string(to_string(root)) +
+                             (layout == Layout::Relation ? " relation-major" : ""));
+                const auto encoder = FlatEncoder::create(table, options);
+                const auto batch = encoder->encode(given.input());
+                expect_reference(*encoder, given, *batch);
+                for (const test::Horizon& other : same)
+                    EXPECT_TRUE(same_bytes(*batch, *encoder->encode(other.input())));
+                // hand computed: one action tuple per distinct (destination, relation, objects), in that order, behind the
+                // state entity of the destination; one parent tuple per distinct (source, destination), ascending. Under
+                // `exclude` the root has no entity: the edge into it has no action tuple and no edge that touches it a
+                // parent tuple.
+                const Decoded decoded = decode(*batch, encoder->schema());
+                const EncodingSchema& schema = encoder->schema();
+                auto tuples_of = [&](const char* action)
+                {
+                    const auto& names = encoder->table().schema_names();
+                    const usize schema_id = static_cast<usize>(std::find(names.begin(), names.end(), action) - names.begin());
+                    return decoded[0].at(schema.relation(static_cast<u32>(schema.schema_relations()[schema_id])).name);
+                };
+                const bool exclude = root == RootPolicy::Exclude;
+                std::vector<std::string> enable = {"s1," + o(oa), "s1," + o(ob)};
+                if (!exclude)
+                    enable.insert(enable.begin(), "s0," + o(oa));
+                EXPECT_EQ(tuples_of("enable"), enable);
+                EXPECT_EQ(tuples_of("disable"), (std::vector<std::string>{"s2," + o(oa)}));
+                EXPECT_EQ(tuples_of("switch"), (std::vector<std::string>{"s1", "s3"}));
+                const std::vector<std::string> parents =
+                    exclude ? std::vector<std::string>{"s1,s1", "s1,s2", "s3,s2"}
+                            : std::vector<std::string>{"s0,s1", "s0,s3", "s1,s1", "s1,s2", "s2,s0", "s3,s2"};
+                EXPECT_EQ(decoded[0].at("_parent_"), parents);
+            }
+}
+
+TEST(Horizon, GraphsWithoutEdgesNeedNoEdgeArrays)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows roots = test::random_walk(*table, 0, 3, 2);
+    const test::Horizon h = test::horizon_of(*table, roots, 0);
+    for (const bool parent : {false, true})
+    {
+        FlatOptions options = horizon_options(HorizonMode::Full, RootPolicy::Include);
+        options.horizon.parent_relation = parent;
+        const auto encoder = FlatEncoder::create(table, options);
+        EncodeInput in = h.input();
+        in.horizon.edge_src = in.horizon.edge_dst = in.horizon.edge_schema = in.horizon.edge_binding = nullptr;
+        in.horizon.label_width = 0;
+        EXPECT_TRUE(same_bytes(*encoder->encode(in), *encoder->encode(h.input()))) << parent;
+        // the edge arrays are needed as soon as an edge exists
+        test::Horizon one_edge = test::horizon_of(*table, test::random_walk(*table, 0, 1, 2), 1, 1);
+        in = one_edge.input();
+        in.horizon.edge_src = nullptr;
+        EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+    }
+}
+
+TEST(Horizon, ProvidedDerivedWordsAreTheEvaluatedOnes)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("features", "p01"));
+    const Task& task = *table->instance(0).task;
+    const test::Rows roots = test::random_walk(*table, 0, 3, 5);
+    const test::Horizon h = test::horizon_of(*table, roots, 2, 4);
+    ASSERT_GT(table->derived_words(), 0u);
+    for (const HorizonMode mode : k_modes)
+        for (const RootPolicy root : k_roots)
+        {
+            const auto encoder = FlatEncoder::create(table, horizon_options(mode, root));
+            const u64 stride = encoder->context().max_derived_words() + 1;
+            std::vector<u64> derived(h.num_nodes() * stride, 0);
+            for (u64 node = 0; node < h.num_nodes(); ++node)
+            {
+                const WorkspaceLease lease = task.workspace();
+                auto& engine = lease->engine();
+                engine.set_state(h.nodes.data() + node * h.words, table->instance(0).words);
+                engine.build_view();
+                lease->axioms().evaluate();
+                std::copy_n(engine.derived(), table->derived_words(), derived.begin() + static_cast<std::ptrdiff_t>(node * stride));
+            }
+            EncodeInput in = h.input();
+            in.derived = derived.data();
+            in.derived_stride = stride;
+            SCOPED_TRACE(std::string(to_string(mode)) + " " + std::string(to_string(root)));
+            const auto evaluated = encoder->encode(h.input());
+            EXPECT_TRUE(same_bytes(*evaluated, *encoder->encode(in)));
+            // the derived words are what the lanes read: other words give another batch
+            std::vector<u64> flipped = derived;
+            for (u64 node = 0; node < h.num_nodes(); ++node)
+                flipped[node * stride] = ~flipped[node * stride] & ((u64{1} << task.atoms().derived_slots()) - 1);
+            in.derived = flipped.data();
+            EXPECT_FALSE(same_bytes(*evaluated, *encoder->encode(in)));
+            // a stride below the instance's derived words, and a bit past its derived slots
+            in.derived = derived.data();
+            in.derived_stride = encoder->context().max_derived_words() - 1;
+            EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
+            in.derived_stride = stride;
+            derived[stride] |= u64{1} << 63;
+            try
+            {
+                (void)encoder->encode(in);
+                ADD_FAILURE() << "a foreign derived bit was accepted";
+            }
+            catch (const std::invalid_argument& error)
+            {
+                EXPECT_NE(std::string(error.what()).find("graph 0 of the horizon"), std::string::npos) << error.what();
+            }
+        }
+}
+
+TEST(Horizon, TheCatalogListsOnlyRelationsAGraphCanFill)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("features", "p01"));
+    for (const HorizonMode mode : k_modes)
+        for (const RootPolicy root : k_roots)
+            for (const bool statics : {false, true})
+            {
+                FlatOptions options = horizon_options(mode, root);
+                options.include_static = statics;
+                const auto encoder = FlatEncoder::create(table, options);
+                const EncodingSchema& schema = encoder->schema();
+                bool static_relation = false;
+                for (u32 id = 0; id < schema.num_relations(); ++id)
+                {
+                    const Relation& r = schema.relation(id);
+                    SCOPED_TRACE(r.name);
+                    // the satisfaction of a literal of the atoms a node adds or deletes has no goal level: no cell lists it
+                    if (r.lane == Lane::GoalSatisfaction)
+                    {
+                        EXPECT_TRUE(r.level.has_value() && r.derivation.has_value());
+                    }
+                    // the static atoms are the root's: no relation of a node, no atom a node adds or deletes
+                    if (r.lane == Lane::Static)
+                    {
+                        static_relation = true;
+                        EXPECT_FALSE(r.state_anchored);
+                        EXPECT_EQ(r.sign, 0);
+                    }
+                }
+                EXPECT_EQ(static_relation, statics);
+            }
+}
+
 TEST(Horizon, CorruptBatchesAreRefused)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
@@ -825,5 +1099,34 @@ TEST(Horizon, CorruptBatchesAreRefused)
     EXPECT_THROW(validate(test::with_value(*batch, "entity_role", first_state, 0), schema), std::invalid_argument);
     EXPECT_THROW(validate(test::with_value(*batch, "target_group", 0, 0), schema), std::invalid_argument);
     EXPECT_THROW(validate(test::with_change(*batch, "target_entity", 0, 1), schema), std::invalid_argument);
+}
+
+TEST(Horizon, EdgeTuplesThatAreRepeatedOrOutOfOrderAreRefused)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows roots = test::random_walk(*table, 0, 1, 2);
+    const test::Horizon h = test::horizon_of(*table, roots, 2, 3);
+    FlatOptions options = horizon_options(HorizonMode::Full, RootPolicy::Include);
+    options.horizon.parent_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    const auto batch = encoder->encode(h.input());
+    const EncodingSchema& schema = encoder->schema();
+    EXPECT_NO_THROW(validate(*batch, schema));
+    const u32 parent = *schema.find("_parent_");
+    const auto counts = ints(*batch, "relation_counts");
+    const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+    ASSERT_GE(counts[parent], 2);
+    const u64 first = static_cast<u64>(arg_offsets[parent]);
+    const auto args = ints(*batch, "relation_args");
+    // the second tuple made the first: a tuple twice
+    auto repeated = test::with_value(*batch, "relation_args", first + 2, args[first]);
+    repeated = test::with_value(repeated, "relation_args", first + 3, args[first + 1]);
+    EXPECT_THROW(validate(repeated, schema), std::invalid_argument);
+    // the first two tuples swapped: not ascending
+    auto swapped = test::with_value(*batch, "relation_args", first, args[first + 2]);
+    swapped = test::with_value(swapped, "relation_args", first + 1, args[first + 3]);
+    swapped = test::with_value(swapped, "relation_args", first + 2, args[first]);
+    swapped = test::with_value(swapped, "relation_args", first + 3, args[first + 1]);
+    EXPECT_THROW(validate(swapped, schema), std::invalid_argument);
 }
 }  // namespace

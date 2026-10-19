@@ -308,8 +308,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
         if relation not in rows:
             continue
         keys = rows[relation]
-        edges = encoder.options["horizon_mode"] is not None and encoder.relation_lanes[relation] in ("action", "parent")
-        if not edges and any(a >= b for a, b in zip(keys, keys[1:])):
+        if any(a >= b for a, b in zip(keys, keys[1:])):
             unordered.append(names[relation])
         tuples[names[relation]] = [tuple(entities[x][1] for x in key) for key in keys]
     catalog = [(names[i], encoder.relation_logical_arities[i]) for i in selected]

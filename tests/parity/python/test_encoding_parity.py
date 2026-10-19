@@ -870,7 +870,7 @@ def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horiz
     assert any(m.kind == "tuple" for m in compare(expected, moved, context))
 
 
-def test_the_edge_arrays_give_the_action_and_parent_tuples_one_per_edge_in_order():
+def test_the_edge_arrays_give_the_action_and_parent_tuples_whatever_the_order_and_multiplicity_of_the_edges():
     fixture, task = load(prefix_path("f01"))
     record = next(r for r in fixture["encodings"] if r["config"] == "C7C" and r["state"] == "s2")
     view = encoding_view(task, record)
@@ -878,15 +878,19 @@ def test_the_edge_arrays_give_the_action_and_parent_tuples_one_per_edge_in_order
     graph = native_graph(encoder, encoder.encode(view), 0, [task], COMPARED_LANES)
     assert graph.tuples["_parent_"] == [("target:0", "target:1"), ("target:0", "target:2"), ("target:1", "target:3"),
                                         ("target:2", "target:4")]
-    order = np.array([3, 1, 0, 2])
-    permuted = type(view)(
-        view.nodes, view.node_offsets, view.edge_offsets, np.asarray(view.edge_src)[order],
-        np.asarray(view.edge_dst)[order], np.asarray(view.edge_schema)[order], np.asarray(view.edge_binding)[order],
-        view.task_ids)
-    graph = native_graph(encoder, encoder.encode(permuted), 0, [task], COMPARED_LANES)
-    assert graph.tuples["_parent_"] == [("target:2", "target:4"), ("target:0", "target:2"), ("target:0", "target:1"),
-                                        ("target:1", "target:3")]
     assert graph.unordered == ()
+
+    def with_edges(order):
+        return type(view)(
+            view.nodes, view.node_offsets, np.array([0, len(order)], np.int32), np.asarray(view.edge_src)[order],
+            np.asarray(view.edge_dst)[order], np.asarray(view.edge_schema)[order], np.asarray(view.edge_binding)[order],
+            view.task_ids)
+
+    # the edges reordered, and one of them twice, give the same graph
+    for order in (np.array([3, 1, 0, 2]), np.array([2, 0, 3, 1, 0, 3])):
+        again = native_graph(encoder, encoder.encode(with_edges(order)), 0, [task], COMPARED_LANES)
+        assert again == graph
+        assert again.unordered == ()
 
 
 @pytest.mark.parametrize("path, config", [c for c in case_params() if c.values[1].startswith("C7")])

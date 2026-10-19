@@ -13,6 +13,7 @@ import mymyr
 from mymyr import encoding, rl
 from conftest import text_task, walk
 from horizon_support import expand_horizons
+from test_encoding import derived_words
 
 
 def rows_of(task, states):
@@ -273,3 +274,75 @@ def test_a_view_without_a_field_is_an_attribute_error(blocks):
     bare = SimpleNamespace(**{k: v for k, v in view.__dict__.items() if k != "edge_dst"})
     with pytest.raises(AttributeError, match="the horizon view has no attribute 'edge_dst'"):
         encoder_of(blocks).encode(bare)
+
+
+def with_edges(view, edges):
+    """The view with the edges (source, destination, schema, binding row) in the given order."""
+    width = np.asarray(view.edge_binding).shape[1]
+    return encoding.HorizonView(
+        nodes=view.nodes,
+        node_offsets=view.node_offsets,
+        edge_offsets=np.array([0, len(edges)], np.int32),
+        edge_src=np.array([e[0] for e in edges], np.int32),
+        edge_dst=np.array([e[1] for e in edges], np.int32),
+        edge_schema=np.array([e[2] for e in edges], np.int32),
+        edge_binding=np.array([e[3] for e in edges], np.int32).reshape(len(edges), width),
+        task_ids=view.task_ids,
+    )
+
+
+@pytest.mark.parametrize("policy", ["include", "encode_only", "exclude"])
+@pytest.mark.parametrize("mode", ["full", "delta", "action"])
+def test_the_edge_tuples_are_distinct_and_ordered_whatever_the_edges(blocks, mode, policy):
+    table, view = horizon_of(blocks, depth=1, max_children=3)
+    # nodes 0 (the root) to 3; the edges below are the three of the view, then a repeated edge, an edge into the root,
+    # a self-loop, a second edge into node 3 with the action of the first, and an edge between two children
+    pick, unstack = list(table.schema_names).index("pick-up"), list(table.schema_names).index("unstack")
+    edges = [
+        (0, 1, pick, [4, -1]), (0, 2, pick, [5, -1]), (0, 3, unstack, [6, 0]),
+        (0, 1, pick, [4, -1]),
+        (2, 0, pick, [5, -1]),
+        (1, 1, unstack, [6, 0]),
+        (1, 3, unstack, [6, 0]),
+        (3, 2, pick, [4, -1]),
+    ]
+    assert [e[:3] for e in edges[:3]] == [tuple(int(x) for x in t) for t in zip(view.edge_src, view.edge_dst, view.edge_schema)]
+    encoder = encoder_of(blocks, horizon_mode=mode, root_policy=policy, parent_relation=True)
+    batch = encoder.encode(with_edges(view, edges))
+    rng = np.random.default_rng(0)
+    for order in (edges[::-1], [edges[i] for i in rng.permutation(len(edges))]):
+        other = encoder.encode(with_edges(view, order))
+        for key, value in batch.as_dict().items():
+            assert np.array_equal(value, other.as_dict()[key]), key
+    # by hand: an action tuple per distinct (destination, objects), by destination and then objects, and none for an edge
+    # into the root that is not a node; a parent tuple per distinct (source, destination) in ascending order, and none
+    # for an edge that touches the root when the root is not a node
+    relations = encoder.describe(batch, 0).relations
+    rooted = policy != "exclude"
+    pick_tuples = [("target:0", "o5")] * rooted + [("target:1", "o4"), ("target:2", "o4"), ("target:2", "o5")]
+    parents = [(0, 1), (0, 2), (0, 3)] * rooted + [(1, 1), (1, 3)] + [(2, 0)] * rooted + [(3, 2)]
+    assert relations["pick-up"] == tuple(pick_tuples)
+    assert relations["unstack"] == (("target:1", "o6", "o0"), ("target:3", "o6", "o0"))
+    assert relations["_parent_"] == tuple((f"target:{s}", f"target:{d}") for s, d in parents)
+    assert not relations.get("put-down") and not relations.get("stack")
+
+
+def test_given_derived_words_equal_the_evaluated_ones_of_a_horizon():
+    task = text_task("philosophers__p03-phil4")
+    table = rl.as_table(task)
+    states = walk(task, steps=3, walks=1)
+    view = expand_horizons(table, rows_of(task, states[:1]), depth=1, max_children=4)
+    nodes = task.decode(np.asarray(view.nodes))
+    words = derived_words(task, nodes)
+    encoder = encoder_of(task, parent_relation=True)
+    expected = encoder.encode(view)
+    given = encoder.encode(view, derived=words)
+    for key, value in expected.as_dict().items():
+        assert np.array_equal(value, given.as_dict()[key]), key
+    padded = np.concatenate([words, np.ones((len(nodes), 2), np.uint64)], axis=1)
+    assert np.array_equal(encoder.encode(view, derived=padded).relation_args, expected.relation_args)
+    # the words are used: without derived atoms there are no derived tuples
+    derived = [name for name, lane in zip(encoder.relation_names, encoder.relation_lanes) if lane == "derived"]
+    blank = encoder.encode(view, derived=np.zeros_like(words))
+    assert any(encoder.describe(expected, 0).relations.get(name) for name in derived)
+    assert not any(encoder.describe(blank, 0).relations.get(name) for name in derived)

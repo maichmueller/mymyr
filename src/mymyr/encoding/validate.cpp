@@ -314,9 +314,6 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             const bool history_target = roles.front() == SlotRole::HistoryTarget;
             const bool action = roles.front() == SlotRole::Action;
             const bool leading = goal_target || subgoal_target || history_target || action;
-            // the tuples of the edge relations of a horizon are in the order of the edges
-            const Lane lane = schema.relation(static_cast<u32>(r)).lane;
-            const bool edge_order = horizon && (lane == Lane::Action || lane == Lane::Parent);
             // the tuples of a target or action relation start with their own entity, which is ascending by
             // construction, so that the tuples are compared past it
             const u32 lead = leading ? 1u : 0u;
@@ -394,7 +391,7 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
                         virtual_used[static_cast<usize>(id - virtual_start)] = true;
                     }
                 }
-                if (t > 0 && !edge_order)
+                if (t > 0)
                 {
                     u32 k = lead;
                     while (k < arity && args[at + k] == args[at - arity + k])

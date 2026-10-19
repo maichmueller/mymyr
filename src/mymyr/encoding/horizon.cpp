@@ -22,257 +22,6 @@ using Scratch = EncodeScratch::Impl;
 
 [[noreturn]] void invalid(const std::string& why) { throw std::invalid_argument("mymyr: encoding: " + why); }
 
-/// Everything the cells of one graph read.
-struct Graph
-{
-    const InstanceView* v;
-    GoalWords goal;
-    RowInput row;  // the graph's goal and subgoal layers; atoms and derived of a node are given by the accessors
-    const u64* nodes;
-    u64 node_stride;
-    const u64* derived;  // the first node's derived words (null: not read)
-    u64 derived_stride;
-    u32 count;  // the nodes
-    const i32* src;
-    const i32* dst;
-    const i32* schema;
-    const i32* binding;
-    u32 label_width;
-    u32 edges;
-    const i32* schema_relation;  // [schemas] the relation of each action schema (-1: none)
-    bool exclude;                // the root has no entity
-};
-
-const u64* atoms_of(const Graph& h, u32 node) { return h.nodes + u64{node} * h.node_stride; }
-const u64* derived_of(const Graph& h, u32 node)
-{
-    return h.derived ? h.derived + u64{node} * h.derived_stride : nullptr;
-}
-
-struct NodeRange
-{
-    u32 first, last;
-};
-
-NodeRange scope_of(const Cell& c, u32 count)
-{
-    switch (horizon_scope(c.op))
-    {
-    case HorizonScope::Root: return {0, 1};
-    case HorizonScope::Nodes: return {1, count};
-    default: return {0, count};
-    }
-}
-
-/// Word `w` of the slots [lo, hi) of the word `x` (the word of index w), the others cleared.
-u64 clip_word(u64 x, u32 w, u32 lo, u32 hi)
-{
-    if (w == (lo >> 6))
-        x &= ~u64{0} << (lo & 63u);
-    if (w == ((hi - 1u) >> 6))
-        x &= ~u64{0} >> (63u - ((hi - 1u) & 63u));
-    return x;
-}
-
-RowInput node_input(const Graph& h, u32 node)
-{
-    RowInput row = h.row;
-    row.atoms = atoms_of(h, node);
-    row.derived = derived_of(h, node);
-    return row;
-}
-
-/// Word `w` of the slots of cell `c` that are tuples at `node` (the cell is slot based: not static facts, not an edge
-/// cell).
-u64 cell_word(const Cell& c, const Graph& h, u32 node, u32 w)
-{
-    const u32 low = horizon_low(c.op);
-    switch (horizon_kind(c.op))
-    {
-    case HorizonKind::Facts:
-    {
-        const u64* x = low == static_cast<u32>(CellOp::Derived) ? derived_of(h, node) : atoms_of(h, node);
-        return x ? range_word(x, w, c.a, c.b) : 0;
-    }
-    case HorizonKind::Delta:
-    {
-        const bool derived = low == static_cast<u32>(CellOp::Derived);
-        const u64* x = derived ? derived_of(h, node) : atoms_of(h, node);
-        const u64* root = derived ? derived_of(h, 0) : atoms_of(h, 0);
-        if (!x || !root)
-            return 0;
-        return clip_word(horizon_minus(c.op) ? root[w] & ~x[w] : x[w] & ~root[w], w, c.a, c.b);
-    }
-    case HorizonKind::Goal:
-    case HorizonKind::Sat:
-    {
-        Cell flat = c;
-        flat.op = low;
-        return goal_word<true>(flat, h.goal, node_input(h, node), w);
-    }
-    case HorizonKind::Added:
-    {
-        Cell flat = c;
-        flat.op = low;
-        const u64 literals = goal_word<true>(flat, h.goal, h.row, w);
-        if (!literals)
-            return 0;
-        const bool derived = goal_op_derived(low);
-        const u64* x = derived ? derived_of(h, node) : atoms_of(h, node);
-        const u64* root = derived ? derived_of(h, 0) : atoms_of(h, 0);
-        if (!x || !root)
-            return 0;
-        // a positive literal is newly satisfied by an atom the node adds and newly falsified by one it deletes; a
-        // negative literal the other way round
-        const bool added = horizon_minus(c.op) == goal_op_negative(low);
-        return literals & (added ? x[w] & ~root[w] : root[w] & ~x[w]);
-    }
-    default: return 0;
-    }
-}
-
-bool edge_skipped(const Graph& h, const Cell& c, u32 e)
-{
-    if (horizon_kind(c.op) == HorizonKind::Action)
-        return h.schema_relation[h.schema[e]] != static_cast<i32>(c.relation) || (h.exclude && h.dst[e] == 0);
-    return h.exclude && (h.src[e] == 0 || h.dst[e] == 0);
-}
-
-/// The tuples of cell `c` in the graph.
-u32 cell_count(const Cell& c, const Graph& h)
-{
-    const HorizonKind kind = horizon_kind(c.op);
-    if (kind == HorizonKind::Action || kind == HorizonKind::Parent)
-    {
-        u32 n = 0;
-        for (u32 e = 0; e < h.edges; ++e)
-            n += edge_skipped(h, c, e) ? 0u : 1u;
-        return n;
-    }
-    const auto [first, last] = scope_of(c, h.count);
-    if (kind == HorizonKind::Facts && horizon_low(c.op) == static_cast<u32>(CellOp::Static))
-        return (last - first) * (c.b - c.a);
-    const u32 constants = h.goal.constants && (kind == HorizonKind::Goal || kind == HorizonKind::Sat) ? c.d - c.c : 0u;
-    u32 n = 0;
-    for (u32 node = first; node < last; ++node)
-    {
-        n += constants;
-        if (c.a < c.b)
-            for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
-                n += popcount64(cell_word(c, h, node, w));
-    }
-    return n;
-}
-
-/// Calls out.put(node, objects) for the tuples of a slot based cell at `node`, in the order of the cell: the cell's
-/// slots in ascending order, with the constant goal tuples merged in.
-template<class Out>
-void emit_node(const Cell& c, const Graph& h, u32 node, Out& out)
-{
-    const InstanceView& v = *h.v;
-    const HorizonKind kind = horizon_kind(c.op);
-    const u32 low = horizon_low(c.op);
-    const bool derived = (kind == HorizonKind::Facts || kind == HorizonKind::Delta)
-                             ? low == static_cast<u32>(CellOp::Derived)
-                             : goal_op_derived(low);
-    const i32* rows = derived ? v.derived_args : v.slot_args;
-    const u32 stride = v.max_arity;
-    u32 k = c.c;
-    const u32 end = h.goal.constants && (kind == HorizonKind::Goal || kind == HorizonKind::Sat) ? c.d : c.c;
-    if (c.a < c.b)
-        for (u32 w = c.a >> 6; w <= ((c.b - 1u) >> 6); ++w)
-        {
-            u64 bits = cell_word(c, h, node, w);
-            while (bits)
-            {
-                const u32 slot = w * 64u + lowest_bit64(bits);
-                bits &= bits - 1;
-                const i32* objects = rows + u64{slot} * stride;
-                while (k < end && tuple_before(v.goal_args + u64{k} * stride, objects, c.logical_arity))
-                    out.put(node, v.goal_args + u64{k++} * stride);
-                out.put(node, objects);
-            }
-        }
-    while (k < end)
-        out.put(node, v.goal_args + u64{k++} * stride);
-}
-
-/// Calls out.put(node, objects) / out.put_pair(src, dst) for the tuples of cell `c`, in order.
-template<class Out>
-void emit_cell(const Cell& c, const Graph& h, Out& out)
-{
-    const HorizonKind kind = horizon_kind(c.op);
-    if (kind == HorizonKind::Action)
-    {
-        for (u32 e = 0; e < h.edges; ++e)
-            if (!edge_skipped(h, c, e))
-                out.put(static_cast<u32>(h.dst[e]), h.binding + u64{e} * h.label_width);
-        return;
-    }
-    if (kind == HorizonKind::Parent)
-    {
-        for (u32 e = 0; e < h.edges; ++e)
-            if (!edge_skipped(h, c, e))
-                out.put_pair(static_cast<u32>(h.src[e]), static_cast<u32>(h.dst[e]));
-        return;
-    }
-    const auto [first, last] = scope_of(c, h.count);
-    const bool statics = kind == HorizonKind::Facts && horizon_low(c.op) == static_cast<u32>(CellOp::Static);
-    for (u32 node = first; node < last; ++node)
-    {
-        if (statics)
-            for (u32 row = c.a; row < c.b; ++row)
-                out.put(node, h.v->static_args + u64{row} * h.v->max_arity);
-        else
-            emit_node(c, h, node, out);
-    }
-}
-
-/// Whether a cell's tuples of a nullary predicate are over the auxiliary entity.
-bool over_auxiliary(const Cell& c)
-{
-    const HorizonKind kind = horizon_kind(c.op);
-    return c.logical_arity == 0 && kind != HorizonKind::Action && kind != HorizonKind::Parent;
-}
-
-/// Writes the entity ids of a cell's tuples.
-template<class I>
-struct Writer
-{
-    I* dst;
-    u64 object_base;
-    u64 auxiliary;
-    u64 state_first;  // the entity of the first node that has one
-    u32 skip;         // the nodes before it
-    u64 predicate;    // the predicate entity of the cell (k_no_entity: none)
-    bool lead;
-    bool nullary;  // a nullary predicate: its only argument is the auxiliary entity
-    u32 objects;
-
-    u64 state(u32 node) const
-    {
-        assert(node >= skip);
-        return state_first + node - skip;
-    }
-    void put(u32 node, const i32* row)
-    {
-        if (lead)
-            *dst++ = static_cast<I>(state(node));
-        if (predicate != k_no_entity)
-            *dst++ = static_cast<I>(predicate);
-        if (nullary)
-            *dst++ = static_cast<I>(auxiliary);
-        else
-            for (u32 k = 0; k < objects; ++k)
-                *dst++ = static_cast<I>(object_base + static_cast<u64>(row[k]));
-    }
-    void put_pair(u32 a, u32 b)
-    {
-        *dst++ = static_cast<I>(state(a));
-        *dst++ = static_cast<I>(state(b));
-    }
-};
-
 /// What the passes of one horizon call share.
 struct HPass
 {
@@ -287,6 +36,7 @@ struct HPass
     bool evaluate;  // the derived words of the nodes are evaluated here, into s.derived
     bool edges_used;
     bool actions;
+    bool parents;
     bool exclude;
     bool include_root_target;
     const i32* schema_relation;
@@ -306,9 +56,6 @@ struct HPass
     {
         return in.goal_pos ? CellList{v.row_cells, v.num_row_cells} : CellList{v.cells, v.num_cells};
     }
-    /// The state entities of a graph of `nodes` nodes, and its targets.
-    [[nodiscard]] u32 states_of(u32 nodes) const noexcept { return nodes - (exclude ? 1u : 0u); }
-    [[nodiscard]] u32 targets_of(u32 nodes) const noexcept { return nodes - (include_root_target ? 0u : 1u); }
 
     /// The graph's derived words, as the lanes read them (null if the instance does not read them).
     [[nodiscard]] const u64* derived_rows(u64 g, const InstanceView& v) const noexcept
@@ -318,7 +65,7 @@ struct HPass
         return in.derived ? in.derived + first_node(g) * s.derived_stride : s.derived.get() + first_node(g) * s.derived_stride;
     }
 
-    [[nodiscard]] Graph graph(u64 g, const InstanceView& v, RowLayers& layers) const noexcept
+    [[nodiscard]] HorizonGraph graph(u64 g, const InstanceView& v, RowLayers& layers) const noexcept
     {
         RowInput row{in.horizon.nodes.row(first_node(g)), nullptr};
         if (const LayerInput& l = in.subgoals; l.layers != 0)
@@ -346,7 +93,7 @@ struct HPass
             row.goal_derived_neg = in.goal_derived_neg + g * in.goal_derived_stride;
         }
         const HorizonInput& h = in.horizon;
-        Graph out{};
+        HorizonGraph out{};
         out.v = &v;
         out.goal = goal_words(v, row);
         out.row = row;
@@ -359,6 +106,7 @@ struct HPass
         {
             const u64 e = first_edge(g);
             out.edges = edges_of(g);
+            out.order = s.edge_order.data() + 2 * e + 2 * g;
             out.src = h.edge_src ? h.edge_src + e : nullptr;
             out.dst = h.edge_dst ? h.edge_dst + e : nullptr;
             out.schema = h.edge_schema ? h.edge_schema + e : nullptr;
@@ -366,7 +114,10 @@ struct HPass
             out.label_width = h.label_width;
         }
         out.schema_relation = schema_relation;
+        out.use_actions = actions;
+        out.use_parents = parents;
         out.exclude = exclude;
+        out.root_target = include_root_target;
         return out;
     }
 
@@ -489,7 +240,7 @@ void count_range(const HPass& p, u32 t)
             }
         }
         RowLayers layers;
-        const Graph h = p.graph(g, v, layers);
+        const HorizonGraph h = p.graph(g, v, layers);
         const RowInput& row = h.row;
         if (has_foreign_goal_bits(v, row))
         {
@@ -509,30 +260,15 @@ void count_range(const HPass& p, u32 t)
             m.cell_counts.resize(at + list.count);
             cell_counts = m.cell_counts.data() + at;
         }
-        GraphTotals totals = empty_totals();
-        u32* used = m.virtual_scratch.data();
-        for (u32 q = 0; q < p.view.num_virtual; ++q)
-            used[q] = 0;
-        for (u32 i = 0; i < list.count; ++i)
+        canonical_horizon_edges(h);
+        const auto sink = [&](u32 i, const Cell& c, u32 n)
         {
-            const Cell& c = list.cells[i];
-            const u32 n = cell_count(c, h);
             if (cell_counts)
                 cell_counts[i] = n;
-            totals.tuples += n;
-            totals.args += u64{n} * c.arity;
-            if (n && over_auxiliary(c))
-                totals.flags |= k_graph_auxiliary;
-            if (n && p.view.num_virtual != 0 && p.view.relation_virtual[c.relation] != k_no_virtual)
-                used[p.view.relation_virtual[c.relation]] = 1;
             if (p.relation_major)
                 m.tally[c.relation] += n;
-        }
-        for (u32 q = 0; q < p.view.num_virtual; ++q)
-            totals.virtuals += used[q];
-        totals.targets = p.targets_of(nodes);
-        totals.entities = v.num_objects + ((totals.flags & k_graph_auxiliary) ? 1u : 0u) + p.states_of(nodes) +
-                          totals.virtuals;
+        };
+        const GraphTotals totals = horizon_count_graph(v, h, list, m.virtual_scratch.data(), sink);
         m.totals[g - lo] = totals;
         m.entities += totals.entities;
         m.tuples += totals.tuples;
@@ -571,55 +307,18 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         const InstanceView v = instance_view(p.view, instance);
         const GraphTotals& totals = m.totals[g - lo];
         RowLayers layers;
-        const Graph h = p.graph(g, v, layers);
-        entity_offsets[g] = static_cast<I>(entity);
+        const HorizonGraph h = p.graph(g, v, layers);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
-        // the entities: objects, the auxiliary entity, the state nodes, the predicate nodes
-        const bool auxiliary = (totals.flags & k_graph_auxiliary) != 0;
-        const u32 skip = p.exclude ? 1u : 0u;
-        const u64 auxiliary_entity = entity + v.num_objects;
-        const u64 state_first = auxiliary_entity + (auxiliary ? 1u : 0u);
-        const u32 states = p.states_of(h.count);
-        const u64 virtual_first = state_first + states;
-        fill_graph_header<I>(v, h.row, g, target, out);
-        fill_objects<I>(0, v.num_objects, entity, out);
-        if (auxiliary)
-            fill_auxiliary_entity<I>(v.num_objects, entity, out);
-        if (out.entity_role)
-            for (u32 k = 0; k < states; ++k)
-            {
-                out.entity_role[state_first + k] = k_role_state;
-                out.entity_ref[state_first + k] = static_cast<I>(k + skip);
-            }
-        if (out.target_entity)
-            for (u32 k = p.include_root_target ? 0u : 1u; k < h.count; ++k)
-            {
-                out.target_entity[target + k - (p.include_root_target ? 0u : 1u)] =
-                    static_cast<I>(state_first + k - skip);
-                out.target_group[target + k - (p.include_root_target ? 0u : 1u)] = k_target_group_state;
-            }
+        const HorizonEntities entities = horizon_entities(v, h, totals, entity);
+        entity_offsets[g] = static_cast<I>(entity);
+        fill_horizon_entities<I>(v, h, entities, g, target, out);
         const CellList list = p.cells_of(v);
         // the virtual entities: the predicates that have a tuple, in the order of their names
         u32* rank = m.virtual_scratch.empty() ? nullptr : m.virtual_scratch.data();
         if (rank)
         {
-            for (u32 q = 0; q < v.num_virtual; ++q)
-                rank[q] = 0;
-            for (u32 i = 0; i < list.count; ++i)
-            {
-                const u32 q = v.relation_virtual[list.cells[i].relation];
-                if (q != k_no_virtual && graph_counts[i] != 0)
-                    rank[q] = 1;
-            }
-            u32 used = 0;
-            for (u32 q = 0; q < v.num_virtual; ++q)
-            {
-                const u32 flag = rank[q];
-                rank[q] = flag ? used : k_no_virtual;
-                used += flag;
-            }
-            const EntityBlocks blocks{0, 0, 0, 0, 0, virtual_first};
-            fill_virtual_entities<I>(v, blocks, rank, out);
+            horizon_virtual_ranks(v, list, graph_counts, rank);
+            fill_virtual_entities<I>(v, EntityBlocks{0, 0, 0, 0, 0, entities.virtuals}, rank, out);
         }
         // the cells
         I* counts = out.relation_counts ? out.relation_counts + g * R : nullptr;
@@ -658,20 +357,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
             {
                 const u32 q = v.relation_virtual[c.relation];
                 if (q != k_no_virtual && rank[q] != k_no_virtual)
-                    predicate = virtual_first + rank[q];
+                    predicate = entities.virtuals + rank[q];
             }
-            const HorizonKind kind = horizon_kind(c.op);
-            Writer<I> writer{dst,
-                             entity,
-                             auxiliary_entity,
-                             state_first,
-                             skip,
-                             predicate,
-                             horizon_lead(c.op),
-                             over_auxiliary(c),
-                             kind == HorizonKind::Parent ? 0u : c.logical_arity};
-            emit_cell(c, h, writer);
-            const u64 n = static_cast<u64>(writer.dst - dst) / c.arity;
+            const u64 n = fill_horizon_cell<I>(c, h, entities, predicate, dst);
             assert(!graph_counts || n == graph_counts[i]);
             if (counts)
                 counts[c.relation] = static_cast<I>(n);
@@ -715,6 +403,7 @@ HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& contex
                  evaluate,
                  o.include_actions || o.horizon.parent_relation,
                  o.include_actions,
+                 o.horizon.parent_relation,
                  o.horizon.root == RootPolicy::Exclude,
                  o.horizon.root == RootPolicy::Include,
                  context.schema().schema_relations().data()};
@@ -787,10 +476,10 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
             invalid("the horizon needs its edge_src and edge_dst");
         if (options.include_actions && (!h.edge_schema || !h.edge_binding))
             invalid("the horizon needs its edge_schema and edge_binding");
+        if (options.include_actions && h.label_width < table.label_width())
+            invalid("the horizon's label width " + std::to_string(h.label_width) +
+                    " is below the table's largest action arity " + std::to_string(table.label_width()));
     }
-    if (options.include_actions && graphs && h.label_width < table.label_width())
-        invalid("the horizon's label width " + std::to_string(h.label_width) +
-                " is below the table's largest action arity " + std::to_string(table.label_width()));
     if (R && graphs > std::numeric_limits<u64>::max() / R - 1)
         throw std::overflow_error("mymyr: encoding: the batch has too many cells");
     const bool evaluate = !in.derived && context.max_derived_words() > 0;
@@ -800,6 +489,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         s.derived_capacity = nodes * s.derived_stride;
         s.derived = std::make_unique_for_overwrite<u64[]>(s.derived_capacity);
     }
+    if (edges_used)
+        s.edge_order.resize(horizon_order_words(0) * graphs + 2 * edges);
     const u32 members = members_for(nodes, pool);
     s.members.resize(members);
     s.bounds.clear();

@@ -62,6 +62,7 @@ struct EncodeScratch::Impl
     u64 derived_capacity = 0;
     u64 derived_stride = 0;
     std::vector<u64> bounds;  // horizon: the first graph of each member, and the graphs (members + 1 entries)
+    std::vector<u32> edge_order;  // horizon: the canonical edge lists of every graph (horizon_order_words per graph)
     std::vector<detail::Member> members;
 };
 

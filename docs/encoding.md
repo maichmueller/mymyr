@@ -254,13 +254,16 @@ the rows of one batch of states plus offsets and edges, as `rl.expand` produces 
 | `edge_binding` | int32 `[E, L]`: the objects of an edge's ground action (`L` at least the table's `label_width`; only the schema's arity entries of a row are read) |
 | `task_ids` | int32 `[G]`: the instance of each graph (required for a table of several instances) |
 
-The edges are used as given. There is one **action tuple** and one **`_parent_` tuple** per edge, in the order of the
-edges of the graph: the encoder neither sorts nor merges them, so two edges with the same endpoints and action give two
-equal tuples, a node with several incoming edges has several parents, and a node with none has none. (The tuples of
-every other relation are in the canonical order of the flat encoder.) `rl.expand` rows are a valid edge list: the rows of
-a state's successors, `schema`, `binding`, with `edge_src` the state's node and `edge_dst` the node you made of the
-successor. The edge arrays a schema does not read (all of them without action and parent relations, `edge_schema` and
-`edge_binding` without action relations) may be `None`. `derived` is per node row `[M, D]`; `goals` and `subgoals` are
+**The edges.** The graph is a dag: a node may have several parents, an edge may lead back to the root or to its own
+source, and the edges may come in any order and more than once. The **action tuples** of a relation are the distinct
+`(dst node, objects)` of the edges whose schema belongs to it, ordered by destination node and then objects, and the
+**`_parent_` tuples** are the distinct `(src, dst)` pairs in ascending order; so reordering or repeating the edges does
+not change the batch, a node that several edges reach with the same action has one action tuple, and a node with several
+parents has one `_parent_` tuple for each. (The tuples of every other relation are in the canonical order of the flat
+encoder.) `rl.expand` rows are a valid edge list: the rows of a state's successors, `schema`, `binding`, with `edge_src`
+the state's node and `edge_dst` the node you made of the successor. The edge arrays a schema does not read (all of them
+without action and parent relations, `edge_schema` and `edge_binding` without action relations) and the arrays of a batch
+without any edge may be `None`. `derived` is per node row `[M, D]`; `goals` and `subgoals` are
 per graph (`[G, ...]`, or one row for all graphs) and replace the instance's goal and layers for that graph.
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon encoder has no
 `stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. The device encoder refuses a horizon
@@ -278,8 +281,9 @@ batch lists them in `target_entity`, so the schema has targets (the capacity for
 **Root policies.** `include` (the default) makes the root node 0 a state entity and a target candidate. `encode_only`
 gives it a state entity but does not list it as a target. `exclude` has no state entity for the root: the graph's
 entities are the nodes 1 and up, and the root's relations are the plain ones (no state slot): the root's atoms are
-tuples without a state argument, and an edge into or out of the root gives no action tuple and no `_parent_` tuple.
-The root has no entity at all; its relations say what it holds.
+tuples without a state argument. An edge into the root gives no action tuple (the action tuples start with the state of
+their destination) and an edge that touches the root no `_parent_` tuple; an edge out of the root keeps its action tuple,
+which names the node it leads to. The root has no entity at all; its relations say what it holds.
 
 **Modes.** Every relation of a node has the node's state entity as its first argument (the slot role `state`):
 
