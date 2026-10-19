@@ -626,6 +626,20 @@ void bind_formulas(nb::module_& m, nb::module_& parent)
                 },
                 "The state bit of a fluent atom of a Task, or None (static and derived atoms, atoms without a slot yet "
                 "under lazy slots, atoms of a NormalizedTask).")
+            .def_prop_ro(
+                "derived_slot",
+                [](const PyGroundAtom& a) -> std::optional<u32> {
+                    if (!a.o.core || a.o.data->predicates[a.a.predicate.v].kind != fm::PredKind::Derived)
+                        return std::nullopt;
+                    const Task& task = *a.o.core->task;
+                    std::vector<u32> objects;
+                    for (ObjectId o : a.a.objects)
+                        objects.push_back(o.v);
+                    const u32 s = task.atoms().find(task.compiled().layout.encode(a.a.predicate.v, objects.data()));
+                    return s == AtomIndex::k_empty ? std::nullopt : std::optional<u32>(s);
+                },
+                "The bit of a derived atom of a Task in the derived words, or None (static and fluent atoms, derived "
+                "atoms without a slot, atoms of a NormalizedTask).")
             .def(
                 "holds", [](const PyGroundAtom& a, Arg<PyState> state) {
                     const PyState& s = formula_state(a.o, state);

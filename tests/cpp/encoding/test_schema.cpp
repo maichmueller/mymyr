@@ -42,7 +42,7 @@ std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 
 using R = SlotRole;
 
-constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0x31e6ae6fd252e8a1,
+constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0xed98cc0c8c0e4c86,
                 PIN_FULL = 0x8f230d9913e98bf7;
 
 TEST(EncodingSchema, DefaultCatalogIsSortedBytewise)
@@ -83,6 +83,7 @@ TEST(EncodingSchema, SlotRolesFollowTheTargetsAndVirtualNodes)
 {
     FlatOptions options;
     options.targets = {TargetSource::Goal, TargetSource::History, TargetSource::Action};
+    options.history = true;
     options.predicate_virtual_nodes = true;
     options.max_goal_level = 1;
     options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Unsatisfied};
@@ -246,6 +247,7 @@ TEST(EncodingSchema, FingerprintIgnoresDeclarationOrderAndTracksTheOutput)
     FlatOptions pin_targets;
     pin_targets.max_goal_level = 2;
     pin_targets.targets = {TargetSource::Goal, TargetSource::Subgoal, TargetSource::History, TargetSource::Action};
+    pin_targets.history = true;
     pin_targets.layout = Layout::Relation;
     pin_targets.index = IndexType::I64;
     EXPECT_EQ(EncodingSchema::create(d, pin_targets)->fingerprint(), PIN_TARGETS);

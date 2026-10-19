@@ -40,6 +40,7 @@ def native_options(entry):
             if key in kw:
                 out[key] = kw[key]
         out["nullary"] = not kw.get("ignore_zero_arity_relations", True)
+        out["history"] = "history" in kw.get("target_sources", ())
         out["predicate_virtual_nodes"] = bool(kw.get("use_predicate_virtual_nodes", False))
     else:
         out["horizon_mode"] = kw["transition_mode"]

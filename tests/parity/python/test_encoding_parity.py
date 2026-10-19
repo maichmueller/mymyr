@@ -6,6 +6,7 @@ tested on its own (a fixture against itself, mutated copies, the narrowness of t
 native encoder is tested for what parity cannot show: a graph does not depend on the rows around it."""
 
 import itertools
+import re
 
 import numpy as np
 import pytest
@@ -15,7 +16,9 @@ from mymyr import encoding, rl
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
     HELPER, Context, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, replay, run_case, sources_of,
+    goal_literals, literal_text, needed_differences,
+    lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
+    sources_of,
 )
 
 IDS = [p.stem[:3] for p in FIXTURES]
@@ -52,7 +55,7 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
             found |= set(catalog["sources"]) - set(sources_of(config))
     assert found == set(PENDING_SOURCES)
     assert set(COMPARED_SOURCES) & set(PENDING_SOURCES) == set()
-    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation")
+    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation", "history")
     assert [c for c in SUPPORTED if "action" in lanes_of(c)] == [c for c in SUPPORTED if "action" in sources_of(c)]
     assert all(("action" in lanes_of(c)) == SUPPORTED[c].get("include_actions", True) for c in SUPPORTED)
 
@@ -243,20 +246,16 @@ def test_registered_differences_do_not_hide_mutations_of_the_native_graph(path):
     assert {m.kind for m in compare(expected, lost, context)} == {"catalog", "tuple"}
 
 
-def goal_case(config, state="s1"):
-    fixture, task = load(prefix_path("f03"))
+def goal_case(config, state="s1", prefix="f03"):
+    fixture, task = load(prefix_path(prefix))
     records = [r for r in fixture["encodings"] if r["config"] == config]
     states = {s["id"]: s for s in fixture["states"]}
     rows = [replay(task, states[r["state"]]["path"]) for r in records]
-    encoder, placed = encode_records(task, config, rows, records)
     index = [r["state"] for r in records].index(state)
-    batch, row = placed[index]
-    goals = records[index]["inputs"].get("goals")
-    actions = records[index]["inputs"].get("actions")
-    context = Context(fixture, task, states[state], config, None if goals is None else tuple(goals),
-                      None if actions is None else tuple(actions))
+    placed = encode_records(task, config, rows, records)[index]
+    context = record_context(fixture, task, states[state], config, records[index], placed.dropped)
     expected = fixture_graph(fixture, records[index], sources_of(config))
-    return expected, native_graph(encoder, batch, row, [task], lanes_of(config)), context
+    return expected, native_graph(placed.encoder, placed.batch, placed.row, [task], lanes_of(config)), context
 
 
 @pytest.mark.parametrize("config", ["C1", "C2", "C3"])
@@ -303,6 +302,191 @@ def test_action_tuples_action_entities_and_virtual_nodes_are_compared():
     extra = copy(actual)
     extra.entities.append(("predicate_virtual", "predicate:unused"))
     assert {m.kind for m in compare(expected, extra, context)} == {"entity"}
+
+
+def levelled(graph):
+    """The relations of a graph that hold subgoal tuples (``[sg]``, ``[ssg]``, ``[sssg]``, with their satisfaction)."""
+    return [n for n in graph.tuples if re.search(r"\[s{1,3}g\]", n)]
+
+
+def test_subgoal_tuples_and_subgoal_entities_are_compared():
+    expected, actual, context = goal_case("C4_L2", "s0", "f01")
+    assert compare(expected, actual, context) == []
+    relations = levelled(actual)
+    assert any(n.endswith("[sg]") for n in relations) and any(n.endswith("[ssg]") for n in relations)
+    assert any(n.endswith("[sat]") or n.endswith("[unsat]") for n in relations)
+    for name in relations:
+        dropped = copy(actual)
+        dropped.tuples[name] = dropped.tuples[name][1:]
+        assert {(m.kind, m.where) for m in compare(expected, dropped, context)} == {("tuple", name)}
+        extra = copy(actual)
+        extra.tuples[name] = extra.tuples[name] + extra.tuples[name][:1]
+        assert [(m.kind, m.where) for m in compare(expected, extra, context)] == [("tuple", name)]
+    subgoals = [i for i, (role, _) in enumerate(actual.entities) if role == "subgoal"]
+    assert subgoals
+    for i in subgoals:
+        role, name = actual.entities[i]
+        moved = copy(actual)
+        higher = name.endswith("[sg]")
+        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if higher else name.replace("[ssg]", "[sg]"))
+        assert {m.kind for m in compare(expected, moved, context)} == {"entity"}
+        lost = copy(actual)
+        del lost.entities[i]
+        assert {m.kind for m in compare(expected, lost, context)} == {"entity"}
+
+
+def test_the_numbering_of_subgoal_entities_is_excused_but_their_names_are_not():
+    expected, actual, context = goal_case("C4_L2", "s0", "f01")
+    first, second = [i for i, (role, _) in enumerate(actual.entities) if role == "subgoal"][:2]
+    swapped = copy(actual)
+    swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
+    assert compare(expected, swapped, context) == []
+    strict = [n for n in NAMES if n != "subgoal_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, strict)} == {"entity"}
+
+
+def test_history_tuples_history_steps_and_history_targets_are_compared():
+    expected, actual, context = goal_case("C5A", "s2", "f01")
+    assert compare(expected, actual, context) == []
+    relations = [n for n in actual.tuples if n.endswith("[hist]")]
+    assert relations and {role for role, _ in actual.entities} >= {"history", "history_target"}
+    for name in relations:
+        dropped = copy(actual)
+        dropped.tuples[name] = dropped.tuples[name][1:]
+        assert {(m.kind, m.where) for m in compare(expected, dropped, context)} == {("tuple", name)}
+    for role in ("history", "history_target"):
+        i = next(i for i, (r, _) in enumerate(actual.entities) if r == role)
+        renamed = copy(actual)
+        renamed.entities[i] = (role, actual.entities[i][1] + "_renamed")
+        assert {m.kind for m in compare(expected, renamed, context)} >= {"entity"}
+        lost = copy(actual)
+        del lost.entities[i]
+        assert {m.kind for m in compare(expected, lost, context)} >= {"entity"}
+    steps = [i for i, (role, _) in enumerate(actual.entities) if role == "history"]
+    swapped = copy(actual)
+    swapped.entities[steps[0]], swapped.entities[steps[1]] = actual.entities[steps[1]], actual.entities[steps[0]]
+    assert {m.kind for m in compare(expected, swapped, context)} == {"entity"}
+
+
+def test_the_numbering_of_history_targets_is_excused_but_their_names_are_not():
+    expected, actual, context = goal_case("C5A", "s2", "f01")
+    first, second = [i for i, (role, _) in enumerate(actual.entities) if role == "history_target"][:2]
+    swapped = copy(actual)
+    swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
+    assert compare(expected, swapped, context) == []
+    unexcused = [n for n in NAMES if n != "history_target_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, unexcused)} == {"entity"}
+
+
+def test_the_history_of_a_record_keeps_only_its_newest_steps():
+    fixture, task = load(prefix_path("f08"))
+    records = [r for r in fixture["encodings"] if r["config"] == "C5B"]
+    assert all(r["inputs"]["history_max_steps"] == 2 and len(r["inputs"]["history_subgoals"]) == 3 for r in records)
+    expected, actual, context = goal_case("C5B", "s0", "f08")
+    assert compare(expected, actual, context) == []
+    steps = [name for role, name in actual.entities if role == "history"]
+    assert steps == [f"history:{dt}#{i}" for i, (dt, _) in enumerate(context.history[-2:])]
+    older = copy(actual)
+    older.entities = [e for e in actual.entities if e[0] != "history"] + [("history", "history:-3#0")]
+    assert {m.kind for m in compare(expected, older, context)} >= {"entity"}
+
+
+def test_a_goal_literal_that_a_layer_lists_is_expected_once_in_the_goal():
+    expected, actual, context = goal_case("C4_L1", "s2", "f01")
+    assert "repeated_literal" in needed_differences(expected, actual, context)
+    assert compare(expected, actual, context) == []
+    layered = {parse_literal(literal) for layer in context.layers for literal in layer}
+    shared = sorted(goal_literals(context) & layered, key=repr)
+    assert shared
+    entity = literal_text(*shared[0]) + "[g]"
+    assert ("goal", entity) in actual.entities
+    lost = copy(actual)
+    lost.entities.remove(("goal", entity))
+    assert {m.kind for m in compare(expected, lost, context)} == {"entity"}
+    relation = next(n for n, ts in actual.tuples.items() if n.endswith("[g]") and any(t[0] == entity for t in ts))
+    twice = copy(actual)
+    twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+    assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+    level = copy(actual)
+    level.entities.append(("subgoal", entity.replace("[g]", "[sg]")))
+    assert {m.kind for m in compare(expected, level, context)} == {"entity"}
+
+
+def test_a_literal_in_two_layers_is_expected_once_at_the_lower_level():
+    expected, actual, context = goal_case("C4_L2", "s3", "f09")
+    assert "repeated_literal" in needed_differences(expected, actual, context)
+    assert compare(expected, actual, context) == []
+    shared = sorted({parse_literal(l) for l in context.layers[0]} & {parse_literal(l) for l in context.layers[1]},
+                    key=repr)
+    assert shared and not set(shared) & goal_literals(context)
+    name = literal_text(*shared[0])
+    assert ("subgoal", f"{name}[sg]") in actual.entities and ("subgoal", f"{name}[ssg]") not in actual.entities
+    higher = copy(actual)
+    higher.entities[higher.entities.index(("subgoal", f"{name}[sg]"))] = ("subgoal", f"{name}[ssg]")
+    assert {m.kind for m in compare(expected, higher, context)} == {"entity"}
+
+
+def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that_literal():
+    fixture, task = load(prefix_path("f08"))
+    found = 0
+    for state in ("s0", "s1", "s2", "s3", "s4"):
+        expected, actual, context = goal_case("C5A", state, "f08")
+        assert compare(expected, actual, context) == []
+        for kind, where, text in context.dropped:
+            found += 1
+            atom = task.literal(text).atom
+            assert atom.kind == "static" or (atom.slot if atom.kind == "fluent" else atom.derived_slot) is None
+            assert kind == "history" and where.startswith("history:")
+        if context.dropped:
+            assert "literal_without_slot" in needed_differences(expected, actual, context)
+            extra = copy(actual)
+            relation = next(n for n, ts in actual.tuples.items() if ts and n.endswith("[hist]"))
+            extra.tuples[relation] = actual.tuples[relation] + actual.tuples[relation][:1]
+            assert [(m.kind, m.where) for m in compare(expected, extra, context)] == [("tuple", relation)]
+    assert found
+
+
+def test_a_goal_literal_without_a_slot_that_a_layer_lists_is_compared_in_the_native_goal():
+    for prefix, config, state in (("f08", "C4_L1", "s3"), ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
+        expected, actual, context = goal_case(config, state, prefix)
+        assert compare(expected, actual, context) == []
+        goal = goal_literals(context)
+        slotless = [parse_literal(text) for kind, _, text in context.dropped
+                    if kind == "subgoal" and parse_literal(text) in goal]
+        assert slotless
+        for literal in slotless:
+            entity = literal_text(*literal) + "[g]"
+            relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[g]"
+            assert ("goal", entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
+            missing = copy(actual)
+            missing.entities.remove(("goal", entity))
+            assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
+            twice = copy(actual)
+            twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+            assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+            fewer = copy(actual)
+            fewer.tuples[relation] = [t for t in actual.tuples[relation] if t[0] != entity]
+            assert ("tuple", relation) in {(m.kind, m.where) for m in compare(expected, fewer, context)}
+
+
+def test_a_nullary_literal_of_a_layer_is_a_tuple_over_the_auxiliary_entity():
+    exercised = 0
+    for prefix, config in (("f01", "C5BN"), ("f08", "C4_L2N"), ("f10", "C5BN"), ("f10", "C4_L1N")):
+        for state in ("s0", "s1", "s2", "s3", "s4"):
+            expected, actual, context = goal_case(config, state, prefix)
+            assert compare(expected, actual, context) == []
+            nullary = [n for n, a in actual.catalog if a == 0 and re.search(r"\[(hist|s{1,3}g)\]$", n)
+                       and actual.tuples.get(n)]
+            for name in nullary:
+                exercised += 1
+                assert all(t[-1] == AUXILIARY for t in actual.tuples[name])
+                other = copy(actual)
+                other.tuples[name] = [t[:-1] + (actual.entities[0][1],) for t in actual.tuples[name]]
+                assert {(m.kind, m.where) for m in compare(expected, other, context)} == {("tuple", name)}
+                lost = copy(actual)
+                del lost.tuples[name]
+                assert {(m.kind, m.where) for m in compare(expected, lost, context)} == {("tuple", name)}
+    assert exercised >= 4
 
 
 def test_a_record_that_lists_fewer_actions_excuses_only_the_unlisted_ones():
