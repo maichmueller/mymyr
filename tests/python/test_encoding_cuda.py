@@ -527,12 +527,23 @@ def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mod
     if wrong_stream and torch.cuda.get_allocator_backend() != "native":
         pytest.skip("the stream mutation requires allocations completed before use on another stream")
     case = cases["gripper"]
-    encoder = encoding.FlatRelationEncoder(case.source)
-    host = encoder.encode(case.rows)
+    encoder = encoding.FlatRelationEncoder(case.source, goal_derivations=())
+    first = case.rows[:1]
+    successors = np.asarray(rl.expand(case.source, first).succ)
+    candidates = np.concatenate((first, successors))
+    counts = encoder.encode(candidates).relation_counts
+    alternative = next((i for i in range(1, len(candidates))
+                        if np.array_equal(counts[0], counts[i]) and
+                        np.count_nonzero(candidates[0] ^ candidates[i]) == 1), None)
+    assert alternative is not None
+    # A single word changes while every cell keeps its count, so count and fill use the same extents in either order.
+    before = np.repeat(candidates[:1], case.n, axis=0)
+    after = np.repeat(candidates[alternative:alternative + 1], case.n, axis=0)
+    host = encoder.encode(after)
     caps = exact_capacities(host)
     handle = rt.register(encoder)
-    source = to_device(case.rows, dev)
-    rows = torch.zeros_like(source)
+    source = to_device(after, dev)
+    rows = to_device(before, dev)
     stream = torch.cuda.Stream(dev)
     held_scratch = []
     allocate = encoding._device._scratch
