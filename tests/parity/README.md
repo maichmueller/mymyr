@@ -145,7 +145,7 @@ Encodings
   entity in mymyr, which the reference lacks. `encoding_parity.REGISTRY` lists each such difference with its reason,
   its scope and the fixture cases that need it; a difference outside the registry fails.
 - Horizons (`FlatHorizonEncoder`, configs C7A to C7D, C7G to C7K, C7S, C7T; the rooted variants with sibling and cousin
-  relations are not ported yet): the fixtures' dags become one graph each, the nodes in the dag's order and the edges in
+  relations are not compared): the fixtures' dags become one graph each, the nodes in the dag's order and the edges in
   its order, one action and one `_parent_` tuple per edge. The reference names the root that a root policy excludes
   `_root_state_`, an entity that none of its tuples mentions; mymyr has no entity for it. Nullary relations are tuples of a
   node's state entity and the auxiliary entity in mymyr and empty in the reference. The reference lists delta relations
