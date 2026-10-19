@@ -838,8 +838,8 @@ def _literal_without_slot(expected, actual, context):
     or a history step. The native encoder takes masks over the atoms that have slots, so such a literal cannot be
     given to it (the harness leaves it out, and ``Context.dropped`` lists it). The expectation drops what mifrost made
     of exactly those literals: their entity, their tuples (the argument rows of their relations when the graph has no
-    target entities) and their satisfaction tuples. When such a literal is also a goal literal, mifrost leaves it out
-    of the goal too, whatever its value; the goal entity and tuples of the native graph are dropped for it."""
+    target entities) and their satisfaction tuples. A literal that is also a goal literal is in the goal of the native
+    graph, and mifrost's copy of it is moved onto that goal tuple by ``repeated_literal``; nothing is dropped for it."""
     if not context.dropped or context.dag is not None:
         return expected, actual
     goal = goal_literals(context)
@@ -862,15 +862,13 @@ def _literal_without_slot(expected, actual, context):
         sign = "+" if positive else "-"
         text = literal_text(positive, predicate, arguments)
         if kind == "subgoal":
+            if (positive, predicate, arguments) in goal:
+                continue  # a goal literal is in the goal of both graphs; repeated_literal moves the reference's copy
             suffix = _level_suffix(where)
             relation = f"[{sign}]{predicate}[{suffix}]"
             satisfaction = [relation + "[sat]", relation + "[unsat]"]
             drop("expected", "subgoal", f"{text}[{suffix}]", relation)
             drop_satisfaction("expected", satisfaction, arguments)
-            if (positive, predicate, arguments) in goal:
-                relation = f"[{sign}]{predicate}[g]"
-                drop("actual", "goal", f"{text}[g]", relation)
-                drop_satisfaction("actual", [relation + "[sat]", relation + "[unsat]"], arguments)
         else:
             relation, entity = f"[{sign}]{predicate}[hist]", f"{where}:{text}"
             entities, tuples = graphs["expected"]
@@ -988,8 +986,8 @@ REGISTRY = (
         "literal_without_slot",
         "A literal over a static predicate, or over an atom that no state can make true, has no slot, so the "
         "native subgoal and history inputs cannot hold it; mifrost encodes it.",
-        "the entities and tuples that mifrost made of the literals the harness left out of the native inputs, and the "
-        "native goal entity and tuples of such a literal that is also a goal literal",
+        "the entities and tuples that mifrost made of the literals the harness left out of the native inputs, except "
+        "those of a literal that is also a goal literal",
         (("f08", "C3S"), ("f08", "C5A"), ("f08", "C5BN")),
         _literal_without_slot,
     ),
@@ -1000,7 +998,8 @@ REGISTRY = (
         "the other levels.",
         "the subgoal entity and the equal tuples of the highest level of a literal that is listed in several levels, "
         "and its satisfaction tuples",
-        (("f01", "C4_L1"), ("f01", "C4_L2"), ("f08", "C4_L1N"), ("f09", "C4_L2")),
+        (("f01", "C4_L1"), ("f01", "C4_L2"), ("f08", "C4_L1"), ("f08", "C4_L1N"), ("f08", "C4_L2"), ("f08", "C4_L2N"),
+         ("f09", "C4_L2"), ("f13", "C4_L1N")),
         _repeated_literal,
     ),
     Difference(

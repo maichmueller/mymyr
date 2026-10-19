@@ -51,21 +51,21 @@ Kind parse_kind(std::string_view n)
 {
     if (n == "blind")
         return Kind::Blind;
-    if (n == "goal_count" || n == "gc" || n == "goalcount")
+    if (n == "goal_count")
         return Kind::GoalCount;
-    if (n == "max" || n == "hmax" || n == "h_max")
+    if (n == "max")
         return Kind::Max;
-    if (n == "add" || n == "hadd" || n == "h_add")
+    if (n == "add")
         return Kind::Add;
-    if (n == "ff" || n == "hff" || n == "h_ff")
+    if (n == "ff")
         return Kind::FF;
-    if (n == "set_additive" || n == "hsa" || n == "setadd")
+    if (n == "set_additive")
         return Kind::SetAdditive;
     if (n == "h2")
         return Kind::H2;
-    if (n == "lmcut" || n == "lm_cut")
+    if (n == "lmcut")
         return Kind::LmCut;
-    if (n == "lmcount" || n == "lm_count" || n == "landmark_count")
+    if (n == "lmcount")
         return Kind::LmCount;
     if (n == "perfect")
         throw std::invalid_argument("mymyr: the perfect heuristic needs a state space: build it with heuristics::perfect "

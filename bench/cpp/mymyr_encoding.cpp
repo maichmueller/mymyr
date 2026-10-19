@@ -359,6 +359,9 @@ int main(int argc, char** argv)
         std::shared_ptr<const rl::ArrayBundle> bundle;
         ThreadPool pool(threads);
         encoding::EncodeScratch scratch;
+        // two untimed calls: the first takes a fresh block and the second a second one (the first is still held), so
+        // the timed calls below recycle the two
+        bundle = encoder->encode(in, pool, scratch);
         bundle = encoder->encode(in, pool, scratch);
         const long faults0 = minor_faults();
         for (int rep = 0; rep < 5; ++rep)

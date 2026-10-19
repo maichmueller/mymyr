@@ -69,7 +69,7 @@ u64 batch_fp(const cuda::MultiIwBatch& b)
         add(x);
     for (const auto& x : b.pass_stats)
     {
-        add(x.arity);
+        add(x.width);
         add(static_cast<u64>(x.status));
         add(x.expanded);
         add(x.generated);
@@ -224,7 +224,7 @@ int main(int argc, char** argv)
         co.max_bytes = max_bytes;
         const auto ctx = cuda::DeviceContext::create(0, co);
         cuda::MultiIwOptions mo;
-        mo.max_arity = arity;
+        mo.max_width = arity;
         mo.max_next_layer_states = next;
         mo.budget.max_states = max_states;
         if (chunk)
@@ -262,24 +262,24 @@ int main(int argc, char** argv)
             {
                 // CPU warm-up (workspaces, lazy slots)
                 search::ParallelRolloutOptions w;
-                w.iw.max_arity = arity;
+                w.iw.max_width = arity;
                 w.iw.control.budget.max_states = max_states;
                 w.max_next_layer_states = next;
                 w.seeds.assign(ro.seeds.begin(), ro.seeds.begin() + std::min<u32>(n, 8));
-                w.num_threads = 1;
+                w.threads = 1;
                 (void)search::find_rollouts_parallel(*task, w);
             }
             search::ParallelRolloutOptions c;
-            c.iw.max_arity = arity;
+            c.iw.max_width = arity;
             c.iw.control.budget.max_states = max_states;
             c.max_next_layer_states = next;
             c.seeds.assign(ro.seeds.begin(), ro.seeds.begin() + sample);
-            c.num_threads = 1;
+            c.threads = 1;
             auto t0 = Clock::now();
             const search::ParallelRolloutsResult one = search::find_rollouts_parallel(*task, c);
             cpu1 = since(t0) / sample;
             c.seeds.assign(ro.seeds.begin(), ro.seeds.begin() + n_all);
-            c.num_threads = T;
+            c.threads = T;
             t0 = Clock::now();
             const search::ParallelRolloutsResult all = search::find_rollouts_parallel(*task, c);
             cpuT = since(t0) / n_all;
@@ -307,7 +307,7 @@ int main(int argc, char** argv)
                 auto t0 = Clock::now();
                 batch = cuda::batched_iw1(ctx, task, ds, mo, ctx->stream());  // cold
                 first = since(t0);
-                mo.max_arity = 1;
+                mo.max_width = 1;
                 cuda::DeviceMultiIw x(ctx, task, mo);
                 (void)x.run(ds);
                 for (int r = 0; r < reps; ++r)
@@ -320,7 +320,7 @@ int main(int argc, char** argv)
             auto cpu_iw = [&](u32 i)
             {
                 search::IwOptions c;
-                c.max_arity = 1;
+                c.max_width = 1;
                 c.control.budget.max_states = max_states;
                 c.start = starts[i];
                 return search::iw(*task, c);
@@ -338,8 +338,8 @@ int main(int argc, char** argv)
             {
                 const search::IwResult& x = one[i];
                 const i32 len = x.status == search::SearchStatus::Solved ? static_cast<i32>(x.plan.size()) : -1;
-                equal = equal && batch.status[i] == x.status && batch.plan_length[i] == len && batch.expanded(i) == x.total.expanded &&
-                        batch.generated(i) == x.total.generated;
+                equal = equal && batch.status[i] == x.status && batch.plan_length[i] == len && batch.expanded(i) == x.stats.expanded &&
+                        batch.generated(i) == x.stats.generated;
             }
         }
         for (u32 i = 0; i < batch.n; ++i)

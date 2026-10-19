@@ -432,7 +432,7 @@ TEST(RolloutIw, EqualsTheOracle)
                 const std::string what = t.name + " " + to_string(ord) + (atom ? " atom " + std::to_string(*atom) : "");
                 EXPECT_EQ(r.status, ref.status) << what;
                 EXPECT_EQ(r.root_solved, ref.root_solved) << what;
-                expect_same_stats(r.statistics, ref.st, what);
+                expect_same_stats(r.rollout, ref.st, what);
                 if (r.status == SearchStatus::Solved)
                 {
                     EXPECT_EQ(r.plan.size(), ref.plan_length) << what;
@@ -464,13 +464,13 @@ TEST(RolloutIw, DeterministicPerSeed)
         const RolloutIwResult a = rollout_iw(*task, o), b = rollout_iw(*task, o);
         EXPECT_EQ(a.status, b.status);
         EXPECT_EQ(a.plan, b.plan);
-        expect_same_stats(a.statistics, b.statistics, to_string(ord));
+        expect_same_stats(a.rollout, b.rollout, to_string(ord));
         bool differs = false;
         for (u64 seed = 6; seed < 12 && !differs; ++seed)
         {
             o.seed = seed;
             const RolloutIwResult c = rollout_iw(*task, o);
-            differs = c.statistics.generated != a.statistics.generated || c.plan != a.plan;
+            differs = c.rollout.generated != a.rollout.generated || c.plan != a.plan;
         }
         EXPECT_TRUE(differs) << "the seed matters";
     }
@@ -483,16 +483,16 @@ TEST(RolloutIw, BudgetsAndBounds)
         RolloutIwOptions o;
         o.max_rollouts = 1;
         const RolloutIwResult r = rollout_iw(*task, o);
-        EXPECT_EQ(r.status, SearchStatus::Failed);
+        EXPECT_EQ(r.status, SearchStatus::OutOfStates);
         EXPECT_EQ(r.message, "rollout budget expired");
-        EXPECT_EQ(r.statistics.rollouts, 1u);
+        EXPECT_EQ(r.rollout.rollouts, 1u);
     }
     {
         RolloutIwOptions o;
         o.control.budget.max_states = 7;
         const RolloutIwResult r = rollout_iw(*task, o);
         EXPECT_EQ(r.status, SearchStatus::OutOfStates);
-        EXPECT_EQ(r.statistics.generated, 7u);
+        EXPECT_EQ(r.rollout.generated, 7u);
     }
     {
         RolloutIwOptions o;
@@ -509,8 +509,8 @@ TEST(RolloutIw, BudgetsAndBounds)
         const RolloutIwResult r = rollout_iw(*task, o);
         EXPECT_EQ(r.status, SearchStatus::Exhausted);
         EXPECT_TRUE(r.root_solved);
-        EXPECT_LE(r.statistics.max_rollout_depth, 2u);
-        EXPECT_GT(r.statistics.depth_bound_prunings, 0u);
+        EXPECT_LE(r.rollout.max_rollout_depth, 2u);
+        EXPECT_GT(r.rollout.depth_bound_prunings, 0u);
     }
     {
         // incumbent bound: no plan of length >= the bound is returned
@@ -527,7 +527,7 @@ TEST(RolloutIw, BudgetsAndBounds)
         {
             EXPECT_LT(r.plan.size(), base.plan.size());
         }
-        EXPECT_GT(r.statistics.incumbent_bound_prunings, 0u);
+        EXPECT_GT(r.rollout.incumbent_bound_prunings, 0u);
         // the same bound through a coordination, which also counts the expansions
         SearchCoordination coord;
         coord.incumbent_length.store(static_cast<u32>(base.plan.size()));
@@ -535,8 +535,8 @@ TEST(RolloutIw, BudgetsAndBounds)
         c.control.coordination = &coord;
         const RolloutIwResult rc = rollout_iw(*task, c);
         EXPECT_EQ(rc.status, r.status);
-        expect_same_stats(rc.statistics, r.statistics, "coordination bound");
-        EXPECT_EQ(coord.get_total_expansions(), rc.statistics.expanded);
+        expect_same_stats(rc.rollout, r.rollout, "coordination bound");
+        EXPECT_EQ(coord.get_total_expansions(), rc.rollout.expanded);
         SearchCoordination cancelled;
         cancelled.request_cancel();
         c.control.coordination = &cancelled;
@@ -550,7 +550,7 @@ TEST(RolloutIw, BudgetsAndBounds)
         const RolloutIwResult r = rollout_iw(*task, o);
         EXPECT_EQ(r.status, SearchStatus::Solved);
         EXPECT_TRUE(r.plan.empty());
-        EXPECT_EQ(r.statistics.expanded, 0u);
+        EXPECT_EQ(r.rollout.expanded, 0u);
     }
 }
 
@@ -564,7 +564,7 @@ TEST(RolloutIw, BlockedStatesAreNeverEntered)
     ASSERT_TRUE(base.goal_state);
     o.control.blocked_states = {*base.goal_state};
     const RolloutIwResult r = rollout_iw(*task, o);
-    EXPECT_GT(r.statistics.blocked, 0u);
+    EXPECT_GT(r.rollout.blocked, 0u);
     if (r.status == SearchStatus::Solved)
     {
         EXPECT_NE(*r.goal_state, *base.goal_state);
@@ -582,7 +582,7 @@ TEST(RolloutIw, ObserverEvents)
         o.control.observer = &c;
         o.control.budget.max_states = 5000;
         const RolloutIwResult r = rollout_iw(*task, o);
-        const RolloutIwStatistics& s = r.statistics;
+        const RolloutIwStatistics& s = r.rollout;
         EXPECT_EQ(c.starts, 1u);
         EXPECT_EQ(c.ends, 1u);
         EXPECT_EQ(c.solutions, r.status == SearchStatus::Solved ? 1u : 0u);
@@ -595,7 +595,7 @@ TEST(RolloutIw, ObserverEvents)
         // an observer does not change the search
         RolloutIwOptions q = o;
         q.control.observer = nullptr;
-        expect_same_stats(rollout_iw(*task, q).statistics, s, to_string(ord));
+        expect_same_stats(rollout_iw(*task, q).rollout, s, to_string(ord));
     }
 }
 
@@ -605,7 +605,7 @@ TEST(IwVariantEvents, EveryTransitionHasOneOutcome)
     const auto task = Task::from_text_file(task_path("depot__p02"));
     Counter c;
     LiwOptions lo;
-    lo.max_arity = 2;
+    lo.max_width = 2;
     lo.control.observer = &c;
     const IwResult r = liw(*task, lo);
     u64 generated = 0, in_tree = 0;
@@ -644,7 +644,7 @@ void expect_same_rollout(const RolloutResult& a, const RolloutResult& b, const s
         EXPECT_EQ(a.search.passes[i].generated, b.search.passes[i].generated) << what;
         EXPECT_EQ(a.search.passes[i].generated_in_tree, b.search.passes[i].generated_in_tree) << what;
     }
-    EXPECT_EQ(a.num_states, b.num_states) << what;
+    EXPECT_EQ(a.num_created_states, b.num_created_states) << what;
     EXPECT_EQ(a.reached_fluent_atoms, b.reached_fluent_atoms) << what;
     EXPECT_EQ(a.reached_derived_atoms, b.reached_derived_atoms) << what;
     ASSERT_EQ(a.landing_states.size(), b.landing_states.size()) << what;
@@ -660,8 +660,8 @@ void expect_same_rollout(const RolloutResult& a, const RolloutResult& b, const s
 ParallelRolloutOptions rollout_batch(u32 n, u32 threads)
 {
     ParallelRolloutOptions o;
-    o.iw.max_arity = 1;
-    o.num_threads = threads;
+    o.iw.max_width = 1;
+    o.threads = threads;
     o.report_landing_states = true;
     o.report_co_occurrence = true;
     for (u32 i = 0; i < n; ++i)
@@ -691,7 +691,7 @@ TEST(ParallelRollouts, SameResultAtEveryThreadCount)
         const CanonicalAtom atom = goals.empty() ? CanonicalAtom{} : goals.back();
         ParallelRolloutOptions o = rollout_batch(8, 1);
         o.max_next_layer_states = arity == 1 ? 64 : ~u32{0};
-        o.iw.max_arity = arity;
+        o.iw.max_width = arity;
         if (atomic)
             o.iw.control.goal = atom_goal(*t1, atom);
         const ParallelRolloutsResult ref = find_rollouts_parallel(*t1, o);
@@ -699,7 +699,7 @@ TEST(ParallelRollouts, SameResultAtEveryThreadCount)
         for (u32 threads : {3u, 8u})
         {
             const auto tn = Task::from_text_file(task_path(name));
-            o.num_threads = threads;
+            o.threads = threads;
             if (atomic)
                 o.iw.control.goal = atom_goal(*tn, atom);
             const ParallelRolloutsResult r = find_rollouts_parallel(*tn, o);
@@ -738,7 +738,7 @@ TEST(ParallelRollouts, SixtyFourThreads)
     ASSERT_EQ(root.workers.size(), 64u);
     u64 expanded = 0, events = 0;
     for (const RolloutResult& x : r.rollouts)
-        expanded += x.search.total.expanded;
+        expanded += x.search.stats.expanded;
     for (const auto& w : root.workers)
         events += w->expands;
     EXPECT_EQ(events, expanded);
@@ -753,11 +753,11 @@ TEST(ParallelRollouts, SixtyFourThreads)
     // IW(2) ladders on a fresh task: 64 threads assign lazy atom slots concurrently
     const auto fresh = Task::from_text_file(task_path("depot__p02"));
     ParallelRolloutOptions o2 = rollout_batch(64, 64);
-    o2.iw.max_arity = 2;
+    o2.iw.max_width = 2;
     const ParallelRolloutsResult r2 = find_rollouts_parallel(*fresh, o2);
     EXPECT_EQ(r2.threads_used, 64u);
     const auto serial2 = Task::from_text_file(task_path("depot__p02"));
-    o2.num_threads = 1;
+    o2.threads = 1;
     const ParallelRolloutsResult s2 = find_rollouts_parallel(*serial2, o2);
     for (usize k = 0; k < r2.rollouts.size(); ++k)
         expect_same_rollout(r2.rollouts[k], s2.rollouts[k], "IW(2) rollout " + std::to_string(k));
@@ -783,7 +783,7 @@ TEST(ParallelRollouts, RandomizedLayersFollowTheSeed)
         EXPECT_TRUE(reaches_goal(*task, x.search.plan, [&](StateView s) { return bits::test(s.w, s.nw, far_slot); }));
         plans.insert(x.search.plan);
         // tracker invariants
-        EXPECT_GE(x.num_states, x.landing_states.size());
+        EXPECT_GE(x.num_created_states, x.landing_states.size());
         EXPECT_EQ(x.landing_state_by_atom.size(), x.reached_fluent_atoms.size());
         for (const auto& [atom, idx] : x.landing_state_by_atom)
         {
@@ -832,7 +832,7 @@ TEST(ParallelRollouts, NotParallelSafeRunsOnTheCallingThread)
         EXPECT_NE(r.message.find("not parallel-safe"), std::string::npos);
         u64 expanded = 0;
         for (const RolloutResult& x : r.rollouts)
-            expanded += x.search.total.expanded;
+            expanded += x.search.stats.expanded;
         EXPECT_EQ(root.expands, expanded) << "every event on the root observer";
     }
     const std::thread::id caller = std::this_thread::get_id();
@@ -882,8 +882,8 @@ PortfolioOptions portfolio(u32 workers, u32 threads)
 {
     PortfolioOptions o;
     o.num_rollout_workers = workers;
-    o.num_threads = threads;
-    o.base_seed = 3;
+    o.threads = threads;
+    o.seed = 3;
     return o;
 }
 
@@ -895,7 +895,7 @@ TEST(Portfolio, CertifierAloneEqualsIw1)
     {
         const auto task = Task::from_text_file(task_path(name));
         IwOptions io;
-        io.max_arity = 1;
+        io.max_width = 1;
         const IwResult ref = iw(*task, io);
         const PortfolioResult r = atomic_goal_portfolio(*task, portfolio(0, 1));
         ASSERT_TRUE(r.certifier_ran);
@@ -914,7 +914,7 @@ TEST(Portfolio, CertifierAloneEqualsIw1)
             EXPECT_EQ(r.cost, ref.cost);
             EXPECT_TRUE(r.certified_optimal);
             EXPECT_EQ(r.winning_worker, 0u);
-            EXPECT_EQ(r.stats.expanded, ref.total.expanded) << name;
+            EXPECT_EQ(r.stats.expanded, ref.stats.expanded) << name;
         }
         else
             EXPECT_EQ(r.status, SearchStatus::Exhausted) << name;
@@ -974,13 +974,13 @@ TEST(Portfolio, RolloutWorkersAndCertification)
         {
             EXPECT_TRUE(r.certified_optimal);
         }
-        EXPECT_GE(r.stats.expanded, r.certifier.total.expanded);
+        EXPECT_GE(r.stats.expanded, r.certifier.stats.expanded);
     }
     // rollouts alone find a plan the exhausted certifier does not: not certified
     {
         const auto task = Task::from_text_file(task_path("blocks__probBLOCKS-8-0"));
         IwOptions io;
-        io.max_arity = 1;
+        io.max_width = 1;
         if (iw(*task, io).status == SearchStatus::Exhausted)
         {
             PortfolioOptions o = portfolio(4, 1);
@@ -1013,7 +1013,7 @@ TEST(Portfolio, HooksBudgetsAndErrors)
         EXPECT_EQ(root.starts, 1u);
         EXPECT_EQ(root.ends, 1u);
         EXPECT_EQ(root.expands, 0u);
-        EXPECT_EQ(root.workers[0]->expands, r.certifier.total.expanded);
+        EXPECT_EQ(root.workers[0]->expands, r.certifier.stats.expanded);
         for (u32 k = 1; k < 4; ++k)
             EXPECT_EQ(root.workers[k]->expands, r.rollout_statistics[k - 1].expanded);
     }
@@ -1024,7 +1024,7 @@ TEST(Portfolio, HooksBudgetsAndErrors)
         const PortfolioResult r = atomic_goal_portfolio(*task, o);
         EXPECT_EQ(r.threads_used, 1u);
         EXPECT_NE(r.message.find("not parallel-safe"), std::string::npos);
-        EXPECT_EQ(root.expands, r.certifier.total.expanded + r.rollout_statistics[0].expanded + r.rollout_statistics[1].expanded +
+        EXPECT_EQ(root.expands, r.certifier.stats.expanded + r.rollout_statistics[0].expanded + r.rollout_statistics[1].expanded +
                                     r.rollout_statistics[2].expanded);
     }
     {

@@ -97,8 +97,8 @@ void expect_same(const SiwResult& a, const SiwResult& b, const std::string& what
 {
     EXPECT_EQ(a.status, b.status) << what;
     EXPECT_EQ(a.plan, b.plan) << what;
-    EXPECT_EQ(a.total.expanded, b.total.expanded) << what;
-    EXPECT_EQ(a.total.generated, b.total.generated) << what;
+    EXPECT_EQ(a.stats.expanded, b.stats.expanded) << what;
+    EXPECT_EQ(a.stats.generated, b.stats.generated) << what;
     ASSERT_EQ(a.subproblems.size(), b.subproblems.size()) << what;
     for (usize i = 0; i < a.subproblems.size(); ++i)
     {
@@ -114,7 +114,7 @@ void expect_same(const BrfsResult& a,const BrfsResult& b, const std::string& wha
     EXPECT_EQ(a.expanded, b.expanded) << what;
     EXPECT_EQ(a.generated, b.generated) << what;
     EXPECT_EQ(a.states, b.states) << what;
-    EXPECT_EQ(a.goal_states, b.goal_states) << what;
+    EXPECT_EQ(a.num_goal_states, b.num_goal_states) << what;
     EXPECT_EQ(a.layers, b.layers) << what;
     EXPECT_EQ(a.fingerprint, b.fingerprint) << what;
 }
@@ -122,7 +122,7 @@ void expect_same(const BrfsResult& a,const BrfsResult& b, const std::string& wha
 IwResult run_iw(const Task& task, const LayerOrdering& lo, u32 threads, u64 max_expanded = ~u64{0})
 {
     IwOptions o;
-    o.max_arity = 2;
+    o.max_width = 2;
     o.control.budget.max_expanded = max_expanded;
     o.layers = lo;
     o.threads = threads;
@@ -184,7 +184,7 @@ TEST(BeamParallel, EqualsTheSerialBeamOnTheBeamSuite)
                         {
                             expect_same(run_iw(*task, lo, T, budget), si, what + " iw threads " + std::to_string(T));
                             const BrfsResult pb = run_brfs(*task, lo, T, budget * 8);
-                            EXPECT_EQ(pb.threads, T) << what;
+                            EXPECT_EQ(pb.threads_used, T) << what;
                             expect_same(pb, sb, what + " brfs threads " + std::to_string(T));
                             compared += 2;
                         }
@@ -204,7 +204,7 @@ TEST(BeamParallel, OptimizedIw1SiwAndIwPassEqualTheSerialBeam)
                 const std::string what = std::string(name) + " " + name_of(mode) + " width " + std::to_string(w);
                 IwOptions o;
                 o.layers = beam(w, mode, true, 7);
-                o.max_arity = 1;  // optimized IW(1)
+                o.max_width = 1;  // optimized IW(1)
                 const IwResult a = iw(*task, o);
                 const SiwResult sa = siw(*task, o);
                 const IwResult pa = iw_pass(*task, 2, o);
@@ -268,7 +268,7 @@ TEST(BeamParallel, IwFamilyVariantsEqualTheSerialBeam)
                 if (mode == Novelty::AllTested)
                 {
                     LiwOptions l;
-                    l.max_arity = 2;
+                    l.max_width = 2;
                     l.layers = beam(w, mode);
                     const IwResult ls = liw(*task, l);
                     l.threads = 4;
@@ -563,7 +563,7 @@ TEST(RelaxedBeam, EqualsItsDefinition)
                         IwOptions o;
                         o.layers = lo;
                         o.threads = T;
-                        o.max_arity = 1;
+                        o.max_width = 1;
                         o.control.budget.max_expanded = 400;
                         const IwResult m = iw(*task, o);
                         const RelaxedRef ref =
@@ -638,7 +638,7 @@ TEST(RelaxedBeam, OnePartDoesNotDependOnTheThreadCount)
             {
                 expect_same(run_iw(*task, lo, T), a, std::string(name) + " iw");
                 BrfsResult c = run_brfs(*task, lo, T);
-                c.threads = b.threads;
+                c.threads_used = b.threads_used;
                 expect_same(c, b, std::string(name) + " brfs");
             }
             // the abstracted IW engine alike
@@ -729,10 +729,10 @@ TEST(BeamParallel, Refusals)
     b.threads = 4;
     b.stop_at_goal = true;
     const BrfsResult with = brfs(*task, b);
-    EXPECT_EQ(with.threads, 1u);
+    EXPECT_EQ(with.threads_used, 1u);
     b.observer = nullptr;
     const BrfsResult without = brfs(*task, b);
-    EXPECT_EQ(without.threads, 4u);
+    EXPECT_EQ(without.threads_used, 4u);
     EXPECT_EQ(with.plan, without.plan);
     EXPECT_EQ(with.expanded, without.expanded);
     o = IwOptions{};

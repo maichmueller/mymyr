@@ -282,7 +282,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
             choice(root_policy, "root_policy", parse_root_policy, "'include', 'exclude', 'encode_only' or None");
     options.horizon.parent_relation = parent_relation;
     options.history = history;
-    options.history_max_steps = int_arg<u32>(history_max_steps, "history_max_steps", 0);
+    options.history_max_steps = opt_int_arg<u32>(history_max_steps, "history_max_steps", 1);
     return options;
 }
 
@@ -316,7 +316,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["root_policy"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.root)))) : nb::none();
     out["parent_relation"] = o.horizon.parent_relation;
     out["history"] = o.history;
-    out["history_max_steps"] = o.history_max_steps;
+    out["history_max_steps"] = o.history_max_steps ? nb::object(nb::cast(*o.history_max_steps)) : nb::none();
     return out;
 }
 
@@ -325,7 +325,7 @@ constexpr const char* k_option_doc =
     "added_unsatisfied for the delta horizon). max_goal_level: subgoal levels beyond the goal (0 to 3): the "
     "relations `[sg]`, `[ssg]`, `[sssg]` of each level hold the literals of the `subgoals` layers of a row. history: "
     "the history relations `[+]p[hist]` / `[-]p[hist]` hold the literals of the `history` steps of a row; "
-    "history_max_steps: only the newest this many steps of a row are encoded (0: all). "
+    "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
     "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
     "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
@@ -399,7 +399,7 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
                           entity_arrays, horizon_mode, root_policy, parent_relation, history, history_max_steps);
             },
             "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "horizon_mode"_a = nb::none(),
-            "root_policy"_a = nb::none(), "parent_relation"_a = false, "history"_a = false, "history_max_steps"_a = 0, doc);
+            "root_policy"_a = nb::none(), "parent_relation"_a = false, "history"_a = false, "history_max_steps"_a.none() = nb::none(), doc);
     }
     else if constexpr (H == HorizonArgs::Absent)
     {
@@ -411,7 +411,7 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
                           predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts,
                           entity_arrays, nb::none(), nb::none(), false, history, history_max_steps);
             },
-            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "history"_a = false, "history_max_steps"_a = 0, doc);
+            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "history"_a = false, "history_max_steps"_a.none() = nb::none(), doc);
     }
     else
     {
@@ -427,7 +427,7 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
             {
                 construct(self, table, goal_derivations, max_goal_level, include_static, include_derived, nullary, equality,
                           predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts,
-                          entity_arrays, horizon_mode, root_policy, parent_relation, false, nb::int_(0));
+                          entity_arrays, horizon_mode, root_policy, parent_relation, false, nb::none());
             },
             "table"_a, nb::kw_only(), "horizon_mode"_a.none(), MYMYR_ENCODING_DEFAULTS, "root_policy"_a = nb::none(),
             "parent_relation"_a = false, doc);
@@ -706,8 +706,9 @@ LayerArray import_layer_array(rlimp::Imports& imports, nb::handle value, const c
     if (!out.data)
         throw nb::type_error((std::string("mymyr: encoding: ") + name + " must be an array, not None").c_str());
     if (static_cast<u64>(lead[0]) != rows && !(may_share && lead[0] == 1))
-        throw nb::value_error((std::string("mymyr: encoding: ") + name + " has " + std::to_string(lead[0]) + " rows: one per state (" +
-                               std::to_string(rows) + (may_share ? ") or a single shared row" : ")"))
+        throw nb::value_error((std::string("mymyr: encoding: ") + name + " has " + std::to_string(lead[0]) +
+                               " rows: one per state (" + std::to_string(rows) +
+                               (may_share ? ") or a single shared row" : ")"))
                                   .c_str());
     out.rows = static_cast<u64>(lead[0]);
     out.layers = static_cast<u32>(lead[1]);
@@ -754,8 +755,8 @@ usize layer_tuple_size(nb::handle value, const char* shape_message, std::initial
     throw nb::value_error(shape_message);
 }
 
-/// The subgoal layers of the rows from `subgoals`, a pair (pos, neg) or a quadruple that adds the masks over the derived
-/// slots: arrays [N, L, W] or [1, L, W] (the layers of every row) of 64-bit words or 32-bit halves.
+/// The subgoal layers of the rows from `subgoals`, a pair (pos, neg) or a quadruple that adds the masks over the
+/// derived slots: arrays [N, L, W] or [1, L, W] (the layers of every row) of 64-bit words or 32-bit halves.
 void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, encoding::EncodeInput& input)
 {
     constexpr const char* k_shape =
@@ -773,11 +774,13 @@ void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, enc
 void import_history(rlimp::Imports& imports, std::vector<i32>& dt_copy, std::vector<i32>& count_copy,
                     nb::handle history, u64 count_rows, encoding::HistoryInput& out)
 {
-    constexpr const char* k_shape = "mymyr: encoding: history must be (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
-                                    "dt, count, derived_pos, derived_neg)";
+    constexpr const char* k_shape =
+        "mymyr: encoding: history must be (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, dt, count, derived_pos, "
+        "derived_neg)";
     const usize size = layer_tuple_size(history, k_shape, {3, 4, 6});
-    static constexpr const char* names[] = {"history[0] (pos)", "history[1] (neg)", "history[2] (dt)",
-                                            "history[3] (count)", "history[4] (derived_pos)", "history[5] (derived_neg)"};
+    static constexpr const char* names[] = {"history[0] (pos)",         "history[1] (neg)",
+                                            "history[2] (dt)",          "history[3] (count)",
+                                            "history[4] (derived_pos)", "history[5] (derived_neg)"};
     import_layer_pair(imports, history, 0, names, count_rows, false, false, out.masks);
     const i64 steps = out.masks.layers;
     out.dt = imports.ints32(history[2], names[2], {static_cast<i64>(count_rows), steps}, dt_copy);
@@ -1057,8 +1060,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"entity_ref",
      "index [E]: an object's instance-local id; a goal, subgoal or history target entity's tuple (its index among the "
      "graph's tuples in graph-major order); an action entity's first row among its graph's rows of the expansion given "
-     "as `actions` (the expansion row is actions.offsets[g] + entity_ref); a history step's index among the valid steps "
-     "of its row (step entity_ref of the row's `history`); a predicate virtual node's key (the id of its "
+     "as `actions` (the expansion row is actions.offsets[g] + entity_ref); a history step's index among the valid "
+     "steps of its row (step entity_ref of the row's `history`); a predicate virtual node's key (the id of its "
      "predicate's state relation); -1 for the auxiliary entity. The same in both layouts. Absent when implicit."},
     {"relation_counts",
      "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
@@ -1082,7 +1085,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "uint8 [T]: the group of each target, an index into target_group_names (0: goal, 1: subgoal, 2: action, 3: "
      "history). Absent like target_offsets."},
     {"history_offsets",
-     "index [G + 1]: graph g's history steps are [history_offsets[g], history_offsets[g + 1]). Absent without history."},
+     "index [G + 1]: graph g's history steps are [history_offsets[g], history_offsets[g + 1]). Absent without "
+     "history."},
     {"history_entity",
      "index [S]: the entity of each history step, graph after graph in step order (oldest first). Absent like "
      "history_offsets."},
@@ -1304,9 +1308,9 @@ void bind_encoding(nb::module_& parent)
                 out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
                 return out;
             },
-            "After an encoding with capacities: the true entities, tuples, args and targets of the batch (and its history "
-            "steps, if the schema has history) and whether it overflowed (`overflow`: the batch is all zero), because "
-            "of the capacities (`capacity_overflow`) or the index type (`index_overflow`); None otherwise.")
+            "After an encoding with capacities: the true entities, tuples, args and targets of the batch (and its "
+            "history steps, if the schema has history) and whether it overflowed (`overflow`: the batch is all zero), "
+            "because of the capacities (`capacity_overflow`) or the index type (`index_overflow`); None otherwise.")
         .def(
             "as_dict",
             [](const PyFlatBatch& self, Arg<ann::Framework> framework)
@@ -1360,8 +1364,8 @@ void bind_encoding(nb::module_& parent)
              "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "subgoals: the subgoal layers of each row, (pos, neg) or (pos, neg, derived_pos, derived_neg): masks "
              "[N, L, W] ([N, L, D]), or [1, L, W] for layers shared by all rows, with L at most max_goal_level; layer "
-             "l fills the relations of level l + 1. A literal that the goal or a lower layer has is encoded once, at its "
-             "lowest level. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
+             "l fills the relations of level l + 1. A literal that the goal or a lower layer has is encoded once, at "
+             "its lowest level. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
              "dt, count, derived_pos, derived_neg): masks [N, H, W] ([N, H, D]) of its steps oldest first, dt "
              "[N, H] integers and count [N] the valid steps of each row (a prefix; None: all H); only the newest "
              "history_max_steps of them are encoded. `mymyr.encoding.subgoal_masks` and `history_masks` build both "

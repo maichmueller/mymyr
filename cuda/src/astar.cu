@@ -376,7 +376,12 @@ __device__ u32 action_cost(const Relax& r, u64 c, u32* error)
     if (r.costs.unit)
         return 1;
     const f64 v = costs::evaluate(r.costs.program, 0, r.schema[c], r.binding + c * r.label_width);
-    if (!(v >= 0 && v < 2147483648.0))  // undefined (NaN), negative, or beyond the u32 g values
+    if (v < 0)
+    {
+        atomicOr(error, k_err_negative);
+        return 0;
+    }
+    if (!(v < 2147483648.0))  // undefined (NaN), or beyond the u32 g values
     {
         atomicOr(error, k_err_cost);
         return 0;
@@ -693,7 +698,7 @@ __global__ void k_chunk_end(Append a, Ctl* ctl, u32 k)
     c.head = 0;
     c.open_size += c.push_n;
     c.open_entries += c.push_n;
-    if (c.count > a.max_states)
+    if (c.count >= a.max_states)
         c.status = k_out_of_states;
 }
 

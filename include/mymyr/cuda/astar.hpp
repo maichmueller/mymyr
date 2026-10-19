@@ -32,7 +32,8 @@
 // Supported: the task's goal (GoalSpec::Kind::Task), budgets (max_expanded exactly; max_states, max_seconds and
 // cancellation between chunks; max_depth), unit and state-independent integral action costs (total-cost; evaluated on
 // the device by cost programs, mymyr/cuda/cost_program.hpp: any number of cost parameters, any static function key
-// space; an undefined or negative cost, or one of 2^31 or more, throws std::domain_error), witness pruning and
+// space; an undefined cost, or one of 2^31 or more, throws std::domain_error; a negative one ends A* and GBFS with
+// status Failed and a message, as the CPU A*, while the CPU GBFS accepts it), witness pruning and
 // canonical order as the CPU. Numeric tasks carry canonical double tails and evaluate fluent costs, ordered total-cost
 // effects and state metrics in flat device programs. Their F64 priorities use a host heap, one parent per step, with
 // eager CPU tie order; numeric searches do not capture graphs. Refused with std::invalid_argument ("mymyr: ..."): tasks the successor

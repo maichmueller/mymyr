@@ -35,7 +35,7 @@
 // on_pass(iteration, statistics of the iteration) after each iteration; on_end once.
 //
 // Result: stats, evaluations, dead_ends and reopened add up the iterations (stats.states: the states stored by all
-// iterations), store_bytes is the largest iteration's, initial_h, store and queue are the first iteration's,
+// iterations), stats.memory_bytes is the largest iteration's, initial_h, store and queue are the first iteration's,
 // setup_seconds is building the heuristic, stats.seconds the search after it.
 //
 // Thread-safety: as the best-first searches (one heuristic per search thread; the task may be shared).

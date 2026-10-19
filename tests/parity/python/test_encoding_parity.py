@@ -327,7 +327,8 @@ def test_subgoal_tuples_and_subgoal_entities_are_compared():
     for i in subgoals:
         role, name = actual.entities[i]
         moved = copy(actual)
-        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if name.endswith("[sg]") else name.replace("[ssg]", "[sg]"))
+        higher = name.endswith("[sg]")
+        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if higher else name.replace("[ssg]", "[sg]"))
         assert {m.kind for m in compare(expected, moved, context)} == {"entity"}
         lost = copy(actual)
         del lost.entities[i]
@@ -340,7 +341,8 @@ def test_the_numbering_of_subgoal_entities_is_excused_but_their_names_are_not():
     swapped = copy(actual)
     swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
     assert compare(expected, swapped, context) == []
-    assert {m.kind for m in compare(expected, swapped, context, [n for n in NAMES if n != "subgoal_entity_order"])} == {"entity"}
+    strict = [n for n in NAMES if n != "subgoal_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, strict)} == {"entity"}
 
 
 def test_history_tuples_history_steps_and_history_targets_are_compared():
@@ -442,6 +444,29 @@ def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that
             extra.tuples[relation] = actual.tuples[relation] + actual.tuples[relation][:1]
             assert [(m.kind, m.where) for m in compare(expected, extra, context)] == [("tuple", relation)]
     assert found
+
+
+def test_a_goal_literal_without_a_slot_that_a_layer_lists_is_compared_in_the_native_goal():
+    for prefix, config, state in (("f08", "C4_L1", "s3"), ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
+        expected, actual, context = goal_case(config, state, prefix)
+        assert compare(expected, actual, context) == []
+        goal = goal_literals(context)
+        slotless = [parse_literal(text) for kind, _, text in context.dropped
+                    if kind == "subgoal" and parse_literal(text) in goal]
+        assert slotless
+        for literal in slotless:
+            entity = literal_text(*literal) + "[g]"
+            relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[g]"
+            assert ("goal", entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
+            missing = copy(actual)
+            missing.entities.remove(("goal", entity))
+            assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
+            twice = copy(actual)
+            twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+            assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+            fewer = copy(actual)
+            fewer.tuples[relation] = [t for t in actual.tuples[relation] if t[0] != entity]
+            assert ("tuple", relation) in {(m.kind, m.where) for m in compare(expected, fewer, context)}
 
 
 def test_a_nullary_literal_of_a_layer_is_a_tuple_over_the_auxiliary_entity():

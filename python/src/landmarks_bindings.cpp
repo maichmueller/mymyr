@@ -19,6 +19,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -538,9 +539,11 @@ void bind_landmarks(nb::module_& m)
         [](TaskArg task, bool include_positive_goal_facts, bool compute_greedy_necessary_orderings,
            IntArg max_disjunctive_landmark_size_in, IntArg max_disjunctive_landmark_depth_in,
            Arg<std::variant<lm::FirstAchievers, std::string>> first_achievers, bool include_derived_atoms,
-           IntArg max_operators_in, IntArg max_bindings_in, double max_seconds) {
+           IntArg max_operators_in, IntArg max_bindings_in, FloatArg max_seconds_in) {
             const u64 max_disjunctive_landmark_size = int_arg<u64>(max_disjunctive_landmark_size_in, "max_disjunctive_landmark_size");
-            const u64 max_disjunctive_landmark_depth = int_arg<u64>(max_disjunctive_landmark_depth_in, "max_disjunctive_landmark_depth");
+            const u64 max_disjunctive_landmark_depth =
+                opt_int_arg<u64>(max_disjunctive_landmark_depth_in, "max_disjunctive_landmark_depth").value_or(~u64{0});
+            const double max_seconds = opt_float_arg(max_seconds_in, "max_seconds", 0).value_or(std::numeric_limits<double>::infinity());
             const u64 max_operators = int_arg<u64>(max_operators_in, "max_operators");
             const u64 max_bindings = int_arg<u64>(max_bindings_in, "max_bindings");
             const Owner o = owner_of(task);
@@ -565,12 +568,13 @@ void bind_landmarks(nb::module_& m)
             return make_graph(o, std::move(*g));
         },
         "task"_a, nb::kw_only(), "include_positive_goal_facts"_a = true, "compute_greedy_necessary_orderings"_a = true,
-        "max_disjunctive_landmark_size"_a = 0, "max_disjunctive_landmark_depth"_a = 0,
+        "max_disjunctive_landmark_size"_a = 0, "max_disjunctive_landmark_depth"_a = nb::none(),
         "first_achievers"_a = lm::FirstAchievers::HMax, "include_derived_atoms"_a = false, "max_operators"_a = 5'000'000,
-        "max_bindings"_a = 100'000'000, "max_seconds"_a = 60.0,
+        "max_bindings"_a = 100'000'000, "max_seconds"_a.none() = 60.0,
         "Fact landmarks over the grounded delete relaxation, with the achiever index. Grounds the task: max_operators, max_bindings and "
-        "max_seconds bound the grounding (RuntimeError beyond). max_disjunctive_landmark_size 0: no disjunctive "
-        "landmarks; max_disjunctive_landmark_depth 0: unbounded. first_achievers: a FirstAchievers or 'hmax' / "
+        "max_seconds (None: unlimited) bound the grounding (RuntimeError beyond). max_disjunctive_landmark_size 0: no "
+        "disjunctive landmarks; max_disjunctive_landmark_depth: the layers of expanded members (None: unbounded; 0: no "
+        "disjunctive landmarks). first_achievers: a FirstAchievers or 'hmax' / "
         "'possibly_before' (sound; the landmark count's). include_derived_atoms: derived goal atoms and derived "
         "preconditions are landmarks too, achieved by the axioms (the graph's achieved / unachieved see fluent atoms "
         "only).");

@@ -293,7 +293,7 @@ int main(int argc, char** argv)
                     "\"groups\":%llu,\"loops\":%llu,\"captures\":%llu,\"resumed\":%llu,\"redone\":%llu",
                     o.witness_pruning ? "true" : "false", o.canonical_order ? "true" : "false",
                     static_cast<unsigned long long>(r.states), static_cast<unsigned long long>(r.expanded),
-                    static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.goal_states), r.layers,
+                    static_cast<unsigned long long>(r.generated), static_cast<unsigned long long>(r.num_goal_states), r.layers,
                     r.exhausted ? "true" : "false", r.solved ? "true" : "false", r.plan.size(), median(times), join(times).c_str(),
                     static_cast<unsigned long long>(r.fingerprint), st.view_ms, st.gen_ms, st.dedup_ms, st.host_ms,
                     static_cast<unsigned long long>(st.chunks), st.uploads, st.widenings,
@@ -318,7 +318,7 @@ int main(int argc, char** argv)
                 c = brfs(*task, bo);
                 ct.push_back(c.search_s);
             }
-            const bool equal = c.states == r.states && c.generated == r.generated && c.goal_states == r.goal_states &&
+            const bool equal = c.states == r.states && c.generated == r.generated && c.num_goal_states == r.num_goal_states &&
                                c.layers == r.layers && c.fingerprint == r.fingerprint && c.plan == r.plan;
             std::printf(",\"cpu%u_s\":%.4f,\"cpu%u_s_all\":[%s],\"cpu%u_equal\":%s", bo.threads, median(ct), bo.threads,
                         join(ct).c_str(), bo.threads, equal ? "true" : "false");

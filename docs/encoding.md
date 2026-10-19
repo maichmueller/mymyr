@@ -182,8 +182,8 @@ Nullary literals in a layer are unary tuples over the auxiliary entity, which th
 ### History
 
 With `history=True` the history relations `[+]on[hist]` and `[-]on[hist]` of the schema hold the literals of the steps of
-a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (0, the default: all of
-them). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
+a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (`None`, the default: all of
+them; otherwise at least 1). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
 oldest first; the batch lists them in `history_offsets` `[G + 1]`, `history_entity` `[S]` (the entity of each step) and
 `history_dt` int32 `[S]` (its `dt`). The `entity_ref` of a step entity is the step's index among the row's valid steps
 (not among the encoded ones: step `entity_ref` of the row's `history` is `history[2][g, entity_ref]` for its `dt` and
@@ -369,6 +369,33 @@ batch's framework. NumPy arrays are read-only; do not mutate the shared buffers 
 cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
 `batch.schema` is its `EncodingSchema`.
 
+## Memory of batches
+
+A batch is one block of memory. Fresh memory costs a kernel page fault per 4 KiB page, which for a batch of tens of
+megabytes is several times the work of filling it, so released blocks are kept and handed out again with their pages
+still mapped. The same cache serves the other batch outputs (`mymyr.rl.expand`, table batches). It is bounded:
+
+| Block size | Served by | Bound |
+|---|---|---|
+| up to 128 KiB | the system allocator | not cached by mymyr |
+| up to 4 MiB | a cache private to the thread that releases the block | 4 blocks per thread |
+| above 4 MiB | a cache shared by all threads | 8 blocks and 512 MiB in all; a block above 256 MiB is never kept |
+
+A block returns to the cache of the thread that drops its last reference, whichever thread made it. Blocks are
+anonymous memory mappings, so dropping one gives its memory back to the operating system. A shared block that no
+acquire takes within the 256 acquires of blocks above 128 KiB that follow its release is dropped by itself, so a one-off
+huge batch does not stay resident. `mymyr.block_cache_bytes()` reports what the calling thread's cache and the shared
+cache hold, and `mymyr.trim_block_cache()` frees all of it; other threads' private caches are freed when those threads
+end. Arrays that a batch still owns keep their memory either way.
+
+```python
+big = encoder.encode([state] * 20000)  # a batch of several megabytes
+del big  # its block goes back to the cache
+assert mymyr.block_cache_bytes() > 0
+mymyr.trim_block_cache()  # and back to the system
+assert mymyr.block_cache_bytes() == 0
+```
+
 ## Layouts and omitted arrays
 
 `layout='graph'` (the default) stores the tuples graph by graph; `layout='relation'` stores them relation by relation
@@ -518,7 +545,7 @@ relations. An encoder has the same properties.
 - **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
   `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
-  targets together with a horizon mode; history targets or `history_max_steps` without `history`; `history` together with a
+  targets together with a horizon mode; history targets or `history_max_steps` without `history`; a `history_max_steps` of 0; `history` together with a
   horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
   `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that

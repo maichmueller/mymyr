@@ -1,5 +1,5 @@
 #pragma once
-// Thread counts. Every parallel call takes a thread count from its caller (`threads`, `num_threads`): 0 means one
+// Thread counts. Every parallel call takes a thread count from its caller (`threads`): 0 means one
 // thread per hardware thread, and a count above max_threads() is refused, so that a typo or a negative number cast to
 // unsigned cannot start millions of threads. Oversubscription up to the bound stays possible (tests and small machines
 // run more threads than cores).

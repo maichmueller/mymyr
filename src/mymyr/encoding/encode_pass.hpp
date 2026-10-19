@@ -28,7 +28,7 @@ struct alignas(k_cache_line) Member
     // pass one
     std::vector<GraphTotals> totals;  // the slice's graphs
     std::vector<u32> cell_counts;     // the slice's cells, graph after graph, in cell order (relation-major or
-                                      // with predicate virtual nodes)
+                                      // with predicate virtual nodes or layers)
     std::vector<u32> action_starts;   // [slice graphs, starts_stride] the run starts of each graph's rows
     std::vector<u32> action_cursors;  // [num_schemas] the cursors of the merge of one action relation's runs
     std::vector<u64> tally;           // [R] tuples per relation in the slice (relation-major)
@@ -39,6 +39,7 @@ struct alignas(k_cache_line) Member
     u64 narrow_history = k_none, bad_history_bits = k_none, bad_history_count = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 bad_edge = k_none;  // horizon: the first graph with an invalid edge
+    std::vector<u64> effective;        // the subgoal levels of the row being counted or filled (effective_layers)
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice

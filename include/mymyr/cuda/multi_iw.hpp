@@ -2,7 +2,7 @@
 // Many IW searches at once on the device:
 //
 //   auto ctx = mymyr::cuda::DeviceContext::create(0);
-//   mymyr::cuda::MultiIwOptions o;               // max_arity = 1: optimized IW(1)
+//   mymyr::cuda::MultiIwOptions o;               // max_width = 1: optimized IW(1)
 //   std::vector<mymyr::search::IwResult> r = mymyr::cuda::multi_iw(ctx, task, starts, o);
 //
 // B searches, each with its own start state (and optionally its own goal), share one uploaded task and run the IW
@@ -11,7 +11,7 @@
 // novelty table (arity 1: one bit per fluent slot; arity 2: a symmetric bit matrix of the slots, "where the table
 // fits": groups of searches are sized to MultiIwOptions::table_bytes and run one after the other).
 //
-// Semantics: per search, exactly search::iw(task, {start, max_arity, optimize_iw1, width_zero, witness_pruning,
+// Semantics: per search, exactly search::iw(task, {start, max_width, optimize_iw1, width_zero, witness_pruning,
 // canonical_order, budgets}): the width-0 pass, optimized IW(1), goal test on
 // pop, expanded / generated / generated_in_tree / skipped per pass, the plan and the goal state. The candidates of a
 // chunk come in canonical order (search, pop position, schema, binding; the lifted kernels, with their per-schema
@@ -52,7 +52,7 @@ namespace mymyr::cuda
 {
 struct MultiIwOptions
 {
-    u32 max_arity = 1;  // the ladder 0..max_arity (the device runs arities 0, 1 and 2)
+    u32 max_width = 1;  // the ladder 0..max_width (the device runs widths 0, 1 and 2)
     bool optimize_iw1 = true;
     search::WidthZero width_zero = search::WidthZero::ExpandDepthOne;
     bool witness_pruning = false;  // search::iw()'s default: every applicable action is a transition
@@ -180,7 +180,7 @@ private:
                                                      std::span<const search::GoalSpec::AtomGoal> goals = {});
 
 /// Exact batched IW(1) (an RL building block): optimized IW(1) from each of the device start rows; per search
-/// the status, plan length, goal row and counts (MultiIwBatch). options.max_arity is forced to 1.
+/// the status, plan length, goal row and counts (MultiIwBatch). options.max_width is forced to 1.
 [[nodiscard]] MultiIwBatch batched_iw1(ContextPtr ctx, TaskPtr task, DeviceStarts starts, MultiIwOptions options = {},
                                        cudaStream_t stream = nullptr);
 

@@ -44,9 +44,9 @@ struct FlatSizes
 /// int64). The caller owns them. Arrays of size G, G + 1, G * R or G * R + 1 must have that size; relation_args,
 /// entity_role, entity_ref, target_entity, target_group, history_entity and history_dt must hold at least the sizes of
 /// the batch (FlatSizes). entity_role and entity_ref must be null iff the schema has implicit entity arrays,
-/// relation_counts iff it does not store counts, goal_complete iff it has no goal relations, the three target arrays iff
-/// it has no targets, the three history arrays iff it has no history. Nothing is written past the sizes: the entries of
-/// the variable-size arrays beyond them keep their old values.
+/// relation_counts iff it does not store counts, goal_complete iff it has no goal relations, the three target arrays
+/// iff it has no targets, the three history arrays iff it has no history. Nothing is written past the sizes: the
+/// entries of the variable-size arrays beyond them keep their old values.
 struct FlatBuffers
 {
     i32* task_ids = nullptr;

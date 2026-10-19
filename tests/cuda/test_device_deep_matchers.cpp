@@ -180,7 +180,7 @@ TEST(CudaDeep, OrganicSynthesisIwInSmallChunksEqualsOneChunk)
     {
         SCOPED_TRACE("arity " + std::to_string(arity));
         cuda::MultiIwOptions o;
-        o.max_arity = arity;
+        o.max_width = arity;
         o.budget.max_states = arity == 1 ? 200 : 60;
         cuda::DeviceMultiIw ref_run(context(), task, o);
         const cuda::MultiIwBatch ref = ref_run.run(starts);
@@ -308,7 +308,7 @@ TEST(CudaDeep, OrganicSynthesisBrfsEqualsTheCpu)
         EXPECT_EQ(d.result.states, c.states);
         EXPECT_EQ(d.result.expanded, c.expanded);
         EXPECT_EQ(d.result.generated, c.generated);
-        EXPECT_EQ(d.result.goal_states, c.goal_states);
+        EXPECT_EQ(d.result.num_goal_states, c.num_goal_states);
         EXPECT_EQ(d.result.fingerprint, c.fingerprint);
         EXPECT_EQ(d.stats.host_schemas, 0u);
         if (candidate_bytes > 1)

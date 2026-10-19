@@ -297,7 +297,7 @@ TEST(DeviceRlOps, RandomActionsEqualTheRandomPolicy)
         count[i] = static_cast<i32>(hash::mix64(i + N) % 40) - 3;  // some without successors
     }
     cuda::DeviceBuffer dd = upload(ctx, draws, s), dc = upload(ctx, count, s), dout(ctx, N * sizeof(i64), s);
-    for (const u32 limit : {0u, 1u, 7u})
+    for (const u32 limit : {~u32{0}, 1u, 7u})  // ~u32{0}: no limit
     {
         cuda::check(cuda::envk::launch_random_actions(ptr<const u64>(dd), ptr<const i32>(dc), N, seed, nullptr,
                                                       first_env, limit, ptr<i64>(dout), s),
@@ -306,8 +306,7 @@ TEST(DeviceRlOps, RandomActionsEqualTheRandomPolicy)
         for (u64 i = 0; i < N; ++i)
         {
             u32 c = count[i] > 0 ? static_cast<u32>(count[i]) : 0u;
-            if (limit && c > limit)
-                c = limit;
+            c = std::min(c, limit);
             const i64 want = c ? i64{rl::rng::successor_index(seed, first_env + i, draws[i], c)} : i64{0};
             ASSERT_EQ(got[i], want) << i << " limit " << limit;
         }

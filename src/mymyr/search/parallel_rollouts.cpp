@@ -122,7 +122,7 @@ void record_plan_extraction(detail::Env& env, detail::StateTracker& tr, const St
 /// Converts a rollout's tracked states to the portable result.
 void collect(const Task& task, Successors& succ, const detail::StateTracker& tr, bool landing, bool co, RolloutResult& r)
 {
-    r.num_states = tr.num_states();
+    r.num_created_states = tr.num_states();
     ReachedOrder order(task, tr.reached());
     r.reached_fluent_atoms.reserve(order.size());
     for (u32 i = 0; i < order.size(); ++i)
@@ -187,8 +187,8 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
     const SearchControl& control = o.iw.control;
     if (control.coordination)
         return fail_all("find_rollouts_parallel: SearchControl::coordination is not supported with randomized layer orders");
-    if (o.iw.max_arity > novelty::k_max_arity)
-        return fail_all("IW arity " + std::to_string(o.iw.max_arity) + " exceeds the maximum " + std::to_string(novelty::k_max_arity));
+    if (o.iw.max_width > novelty::k_max_arity)
+        return fail_all("IW arity " + std::to_string(o.iw.max_width) + " exceeds the maximum " + std::to_string(novelty::k_max_arity));
     if (o.max_next_layer_states == 0)
         return fail_all("max_next_layer_states must be positive");
 
@@ -230,7 +230,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         worker_obs.assign(K, nullptr);
         worker_goals.clear();
     }
-    u32 T = resolve_threads(o.num_threads, "num_threads");
+    u32 T = resolve_threads(o.threads, "threads");
     T = static_cast<u32>(std::min<usize>(T, K));
     if (!safe)
         T = 1;
@@ -268,7 +268,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         detail::StateTracker tracker(task, o.report_landing_states, o.report_co_occurrence);
         env.tracker = &tracker;
         RolloutResult& r = out.rollouts[k];
-        r.search = detail::classic_ladder(env, start, o.iw.max_arity, o.iw.optimize_iw1, o.iw.width_zero, o.iw.tables);
+        r.search = detail::classic_ladder(env, start, o.iw.max_width, o.iw.optimize_iw1, o.iw.width_zero, o.iw.tables);
         if (r.search.status == SearchStatus::Solved)
             record_plan_extraction(env, tracker, start, r.search.plan);
         detail::finish_result(env, start, r.search);
@@ -314,7 +314,7 @@ ParallelRolloutsResult find_rollouts_parallel(const Task& task, const ParallelRo
         {
             for (const IwPassStatistics& p : r.search.passes)
             {
-                root->on_pass(p.arity, p.statistics());
+                root->on_pass(p.width, p.stats());
                 detail::add_pass(total, p);
             }
             if (r.search.status == SearchStatus::Solved)

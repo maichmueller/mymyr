@@ -94,7 +94,7 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
     SearchObserver* const obs = c.observer;
     Successors& succ = c.succ;
     IwPassStatistics& st = out.st;
-    st.arity = 1;
+    st.width = 1;
 
     // the ordered pass stores atom words only; numeric states would lose their values
     if (task.numeric_slots() > 0)
@@ -181,7 +181,7 @@ void run_ordered_pass(Context& c, StateView root, const GoalTest& goal, bool roo
                 if (st.expanded >= progress_next)
                 {
                     progress_next += interval;
-                    if (!obs->on_progress(st.statistics()))
+                    if (!obs->on_progress(st.stats()))
                     {
                         finish(SearchStatus::Cancelled);
                         stop = true;

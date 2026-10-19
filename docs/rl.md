@@ -47,8 +47,8 @@ its derived atoms (`expansion.derived`, `[M, D]` words in the encoding of the st
 without derived atoms, whose arrays are zero-width. An instance with fewer derived words has zeros past its own. The
 words are exactly what the [relational encoder](encoding.md) evaluates itself, so they can replace its evaluation.
 Capacity and overflow follow `succ`: rows past the capacity are counted, not written; `derived=False` leaves every other
-output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(K)` /
-`K=` carry `padded.derived` `[N, K, D]` with zero padding, and device inputs fill the words on the device (every device
+output unchanged and costs nothing. `expand_into` takes a `derived=` destination (it needs `succ=`), `exp.pad(k)` /
+`k=` carry `padded.derived` `[N, k, D]` with zero padding, and device inputs fill the words on the device (every device
 expansion path, including tables of instances with axioms and suites). The torch ops `expand_derived` and
 `expand_flat_derived` return the words as a seventh result, and `Env.expand(..., derived=True)` /
 `Env.expand_flat(..., derived=True)` of `mymyr.rl.jax` fill the `derived` field (uint32 pairs).

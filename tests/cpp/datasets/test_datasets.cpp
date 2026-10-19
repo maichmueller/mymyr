@@ -91,29 +91,41 @@ TEST(StateSpace, CountsMatchTheBrfsSuite)
 // ----------------------------------------------------------------------------------------------- options
 TEST(StateSpace, MaxStatesFailsIffTheSpaceReachesIt)
 {
+    // the state that fills the store ends the generation: OutOfStates with `states` the limit, on every thread count
     const TaskPtr task = small_task("gripper", "test_problem4.pddl");  // 256 states
     if (!task)
         GTEST_SKIP();
     for (u32 T : {1u, 4u})
     {
         StateSpaceOptions o = ss_options(T);
-        o.max_states = 256;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates) << T;
+        for (const u64 limit : {u64{0}, u64{1}, u64{2}, u64{10}, u64{255}, u64{256}})
+        {
+            o.max_states = limit;
+            const StateSpaceResult r = generate_state_space(task, o);
+            EXPECT_EQ(r.status, search::SearchStatus::OutOfStates) << T << " " << limit;
+            EXPECT_EQ(r.states, std::max<u64>(limit, 1)) << T << " " << limit;
+        }
         o.max_states = 257;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::Ok) << T;
-        o.max_states = 10;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates) << T;
+        EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::Exhausted) << T;
     }
-    // a single-state space fits every limit (it fails iff N >= max(max_states, 2))
+    // a single-state space fits a limit of 2 or more; the initial state alone fills one of 1 (or 0)
     const TaskPtr one = small_task("deadend", "test_problem.pddl");
     ASSERT_TRUE(one);
     for (u32 T : {1u, 2u})
     {
         StateSpaceOptions o = ss_options(T);
-        o.max_states = 0;
+        o.remove_if_unsolvable = false;
+        o.max_states = 2;
         const StateSpaceResult r = generate_state_space(one, o);
-        ASSERT_EQ(r.status, StateSpaceStatus::Ok);
+        ASSERT_EQ(r.status, search::SearchStatus::Exhausted);
         EXPECT_EQ(r.space->num_states(), 1u);
+        for (const u64 limit : {u64{0}, u64{1}})
+        {
+            o.max_states = limit;
+            const StateSpaceResult full = generate_state_space(one, o);
+            EXPECT_EQ(full.status, search::SearchStatus::OutOfStates) << T << " " << limit;
+            EXPECT_EQ(full.states, 1u);
+        }
     }
 }
 
@@ -126,10 +138,10 @@ TEST(StateSpace, RemoveIfUnsolvableDropsTheWholeSpace)
     {
         StateSpaceOptions o;
         o.threads = T;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::Unsolvable);
+        EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::Unsolvable);
         o.remove_if_unsolvable = false;
         const StateSpaceResult r = generate_state_space(task, o);
-        ASSERT_EQ(r.status, StateSpaceStatus::Ok);
+        ASSERT_EQ(r.status, search::SearchStatus::Exhausted);
         EXPECT_EQ(r.space->num_unsolvable_states(), r.space->num_states());
         EXPECT_EQ(r.space->unit_goal_distances()[0], k_unsolvable_distance);
         EXPECT_TRUE(std::isinf(r.space->cost_goal_distances()[0]));
@@ -138,7 +150,7 @@ TEST(StateSpace, RemoveIfUnsolvableDropsTheWholeSpace)
     const TaskPtr spanner = small_task("spanner", "p15-easy.pddl");
     ASSERT_TRUE(spanner);
     const StateSpaceResult r = generate_state_space(spanner, {});
-    ASSERT_EQ(r.status, StateSpaceStatus::Ok);
+    ASSERT_EQ(r.status, search::SearchStatus::Exhausted);
     EXPECT_GT(r.space->num_unsolvable_states(), 0u);
 }
 
@@ -168,9 +180,9 @@ TEST(StateSpace, StaticallyFalseGoalHasNoSpace)
     {
         StateSpaceOptions o;
         o.remove_if_unsolvable = remove;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::Unsolvable);
+        EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::Unsolvable);
         o.threads = 2;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::Unsolvable);
+        EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::Unsolvable);
     }
 }
 
@@ -232,9 +244,9 @@ TEST(StateSpace, NumericTasks)
     ASSERT_GT(task->numeric_slots(), 0u);
     StateSpaceOptions o = ss_options();
     o.max_states = 1000;  // fuel is unbounded: the space is infinite
-    EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates);
+    EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::OutOfStates);
     o.threads = 3;
-    EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::OutOfStates);
+    EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::OutOfStates);
     // a bounded counter: x in 0..3 with and without done
     const TaskPtr bounded = pddl_task(R"(
 (define (domain counter2)
@@ -309,7 +321,7 @@ TEST(StateSpace, TimeoutStops)
     {
         StateSpaceOptions o = ss_options(T);
         o.max_seconds = 0;
-        EXPECT_EQ(generate_state_space(task, o).status, StateSpaceStatus::Timeout) << T;
+        EXPECT_EQ(generate_state_space(task, o).status, search::SearchStatus::OutOfTime) << T;
     }
 }
 

@@ -196,7 +196,7 @@ cudaError_t launch_store(u64* dst, u64 value, cudaStream_t s);
 cudaError_t launch_philox(const u32* counters, const u32* keys, u64 n, u32* out, cudaStream_t s);
 
 /// The random policy's next choices without stepping (TorchRL's rand_action): out[i] = rl::rng::successor_index(
-/// seed, first_env + i, draws[i], c) with c = count[i], limited to max_actions (0: no limit); 0 where c is 0 (the key
+/// seed, first_env + i, draws[i], c) with c = count[i], limited to max_actions (~u32{0}: no limit); 0 where c is 0 (the key
 /// is *seed_dev where given). The environment's own random step at the same draw counter takes the same successor
 /// (when count <= max_actions).
 cudaError_t launch_random_actions(const u64* draws, const i32* count, u64 rows, u64 seed, const u64* seed_dev,

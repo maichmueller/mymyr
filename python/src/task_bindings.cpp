@@ -298,7 +298,7 @@ TaskOptions make_options(std::string_view atoms, std::string_view matching, IntA
         o.matching = TaskOptions::Matching::Auto;
     else if (matching == "fixed")
         o.matching = TaskOptions::Matching::FixedOrder;
-    else if (matching == "fc" || matching == "forward_checking")
+    else if (matching == "fc")
         o.matching = TaskOptions::Matching::ForwardChecking;
     else
         throw nb::value_error("mymyr: matching must be 'auto', 'fixed' or 'fc'");
@@ -313,7 +313,7 @@ TaskOptions make_options(std::string_view atoms, std::string_view matching, IntA
     o.fc_auto_free_params = int_arg<u32>(fc_free_params, "fc_free_params");
     o.numeric_quantum = float_arg(numeric_quantum, "numeric_quantum", 0.0, std::numeric_limits<double>::max());
     o.numeric_tolerant = numeric_tolerant;
-    o.reachability_budget = int_arg<u64>(reachability_budget, "reachability_budget", 0);
+    o.reachability_budget = opt_int_arg<u64>(reachability_budget, "reachability_budget", 0).value_or(~u64{0});
     return o;
 }
 
@@ -347,7 +347,8 @@ nb::tuple options_tuple(const TaskOptions& o)
                            : o.matching == TaskOptions::Matching::FixedOrder ? "fixed"
                                                                              : "fc";
     return nb::make_tuple(atoms_option_name(o.atoms), matching, o.fc_auto_free_params, storage_option_name(o.numeric_storage),
-                          o.numeric_quantum, o.numeric_tolerant, o.reachability_budget);
+                          o.numeric_quantum, o.numeric_tolerant,
+                          o.reachability_budget == ~u64{0} ? nb::object(nb::none()) : nb::cast(o.reachability_budget));
 }
 
 TaskOptions options_of_tuple(nb::handle t)
@@ -377,7 +378,7 @@ constexpr const char* k_options_doc =
     "'dense'; 'lazy': slots on first touch, for searches only), matching ('auto', 'fixed', 'fc'), fc_free_params, "
     "numeric_storage ('auto': 'i32' for statically integral tasks without a quantum, else 'f64'; 'f64'; 'i32'), "
     "numeric_quantum (> 0: stored values snap to multiples of it), numeric_tolerant (tolerant numeric semantics), "
-    "reachability_budget (the analysis' work bound in join steps; 0: unbounded). The same task and options give the "
+    "reachability_budget (the analysis' work bound in join steps; None: unbounded). The same task and options give the "
     "same encoding in every run and process (atoms='lazy' aside).";
 
 /// A state argument: a State of this task, or state words (one row).

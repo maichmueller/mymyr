@@ -12,7 +12,7 @@ namespace nb = nanobind;
 /// The arguments of rl.expand.
 struct ExpandArgs
 {
-    nb::handle table, states, task_ids, capacity, words, K;
+    nb::handle table, states, task_ids, capacity, words, k;
     bool goal = false, derived = false, canonical = true, witness = false;
     nb::handle framework;
     bool validate = true;

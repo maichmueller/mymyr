@@ -45,8 +45,9 @@ struct GoalRelations
     [[nodiscard]] i32 at(u32 predicate, u32 sign, u32 variant) const { return id[(u64{predicate} * 2 + sign) * 3 + variant]; }
 };
 
-/// The subgoal and history relations of the schema, by predicate: for each of the levels 1 to 3 the relations of the goal
-/// variants of each sign (plain, satisfied, unsatisfied), and the history relation of each sign (-1: the schema has none).
+/// The subgoal and history relations of the schema, by predicate: for each of the levels 1 to 3 the relations of the
+/// goal variants of each sign (plain, satisfied, unsatisfied), and the history relation of each sign (-1: the schema
+/// has none).
 struct LayerRelations
 {
     std::vector<i32> subgoal;  // [level - 1, predicate, sign, variant]
@@ -147,10 +148,10 @@ struct InstanceRows
     std::vector<Cell> cells;      // with the instance's goal: the goal cells that can hold a tuple, narrowed
     std::vector<Cell> row_cells;  // with the goals of a row: the goal cells of every predicate that has slots
     std::vector<Cell> plain_cells, plain_row_cells;  // the same two lists without the action cells
-    std::array<std::vector<Cell>, 12> extended;      // the four lists with the cells of subgoal layers, of history steps,
-                                                     // and of both: index (e - 1) * 4 + k for e (1: layers, 2: history,
-                                                     // 3: both) and the list k of {cells, row_cells, plain_cells,
-                                                     // plain_row_cells}
+    std::array<std::vector<Cell>, 12> extended;      // the four lists with the cells of subgoal layers, of history
+                                                     // steps, and of both: index (e - 1) * 4 + k for e (1: layers,
+                                                     // 2: history, 3: both) and the list k of {cells, row_cells,
+                                                     // plain_cells, plain_row_cells}
     std::vector<i32> slot_args, derived_args, static_args;  // rows of max_arity objects, -1 padded
     std::vector<u64> goal_words;                            // goal masks: pos, neg (words each), derived pos, neg
     std::vector<i32> goal_args;                             // the constant goal tuples, rows of max_arity objects
@@ -631,8 +632,11 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                 if (id >= 0)
                     history_cells.push_back(
                         {static_cast<u32>(id),
-                         detail::history_op(derived, sign == 1, layer_relations.target[static_cast<u32>(id)] != 0), a, b,
-                         schema.relation(static_cast<u32>(id)).arity, logical});
+                         detail::history_op(derived, sign == 1, layer_relations.target[static_cast<u32>(id)] != 0),
+                         a,
+                         b,
+                         schema.relation(static_cast<u32>(id)).arity,
+                         logical});
             }
     }
     {
@@ -647,7 +651,8 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                     list.insert(list.end(), layer_cells.begin(), layer_cells.end());
                 if (extension & 2u)
                     list.insert(list.end(), history_cells.begin(), history_cells.end());
-                std::sort(list.begin(), list.end(), [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
+                std::sort(list.begin(), list.end(),
+                          [](const Cell& x, const Cell& y) { return x.relation < y.relation; });
             }
     }
     append_slot_rows(out.slot_args, atom_pred, atom_padded, fluent_width, arity, max_arity);
@@ -728,8 +733,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
         const u32 variant = plain ? 0 : relation.derivation == GoalDerivation::Satisfied ? 1 : 2;
         const u32 level = *relation.level;
         const u64 per_level = u64{table->num_domain_predicates()} * 6;
-        layer_relations.subgoal[(level - 1) * per_level + (u64{static_cast<u32>(relation.predicate)} * 2 + sign) * 3 + variant] =
-            static_cast<i32>(id);
+        const u64 predicate = static_cast<u32>(relation.predicate);
+        layer_relations.subgoal[(level - 1) * per_level + (predicate * 2 + sign) * 3 + variant] = static_cast<i32>(id);
         if (plain && own->slot_roles(id).front() == SlotRole::SubgoalTarget)
             layer_relations.target[id] = 1;
     }

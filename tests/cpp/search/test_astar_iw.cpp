@@ -169,7 +169,7 @@ TEST(AStarIw, MatchesIwWidthBoundary)
         AStarIwOptions o;
         o.width = width;
         IwOptions iw_opts;
-        iw_opts.max_arity = width;
+        iw_opts.max_width = width;
         const auto r = astar_iw(*task, o);
         EXPECT_EQ(r.status == SearchStatus::Solved, iw(*task, iw_opts).status == SearchStatus::Solved);
         EXPECT_EQ(r.status == SearchStatus::Solved, width == 2);

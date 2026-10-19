@@ -18,7 +18,8 @@ arrays = space.arrays()
 print(space.num_states, space.num_transitions, arrays["goal"].sum())
 ```
 
-Use `max_states=` and `max_seconds=` to bound generation. `threads=` controls CPU generation workers (default 1, `0`:
+Use `max_states=` and `max_seconds=` to bound generation: it fails with `OUT_OF_STATES` when the space has
+`max(max_states, 1)` states or more. `threads=` controls CPU generation workers (default 1, `0`:
 one per hardware thread); the options follow the [API conventions](conventions.md).
 
 `arrays()["state_words"]` holds the states as rows in the task's encoding, the same for every thread count and run

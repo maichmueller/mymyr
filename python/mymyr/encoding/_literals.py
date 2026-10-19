@@ -1,8 +1,8 @@
 """Masks of lists of literals, the form in which an encoder takes the subgoals and the history of its rows.
 
 A literal is anything ``Task.literal`` takes: a GroundLiteral or GroundAtom, ``'(on a b)'``, ``'(not (on a b))'`` or
-``('on', 'a', 'b')``. It becomes a bit of the positive or negative mask of its row (and layer or step) at the slot of its
-atom: the fluent slot of a fluent atom, the derived slot of a derived atom. A literal that has no slot raises
+``('on', 'a', 'b')``. It becomes a bit of the positive or negative mask of its row (and layer or step) at the slot of
+its atom: the fluent slot of a fluent atom, the derived slot of a derived atom. A literal that has no slot raises
 ValueError: an atom of a static predicate (its truth is the instance's, so a state cannot change it), a fluent or
 derived atom that the task gave no slot, and a literal with variables.
 """
