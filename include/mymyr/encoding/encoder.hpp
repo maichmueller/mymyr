@@ -165,6 +165,10 @@ public:
     EncodeScratch(const EncodeScratch&) = delete;
     EncodeScratch& operator=(const EncodeScratch&) = delete;
 
+    /// The scratch of the calling thread, kept for the life of the thread: the one for calls that do not own a scratch
+    /// (it is warm once the thread has encoded). It serves one call at a time, like any scratch.
+    [[nodiscard]] static EncodeScratch& of_this_thread();
+
     struct Impl;
     [[nodiscard]] Impl& impl() noexcept { return *m_impl; }
 

@@ -104,6 +104,12 @@ struct EncodeScratch::Impl
 EncodeScratch::EncodeScratch() : m_impl(std::make_unique<Impl>()) {}
 EncodeScratch::~EncodeScratch() = default;
 
+EncodeScratch& EncodeScratch::of_this_thread()
+{
+    thread_local EncodeScratch scratch;
+    return scratch;
+}
+
 namespace
 {
 using Scratch = EncodeScratch::Impl;

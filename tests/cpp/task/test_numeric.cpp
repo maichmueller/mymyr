@@ -501,7 +501,7 @@ TEST(NumericRl, ExpandRowsCarryTheNumericWords)
         std::vector<u64> psucc(batch.size() * K * (PW + NN));
         std::vector<u8> mask(batch.size() * K);
         rl::PaddedExpansion pd;
-        pd.K = K;
+        pd.k = K;
         pd.words = PW;
         pd.numeric_words = NN;
         pd.succ = psucc.data();
