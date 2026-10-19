@@ -524,6 +524,8 @@ def test_the_workspace_of_a_stream_is_reused_and_reserved_in_advance(cases):
 @pytest.mark.parametrize("wrong_stream", [False, True], ids=["current_stream", "default_stream_mutation"])
 def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mode, wrong_stream):
     dev = gpu()
+    if wrong_stream and torch.cuda.get_allocator_backend() != "native":
+        pytest.skip("the stream mutation requires allocations completed before use on another stream")
     case = cases["gripper"]
     encoder = encoding.FlatRelationEncoder(case.source)
     host = encoder.encode(case.rows)
