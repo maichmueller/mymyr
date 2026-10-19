@@ -53,8 +53,9 @@
 // g is, in the graph-major layout, tuple relation_offsets[g * R] + k; in the relation-major layout subtract the counts
 // of the graph's cells (relation_counts[g, 0], relation_counts[g, 1], ...) from k until the rest j falls into a cell
 // (g, r), and the tuple is relation_offsets[r * G + g] + j. The expansion row of an action entity with reference k is
-// row offsets[g] + k of the expansion given as `actions`. The history step with reference k of graph g is step k of the
-// row's history, history.dt[g * H + k] and the masks at index k of the row's history masks.
+// row offsets[g] + k of the expansion given as `actions`. The history step with reference k of graph g is the k-th valid
+// step of the row's history input (counted before FlatOptions::history_max_steps drops the oldest steps): its dt is
+// history.dt[g * history.masks.layers + k] and its masks are at index k of the row's history masks.
 //
 // Omitted arrays. With FlatOptions::emit_counts = false a batch has no relation_counts: the tuples of segment s are
 // relation_offsets[s + 1] - relation_offsets[s]. When EncodingSchema::implicit_entity_arrays() holds, a batch has no
