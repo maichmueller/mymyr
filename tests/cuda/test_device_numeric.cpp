@@ -1134,7 +1134,7 @@ void expect_derived_equal_host(const cuda::ContextPtr& ctx, const TaskPtr& task,
         std::vector<u64> padded_succ(u64{N} * K * RW), padded_derived(u64{N} * K * DW, 0x77);
         std::vector<u8> padded_goal(u64{N} * K);
         rl::PaddedExpansion padded;
-        padded.K = K; padded.words = W; padded.numeric_words = NN; padded.label_width = L;
+        padded.k = K; padded.words = W; padded.numeric_words = NN; padded.label_width = L;
         padded.succ = padded_succ.data(); padded.goal = padded_goal.data();
         padded.derived = padded_derived.data(); padded.derived_words = DW;
         rl::pad(host, N, padded);
