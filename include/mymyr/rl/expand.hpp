@@ -129,7 +129,7 @@ inline void expand(const TaskTable& table, StateBatchView in, const i32* task_id
 /// The padded [rows, K] view of a flat expansion.
 struct PaddedExpansion
 {
-    u32 K = 0;
+    u32 k = 0;
     i32* index = nullptr;    // [rows, K]: flat row of the k-th successor, -1 = none
     u8* mask = nullptr;      // [rows, K]: 1 = valid
     i32* count = nullptr;    // [rows]: true successor counts (may exceed K)

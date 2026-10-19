@@ -324,6 +324,47 @@ MYMYR_HD bool reads_derived(const InstanceView& v, bool row_goals, bool row_deri
            (layer_derived_goals && (flags & k_needs_row_goal_derived) != 0);
 }
 
+/// Whether a row can be read for its instance. Width checks happen before any state or goal word is read.
+enum class RowValidity : u8 { Valid, BadTask, NarrowState, NarrowGoal };
+
+MYMYR_HD RowValidity row_validity(const ContextView& context, i32 instance, u32 state_words,
+                                  bool row_goals, u32 goal_words, bool derived_goals, u32 goal_derived_words)
+{
+    if (instance < 0 || static_cast<u32>(instance) >= context.num_instances)
+        return RowValidity::BadTask;
+    const InstanceView v = instance_view(context, static_cast<u32>(instance));
+    if (state_words < v.words)
+        return RowValidity::NarrowState;
+    if ((row_goals && goal_words < v.words) || (derived_goals && goal_derived_words < v.derived_words))
+        return RowValidity::NarrowGoal;
+    return RowValidity::Valid;
+}
+
+/// Conservative work of one instance without expansion rows, including either instance or row goals.
+struct GraphWidth
+{
+    u64 words = 0, cells = 0, args = 0;
+};
+MYMYR_HD GraphWidth graph_width(const InstanceView& v)
+{
+    GraphWidth out;
+    out.words = v.words > v.derived_words ? v.words : v.derived_words;
+    out.cells = v.num_plain_cells > v.num_plain_row_cells ? v.num_plain_cells : v.num_plain_row_cells;
+    for (u32 own = 0; own < 2; ++own)
+    {
+        const Cell* cells = own ? v.plain_row_cells : v.plain_cells;
+        const u32 count = own ? v.num_plain_row_cells : v.num_plain_cells;
+        u64 args = 0;
+        for (u32 i = 0; i < count; ++i)
+        {
+            const Cell& c = cells[i];
+            args += (u64{c.b - c.a} + (is_goal_op(c.op) ? c.d - c.c : 0u)) * c.arity;
+        }
+        out.args = args > out.args ? args : out.args;
+    }
+    return out;
+}
+
 /// The expansion rows of one graph's state: the labels of its successors, in canonical order (by schema, then
 /// lexicographically by binding). `schema`, `binding` (rows of `label_width` objects, -1 past the schema's arity) and
 /// `parent` (the batch index of the expanded state; null: not checked) point at the state's first row, and `state` is

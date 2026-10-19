@@ -1,12 +1,14 @@
 #include "mymyr/encoding/stream.hpp"
 
+#include "mymyr/core/hash.hpp"
+
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 namespace mymyr::encoding
@@ -218,14 +220,38 @@ public:
             invalid("the stream holds rows with " + describe(m_inputs) + ", these rows have " + describe(given));
     }
 
+    /// Makes room for `rows` more rows of `given` (checked) and `action_rows` more action rows, so that storing them
+    /// does not grow the columns row by row.
+    void reserve(const Inputs& given, u64 rows, u64 action_rows)
+    {
+        adopt(given);
+        const u64 slots = m_slots + rows;
+        grow(m_states, slots * m_words);
+        grow(m_task_ids, slots);
+        grow(m_spans, slots);
+        if (m_inputs.derived)
+            grow(m_derived, slots * m_derived_words);
+        if (m_inputs.goals)
+        {
+            grow(m_goal_pos, slots * m_words);
+            grow(m_goal_neg, slots * m_words);
+        }
+        if (m_inputs.derived_goals)
+        {
+            grow(m_goal_derived_pos, slots * m_derived_words);
+            grow(m_goal_derived_neg, slots * m_derived_words);
+        }
+        if (m_inputs.actions)
+        {
+            grow(m_schema, m_schema.size() + action_rows);
+            grow(m_binding, (m_schema.size() + action_rows) * m_label_width);
+        }
+    }
+
     /// A free slot, for rows of `given` (checked); the first row after the stream was empty sets its inputs.
     u32 allocate(const Inputs& given)
     {
-        if (m_live == 0 && !(given == m_inputs))
-        {
-            reset();
-            m_inputs = given;
-        }
+        adopt(given);
         u32 slot;
         if (!m_free.empty())
         {
@@ -605,6 +631,24 @@ private:
         m_history_garbage = 0;
     }
 
+    /// The first rows after the stream was empty set its inputs.
+    void adopt(const Inputs& given)
+    {
+        if (m_live == 0 && !(given == m_inputs))
+        {
+            reset();
+            m_inputs = given;
+        }
+    }
+
+    /// Reserves capacity for `size` elements, at least doubling it so that repeated appends stay linear.
+    template <class T>
+    static void grow(std::vector<T>& column, u64 size)
+    {
+        if (size > column.capacity())
+            column.reserve(std::max<u64>(size, 2 * column.capacity()));
+    }
+
     /// Gives up the action rows of `slot`.
     void drop_actions(u32 slot)
     {
@@ -712,6 +756,12 @@ private:
     rl::Expansion m_expansion;
 };
 
+/// The action rows of the states of `rows` (they have been checked).
+[[nodiscard]] u64 action_rows_of(const EncodeInput& rows) noexcept
+{
+    return rows.actions ? static_cast<u64>(rows.actions->offsets[rows.states.rows] - rows.actions->offsets[0]) : 0;
+}
+
 [[nodiscard]] const FlatEncoder& required(const std::shared_ptr<const FlatEncoder>& encoder)
 {
     if (!encoder)
@@ -721,11 +771,12 @@ private:
     return *encoder;
 }
 
-/// The batch of `in`, and for the capacity form its sizes.
+/// The batch of `in`, and for the capacity form its sizes. The working memory is the calling thread's, kept between
+/// calls, so that the first flush of a stream on a thread that has encoded before does not grow it again.
 std::shared_ptr<const rl::ArrayBundle> encode_rows(const FlatEncoder& encoder, const EncodeInput& in, ThreadPool& pool,
-                                                   EncodeScratch& scratch, const FlatCapacities* capacities,
-                                                   FlatSizes* sizes)
+                                                   const BatchShape* capacities, FlatSizes* sizes)
 {
+    EncodeScratch& scratch = EncodeScratch::of_this_thread();
     return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes) : encoder.encode(in, pool, scratch);
 }
 }  // namespace
@@ -739,7 +790,6 @@ struct FlatStream::Impl
     std::shared_ptr<const FlatEncoder> encoder;
     mutable std::mutex mutex;
     RowStore store;
-    EncodeScratch scratch;
 };
 
 FlatStream::FlatStream(std::shared_ptr<const FlatEncoder> encoder) : m_impl(std::make_unique<Impl>(std::move(encoder)))
@@ -759,6 +809,7 @@ void FlatStream::append(const EncodeInput& rows)
         return;
     const Inputs given = store.check(rows);
     store.check_inputs(given);
+    store.reserve(given, rows.states.rows, action_rows_of(rows));
     for (u64 g = 0; g < rows.states.rows; ++g)
         store.write(store.allocate(given), rows, g);
 }
@@ -780,17 +831,17 @@ std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool)
     std::lock_guard lock(m_impl->mutex);
     RowStore& store = m_impl->store;
     const EncodeInput in = store.assemble(nullptr, store.live());
-    auto out = encode_rows(*m_impl->encoder, in, pool, m_impl->scratch, nullptr, nullptr);
+    auto out = encode_rows(*m_impl->encoder, in, pool, nullptr, nullptr);
     store.reset();
     return out;
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const FlatCapacities& capacities, FlatSizes& sizes)
+std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const BatchShape& capacities, FlatSizes& sizes)
 {
     std::lock_guard lock(m_impl->mutex);
     RowStore& store = m_impl->store;
     const EncodeInput in = store.assemble(nullptr, store.live());
-    auto out = encode_rows(*m_impl->encoder, in, pool, m_impl->scratch, &capacities, &sizes);
+    auto out = encode_rows(*m_impl->encoder, in, pool, &capacities, &sizes);
     if (!sizes.overflowed())
         store.reset();
     return out;
@@ -798,43 +849,215 @@ std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const
 
 // ------------------------------------------------------------------------------------------------ FlatMutableStream
 
+namespace
+{
+/// A map from an index to a slot: open addressing over a power-of-two table (linear probing, deletion by shifting
+/// the following entries back, so there are no tombstones), at most 5/8 full.
+class SlotMap
+{
+public:
+    [[nodiscard]] usize size() const noexcept { return m_size; }
+
+    [[nodiscard]] const u32* find(i64 key) const noexcept
+    {
+        if (m_size == 0)
+            return nullptr;
+        for (usize i = home(key);; i = (i + 1) & m_mask)
+        {
+            const Entry& e = m_entries[i];
+            if (!e.used)
+                return nullptr;
+            if (e.key == key)
+                return &e.slot;
+        }
+    }
+    [[nodiscard]] bool contains(i64 key) const noexcept { return find(key) != nullptr; }
+
+    /// Makes room for `count` entries in all.
+    void reserve(usize count)
+    {
+        usize capacity = std::max<usize>(m_entries.size(), k_min_capacity);
+        while (count * 8 > capacity * 5)
+            capacity *= 2;
+        if (capacity > m_entries.size())
+            rehash(capacity);
+    }
+
+    /// Adds `key`, which must not be in the map.
+    void insert(i64 key, u32 slot)
+    {
+        reserve(m_size + 1);
+        usize i = home(key);
+        while (m_entries[i].used)
+            i = (i + 1) & m_mask;
+        m_entries[i] = {key, slot, true};
+        ++m_size;
+    }
+
+    /// Removes `key`, which must be in the map.
+    void erase(i64 key) noexcept
+    {
+        usize hole = home(key);
+        while (!m_entries[hole].used || m_entries[hole].key != key)
+            hole = (hole + 1) & m_mask;
+        for (usize i = (hole + 1) & m_mask; m_entries[i].used; i = (i + 1) & m_mask)
+        {
+            // the entry moves into the hole unless its home lies cyclically in (hole, i]
+            if (((i - home(m_entries[i].key)) & m_mask) >= ((i - hole) & m_mask))
+            {
+                m_entries[hole] = m_entries[i];
+                hole = i;
+            }
+        }
+        m_entries[hole].used = false;
+        --m_size;
+    }
+
+    void clear() noexcept
+    {
+        for (Entry& e : m_entries)
+            e.used = false;
+        m_size = 0;
+    }
+
+    /// Calls `f(key, slot)` for every entry, in no particular order.
+    template <class F>
+    void for_each(F&& f) const
+    {
+        for (const Entry& e : m_entries)
+            if (e.used)
+                f(e.key, e.slot);
+    }
+
+private:
+    struct Entry
+    {
+        i64 key = 0;
+        u32 slot = 0;
+        bool used = false;
+    };
+
+    static constexpr usize k_min_capacity = 16;
+
+    /// Where the probe for `key` starts: eight consecutive keys start eight consecutive places (counters are the
+    /// common indices, and a run of them then touches one or two cache lines), the runs are scattered by a mix.
+    [[nodiscard]] usize home(i64 key) const noexcept
+    {
+        const u64 k = static_cast<u64>(key);
+        return (hash::mix64(k >> 3) + k) & m_mask;
+    }
+
+    void rehash(usize capacity)
+    {
+        std::vector<Entry> old(capacity);
+        old.swap(m_entries);
+        m_mask = capacity - 1;
+        for (const Entry& e : old)
+        {
+            if (!e.used)
+                continue;
+            usize i = home(e.key);
+            while (m_entries[i].used)
+                i = (i + 1) & m_mask;
+            m_entries[i] = e;
+        }
+    }
+
+    std::vector<Entry> m_entries;
+    usize m_mask = 0;
+    usize m_size = 0;
+};
+}  // namespace
+
 struct FlatMutableStream::Impl
 {
     explicit Impl(std::shared_ptr<const FlatEncoder> e) : encoder(std::move(e)), store(required(encoder)) {}
 
-    /// The rows in ascending index order: their slots, the same rows' indices.
+    /// The rows in ascending index order: `sorted` (index, slot) and the slots alone. An append keeps them current
+    /// (the new rows are added, or merged in when they do not ascend above the largest index); a removal invalidates
+    /// them and the next call rebuilds them from the map.
     void order()
     {
         if (order_valid)
             return;
-        sorted.assign(slot_of.begin(), slot_of.end());
-        std::sort(sorted.begin(), sorted.end());
-        slots.resize(sorted.size());
-        for (usize i = 0; i < sorted.size(); ++i)
-            slots[i] = sorted[i].second;
-        // the storage order: every slot holds a row, and they ascend with the indices
-        direct = store.slots() == sorted.size();
-        for (usize i = 0; direct && i < slots.size(); ++i)
-            direct = slots[i] == i;
+        sorted.clear();
+        sorted.reserve(slot_of.size());
+        slot_of.for_each([this](i64 index, u32 slot) { sorted.emplace_back(index, slot); });
+        std::sort(sorted.begin(), sorted.end(), by_index);
+        slots_from(0);
         order_valid = true;
     }
+
+    /// An append calls begin_append() before it stores its rows, track() for each stored row and end_append() after
+    /// the last one.
+    void begin_append()
+    {
+        merging = order_valid;
+        order_valid = false;
+        first_new = sorted.size();
+        ascending = true;
+    }
+    void track(i64 index, u32 slot)
+    {
+        if (!merging)
+            return;
+        ascending = ascending && (sorted.empty() || index > sorted.back().first);
+        sorted.emplace_back(index, slot);
+    }
+    void end_append()
+    {
+        if (!merging)
+            return;
+        if (!ascending)
+        {
+            const auto middle = sorted.begin() + static_cast<std::ptrdiff_t>(first_new);
+            std::sort(middle, sorted.end(), by_index);
+            std::inplace_merge(sorted.begin(), middle, sorted.end(), by_index);
+        }
+        slots_from(ascending ? first_new : 0);
+        order_valid = true;
+    }
+
+    /// Whether the slots of `sorted` are 0, 1, 2, ... and fill the store, so that a flush reads its storage as it is.
+    [[nodiscard]] bool direct() const noexcept { return identity && store.slots() == slots.size(); }
 
     void reset()
     {
         store.reset();
         slot_of.clear();
-        order_valid = false;
+        sorted.clear();
+        slots.clear();
+        identity = order_valid = true;
     }
 
     std::shared_ptr<const FlatEncoder> encoder;
     mutable std::mutex mutex;
     RowStore store;
-    EncodeScratch scratch;
-    std::unordered_map<i64, u32> slot_of;
+    SlotMap slot_of;
     std::vector<std::pair<i64, u32>> sorted;  // (index, slot) by index; valid iff order_valid
     std::vector<u32> slots;                   // the slot of each entry of `sorted`
     bool order_valid = true;
-    bool direct = true;  // the slots of `sorted` are 0, 1, 2, ...
+    bool identity = true;  // slots[i] == i for every entry
+
+private:
+    static bool by_index(const std::pair<i64, u32>& a, const std::pair<i64, u32>& b) noexcept { return a.first < b.first; }
+
+    /// Brings `slots` and `identity` up to date for the entries of `sorted` from `from` on.
+    void slots_from(usize from)
+    {
+        slots.resize(sorted.size());
+        if (from == 0)
+            identity = true;
+        for (usize i = from; i < sorted.size(); ++i)
+        {
+            slots[i] = sorted[i].second;
+            identity = identity && slots[i] == i;
+        }
+    }
+
+    bool merging = false;   // an append is under way on a current order
+    bool ascending = true;  // the rows it added ascend above the largest index
+    usize first_new = 0;    // where they start in `sorted`
 };
 
 namespace
@@ -842,6 +1065,9 @@ namespace
 /// Throws std::invalid_argument if `indices` repeats an index.
 void check_distinct(std::span<const i64> indices)
 {
+    // indices that ascend strictly (the usual append) are distinct
+    if (std::adjacent_find(indices.begin(), indices.end(), std::greater_equal<>{}) == indices.end())
+        return;
     std::vector<i64> sorted(indices.begin(), indices.end());
     std::sort(sorted.begin(), sorted.end());
     const auto repeated = std::adjacent_find(sorted.begin(), sorted.end());
@@ -853,6 +1079,11 @@ void check_row_count(std::span<const i64> indices, const EncodeInput* rows)
 {
     if (rows && indices.size() != rows->states.rows)
         invalid(std::to_string(indices.size()) + " indices for " + std::to_string(rows->states.rows) + " rows");
+}
+
+[[noreturn]] void not_held(i64 index)
+{
+    throw std::out_of_range("mymyr: encoding: the index " + std::to_string(index) + " is not in the stream");
 }
 }  // namespace
 
@@ -879,14 +1110,17 @@ void FlatMutableStream::append(std::span<const i64> indices, const EncodeInput& 
             invalid("the index " + std::to_string(index) + " is in the stream already; update it instead");
     const Inputs given = s.store.check(rows);
     s.store.check_inputs(given);
-    s.order_valid = false;
+    s.store.reserve(given, indices.size(), action_rows_of(rows));
     s.slot_of.reserve(s.slot_of.size() + indices.size());
+    s.begin_append();
     for (u64 g = 0; g < indices.size(); ++g)
     {
         const u32 slot = s.store.allocate(given);
         s.store.write(slot, rows, g);
-        s.slot_of.emplace(indices[g], slot);
+        s.slot_of.insert(indices[g], slot);
+        s.track(indices[g], slot);
     }
+    s.end_append();
 }
 
 void FlatMutableStream::update(std::span<const i64> indices, const EncodeInput& rows)
@@ -898,12 +1132,12 @@ void FlatMutableStream::update(std::span<const i64> indices, const EncodeInput& 
         return;
     for (const i64 index : indices)
         if (!s.slot_of.contains(index))
-            throw std::out_of_range("mymyr: encoding: the index " + std::to_string(index) + " is not in the stream");
+            not_held(index);
     check_distinct(indices);
     const Inputs given = s.store.check(rows);
     s.store.check_inputs(given);
     for (u64 g = 0; g < indices.size(); ++g)
-        s.store.write(s.slot_of.at(indices[g]), rows, g);
+        s.store.write(*s.slot_of.find(indices[g]), rows, g);
     s.store.compact_if_sparse();
 }
 
@@ -913,19 +1147,18 @@ void FlatMutableStream::remove(std::span<const i64> indices)
     Impl& s = *m_impl;
     for (const i64 index : indices)
         if (!s.slot_of.contains(index))
-            throw std::out_of_range("mymyr: encoding: the index " + std::to_string(index) + " is not in the stream");
+            not_held(index);
     check_distinct(indices);
     if (indices.empty())
         return;
     s.order_valid = false;
     for (const i64 index : indices)
     {
-        const auto it = s.slot_of.find(index);
-        const u32 slot = it->second;
-        s.slot_of.erase(it);
+        const u32 slot = *s.slot_of.find(index);
+        s.slot_of.erase(index);
         s.store.release(slot);
     }
-    if (s.slot_of.empty())
+    if (s.slot_of.size() == 0)
         s.reset();
     else
         s.store.compact_if_sparse();
@@ -964,17 +1197,17 @@ std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool
     std::lock_guard lock(m_impl->mutex);
     Impl& s = *m_impl;
     s.order();
-    const EncodeInput in = s.store.assemble(s.direct ? nullptr : s.slots.data(), s.slots.size());
-    return encode_rows(*s.encoder, in, pool, s.scratch, nullptr, nullptr);
+    const EncodeInput in = s.store.assemble(s.direct() ? nullptr : s.slots.data(), s.slots.size());
+    return encode_rows(*s.encoder, in, pool, nullptr, nullptr);
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const FlatCapacities& capacities,
+std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const BatchShape& capacities,
                                                                 FlatSizes& sizes)
 {
     std::lock_guard lock(m_impl->mutex);
     Impl& s = *m_impl;
     s.order();
-    const EncodeInput in = s.store.assemble(s.direct ? nullptr : s.slots.data(), s.slots.size());
-    return encode_rows(*s.encoder, in, pool, s.scratch, &capacities, &sizes);
+    const EncodeInput in = s.store.assemble(s.direct() ? nullptr : s.slots.data(), s.slots.size());
+    return encode_rows(*s.encoder, in, pool, &capacities, &sizes);
 }
 }  // namespace mymyr::encoding

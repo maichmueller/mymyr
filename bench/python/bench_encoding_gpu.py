@@ -18,9 +18,9 @@ rounds per mode.
     graph-major and relation-major, with `capacities=` measured from the CPU encoding of those rows. One encode is
     captured into a CUDA graph on a side stream and 10 replays are timed between CUDA events (median over the
     repeats); device_encode_graph_eager is the same call timed as one eager call plus a synchronize, on the host clock.
-    Every device run is built and warmed outside any capture, and only one is alive at a time. They are skipped with
-    the reason "not supported on the device" while `encode` takes no device rows; on a build that has a device
-    encode path the harness cannot drive, the run fails.
+    Every device run is built and warmed outside any capture on the capture stream, and only one is alive at a time.
+    They are skipped with the reason "not supported on the device"
+    on a build without a device encode path; on a build that has one the harness cannot drive, the run fails.
   - With --device-bench PATH the three device_encode modes come from the C++ driver mymyr_device_encoding_bench instead
     (the build's bench/cuda/device_encoding_bench.cpp): the harness writes the walk rows of the task to a file, the
     driver encodes the rows tiled to the largest environment size on the device, captures one encode per layout into a
@@ -317,7 +317,7 @@ class Mode:
 def capacities_of(encoder, rows):
     """The capacity dict that fits the batch `rows` exactly."""
     batch = encoder.encode(rows)
-    return dict(entities=int(batch.entity_offsets[-1]), tuples=int(batch.relation_offsets[-1]),
+    return dict(graphs=batch.num_graphs, entities=int(batch.entity_offsets[-1]),
                 args=int(batch.relation_arg_offsets[-1]))
 
 
@@ -438,16 +438,25 @@ def probe_device_encode(gpu, encoder, states):
     return None
 
 
+def capture_stream(gpu):
+    """The stream that `torch.cuda.graph` captures on without a `stream=` argument."""
+    graph = gpu.torch.cuda.graphs.graph
+    if graph.default_capture_stream is None:
+        graph.default_capture_stream = gpu.torch.cuda.Stream()
+    return graph.default_capture_stream
+
+
 class DeviceRun:
     """`FlatRelationEncoder.encode` on device rows with `capacities=` measured from the CPU encoding of those rows.
-    The first encode runs at construction, outside any capture: whatever the encoder acquires for it stays with the
-    encoder, so a later encode inside a capture takes nothing new. `close()` drops the encoder and the rows and waits for
-    the device."""
+    The first encode runs on `stream` at construction, outside capture, to upload and acquire the context. Captured
+    calls allocate their scratch in the graph's private pool. `close()` drops the encoder and rows and waits for the
+    device."""
 
-    def __init__(self, gpu, encoder, states):
+    def __init__(self, gpu, encoder, states, stream=None):
         self.gpu, self.encoder, self.states = gpu, encoder, states
         self.capacities = padded_capacities(capacities_of(encoder, host_rows(states)))
-        self.encode()
+        with gpu.torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
+            self.encode()
         gpu.sync()
 
     def encode(self, states=None):
@@ -467,6 +476,8 @@ def run_device_bench(binary, files, rows, n, rounds, device):
         command = [str(binary), "--domain", str(files[0]), "--problem", str(files[1]), "--rows", str(path), "--words",
                    str(rows.shape[1]), "--n", str(n), "--rounds", str(rounds), "--replays", str(REPLAYS), "--device",
                    str(device)]
+        if len(files) == 3:
+            command += ["--secondary-problem", str(files[2])]
         done = subprocess.run(command, capture_output=True, text=True, check=False)
     lines = done.stdout.strip().splitlines()
     try:
@@ -503,7 +514,8 @@ def device_bench_modes(binary, args, rows, files, encoders, wants):
         info = result[layout]
         mode.fields.update(kernels=info["kernels"], memsets=info["memsets"], other_nodes=info["other_nodes"],
                            scratch_bytes=info["scratch_bytes"], cub_bytes=info["cub_bytes"], cells=info["cells"],
-                           relations=info["relations"], wide_totals=info["wide"], device_bench=True)
+                           relations=info["relations"], wide_totals=info["wide"], device_bench=True,
+                           thread_fills=info.get("thread_fills"), warp_fills=info.get("warp_fills"))
         encoder, reason = encoders[layout]
         if encoder is None:
             mode.skipped(f"layout {layout} unavailable: {reason}", True)
@@ -541,7 +553,8 @@ def replay_and_sync(gpu, graph):
 def encode_session(gpu, encoder, states, eager):
     """The run of one device encode of `states`: a CUDA graph of one encode captured on a side stream and replayed
     REPLAYS times per timed run (the time comes from CUDA events), or with `eager` one call and a synchronize."""
-    run = DeviceRun(gpu, encoder, states)
+    stream = None if eager else gpu.torch.cuda.Stream()
+    run = DeviceRun(gpu, encoder, states, stream)
     graph = output = None
     try:
         if eager:
@@ -553,7 +566,7 @@ def encode_session(gpu, encoder, states, eager):
             yield timed
         else:
             graph = gpu.torch.cuda.CUDAGraph()
-            with gpu.torch.cuda.graph(graph, stream=gpu.torch.cuda.Stream()):
+            with gpu.torch.cuda.graph(graph, stream=stream):
                 output = run.encode()
             yield lambda: time_graph_replays(gpu, graph, REPLAYS)
     finally:
@@ -564,7 +577,7 @@ def encode_session(gpu, encoder, states, eager):
 @contextlib.contextmanager
 def encode_in_step_session(gpu, env, encoder):
     """The run of a captured environment step whose policy encodes the step's states."""
-    run = DeviceRun(gpu, encoder, env.states)
+    run = DeviceRun(gpu, encoder, env.states, capture_stream(gpu))
     graph = None
     try:
 
@@ -1147,6 +1160,59 @@ def run_task(key, args, gpu, pool):
     return records
 
 
+def run_mixed_table(args, gpu, pool):
+    """Small rows from a table that also contains a wide instance, with both layouts timed by the C++ driver."""
+    key = "blocks-mixed-widths"
+    small, why = load_task("blocks-p01e", args.data)
+    wide, why_wide = load_task("blocks-p20m", args.data)
+    if small is None or wide is None:
+        return [dict(task=key, mode="*", status="skipped", reason=why or why_wide)]
+    if not args.device_bench:
+        return [dict(task=key, mode="*", status="skipped", reason="--mixed-widths requires --device-bench")]
+    table = rl.TaskTable([small, wide])
+    raw = walk_rows(small, args.rows, args.seed)
+    rows = np.zeros((len(raw), table.words), dtype=np.uint64)
+    rows[:, :raw.shape[1]] = raw
+    class FirstInstance:
+        def __init__(self, encoder):
+            self.encoder = encoder
+            self.ids = {}
+
+        def encode(self, data, **kwargs):
+            n = len(data)
+            ids = self.ids.get(n)
+            if ids is None:
+                ids = self.ids[n] = np.zeros(n, dtype=np.int32)
+            return self.encoder.encode(data, ids, **kwargs)
+
+    encoders = {}
+    for layout in ("graph", "relation"):
+        encoder, reason = make_encoder(table, layout=layout)
+        encoders[layout] = (None if encoder is None else FirstInstance(encoder), reason)
+    files = (*task_files("blocks-p01e", args.data), task_files("blocks-p20m", args.data)[1])
+    wants = lambda name: wanted(name, args.modes)
+    modes = device_bench_modes(args.device_bench, args, rows, files, encoders, wants)
+    if group_wanted("cpu", args.modes):
+        modes += cpu_modes(rows, tile(rows, max(len(rows), args.min_batch)), pool, encoders, wants)
+    time_rounds(modes, args.rounds)
+    records, cache = [], {}
+    for mode in modes:
+        record = dict(task=key, words=table.words, objects=len(small.objects), mode=mode.name, group=mode.group,
+                      unit=mode.unit, units=mode.units, **mode.fields)
+        if mode.error:
+            record.update(status="error", reason=mode.error)
+        elif mode.skip is not None:
+            record.update(status="skipped", reason=mode.skip)
+        else:
+            record.update(status="ok", **summarize(mode))
+            if mode.name.startswith("device_encode") and (mode.fields.get("thread_fills") != 1 or mode.fields.get("warp_fills") != 0):
+                record.update(status="error", reason="the small rows must use one thread fill")
+            if mode.stats is not None:
+                record["bytes_per_state"], record["ints_per_state"] = stats_of(mode, cache)
+        records.append(record)
+    return records
+
+
 def baselines():
     return dict(
         env_step_us=ENV_STEP_US, earlier_cpu_us={k: dict(zip(("single", "batch256", "threads8"), v))
@@ -1180,6 +1246,7 @@ def parse_args(argv):
     p.add_argument("--env-sizes", default=",".join(map(str, ENV_SIZES)), help="environment counts N")
     p.add_argument("--device-bench", metavar="PATH", help="the mymyr_device_encoding_bench binary: it times the device_encode "
                    "modes (C++ replays of captured encodes) and measures their launches and scratch")
+    p.add_argument("--mixed-widths", action="store_true", help="also time small rows in a table with a wide instance")
     p.add_argument("--quick", action="store_true", help="a smoke configuration: one small task, few rows and rounds")
     args = p.parse_args(argv)
     if args.rounds < 1:
@@ -1205,6 +1272,9 @@ def main(argv=None):
     pool = rl.ThreadPool(THREADS)
     for key in args.tasks:
         records += run_task(key, args, gpu, pool)
+    if args.mixed_widths:
+        records += run_mixed_table(args, gpu, pool)
+        args.tasks.append("blocks-mixed-widths")
     if gpu.ok:
         env["gpu"]["status_end"] = gpu_status(args.device)
     env["load_average_end"] = os.getloadavg()

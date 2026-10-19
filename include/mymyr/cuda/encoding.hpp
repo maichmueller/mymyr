@@ -25,6 +25,8 @@
 
 namespace mymyr::cuda
 {
+namespace detail { struct EncodingExecution; struct EncodingFacts; struct EncodingWorkspaceState; }
+class DeviceEncodingContext;
 /// A device view and its owning generation, acquired together. Keep the stream alive until this object is released.
 /// Acquisitions on the same stream may overlap; callers order work on that stream. Move-only.
 class EncodingAcquisition
@@ -46,6 +48,10 @@ public:
     u64 number;
 
 private:
+    friend class DeviceEncodingContext;
+    friend class DeviceEncoder;
+    std::shared_ptr<const detail::EncodingFacts> m_facts;
+    const DeviceEncodingContext* m_owner = nullptr;
     std::shared_ptr<LastUse> m_last;
     cudaStream_t m_stream;
 };
@@ -81,11 +87,13 @@ public:
     [[nodiscard]] std::vector<std::byte> download(cudaStream_t stream = nullptr) const;
 
 private:
+    friend class DeviceEncoder;
     DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host);
     void copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream);
 
     ContextPtr m_ctx;
     std::shared_ptr<const encoding::EncodingContext> m_host;
+    std::shared_ptr<const detail::EncodingFacts> m_facts;
     std::shared_ptr<DeviceBuffer> m_block;
     encoding::detail::ContextView m_view;
     PinnedLease m_staging;
@@ -95,14 +103,7 @@ private:
     mutable std::mutex m_mutex;
 };
 
-struct BatchShape
-{
-    u64 graphs = 0;
-    u64 entities = 0;
-    u64 args = 0;
-    u64 targets = 0;
-    [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
-};
+using encoding::BatchShape;
 
 /// Conservative maxima per graph over the instances of the context, covering every lane the device encodes: the state,
 /// static and derived cells, the nullary (auxiliary) entity, the goal cells of the instance's goal and of a row's own
@@ -145,49 +146,14 @@ struct OutputLayout
 struct DeviceOutput
 {
     encoding::FlatBuffers arrays;
-    encoding::FlatCapacities capacities;
+    encoding::BatchShape capacities;
     encoding::FlatSizes* sizes = nullptr;
+    /// Zero the variable arrays' unused tails, and all output arrays on overflow, in the fill kernel.
+    bool zero_unused = false;
 };
 /// The destinations in the device block `block` of output_layout(shape, ...), with the capacities of `shape`
-/// (every tuple has at least one argument, so the tuple capacity is the argument capacity).
+/// (the graph capacity bounds every per-graph and per-cell array).
 [[nodiscard]] DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void* block);
-
-/// The scratch of a batch in one block: the flags and totals, the cell counts and the temporary storage of one inclusive
-/// scan over the totals. The totals are four rows of G + 1 entries (the entities, targets, tuples and arguments of the
-/// graphs, each row opened by a zero) for the graph-major layout, and for the relation-major layout the entity and
-/// target rows and a row of G * R + 1 entries, the tuples of the cells in segment order. The entries are u32 when the
-/// conservative sum of the bounds fits u32, u64 otherwise. Cell counts are [G, cells] u32 (graph-major only). The scan
-/// is two kernels. Offsets are bytes into the scratch. Scratch bytes: 16 per graph and 4 per cell (graph-major,
-/// narrow), plus the scan's storage.
-struct ScratchLayout
-{
-    u64 flags = 0, totals = 0, cell_counts = 0, scan_temp = 0;
-    u64 cell_stride = 0;  // entries from the counts of one graph to the next
-    u64 cell_entries = 0, scan_length = 0;
-    u64 scan_temp_bytes = 0, bytes = 0;
-    u64 relations = 0;
-    bool wide = false;
-    bool relation_major = false;
-    [[nodiscard]] friend bool operator==(const ScratchLayout&, const ScratchLayout&) noexcept = default;
-    /// The entries of the scanned array for a batch of `graphs` graphs.
-    [[nodiscard]] u64 scanned(u64 graphs) const;
-};
-/// Uses the current CUDA device for the CUB query; throws CudaError or std::overflow_error. The width of the totals
-/// follows the bounds only, never the capacities of the outputs.
-[[nodiscard]] ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds, encoding::Layout layout,
-                                           u64 relations = 0);
-
-/// The scratch of a held workspace as device pointers.
-struct ScratchView
-{
-    u32* flags = nullptr;
-    void* totals = nullptr;      // u32 (u64 when wide)
-    u32* cell_counts = nullptr;  // [G, cell_stride] counts
-    u64 cell_stride = 0;
-    void* scan_temp = nullptr;
-    u64 scan_temp_bytes = 0;
-    bool wide = false;
-};
 
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
 struct DeviceEncodeInput
@@ -197,8 +163,8 @@ struct DeviceEncodeInput
     u64 state_stride = 0;           // words from one row to the next (at least state_words)
     u32 state_words = 0;            // the words of a row, at least those of every instance in the batch
     const i32* task_ids = nullptr;  // [graphs] the instance of each row; null: instance 0
-    // The derived words of each row. Required when a graph reads them (the schema has derived relations, or goal
-    // relations that list derived literals); the device does not evaluate axioms.
+    // The derived words of each row. Required if any instance in the encoder's table reads them for the supplied
+    // kind of goal (instance, fluent row masks, or also derived row masks); the device does not evaluate axioms.
     const u64* derived = nullptr;
     u64 derived_stride = 0;
     // The goal of each row, replacing its instance's goal, with the layout and rules of encoding::EncodeInput.
@@ -214,7 +180,7 @@ struct DeviceEncodeInput
 
 enum class FillMode : u8
 {
-    Auto,  // a thread per graph for rows of at most 8 words, 128 cells and 1024 argument entries, else a warp per graph
+    Auto,  // per-instance work and layout select a thread or warp; shared-memory limits may require a warp
     Thread,
     Warp,
 };
@@ -223,9 +189,10 @@ enum class FillMode : u8
 /// which graph, every position being a prefix sum in batch order.
 struct LaunchConfig
 {
-    u32 count_lanes = 0;  // lanes per graph of the count kernel: 4, 8 or 32; 0: by the width of the rows
+    u32 count_lanes = 0;  // lanes per graph of the count kernel: 4, 8 or 32; 0: four lanes, then eight or 32 if needed for shared memory
     FillMode fill = FillMode::Auto;
-    const u32* order = nullptr;  // device [graphs]: a permutation of the graphs, the graph each thread or warp takes
+    const u32* order = nullptr;  // device [graphs]: a permutation; every graph must occur exactly once (caller contract).
+                                 // An entry >= graphs sets the input flag without reading that graph.
 };
 
 /// A held acquisition: the context generation and the scratch of one stream; outputs belong to the caller. It is the
@@ -234,28 +201,29 @@ struct LaunchConfig
 class EncodingWorkspace
 {
 public:
-    EncodingWorkspace(EncodingAcquisition context, std::shared_ptr<const DeviceBuffer> scratch, BatchShape shape,
-                      ScratchLayout layout);
     EncodingWorkspace(EncodingWorkspace&&) noexcept = default;
     EncodingWorkspace& operator=(EncodingWorkspace&&) = delete;
     EncodingWorkspace(const EncodingWorkspace&) = delete;
     EncodingWorkspace& operator=(const EncodingWorkspace&) = delete;
 
-    /// The acquisition's stream: work and replays run on it.
-    [[nodiscard]] cudaStream_t stream() const noexcept { return context.stream(); }
-    [[nodiscard]] const encoding::detail::ContextView& view() const noexcept { return context.view; }
-    [[nodiscard]] ScratchView scratch_view() const noexcept;
+    [[nodiscard]] cudaStream_t stream() const noexcept;
+    [[nodiscard]] const encoding::detail::ContextView& view() const noexcept;
+    [[nodiscard]] BatchShape shape() const noexcept;
+    [[nodiscard]] u64 generation() const noexcept;
+    [[nodiscard]] u64 scratch_bytes() const noexcept;
 
-    EncodingAcquisition context;
-    std::shared_ptr<const DeviceBuffer> scratch;
-    BatchShape shape;
-    ScratchLayout layout;
+private:
+    friend class DeviceEncoder;
+    explicit EncodingWorkspace(std::shared_ptr<const detail::EncodingWorkspaceState> state) : m_state(std::move(state)) {}
+    std::shared_ptr<const detail::EncodingWorkspaceState> m_state;
 };
 
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: action targets.
+    /// Throws std::invalid_argument for a schema the device does not encode.
+    static void check_schema(const encoding::EncodingSchema& schema);
+
     /// Each stream has its own scratch.
     DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder);
     DeviceEncoder(const DeviceEncoder&) = delete;
@@ -272,7 +240,10 @@ public:
     /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;
     [[nodiscard]] u64 bytes_needed(u64 graphs) const;
-    [[nodiscard]] ScratchLayout scratch_layout(const BatchShape& shape) const;
+    /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes.
+    [[nodiscard]] u64 scratch_bytes(const BatchShape& shape) const;
+    /// The exact byte count for a held generation, including one held across refresh().
+    [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape) const;
 
     /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
     /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.
@@ -293,14 +264,15 @@ public:
     void release(cudaStream_t stream = nullptr);
     bool refresh(std::shared_ptr<const encoding::FlatEncoder> grown, cudaStream_t stream = nullptr);
 
-    /// Encodes the rows into `out` on the workspace's stream: a clear, the count kernel, a scan (two kernels) and the
-    /// fill kernel, with no allocation, no synchronization and no stream or event operation, so it may be captured in a
-    /// CUDA graph (acquire the workspace before the capture and hold it through the last replay). The batch writes
+    /// Encodes the rows into `out` on the workspace's stream: a clear, a count and fill kernel per active width class,
+    /// and a shared scan (two kernels), with no allocation, synchronization or stream or event operation. It may be
+    /// captured in a CUDA graph (acquire the workspace before capture and hold it through the last replay). The batch writes
     /// `out.sizes` with its true sizes; if they exceed the capacities or the index type, or a row is invalid (a task id
     /// outside the table, a row or goal mask narrower than its instance, a bit its instance does not have), nothing of
-    /// the batch is written and sizes.overflow says why. The rows, outputs and `launch.order` are device memory the
+    /// the batch is written and sizes.overflow says why. With `out.zero_unused`, the unused tails are zero and
+    /// overflow zeros all output arrays. The rows, outputs and `launch.order` are device memory the
     /// stream may read and write. Throws std::invalid_argument for input that can be checked without reading device
-    /// memory (more graphs than the workspace's shape, arrays that do not match the schema, derived words that
+    /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, derived words that
     /// are needed and missing, a launch that needs more shared memory than a block has).
     void encode(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
                 const LaunchConfig& launch = {}) const;
@@ -308,16 +280,40 @@ public:
     void encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream = nullptr,
                 const LaunchConfig& launch = {}) const;
 
+    /// encode() in two steps, for a caller that sizes its outputs by the batch: count() enqueues the clear, the count
+    /// kernel, the scan and a kernel that writes the true sizes of the rows to `out.sizes` (device memory; the capacity flag
+    /// is never set, the index and input flags are), and nothing else. fill() then enqueues the fill kernel with the
+    /// capacities of `out`, which writes `out.sizes` again and writes the batch unless a flag is set, as encode() does.
+    /// fill() reads the counts that count() left in the workspace's scratch: it must follow a count() of the same
+    /// workspace, rows and launch configuration on the same stream with no other count() or encode() of that workspace in
+    /// between. Both have the checks of encode(); neither synchronizes.
+    void count(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
+               const LaunchConfig& launch = {}) const;
+    void fill(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
+              const LaunchConfig& launch = {}) const;
+
+    /// The caller-owned scratch forms. `shape.graphs` bounds the batch, and `bytes` is at least scratch_bytes(shape).
+    /// Obtain the acquisition from context().acquire(stream) before capture. It holds the context generation; keep it,
+    /// the scratch, inputs and outputs alive through the last replay. These forms allocate and synchronize nothing.
+    /// count() and fill() use the same acquisition, scratch address, shape, rows and launch configuration on one stream,
+    /// with no other use of that scratch between them. Refresh preserves the held generation's scratch requirements.
+    void encode(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
+                const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
+    void count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
+               const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
+    void fill(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
+              const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
+
 private:
-    struct Workspace
+    enum class Phase : u8
     {
-        BatchShape shape;
-        ScratchLayout layout;
-        std::shared_ptr<DeviceBuffer> scratch;
-        std::shared_ptr<LastUse> last;  // the use of the scratch and of the generation, recorded at each release
-        Event ready;
-        std::mutex mutex;
+        Whole,
+        Count,
+        Fill,
     };
+    void run(Phase phase, const detail::EncodingExecution& execution, const DeviceEncodeInput& in,
+             const DeviceOutput& out, const LaunchConfig& launch) const;
+    struct Workspace;
     [[nodiscard]] std::shared_ptr<Workspace> workspace(cudaStream_t stream) const;
     void reserve_workspace(Workspace& workspace, const BatchShape& shape);
     void reserve_locked(const BatchShape& shape, cudaStream_t stream);
@@ -327,7 +323,6 @@ private:
     std::shared_ptr<const encoding::EncodingSchema> m_schema;
     std::shared_ptr<DeviceEncodingContext> m_context;
     GraphBounds m_bounds;
-    std::array<bool, 3> m_reads_derived{};  // by the goals of the rows: none, over the fluent slots, also derived
     mutable std::shared_mutex m_state_mutex;
     mutable std::mutex m_workspace_mutex;
     mutable std::unordered_map<cudaStream_t, std::shared_ptr<Workspace>> m_workspaces;

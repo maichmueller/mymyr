@@ -719,7 +719,7 @@ void mixed_expand(const cuda::ContextPtr& ctx, const rl::TaskSuitePtr& suite, co
         for (u32 extra : {0u, 2u})
         {
             std::vector<u64> padded(ids.size() * K * (RW + extra));
-            rl::PaddedExpansion hp; hp.K = K; hp.words = W + extra; hp.numeric_words = NN; hp.succ = padded.data();
+            rl::PaddedExpansion hp; hp.k = K; hp.words = W + extra; hp.numeric_words = NN; hp.succ = padded.data();
             rl::pad(cpu, ids.size(), hp);
             auto pd = test::to_device(ctx, std::vector<u64>(padded.size()), stream);
             rl::PaddedExpansion gd = hp; gd.succ = static_cast<u64*>(pd.data());
@@ -1134,7 +1134,7 @@ void expect_derived_equal_host(const cuda::ContextPtr& ctx, const TaskPtr& task,
         std::vector<u64> padded_succ(u64{N} * K * RW), padded_derived(u64{N} * K * DW, 0x77);
         std::vector<u8> padded_goal(u64{N} * K);
         rl::PaddedExpansion padded;
-        padded.K = K; padded.words = W; padded.numeric_words = NN; padded.label_width = L;
+        padded.k = K; padded.words = W; padded.numeric_words = NN; padded.label_width = L;
         padded.succ = padded_succ.data(); padded.goal = padded_goal.data();
         padded.derived = padded_derived.data(); padded.derived_words = DW;
         rl::pad(host, N, padded);

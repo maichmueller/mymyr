@@ -1,7 +1,7 @@
 #pragma once
 // The launches of the relational encoder on the device (include/mymyr/cuda/encoding.hpp builds the parameters). The
-// encoding of a batch is four kernels on one stream, with no allocation and no synchronization, which a CUDA graph can
-// capture:
+// active width classes count and fill around one shared scan, with no allocation or synchronization, so a CUDA graph
+// can capture the launches:
 //   count  one group of 4, 8 or 32 lanes per graph counts its cells (encoding::detail::count_graph_group), writes the
 //          graph's totals and cell counts into the scratch, and flags invalid rows;
 //   scan   one inclusive scan over the scratch's totals, two kernels (cub::DeviceScan): the entities, the targets and,
@@ -42,13 +42,15 @@ struct EncodeParams
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    bool classify = false, warp_class = false, first_class = true;
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
     // the batch
     encoding::FlatBuffers out;
     encoding::FlatSizes* sizes = nullptr;
-    encoding::FlatCapacities capacities;
+    encoding::BatchShape capacities;
     u32 static_overflow = 0;  // the k_overflow_ flags that follow from the shape alone
     bool index64 = false;
+    bool zero_unused = false;
     bool relation_major = false;
     // the scratch
     void* totals = nullptr;  // the scanned array: u32, u64 when wide
@@ -63,11 +65,12 @@ struct EncodeParams
 struct LaunchShape
 {
     u32 lanes = 4;            // lanes per graph of the count kernel: 4, 8 or 32
+    u32 fill_mask = 1;         // bit 0: thread fill, bit 1: warp fill
     bool warp_fill = false;   // a warp per graph in the fill kernel, else a thread
     u64 scan_length = 0;      // entries of the scanned array
     void* scan_temp = nullptr;
     u64 scan_temp_bytes = 0;
-    void* zero_begin = nullptr;  // cleared before the count: the flags and, relation-major, the cell row
+    void* zero_begin = nullptr;  // cleared before the count: the flags and scanned totals
     u64 zero_bytes = 0;
 };
 
@@ -76,6 +79,22 @@ inline constexpr u32 k_encode_block = 128;
 /// The dynamic shared memory a launch may use without opting in.
 inline constexpr u64 k_shared_limit = 48 * 1024;
 
+/// Fill policy for the work of one instance. Graph-major cells benefit from cooperation sooner than relation-major
+/// cells, whose adjacent graphs write adjacent segments.
+__host__ __device__ inline bool warp_fill_for(const encoding::detail::GraphWidth& width, bool relation_major)
+{
+    return width.words > 8u || width.cells > 128u ||
+           width.args > (relation_major ? 1024u : 128u);
+}
+
+/// Word and cell bounds can select a warp without reading the cell lists for an argument bound.
+__host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceView& v, bool relation_major)
+{
+    const encoding::detail::GraphWidth rough{v.words > v.derived_words ? v.words : v.derived_words,
+        v.num_plain_cells > v.num_plain_row_cells ? v.num_plain_cells : v.num_plain_row_cells, 0};
+    return warp_fill_for(rough, relation_major) || warp_fill_for(encoding::detail::graph_width(v), relation_major);
+}
+
 /// The temporary storage of the scan of `length` entries, u64 entries when `wide`.
 [[nodiscard]] u64 totals_scan_temp_bytes(u64 length, bool wide);
 
@@ -83,7 +102,14 @@ inline constexpr u64 k_shared_limit = 48 * 1024;
 /// the relation-major fill, the argument position of every relation.
 [[nodiscard]] u64 count_shared_bytes(u32 virtual_nodes, u32 lanes);
 [[nodiscard]] u64 fill_shared_bytes(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major);
+[[nodiscard]] u64 count_shared_required(u32 virtual_nodes, u32 lanes);
+[[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major, bool index64);
 
 /// Enqueues the encoding on `stream`: a clear of the flags (and cell row), the count kernel, the scan and the fill kernel.
 cudaError_t launch_encode(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
+/// The first half of the encoding: the clear, the count kernel and the scan, then a one-block kernel that writes the true
+/// sizes of the batch to `params.sizes` (the capacity flag against `params.capacities`).
+cudaError_t launch_count_sizes(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
+/// The second half: the fill kernel, over the scratch that launch_count_sizes left for the same rows.
+cudaError_t launch_fill(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
 }  // namespace mymyr::cuda::detail

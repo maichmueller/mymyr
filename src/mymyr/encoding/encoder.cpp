@@ -53,6 +53,12 @@ rl::ArrayShape shape2(u64 n, u64 m) { return {static_cast<i64>(n), static_cast<i
 EncodeScratch::EncodeScratch() : m_impl(std::make_unique<Impl>()) {}
 EncodeScratch::~EncodeScratch() = default;
 
+EncodeScratch& EncodeScratch::of_this_thread()
+{
+    thread_local EncodeScratch scratch;
+    return scratch;
+}
+
 namespace
 {
 using Scratch = EncodeScratch::Impl;
@@ -269,7 +275,6 @@ void count_range(const Pass& p, u32 t)
 {
     const auto [lo, hi] = ThreadPool::slice(p.graphs, t, p.members);
     const rl::TaskTable& table = p.context.table();
-    const u32 instances = table.size();
     Member& m = p.s.members[t];
     m.totals.assign(hi - lo, detail::GraphTotals{});
     m.entities = m.tuples = m.args = m.targets = m.history = 0;
@@ -289,14 +294,13 @@ void count_range(const Pass& p, u32 t)
     for (u64 g = lo; g < hi; ++g)
     {
         const u32 instance = p.instance_of(g);
-        if (p.in.task_ids && (p.in.task_ids[g] < 0 || instance >= instances))
+        const auto validity = detail::row_validity(p.view, p.in.task_ids ? p.in.task_ids[g] : 0, p.in.states.words,
+            p.in.goal_pos != nullptr, p.in.goal_words, p.in.goal_derived_pos != nullptr, p.in.goal_derived_words);
+        if (validity != detail::RowValidity::Valid)
         {
-            m.bad_id = std::min(m.bad_id, g);
-            continue;
-        }
-        if (p.in.states.words < table.instance(instance).words)
-        {
-            m.narrow = std::min(m.narrow, g);
+            u64& bad = validity == detail::RowValidity::BadTask ? m.bad_id :
+                       validity == detail::RowValidity::NarrowState ? m.narrow : m.narrow_goal;
+            bad = std::min(bad, g);
             continue;
         }
         if (p.in.actions && !p.action_slice_valid(g))
@@ -305,12 +309,6 @@ void count_range(const Pass& p, u32 t)
             continue;
         }
         const detail::InstanceView v = detail::instance_view(p.view, instance);
-        if ((p.in.goal_pos && p.in.goal_words < v.words) ||
-            (p.in.goal_derived_pos && p.in.goal_derived_words < v.derived_words))
-        {
-            m.narrow_goal = std::min(m.narrow_goal, g);
-            continue;
-        }
         if (Layered && refuse_layers(p, m, v, g))
             continue;
         detail::RowLayers layers;
@@ -519,6 +517,10 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
         invalid("the goal needs both goal_pos and goal_neg");
     if ((in.goal_derived_pos == nullptr) != (in.goal_derived_neg == nullptr))
         invalid("the derived goal needs both goal_derived_pos and goal_derived_neg");
+    if (in.goal_pos && in.goal_stride && in.goal_stride < in.goal_words)
+        invalid("the goal row stride is smaller than its width");
+    if (in.goal_derived_pos && in.goal_derived_stride && in.goal_derived_stride < in.goal_derived_words)
+        invalid("the derived goal row stride is smaller than its width");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
     check_layer_inputs(in);
@@ -722,12 +724,14 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         close(i32{});
 }
 
-FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const FlatCapacities& capacities, const FlatBuffers& out,
+FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
                                    ThreadPool& pool, EncodeScratch& scratch) const
 {
+    if (graphs_of(in) > capacities.graphs)
+        invalid("the batch has more graphs than the output capacity");
     FlatSizes sizes = count(in, pool, scratch);
-    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args ||
-        sizes.targets > capacities.targets || sizes.history > capacities.history)
+    if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
+        sizes.history > capacities.history)
         sizes.overflow |= k_overflow_capacity;
     if (!sizes.overflowed())
         fill(in, sizes, out, pool, scratch);
@@ -837,12 +841,14 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in,
-                                                                    const FlatCapacities& capacities, ThreadPool& pool,
+                                                                    const BatchShape& capacities, ThreadPool& pool,
                                                                     EncodeScratch& scratch, FlatSizes& sizes) const
 {
+    if (graphs_of(in) > capacities.graphs)
+        invalid("the batch has more graphs than the output capacity");
     sizes = count(in, pool, scratch);
-    if (sizes.entities > capacities.entities || sizes.tuples > capacities.tuples || sizes.args > capacities.args ||
-        sizes.targets > capacities.targets || sizes.history > capacities.history)
+    if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
+        sizes.history > capacities.history)
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();

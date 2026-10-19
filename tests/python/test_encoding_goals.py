@@ -378,7 +378,7 @@ def test_capacities_carry_the_targets():
     states = walk(task, steps=6, walks=2)
     encoder = encoding.FlatRelationEncoder(task, target_sources=("goal",))
     exact = encoder.encode(states)
-    sizes = {"entities": len(exact.entity_role), "tuples": int(exact.relation_offsets[-1]),
+    sizes = {"entities": len(exact.entity_role), "graphs": exact.num_graphs,
              "args": len(exact.relation_args), "targets": len(exact.target_entity)}
     with pytest.raises(ValueError, match="needs the key 'targets'"):
         encoder.encode(states, capacities={k: v for k, v in sizes.items() if k != "targets"})

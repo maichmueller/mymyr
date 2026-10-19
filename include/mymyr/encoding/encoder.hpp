@@ -193,6 +193,10 @@ public:
     EncodeScratch(const EncodeScratch&) = delete;
     EncodeScratch& operator=(const EncodeScratch&) = delete;
 
+    /// The scratch of the calling thread, kept for the life of the thread: the one for calls that do not own a scratch
+    /// (it is warm once the thread has encoded). It serves one call at a time, like any scratch.
+    [[nodiscard]] static EncodeScratch& of_this_thread();
+
     struct Impl;
     [[nodiscard]] Impl& impl() noexcept { return *m_impl; }
 
@@ -233,7 +237,7 @@ public:
     /// batch in their first `sizes.entities` / `sizes.args` / ... entries and are zero beyond; if `sizes.overflow` is
     /// set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
-                                                                         const FlatCapacities& capacities,
+                                                                         const BatchShape& capacities,
                                                                          ThreadPool& pool, EncodeScratch& scratch,
                                                                          FlatSizes& sizes) const;
 
@@ -254,7 +258,7 @@ public:
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
     /// returned sizes are true; if they overflow, no array of `out` is written. Entries of `out` past the sizes are
     /// left as they were. Reuses the buffers of `scratch`.
-    FlatSizes encode_into(const EncodeInput& in, const FlatCapacities& capacities, const FlatBuffers& out,
+    FlatSizes encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
                           ThreadPool& pool, EncodeScratch& scratch) const;
 
 private:

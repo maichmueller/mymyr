@@ -181,9 +181,14 @@ Named goal_reference(const EncodingSchema& schema, i64 num_objects, const std::v
         const bool holds = (atoms.count({literal.predicate, literal.objects}) != 0) == literal.positive;
         const std::string base = std::string(literal.positive ? "[+]" : "[-]") + literal.predicate + "[g]";
         const Tuple tuple = literal.objects.empty() ? Tuple{num_objects} : literal.objects;
-        for (const std::string& name : {base, base + (holds ? "[sat]" : "[unsat]")})
+        for (const bool status : {false, true})
+        {
+            std::string name = base;
+            if (status)
+                name += holds ? "[sat]" : "[unsat]";
             if (schema.find(name))
                 out[name].push_back(tuple);
+        }
     }
     for (auto& entry : out)
     {
@@ -714,7 +719,7 @@ TEST(EncoderGoals, TheCapacityFormKeepsTheGoalArrays)
     ThreadPool pool(1);
     EncodeScratch scratch;
     FlatSizes sizes;
-    const FlatCapacities fits{ints(*exact, "entity_ref").size() + 5, ints(*exact, "relation_args").size() + 7,
+    const BatchShape fits{rows.size(), ints(*exact, "entity_ref").size() + 5,
                               ints(*exact, "relation_args").size() + 7, ints(*exact, "target_entity").size() + 3};
     const auto padded = encoder->encode_capacity(input_of(rows), fits, pool, scratch, sizes);
     EXPECT_FALSE(sizes.overflowed());
@@ -722,7 +727,7 @@ TEST(EncoderGoals, TheCapacityFormKeepsTheGoalArrays)
     validate(*padded, encoder->schema());
     EXPECT_EQ(ints(*padded, "target_entity").size(), sizes.targets + 3);
     EXPECT_EQ(ints(*padded, "goal_complete"), ints(*exact, "goal_complete"));
-    FlatCapacities small = fits;
+    BatchShape small = fits;
     small.targets = sizes.targets - 1;
     const auto over = encoder->encode_capacity(input_of(rows), small, pool, scratch, sizes);
     EXPECT_TRUE(sizes.overflow & k_overflow_capacity);

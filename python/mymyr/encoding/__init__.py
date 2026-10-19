@@ -29,11 +29,13 @@ from mymyr._core._encoding import (
     FlatRelationEncoder,
     FlatStream,
 )
+from mymyr.encoding._device import DeviceFlatBatch
 from mymyr.encoding._horizon import HorizonView
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
 
 __all__ = [
+    "DeviceFlatBatch",
     "EncodingSchema",
     "FlatBatch",
     "FlatHorizonEncoder",
