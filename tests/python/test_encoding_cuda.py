@@ -1124,15 +1124,19 @@ def test_device_collation_of_rollout_slices_equals_one_encode(cases, layout, ind
     with pytest.raises(ValueError, match="^mymyr: encoding: cannot collate an overflowed batch"):
         invalid_plan.encode()
     assert invalid_plan.encode(capacities=caps).sizes["invalid_input"]
-    stream = torch.cuda.current_stream()
-    stream.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        captured = plan.encode(capacities=caps)
-    for _ in range(3):
-        graph.replay()
-    stream.synchronize()
-    same_batch(host, captured)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream.wait_stream(torch.cuda.default_stream())
+        captured_plan = encoding.DeviceCollator(batches)
+        captured_plan.encode(capacities=caps)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = captured_plan.encode(capacities=caps)
+        for _ in range(3):
+            graph.replay()
+        stream.synchronize()
+        same_batch(host, captured)
 
 
 @pytest.mark.parametrize("mode", ["exact", "capacity"])

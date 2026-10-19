@@ -55,13 +55,12 @@ struct DeviceRowStream::Impl
         DeviceGuard guard(context->device());
         ring.graphs = capacity;
         ring.row_capacity = capacity;
-        const auto& c = host->context();
         ring.state_words = host->table().words();
         ring.state_stride = ring.state_words;
-        ring.derived_stride = c.max_derived_words();
+        ring.derived_stride = host->table().derived_words();
         ring.goal_words = ring.state_words;
         ring.goal_stride = ring.state_words;
-        ring.goal_derived_words = c.max_derived_words();
+        ring.goal_derived_words = host->table().derived_words();
         ring.goal_derived_stride = ring.goal_derived_words;
         columns.reserve(9);
         auto allocate = [&](u64 count, u64 width) -> void*
