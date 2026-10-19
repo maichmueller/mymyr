@@ -115,7 +115,33 @@ struct HistoryInput
     const i32* count = nullptr;
 };
 
-/// The inputs of one batch.
+/// The graphs of a horizon batch: G graphs, each a root state and the nodes below it, as rows of one state batch, and
+/// the edges between the nodes. The rows of graph g are [node_offsets[g], node_offsets[g + 1]) of `nodes`; the first of
+/// them is the graph's root, so every graph has at least one node, and node k of graph g is row node_offsets[g] + k.
+/// The edges of graph g are the entries [edge_offsets[g], edge_offsets[g + 1]) of the edge arrays: edge e leads from node
+/// edge_src[e] to node edge_dst[e] (graph-local node indices) by the ground action of schema edge_schema[e] with the
+/// objects edge_binding[e * label_width ...] (the first arity-of-the-schema entries; the others are not read). The
+/// edges are given as they are: a node may have several incoming edges, or none. rl::expand's rows have this form
+/// (schema, binding, label_width).
+/// `node_offsets` and `edge_offsets` start at 0. `edge_schema` and `edge_binding` are needed only for a schema with
+/// action relations (`label_width` at least the table's), `edge_src` and `edge_dst` only for one with action or parent
+/// relations; the other edge arrays may be null then. A schema without either does not read the edges at all.
+struct HorizonInput
+{
+    rl::StateBatchView nodes;           // M node rows (numeric_words must be 0); the stride is honoured
+    u64 graphs = 0;                     // G
+    const i32* node_offsets = nullptr;  // [G + 1] strictly ascending from 0, the last at most nodes.rows
+    const i32* edge_offsets = nullptr;  // [G + 1] ascending from 0
+    const i32* edge_src = nullptr;      // [E]
+    const i32* edge_dst = nullptr;      // [E]
+    const i32* edge_schema = nullptr;   // [E]
+    const i32* edge_binding = nullptr;  // [E, label_width]
+    u32 label_width = 0;
+};
+
+/// The inputs of one batch. With a horizon schema (EncodingSchema::has_horizon) the graphs are those of `horizon` and
+/// `states` is empty; `task_ids` and the goals and subgoal layers are then per graph and `derived` per node row (M
+/// rows). Without one, `horizon` is empty.
 struct EncodeInput
 {
     rl::StateBatchView states;      // N rows (numeric_words must be 0); the stride is honoured
@@ -148,6 +174,8 @@ struct EncodeInput
     LayerInput subgoals{};
     // The history steps of each row. Needs the history lane in the options.
     HistoryInput history{};
+    // The graphs of a horizon schema.
+    HorizonInput horizon{};
 };
 
 /// The graphs a pool member should have at least: waking a member costs about as much as encoding several hundred
@@ -179,8 +207,7 @@ private:
 class FlatEncoder
 {
 public:
-    /// Throws std::invalid_argument ("mymyr: encoding: ...") for invalid options and for options this encoder does not
-    /// encode: horizons.
+    /// Throws std::invalid_argument ("mymyr: encoding: ...") for invalid options.
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(rl::TaskTablePtr table, const FlatOptions& options);
     [[nodiscard]] static std::shared_ptr<const FlatEncoder> create(TaskPtr task, const FlatOptions& options);
 
@@ -245,6 +272,12 @@ private:
     /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments, `targets`
     /// targets and `history` history steps.
     [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const;
+    /// count() and fill() for a horizon schema (horizon.cpp).
+    [[nodiscard]] FlatSizes count_horizon(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
+    void fill_horizon(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,
+                      EncodeScratch& scratch) const;
+    /// The number of graphs of a batch: the rows of `in.states`, or the graphs of `in.horizon`.
+    [[nodiscard]] u64 graphs_of(const EncodeInput& in) const noexcept;
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;

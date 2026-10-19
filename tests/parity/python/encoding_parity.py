@@ -10,7 +10,8 @@
   that no entry covers is a failure, and an entry that no case needs is reported as stale.
 - ``compare``: every mismatch of a graph against its expectation, not only the first.
 - ``SUPPORTED``, ``PENDING_CONFIGS`` and ``PENDING_SOURCES``: which configurations and which relation sources of the
-  fixtures the native encoder is compared on, and for the others which lane turns them on.
+  fixtures the native encoder is compared on, and for the others which lane turns them on. The horizon configs (C7) are
+  encoded by FlatHorizonEncoder from the dags of their records (``horizon_dag``, ``horizon_view``).
 - ``random_walk_rows``: seeded, distinct states for property tests.
 """
 
@@ -172,6 +173,7 @@ class Context:
     layers: tuple | None = None
     history: tuple | None = None
     dropped: tuple = ()
+    dag: dict | None = None
 
 
 def fixture_graph(fixture, record, sources=None):
@@ -213,6 +215,8 @@ def entity_name(role, ref, task, relation_names):
         return task.objects[ref]
     if role == "auxiliary":
         return AUXILIARY
+    if role == "state":
+        return f"target:{ref}"
     if role == "predicate_virtual":
         return f"predicate:{base_predicate(relation_names[ref])}"
     raise NotImplementedError(f"no naming rule for the entity role {role!r}")
@@ -445,7 +449,7 @@ def _nullary_over_auxiliary(expected, actual, context):
     (after the goal entity, when the goal relations have targets), which the graph has exactly when there is one.
     The expectation is rebuilt that way from the atoms of the recorded state and the goal's nullary tuples of the
     config that keeps them; a nullary relation that the native catalog lacks, or has in addition, stays a mismatch."""
-    if not SUPPORTED[context.config].get("nullary", True):
+    if not SUPPORTED[context.config].get("nullary", True) or context.dag is not None:
         return expected, actual
     fixture = context.fixture
     catalog = fixture["catalogs"][fixture["configs"][NULLARY_CONFIG]["catalog"]]
@@ -482,6 +486,213 @@ def _nullary_over_auxiliary(expected, actual, context):
             slot = node[1]
             tuples[name] = [t[:-1] + (slot, t[-1]) for t in tuples[name]]
     return replace(expected, catalog=expected_catalog, entities=entities, tuples=tuples), actual
+
+
+HORIZON_RELATION = re.compile(r"^(?:\[([+-])\])?([^\[\]]+)((?:\[[a-z+\-]+\])*)$")
+
+
+def _node_atoms(context):
+    """The names of the nullary atoms that hold in each node of the record's dag (static ones included)."""
+    task = context.task
+    static = {a.strip("()") for a in atoms(task.formalism.static_init) if " " not in a.strip("()")}
+    nodes = []
+    for path in context.dag["nodes"]:
+        state = replay(task, path)
+        held = {a.strip("()") for a in atoms(state.atoms()) + atoms(state.derived_atoms()) if " " not in a.strip("()")}
+        nodes.append(held | static)
+    return nodes
+
+
+def horizon_nullary_tuples(name, context, nodes):
+    """The tuples of the relation ``name`` of a nullary predicate in a horizon graph, from the atoms of the nodes of
+    the record's dag: a tuple is ``(target:k, auxiliary)``, with no state for a root that the policy excludes."""
+    options = SUPPORTED[context.config]
+    mode, root = options["horizon_mode"], options.get("root_policy", "include")
+    all_nodes = mode == "full" and root != "exclude"
+    lead = [(f"target:{k}", AUXILIARY) for k in range(len(nodes))]
+    if root == "exclude":
+        lead[0] = (AUXILIARY,)
+    sign, predicate, decoration = HORIZON_RELATION.match(name).groups()
+    marks = re.findall(r"\[([a-z+\-]+)\]", decoration)
+    levels = {"g": 0, "sg": 1, "ssg": 2, "sssg": 3}
+    level = next((levels[m] for m in marks if m in levels), None)
+    rest = [m for m in marks if m not in levels]
+    holds = [predicate in held for held in nodes]
+    added = [h and not holds[0] for h in holds]
+    deleted = [holds[0] and not h for h in holds]
+    below = range(1, len(nodes))
+    if level is None:
+        if rest and rest != ["state"]:
+            return []
+        if sign:
+            return [lead[k] for k in below if (added if sign == "+" else deleted)[k]]
+        if rest == ["state"]:
+            return [lead[k] for k in below if holds[k]]
+        if rest:
+            return []
+        return [lead[k] for k in (range(len(nodes)) if all_nodes else [0]) if holds[k]]
+    positive = sign == "+"
+    literals = [goal_literals(context)] + [set(map(parse_literal, layer)) for layer in context.layers or ()]
+    if level >= len(literals) or (positive, predicate, ()) not in literals[level]:
+        return []
+    if any((positive, predicate, ()) in literals[lower] for lower in range(level)):
+        return []
+    if not rest:
+        return [lead[0]]
+    satisfied = [h == positive for h in holds]
+    if rest[0] in ("sat+", "sat-"):
+        becomes = (added if positive else deleted) if rest[0] == "sat+" else (deleted if positive else added)
+        return [lead[k] for k in below if becomes[k]]
+    wanted = rest[0] == "sat"
+    if "state" in rest:
+        return [lead[k] for k in below if satisfied[k] == wanted]
+    return [lead[k] for k in (range(len(nodes)) if all_nodes else [0]) if satisfied[k] == wanted]
+
+
+def _nullary_horizon(expected, actual, context):
+    """mifrost's horizon graphs have no tuples in the relations of nullary predicates (their catalog lists them); the
+    native encoder fills them as it does for a state: the atom of a node is the tuple (node, auxiliary entity), and the
+    graph has the auxiliary entity exactly when such a tuple exists. The expectation fills them from the atoms of the
+    record's nodes by the semantics of each relation (facts, delta, goal, satisfaction at the nodes or relative to the
+    root); a nullary relation that the native catalog lacks, or has in addition, stays a mismatch."""
+    if context.dag is None or not SUPPORTED[context.config].get("nullary", True):
+        return expected, actual
+    nodes = _node_atoms(context)
+    nullary = {p.name for p in context.task.formalism.predicates if p.arity == 0}
+    tuples = dict(expected.tuples)
+    for name, count in expected.catalog:
+        if count == 0 and HORIZON_RELATION.match(name).group(2) in nullary:
+            found = horizon_nullary_tuples(name, context, nodes)
+            if found:
+                tuples[name] = found
+            else:
+                tuples.pop(name, None)
+    entities = list(expected.entities)
+    if any(AUXILIARY in t for ts in tuples.values() for t in ts) and ("auxiliary", AUXILIARY) not in entities:
+        last = max((i for i, (role, _) in enumerate(entities) if role == "object"), default=-1)
+        entities.insert(last + 1, ("auxiliary", AUXILIARY))
+    return replace(expected, entities=entities, tuples=tuples), actual
+
+
+ROOT_ENTITY = ("state", "_root_state_")
+
+
+def _root_state_entity(expected, actual, context):
+    """mifrost names the root that a policy excludes by an entity `_root_state_` that no tuple mentions: the entity is
+    dropped from its graph. Applies only when no tuple of the reference has it as an argument."""
+    if ROOT_ENTITY not in expected.entities or any(ROOT_ENTITY[1] in t for ts in expected.tuples.values() for t in ts):
+        return expected, actual
+    return replace(expected, entities=[e for e in expected.entities if e != ROOT_ENTITY]), actual
+
+
+def _repeated_literal_horizon(expected, actual, context):
+    """A literal that the goal and a layer, or two layers, list is in mifrost's horizon graph at the highest of its
+    levels, once for each level it is listed in, in each relation family of that level (goal, satisfaction at the
+    nodes, added satisfaction); the native encoder has it once, at the lowest. The expectation moves the equal tuples
+    of the highest level to the lowest, keeping one, when it finds as many equal tuples as the literal has levels."""
+    if context.dag is None or not context.layers:
+        return expected, actual
+    levels = {}
+    for literal in goal_literals(context):
+        levels.setdefault(literal, set()).add(0)
+    for level, layer in enumerate(context.layers, 1):
+        for text in layer:
+            levels.setdefault(parse_literal(text), set()).add(level)
+    tuples = {name: list(ts) for name, ts in expected.tuples.items()}
+    for (positive, predicate, arguments), listed in sorted(levels.items(), key=repr):
+        if len(listed) < 2 or not arguments:
+            continue
+        sign = "+" if positive else "-"
+        high, low = f"[{_level_suffix(max(listed))}]", f"[{_level_suffix(min(listed))}]"
+        for name in [n for n in tuples if n.startswith(f"[{sign}]{predicate}{high}")]:
+            moved = [t for t in tuples[name] if t[len(t) - len(arguments) :] == arguments]
+            by_tuple = Counter(moved)
+            if not moved or any(count != len(listed) for count in by_tuple.values()):
+                continue
+            tuples[name] = [t for t in tuples[name] if t not in by_tuple]
+            target = f"[{sign}]{predicate}{low}" + name[len(f"[{sign}]{predicate}{high}") :]
+            tuples.setdefault(target, [])
+            tuples[target] += [t for t in by_tuple if t not in tuples[target]]
+    return replace(expected, tuples={n: ts for n, ts in tuples.items() if ts}), actual
+
+
+def _static_names(context):
+    return {a.strip("()") for a in atoms(context.task.formalism.static_init)}
+
+
+def _delta_static_relations(expected, actual, context):
+    """The delta mode compares a node with its root, and static atoms never change: the native catalog has no delta
+    relation (`[+]p`, `[-]p`, `[+]p[sat+]`, ...) for a static predicate. mifrost lists them, always empty. The
+    expectation drops the relations of static predicates that the native catalog lacks and the reference leaves empty."""
+    if context.dag is None or SUPPORTED[context.config]["horizon_mode"] != "delta":
+        return expected, actual
+    static = {p.name for p in context.task.formalism.predicates if p.kind == "static"}
+    own = {name for name, _ in actual.catalog}
+    dropped = {name for name, _ in expected.catalog if name not in own and not expected.tuples.get(name)
+               and HORIZON_RELATION.match(name).group(2) in static}
+    return replace(expected, catalog=[c for c in expected.catalog if c[0] not in dropped]), actual
+
+
+def _never_filled_relations(expected, actual, context):
+    """The catalogs of mifrost's horizons list relations that no graph has tuples in, and the native catalog leaves them
+    out: the delta mode's literal-level support relations (``[+]p[sat]``, ``[-]p[unsat]``, ``[+]p[sat+]``, ``[-]p[sat-]``,
+    without a goal level; the native encoder has no support literals) and the state-anchored relation of a static
+    predicate in the split catalog (``fixed[state]``; the static atoms are the root's). The expectation drops these
+    entries of the catalog while the reference has no tuple in them and the native catalog lacks them."""
+    if context.dag is None:
+        return expected, actual
+    static = {p.name for p in context.task.formalism.predicates if p.kind == "static"}
+    own = {name for name, _ in actual.catalog}
+    levels = {"g", "sg", "ssg", "sssg"}
+
+    def never_filled(name):
+        sign, predicate, decoration = HORIZON_RELATION.match(name).groups()
+        marks = re.findall(r"\[([a-z+\-]+)\]", decoration)
+        if any(m in levels for m in marks):
+            return False
+        return (sign is not None and any(m in ("sat", "unsat", "sat+", "sat-") for m in marks)) or (
+            marks == ["state"] and predicate in static)
+
+    dropped = {name for name, _ in expected.catalog
+               if name not in own and not expected.tuples.get(name) and never_filled(name)}
+    return replace(expected, catalog=[c for c in expected.catalog if c[0] not in dropped]), actual
+
+
+def _static_literal_at_nodes(expected, actual, context):
+    """mifrost evaluates the goal at the nodes below the root without the static atoms: a static atom does not hold
+    there, so a positive static literal that holds is not satisfied at them, and a negative one is satisfied. The
+    native encoder evaluates every node with the instance's static atoms. The native graph is rewritten to mifrost's
+    reading, for the literals over static predicates whose atom holds and the nodes below the root only: a native
+    satisfaction tuple of a positive literal moves to the unsatisfied relation (or is dropped when the catalog has none),
+    one of a negative literal's unsatisfied relation moves to the satisfied one."""
+    if context.dag is None:
+        return expected, actual
+    static = _static_names(context)
+    kinds = {p.name: p.kind for p in context.task.formalism.predicates}
+    levels = {}
+    for literal in goal_literals(context):
+        levels.setdefault(literal, set()).add(0)
+    for level, layer in enumerate(context.layers or (), 1):
+        for text in layer:
+            levels.setdefault(parse_literal(text), set()).add(level)
+    tuples = {name: list(ts) for name, ts in actual.tuples.items()}
+    own = {name for name, _ in actual.catalog}
+    for (positive, predicate, arguments), listed in sorted(levels.items(), key=repr):
+        if kinds.get(predicate) != "static" or " ".join((predicate, *arguments)) not in static:
+            continue
+        family = f"[{'+' if positive else '-'}]{predicate}[{_level_suffix(min(listed))}]"
+        for anchor in ("", "[state]"):
+            source, target = (f"{family}[sat]{anchor}", f"{family}[unsat]{anchor}")
+            if not positive:
+                source, target = target, source
+            moved = [t for t in tuples.get(source, []) if t[len(t) - len(arguments) :] == arguments
+                     and t[0].startswith("target:") and t[0] != "target:0"]
+            if not moved:
+                continue
+            tuples[source] = [t for t in tuples[source] if t not in moved]
+            if target in own:
+                tuples.setdefault(target, []).extend(moved)
+    return expected, replace(actual, tuples={n: ts for n, ts in tuples.items() if ts})
 
 
 def _action_subset(expected, actual, context):
@@ -536,7 +747,7 @@ def _nullary_layers_over_auxiliary(expected, actual, context):
     nullary literal of a layer or step is a tuple over the auxiliary entity, which the graph has exactly when there is
     one. The expectation lists the history relations that its catalog omits, from the config that keeps nullary
     relations, and ends each tuple of a nullary subgoal or history relation with the auxiliary entity."""
-    if not SUPPORTED[context.config].get("nullary", True):
+    if not SUPPORTED[context.config].get("nullary", True) or context.dag is not None:
         return expected, actual
     fixture = context.fixture
     kept = fixture["catalogs"][fixture["configs"][NULLARY_CONFIG]["catalog"]]
@@ -629,7 +840,7 @@ def _literal_without_slot(expected, actual, context):
     of exactly those literals: their entity, their tuples (the argument rows of their relations when the graph has no
     target entities) and their satisfaction tuples. A literal that is also a goal literal is in the goal of the native
     graph, and mifrost's copy of it is moved onto that goal tuple by ``repeated_literal``; nothing is dropped for it."""
-    if not context.dropped:
+    if not context.dropped or context.dag is not None:
         return expected, actual
     goal = goal_literals(context)
     graphs = {"expected": (list(expected.entities), {n: list(ts) for n, ts in expected.tuples.items()}),
@@ -673,6 +884,62 @@ def _literal_without_slot(expected, actual, context):
 
 
 REGISTRY = (
+    Difference(
+        "horizon_nullary_over_auxiliary",
+        "mifrost's horizon graphs have no tuples in the relations of nullary predicates (its catalog lists them); the "
+        "native encoder fills them as it does for a state graph: the atom of a node is the tuple of its state entity and "
+        "the graph's auxiliary entity, which the graph has exactly when such a tuple exists.",
+        "the relations of arity 0 of a horizon graph and its auxiliary entity",
+        (("f10", "C7AN"), ("f01", "C7A")),
+        _nullary_horizon,
+    ),
+    Difference(
+        "root_state_entity",
+        "mifrost has an entity `_root_state_` for the root that a horizon's root policy excludes, which none of its "
+        "tuples mentions; the native graph has no entity for it, and the root's relations are the plain ones.",
+        "the entity `_root_state_` of a horizon graph, only when no tuple of the reference mentions it",
+        (("f01", "C7B"),),
+        _root_state_entity,
+    ),
+    Difference(
+        "repeated_literal_horizon",
+        "A literal that the goal and a layer, or two layers, list is encoded once, at the lowest of its levels; "
+        "mifrost's horizon graph has it once for each level it is listed in, all at the highest of them.",
+        "the tuples of the highest level of a literal that is listed in several levels, in every relation of that "
+        "level, when there are as many equal tuples as levels",
+        (("f01", "C7T"), ("f01", "C7S")),
+        _repeated_literal_horizon,
+    ),
+    Difference(
+        "delta_static_relations",
+        "A delta horizon compares a node with its root and static atoms never change: the native catalog has no delta "
+        "relation for a static predicate. mifrost lists them (`[+]p`, `[-]p`, `[sat+]`, `[sat-]`), and they are empty.",
+        "the catalog entries of static predicates that the native catalog lacks, only in the delta mode and only when "
+        "the reference has no tuple in them",
+        (("f08", "C7B"), ("f09", "C7C")),
+        _delta_static_relations,
+    ),
+    Difference(
+        "never_filled_horizon_relations",
+        "mifrost's horizon catalogs list relations that no graph has a tuple in: the delta mode's relations of the "
+        "literals themselves (`[+]p[sat]`, `[-]p[unsat]`, `[+]p[sat+]`, `[-]p[sat-]`, which have no goal level) and, in the "
+        "split catalog, the relation of the nodes of a static predicate (`fixed[state]`). The native catalog lists a "
+        "relation only if a graph can have a tuple in it: it has no support literals, and static atoms are the root's.",
+        "the catalog entries of those relations, only when the reference has no tuple in them and the native catalog "
+        "lacks them",
+        (("f01", "C7I"), ("f08", "C7G")),
+        _never_filled_relations,
+    ),
+    Difference(
+        "static_literal_at_nodes",
+        "mifrost evaluates the goal at the nodes below the root without the instance's static atoms (a static atom does "
+        "not hold there: a positive static literal that holds is unsatisfied, a negative one satisfied); the native "
+        "encoder evaluates every node with the static atoms.",
+        "the satisfaction tuples of the literals over static predicates whose atom holds, at the nodes below the root "
+        "of a horizon graph",
+        (("f08", "C7A"), ("f08", "C7G")),
+        _static_literal_at_nodes,
+    ),
     Difference(
         "action_subset",
         "A record's reference encoding was given the actions listed in its inputs, which can be fewer than the "
@@ -839,13 +1106,33 @@ SUPPORTED = {
     "C5B": dict(history=True, include_actions=False, nullary=False),
     "C5BN": dict(history=True, include_actions=False, nullary=True),
 }
+# The horizon configs (mifrost's FlatHorizonEncoder). Every one is compared with the nullary relations kept: mifrost's
+# catalog lists them whatever its ignore_zero_arity_relations says, and leaves them empty.
+ADDED = ("added_satisfied", "added_unsatisfied")
+for _config, _options in {
+    "C7A": dict(horizon_mode="full"),
+    "C7AN": dict(horizon_mode="full"),
+    "C7B": dict(horizon_mode="delta", root_policy="exclude", goal_derivations=ADDED, include_actions=False),
+    "C7C": dict(horizon_mode="delta", root_policy="encode_only", goal_derivations=ADDED, parent_relation=True),
+    "C7D": dict(horizon_mode="action", root_policy="exclude"),
+    "C7DN": dict(horizon_mode="action", root_policy="exclude"),
+    "C7G": dict(horizon_mode="full", root_policy="exclude"),
+    "C7H": dict(horizon_mode="full", root_policy="encode_only"),
+    "C7I": dict(horizon_mode="delta", goal_derivations=ADDED, include_actions=False),
+    "C7J": dict(horizon_mode="action"),
+    "C7K": dict(horizon_mode="action", root_policy="encode_only"),
+    "C7S": dict(horizon_mode="delta", root_policy="exclude", goal_derivations=ADDED, include_actions=False,
+                max_goal_level=2),
+    "C7T": dict(horizon_mode="full", max_goal_level=1),
+}.items():
+    SUPPORTED[_config] = _options
 # Relation sources of the fixtures' catalogs (inside a compared config) that the comparison leaves out, with the lane
 # that turns them on.
 PENDING_SOURCES = {
     "action": "actions (of the configs whose native encoder has no action relations)",
 }
-COMPARED_SOURCES = ("state", "goal", "goal_derivation", "history")
-COMPARED_LANES = ("fluent", "static", "derived", "goal", "goal_derivation", "history")
+COMPARED_SOURCES = ("state", "goal", "goal_derivation", "history", "goal_satisfaction", "parent")
+COMPARED_LANES = ("fluent", "static", "derived", "goal", "goal_derivation", "history", "goal_satisfaction", "parent")
 
 
 def sources_of(config):
@@ -858,25 +1145,17 @@ def lanes_of(config):
     return COMPARED_LANES + (("action",) if SUPPORTED[config].get("include_actions", True) else ())
 
 
+def is_horizon(config):
+    """Whether ``config`` is encoded by the horizon encoder."""
+    return "horizon_mode" in SUPPORTED[config]
+
+
 # Configs that are not compared yet, with the lanes they need.
 PENDING_CONFIGS = {
-    "C7A": "goals, actions, horizon",
-    "C7AN": "goals, actions, horizon",
-    "C7B": "goals, horizon",
-    "C7C": "goals, actions, horizon",
-    "C7D": "goals, actions, horizon",
-    "C7DN": "goals, actions, horizon",
     "C7E": "goals, actions, horizon",
     "C7EN": "goals, actions, horizon",
     "C7F": "goals, actions, horizon",
     "C7FN": "goals, actions, horizon",
-    "C7G": "goals, actions, horizon",
-    "C7H": "goals, actions, horizon",
-    "C7I": "goals, horizon",
-    "C7J": "goals, actions, horizon",
-    "C7K": "goals, actions, horizon",
-    "C7S": "goals, subgoals, horizon",
-    "C7T": "goals, actions, subgoals, horizon",
     "C8A": "goals, actions, transition",
     "C8AN": "goals, actions, transition",
     "C8B": "goals, actions, transition",
@@ -891,7 +1170,8 @@ PENDING_CONFIGS = {
 def native_encoder(task, config, **options):
     from mymyr import encoding
 
-    return encoding.FlatRelationEncoder(task, **{**SUPPORTED[config], **options})
+    cls = encoding.FlatHorizonEncoder if is_horizon(config) else encoding.FlatRelationEncoder
+    return cls(task, **{**SUPPORTED[config], **options})
 
 
 @dataclass
@@ -986,7 +1266,64 @@ def record_context(fixture, task, state, config, record, dropped=()):
     history = None if steps is None else tuple((dt, tuple(literals)) for dt, literals in steps)
     layers = inputs.get("subgoal_layers")
     layers = None if layers is None else tuple(tuple(layer) for layer in layers)
-    return Context(fixture, task, state, config, given("goals"), given("actions"), layers, history, dropped)
+    return Context(fixture, task, state, config, given("goals"), given("actions"), layers, history, dropped,
+                   inputs.get("dag"))
+
+
+def horizon_dag(task, table, dag):
+    """The node rows and the edges (source, target, schema, binding) of a recorded dag: the nodes are the states of its
+    action paths, and each edge is the row of the parent's expansion that has the edge's action and leads to the child."""
+    from mymyr import rl
+
+    rows = np.ascontiguousarray(task.encode([replay(task, path) for path in dag["nodes"]]))
+    expansions = {}
+    edges = []
+    for parent, child, name in dag["edges"]:
+        if parent not in expansions:
+            expansions[parent] = rl.expand(table, rows[parent : parent + 1])
+        expansion = expansions[parent]
+        succ = np.asarray(expansion.succ)
+        row = next(r for r in range(int(expansion.offsets[1]))
+                   if str(expansion.action(r)) == name and (succ[r] == rows[child]).all())
+        edges.append((parent, child, int(expansion.schema[row]), np.asarray(expansion.binding[row])))
+    return rows, edges
+
+
+def horizon_view(table, dags):
+    """A HorizonView of the dags (``(rows, edges)`` of ``horizon_dag``), one graph each."""
+    from mymyr import encoding
+
+    flat = [edge for _, edges in dags for edge in edges]
+    return encoding.HorizonView(
+        nodes=np.concatenate([rows for rows, _ in dags]),
+        node_offsets=np.cumsum([0] + [len(rows) for rows, _ in dags]).astype(np.int32),
+        edge_offsets=np.cumsum([0] + [len(edges) for _, edges in dags]).astype(np.int32),
+        edge_src=np.array([e[0] for e in flat], np.int32), edge_dst=np.array([e[1] for e in flat], np.int32),
+        edge_schema=np.array([e[2] for e in flat], np.int32),
+        edge_binding=np.array([e[3] for e in flat], np.int32).reshape(len(flat), table.label_width),
+        task_ids=np.zeros(len(dags), np.int32))
+
+
+def encode_horizon_records(task, config, records):
+    """The ``Placed`` graph of each horizon record: the records without subgoal layers in one batch, each other record
+    alone with its layers as the subgoals of its graph."""
+    from mymyr import rl
+
+    table = rl.as_table(task)
+    dags = [horizon_dag(task, table, r["inputs"]["dag"]) for r in records]
+    placed = [None] * len(records)
+    plain = [i for i, r in enumerate(records) if "subgoal_layers" not in r["inputs"]]
+    if plain:
+        encoder = native_encoder(task, config)
+        batch = encoder.encode(horizon_view(table, [dags[i] for i in plain]))
+        for k, i in enumerate(plain):
+            placed[i] = Placed(encoder, batch, k)
+    for i, record in enumerate(records):
+        if placed[i] is None:
+            encoder = native_encoder(task, config)
+            arguments, dropped = layer_inputs(encoder, record["inputs"])
+            placed[i] = Placed(encoder, encoder.encode(horizon_view(table, [dags[i]]), **arguments), 0, dropped)
+    return placed
 
 
 def encode_records(task, config, rows, records):
@@ -996,6 +1333,8 @@ def encode_records(task, config, rows, records):
     the action lane."""
     from mymyr import rl
 
+    if is_horizon(config):
+        return encode_horizon_records(task, config, records)
     table = rl.as_table(task)
     actions = SUPPORTED[config].get("include_actions", True)
     alone = ("goals", "subgoal_layers", "history_subgoals")

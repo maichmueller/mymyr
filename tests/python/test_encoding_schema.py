@@ -203,7 +203,7 @@ def test_options_round_trip_and_normalize():
 
 
 # ------------------------------------------------------------------------------------------------ fingerprint
-PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0x1A9BE3C01D8DC4E2, 0x2F5279FDFE082E1C, 0xCCB27EEFA062F265
+PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0xF3C870FB1B1D5A8F, 0x2F5279FDFE082E1C, 0x069637BAFBF3C417
 FINGERPRINT_VARIANTS = {
     "goal_derivations": {"goal_derivations": ["plain"]},
     "goal_derivations_unsat": {"goal_derivations": ["plain", "satisfied", "unsatisfied"]},

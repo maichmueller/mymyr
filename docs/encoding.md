@@ -99,8 +99,8 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']`, `['targets']` and
   (with history) `['history']` are the true sizes.
 
-Options that this encoder does not encode raise `ValueError` with a `mymyr: encoding:` message: `horizon_mode`.
-Numeric tasks raise as well.
+`FlatRelationEncoder` takes no horizon options (`horizon_mode`, `root_policy`, `parent_relation`: `TypeError`); the
+[horizon encoder](#horizons) encodes them. Numeric tasks raise `ValueError`.
 Every other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed
 `derived` array) raises `ValueError` too; a batch that needs more indices than the index type holds raises
 `OverflowError` (`index_dtype='int64'` lifts the limit).
@@ -231,6 +231,104 @@ a predicate without one (a static or derived predicate whose state relation is d
 catalog (C++: `EncodingSchema::virtual_key`). The nullary atoms of a predicate are the tuple over its node and the
 auxiliary entity. Actions are not virtual-node predicates.
 
+## Horizons
+
+`FlatHorizonEncoder(table_or_task, *, horizon_mode, <options>)` encodes **horizons**: one graph per root state, holding
+the root and the nodes below it (states reached from the root by actions) as state entities, so that a model sees a
+root and its candidate successors in one graph. It has the options of `FlatRelationEncoder` except `history` (a horizon
+has none), with `horizon_mode` required (`'full'`, `'delta'` or `'action'`; `None` raises `ValueError`, there is no
+horizon without a mode) and `root_policy` and `parent_relation` new. It shares the batch format,
+`schema`, `table`, `entity_names`, `describe` and pickling of the flat encoder, and a `FlatBatch` of a horizon encoder
+has `batch.schema.options['horizon_mode']` set. `EncodingSchema` takes the same three options.
+`encoder.encode(view, *, derived=None, goals=None, subgoals=None, framework=None, threads=1, pool=None,
+capacities=None)` returns a `FlatBatch` of `G` graphs, one per root.
+
+**The view.** The nodes and edges are given as a `mymyr.encoding.HorizonView` (or any object with its attributes),
+the rows of one batch of states plus offsets and edges, as `rl.expand` produces them:
+
+| Attribute | Meaning |
+|---|---|
+| `nodes` | state words `[M, W]` of any DLPack framework (u64, or u32 halves), or a list of `State`s |
+| `node_offsets` | int32 `[G + 1]`, from 0, strictly ascending: graph `g`'s nodes are the rows `[node_offsets[g], node_offsets[g + 1])`; the first is its root, and **node `k` of graph `g` is row `node_offsets[g] + k`** |
+| `edge_offsets` | int32 `[G + 1]`, from 0, ascending: the edges of graph `g` |
+| `edge_src`, `edge_dst` | int32 `[E]`: graph-local node indices of an edge's ends |
+| `edge_schema` | int32 `[E]`: the action schema of an edge |
+| `edge_binding` | int32 `[E, L]`: the objects of an edge's ground action (`L` at least the table's `label_width`; only the schema's arity entries of a row are read) |
+| `task_ids` | int32 `[G]`: the instance of each graph (required for a table of several instances) |
+
+**The edges.** The graph is a dag: a node may have several parents, an edge may lead back to the root or to its own
+source, and the edges may come in any order and more than once. The **action tuples** of a relation are the distinct
+`(dst node, objects)` of the edges whose schema belongs to it, ordered by destination node and then objects, and the
+**`_parent_` tuples** are the distinct `(src, dst)` pairs in ascending order; so reordering or repeating the edges does
+not change the batch, a node that several edges reach with the same action has one action tuple, and a node with several
+parents has one `_parent_` tuple for each. (The tuples of every other relation are in the canonical order of the flat
+encoder.) `rl.expand` rows are a valid edge list: the rows of a state's successors, `schema`, `binding`, with `edge_src`
+the state's node and `edge_dst` the node you made of the successor. The edge arrays a schema does not read (all of them
+without action and parent relations, `edge_schema` and `edge_binding` without action relations) and the arrays of a batch
+without any edge may be `None`. `derived` is per node row `[M, D]`; `goals` and `subgoals` are
+per graph (`[G, ...]`, or one row for all graphs) and replace the instance's goal and layers for that graph.
+Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon encoder has no
+`stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. The device encoder refuses a horizon
+schema (`ValueError`, "mymyr: encoding: ..."). Invalid views raise `ValueError` naming the graph
+(`graph 3 of the horizon has no nodes`, `edge 2 of graph 0 of the horizon has an endpoint outside the graph's nodes`,
+`node 1 of graph 2 sets an atom bit its instance does not have`).
+
+**State entities.** The graph has an entity of role 7 (`state`) per node, after the objects, the auxiliary entity and
+before the predicate virtual nodes. Its `entity_ref` is the **graph-local node index** `k`, so the node is row
+`horizon.node_offsets[g] + entity_ref` of the view's `nodes`, whatever the layout or the graph's place in the batch.
+Names are `target:k` (`encoder.entity_names`). The nodes that are candidates for a model's choice (`target_group` 4,
+`encoder.target_group_names`) are all state entities under `root_policy='include'` and all but the root otherwise; the
+batch lists them in `target_entity`, so the schema has targets (the capacity form needs `targets`).
+
+**Root policies.** `include` (the default) makes the root node 0 a state entity and a target candidate. `encode_only`
+gives it a state entity but does not list it as a target. `exclude` has no state entity for the root: the graph's
+entities are the nodes 1 and up, and the root's relations are the plain ones (no state slot): the root's atoms are
+tuples without a state argument. An edge into the root gives no action tuple (the action tuples start with the state of
+their destination) and an edge that touches the root no `_parent_` tuple; an edge out of the root keeps its action tuple,
+which names the node it leads to. The root has no entity at all; its relations say what it holds.
+
+**Modes.** Every relation of a node has the node's state entity as its first argument (the slot role `state`):
+
+- `full`: the atoms of every node, `on(node, a, b)`, the root included under `include` and `encode_only`; under
+  `exclude` the root's atoms are the plain relations `on(a, b)` and the nodes' `on[state](node, a, b)`. The static
+  atoms are the root's only (the same for every node): `object(target:0, a)`, or plain under `exclude`. The goal
+  relations hold the goal's tuples once, at the root, and the satisfaction relations `[g][sat]`, `[g][unsat]` the
+  satisfaction of the goal literals at every node.
+- `delta`: the facts the node adds to or deletes from its **root** (not its parent): `[+]on(node, a, b)` for an atom
+  that holds in the node and not in the root, `[-]on(node, a, b)` for one that holds in the root and not in the node.
+  The root's own atoms are in the plain relations (with the root's state entity unless it is excluded). With
+  `goal_derivations` `added_satisfied` and
+  `added_unsatisfied`, the relations `[+]on[g][sat+]` and `[sat-]` hold the goal literals that the node makes true and
+  those it makes false, relative to the root. A node equal to its root (a self-loop's end) has no delta tuples.
+- `action`: the root's state and, for every edge, the action that leads to its target node: the action relation of the
+  schema holds `(dst node, o_1, ..., o_k)`. The nodes carry no facts of their own.
+
+The catalog lists only relations a graph can have tuples in: a static predicate has no delta relation and no relation
+of the nodes (its atoms are the root's), and the added-satisfaction relations exist per goal level.
+
+**Nullary relations.** The atoms and goal literals of nullary predicates are tuples over the graph's auxiliary entity,
+in front of which stands the state entity (`handempty(node, auxiliary)`); the graph has the auxiliary entity exactly when
+a nullary tuple exists. With `nullary=False` they are absent.
+
+```python
+import numpy as np
+from mymyr import encoding, rl
+
+table = rl.as_table(task)
+roots = np.ascontiguousarray(task.encode([task.initial_state]))
+exp = rl.expand(table, roots)
+n = int(exp.offsets[1])                                # the root's successors
+view = encoding.HorizonView(
+    nodes=np.concatenate([roots, np.asarray(exp.succ)]),            # node 0 is the root, nodes 1..n its successors
+    node_offsets=np.array([0, n + 1], np.int32), edge_offsets=np.array([0, n], np.int32),
+    edge_src=np.zeros(n, np.int32), edge_dst=np.arange(1, n + 1, dtype=np.int32),
+    edge_schema=np.asarray(exp.schema), edge_binding=np.asarray(exp.binding),
+)
+horizon = encoding.FlatHorizonEncoder(task, horizon_mode="full", parent_relation=True)
+batch = horizon.encode(view)
+assert horizon.entity_names(batch, 0)[-n - 1:] == [f"target:{k}" for k in range(n + 1)]
+```
+
 ## The batch
 
 For `G` graphs and `R = schema.num_relations` relations, with `I` the index type (`int32` by default, `int64` with
@@ -241,7 +339,7 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `task_ids` | int32 `[G]` | the instance of each row |
 | `num_objects` | I `[G]` | the objects of the instance (the auxiliary entity is not counted) |
 | `entity_offsets` | I `[G + 1]` | graph `g`'s entities are `[entity_offsets[g], entity_offsets[g + 1])` |
-| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 1 predicate virtual node, 2 goal, 3 subgoal, 4 action, 5 history step, 6 history target, 8 auxiliary; omitted when implicit |
+| `entity_role` | uint8 `[E]` | the role of each entity: 0 object, 1 predicate virtual node, 2 goal, 3 subgoal, 4 action, 5 history step, 6 history target, 7 state (a horizon's node), 8 auxiliary; omitted when implicit |
 | `entity_ref` | I `[E]` | an object's instance-local id; a goal, subgoal or history target entity's tuple index within its graph (graph-major order); an action entity's row within its graph's rows of `actions`; a history step's index among the row's valid steps; a virtual node's key relation id; -1 for the auxiliary entity; omitted like `entity_role` |
 | `relation_counts` | I `[G, R]` | the tuples of cell `(g, r)`, in both layouts; omitted with `emit_counts=False` |
 | `relation_offsets` | I `[G * R + 1]` | segment `s` holds the tuples `[offsets[s], offsets[s + 1])`; cell `(g, r)` is `s = g * R + r`, or `r * G + g` in the relation layout |

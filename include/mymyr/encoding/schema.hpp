@@ -219,13 +219,18 @@ public:
     /// Whether a batch stores `goal_complete`: the schema has goal relations (of any level or derivation).
     [[nodiscard]] bool has_goal_complete() const noexcept { return m_goal_complete; }
     /// Whether a batch stores the target arrays `target_offsets`, `target_entity` and `target_group`: the options name
-    /// at least one target source.
-    [[nodiscard]] bool has_targets() const noexcept { return !m_options.targets.empty(); }
+    /// at least one target source, or a horizon mode (its candidate state nodes are the targets).
+    [[nodiscard]] bool has_targets() const noexcept
+    {
+        return !m_options.targets.empty() || m_options.horizon.mode != HorizonMode::None;
+    }
+    /// Whether the schema is that of a horizon: batches then hold state entities (see FlatHorizonEncoder).
+    [[nodiscard]] bool has_horizon() const noexcept { return m_options.horizon.mode != HorizonMode::None; }
 
     /// Whether a batch stores the history arrays `history_offsets`, `history_entity` and `history_dt`
     /// (FlatOptions::history).
     [[nodiscard]] bool has_history() const noexcept { return m_options.history; }
-    /// Whether the schema has subgoal relations: goal relations of a level above 0.
+    /// Whether the schema has subgoal relations: goal relations of a level above 0, including the ones of a horizon.
     [[nodiscard]] bool has_subgoals() const noexcept { return m_subgoals; }
 
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape

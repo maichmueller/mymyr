@@ -1,5 +1,7 @@
 #include "mymyr/encoding/encoder.hpp"
 
+#include "encode_pass.hpp"
+
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -15,11 +17,10 @@ namespace mymyr::encoding
 {
 namespace
 {
-constexpr usize k_cache_line = 64;
-// Graphs per tile of the relation-major scan: it runs over the tile's graphs one relation at a time, so that the
-// strided writes (G entries apart) fill whole cache lines.
-constexpr u64 k_scan_tile = 128;
-constexpr u64 k_none = std::numeric_limits<u64>::max();
+using detail::k_none;
+using detail::Member;
+using detail::members_for;
+using detail::run;
 
 [[nodiscard]] u64 index_limit(IndexType index)
 {
@@ -44,62 +45,10 @@ void check_index_range(u64 value, IndexType index, const char* what)
 
 namespace
 {
-[[noreturn]] void unsupported(const char* option)
-{
-    throw std::invalid_argument(std::string("mymyr: encoding: ") + option + " is not supported by this encoder yet");
-}
-
-void refuse_unsupported(const FlatOptions& o)
-{
-    if (o.horizon.mode != HorizonMode::None)
-        unsupported("horizon");
-}
-
 rl::ArrayShape shape1(u64 n) { return {static_cast<i64>(n)}; }
 rl::ArrayShape shape2(u64 n, u64 m) { return {static_cast<i64>(n), static_cast<i64>(m)}; }
 
-/// The state of one pool member: it counts a contiguous slice of the graphs and later fills the same slice, so that the
-/// per-graph data of the slice stays with the member. Aligned so that members never share a cache line.
-struct alignas(k_cache_line) Member
-{
-    // pass one
-    std::vector<detail::GraphTotals> totals;  // the slice's graphs
-    std::vector<u32> cell_counts;             // the slice's cells, graph after graph, in cell order (relation-major or
-                                              // with predicate virtual nodes or layers)
-    std::vector<u32> action_starts;           // [slice graphs, starts_stride] the run starts of each graph's rows
-    std::vector<u32> action_cursors;          // [num_schemas] the cursors of the merge of one action relation's runs
-    std::vector<u64> tally;                   // [R] tuples per relation in the slice (relation-major)
-    u64 entities = 0, tuples = 0, args = 0, targets = 0, history = 0;  // the slice's sizes
-    u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;  // the first row of each kind of invalid input
-    u64 narrow_goal = k_none, bad_goal_bits = k_none;
-    u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none;
-    u64 narrow_history = k_none, bad_history_bits = k_none, bad_history_count = k_none;
-    u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
-    std::vector<u64> effective;        // the subgoal levels of the row being counted or filled (effective_layers)
-    std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
-    // between the passes
-    u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice
-                                                                                                // starts in the batch
-    std::vector<u64> start_tuples, start_args;  // [R] where the slice starts in each relation (relation-major)
-    // pass two
-    std::vector<u64> run_tuples, run_args;  // [R] the running positions
-    std::vector<u32> tile_counts;           // [R, k_scan_tile] the counts of the tile being scanned
-};
 }  // namespace
-
-struct EncodeScratch::Impl
-{
-    // The input count() saw, so that fill() can refuse another one.
-    bool counted = false;
-    EncodeInput counted_input;
-    FlatSizes sizes;
-
-    std::vector<u32> arity;          // [R] the arguments per tuple of each relation
-    std::unique_ptr<u64[]> derived;  // [G, derived_stride] when the rows' derived words are evaluated here
-    u64 derived_capacity = 0;
-    u64 derived_stride = 0;
-    std::vector<Member> members;
-};
 
 EncodeScratch::EncodeScratch() : m_impl(std::make_unique<Impl>()) {}
 EncodeScratch::~EncodeScratch() = default;
@@ -123,7 +72,14 @@ bool same_input(const EncodeInput& a, const EncodeInput& b)
                x.derived_pos == y.derived_pos && x.derived_neg == y.derived_neg &&
                x.derived_stride == y.derived_stride && x.derived_words == y.derived_words;
     };
-    return same_layers(a.subgoals, b.subgoals) && same_layers(a.history.masks, b.history.masks) &&
+    const auto& ha = a.horizon;
+    const auto& hb = b.horizon;
+    return ha.nodes.data == hb.nodes.data && ha.nodes.rows == hb.nodes.rows && ha.nodes.words == hb.nodes.words &&
+           ha.nodes.stride == hb.nodes.stride && ha.nodes.numeric_words == hb.nodes.numeric_words &&
+           ha.graphs == hb.graphs && ha.node_offsets == hb.node_offsets && ha.edge_offsets == hb.edge_offsets &&
+           ha.edge_src == hb.edge_src && ha.edge_dst == hb.edge_dst && ha.edge_schema == hb.edge_schema &&
+           ha.edge_binding == hb.edge_binding && ha.label_width == hb.label_width &&
+           same_layers(a.subgoals, b.subgoals) && same_layers(a.history.masks, b.history.masks) &&
            a.history.dt == b.history.dt && a.history.count == b.history.count && a.states.data == b.states.data &&
            a.states.rows == b.states.rows && a.states.words == b.states.words &&
            a.states.stride == b.states.stride && a.states.numeric_words == b.states.numeric_words &&
@@ -469,96 +425,12 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         if constexpr (Layered)
             history += totals.history_steps;
     };
-    if (!p.relation_major)
-    {
-        const u32* graph_counts = m.cell_counts.empty() ? nullptr : m.cell_counts.data();
-        for (u64 g = lo; g < hi; ++g)
-        {
-            fill_one(g, graph_counts);
-            if (graph_counts)
-                graph_counts += p.cells_of<Layered>(detail::instance_view(p.view, p.instance_of(g)), g).count;
-        }
-        return;
-    }
-    m.run_tuples = m.start_tuples;
-    m.run_args = m.start_args;
-    m.tile_counts.resize(p.R * k_scan_tile);
-    const u32* cell_counts = m.cell_counts.data();
-    for (u64 first = lo; first < hi; first += k_scan_tile)
-    {
-        const u64 width = std::min(k_scan_tile, hi - first);
-        // the tile's counts, relation by relation (a relation without a cell in a graph has count 0)
-        std::fill(m.tile_counts.begin(), m.tile_counts.end(), 0u);
-        const u32* next = cell_counts;
-        for (u64 j = 0; j < width; ++j)
-        {
-            const u32 instance = p.instance_of(first + j);
-            const detail::CellList cells = p.cells_of<Layered>(detail::instance_view(p.view, instance), first + j);
-            for (u32 i = 0; i < cells.count; ++i)
-                m.tile_counts[cells.cells[i].relation * k_scan_tile + j] = next[i];
-            next += cells.count;
-        }
-        // the exclusive scan in segment order r * G + g, written in runs of `width` per relation
-        for (u32 r = 0; r < p.R; ++r)
-        {
-            I* offsets = out.relation_offsets + r * p.graphs + first;
-            I* arg_offsets = out.relation_arg_offsets + r * p.graphs + first;
-            const u32* counts = m.tile_counts.data() + r * k_scan_tile;
-            const u64 arity = p.s.arity[r];
-            u64 tuples = m.run_tuples[r];
-            u64 args = m.run_args[r];
-            if (m.tally[r] == 0)  // no graph of the slice has a tuple of the relation: the offsets do not advance
-            {
-                std::fill_n(offsets, width, static_cast<I>(tuples));
-                std::fill_n(arg_offsets, width, static_cast<I>(args));
-                continue;
-            }
-            for (u64 j = 0; j < width; ++j)
-            {
-                offsets[j] = static_cast<I>(tuples);
-                arg_offsets[j] = static_cast<I>(args);
-                tuples += counts[j];
-                args += counts[j] * arity;
-            }
-            m.run_tuples[r] = tuples;
-            m.run_args[r] = args;
-        }
-        const u32* graph_counts = cell_counts;
-        for (u64 j = 0; j < width; ++j)
-        {
-            fill_one(first + j, graph_counts);
-            graph_counts +=
-                p.cells_of<Layered>(detail::instance_view(p.view, p.instance_of(first + j)), first + j).count;
-        }
-        cell_counts = next;
-    }
+    const auto cells_of = [&](u64 g)
+    { return p.cells_of<Layered>(detail::instance_view(p.view, p.instance_of(g)), g); };
+    detail::fill_member<I>(m, {p.graphs, p.R, p.relation_major, p.s.arity.data()}, lo, hi, out.relation_offsets,
+                           out.relation_arg_offsets, fill_one, cells_of);
 }
 
-/// The members that encode a batch of `graphs` graphs: all of the pool for a large batch, fewer for a small one, one
-/// (the calling thread) for a batch under the grain.
-[[nodiscard]] u32 members_for(u64 graphs, const ThreadPool& pool) noexcept
-{
-    const u64 wanted = std::max<u64>(1, (graphs + k_graphs_per_member - 1) / k_graphs_per_member);
-    return static_cast<u32>(std::min<u64>(pool.size(), wanted));
-}
-
-/// Runs `f(t)` for the members [0, members) without allocating a closure: inline for one member, on the pool otherwise
-/// (a pool member beyond `members` has nothing to do).
-template<class F>
-void run(ThreadPool& pool, u32 members, const F& f)
-{
-    if (members == 1)
-    {
-        f(0);
-        return;
-    }
-    const std::function<void(u32)> job = [&f, members](u32 t)
-    {
-        if (t < members)
-            f(t);
-    };
-    pool.run(job);
-}
 }  // namespace
 
 std::shared_ptr<const FlatEncoder> FlatEncoder::create(rl::TaskTablePtr table, const FlatOptions& options)
@@ -567,7 +439,6 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(rl::TaskTablePtr table, c
         invalid("an encoder needs a task table");
     auto encoder = std::shared_ptr<FlatEncoder>(new FlatEncoder());
     encoder->m_schema = EncodingSchema::create(*table, options);
-    refuse_unsupported(options);
     encoder->m_context = EncodingContext::create(std::move(table), encoder->m_schema);
     return encoder;
 }
@@ -612,12 +483,20 @@ void FlatEncoder::check_layer_inputs(const EncodeInput& in) const
     }
 }
 
+u64 FlatEncoder::graphs_of(const EncodeInput& in) const noexcept
+{
+    return m_schema->has_horizon() ? in.horizon.graphs : in.states.rows;
+}
+
 FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const
 {
     const EncodingContext& context = *m_context;
     Scratch& s = scratch.impl();
     s.counted = false;
-    const IndexType index = m_schema->options().index;
+    if (m_schema->has_horizon())
+        return count_horizon(in, pool, scratch);
+    if (in.horizon.graphs != 0 || in.horizon.node_offsets || in.horizon.nodes.rows != 0)
+        invalid("a horizon is given, but the schema has no horizon mode");
     const bool relation_major = m_schema->options().layout == Layout::Relation;
     const u64 graphs = in.states.rows;
     const u32 R = static_cast<u32>(m_schema->num_relations());
@@ -755,52 +634,7 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
                 " are not in canonical order: strictly ascending in (schema, binding)");
 
     // 3. scan the members, in u64: where each starts in the batch and, relation-major, in every relation
-    u64 entities = 0, tuples = 0, args = 0, targets = 0, history = 0;
-    for (Member& m : s.members)
-    {
-        m.entity_start = entities;
-        m.tuple_start = tuples;
-        m.arg_start = args;
-        m.target_start = targets;
-        m.history_start = history;
-        entities += m.entities;
-        tuples += m.tuples;
-        args += m.args;
-        targets += m.targets;
-        history += m.history;
-    }
-    if (relation_major)
-    {
-        for (Member& m : s.members)
-        {
-            m.start_tuples.resize(R);
-            m.start_args.resize(R);
-        }
-        s.arity.resize(R);
-        u64 tuple_position = 0, arg_position = 0;
-        for (u32 r = 0; r < R; ++r)
-        {
-            s.arity[r] = m_schema->relation(r).arity;
-            for (Member& m : s.members)
-            {
-                m.start_tuples[r] = tuple_position;
-                m.start_args[r] = arg_position;
-                tuple_position += m.tally[r];
-                arg_position += m.tally[r] * s.arity[r];
-            }
-        }
-    }
-
-    FlatSizes sizes;
-    sizes.entities = entities;
-    sizes.tuples = tuples;
-    sizes.args = args;
-    sizes.targets = targets;
-    sizes.history = history;
-    const u64 limit = index_limit(index);
-    if (entities > limit || tuples > limit || args > limit || targets > limit || history > limit ||
-        graphs * R + 1 > limit || graphs + 1 > limit)
-        sizes.overflow |= k_overflow_index;
+    const FlatSizes sizes = detail::scan_members(s, *m_schema, graphs);
 
     s.sizes = sizes;
     s.counted = true;
@@ -823,7 +657,7 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         invalid("fill needs the thread pool of count()");
     const EncodingSchema& schema = *m_schema;
     const FlatOptions& options = schema.options();
-    const u64 graphs = in.states.rows;
+    const u64 graphs = graphs_of(in);
     if (!out.task_ids || !out.num_objects || !out.entity_offsets || !out.relation_offsets || !out.relation_arg_offsets)
         invalid("a destination array of the batch is null");
     if (sizes.args > 0 && !out.relation_args)
@@ -848,27 +682,32 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         (sizes.history > 0 && (!out.history_entity || !out.history_dt)))
         invalid(schema.has_history() ? "a history array is null, the schema stores them"
                                      : "the history arrays must be null, the schema has no history");
-    const bool evaluate = !in.derived && m_context->max_derived_words() > 0;
-    const detail::ContextView view = m_context->view();
-    const Pass pass{in,
-                    s,
-                    *m_context,
-                    view,
-                    graphs,
-                    members,
-                    static_cast<u32>(schema.num_relations()),
-                    options.layout == Layout::Relation,
-                    evaluate,
-                    in.actions ? u64{view.num_schemas} + 1 : 0};
-    run(pool, members,
-        [&pass, &out, wide = options.index == IndexType::I64](u32 t)
-        {
-            if (pass.layered)
-                wide ? fill_range<i64, true>(pass, out, t) : fill_range<i32, true>(pass, out, t);
-            else
-                wide ? fill_range<i64, false>(pass, out, t) : fill_range<i32, false>(pass, out, t);
-        });
-    const u64 cells = graphs * pass.R;
+    const u64 cells = graphs * schema.num_relations();
+    if (schema.has_horizon())
+        fill_horizon(in, sizes, out, pool, scratch);
+    else
+    {
+        const bool evaluate = !in.derived && m_context->max_derived_words() > 0;
+        const detail::ContextView view = m_context->view();
+        const Pass pass{in,
+                        s,
+                        *m_context,
+                        view,
+                        graphs,
+                        members,
+                        static_cast<u32>(schema.num_relations()),
+                        options.layout == Layout::Relation,
+                        evaluate,
+                        in.actions ? u64{view.num_schemas} + 1 : 0};
+        run(pool, members,
+            [&pass, &out, wide = options.index == IndexType::I64](u32 t)
+            {
+                if (pass.layered)
+                    wide ? fill_range<i64, true>(pass, out, t) : fill_range<i32, true>(pass, out, t);
+                else
+                    wide ? fill_range<i64, false>(pass, out, t) : fill_range<i32, false>(pass, out, t);
+            });
+    }
     auto close = [&]<class I>(I)
     {
         static_cast<I*>(out.entity_offsets)[graphs] = static_cast<I>(sizes.entities);
@@ -888,7 +727,7 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
 FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
                                    ThreadPool& pool, EncodeScratch& scratch) const
 {
-    if (in.states.rows > capacities.graphs)
+    if (graphs_of(in) > capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
     FlatSizes sizes = count(in, pool, scratch);
     if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
@@ -986,7 +825,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     if (sizes.overflow & k_overflow_index)
     {
         const IndexType index = m_schema->options().index;
-        const u64 graphs = in.states.rows;
+        const u64 graphs = graphs_of(in);
         const u64 R = m_schema->num_relations();
         detail::check_index_range(sizes.entities, index, "entities");
         detail::check_index_range(sizes.tuples, index, "tuples");
@@ -996,7 +835,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(graphs * R + 1, index, "relation cells");
         detail::check_index_range(graphs + 1, index, "graphs");
     }
-    Allocation allocation = allocate(in.states.rows, sizes.entities, sizes.args, sizes.targets, sizes.history);
+    Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history);
     fill(in, sizes, allocation.buffers, pool, scratch);
     return std::move(allocation.bundle);
 }
@@ -1005,13 +844,13 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
                                                                     const BatchShape& capacities, ThreadPool& pool,
                                                                     EncodeScratch& scratch, FlatSizes& sizes) const
 {
-    if (in.states.rows > capacities.graphs)
+    if (graphs_of(in) > capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
     sizes = count(in, pool, scratch);
     if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
         sizes.history > capacities.history)
         sizes.overflow |= k_overflow_capacity;
-    const u64 graphs = in.states.rows;
+    const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();
     Allocation allocation =
         allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history);

@@ -1129,6 +1129,24 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
                   std::string::npos)
             << e.what();
     }
+    // horizon relations, in every mode
+    for (const encoding::HorizonMode mode :
+         {encoding::HorizonMode::Full, encoding::HorizonMode::Delta, encoding::HorizonMode::Action})
+    {
+        encoding::FlatOptions horizon = test::encoder_options();
+        horizon.horizon.mode = mode;
+        try
+        {
+            cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, horizon));
+            ADD_FAILURE() << "the " << encoding::to_string(mode) << " horizon was accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
+                      std::string::npos)
+                << e.what();
+        }
+    }
     // subgoal and history relations
     {
         encoding::FlatOptions with_subgoals;

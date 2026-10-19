@@ -11,7 +11,10 @@ A batch stores no names. The naming rules, per entity role:
 - a history step is ``history:<dt>#<i>``, with the dt of the step and ``i`` its position among the graph's history
   steps, counted from 0; a history target is ``history:<dt>#<i>:[+](on c b)``, after the step and the literal of the
   history tuple it is the target of;
-- a predicate virtual node is ``predicate:<name>`` after the predicate of its key relation (``entity_ref``).
+- a predicate virtual node is ``predicate:<name>`` after the predicate of its key relation (``entity_ref``);
+- a state entity of a horizon graph is ``target:<k>``, with ``k`` its ``entity_ref``: the node's index in its graph (the
+  root is ``target:0``; under the ``exclude`` root policy the graph has no entity for the root, and the root's relations
+  are the plain ones).
 """
 
 import re
@@ -25,7 +28,7 @@ from mymyr.encoding._device import DeviceFlatBatch, _Host
 _TARGET_RELATION = re.compile(r"^\[([+-])\](.+?)(\[g\]|\[sg\]|\[ssg\]|\[sssg\]|\[hist\])$")
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 
-_OBJECT, _PREDICATE_VIRTUAL, _AUXILIARY = 0, 1, 8
+_OBJECT, _PREDICATE_VIRTUAL, _STATE, _AUXILIARY = 0, 1, 7, 8
 _ARGUMENT_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT = 0, 3, 4
 _SUBGOAL_TARGET_SLOT, _HISTORY_TARGET_SLOT, _HISTORY_SLOT = 5, 6, 7
 
@@ -156,6 +159,8 @@ def _names(encoder, batch, graph):
             names[i] = g.entity_role_names[_AUXILIARY]
         elif role == _PREDICATE_VIRTUAL:
             names[i] = f"predicate:{_base_predicate(g.names[ref])}"
+        elif role == _STATE:
+            names[i] = f"target:{ref}"
     if g.history_entities is not None:
         for step, (entity, dt) in enumerate(zip(g.history_entities.tolist(), g.history_dt.tolist())):
             names[entity - g.begin] = f"history:{dt}#{step}"

@@ -766,6 +766,8 @@ private:
 {
     if (!encoder)
         invalid("a stream needs an encoder");
+    if (encoder->schema().has_horizon())
+        invalid("a stream does not encode horizons: a horizon batch is built whole and encoded in one call");
     return *encoder;
 }
 

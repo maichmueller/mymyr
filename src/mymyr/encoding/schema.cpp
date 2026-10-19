@@ -213,7 +213,8 @@ void Catalog::build_horizon(u32 predicate, bool state_relation, bool top)
     if (state_relation)
     {
         add_root(state_lane(source.kind), key());
-        if (split)
+        // the static atoms are the root's alone: no node has a relation of them
+        if (split && changing)
             add_candidate(state_lane(source.kind), key(0, {}, {}, {}, true));
     }
     if (top)
@@ -246,26 +247,11 @@ void Catalog::build_horizon(u32 predicate, bool state_relation, bool top)
         }
     if (!delta)
         return;
-    // A delta horizon also lists the literals themselves: the atoms a node adds (+) and deletes (-) relative to its
-    // root, and the satisfaction of those literals.
-    for (i8 sign : {i8{1}, i8{-1}})
-    {
-        if (changing)
+    // A delta horizon also lists the atoms a node adds (+) and deletes (-) relative to its root, for the predicates that
+    // change. The goal literals they satisfy are the added-satisfaction relations above.
+    if (changing)
+        for (i8 sign : {i8{1}, i8{-1}})
             add_candidate(state_lane(source.kind), key(sign));
-        for (GoalDerivation derivation : o.goal_derivations.members())
-        {
-            if (derivation == GoalDerivation::Plain)
-                continue;
-            const bool added = derivation == GoalDerivation::AddedSatisfied || derivation == GoalDerivation::AddedUnsatisfied;
-            if (added && !changing)
-                continue;
-            const Key literal = key(sign, {}, derivation);
-            if (added)
-                add_candidate(Lane::GoalSatisfaction, literal);
-            else
-                add_root(Lane::GoalSatisfaction, literal);
-        }
-    }
 }
 
 void Catalog::build()
@@ -458,7 +444,10 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });
     schema->m_subgoals = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
-        { return (r.lane == Lane::Goal || r.lane == Lane::GoalDerivation) && r.level.value_or(0) > 0; });
+        {
+            return (r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction) &&
+                   r.level.value_or(0) > 0;
+        });
     const FlatOptions& o = schema->m_options;
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
                                   !o.predicate_virtual_nodes && !o.include_actions && !o.history &&
