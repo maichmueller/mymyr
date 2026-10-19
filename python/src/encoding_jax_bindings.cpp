@@ -444,6 +444,14 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
         const Call c = call_of(e, args, entities, targets, states, task_ids, derived, goal_pos, goal_neg,
                                goal_derived_pos, goal_derived_neg, rets, false);
         ++e.cpu_calls;
+        if (c.graphs == 0)  // the empty batch: zero offsets and sizes
+        {
+            for (usize k = 0; k < k_arrays; ++k)
+                if (c.arrays[k])
+                    std::memset(c.arrays[k], 0, c.bytes[k]);
+            std::memset(c.sizes, 0, sizeof(encoding::FlatSizes));
+            return;
+        }
         encoding::EncodeInput in;
         in.states = rl::StateBatchView{c.states.data, c.graphs, c.states.words, c.states.words, 0};
         in.task_ids = c.task_ids;
@@ -560,7 +568,7 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         out.arrays = buffers_of(c);
         out.capacities = shape;
         out.sizes = c.sizes;
-        d->encoder->encode(*d->held, reinterpret_cast<void*>(base + pad), c.scratch_bytes - pad, shape, in, out);
+        d->encoder->encode(*d->held, st, reinterpret_cast<void*>(base + pad), c.scratch_bytes - pad, shape, in, out);
     });
 }
 

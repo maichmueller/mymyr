@@ -303,6 +303,11 @@ public:
     /// with no other use of that scratch between them. Refresh preserves the held generation's scratch requirements.
     void encode(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                 const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
+    /// encode() on `stream` instead of the acquisition's stream, for a caller that holds one acquisition for every
+    /// stream it encodes on (an XLA custom call, which cannot acquire under capture). The caller orders the upload that
+    /// preceded the acquisition before the first launch on `stream` and every launch before the acquisition's release.
+    void encode(const EncodingAcquisition& context, cudaStream_t stream, void* scratch, u64 bytes, const BatchShape& shape,
+                const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
     void count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
     void fill(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,

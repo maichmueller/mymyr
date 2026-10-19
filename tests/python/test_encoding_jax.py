@@ -126,9 +126,9 @@ class Case:
         out = Case.__new__(Case)
         out.source, out.tasks, out.table = self.source, self.tasks, self.table
         pick = np.arange(n) % self.n
-        out.rows = np.ascontiguousarray(self.rows[pick].reshape(n, self.rows.shape[1]))
+        out.rows = np.ascontiguousarray(self.rows[pick])
         out.ids = None if self.ids is None else np.ascontiguousarray(self.ids[pick])
-        out.derived = None if self.derived is None else np.ascontiguousarray(self.derived[pick].reshape(n, -1))
+        out.derived = None if self.derived is None else np.ascontiguousarray(self.derived[pick])
         return out
 
 
@@ -323,7 +323,7 @@ def test_jit_equals_eager_and_the_exact_path_equals_the_host(cases):
 
 
 def test_lax_scan_encodes_every_step(cases):
-    case = cases["gripper"]
+    case = cases["gripper"].resized(60)
     encoder = encoding.FlatRelationEncoder(case.source, layout="relation", target_sources=("goal",))
     steps = 5
     per_step = 12
@@ -350,7 +350,7 @@ def test_lax_scan_encodes_every_step(cases):
 
 
 def test_vmap_encodes_each_batch_on_its_own(cases):
-    case = cases["gripper"]
+    case = cases["gripper"].resized(30)
     encoder = encoding.FlatRelationEncoder(case.source)
     caps = exact_capacities(host_encode(encoder, case))
     caps["graphs"] = 10
@@ -444,7 +444,8 @@ def test_a_jax_batch_has_the_accessors_of_a_host_batch(cases):
     caps = exact_capacities(host)
     batch = jax_encode(encoder, case, "cpu", capacities=caps)
     assert batch.num_graphs == host.num_graphs and batch.num_relations == host.num_relations
-    assert batch.schema.fingerprint == encoder.schema.fingerprint
+    assert batch.schema.num_relations == encoder.schema.num_relations
+    assert batch.as_dict()["schema_fingerprint"] == host.as_dict()["schema_fingerprint"]
     assert batch.implicit_entities and host.implicit_entities
     for name in ("relation_counts", "entity_role", "entity_ref", "goal_complete", "target_offsets"):
         with pytest.raises(AttributeError, match=f"this batch has no {name}"):
@@ -473,12 +474,12 @@ def test_a_compiled_function_outlives_every_reference_to_its_encoder(cases):
         del encoder
         gc.collect()
         same_batch(want, f(rows))  # the registry holds the encoder
+        assert _encoding_jax.calls(handle)["cuda" if platform == "cuda" else "cpu"] == 2
         ej.unregister(handle)
+        assert ej.registered(encoding.FlatRelationEncoder(case.source)) is None
         same_batch(want, f(rows))  # and so does the compiled function
         with pytest.raises(ValueError, match="no encoder is registered under handle"):
             f(rows[:5])  # a new trace looks the handle up
-        calls = _encoding_jax.calls(handle)
-        assert calls["cuda" if platform == "cuda" else "cpu"] >= 1
 
 
 # ------------------------------------------------------------------------------------------------ CUDA

@@ -612,7 +612,7 @@ namespace
 void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution, const DeviceEncodeInput& in,
                         const DeviceOutput& out, const LaunchConfig& launch) const
 {
-    const auto& [context, block, bytes, scratch_shape, layout] = execution;
+    const auto& [context, block, bytes, scratch_shape, layout, stream] = execution;
     DeviceGuard guard(m_ctx->device());
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
@@ -772,28 +772,31 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     shape.zero_bytes = add(k_flag_bytes, mul(entry, shape.scan_length));
     switch (phase)
     {
-    case Phase::Whole: check(detail::launch_encode(p, shape, context.stream()), "encoding kernels"); break;
-    case Phase::Count: check(detail::launch_count_sizes(p, shape, context.stream()), "encoding kernels (count)"); break;
-    case Phase::Fill: check(detail::launch_fill(p, shape, context.stream()), "encoding kernels (fill)"); break;
+    case Phase::Whole: check(detail::launch_encode(p, shape, stream), "encoding kernels"); break;
+    case Phase::Count: check(detail::launch_count_sizes(p, shape, stream), "encoding kernels (count)"); break;
+    case Phase::Fill: check(detail::launch_fill(p, shape, stream), "encoding kernels (fill)"); break;
     }
 }
 void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                            const LaunchConfig& launch) const
 {
     const auto& s = *work.m_state;
-    run(Phase::Whole, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
+    run(Phase::Whole, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, s.context.stream()}, in, out,
+        launch);
 }
 void DeviceEncoder::count(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                           const LaunchConfig& launch) const
 {
     const auto& s = *work.m_state;
-    run(Phase::Count, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
+    run(Phase::Count, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, s.context.stream()}, in, out,
+        launch);
 }
 void DeviceEncoder::fill(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                          const LaunchConfig& launch) const
 {
     const auto& s = *work.m_state;
-    run(Phase::Fill, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
+    run(Phase::Fill, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, s.context.stream()}, in, out,
+        launch);
 }
 
 void DeviceEncoder::encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream,
@@ -809,7 +812,17 @@ void DeviceEncoder::encode(const EncodingAcquisition& context, void* scratch, u6
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
     const auto layout = detail::scratch_layout(shape, context.m_facts->bounds, options().layout, schema().num_relations());
-    run(Phase::Whole, {context, scratch, bytes, shape, layout}, in, out, launch);
+    run(Phase::Whole, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
+}
+void DeviceEncoder::encode(const EncodingAcquisition& context, cudaStream_t stream, void* scratch, u64 bytes,
+                           const BatchShape& shape, const DeviceEncodeInput& in, const DeviceOutput& out,
+                           const LaunchConfig& launch) const
+{
+    DeviceGuard guard(m_ctx->device());
+    if (context.m_owner != m_context.get() || !context.m_facts)
+        invalid("acquire the context from this device encoder");
+    const auto layout = detail::scratch_layout(shape, context.m_facts->bounds, options().layout, schema().num_relations());
+    run(Phase::Whole, {context, scratch, bytes, shape, layout, stream}, in, out, launch);
 }
 void DeviceEncoder::count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
@@ -818,7 +831,7 @@ void DeviceEncoder::count(const EncodingAcquisition& context, void* scratch, u64
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
     const auto layout = detail::scratch_layout(shape, context.m_facts->bounds, options().layout, schema().num_relations());
-    run(Phase::Count, {context, scratch, bytes, shape, layout}, in, out, launch);
+    run(Phase::Count, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
 }
 void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
@@ -827,6 +840,6 @@ void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
     const auto layout = detail::scratch_layout(shape, context.m_facts->bounds, options().layout, schema().num_relations());
-    run(Phase::Fill, {context, scratch, bytes, shape, layout}, in, out, launch);
+    run(Phase::Fill, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
 }
 }  // namespace mymyr::cuda
