@@ -812,7 +812,7 @@ def test_encoders_still_pickle_and_free_their_device_state(cases):
     assert ref() is None
 
 
-def test_outputs_that_do_not_hold_the_graphs_are_refused_before_any_launch(cases, monkeypatch):
+def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
     dev = gpu()
     case = cases["gripper"]
     encoder = encoding.FlatRelationEncoder(case.source)
