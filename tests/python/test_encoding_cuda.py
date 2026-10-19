@@ -143,10 +143,6 @@ def exact_capacities(batch, factor=1):
     return {k: v * factor for k, v in sizes.items()}
 
 
-def host_sizes(sizes):
-    return sizes
-
-
 def fluent_goals(case, seed=3):
     """Random goal masks over the fluent slots of every row: (goal_pos, goal_neg) [N, W]."""
     rng = np.random.default_rng(seed)
