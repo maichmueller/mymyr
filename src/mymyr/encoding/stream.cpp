@@ -504,7 +504,7 @@ private:
 /// The batch of `in`, and for the capacity form its sizes. The working memory is the calling thread's, kept between
 /// calls, so that the first flush of a stream on a thread that has encoded before does not grow it again.
 std::shared_ptr<const rl::ArrayBundle> encode_rows(const FlatEncoder& encoder, const EncodeInput& in, ThreadPool& pool,
-                                                   const FlatCapacities* capacities, FlatSizes* sizes)
+                                                   const BatchShape* capacities, FlatSizes* sizes)
 {
     EncodeScratch& scratch = EncodeScratch::of_this_thread();
     return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes) : encoder.encode(in, pool, scratch);
@@ -566,7 +566,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool)
     return out;
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const FlatCapacities& capacities, FlatSizes& sizes)
+std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const BatchShape& capacities, FlatSizes& sizes)
 {
     std::lock_guard lock(m_impl->mutex);
     RowStore& store = m_impl->store;
@@ -931,7 +931,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool
     return encode_rows(*s.encoder, in, pool, nullptr, nullptr);
 }
 
-std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const FlatCapacities& capacities,
+std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const BatchShape& capacities,
                                                                 FlatSizes& sizes)
 {
     std::lock_guard lock(m_impl->mutex);

@@ -163,7 +163,7 @@ public:
     /// entity and group arrays) have the capacities' sizes. The arrays hold the batch in their first `sizes.entities` / `sizes.args` entries and are zero
     /// beyond; if `sizes.overflow` is set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
-                                                                         const FlatCapacities& capacities,
+                                                                         const BatchShape& capacities,
                                                                          ThreadPool& pool, EncodeScratch& scratch,
                                                                          FlatSizes& sizes) const;
 
@@ -179,7 +179,7 @@ public:
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
     /// returned sizes are true; if they overflow, no array of `out` is written. Entries of `out` past the sizes are
     /// left as they were. Reuses the buffers of `scratch`.
-    FlatSizes encode_into(const EncodeInput& in, const FlatCapacities& capacities, const FlatBuffers& out,
+    FlatSizes encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
                           ThreadPool& pool, EncodeScratch& scratch) const;
 
 private:

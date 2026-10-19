@@ -2,7 +2,7 @@
 // output.
 //
 //   mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W [--n 16384] [--rounds 20]
-//                               [--replays 10] [--device 0]
+//                               [--replays 10] [--device 0] [--secondary-problem P.pddl]
 //                               [--lanes 4|8|32] [--fill auto|thread|warp]
 //
 // FILE holds the state rows, little-endian u64 [rows, W]; they are tiled to --n graphs. For each of the graph-major and
@@ -13,6 +13,7 @@
 // reserved workspace, and whether the device's sizes equal the host encoder's.
 
 #include "mymyr/cuda/encoding.hpp"
+#include "../../cuda/src/encoding_scratch.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
 
@@ -43,7 +44,7 @@ namespace
 
 struct Args
 {
-    std::string domain, problem, rows;
+    std::string domain, problem, secondary_problem, rows;
     u32 words = 0;
     u64 n = 16384;
     u32 rounds = 20, replays = 10;
@@ -67,6 +68,8 @@ Args parse(int argc, char** argv)
             a.domain = value();
         else if (flag == "--problem")
             a.problem = value();
+        else if (flag == "--secondary-problem")
+            a.secondary_problem = value();
         else if (flag == "--rows")
             a.rows = value();
         else if (flag == "--words")
@@ -123,7 +126,7 @@ std::vector<u64> read_rows(const std::string& path, u32 words, u64 n)
 
 struct NodeCounts
 {
-    u32 kernels = 0, memsets = 0, others = 0;
+    u32 kernels = 0, memsets = 0, others = 0, thread_fills = 0, warp_fills = 0;
 };
 
 NodeCounts count_nodes(cudaGraph_t graph)
@@ -137,6 +140,17 @@ NodeCounts count_nodes(cudaGraph_t graph)
     {
         cudaGraphNodeType type;
         cuda::check(cudaGraphNodeGetType(node, &type), "cudaGraphNodeGetType");
+        if (type == cudaGraphNodeTypeKernel)
+        {
+            cudaKernelNodeParams params{};
+            cuda::check(cudaGraphKernelNodeGetParams(node, &params), "cudaGraphKernelNodeGetParams");
+            const char* symbol = nullptr;
+            cuda::check(cudaFuncGetName(&symbol, params.func), "cudaFuncGetName");
+            const std::string name(symbol);
+            const auto fill = name.find("fill_kernel");
+            if (fill != std::string::npos)
+                (name.find("Lb1E", fill) < name.find("Lb0E", fill) ? counts.warp_fills : counts.thread_fills) += 1;
+        }
         (type == cudaGraphNodeTypeKernel ? counts.kernels : type == cudaGraphNodeTypeMemset ? counts.memsets : counts.others) += 1;
     }
     return counts;
@@ -157,20 +171,20 @@ struct Session
     cudaGraph_t graph = nullptr;
     cudaGraphExec_t exec = nullptr;
     NodeCounts nodes;
-    cuda::ScratchLayout scratch;
+    cuda::detail::ScratchLayout scratch;
     u64 cells = 0;
     bool sizes_match = false;
 
     cuda::LaunchConfig launch;
 
-    Session(const cuda::ContextPtr& ctx, cudaStream_t stream, TaskPtr task, encoding::Layout l, const std::vector<u64>& rows,
+    Session(const cuda::ContextPtr& ctx, cudaStream_t stream, rl::TaskTablePtr table, encoding::Layout l, const std::vector<u64>& rows,
             u32 words, u64 n, const cuda::LaunchConfig& config)
         : layout(l), launch(config)
     {
         encoding::FlatOptions options;
         options.goal_derivations = {};
         options.layout = l;
-        host = encoding::FlatEncoder::create(rl::TaskTable::single(task), options);
+        host = encoding::FlatEncoder::create(std::move(table), options);
         if (host->context().max_derived_words() != 0)
             throw std::runtime_error("the task has derived atoms; the device encoder takes their words as input");
         // the host's sizes size the output
@@ -199,7 +213,7 @@ struct Session
         sizes_match = device_sizes.entities == host_sizes.entities && device_sizes.tuples == host_sizes.tuples &&
                       device_sizes.args == host_sizes.args && device_sizes.targets == host_sizes.targets &&
                       device_sizes.overflow == 0 && host_sizes.overflow == 0;
-        scratch = device->scratch_layout(shape);
+        scratch = cuda::detail::scratch_layout(shape, device->bounds(), l, host->schema().num_relations());
         cells = device->bounds().cells;
         // the captured encode
         work.emplace(device->acquire(stream));
@@ -263,11 +277,11 @@ void print_times(const char* name, const std::vector<double>& times)
 void print_layout(const char* name, const Session& s)
 {
     std::printf("\"%s\":{\"kernels\":%u,\"memsets\":%u,\"other_nodes\":%u,\"scratch_bytes\":%llu,\"cub_bytes\":%llu,"
-                "\"cells\":%llu,\"relations\":%llu,\"wide\":%s,\"output_bytes\":%llu,\"sizes_match\":%s,"
+                "\"thread_fills\":%u,\"warp_fills\":%u,\"cells\":%llu,\"relations\":%llu,\"wide\":%s,\"output_bytes\":%llu,\"sizes_match\":%s,"
                 "\"entities\":%llu,\"tuples\":%llu,\"args\":%llu,\"targets\":%llu}",
                 name, s.nodes.kernels, s.nodes.memsets, s.nodes.others,
                 static_cast<unsigned long long>(s.scratch.bytes), static_cast<unsigned long long>(s.scratch.scan_temp_bytes),
-                static_cast<unsigned long long>(s.cells), static_cast<unsigned long long>(s.scratch.relations),
+                s.nodes.thread_fills, s.nodes.warp_fills, static_cast<unsigned long long>(s.cells), static_cast<unsigned long long>(s.scratch.relations),
                 s.scratch.wide ? "true" : "false", static_cast<unsigned long long>(s.layout_of.sizes),
                 s.sizes_match ? "true" : "false", static_cast<unsigned long long>(s.host_sizes.entities),
                 static_cast<unsigned long long>(s.host_sizes.tuples), static_cast<unsigned long long>(s.host_sizes.args),
@@ -281,13 +295,19 @@ int main(int argc, char** argv)
     {
         const Args a = parse(argc, argv);
         const TaskPtr task = Task::create(*frontend::load_task(a.domain, a.problem));
-        const std::vector<u64> rows = read_rows(a.rows, a.words, a.n);
+        const auto table = a.secondary_problem.empty() ? rl::TaskTable::single(task) :
+            rl::TaskTable::create({task, Task::create(*frontend::load_task(a.domain, a.secondary_problem))});
+        const u32 words = std::max(a.words, table->words());
+        const auto raw = read_rows(a.rows, a.words, a.n);
+        std::vector<u64> rows(a.n * words, 0);
+        for (u64 g = 0; g < a.n; ++g)
+            std::copy_n(raw.data() + g * a.words, a.words, rows.data() + g * words);
         cuda::ContextOptions options;
         options.max_bytes = u64{3} << 30;
         const cuda::ContextPtr ctx = cuda::DeviceContext::create(a.device, options);
         cuda::Stream stream;
-        Session graph_major(ctx, stream, task, encoding::Layout::Graph, rows, a.words, a.n, a.launch);
-        Session relation_major(ctx, stream, task, encoding::Layout::Relation, rows, a.words, a.n, a.launch);
+        Session graph_major(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch);
+        Session relation_major(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch);
         std::vector<double> graph_times, relation_times, eager_times;
         for (u32 r = 0; r < a.rounds; ++r)
         {

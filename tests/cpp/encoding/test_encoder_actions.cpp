@@ -501,7 +501,7 @@ TEST(EncoderActions, LayoutsThreadsAndCapacitiesAgree)
         FlatSizes sizes;
         ThreadPool pool(3);
         EncodeScratch scratch;
-        const FlatCapacities capacities{single->find("entity_role")->elements() + 7, single->find("relation_args")->elements() + 5,
+        const BatchShape capacities{rows.size(), single->find("entity_role")->elements() + 7,
                                         single->find("relation_args")->elements() + 5, single->find("target_entity")->elements() + 3};
         const auto roomy = encoder->encode_capacity(input_of(rows, expanded.get()), capacities, pool, scratch, sizes);
         EXPECT_FALSE(sizes.overflowed());

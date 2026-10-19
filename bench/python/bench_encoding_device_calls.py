@@ -39,7 +39,7 @@ from bench_encoding_gpu import REPLAYS, load_task, make_encoder, padded_capaciti
 def capacities_of(encoder, rows):
     batch = encoder.encode(rows)
     return padded_capacities(
-        dict(entities=int(batch.entity_offsets[-1]), tuples=int(batch.relation_offsets[-1]),
+        dict(graphs=batch.num_graphs, entities=int(batch.entity_offsets[-1]),
              args=int(batch.relation_arg_offsets[-1]))
     )
 
@@ -72,8 +72,8 @@ def bench_task(key, n, rounds, data):
     handle = rt.register(encoder)
 
     def op(states):
-        return torch.ops.mymyr.encode_flat(handle, states, None, None, None, None, None, None, caps["entities"],
-                                           caps["tuples"], caps["args"], 0)
+        return torch.ops.mymyr.encode_flat(handle, states, None, None, None, None, None, None, caps["graphs"],
+                                           caps["entities"], caps["args"], 0)
 
     torch._dynamo.reset()  # a function compiled for another handle would retrace with symbolic handles and capacities
     compiled = torch.compile(lambda states: op(states), fullgraph=True, backend="eager")
@@ -118,7 +118,7 @@ def bench_task(key, n, rounds, data):
         for run in runs:
             run.times.append(run.once())
     rt.unregister(handle)
-    return dict(task=key, n=n, rounds=rounds, entities=caps["entities"] // n, tuples=caps["tuples"] // n,
+    return dict(task=key, n=n, rounds=rounds, entities=caps["entities"] // n, tuples=int(encoder.encode(rows).relation_offsets[-1]) // n,
                 us_per_state={r.name: dict(min=min(r.times), median=statistics.median(r.times)) for r in runs})
 
 

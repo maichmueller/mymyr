@@ -7,16 +7,16 @@
 
 namespace mymyr::encoding
 {
-/// The capacities of the variable-size arrays of a batch, for the capacity form: how many entities (the entries of the
-/// entity arrays), tuples, tuple arguments (the entries of relation_args) and targets (the entries of target_entity and
-/// target_group) the caller's buffers hold. The arrays whose size follows from the number of graphs and relations are
-/// always large enough by contract (see FlatBuffers).
-struct FlatCapacities
+/// Capacities of the arrays of a batch: graphs bound the per-graph and per-cell arrays, entities the entity arrays,
+/// args the entries of relation_args, and targets the target_entity and target_group arrays. Tuple counts have no
+/// separate capacity because every tuple has at least one argument and no array is indexed by tuple alone.
+struct BatchShape
 {
+    u64 graphs = 0;
     u64 entities = 0;
-    u64 tuples = 0;
     u64 args = 0;
     u64 targets = 0;
+    [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
 /// Flags of FlatSizes::overflow.

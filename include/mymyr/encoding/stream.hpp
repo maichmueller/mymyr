@@ -64,7 +64,7 @@ public:
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);
     /// The capacity form (FlatEncoder::encode_capacity): the rows are dropped iff the batch fits (sizes.overflow == 0),
     /// so that a flush that overflowed can be repeated with larger capacities.
-    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const FlatCapacities& capacities,
+    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const BatchShape& capacities,
                                                                FlatSizes& sizes);
 
 private:
@@ -107,7 +107,7 @@ public:
     /// row of indices()[j]. The rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);
     /// The capacity form (FlatEncoder::encode_capacity). The rows are kept.
-    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const FlatCapacities& capacities,
+    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const BatchShape& capacities,
                                                                FlatSizes& sizes);
 
 private:

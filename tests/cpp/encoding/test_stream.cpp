@@ -386,13 +386,13 @@ TEST(FlatStream, TheCapacityFormDropsTheRowsOnlyWhenTheBatchFits)
     stream.append(rows.input(true, true));
     ThreadPool one(1);
     FlatSizes sizes;
-    const FlatCapacities small{1, 1, 1, 1};
+    const BatchShape small{50, 1, 1, 1};
     std::ignore = stream.flush(one, small, sizes);
     EXPECT_TRUE(sizes.overflowed());
     EXPECT_EQ(stream.size(), 50u);
     FlatSizes true_sizes;
     EncodeScratch scratch;
-    const FlatCapacities roomy{sizes.entities + 5, sizes.tuples + 5, sizes.args + 5, sizes.targets + 5};
+    const BatchShape roomy{50, sizes.entities + 5, sizes.args + 5, sizes.targets + 5};
     const auto reference = encoder->encode_capacity(rows.input(true, true), roomy, one, scratch, true_sizes);
     const auto fitted = stream.flush(one, roomy, sizes);
     EXPECT_FALSE(sizes.overflowed());

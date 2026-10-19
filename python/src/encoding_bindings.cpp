@@ -507,28 +507,28 @@ nb::object batch_array(const PyFlatBatch& batch, const char* name)
 using PoolArg = Arg<PyPool>;
 using CapacitiesArg = std::optional<nb::typed<nb::dict, std::string, std::uint64_t>>;
 
-encoding::FlatCapacities capacities_of(const nb::dict& value, bool has_targets)
+encoding::BatchShape capacities_of(const nb::dict& value, bool has_targets)
 {
-    encoding::FlatCapacities out;
-    bool entities = false, tuples = false, args = false, targets = false;
+    encoding::BatchShape out;
+    bool entities = false, graphs = false, args = false, targets = false;
     for (auto [key, item] : value)
     {
         const std::string name = text_of(key, "capacities key");
         if (name == "entities")
             out.entities = int_arg<u64>(item, "capacities['entities']"), entities = true;
-        else if (name == "tuples")
-            out.tuples = int_arg<u64>(item, "capacities['tuples']"), tuples = true;
+        else if (name == "graphs")
+            out.graphs = int_arg<u64>(item, "capacities['graphs']"), graphs = true;
         else if (name == "args")
             out.args = int_arg<u64>(item, "capacities['args']"), args = true;
         else if (name == "targets")
             out.targets = int_arg<u64>(item, "capacities['targets']"), targets = true;
         else
             throw nb::value_error(("mymyr: encoding: capacities has the unknown key '" + name +
-                                   "'; the keys are 'entities', 'tuples', 'args' and 'targets'")
+                                   "'; the keys are 'entities', 'graphs', 'args' and 'targets'")
                                       .c_str());
     }
-    if (!(entities && tuples && args))
-        throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'tuples' and 'args'");
+    if (!(entities && graphs && args))
+        throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'graphs' and 'args'");
     if (!targets && has_targets)
         throw nb::value_error("mymyr: encoding: the schema has targets: capacities needs the key 'targets' as well");
     return out;
@@ -719,7 +719,7 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
                 .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,
                                 threads_in, pool_in, capacities_in ? nb::object(*capacities_in) : nb::none()));
     const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::FlatCapacities> capacities =
+    const std::optional<encoding::BatchShape> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema().has_targets()))
                       : std::nullopt;
     ImportedRows rows;
@@ -834,7 +834,7 @@ PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads
 {
     PyFlatEncoder& encoder = self.owner();
     const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::FlatCapacities> capacities =
+    const std::optional<encoding::BatchShape> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, encoder.encoder->schema().has_targets()))
                       : std::nullopt;
     PyFlatBatch output;
@@ -1011,7 +1011,7 @@ void bind_encoding(nb::module_& parent)
              "hardware thread; a batch of 1024 graphs or fewer is encoded on the calling thread); the encoder keeps "
              "one pool of that size, rebuilt when the count changes. pool: a mymyr.rl.ThreadPool to use instead (it "
              "takes precedence over threads; one batch at a time runs on it). The result does not depend on either. "
-             "capacities: a dict with the keys 'entities', 'tuples', 'args' (and 'targets' with target_sources); the "
+             "capacities: a dict with the keys 'graphs', 'entities', 'args' (and 'targets' with target_sources); the "
              "batch then has relation_args, the entity arrays and the target arrays of exactly the capacities' sizes "
              "(the first sizes['entities'] / sizes['args'] / sizes['targets'] entries hold the encoding, the rest is "
              "zero) and `sizes` reports the true sizes. A batch that does not fit its "

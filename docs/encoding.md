@@ -74,11 +74,12 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   `os.fork()` the child makes its own.
 - **`pool`:** a `mymyr.rl.ThreadPool` that you hold, like `rl.expand`'s: it is used instead of `threads` and shared by
   the calls that name it (one batch runs on it at a time).
-- **`capacities`:** `None` (default) sizes every array to the batch. A dict with the keys `entities`, `tuples` and
+- **`capacities`:** `None` (default) sizes every array to the batch. A dict with the keys `graphs`, `entities` and
   `args` (and `targets` when the schema has targets) gives the capacity of the variable-size arrays instead:
   `entity_role` and `entity_ref` have `entities` entries, `relation_args` has `args` entries, `target_entity` and
-  `target_group` have `targets` entries; the offset arrays keep their sizes (`G + 1`, `G * R + 1`) and `tuples`
-  bounds the total number of tuples. The batch fills the first entries of each array and the rest is zero, so batches
+  `target_group` have `targets` entries; the offset arrays keep their sizes (`G + 1`, `G * R + 1`) and `graphs`
+  bounds the number of input rows. Exceeding the graph capacity raises before encoding; tuple counts have no
+  separate capacity because every tuple has at least one argument. The batch fills the first entries of each array and the rest is zero, so batches
   of different sizes share array shapes (for example under `jax.jit`). A batch that does not fit (a capacity too small,
   or an index type too narrow) leaves every array zero and sets `batch.sizes['overflow']`; `sizes['capacity_overflow']`
   and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']` and `['targets']` are the
@@ -346,7 +347,7 @@ assert batch.relation_args.is_cuda and batch.num_graphs == 2
 assert np.array_equal(batch.as_dict("numpy")["relation_args"], encoder.encode(rows).relation_args)
 
 # with capacities nothing waits for the device: the arrays have the capacities' sizes
-capacities = dict(entities=256, tuples=1024, args=2048)
+capacities = dict(graphs=2, entities=256, args=2048)
 fixed = encoder.encode(device_rows, capacities=capacities)
 assert fixed.relation_args.shape == (2048,)
 assert not fixed.sizes["overflow"]                        # reads the sizes: waits for the device
@@ -369,7 +370,7 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   batch on the stream, copies the five sizes to the host and waits for them (the only host wait of the call), allocates
   exact arrays and fills them. A batch that needs more indices than `int32` holds raises `OverflowError`; use
   `index_dtype='int64'`.
-- **No wait with capacities.** With `capacities=dict(entities=, tuples=, args=, targets=)` (`targets` only with target
+- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=)` (`targets` only with target
   sources) every variable-size array is allocated at its capacity, zero-filled, and the kernels write the true sizes into
   `batch.device_sizes` (an `int64` `[5]` tensor: entities, tuples, args, targets and the overflow flags, 1 for a
   capacity, 2 for the index type, 4 for an invalid row). The call never waits and can be captured in a CUDA graph. A batch
@@ -389,7 +390,7 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 ### The torch op
 
 `torch.ops.mymyr.encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
-entities, tuples, args, targets)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs
+graphs, entities, args, targets)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs
 (`import mymyr.rl.torch` registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors
 are as above (`None` for an input that is absent) and the four ints are the capacities (`targets` 0 without target
 sources). It returns the list of 14 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the
@@ -485,7 +486,7 @@ batch against the contract. `encode(in, pool, scratch)` takes a `ThreadPool` (th
 `ceil(graphs / k_graphs_per_member)` of its members, on the calling thread alone for a small batch, byte-identically for
 any pool) and a reusable `EncodeScratch`. `count(in, pool, scratch)` returns the `FlatSizes` of a batch (entities,
 tuples, args, targets); `fill(in, sizes, buffers, pool, scratch)` then writes it into caller-provided `FlatBuffers`, and
-`encode_into(in, capacities, buffers, pool, scratch)` does both within `FlatCapacities`, reporting `overflow` in the
+`encode_into(in, capacities, buffers, pool, scratch)` does both within `BatchShape{graphs, entities, args, targets}`, reporting `overflow` in the
 sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scratch, sizes)` returns a bundle whose
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The host encoder
 runs on the CPU.
@@ -493,7 +494,7 @@ runs on the CPU.
 `mymyr/cuda/encoding.hpp`, linked with `mymyr::cuda`, has the [device encoder](#encoding-on-the-device):
 `cuda::DeviceEncoder(context, encoder)` uploads the encoder's context, `reserve` and `acquire` give an
 `EncodingWorkspace` per stream, and `encode(workspace, in, out)` encodes device rows within the capacities of `out`
-(no allocation, no synchronization, capturable in a CUDA graph). `count(workspace, in, sizes)` followed by
+(no allocation, no synchronization, capturable in a CUDA graph). `count(workspace, in, out)` followed by
 `fill(workspace, in, out)` is the same encoding in two steps for a caller that sizes its outputs by the batch: the
 count writes the `FlatSizes` of the rows to device memory, the caller waits for them and allocates, and the fill writes
 the arrays.
@@ -503,3 +504,26 @@ and `flush(pool)` (or `flush(pool, capacities, sizes)`), and `FlatMutableStream(
 `append(indices, input)`, `update(indices, input)`, `remove(indices)`, `contains(index)`, `indices()` and the same
 `flush`. They throw `std::invalid_argument` for invalid rows or indices and `std::out_of_range` for an index that is not
 held; their methods take a mutex, and a flush encodes with the calling thread's `EncodeScratch`, which it keeps between calls.
+
+The host and device capacity forms use `encoding::BatchShape`. `DeviceOutput::capacities.graphs` bounds all
+per-graph and per-cell destinations; `encode`, `count` and `fill` reject a larger input before enqueuing work.
+For runtimes that own their scratch, `DeviceEncoder::scratch_bytes(shape)` reports the required byte count. Acquire
+the context with `device.context().acquire(stream)` outside capture, then call
+`encode(acquisition, scratch, bytes, shape, in, out)` (or the corresponding `count` and `fill` forms). The scratch
+address is aligned to 256 bytes. Keep the acquisition and buffers alive through the last captured replay, and use
+separate scratch for concurrent calls. A workspace owns the same scratch and delegates to the same implementation.
+The scratch layout and workspace storage are private.
+
+Automatic device launches choose a width class from each instance's own word count, cell count and argument bound.
+A graph-major row uses a thread up to 8 words, 128 cells and 128 arguments; relation-major uses the same word and cell
+limits and up to 1,024 arguments. Wider work uses a warp. Count starts with four lanes and tries eight or 32 if its
+shared memory does not fit. The shared-memory budget includes static kernel storage. Class launches share scans in
+batch order, so a launch permutation changes the workers assigned to graphs and preserves every output position.
+
+`bench/python/bench_encoding_gpu.py --mixed-widths --device-bench PATH` also measures small rows in a table containing
+both small and wide instances. The C++ driver accepts `--secondary-problem PATH` for that table and reports the
+captured thread and warp fill launches.
+
+`scratch_bytes(acquisition, shape)` sizes scratch for that acquired generation. Its bounds, launch classes and derived
+word requirements remain attached to the acquisition across refreshes. A split count/fill uses the same acquisition,
+scratch address and shape in both calls; a refresh between them preserves that layout.

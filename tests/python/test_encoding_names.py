@@ -214,12 +214,12 @@ def test_batches_of_the_capacity_form_are_named_and_overflowed_ones_refused():
     states = walk(task, steps=4, walks=1)
     exact = encoder.encode(states)
     sizes = exact.as_dict()
-    roomy = {"entities": int(exact.entity_offsets[-1]) + 20, "tuples": 10_000, "args": 10_000, "targets": 100}
+    roomy = {"entities": int(exact.entity_offsets[-1]) + 20, "graphs": len(states), "args": 10_000, "targets": 100}
     padded = encoder.encode(states, capacities=roomy)
     assert not padded.sizes["overflow"]
     for graph in range(len(states)):
         assert encoder.entity_names(padded, graph) == encoder.entity_names(exact, graph)
-    overflowed = encoder.encode(states, capacities={"entities": 1, "tuples": 1, "args": 1, "targets": 1})
+    overflowed = encoder.encode(states, capacities={"entities": 1, "graphs": len(states), "args": 1, "targets": 1})
     with pytest.raises(ValueError, match="mymyr: encoding: the batch overflowed"):
         encoder.entity_names(overflowed, 0)
     assert sizes["num_graphs"] == len(states)
