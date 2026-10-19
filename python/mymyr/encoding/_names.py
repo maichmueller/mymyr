@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from mymyr._core._encoding import FlatBatch
+from mymyr.encoding._device import DeviceFlatBatch, _Host
 
 _TARGET_RELATION = re.compile(r"^\[([+-])\](.+?)(\[g\]|\[sg\]|\[ssg\]|\[sssg\]|\[hist\])$")
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
@@ -59,9 +60,18 @@ def _tasks_of(encoder):
     return list(tasks) if tasks is not None else [table]
 
 
+def _host(batch, graph):
+    """A device graph as host arrays (waits for that graph), or a host batch and its graph unchanged."""
+    if isinstance(batch, DeviceFlatBatch):
+        return _Host(batch, int(graph)), 0
+    return batch, graph
+
+
 def _check(encoder, batch, graph):
-    if not isinstance(batch, FlatBatch):
-        raise TypeError(f"mymyr: encoding: batch must be a FlatBatch, not {type(batch).__name__}")
+    if not isinstance(batch, (FlatBatch, _Host)):
+        raise TypeError(
+            f"mymyr: encoding: batch must be a FlatBatch or a DeviceFlatBatch, not {type(batch).__name__}"
+        )
     if batch.schema.schema_fingerprint != encoder.schema_fingerprint:
         raise ValueError("mymyr: encoding: the batch was encoded with another schema than this encoder's")
     sizes = batch.sizes
@@ -70,6 +80,14 @@ def _check(encoder, batch, graph):
     graph = int(graph)
     if not 0 <= graph < batch.num_graphs:
         raise IndexError(f"mymyr: encoding: graph {graph} is out of range for a batch of {batch.num_graphs} graphs")
+    # tables over one domain share the schema, so the batch's instance must be one of this encoder's table
+    tasks = _tasks_of(encoder)
+    task_id = int(np.asarray(batch.task_ids)[graph])
+    if not 0 <= task_id < len(tasks) or int(np.asarray(batch.num_objects)[graph]) != len(tasks[task_id].objects):
+        raise ValueError(
+            f"mymyr: encoding: graph {graph} of the batch is not an instance of this encoder's table (instance "
+            f"{task_id} has {int(np.asarray(batch.num_objects)[graph])} objects in the batch)"
+        )
     return graph
 
 
@@ -173,12 +191,15 @@ def _names(encoder, batch, graph):
 
 def entity_names(encoder, batch, graph):
     """The names of the entities of graph ``graph`` of ``batch`` in entity order (see the module's naming rules)."""
+    batch, graph = _host(batch, graph)
     graph = _check(encoder, batch, graph)
     return _names(encoder, batch, graph)[1]
 
 
 def describe(encoder, batch, graph):
     """A GraphDescription of graph ``graph`` of ``batch``: its entities and its relations' tuples by name."""
+    original_graph = int(graph)
+    batch, graph = _host(batch, graph)
     graph = _check(encoder, batch, graph)
     g, names = _names(encoder, batch, graph)
     entities = tuple((g.entity_role_names[int(role)], name) for role, name in zip(g.role.tolist(), names))
@@ -187,4 +208,4 @@ def describe(encoder, batch, graph):
         rows = g.tuples(relation)
         if len(rows):
             relations[name] = tuple(tuple(names[int(e)] for e in row) for row in rows)
-    return GraphDescription(graph, g.task_id, entities, relations)
+    return GraphDescription(original_graph, g.task_id, entities, relations)

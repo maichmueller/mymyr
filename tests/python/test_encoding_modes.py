@@ -186,14 +186,17 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
     assert expected.sizes is None
     exact = {
         "entities": int(expected.entity_offsets[-1]),
-        "tuples": int(expected.relation_offsets[-1]),
+        "graphs": expected.num_graphs,
         "args": int(expected.relation_arg_offsets[-1]),
     }
     for threads in (1, 4):
         batch = encoder.encode(states, capacities=exact, threads=threads)
-        assert batch.sizes == {**exact, "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False}
+        assert batch.sizes == {
+            "entities": exact["entities"], "tuples": int(expected.relation_offsets[-1]), "args": exact["args"],
+            "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False, "invalid_input": False,
+        }
         same_arrays(batch, expected)
-        roomy = {"entities": exact["entities"] + 9, "tuples": exact["tuples"], "args": exact["args"] + 13}
+        roomy = {"entities": exact["entities"] + 9, "graphs": exact["graphs"], "args": exact["args"] + 13}
         batch = encoder.encode(states, capacities=roomy, threads=threads)
         assert batch.sizes["overflow"] is False
         assert batch.relation_args.shape == (roomy["args"],)
@@ -202,11 +205,11 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
         assert np.array_equal(batch.entity_role[: exact["entities"]], expected.entity_role)
         assert not batch.entity_role[exact["entities"] :].any() and not batch.entity_ref[exact["entities"] :].any()
         assert np.array_equal(batch.relation_offsets, expected.relation_offsets)
-        for short in ({**exact, "entities": exact["entities"] - 1}, {**exact, "tuples": exact["tuples"] - 1},
-                      {**exact, "args": exact["args"] - 1}, {"entities": 0, "tuples": 0, "args": 0}):
+        for short in ({**exact, "entities": exact["entities"] - 1},
+                      {**exact, "args": exact["args"] - 1}, {"graphs": len(states), "entities": 0, "args": 0}):
             batch = encoder.encode(states, capacities=short, threads=threads)
             assert batch.sizes["overflow"] is True and batch.sizes["index_overflow"] is False
-            assert {k: batch.sizes[k] for k in exact} == exact  # the true sizes
+            assert {k: batch.sizes[k] for k in ("entities", "args")} == {k: exact[k] for k in ("entities", "args")}
             assert batch.relation_args.shape == (short["args"],)
             for key, value in batch.as_dict().items():
                 if isinstance(value, np.ndarray):
@@ -216,12 +219,12 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
 def test_capacities_of_an_empty_batch_and_bad_capacities():
     task = text_task("gripper__prob05")
     encoder = encoder_of(task)
-    empty = encoder.encode(np.zeros((0, task.words), np.uint64), capacities={"entities": 0, "tuples": 0, "args": 0})
+    empty = encoder.encode(np.zeros((0, task.words), np.uint64), capacities={"graphs": 0, "entities": 0, "args": 0})
     assert empty.num_graphs == 0 and empty.sizes["overflow"] is False
     state = task.initial_state
     for bad, error in (([1, 2, 3], TypeError), ({"entities": 1}, ValueError),
-                       ({"entities": 1, "tuples": 1, "args": 1, "extra": 1}, ValueError),
-                       ({"entities": -1, "tuples": 1, "args": 1}, (ValueError, OverflowError))):
+                       ({"entities": 1, "graphs": 1, "args": 1, "extra": 1}, ValueError),
+                       ({"entities": -1, "graphs": 1, "args": 1}, (ValueError, OverflowError))):
         with pytest.raises(error):
             encoder.encode(state, capacities=bad)
 
@@ -230,7 +233,7 @@ def test_a_capacity_overflow_is_an_overflow_with_its_detail():
     task = text_task("blocks__probBLOCKS-8-0")
     states = walk(task, steps=10, walks=1)
     encoder = encoder_of(task)
-    zero = encoder.encode(states, capacities={"entities": 0, "tuples": 0, "args": 0})
+    zero = encoder.encode(states, capacities={"graphs": len(states), "entities": 0, "args": 0})
     assert zero.sizes["overflow"] and zero.sizes["capacity_overflow"] and not zero.sizes["index_overflow"]
 
 
@@ -295,3 +298,32 @@ def test_a_forked_child_encodes_with_the_threads_of_its_parent():
             os._exit(status)
     _, wait_status = os.waitpid(child_id, 0)
     assert os.waitstatus_to_exitcode(wait_status) == 0
+
+
+def test_graph_capacity_is_checked_before_encoding():
+    task = text_task("blocks__probBLOCKS-8-0")
+    states = np.asarray(task.encode([task.initial_state] * 2))
+    encoder = encoder_of(task)
+    with pytest.raises(ValueError, match="more graphs than the output capacity"):
+        encoder.encode(states, capacities={"graphs": 1, "entities": 100, "args": 1000})
+
+
+def test_cpu_dlpack_device_takes_precedence_over_a_cuda_interface_descriptor():
+    task = text_task("gripper__prob05")
+    encoder = encoder_of(task)
+    rows = np.asarray(task.encode([task.initial_state]))
+
+    class Array:
+        def __dlpack_device__(self):
+            return rows.__dlpack_device__()
+
+        def __dlpack__(self, **kwargs):
+            return rows.__dlpack__(**kwargs)
+
+        @property
+        def __cuda_array_interface__(self):
+            raise AttributeError("host memory has no CUDA array interface")
+
+    batch = encoder.encode(Array())
+    assert isinstance(batch, encoding.FlatBatch)
+    np.testing.assert_array_equal(batch.relation_args, encoder.encode(rows).relation_args)

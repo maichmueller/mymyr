@@ -7,17 +7,18 @@
 
 namespace mymyr::encoding
 {
-/// The capacities of the variable-size arrays of a batch, for the capacity form: how many entities (the entries of the
-/// entity arrays), tuples, tuple arguments (the entries of relation_args), targets (the entries of target_entity and
-/// target_group) and history steps (the entries of history_entity and history_dt) the caller's buffers hold. The arrays
-/// whose size follows from the number of graphs and relations are always large enough by contract (see FlatBuffers).
-struct FlatCapacities
+/// Capacities of the arrays of a batch: graphs bound the per-graph and per-cell arrays, entities the entity arrays,
+/// args the entries of relation_args, targets the target_entity and target_group arrays and history the history_entity
+/// and history_dt arrays. Tuple counts have no separate capacity because every tuple has at least one argument and no
+/// array is indexed by tuple alone.
+struct BatchShape
 {
+    u64 graphs = 0;
     u64 entities = 0;
-    u64 tuples = 0;
     u64 args = 0;
     u64 targets = 0;
     u64 history = 0;
+    [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
 /// Flags of FlatSizes::overflow.
@@ -28,7 +29,8 @@ inline constexpr u32 k_overflow_input = 4;     // a row is invalid: a task id ou
                                                // calls report it here, host calls throw
 
 /// The true sizes of a batch (not clipped to any capacity) and whether the batch can be written. A POD, so that a
-/// device call can return it in the same form.
+/// device call can return it in the same form; its six 64-bit words are entities, tuples, args, targets, history
+/// and the overflow flags, and no byte of it is padding.
 struct FlatSizes
 {
     u64 entities = 0;
@@ -37,8 +39,10 @@ struct FlatSizes
     u64 targets = 0;
     u64 history = 0;
     u32 overflow = 0;  // k_overflow_* flags; 0: the batch fits
+    u32 reserved = 0;  // always 0: the flags fill a 64-bit word
     [[nodiscard]] bool overflowed() const noexcept { return overflow != 0; }
 };
+static_assert(sizeof(FlatSizes) == 6 * sizeof(u64));
 
 /// The destination arrays of a batch of G graphs and R relations, typed by the index type of the options (int32 or
 /// int64). The caller owns them. Arrays of size G, G + 1, G * R or G * R + 1 must have that size; relation_args,

@@ -602,3 +602,6 @@ def test_generated_native_encoding_stubs_are_typed():
     assert "def relation_counts(self) -> Any" in source
     assert "def as_dict(self, framework:" in source and "-> dict[str, Any]" in source
     assert ": object" not in source and "-> object" not in source
+    assert "-> FlatBatch | mymyr._typing.DeviceFlatBatch:" in source
+    assert "def reserve_device(self, graphs: int, *, device: Any | None = None, stream: int | " in source
+    assert "def release_device(self, *, device: Any | None = None, stream: int | " in source

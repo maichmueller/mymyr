@@ -773,7 +773,7 @@ TEST(Horizon, CapacityForm)
         const auto exact = encoder->encode(h.input(), pool, scratch);
         const FlatSizes sizes = encoder->count(h.input(), pool, scratch);
         EXPECT_EQ(sizes.targets, h.num_nodes());  // every node is a candidate under `include`
-        FlatCapacities capacities{sizes.entities + 8, sizes.tuples, sizes.args + 16, sizes.targets + 3, 0};
+        BatchShape capacities{h.graphs() + 2, sizes.entities + 8, sizes.args + 16, sizes.targets + 3, 0};
         FlatSizes reported;
         const auto padded = encoder->encode_capacity(h.input(), capacities, pool, scratch, reported);
         EXPECT_EQ(reported.overflow, 0u);
@@ -790,6 +790,10 @@ TEST(Horizon, CapacityForm)
             EXPECT_TRUE(std::all_of(bytes, bytes + info.elements() * rl::dtype_bytes(info.dtype), [](u8 b) { return b == 0; }))
                 << info.name;
         }
+        // the graphs of the capacity count horizon graphs, not their nodes
+        capacities.args = sizes.args;
+        capacities.graphs = h.graphs() - 1;
+        EXPECT_THROW((void)encoder->encode_capacity(h.input(), capacities, pool, scratch, reported), std::invalid_argument);
         (void)exact;
     }
 }

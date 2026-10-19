@@ -210,16 +210,19 @@ def test_nodes_may_be_a_list_of_states(blocks):
 def test_the_capacity_form(blocks):
     _, view = horizon_of(blocks, depth=1, max_children=3)
     encoder = encoder_of(blocks)
-    exact = encoder.encode(view, capacities={"entities": 10_000, "tuples": 10_000, "args": 100_000, "targets": 1000})
+    exact = encoder.encode(view, capacities={"graphs": 4, "entities": 10_000, "args": 100_000, "targets": 1000})
     sizes = exact.sizes
     assert not sizes["overflow"] and sizes["targets"] == 4
     plain = encoder.encode(view)
     assert plain.sizes is None
     assert np.array_equal(np.asarray(plain.relation_args), np.asarray(exact.relation_args)[: sizes["args"]])
-    small = encoder.encode(view, capacities={"entities": 3, "tuples": 3, "args": 3, "targets": 1})
+    small = encoder.encode(view, capacities={"graphs": 1, "entities": 3, "args": 3, "targets": 1})
     assert small.sizes["overflow"] and small.sizes["capacity_overflow"]
     with pytest.raises(ValueError, match="needs the key 'targets'"):
-        encoder.encode(view, capacities={"entities": 1, "tuples": 1, "args": 1})
+        encoder.encode(view, capacities={"graphs": 1, "entities": 1, "args": 1})
+    # the graphs of the capacities count horizons: the view has one graph of four node rows
+    with pytest.raises(ValueError, match="more graphs than the output capacity"):
+        encoder.encode(view, capacities={"graphs": 0, "entities": 1, "args": 1, "targets": 1})
 
 
 def test_a_per_graph_goal_replaces_the_instances(blocks):

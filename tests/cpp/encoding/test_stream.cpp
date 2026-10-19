@@ -9,11 +9,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <span>
+#include <thread>
 #include <tuple>
 
 using namespace mymyr;
@@ -382,13 +386,13 @@ TEST(FlatStream, TheCapacityFormDropsTheRowsOnlyWhenTheBatchFits)
     stream.append(rows.input(true, true));
     ThreadPool one(1);
     FlatSizes sizes;
-    const FlatCapacities small{1, 1, 1, 1};
+    const BatchShape small{50, 1, 1, 1};
     std::ignore = stream.flush(one, small, sizes);
     EXPECT_TRUE(sizes.overflowed());
     EXPECT_EQ(stream.size(), 50u);
     FlatSizes true_sizes;
     EncodeScratch scratch;
-    const FlatCapacities roomy{sizes.entities + 5, sizes.tuples + 5, sizes.args + 5, sizes.targets + 5};
+    const BatchShape roomy{50, sizes.entities + 5, sizes.args + 5, sizes.targets + 5};
     const auto reference = encoder->encode_capacity(rows.input(true, true), roomy, one, scratch, true_sizes);
     const auto fitted = stream.flush(one, roomy, sizes);
     EXPECT_FALSE(sizes.overflowed());
@@ -575,6 +579,215 @@ TEST(FlatMutableStream, IndexErrorsChangeNothing)
     EXPECT_EQ(stream.size(), 0u);
     stream.append(std::vector<i64>{1, 2, 3}, rows.input(false, false));  // empty again: other inputs
     EXPECT_EQ(stream.size(), 3u);
+}
+
+TEST(FlatMutableStream, AscendingAppendsAndAppendsBelowTheLargestIndexKeepTheOrder)
+{
+    const Pool pool = make_pool(blocks_table(), 100, 12);
+    const Flavor flavor{false, false, false, Layout::Graph};
+    const auto encoder = FlatEncoder::create(pool.table, options_of(flavor));
+    FlatMutableStream stream(encoder);
+    ThreadPool one(1);
+    std::mt19937_64 rng(31);
+    Model model;
+    const auto check = [&]
+    {
+        ASSERT_EQ(stream.indices(), indices_of(model));
+        expect_equal_bundles(*encoder->encode(Selected(pool, picks_of(model)).input(false, false)), *stream.flush(one));
+    };
+    const auto add = [&](std::vector<i64> indices)
+    {
+        std::vector<u64> picks;
+        for (usize i = 0; i < indices.size(); ++i)
+            picks.push_back(rng() % pool.rows.size());
+        stream.append(indices, Selected(pool, picks).input(false, false));
+        for (usize i = 0; i < indices.size(); ++i)
+            model[indices[i]] = picks[i];
+    };
+    add({-3, -2, 0, 7});  // ascending into an empty stream
+    check();
+    add({8, 9, 40});  // ascending above the largest index
+    check();
+    add({41});
+    add({100, 50, 60});  // not ascending: merged into the rows held
+    check();
+    add({-100, 200});  // below the smallest and above the largest at once
+    check();
+    stream.remove(std::vector<i64>{7, 41, 200});
+    for (const i64 index : {7, 41, 200})
+        model.erase(index);
+    add({300, 301});  // after a removal the order is rebuilt
+    check();
+    stream.update(std::vector<i64>{0, 300}, Selected(pool, std::vector<u64>{3, 4}).input(false, false));
+    model[0] = 3;
+    model[300] = 4;
+    check();
+    stream.clear();
+    model.clear();
+    add({5, 6, 7});
+    check();
+}
+
+TEST(FlatMutableStream, ManyIndicesOfAnyShapeAreFoundAfterTheTableGrowsAndShrinks)
+{
+    const Pool pool = make_pool(blocks_table(), 20, 13);
+    const Flavor flavor{false, false, false, Layout::Graph};
+    const auto encoder = FlatEncoder::create(pool.table, options_of(flavor));
+    FlatMutableStream stream(encoder);
+    ThreadPool one(1);
+    std::mt19937_64 rng(77);
+    Model model;
+    // counters, multiples of a power of two, the 64-bit extremes and random values collide in different ways
+    std::vector<i64> candidates;
+    for (i64 i = 0; i < 2500; ++i)
+    {
+        candidates.push_back(i - 1000);
+        candidates.push_back(i * 4096);
+        candidates.push_back(std::numeric_limits<i64>::max() - i);
+        candidates.push_back(std::numeric_limits<i64>::min() + i);
+        candidates.push_back(static_cast<i64>(rng()));
+    }
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+    std::shuffle(candidates.begin(), candidates.end(), rng);
+    const usize total = candidates.size();
+    ASSERT_GT(total, 10000u);
+    for (usize start = 0; start < total; start += 3000)
+    {
+        const std::span<const i64> part(candidates.data() + start, std::min<usize>(3000, total - start));
+        std::vector<u64> picks;
+        for (usize i = 0; i < part.size(); ++i)
+            picks.push_back(rng() % pool.rows.size());
+        stream.append(part, Selected(pool, picks).input(false, false));
+        for (usize i = 0; i < part.size(); ++i)
+            model[part[i]] = picks[i];
+    }
+    ASSERT_EQ(stream.size(), model.size());
+    for (const i64 index : candidates)
+        ASSERT_TRUE(stream.contains(index)) << index;
+    EXPECT_FALSE(stream.contains(1'000'000'007));
+    // remove most of them in batches: the table shifts entries back over the holes
+    const std::vector<i64> doomed(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(total * 9 / 10));
+    for (usize start = 0; start < doomed.size(); start += 1500)
+    {
+        const std::span<const i64> part(doomed.data() + start, std::min<usize>(1500, doomed.size() - start));
+        stream.remove(part);
+        for (const i64 index : part)
+            model.erase(index);
+        for (usize probe = 0; probe < 200; ++probe)
+        {
+            const i64 index = candidates[rng() % total];
+            ASSERT_EQ(stream.contains(index), model.contains(index)) << index;
+        }
+    }
+    ASSERT_EQ(stream.size(), model.size());
+    ASSERT_EQ(stream.indices(), indices_of(model));
+    expect_equal_bundles(*encoder->encode(Selected(pool, picks_of(model)).input(false, false)), *stream.flush(one));
+}
+
+// ------------------------------------------------------------------------------------------------ index type and members
+
+TEST(FlatStream, BatchesOfSeveralMembersWithInt64IndicesEqualTheSingleThreadedEncode)
+{
+    const Pool pool = make_pool(blocks_table(), 1600, 14);
+    for (const Layout layout : {Layout::Graph, Layout::Relation})
+    {
+        FlatOptions options = options_of({true, true, true, layout});
+        options.index = IndexType::I64;
+        const auto encoder = FlatEncoder::create(pool.table, options);
+        FlatStream stream(encoder);
+        FlatMutableStream mutable_stream(encoder);
+        std::vector<u64> all(pool.rows.size());
+        for (u64 i = 0; i < all.size(); ++i)
+            all[i] = (i * 7919) % all.size();
+        ASSERT_GT(all.size(), 2 * k_graphs_per_member);
+        for (u64 start = 0; start < all.size(); start += 900)
+        {
+            const std::span<const u64> part(all.data() + start, std::min<u64>(900, all.size() - start));
+            const Selected chunk(pool, part);
+            stream.append(chunk.input(true, true));
+            std::vector<i64> indices;
+            for (u64 i = 0; i < part.size(); ++i)
+                indices.push_back(-static_cast<i64>(start + i));  // descending
+            mutable_stream.append(indices, chunk.input(true, true));
+        }
+        ThreadPool members(3);
+        const auto appended = encoder->encode(Selected(pool, all).input(true, true));
+        expect_equal_bundles(*appended, *stream.flush(members));
+        const std::vector<u64> reversed(all.rbegin(), all.rend());
+        const auto by_index = encoder->encode(Selected(pool, reversed).input(true, true));
+        expect_equal_bundles(*by_index, *mutable_stream.flush(members));
+        validate(*by_index, encoder->schema());
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ threads
+
+TEST(FlatStream, AppendsFlushesAndChangesFromSeveralThreadsLoseNoRow)
+{
+    const Pool pool = make_pool(blocks_table(), 200, 41);
+    const Flavor flavor{true, true, true, Layout::Graph};
+    const auto encoder = FlatEncoder::create(pool.table, options_of(flavor));
+    FlatStream stream(encoder);
+    FlatMutableStream mutable_stream(encoder);
+    constexpr u32 threads = 4, rounds = 60;
+    std::atomic<u64> appended{0}, flushed{0};
+    std::mutex held_mutex;
+    Model held;  // the rows the mutable stream must end up with: index -> pick
+    std::vector<std::thread> workers;
+    for (u32 t = 0; t < threads; ++t)
+        workers.emplace_back(
+            [&, t]
+            {
+                std::mt19937_64 rng(t + 1);
+                ThreadPool one(1);
+                Model mine;
+                for (u32 r = 0; r < rounds; ++r)
+                {
+                    std::vector<u64> picks(1 + rng() % 9);
+                    for (u64& pick : picks)
+                        pick = rng() % pool.rows.size();
+                    const Selected rows(pool, picks);
+                    stream.append(rows.input(true, true));
+                    appended += picks.size();
+                    std::vector<i64> indices;
+                    for (usize i = 0; i < picks.size(); ++i)
+                        indices.push_back(static_cast<i64>(t) * 1'000'000 + static_cast<i64>(r) * 100 + static_cast<i64>(i));
+                    mutable_stream.append(indices, rows.input(true, true));
+                    for (usize i = 0; i < picks.size(); ++i)
+                        mine[indices[i]] = picks[i];
+                    if (r % 2)
+                    {
+                        const std::vector<u64> other(1, rng() % pool.rows.size());
+                        mutable_stream.update(std::span<const i64>(indices.data(), 1), Selected(pool, other).input(true, true));
+                        mine[indices[0]] = other[0];
+                    }
+                    if (r % 3 == 0 && indices.size() > 1)
+                    {
+                        mutable_stream.remove(std::span<const i64>(indices.data() + indices.size() - 1, 1));
+                        mine.erase(indices.back());
+                    }
+                    if (r % 5 == 4)
+                    {
+                        flushed += static_cast<u64>(stream.flush(one)->scalar("num_graphs"));
+                        (void)mutable_stream.flush(one);
+                        (void)mutable_stream.indices();
+                        (void)mutable_stream.contains(indices[0]);
+                        (void)mutable_stream.size();
+                    }
+                }
+                std::lock_guard lock(held_mutex);
+                held.insert(mine.begin(), mine.end());
+            });
+    for (std::thread& worker : workers)
+        worker.join();
+    ThreadPool one(1);
+    flushed += static_cast<u64>(stream.flush(one)->scalar("num_graphs"));
+    EXPECT_EQ(appended.load(), flushed.load());
+    EXPECT_EQ(stream.size(), 0u);
+    ASSERT_EQ(mutable_stream.size(), held.size());
+    ASSERT_EQ(mutable_stream.indices(), indices_of(held));
+    expect_equal_bundles(*encoder->encode(Selected(pool, picks_of(held)).input(true, true)), *mutable_stream.flush(one));
 }
 
 // ------------------------------------------------------------------------------------------------ derived words

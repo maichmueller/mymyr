@@ -3,10 +3,11 @@
 // configuration, the capacity form, invalid rows, and the encoding inside a CUDA graph. MYMYR_TEST_FULL_SUITE=1 runs
 // the full list of batch sizes.
 
-#include "../cpp/encoding/support.hpp"
+#include "../cpp/encoding/matrix.hpp"
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/cuda/encoding.hpp"
+#include "../../cuda/src/encoding_scratch.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/task/workspace.hpp"
 
@@ -22,6 +23,7 @@
 #include <vector>
 
 using namespace mymyr;
+using namespace mymyr::test::encoding_matrix;
 
 #define SKIP_WITHOUT_GPU()                                                                                              \
     do                                                                                                                  \
@@ -47,228 +49,6 @@ bool full_suite()
 
 // ------------------------------------------------------------------------------------------------ tables
 
-rl::TaskTablePtr table_of(const std::string& domain, const std::vector<std::string>& problems)
-{
-    std::vector<TaskPtr> tasks;
-    for (const std::string& problem : problems)
-        tasks.push_back(test::pddl_task(domain, problem));
-    return rl::TaskTable::create(tasks);
-}
-
-/// Instances of 1, 42 and 184 words: `link` over n objects has n * n slots, `flag` n more, and `armed` one.
-rl::TaskTablePtr wide_table()
-{
-    const auto domain = frontend::Domain::from_string(
-        "(define (domain wide) (:requirements :strips)"
-        " (:predicates (link ?x ?y) (flag ?x) (armed) (fixed ?x ?y))"
-        " (:action connect :parameters (?x ?y) :precondition (and) :effect (link ?x ?y))"
-        " (:action mark :parameters (?x) :precondition (and) :effect (flag ?x))"
-        " (:action arm :parameters () :precondition (and) :effect (armed)))");
-    std::vector<TaskPtr> tasks;
-    for (const u32 n : {5u, 51u, 108u})
-    {
-        std::string objects, init = "(fixed o0 o1) (fixed o1 o2) (armed)";
-        for (u32 i = 0; i < n; ++i)
-            objects += " o" + std::to_string(i);
-        const std::string problem = "(define (problem p" + std::to_string(n) + ") (:domain wide) (:objects" + objects +
-                                    ") (:init " + init + ") (:goal (and (link o0 o1) (flag o2) (armed))))";
-        tasks.push_back(Task::create(*domain->instantiate_string(problem)));
-    }
-    return rl::TaskTable::create(tasks);
-}
-
-// ------------------------------------------------------------------------------------------------ rows
-
-/// The rows of a batch over a table with everything an encode call can take besides the options.
-struct Batch
-{
-    rl::TaskTablePtr table;
-    u64 count = 0;
-    u32 words = 0, derived_words = 0;
-    std::vector<u64> states;  // [count, words]
-    std::vector<i32> task_ids;
-    std::vector<u64> derived;  // [count, derived_words], the axiom evaluation of each row; empty without derived atoms
-    std::vector<u64> goal_pos, goal_neg;                  // [count, words] masks over a subset of the row's fluent slots
-    std::vector<u64> goal_derived_pos, goal_derived_neg;  // [count, derived_words]
-};
-
-void set_bit(u64* row, u32 slot) { row[slot >> 6] |= u64{1} << (slot & 63); }
-bool test_bit(const u64* row, u32 slot) { return (row[slot >> 6] >> (slot & 63)) & 1u; }
-
-/// All zeros, all ones within the instance's slots, single bits at 63, 64 and 65 and at the last slot, and the last
-/// partial word set.
-std::vector<std::vector<u64>> adversarial_rows(const rl::TaskTable& table, u32 instance)
-{
-    const u32 slots = table.task(instance)->atoms().fluent_slots();
-    std::vector<std::vector<u64>> rows;
-    auto blank = [&] { return std::vector<u64>(table.words(), 0); };
-    rows.push_back(blank());
-    {
-        auto row = blank();
-        for (u32 s = 0; s < slots; ++s)
-            set_bit(row.data(), s);
-        rows.push_back(row);
-    }
-    for (const u32 bit : {63u, 64u, 65u, slots ? slots - 1 : 0u})
-        if (bit < slots)
-        {
-            auto row = blank();
-            set_bit(row.data(), bit);
-            rows.push_back(row);
-        }
-    if (slots)
-    {
-        auto row = blank();
-        for (u32 s = ((slots - 1) / 64) * 64; s < slots; ++s)
-            set_bit(row.data(), s);
-        rows.push_back(row);
-    }
-    return rows;
-}
-
-/// The derived words of a state row by a fresh axiom evaluation, as the host encoder does it.
-std::vector<u64> derived_words_of(const rl::TaskTable& table, u32 instance, const u64* row, u32 width)
-{
-    const Task& task = *table.task(instance);
-    std::vector<u64> out(width, 0);
-    const WorkspaceLease workspace = task.workspace();
-    auto& engine = workspace->engine();
-    engine.set_state(row, table.instance(instance).words);
-    engine.build_view();
-    workspace->axioms().evaluate();
-    std::copy_n(engine.derived(), bits::words_for(task.atoms().derived_slots()), out.begin());
-    return out;
-}
-
-/// `count` rows: the adversarial rows of every instance first, then rows interleaved by instance: random walks from
-/// the initial states (`walk`) or random bit patterns of mixed density with garbage in the padding words past a narrower
-/// instance's words.
-Batch make_batch(const rl::TaskTablePtr& table, u64 count, bool walk, u64 seed)
-{
-    Batch b;
-    b.table = table;
-    b.words = table->words();
-    b.derived_words = table->derived_words();
-    const u32 instances = table->size();
-    std::mt19937_64 rng(seed);
-    std::vector<test::Rows> walks;
-    if (walk)
-        for (u32 i = 0; i < instances; ++i)
-            walks.push_back(test::random_walk(*table, i, count / instances + 1, seed + i));
-    std::vector<std::vector<u64>> special;
-    std::vector<i32> special_ids;
-    for (u32 i = 0; i < instances; ++i)
-        for (auto& row : adversarial_rows(*table, i))
-        {
-            special.push_back(std::move(row));
-            special_ids.push_back(static_cast<i32>(i));
-        }
-    for (u64 k = 0; k < count; ++k)
-    {
-        std::vector<u64> row(b.words, 0);
-        i32 id;
-        if (k < special.size())
-        {
-            row = special[k];
-            id = special_ids[k];
-        }
-        else
-        {
-            const u64 j = k - special.size();
-            id = static_cast<i32>(j % instances);
-            const u32 slots = table->task(static_cast<u32>(id))->atoms().fluent_slots();
-            if (walk)
-            {
-                const u64* from = walks[static_cast<u32>(id)].data.data() + (j / instances) * b.words;
-                std::copy(from, from + b.words, row.begin());
-            }
-            else
-            {
-                const double density = std::array{0.002, 0.01, 0.05}[rng() % 3];
-                for (u32 s = 0; s < slots; ++s)
-                    if (std::uniform_real_distribution<double>(0, 1)(rng) < density)
-                        set_bit(row.data(), s);
-                if (rng() % 2)
-                    for (u32 w = table->instance(static_cast<u32>(id)).words; w < b.words; ++w)
-                        row[w] = rng();
-            }
-        }
-        b.states.insert(b.states.end(), row.begin(), row.end());
-        b.task_ids.push_back(id);
-    }
-    b.count = count;
-    // derived words and goals of the rows
-    std::vector<u64> goal_pos(count * b.words, 0), goal_neg(count * b.words, 0);
-    std::vector<u64> goal_derived_pos(count * b.derived_words, 0), goal_derived_neg(count * b.derived_words, 0);
-    b.derived.assign(count * b.derived_words, 0);
-    for (u64 g = 0; g < count; ++g)
-    {
-        const u32 instance = static_cast<u32>(b.task_ids[g]);
-        const Task& task = *table->task(instance);
-        const u64* row = b.states.data() + g * b.words;
-        for (u32 s = 0; s < task.atoms().fluent_slots(); ++s)
-        {
-            if (rng() % 5)
-                continue;
-            set_bit(test_bit(row, s) ? goal_pos.data() + g * b.words : goal_neg.data() + g * b.words, s);
-        }
-        if (b.derived_words)
-        {
-            const auto derived = derived_words_of(*table, instance, row, b.derived_words);
-            std::copy(derived.begin(), derived.end(), b.derived.begin() + static_cast<std::ptrdiff_t>(g * b.derived_words));
-            for (u32 s = 0; s < task.atoms().derived_slots(); ++s)
-            {
-                if (rng() % 3)
-                    continue;
-                set_bit(test_bit(derived.data(), s) ? goal_derived_pos.data() + g * b.derived_words
-                                                    : goal_derived_neg.data() + g * b.derived_words,
-                        s);
-            }
-        }
-    }
-    b.goal_pos = std::move(goal_pos);
-    b.goal_neg = std::move(goal_neg);
-    b.goal_derived_pos = std::move(goal_derived_pos);
-    b.goal_derived_neg = std::move(goal_derived_neg);
-    return b;
-}
-
-/// Which optional inputs a call has.
-struct Inputs
-{
-    bool derived = true;
-    bool row_goals = false;
-    bool derived_goals = false;
-};
-
-encoding::EncodeInput host_input(const Batch& b, u64 n, const Inputs& inputs)
-{
-    encoding::EncodeInput in;
-    in.states = {b.states.data(), n, b.words, 0, 0};
-    in.task_ids = b.task_ids.data();
-    if (inputs.derived && b.derived_words)
-    {
-        in.derived = b.derived.data();
-        in.derived_stride = b.derived_words;
-    }
-    if (inputs.row_goals)
-    {
-        in.goal_pos = b.goal_pos.data();
-        in.goal_neg = b.goal_neg.data();
-        in.goal_stride = b.words;
-        in.goal_words = b.words;
-        if (inputs.derived_goals && b.derived_words)
-        {
-            in.goal_derived_pos = b.goal_derived_pos.data();
-            in.goal_derived_neg = b.goal_derived_neg.data();
-            in.goal_derived_stride = b.derived_words;
-            in.goal_derived_words = b.derived_words;
-        }
-    }
-    return in;
-}
-
-/// The rows of a batch in device memory.
 struct DeviceRows
 {
     cuda::DeviceBuffer states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg;
@@ -337,12 +117,12 @@ struct DeviceResult
 /// the block back.
 DeviceResult run_device(const cuda::DeviceEncoder& device, const cuda::ContextPtr& ctx, cudaStream_t stream,
                         const cuda::DeviceEncodeInput& in, const cuda::BatchShape& shape,
-                        const encoding::FlatCapacities* caps = nullptr, const cuda::LaunchConfig& launch = {})
+                        const encoding::BatchShape* caps = nullptr, const cuda::LaunchConfig& launch = {}, int canary = 0)
 {
     DeviceResult result;
     result.layout = device.output_layout(shape);
     cuda::DeviceBuffer block(ctx, result.layout.bytes, stream);
-    cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), stream), "clear the output");
+    cuda::check(cudaMemsetAsync(block.data(), canary, block.size(), stream), "fill the output");
     cuda::DeviceOutput out = cuda::output_of(result.layout, shape, block.data());
     if (caps)
         out.capacities = *caps;
@@ -420,105 +200,12 @@ cuda::BatchShape shape_of(u64 graphs, const encoding::FlatSizes& s) { return {gr
 
 // ------------------------------------------------------------------------------------------------ configurations
 
-struct Config
-{
-    const char* name;
-    encoding::FlatOptions options;
-    Inputs inputs;
-};
-
-using encoding::GoalDerivation;
-using encoding::TargetSource;
-
-/// The configurations the device encodes. Rows for the first one carry derived words whenever the table has derived atoms.
-std::vector<Config> configs()
-{
-    const encoding::GoalDerivations all = {GoalDerivation::Plain, GoalDerivation::Satisfied, GoalDerivation::Unsatisfied};
-    std::vector<Config> out;
-    auto add = [&](const char* name, auto&& change, Inputs inputs = {})
-    {
-        encoding::FlatOptions o = test::encoder_options();
-        change(o);
-        out.push_back({name, o, inputs});
-    };
-    add("state", [](auto&) {});
-    add("goal_plain_satisfied", [](auto& o) { o.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied}; });
-    add("goal_all_targets",
-        [&](auto& o)
-        {
-            o.goal_derivations = all;
-            o.targets = {TargetSource::Goal};
-        });
-    add("virtual_nodes", [](auto& o) { o.predicate_virtual_nodes = true; });
-    add("virtual_goal_targets",
-        [&](auto& o)
-        {
-            o.predicate_virtual_nodes = true;
-            o.goal_derivations = all;
-            o.targets = {TargetSource::Goal};
-        });
-    add("no_nullary_equality",
-        [](auto& o)
-        {
-            o.nullary = false;
-            o.equality = true;
-        });
-    add("no_static_no_derived",
-        [](auto& o)
-        {
-            o.include_static = false;
-            o.include_derived = false;
-        });
-    add("implicit_entities_no_counts",
-        [](auto& o)
-        {
-            o.emit_counts = false;
-            o.entity_arrays = encoding::EntityArrays::Auto;
-        });
-    add("row_goals", [&](auto& o) { o.goal_derivations = all; }, Inputs{true, true, false});
-    add("row_goals_derived_targets_virtual",
-        [&](auto& o)
-        {
-            o.goal_derivations = all;
-            o.targets = {TargetSource::Goal};
-            o.predicate_virtual_nodes = true;
-        },
-        Inputs{true, true, true});
-    return out;
-}
-
 /// The batch sizes around the widths of the launches: one graph, a warp, a block and a few blocks.
 std::vector<u64> batch_sizes()
 {
     if (full_suite())
         return {1, 2, 31, 32, 33, 255, 256, 257, 4097, 16384};
-    return {1, 33, 257};
-}
-
-struct Corpus
-{
-    const char* name;
-    rl::TaskTablePtr table;
-    bool walk;
-};
-
-std::vector<Corpus> corpus()
-{
-    std::vector<Corpus> out;
-    out.push_back({"blocks", table_of("blocks", {"smedium", "probBLOCKS-8-0"}), true});
-    out.push_back({"features", table_of("features", {"p01", "p02", "p03", "p04"}), true});
-    out.push_back({"goals", table_of("goals", {"conjunctive", "forall", "or", "exists", "not_and", "static_true"}), true});
-    out.push_back({"philosophers", table_of("philosophers", {"p03-phil4", "p03-phil4-one-blocked"}), true});
-    out.push_back({"gripper", table_of("gripper", {"p01", "p02"}), true});
-    out.push_back({"wide", wide_table(), false});
-    return out;
-}
-
-encoding::FlatOptions with(encoding::FlatOptions o, encoding::Layout layout, encoding::IndexType index)
-{
-    o.layout = layout;
-    o.index = index;
-    return o;
+    return {1, 33, 257, 4097};
 }
 
 // ------------------------------------------------------------------------------------------------ the matrix
@@ -683,20 +370,19 @@ TEST(DeviceEncode, CapacitiesReportAsTheHostDoes)
             encoding::EncodeScratch scratch;
             const encoding::FlatSizes exact = encoder->count(host_in, pool, scratch);
             ASSERT_GT(exact.targets, 0u);
-            const encoding::FlatCapacities fits{exact.entities, exact.tuples, exact.args, exact.targets};
+            const encoding::BatchShape fits{n, exact.entities, exact.args, exact.targets};
             struct Case
             {
                 const char* name;
-                encoding::FlatCapacities caps;
+                encoding::BatchShape caps;
             };
             const Case cases[] = {
                 {"exact", fits},
-                {"roomy", {exact.entities + 7, exact.tuples + 3, exact.args + 5, exact.targets + 9}},
-                {"short entities", {exact.entities - 1, exact.tuples, exact.args, exact.targets}},
-                {"short tuples", {exact.entities, exact.tuples - 1, exact.args, exact.targets}},
-                {"short args", {exact.entities, exact.tuples, exact.args - 1, exact.targets}},
-                {"short targets", {exact.entities, exact.tuples, exact.args, exact.targets - 1}},
-                {"zero", {0, 0, 0, 0}},
+                {"roomy", {n, exact.entities + 7, exact.args + 5, exact.targets + 9}},
+                {"short entities", {n, exact.entities - 1, exact.args, exact.targets}},
+                {"short args", {n, exact.entities, exact.args - 1, exact.targets}},
+                {"short targets", {n, exact.entities, exact.args, exact.targets - 1}},
+                {"zero", {n, 0, 0, 0}},
             };
             for (const Case& k : cases)
             {
@@ -705,9 +391,15 @@ TEST(DeviceEncode, CapacitiesReportAsTheHostDoes)
                 const auto host = encoder->encode_capacity(host_in, k.caps, pool, scratch, host_sizes);
                 // the block holds the capacities' entries (zero beyond the batch), and the host's too
                 const cuda::BatchShape shape{n, k.caps.entities, k.caps.args, k.caps.targets};
-                const DeviceResult result = run_device(device, ctx, stream, device_in, shape, &k.caps);
+                const DeviceResult result = run_device(device, ctx, stream, device_in, shape, &k.caps, {}, host_sizes.overflow ? 0xa5 : 0);
                 expect_sizes(host_sizes, result.sizes);
-                expect_same_arrays(*host, result);
+                if (host_sizes.overflow)
+                {
+                    for (u64 b = 0; b < result.layout.sizes; ++b)
+                        ASSERT_EQ(result.block[b], std::byte{0xa5}) << b;
+                }
+                else
+                    expect_same_arrays(*host, result);
                 EXPECT_EQ(result.sizes.overflow != 0, std::string(k.name).find("short") != std::string::npos ||
                                                           std::string(k.name) == "zero");
             }
@@ -743,12 +435,12 @@ void expect_refused(const cuda::DeviceEncoder& device, const encoding::FlatEncod
 {
     EXPECT_THROW((void)encoder.encode(host_in), std::invalid_argument);
     const cuda::BatchShape shape{device_in.graphs, 64, 256, 64};
-    const DeviceResult result = run_device(device, ctx, stream, device_in, shape);
+    const DeviceResult result = run_device(device, ctx, stream, device_in, shape, nullptr, {}, 0xa5);
     EXPECT_NE(result.sizes.overflow & encoding::k_overflow_input, 0u);
     // nothing of the batch is written
     const cuda::OutputLayout& l = result.layout;
     for (u64 i = 0; i < l.sizes; ++i)
-        ASSERT_EQ(result.block[i], std::byte{0}) << "byte " << i;
+        ASSERT_EQ(result.block[i], std::byte{0xa5}) << "byte " << i;
 }
 
 TEST(DeviceEncode, InvalidRowsAreFlaggedAndNothingIsWritten)
@@ -956,7 +648,7 @@ NodeCounts count_nodes(cudaGraph_t graph)
     return counts;
 }
 
-TEST(DeviceEncode, ACapturedEncodeReplaysToTheEagerResultInAtMostFourKernels)
+TEST(DeviceEncode, ACapturedEncodeReplaysWithinTheWidthClassLaunchBudget)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = device_context();
@@ -995,7 +687,7 @@ TEST(DeviceEncode, ACapturedEncodeReplaysToTheEagerResultInAtMostFourKernels)
                 if (error)
                     std::rethrow_exception(error);
                 const NodeCounts nodes = count_nodes(graph);
-                EXPECT_LE(nodes.kernels, 4u);
+                EXPECT_LE(nodes.kernels, 8u);  // at most two fill classes, four kernels per class
                 EXPECT_EQ(nodes.others, 0u) << "an allocation, copy or other node";
                 cudaGraphExec_t exec = nullptr;
                 cuda::check(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
@@ -1049,6 +741,124 @@ TEST(DeviceEncode, TheWorkspaceFormEqualsTheStreamForm)
     expect_same_arrays(*host.bundle, by_stream);
 }
 
+/// The device's FlatSizes of a count() on `stream`, downloaded.
+encoding::FlatSizes count_sizes(const cuda::DeviceEncoder& device, const cuda::ContextPtr& ctx, cudaStream_t stream,
+                                const cuda::EncodingWorkspace& work, const cuda::DeviceEncodeInput& in,
+                                const cuda::LaunchConfig& launch = {})
+{
+    cuda::DeviceBuffer buffer(ctx, sizeof(encoding::FlatSizes), stream);
+    cuda::check(cudaMemsetAsync(buffer.data(), 0xff, buffer.size(), stream), "clear the sizes");
+    cuda::DeviceOutput out;
+    out.capacities.graphs = work.shape().graphs;
+    out.sizes = static_cast<encoding::FlatSizes*>(buffer.data());
+    device.count(work, in, out, launch);
+    encoding::FlatSizes sizes;
+    cuda::check(cudaMemcpyAsync(&sizes, buffer.data(), sizeof(sizes), cudaMemcpyDeviceToHost, stream), "download the sizes");
+    cuda::check(cudaStreamSynchronize(stream), "download the sizes");
+    return sizes;
+}
+
+/// Counting and then filling is encoding: the sizes of the count are the host's, the filled arrays are the host's bytes,
+/// in every configuration and layout.
+TEST(DeviceEncode, CountingThenFillingEqualsTheHostEncoderBitForBit)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const u64 n = 300;
+    u64 compared = 0;
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const Batch batch = make_batch(c.table, n, c.walk, 53);
+        const DeviceRows rows(ctx, stream, batch);
+        for (const Config& config : configs())
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                {
+                    const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, index));
+                    cuda::DeviceEncoder device(ctx, encoder);
+                    device.reserve(cuda::BatchShape{n, 0, 0, 0}, stream);
+                    const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+                    const cuda::BatchShape shape = shape_of(n, host.sizes);
+                    const auto input = rows.input(batch, n, config.inputs);
+                    const cuda::OutputLayout out_layout = device.output_layout(shape);
+                    cuda::DeviceBuffer block(ctx, out_layout.bytes, stream);
+                    cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), stream), "clear the output");
+                    const auto work = device.acquire(stream);
+                    const encoding::FlatSizes counted = count_sizes(device, ctx, stream, work, input);
+                    expect_sizes(host.sizes, counted);
+                    EXPECT_EQ(counted.reserved, 0u);
+                    device.fill(work, input, cuda::output_of(out_layout, shape, block.data()));
+                    DeviceResult result;
+                    result.layout = out_layout;
+                    result.block.resize(block.size());
+                    cuda::check(cudaMemcpyAsync(result.block.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream),
+                                "download the output");
+                    cuda::check(cudaStreamSynchronize(stream), "download the output");
+                    std::memcpy(&result.sizes, result.block.data() + out_layout.sizes, sizeof(encoding::FlatSizes));
+                    expect_sizes(host.sizes, result.sizes);
+                    expect_same_arrays(*host.bundle, result);
+                    ++compared;
+                    if (::testing::Test::HasFailure())
+                        return;
+                }
+        }
+    }
+    EXPECT_GT(compared, 0u);
+}
+
+/// A count reports the index and input flags and never the capacity flag; a fill with short capacities reports it and
+/// writes nothing.
+TEST(DeviceEncode, CountingReportsTheFlagsOfTheRowsAndFillingThoseOfTheCapacities)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];
+    const u64 n = 40;
+    Batch batch = make_batch(c.table, n, true, 59);
+    const Config config = configs()[1];
+    const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, encoding::Layout::Graph, encoding::IndexType::I32));
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(cuda::BatchShape{n, 0, 0, 0}, stream);
+    const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+    const cuda::BatchShape shape = shape_of(n, host.sizes);
+    {
+        const DeviceRows rows(ctx, stream, batch);
+        const auto input = rows.input(batch, n, config.inputs);
+        const auto work = device.acquire(stream);
+        const encoding::FlatSizes counted = count_sizes(device, ctx, stream, work, input);
+        EXPECT_EQ(counted.overflow, 0u);
+        // capacities one short: the fill reports it and writes no array
+        const cuda::OutputLayout layout = device.output_layout(shape);
+        cuda::DeviceBuffer block(ctx, layout.bytes, stream);
+        cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), stream), "clear the output");
+        cuda::DeviceOutput out = cuda::output_of(layout, shape, block.data());
+        out.capacities.args = host.sizes.args - 1;
+        device.fill(work, input, out);
+        std::vector<std::byte> bytes(block.size());
+        cuda::check(cudaMemcpyAsync(bytes.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "download");
+        cuda::check(cudaStreamSynchronize(stream), "download");
+        encoding::FlatSizes sizes;
+        std::memcpy(&sizes, bytes.data() + layout.sizes, sizeof(sizes));
+        EXPECT_EQ(sizes.overflow, encoding::k_overflow_capacity);
+        EXPECT_EQ(sizes.args, host.sizes.args);
+        for (u64 i = 0; i < layout.sizes; ++i)
+            ASSERT_EQ(bytes[i], std::byte{0}) << "byte " << i;
+    }
+    {
+        batch.task_ids[3] = static_cast<i32>(c.table->size());
+        const DeviceRows rows(ctx, stream, batch);
+        const auto input = rows.input(batch, n, config.inputs);
+        const auto work = device.acquire(stream);
+        const encoding::FlatSizes counted = count_sizes(device, ctx, stream, work, input);
+        EXPECT_EQ(counted.overflow, encoding::k_overflow_input);
+    }
+}
+
 TEST(DeviceEncode, EncodingAfterAGrowthOfTheTableUsesTheNewInstances)
 {
     SKIP_WITHOUT_GPU();
@@ -1069,4 +879,311 @@ TEST(DeviceEncode, EncodingAfterAGrowthOfTheTableUsesTheNewInstances)
     expect_sizes(host.sizes, result.sizes);
     expect_same_arrays(*host.bundle, result);
 }
+TEST(DeviceEncode, WideTotalsEqualTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus().back();  // wide
+    const u64 n = 4097;
+    const Batch batch = make_batch(c.table, n, c.walk, 13);
+    const DeviceRows rows(ctx, stream, batch);
+    u64 compared = 0;
+    for (const Config& config : configs())
+        for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+            {
+                SCOPED_TRACE(std::string(config.name) + (layout == encoding::Layout::Graph ? " graph" : " relation"));
+                const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, index));
+                cuda::DeviceEncoder device(ctx, encoder);
+                const cuda::GraphBounds b = device.bounds();
+                const u64 per = b.entities + b.targets + b.tuples + (layout == encoding::Layout::Graph ? b.args : 0);
+                const u64 graphs = (u64{1} << 32) / per + 2;
+                const auto sl = cuda::detail::scratch_layout({graphs, 0, 0, 0}, b, layout, encoder->schema().num_relations());
+                ASSERT_TRUE(sl.wide);
+                if (sl.bytes > (u64{512} << 20))
+                {
+                    ADD_FAILURE() << "scratch too big " << sl.bytes;
+                    continue;
+                }
+                device.reserve(cuda::BatchShape{graphs, 0, 0, 0}, stream);
+                for (const u64 k : {u64{1}, u64{33}, n})
+                {
+                    const Reference host = host_reference(*encoder, host_input(batch, k, config.inputs));
+                    for (const auto fill : {cuda::FillMode::Thread, cuda::FillMode::Warp})
+                    {
+                        cuda::LaunchConfig launch;
+                        launch.fill = fill;
+                        const DeviceResult r = run_device(device, ctx, stream, rows.input(batch, k, config.inputs),
+                                                          shape_of(k, host.sizes), nullptr, launch);
+                        expect_sizes(host.sizes, r.sizes);
+                        expect_same_arrays(*host.bundle, r);
+                        ++compared;
+                    }
+                }
+                if (::testing::Test::HasFailure())
+                    return;
+            }
+    EXPECT_GT(compared, 0u);
+}
 }  // namespace
+
+namespace
+{
+TEST(DeviceEncode, GraphCapacityIsCheckedBeforeAnyLaunch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto c = corpus().front();
+    const auto batch = make_batch(c.table, 33, true, 73);
+    const DeviceRows rows(ctx, stream, batch);
+    const auto encoder = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(33, stream);
+    const auto work = device.acquire(stream);
+    const auto shape = device.worst_case(32);
+    const auto layout = device.output_layout(shape);
+    cuda::DeviceBuffer block(ctx, layout.bytes, stream);
+    const auto out = cuda::output_of(layout, shape, block.data());
+    const auto in = rows.input(batch, 33, {});
+    cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+    EXPECT_THROW(device.encode(work, in, out), std::invalid_argument);
+    EXPECT_THROW(device.count(work, in, out), std::invalid_argument);
+    EXPECT_THROW(device.fill(work, in, out), std::invalid_argument);
+    cudaGraph_t graph = nullptr;
+    cuda::check(cudaStreamEndCapture(stream, &graph), "capture");
+    size_t nodes = 0;
+    cuda::check(cudaGraphGetNodes(graph, nullptr, &nodes), "nodes");
+    EXPECT_EQ(nodes, 0u);
+    cuda::check(cudaGraphDestroy(graph), "destroy");
+}
+
+TEST(DeviceEncode, CallerScratchEqualsTheWorkspaceAndCanBeCaptured)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto c = corpus()[2];
+    const auto batch = make_batch(c.table, 33, true, 79);
+    const DeviceRows rows(ctx, stream, batch);
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+    {
+        const auto config = configs()[4];
+        const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I64));
+        cuda::DeviceEncoder device(ctx, encoder);
+        const auto input = rows.input(batch, 33, config.inputs);
+        const auto reference = host_reference(*encoder, host_input(batch, 33, config.inputs));
+        const auto shape = shape_of(33, reference.sizes);
+        const auto output_layout = device.output_layout(shape);
+        const auto context = device.context().acquire(stream);
+        const u64 bytes = device.scratch_bytes(shape);
+        cuda::DeviceBuffer scratch(ctx, bytes, stream), block(ctx, output_layout.bytes, stream);
+        const auto out = cuda::output_of(output_layout, shape, block.data());
+        EXPECT_THROW(device.encode(context, scratch.data(), bytes - 1, shape, input, out), std::invalid_argument);
+        cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+        device.encode(context, scratch.data(), bytes, shape, input, out);
+        cudaGraph_t graph = nullptr;
+        cuda::check(cudaStreamEndCapture(stream, &graph), "capture");
+        cudaGraphExec_t exec = nullptr;
+        cuda::check(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+        cuda::check(cudaGraphLaunch(exec, stream), "launch");
+        DeviceResult result;
+        result.layout = output_layout;
+        result.block.resize(block.size());
+        cuda::check(cudaMemcpyAsync(result.block.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "download");
+        cuda::check(cudaStreamSynchronize(stream), "download");
+        std::memcpy(&result.sizes, result.block.data() + output_layout.sizes, sizeof result.sizes);
+        expect_sizes(reference.sizes, result.sizes);
+        expect_same_arrays(*reference.bundle, result);
+        device.count(context, scratch.data(), bytes, shape, input, out);
+        device.fill(context, scratch.data(), bytes, shape, input, out);
+        cuda::check(cudaStreamSynchronize(stream), "fill");
+        cuda::check(cudaGraphExecDestroy(exec), "destroy");
+        cuda::check(cudaGraphDestroy(graph), "destroy");
+    }
+}
+
+TEST(DeviceEncode, InvalidLaunchIndicesSetTheInputFlagAndLeaveTheCanary)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto c = corpus().front();
+    const auto batch = make_batch(c.table, 33, true, 83);
+    const DeviceRows rows(ctx, stream, batch);
+    const auto encoder = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(33, stream);
+    std::vector<u32> order(33);
+    std::iota(order.begin(), order.end(), 0u);
+    order[17] = 33;
+    cuda::DeviceBuffer indices(ctx, order.size() * sizeof(u32), stream);
+    cuda::check(cudaMemcpyAsync(indices.data(), order.data(), indices.size(), cudaMemcpyHostToDevice, stream), "order");
+    cuda::LaunchConfig launch;
+    launch.order = static_cast<const u32*>(indices.data());
+    const auto result = run_device(device, ctx, stream, rows.input(batch, 33, {}), device.worst_case(33), nullptr, launch, 0xa5);
+    EXPECT_EQ(result.sizes.overflow, encoding::k_overflow_input);
+    for (u64 i = 0; i < result.layout.sizes; ++i)
+        ASSERT_EQ(result.block[i], std::byte{0xa5}) << i;
+}
+
+TEST(DeviceEncode, MixedWidthsUseBothFillClassesAndKeepBatchOrder)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const u64 n = 4097;
+    const auto table = wide_table();
+    const auto batch = make_batch(table, n, false, 89);
+    const DeviceRows rows(ctx, stream, batch);
+    std::vector<u32> order(n);
+    std::iota(order.rbegin(), order.rend(), 0u);
+    cuda::DeviceBuffer indices(ctx, n * sizeof(u32), stream);
+    cuda::check(cudaMemcpyAsync(indices.data(), order.data(), indices.size(), cudaMemcpyHostToDevice, stream), "order");
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+    {
+        const auto encoder = encoding::FlatEncoder::create(table, with(test::encoder_options(), layout, encoding::IndexType::I32));
+        cuda::DeviceEncoder device(ctx, encoder);
+        const auto reference = host_reference(*encoder, host_input(batch, n, {}));
+        const auto shape = shape_of(n, reference.sizes);
+        const auto output_layout = device.output_layout(shape);
+        device.reserve(shape, stream);
+        const auto work = device.acquire(stream);
+        cuda::DeviceBuffer block(ctx, output_layout.bytes, stream);
+        cuda::LaunchConfig launch;
+        launch.order = static_cast<const u32*>(indices.data());
+        const auto input = rows.input(batch, n, {});
+        cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+        device.encode(work, input, cuda::output_of(output_layout, shape, block.data()), launch);
+        cudaGraph_t graph = nullptr;
+        cuda::check(cudaStreamEndCapture(stream, &graph), "capture");
+        size_t count = 0;
+        cuda::check(cudaGraphGetNodes(graph, nullptr, &count), "nodes");
+        std::vector<cudaGraphNode_t> nodes(count);
+        cuda::check(cudaGraphGetNodes(graph, nodes.data(), &count), "nodes");
+        u32 kernels = 0, thread_fills = 0, warp_fills = 0;
+        for (const auto node : nodes)
+        {
+            cudaGraphNodeType type;
+            cuda::check(cudaGraphNodeGetType(node, &type), "node type");
+            if (type != cudaGraphNodeTypeKernel)
+                continue;
+            ++kernels;
+            cudaKernelNodeParams params{};
+            cuda::check(cudaGraphKernelNodeGetParams(node, &params), "kernel parameters");
+            thread_fills += params.gridDim.x == (n + 127) / 128;
+            warp_fills += params.gridDim.x == (n * 32 + 127) / 128;
+        }
+        EXPECT_LE(kernels, 8u);
+        EXPECT_EQ(thread_fills, 1u);
+        EXPECT_EQ(warp_fills, 1u);
+        cuda::check(cudaGraphDestroy(graph), "destroy");
+        const auto result = run_device(device, ctx, stream, input, shape, nullptr, launch);
+        expect_same_arrays(*reference.bundle, result);
+    }
+}
+}
+
+namespace
+{
+TEST(DeviceEncode, GoalStridesAreCheckedOnBothBackends)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto c = corpus()[3];
+    const auto batch = make_batch(c.table, 33, true, 97);
+    const auto config = configs().back();
+    const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(33, stream);
+    const DeviceRows rows(ctx, stream, batch);
+    auto host_in = host_input(batch, 33, config.inputs);
+    auto device_in = rows.input(batch, 33, config.inputs);
+    ASSERT_GT(batch.words, 0u);
+    ASSERT_GT(batch.derived_words, 0u);
+    ++host_in.goal_words;
+    ++device_in.goal_words;
+    EXPECT_THROW((void)encoder->encode(host_in), std::invalid_argument);
+    EXPECT_THROW((void)run_device(device, ctx, stream, device_in, device.worst_case(33)), std::invalid_argument);
+    --host_in.goal_words;
+    --device_in.goal_words;
+    ++host_in.goal_derived_words;
+    ++device_in.goal_derived_words;
+    EXPECT_THROW((void)encoder->encode(host_in), std::invalid_argument);
+    EXPECT_THROW((void)run_device(device, ctx, stream, device_in, device.worst_case(33)), std::invalid_argument);
+}
+}
+
+namespace
+{
+TEST(DeviceEncode, CallerScratchKeepsTheAcquiredGenerationAcrossRefresh)
+{
+    SKIP_WITHOUT_GPU();
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain growing) (:requirements :strips) (:predicates (fixed ?x) (flag ?x))"
+        " (:action set :parameters (?x) :precondition (and) :effect (flag ?x)))");
+    const auto first = Task::create(*domain->instantiate_string(
+        "(define (problem small) (:domain growing) (:objects a) (:init) (:goal (and)))"));
+    const auto second = Task::create(*domain->instantiate_string(
+        "(define (problem larger) (:domain growing) (:objects a) (:init (fixed a)) (:goal (and)))"));
+    const auto small = encoding::FlatEncoder::create(rl::TaskTable::single(first), test::encoder_options());
+    const auto grown = encoding::FlatEncoder::create(rl::TaskTable::create({first, second}), test::encoder_options());
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, small);
+    const u64 n = 257;
+    const auto batch = make_batch(small->table_ptr(), n, true, 103);
+    const DeviceRows rows(ctx, stream, batch);
+    const auto input = rows.input(batch, n, {});
+    const auto reference = host_reference(*small, host_input(batch, n, {}));
+    const auto shape = shape_of(n, reference.sizes);
+    const auto context = device.context().acquire(stream);
+    const u64 bytes = device.scratch_bytes(context, shape);
+    const auto layout = device.output_layout(shape);
+    cuda::DeviceBuffer scratch(ctx, bytes, stream), block(ctx, layout.bytes, stream);
+    const auto out = cuda::output_of(layout, shape, block.data());
+    device.count(context, scratch.data(), bytes, shape, input, out);
+    ASSERT_TRUE(device.refresh(grown, stream));
+    EXPECT_GT(device.scratch_bytes(shape), bytes);
+    EXPECT_EQ(device.scratch_bytes(context, shape), bytes);
+    device.fill(context, scratch.data(), bytes, shape, input, out);
+    DeviceResult result;
+    result.layout = layout;
+    result.block.resize(block.size());
+    cuda::check(cudaMemcpyAsync(result.block.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "download");
+    cuda::check(cudaStreamSynchronize(stream), "download");
+    std::memcpy(&result.sizes, result.block.data() + layout.sizes, sizeof result.sizes);
+    expect_sizes(reference.sizes, result.sizes);
+    expect_same_arrays(*reference.bundle, result);
+    device.encode(context, scratch.data(), bytes, shape, input, out);
+    cuda::check(cudaStreamSynchronize(stream), "encode");
+}
+
+TEST(DeviceEncode, CallerScratchRejectsAForeignAcquisitionBeforeLaunch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto c = corpus().front();
+    const auto encoder = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder first(ctx, encoder), second(ctx, encoder);
+    const auto foreign = first.context().acquire(stream);
+    const auto shape = second.worst_case(0);
+    const auto layout = second.output_layout(shape);
+    cuda::DeviceBuffer scratch(ctx, second.scratch_bytes(shape), stream), block(ctx, layout.bytes, stream);
+    const auto out = cuda::output_of(layout, shape, block.data());
+    cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "capture");
+    EXPECT_THROW((void)second.scratch_bytes(foreign, shape), std::invalid_argument);
+    EXPECT_THROW(second.encode(foreign, scratch.data(), scratch.size(), shape, {}, out), std::invalid_argument);
+    EXPECT_THROW(second.count(foreign, scratch.data(), scratch.size(), shape, {}, out), std::invalid_argument);
+    EXPECT_THROW(second.fill(foreign, scratch.data(), scratch.size(), shape, {}, out), std::invalid_argument);
+    cudaGraph_t graph = nullptr;
+    cuda::check(cudaStreamEndCapture(stream, &graph), "capture");
+    size_t nodes = 0;
+    cuda::check(cudaGraphGetNodes(graph, nullptr, &nodes), "nodes");
+    EXPECT_EQ(nodes, 0u);
+    cuda::check(cudaGraphDestroy(graph), "destroy");
+}
+}

@@ -11,6 +11,7 @@ import pytest
 import mymyr
 from mymyr import encoding, rl
 from conftest import ROOT, text_task, walk
+from entity_refs import check_entity_names
 
 U64 = np.uint64
 TASKS = ["gripper__prob05", "blocks__probBLOCKS-8-0", "philosophers__p03-phil4"]
@@ -82,11 +83,11 @@ class Pool:
         return out
 
 
-def options_of(variant, layout):
+def options_of(variant, layout, index_dtype="int32"):
     goals, actions, _ = variant
     targets = (("goal",) if goals else ()) + (("action",) if actions else ())
     return dict(goal_derivations=("plain", "satisfied", "unsatisfied") if goals else (), include_actions=actions,
-                target_sources=targets, predicate_virtual_nodes=actions, layout=layout)
+                target_sources=targets, predicate_virtual_nodes=actions, layout=layout, index_dtype=index_dtype)
 
 
 def pools():
@@ -108,12 +109,13 @@ def pool_of():
     return make
 
 
+@pytest.mark.parametrize("index_dtype", ["int32", "int64"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("variant", VARIANTS, ids=lambda v: "-".join(str(x) for x in v))
 @pytest.mark.parametrize("name", pools())
-def test_a_stream_flush_equals_one_encode_over_random_appends(pool_of, name, variant, layout):
+def test_a_stream_flush_equals_one_encode_over_random_appends(pool_of, name, variant, layout, index_dtype):
     pool = pool_of(name)
-    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, layout))
+    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, layout, index_dtype))
     stream = encoder.stream()
     rng = random.Random(3)
     for round_ in range(5):
@@ -130,12 +132,15 @@ def test_a_stream_flush_equals_one_encode_over_random_appends(pool_of, name, var
         assert_same(batch, encoder.encode(**whole))
 
 
+@pytest.mark.parametrize("index_dtype", ["int32", "int64"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("variant", VARIANTS, ids=lambda v: "-".join(str(x) for x in v))
 @pytest.mark.parametrize("name", pools())
-def test_a_mutable_stream_flush_equals_one_encode_over_random_updates_and_removals(pool_of, name, variant, layout):
+def test_a_mutable_stream_flush_equals_one_encode_over_random_updates_and_removals(
+    pool_of, name, variant, layout, index_dtype
+):
     pool = pool_of(name)
-    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, layout))
+    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, layout, index_dtype))
     stream = encoder.mutable_stream()
     rng = random.Random(11)
     model = {}
@@ -260,24 +265,89 @@ def test_the_rows_of_a_stream_give_the_same_inputs_until_it_is_empty_again():
             add(**pool.inputs([3], variant))
 
 
-def test_the_action_entities_of_a_flush_are_those_of_the_appended_states_in_graph_order():
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_the_entities_of_a_flush_are_named_through_the_expansions_they_were_appended_with(layout):
     task = text_task("logistics00__probLOGISTICS-6-1")
     table = rl.as_table(task)
     states = walk(task, steps=6, walks=2)
-    encoder = encoding.FlatRelationEncoder(task, target_sources=("action",), goal_derivations=())
+    encoder = encoding.FlatRelationEncoder(task, **{**options_of(("pair", True, False), layout), "goal_derivations": ("plain",)})
     stream = encoder.stream()
     chunks = [states[:3], states[3:4], states[4:]]
+    where = []  # (expansion, row in it) of each appended state, in append order
     for chunk in chunks:
-        stream.append(chunk, actions=rl.expand(table, chunk))
+        expansion = rl.expand(table, chunk)
+        stream.append(chunk, actions=expansion, goals=goals_of(table, len(chunk)))
+        where += [(expansion, k) for k in range(len(chunk))]
     batch = stream.flush()
     graph = 0
     for chunk in chunks:
         for state in chunk:
-            begin, end = (int(x) for x in batch.entity_offsets[graph : graph + 2])
-            roles = batch.entity_role[begin:end]
-            names = encoder.entity_names(batch, graph)
-            assert sorted(n for n, r in zip(names, roles) if r == 4) == sorted(str(a) for a in state.applicable_actions())
+            expansion, k = where[graph]
+            checked = check_entity_names(encoder, batch, graph, task.objects, expansion, k)
+            assert sorted(checked["action"]) == sorted(str(a) for a in state.applicable_actions())
+            assert checked["goal"]
             graph += 1
+    assert graph == batch.num_graphs
+
+
+def goals_of(table, rows):
+    """Goal masks over the first fluent slots of the table's only instance: positive on slot 0, negative on slot 1."""
+    pos = np.zeros((rows, table.words), U64)
+    neg = np.zeros((rows, table.words), U64)
+    pos[:, 0] = U64(1)
+    neg[:, 0] = U64(2)
+    return pos, neg
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_the_entities_of_a_mutable_flush_are_named_through_the_rows_of_their_indices(layout):
+    task = text_task("logistics00__probLOGISTICS-6-1")
+    table = rl.as_table(task)
+    states = walk(task, steps=6, walks=2)[:9]
+    encoder = encoding.FlatRelationEncoder(task, **{**options_of(("pair", True, False), layout), "goal_derivations": ("plain",)})
+    stream = encoder.mutable_stream()
+    expansions = {}
+    order = [7, -2, 40, 3, 11, 0, 25, 8, 5]
+    for index, state in zip(order, states):
+        expansions[index] = rl.expand(table, [state])
+        stream.append(index, state, actions=expansions[index], goals=goals_of(table, 1))
+    replaced = rl.expand(table, [states[0]])  # a held index takes another state
+    stream.update(40, states[0], actions=replaced, goals=goals_of(table, 1))
+    expansions[40] = replaced
+    stream.remove(3)
+    held = {i: s for i, s in zip(order, states)}
+    held[40] = states[0]
+    del held[3]
+    batch = stream.flush()
+    assert stream.indices().tolist() == sorted(held)
+    for graph, index in enumerate(stream.indices().tolist()):
+        checked = check_entity_names(encoder, batch, graph, task.objects, expansions[index], 0)
+        assert sorted(checked["action"]) == sorted(str(a) for a in held[index].applicable_actions())
+
+
+@pytest.mark.parametrize("mutable", [False, True], ids=["append-only", "mutable"])
+@pytest.mark.parametrize("index_dtype", ["int32", "int64"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("variant", [VARIANTS[1], VARIANTS[4]], ids=lambda v: "-".join(str(x) for x in v))
+def test_a_flush_of_more_rows_than_one_member_encodes_equals_the_serial_encode(pool_of, variant, layout, index_dtype, mutable):
+    pool = pool_of("blocks__probBLOCKS-8-0")
+    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, layout, index_dtype))
+    rng = random.Random(23)
+    picks = [rng.randrange(pool.size) for _ in range(2600)]  # three members' worth of 1024 graphs
+    stream = encoder.mutable_stream() if mutable else encoder.stream()
+    ordered = picks
+    for start in range(0, len(picks), 900):
+        chunk = picks[start : start + 900]
+        if mutable:
+            stream.append([-start - k for k in range(len(chunk))], **pool.inputs(chunk, variant))  # descending indices
+        else:
+            stream.append(**pool.inputs(chunk, variant))
+    if mutable:
+        ordered = picks[::-1]
+    assert len(stream) == len(picks)
+    expected = encoder.encode(**pool.inputs(ordered, variant), threads=1)
+    assert_same(stream.flush(threads=3), expected)
+    assert_same(encoder.encode(**pool.inputs(ordered, variant), threads=3), expected)
 
 
 def test_invalid_rows_are_refused_at_the_append_and_change_nothing():
@@ -348,11 +418,11 @@ def test_capacities_and_pools_of_a_flush():
     sizes = exact.as_dict()
     stream = encoder.stream()
     stream.append(**given)
-    tight = {"entities": 1, "tuples": 1, "args": 1, "targets": 1}
+    tight = {"entities": 1, "graphs": len(picks), "args": 1, "targets": 1}
     overflowed = stream.flush(capacities=tight)
     assert overflowed.sizes["overflow"] and overflowed.sizes["capacity_overflow"]
     assert len(stream) == 40
-    roomy = {"entities": overflowed.sizes["entities"] + 9, "tuples": overflowed.sizes["tuples"] + 9,
+    roomy = {"entities": overflowed.sizes["entities"] + 9, "graphs": len(picks),
              "args": overflowed.sizes["args"] + 9, "targets": overflowed.sizes["targets"] + 9}
     fitted = stream.flush(capacities=roomy, pool=rl.ThreadPool(2))
     assert not fitted.sizes["overflow"] and len(stream) == 0
@@ -410,7 +480,8 @@ def test_the_index_errors_of_a_mutable_stream_change_nothing():
         stream.remove(2.5)
     assert stream.indices().tolist() == [3, 5, 2**62]
     assert stream.indices().dtype == np.int64
-    assert 5 in stream and 4 not in stream
+    assert 5 in stream and 4 not in stream and np.int32(5) in stream
+    assert "5" not in stream and 2.5 not in stream and None not in stream and 2**70 not in stream
     stream.update(np.array([5, 3], dtype=np.int32), **pool.inputs([6, 7], variant))
     stream.remove(2**62)
     assert_same(stream.flush(), encoder.encode(**pool.inputs([7, 6], variant)))
@@ -435,6 +506,64 @@ def test_concurrent_appends_and_flushes_lose_no_row():
     batch = stream.flush()
     assert batch.num_graphs == 40
     assert_same(mutable.flush(), encoder.encode(**pool.inputs([p for c in chunks for p in c], variant)))
+
+
+def graph_digest(batch, graph):
+    """The content of one graph of a batch of the 'graph' layout (entities relative to the graph's first)."""
+    arrays = batch.as_dict()
+    relations = arrays["num_relations"]
+    low, high = (int(arrays["relation_arg_offsets"][graph * relations + k]) for k in (0, relations))
+    first = int(arrays["entity_offsets"][graph])
+    return (arrays["relation_counts"].reshape(-1, relations)[graph].tobytes(),
+            (arrays["relation_args"][low:high] - first).tobytes())
+
+
+def test_appends_updates_removals_and_flushes_from_several_threads_agree_with_a_serial_run():
+    pool = Pool([text_task("gripper__prob05")], seed=14)
+    variant = (None, True, False)
+    encoder = encoding.FlatRelationEncoder(pool.table, **options_of(variant, "graph"))
+    digest_of = {p: graph_digest(encoder.encode(**pool.inputs([p], variant)), 0) for p in range(pool.size)}
+    stream = encoder.stream()
+    mutable = encoder.mutable_stream()
+    threads, rounds = 6, 40
+
+    def work(thread):
+        rng = random.Random(thread)
+        appended, flushed, kept, snapshots = [], [], {}, []
+        for step in range(rounds):
+            picks = [rng.randrange(pool.size) for _ in range(rng.randint(1, 6))]
+            stream.append(**pool.inputs(picks, variant))
+            appended += picks
+            indices = [thread * 10_000 + step * 10 + k for k in range(len(picks))]
+            mutable.append(indices, **pool.inputs(picks, variant))
+            kept.update(zip(indices, picks))
+            if step % 3 == 2:
+                swap = rng.randrange(pool.size)
+                mutable.update(indices[:1], **pool.inputs([swap], variant))
+                kept[indices[0]] = swap
+            if step % 4 == 3 and len(indices) > 1:
+                mutable.remove(indices[-1])
+                del kept[indices[-1]]
+            if step % 5 == 4:
+                batch = stream.flush()
+                flushed += [graph_digest(batch, g) for g in range(batch.num_graphs)]
+                snapshot = mutable.flush(threads=2)
+                snapshots += [graph_digest(snapshot, g) for g in range(snapshot.num_graphs)]
+                mutable.indices()
+        return appended, flushed, kept, snapshots
+
+    with ThreadPoolExecutor(threads) as executor:
+        results = list(executor.map(work, range(threads)))
+    rest = stream.flush()
+    flushed = [d for _, f, _, _ in results for d in f] + [graph_digest(rest, g) for g in range(rest.num_graphs)]
+    # every appended row was flushed exactly once (the rows of a flush are those held at that moment)
+    assert sorted(flushed) == sorted(digest_of[p] for appended, _, _, _ in results for p in appended)
+    held = {index: pick for _, _, kept, _ in results for index, pick in kept.items()}
+    assert len(mutable) == len(held) and mutable.indices().tolist() == sorted(held)
+    # a flush between the changes of other threads holds only rows that were stored
+    possible = set(digest_of.values())
+    assert all(d in possible for _, _, _, snapshots in results for d in snapshots)
+    assert_same(mutable.flush(), encoder.encode(**pool.inputs([held[i] for i in sorted(held)], variant)))
 
 
 def test_the_framework_of_a_stream():

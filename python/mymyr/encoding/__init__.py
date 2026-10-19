@@ -38,11 +38,13 @@ from mymyr._core._encoding import (
     FlatTransitionEffectsEncoder,
     FlatTransitionEncoder,
 )
+from mymyr.encoding._device import DeviceFlatBatch
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
 
 __all__ = [
+    "DeviceFlatBatch",
     "EncodingSchema",
     "FlatBatch",
     "FlatHorizonEncoder",
