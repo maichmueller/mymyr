@@ -377,12 +377,13 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities`, `as_dict(framework=None)` (torch
   tensors, `'dlpack'` or, copying to the host, `'numpy'`) and `device`. `encoder.entity_names(batch, g)` and
   `encoder.describe(batch, g)` accept it and copy it to the host.
-- **Workspaces.** The encoder keeps one device workspace (the scratch of the kernels and its uploaded context) per
-  stream it runs on, made by the first call on the stream and reused after it; a batch of more rows than the workspace
+- **Workspaces.** Exact encodes keep one device workspace per stream, made by the first exact call and reused after it;
+  a batch of more rows than the workspace
   holds makes the next call reserve a larger one (the size is a power of two, at least 1024 rows).
-  `encoder.reserve_device(graphs, *, device=None, stream=None)` reserves one in advance and
+  `encoder.reserve_device(graphs, *, device=None, stream=None)` reserves exact-call scratch in advance and
   `encoder.release_device(*, device=None, stream=None)` frees the workspace of a stream, or of every stream of the
-  device. Workspaces are freed with the encoder.
+  device. Workspaces are freed with the encoder. Capacity encodes allocate scratch through torch's caching allocator
+  per call; captured scratch belongs to the graph's private pool and survives later calls and workspace growth.
 
 ### The torch op
 
@@ -393,16 +394,15 @@ are as above (`None` for an input that is absent) and the four ints are the capa
 sources). It returns the list of 14 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the
 batch table and `sizes` last; an array the schema does not store is an empty tensor, and
 `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch. The op waits for nothing, allocates only
-its outputs and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
+its outputs and scratch and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
 traces it without a graph break. The registry keeps the encoder alive until `unregister(handle)`. A compiled function
-holds its handle and capacities as constants: compile one function per encoder, since one that is called with another
-handle is traced again with symbolic integers, which the fake implementation cannot resolve to an encoder.
+specializes the handle: calling it with another registered encoder traces a graph for that encoder's schema.
 
-To capture the op (or `encode` with capacities) in a `torch.cuda.CUDAGraph`, reserve the workspace on the capture
-stream first, since a reservation allocates and a capture cannot: `encoder.reserve_device(max_rows, stream=capture_stream)`.
-A capture without it raises a `ValueError` that says so, and so does an encoding without capacities. The graph reads
-its input tensors where they were captured: write new rows in place and replay. Keep the encoder registered while the
-graph can replay, and do not release its workspace.
+To capture the op (or `encode` with capacities) in a `torch.cuda.CUDAGraph`, warm it once on the capture stream to upload
+and acquire its context. No scratch reservation is needed. An encoding without capacities waits for the sizes and
+cannot be captured. The graph reads its input tensors where they were captured: write new rows in place and replay.
+Keep the encoder registered or referenced while the graph can replay: a captured `encode` holds raw context pointers
+and does not retain the Python encoder. Graphs of different sizes can share a capture stream; each owns its scratch.
 
 ## Names
 

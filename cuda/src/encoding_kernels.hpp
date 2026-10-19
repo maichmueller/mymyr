@@ -50,6 +50,7 @@ struct EncodeParams
     encoding::BatchShape capacities;
     u32 static_overflow = 0;  // the k_overflow_ flags that follow from the shape alone
     bool index64 = false;
+    bool zero_unused = false;
     bool relation_major = false;
     // the scratch
     void* totals = nullptr;  // the scanned array: u32, u64 when wide

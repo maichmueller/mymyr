@@ -17,3 +17,11 @@
 # stubgen skips __version__.
 ^mymyr\._core\.__suffix__$:
     __version__: str
+
+^mymyr\._core\._encoding\.FlatRelationEncoder\.encode$:
+    \import numpy
+    \import typing
+    @typing.overload
+    def encode(self, states: mymyr._core.State | Sequence[mymyr._core.State] | numpy.ndarray, task_ids: mymyr._typing.SupportsDLPack | Sequence[int] | None = None, *, derived: mymyr._typing.SupportsDLPack | None = None, goals: tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | None = None, actions: mymyr._core._rl.Expansion | None = None, framework: Literal['numpy', 'torch', 'jax', 'dlpack'] | None = None, threads: int = 1, pool: mymyr._core._rl.ThreadPool | None = None, capacities: dict[str, int] | None = None) -> FlatBatch: ...
+    @typing.overload
+    def encode(self, states: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack, task_ids: mymyr._typing.SupportsDLPack | Sequence[int] | None = None, *, derived: mymyr._typing.SupportsDLPack | None = None, goals: tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | tuple[mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack, mymyr._typing.SupportsDLPack] | None = None, actions: mymyr._core._rl.Expansion | None = None, framework: Literal['numpy', 'torch', 'jax', 'dlpack'] | None = None, threads: int = 1, pool: mymyr._core._rl.ThreadPool | None = None, capacities: dict[str, int] | None = None) -> FlatBatch | mymyr._typing.DeviceFlatBatch: ...

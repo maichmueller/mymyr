@@ -642,7 +642,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the derived goal row stride is smaller than its width");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
-    if (!in.derived && facts.reads_derived[in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0])
+    if (graphs && !in.derived && facts.reads_derived[in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0])
         invalid("the device does not evaluate derived atoms: pass the derived words of the rows (derived)");
     const OutputArrays arrays = output_arrays(schema);
     const encoding::FlatBuffers& a = out.arrays;
@@ -650,16 +650,17 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the output needs sizes");
     if (phase != Phase::Count)
     {
-        if (!a.task_ids || !a.num_objects || !a.entity_offsets || !a.relation_offsets || !a.relation_arg_offsets)
+        if ((graphs && (!a.task_ids || !a.num_objects)) || !a.entity_offsets || !a.relation_offsets ||
+            !a.relation_arg_offsets)
             invalid("the output needs task_ids, num_objects, entity_offsets, relation_offsets, relation_arg_offsets and sizes");
         // an array without entries may be null, so a batch of rows without objects needs no entity arrays
         const bool entity_given = (a.entity_role != nullptr) || (a.entity_ref != nullptr);
         if (!arrays.entity_arrays ? entity_given
                                   : (out.capacities.entities && (!a.entity_role || !a.entity_ref)))
             invalid("entity_role and entity_ref must be given iff the schema stores entity arrays");
-        if ((a.relation_counts != nullptr) != arrays.counts)
+        if (arrays.counts ? (graphs && R && !a.relation_counts) : a.relation_counts != nullptr)
             invalid("relation_counts must be given iff the schema stores counts");
-        if ((a.goal_complete != nullptr) != arrays.goal_complete)
+        if (arrays.goal_complete ? (graphs && !a.goal_complete) : a.goal_complete != nullptr)
             invalid("goal_complete must be given iff the schema has goal relations");
         if ((a.target_offsets != nullptr) != arrays.targets ||
             (!arrays.targets && (a.target_entity != nullptr || a.target_group != nullptr)))
@@ -740,6 +741,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         p.capacities = out.capacities;
     }
     p.index64 = index == encoding::IndexType::I64;
+    p.zero_unused = out.zero_unused;
     p.relation_major = relation_major;
     if (mul(graphs, R) >= limit || graphs >= limit)
         p.static_overflow |= encoding::k_overflow_index;

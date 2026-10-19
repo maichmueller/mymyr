@@ -193,7 +193,7 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
         batch = encoder.encode(states, capacities=exact, threads=threads)
         assert batch.sizes == {
             "entities": exact["entities"], "tuples": int(expected.relation_offsets[-1]), "args": exact["args"],
-            "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False,
+            "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False, "invalid_input": False,
         }
         same_arrays(batch, expected)
         roomy = {"entities": exact["entities"] + 9, "graphs": exact["graphs"], "args": exact["args"] + 13}
