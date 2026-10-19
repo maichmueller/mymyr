@@ -258,8 +258,9 @@ def test_capacity_form_equals_host_exact_short_zero_and_ample(cases, layout, nam
         predicate_virtual_nodes=True,
     )
     exact = exact_capacities(host_encode(encoder, case))
+    roomy = exact_capacities(host_encode(encoder, case), 2) if case.n else dict.fromkeys(exact, 10)
     short = dict(exact, args=max(0, exact["args"] - 1))
-    for caps in (exact, exact_capacities(host_encode(encoder, case), 2), short,
+    for caps in (exact, roomy, short,
                  dict(exact, entities=max(0, exact["entities"] - 1)),
                  {"entities": 0, "graphs": case.rows.shape[0], "args": 0, "targets": 0}):
         host = host_encode(encoder, case, capacities=caps)
@@ -665,6 +666,8 @@ def test_the_op_equals_encode_with_capacities(cases, layout, n):
         encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **OPTION_SETS[options])
         handle = rt.register(encoder)
         caps = exact_capacities(host_encode(encoder, case), 2)
+        if not case.n:
+            caps = dict.fromkeys(caps, 10)
         rows, ids, derived, g = op_inputs(case, dev)
         out = call_op(handle, rows, ids, derived, g, caps)
         assert len(out) == len(encoding.DeviceFlatBatch.array_names)
