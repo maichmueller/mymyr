@@ -67,6 +67,9 @@ if(TARGET mymyr_frontend)
         encoding/test_encoder_modes.cpp encoding/test_encoder_goals.cpp encoding/test_encoder_actions.cpp encoding/test_expand_derived.cpp encoding/test_stream.cpp)
     target_link_libraries(mymyr_encoder_tests PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
     gtest_discover_tests(mymyr_encoder_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800 LABELS encoding)
+    add_executable(mymyr_collate_tests encoding/test_collate.cpp)
+    target_link_libraries(mymyr_collate_tests PRIVATE mymyr::encoding mymyr::frontend mymyr_warnings GTest::gtest_main)
+    gtest_discover_tests(mymyr_collate_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 1800 LABELS encoding)
 endif()
 
 # Thread counts and thread creation; interposes pthread_create to simulate refused threads, so in an executable of

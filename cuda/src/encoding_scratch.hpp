@@ -1,5 +1,8 @@
 #pragma once
 #include "mymyr/cuda/encoding.hpp"
+#include "mymyr/cuda/device_task.hpp"
+
+#include <string>
 
 namespace mymyr::cuda::detail
 {
@@ -16,6 +19,7 @@ struct ScratchLayout
     u64 cell_stride = 0;  // entries from the counts of one graph to the next
     u64 cell_entries = 0, scan_length = 0;
     u64 scan_temp_bytes = 0, bytes = 0;
+    u64 derived = 0, axiom_views = 0;
     u64 relations = 0;
     bool wide = false;
     bool relation_major = false;
@@ -45,11 +49,21 @@ struct ScratchView
 
 struct EncodingFacts
 {
+    struct Axioms
+    {
+        DeviceTaskPtr task;
+        std::string refusal;
+    };
     GraphBounds bounds;
     std::vector<encoding::detail::GraphWidth> widths;
     std::array<bool, 3> reads_derived{};
     u32 derived_words = 0;
+    u64 axiom_view_words = 0;
+    std::vector<Axioms> axioms;
 };
+
+[[nodiscard]] ScratchLayout encoding_scratch_layout(const BatchShape& shape, const EncodingFacts& facts,
+                                                    encoding::Layout layout, u64 relations);
 
 struct EncodingExecution
 {

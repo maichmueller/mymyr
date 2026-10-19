@@ -49,11 +49,8 @@ __device__ __forceinline__ u32 head_slot(const TaskView& t, u32 k, const u32* b,
 /// the bitset and pushed into the parent's view at once (Engine::add_derived), so the axioms after it in the same round
 /// see it.
 template<u32 OW, bool FC>
-__global__ void __launch_bounds__(k_axiom_block) k_axioms(TaskView t, Parents p, Views v, Derived d, u32 s_begin, u32 s_end)
+__device__ __forceinline__ void close_axioms(TaskView t, Parents p, Views v, Derived d, u32 s_begin, u32 s_end, u64 i)
 {
-    const u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x;
-    if (i >= live_rows(p))
-        return;
     u64* der = d.data + i * d.words;
     u64* view = v.data + i * v.words;
     const StateRef s{p.data + i * p.stride, p.words, der, d.words};
@@ -97,6 +94,53 @@ __global__ void __launch_bounds__(k_axiom_block) k_axioms(TaskView t, Parents p,
             if (!recursive || cur == 0)
                 break;
         }
+    }
+}
+
+template<u32 OW, bool FC>
+__global__ void __launch_bounds__(k_axiom_block) k_axioms(TaskView t, Parents p, Views v, Derived d, u32 s_begin, u32 s_end)
+{
+    const u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x;
+    if (i < live_rows(p))
+        close_axioms<OW, FC>(t, p, v, d, s_begin, s_end, i);
+}
+
+/// One thread owns a row's view and closure; rows of other instances do not touch either buffer.
+template<u32 OW>
+__global__ void __launch_bounds__(k_axiom_block) k_encoding_axioms(TaskView t, Parents p, Views v, Derived d,
+                                                                  u64 rows, const i32* ids, u32 instance,
+                                                                  const u64* live, const u64* start, u64 capacity)
+{
+    if (live && *live < rows) rows = *live;
+    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
+    {
+        const u64 source = start ? (*start + i) % capacity : i;
+        if ((ids ? ids[source] : 0) != static_cast<i32>(instance))
+            continue;
+        u64* der = d.data + i * d.words;
+        for (u32 w = 0; w < d.words; ++w)
+            der[w] = 0;
+        if (p.words < (u64{t.fluent_slots} + 63) / 64)
+            continue;
+        u64* view = v.data + i * v.words;
+        for (u64 w = 0; w < v.words; ++w)
+            view[w] = 0;
+        const u64* state = p.data + source * p.stride;
+        for (u32 slot = 0; slot < t.fluent_slots; ++slot)
+            if ((state[slot >> 6] >> (slot & 63)) & 1)
+            {
+                const u32* op = t.fluent_view_op + u64{slot} * 4;
+                if (op[0] != k_none)
+                    view[u64{op[0]} * OW + (op[1] >> 6)] |= u64{1} << (op[1] & 63);
+                if (op[2] != k_none)
+                    view[u64{op[2]} * OW + (op[3] >> 6)] |= u64{1} << (op[3] & 63);
+            }
+        Parents row = p;
+        row.data = state;
+        Views row_view{view, v.words};
+        Derived row_derived = d;
+        row_derived.data = der;
+        close_axioms<OW, false>(t, row, row_view, row_derived, 0, t.n_strata, 0);
     }
 }
 
@@ -232,6 +276,31 @@ cudaError_t launch_axioms(const rl::dev::TaskView& t, Parents p, Views v, Derive
         case 32: return launch_axioms_ow<32, false>(t, p, v, d, st, s);
         default: return cudaErrorInvalidValue;
     }
+}
+
+cudaError_t launch_encoding_axioms(const TaskView& t, const u64* states, u64 stride, u32 words, u64 rows,
+                                    const i32* ids, u32 instance, u64* views, u64 view_words, u64* derived,
+                                    u32 derived_words, cudaStream_t stream, const u64* live, const u64* row_start, u64 row_capacity)
+{
+    if (!rows)
+        return cudaSuccess;
+    const Parents p{states, stride, words};
+    const Views v{views, view_words};
+    Derived d;
+    d.data = derived;
+    d.words = derived_words;
+    const unsigned blocks = static_cast<unsigned>((rows + k_axiom_block - 1) / k_axiom_block < 65535 ?
+                                                  (rows + k_axiom_block - 1) / k_axiom_block : 65535);
+#define MYMYR_AXIOM_CASE(OW) case OW: k_encoding_axioms<OW><<<blocks, k_axiom_block, 0, stream>>>(t, p, v, d, rows, ids, instance, live, row_start, row_capacity); break
+    switch (t.ow)
+    {
+        MYMYR_AXIOM_CASE(1); MYMYR_AXIOM_CASE(2); MYMYR_AXIOM_CASE(3); MYMYR_AXIOM_CASE(4);
+        MYMYR_AXIOM_CASE(5); MYMYR_AXIOM_CASE(6); MYMYR_AXIOM_CASE(7); MYMYR_AXIOM_CASE(8);
+        MYMYR_AXIOM_CASE(12); MYMYR_AXIOM_CASE(16); MYMYR_AXIOM_CASE(24); MYMYR_AXIOM_CASE(32);
+        default: return cudaErrorInvalidValue;
+    }
+#undef MYMYR_AXIOM_CASE
+    return cudaGetLastError();
 }
 
 cudaError_t launch_goal_rows_derived(const rl::dev::TaskView& t, const u64* states, u32 words, u64 n, const u64* derived,

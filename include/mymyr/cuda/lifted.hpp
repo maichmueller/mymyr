@@ -228,6 +228,13 @@ struct Strata
 cudaError_t launch_axioms(const rl::dev::TaskView& t, Parents p, Views v, Derived d, bool fc, const Strata& strata,
                           cudaStream_t s);
 
+/// Evaluate a table instance's rows directly into encoder scratch. Other instances' rows are untouched.
+/// Views and derived rows use the table-wide strides; each thread owns one complete view and closure.
+cudaError_t launch_encoding_axioms(const rl::dev::TaskView& task, const u64* states, u64 stride, u32 words, u64 rows,
+                                    const i32* task_ids, u32 instance, u64* views, u64 view_words, u64* derived,
+                                    u32 derived_words, cudaStream_t stream, const u64* live = nullptr,
+                                    const u64* row_start = nullptr, u64 row_capacity = 0);
+
 /// launch_goal_rows with the rows' derived bitsets ([n, derived_words], for goals with derived literals).
 cudaError_t launch_goal_rows_derived(const rl::dev::TaskView& t, const u64* states, u32 words, u64 n, const u64* derived,
                                      u32 derived_words, u8* out, cudaStream_t s);

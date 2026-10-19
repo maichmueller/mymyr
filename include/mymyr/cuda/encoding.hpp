@@ -13,6 +13,7 @@
 // events, so kernels can be launched with it inside a capture.
 
 #include "mymyr/cuda/runtime.hpp"
+#include "mymyr/cuda/encoding_types.hpp"
 #include "mymyr/encoding/buffers.hpp"
 #include "mymyr/encoding/encoder.hpp"
 
@@ -114,16 +115,6 @@ struct GraphBounds
     u64 entities = 0, tuples = 0, args = 0, cells = 0, targets = 0, words = 0;
 };
 
-/// Which arrays a batch stores (see encoding/encoder.hpp). entity_role and entity_ref come together, as do the three
-/// target arrays.
-struct OutputArrays
-{
-    bool entity_arrays = true;
-    bool counts = true;
-    bool goal_complete = false;
-    bool targets = false;
-    [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
-};
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
 
 /// Byte offsets in a caller-owned output block; each array begins at a multiple of 64 bytes. An array that the batch
@@ -140,43 +131,19 @@ struct OutputLayout
 [[nodiscard]] OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations,
                                          const OutputArrays& arrays = {});
 
-/// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities
-/// of the variable-size arrays, and the device address of the FlatSizes that receives the true sizes. The arrays hold at
-/// least the capacities' entries, the others the entries their sizes follow from (encoding::FlatBuffers).
-struct DeviceOutput
-{
-    encoding::FlatBuffers arrays;
-    encoding::BatchShape capacities;
-    encoding::FlatSizes* sizes = nullptr;
-    /// Zero the variable arrays' unused tails, and all output arrays on overflow, in the fill kernel.
-    bool zero_unused = false;
-};
 /// The destinations in the device block `block` of output_layout(shape, ...), with the capacities of `shape`
 /// (the graph capacity bounds every per-graph and per-cell array).
 [[nodiscard]] DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void* block);
 
-/// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
-struct DeviceEncodeInput
-{
-    u64 graphs = 0;
-    const u64* states = nullptr;    // [graphs, state_stride] the atom words of each row
-    u64 state_stride = 0;           // words from one row to the next (at least state_words)
-    u32 state_words = 0;            // the words of a row, at least those of every instance in the batch
-    const i32* task_ids = nullptr;  // [graphs] the instance of each row; null: instance 0
-    // The derived words of each row. Required if any instance in the encoder's table reads them for the supplied
-    // kind of goal (instance, fluent row masks, or also derived row masks); the device does not evaluate axioms.
-    const u64* derived = nullptr;
-    u64 derived_stride = 0;
-    // The goal of each row, replacing its instance's goal, with the layout and rules of encoding::EncodeInput.
-    const u64* goal_pos = nullptr;
-    const u64* goal_neg = nullptr;
-    u64 goal_stride = 0;
-    u32 goal_words = 0;
-    const u64* goal_derived_pos = nullptr;
-    const u64* goal_derived_neg = nullptr;
-    u64 goal_derived_stride = 0;
-    u32 goal_derived_words = 0;
-};
+/// Append all rows or set status[2] without writing when they do not fit. Status is device uint64
+/// [head, live rows, overflow]; the copy precedes the single thread's tail update. One stream orders all uses.
+/// The ring's columns have table-wide widths, fixed presence, and room for ring.graphs rows. Its status is zeroed
+/// before first use. The input's widths equal the columns' widths; row strides may differ or broadcast goals.
+void append_rows(const DeviceEncodeInput& input, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream);
+/// Advances the head by the live rows modulo capacity, empties the ring, and clears the overflow flag.
+void clear_rows(u64* status, u64 capacity, cudaStream_t stream);
+/// Empties the ring while preserving its sticky overflow flag.
+void finish_rows(u64* status, u64 capacity, cudaStream_t stream);
 
 enum class FillMode : u8
 {
@@ -242,6 +209,8 @@ public:
     [[nodiscard]] u64 bytes_needed(u64 graphs) const;
     /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes.
     [[nodiscard]] u64 scratch_bytes(const BatchShape& shape) const;
+    /// Sizes scratch without uploading a context. Uses the current CUDA device for the scan storage query.
+    [[nodiscard]] static u64 scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape);
     /// The exact byte count for a held generation, including one held across refresh().
     [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape) const;
 
@@ -326,5 +295,52 @@ private:
     mutable std::shared_mutex m_state_mutex;
     mutable std::mutex m_workspace_mutex;
     mutable std::unordered_map<cudaStream_t, std::shared_ptr<Workspace>> m_workspaces;
+};
+/// A device ring bound to one stream. Append copies device rows and inputs; flush encodes every live row once,
+/// advances the head and empties the ring on that stream. The overflow flag is sticky until clear().
+/// Construct outside capture and keep the ring, encoder and stream alive through the final replay. All operations
+/// on one ring are ordered on its stream; independent rings may run concurrently. The mutable stream is host-only.
+class DeviceRowStream
+{
+public:
+    DeviceRowStream(ContextPtr context, std::shared_ptr<const encoding::FlatEncoder> encoder, u64 capacity,
+                    cudaStream_t stream = nullptr, bool goals = false, bool derived = false, bool derived_goals = false);
+    ~DeviceRowStream();
+    DeviceRowStream(const DeviceRowStream&) = delete;
+    DeviceRowStream& operator=(const DeviceRowStream&) = delete;
+    [[nodiscard]] u64 capacity() const noexcept;
+    [[nodiscard]] cudaStream_t stream() const noexcept;
+    /// Device uint64 [head, live rows, overflow]. Reading it on the host requires synchronization.
+    [[nodiscard]] const u64* status() const noexcept;
+    void append(const DeviceEncodeInput& input);
+    /// Capacity form. out.graphs, when nonnull, receives the number of encoded rows on the device.
+    /// Per-graph arrays hold capacity() graphs and unused entries are zero. Capturable.
+    void flush(const DeviceOutput& out);
+    void clear();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+/// An uploaded list of batch views, bound to one stream. Construction validates common schema, layout, index type,
+/// statics and stored arrays; empty slices are accepted. Construct outside capture. encode/count/fill only launch
+/// count, scan and fill kernels, with caller-owned 256-byte-aligned scratch, and may be captured. Keep the collator,
+/// source arrays, scratch, output and stream alive through the final replay. No host loop visits individual graphs.
+class DeviceCollator
+{
+public:
+    DeviceCollator(ContextPtr context, std::vector<DeviceCollationBatch> batches, cudaStream_t stream = nullptr);
+    ~DeviceCollator();
+    DeviceCollator(const DeviceCollator&) = delete;
+    DeviceCollator& operator=(const DeviceCollator&) = delete;
+    [[nodiscard]] u64 graphs() const noexcept;
+    [[nodiscard]] u64 scratch_bytes() const noexcept;
+    void encode(void* scratch, u64 bytes, const DeviceOutput& out) const;
+    /// count writes sizes with capacity unbounded; fill reuses its scratch, with no intervening use of it.
+    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes) const;
+    void fill(void* scratch, u64 bytes, const DeviceOutput& out) const;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
 };
 }  // namespace mymyr::cuda

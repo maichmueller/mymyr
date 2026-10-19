@@ -96,6 +96,17 @@ struct Totals
     }
 };
 
+__device__ EncodeParams live_params(EncodeParams p)
+{
+    if (p.graphs_device)
+    {
+        const u64 live = *p.graphs_device;
+        p.graphs = live < p.graphs ? live : p.graphs;
+        p.segments = 2 * (p.graphs + 1);
+    }
+    return p;
+}
+
 /// The instance and row of graph g, or false if the row is invalid for its instance (a task id outside the table, a state
 /// row or goal masks narrower than the instance). Nothing of an invalid row is read.
 struct RowView
@@ -107,24 +118,25 @@ struct RowView
 
 __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
 {
-    const i32 id = p.task_ids ? p.task_ids[g] : 0;
+    const u64 source = p.row_start ? (*p.row_start + g) % p.row_capacity : g;
+    const i32 id = p.task_ids ? p.task_ids[source] : 0;
     if (ed::row_validity(p.context, id, p.state_words, p.goal_pos != nullptr, p.goal_words,
                          p.goal_derived_pos != nullptr, p.goal_derived_words) != ed::RowValidity::Valid)
         return false;
     r.instance = static_cast<u32>(id);
     r.v = ed::instance_view(p.context, r.instance);
-    r.in = ed::RowInput{p.states + g * p.state_stride, nullptr};
+    r.in = ed::RowInput{p.states + source * p.state_stride, nullptr};
     if (p.derived && ed::reads_derived(r.v, p.goal_pos != nullptr, p.goal_derived_pos != nullptr))
-        r.in.derived = p.derived + g * p.derived_stride;
+        r.in.derived = p.derived + (p.derived_logical ? g : source) * p.derived_stride;
     if (p.goal_pos)
     {
-        r.in.goal_pos = p.goal_pos + g * p.goal_stride;
-        r.in.goal_neg = p.goal_neg + g * p.goal_stride;
+        r.in.goal_pos = p.goal_pos + source * p.goal_stride;
+        r.in.goal_neg = p.goal_neg + source * p.goal_stride;
     }
     if (p.goal_derived_pos)
     {
-        r.in.goal_derived_pos = p.goal_derived_pos + g * p.goal_derived_stride;
-        r.in.goal_derived_neg = p.goal_derived_neg + g * p.goal_derived_stride;
+        r.in.goal_derived_pos = p.goal_derived_pos + source * p.goal_derived_stride;
+        r.in.goal_derived_neg = p.goal_derived_neg + source * p.goal_derived_stride;
     }
     return true;
 }
@@ -132,8 +144,9 @@ __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
 // ------------------------------------------------------------------------------------------------ count
 
 template<u32 Lanes>
-__global__ void __launch_bounds__(k_block) count_kernel(const EncodeParams p)
+__global__ void __launch_bounds__(k_block) count_kernel(EncodeParams p)
 {
+    p = live_params(p);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const u64 thread = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x;
     const u64 gi = thread / Lanes;
@@ -316,14 +329,18 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
 /// One block writes the sizes of a counted batch: the second half of the counting, for a caller that sizes its outputs
 /// by them.
 template<bool RelationMajor>
-__global__ void __launch_bounds__(k_block) sizes_kernel(const EncodeParams p)
+__global__ void __launch_bounds__(k_block) sizes_kernel(EncodeParams p)
 {
+    p = live_params(p);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const Totals totals{p.totals, p.wide};
     u64 base = 0;
     const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, reinterpret_cast<u64*>(shared_bytes), base);
     if (threadIdx.x == 0)
+    {
         *p.sizes = sizes;
+        if (p.output_graphs) *p.output_graphs = p.graphs;
+    }
 }
 
 template<class T>
@@ -346,6 +363,19 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     zero_tail(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args);
     zero_tail(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets);
     zero_tail(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets);
+    if (p.graphs_device && !overflow)
+    {
+        const u64 G = p.graphs, C = G * p.context.num_relations;
+        const u64 cap = p.capacities.graphs, cells = cap * p.context.num_relations;
+        zero_tail(a.task_ids, G, cap);
+        zero_tail(static_cast<I*>(a.num_objects), G, cap);
+        zero_tail(static_cast<I*>(a.entity_offsets), G + 1, cap + 1);
+        zero_tail(static_cast<I*>(a.relation_counts), C, cells);
+        zero_tail(static_cast<I*>(a.relation_offsets), C + 1, cells + 1);
+        zero_tail(static_cast<I*>(a.relation_arg_offsets), C + 1, cells + 1);
+        zero_tail(a.goal_complete, G, cap);
+        zero_tail(static_cast<I*>(a.target_offsets), G + 1, cap + 1);
+    }
     if (overflow)
     {
         const u64 graphs = p.capacities.graphs;
@@ -362,8 +392,9 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
 }
 
 template<class I, bool Warp, bool RelationMajor>
-__global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
+__global__ void __launch_bounds__(k_block) fill_kernel(EncodeParams p)
 {
+    p = live_params(p);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const Totals totals{p.totals, p.wide};
     const u64 G = p.graphs;
@@ -377,7 +408,10 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
     u64 base = 0;
     const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, first, base);
     if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
         *p.sizes = sizes;
+        if (p.output_graphs) *p.output_graphs = p.graphs;
+    }
     if (p.zero_unused && p.first_class)
         zero_unused<I>(p, sizes);
     if (sizes.overflow != 0)

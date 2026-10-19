@@ -27,6 +27,11 @@ struct EncodeParams
 {
     encoding::detail::ContextView context;
     u64 graphs = 0;
+    const u64* graphs_device = nullptr;
+    const u64* row_start = nullptr;
+    u64 row_capacity = 0;
+    bool derived_logical = false;
+    u64* output_graphs = nullptr;
     // the rows (device memory)
     const u64* states = nullptr;
     u64 state_stride = 0;  // words from one row to the next

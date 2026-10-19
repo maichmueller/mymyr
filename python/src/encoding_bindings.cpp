@@ -6,6 +6,7 @@
 #include "rl_imports.hpp"
 
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/collate.hpp"
 #include "mymyr/encoding/schema.hpp"
 #include "mymyr/encoding/stream.hpp"
 
@@ -906,6 +907,26 @@ void bind_encoding(nb::module_& parent)
 {
     nb::module_ module = parent.def_submodule("_encoding", "Native classical relational encodings");
 
+    module.def("_collate", [](const std::vector<const PyFlatBatch*>& batches)
+    {
+        if (batches.empty())
+            throw nb::value_error("mymyr: encoding: collate needs at least one batch");
+        std::vector<std::shared_ptr<const rl::ArrayBundle>> arrays;
+        arrays.reserve(batches.size());
+        for (const auto* b : batches)
+        {
+            if (b->sizes && b->sizes->overflowed())
+                throw nb::value_error("mymyr: encoding: cannot collate an overflowed batch");
+            arrays.push_back(b->arrays);
+        }
+        std::shared_ptr<const rl::ArrayBundle> result;
+        {
+            nb::gil_scoped_release release;
+            result = encoding::collate(arrays);
+        }
+        return PyFlatBatch{std::move(result), batches.front()->schema, batches.front()->framework, std::nullopt};
+    }, "batches"_a, "Concatenates host batches of one schema and layout, shifting offsets and entity ids.");
+
     nb::class_<PyEncodingSchema> schema_class(
         module, "EncodingSchema",
         "The relation catalog of an encoding: the relations a batch of encoded states holds, sorted by name, with their "
@@ -1057,6 +1078,17 @@ void bind_encoding(nb::module_& parent)
             nb::kw_only(), "framework"_a = nb::none(),
             "An append-only stream of rows for this encoder (FlatStream). framework: the framework of the batches its "
             "flushes return (default NumPy).")
+        .def(
+            "device_stream",
+            [](nb::handle self, u64 capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals)
+            {
+                return nb::module_::import_("mymyr.encoding._device").attr("DeviceFlatStream")(
+                    self, capacity, "device"_a = device, "goals"_a = goals, "derived"_a = derived,
+                    "derived_goals"_a = derived_goals);
+            },
+            "capacity"_a, nb::kw_only(), "device"_a = nb::none(), "goals"_a = false, "derived"_a = false,
+            "derived_goals"_a = false,
+            "A ring of CUDA rows bound to the current torch stream, with capturable append and capacity flush.")
         .def(
             "mutable_stream",
             [](PyFlatEncoder& self, Arg<ann::Framework> framework)

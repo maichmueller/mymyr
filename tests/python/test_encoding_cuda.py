@@ -362,13 +362,12 @@ def test_the_arguments_are_checked_before_any_launch(cases):
         encoder.encode(torch.cat([rows[:1], rows[:1]]), to_device(np.full(2, 7, np.int32), dev))
 
 
-def test_derived_words_are_required_where_a_graph_reads_them(cases):
+def test_derived_words_are_evaluated_where_a_graph_reads_them(cases):
     dev = gpu()
     case = cases["philosophers"]
     encoder = encoding.FlatRelationEncoder(case.source)
     rows = to_device(case.rows, dev)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not evaluate derived atoms"):
-        encoder.encode(rows)
+    same_batch(host_encode(encoder, case), encoder.encode(rows))
     with pytest.raises(ValueError, match="^mymyr: encoding: 'derived' has"):
         encoder.encode(rows, derived=to_device(case.derived[:-1], dev))
     same_batch(host_encode(encoder, case), encoder.encode(rows, derived=to_device(case.derived, dev)))
