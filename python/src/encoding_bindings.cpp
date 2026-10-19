@@ -247,7 +247,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
                                      nb::handle index_dtype, bool emit_counts, nb::handle entity_arrays,
                                      nb::handle horizon_mode, nb::handle root_policy, bool parent_relation,
-                                     bool history, nb::handle history_max_steps)
+                                     bool history, nb::handle history_max_steps, bool horizon_optional)
 {
     using namespace encoding;
     FlatOptions options;
@@ -272,10 +272,10 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.entity_arrays = choice(entity_arrays, "entity_arrays", parse_entity_arrays, "'auto', 'always'");
     if (!horizon_mode.is_none())
     {
-        options.horizon.mode =
-            choice(horizon_mode, "horizon_mode", parse_horizon_mode, "'full', 'delta', 'action' or None");
+        const std::string allowed = horizon_optional ? "'full', 'delta', 'action' or None" : "'full', 'delta', 'action'";
+        options.horizon.mode = choice(horizon_mode, "horizon_mode", parse_horizon_mode, allowed);
         if (options.horizon.mode == HorizonMode::None)  // None is the spelling of no horizon
-            option_error("horizon_mode", "'full', 'delta', 'action' or None", horizon_mode);
+            option_error("horizon_mode", allowed, horizon_mode);
     }
     if (!root_policy.is_none())
         options.horizon.root =
@@ -376,10 +376,14 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
                             bool parent_relation, bool history, nb::handle history_max_steps)
     {
         const TableRef reference = table_of(table);
+        if (H == HorizonArgs::Required && horizon_mode.is_none())
+            throw nb::value_error(
+                "mymyr: encoding: FlatHorizonEncoder needs a horizon_mode ('full', 'delta' or 'action'); "
+                "FlatRelationEncoder encodes states without a horizon");
         const encoding::FlatOptions options = schema_options(
             max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
             goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays, horizon_mode, root_policy,
-            parent_relation, history, history_max_steps);
+            parent_relation, history, history_max_steps, H != HorizonArgs::Required);
         make(self, reference, options);
     };
     if constexpr (H == HorizonArgs::Optional)
@@ -425,7 +429,7 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
                           predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts,
                           entity_arrays, horizon_mode, root_policy, parent_relation, false, nb::int_(0));
             },
-            "table"_a, nb::kw_only(), "horizon_mode"_a, MYMYR_ENCODING_DEFAULTS, "root_policy"_a = nb::none(),
+            "table"_a, nb::kw_only(), "horizon_mode"_a.none(), MYMYR_ENCODING_DEFAULTS, "root_policy"_a = nb::none(),
             "parent_relation"_a = false, doc);
     }
 }

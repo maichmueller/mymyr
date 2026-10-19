@@ -235,7 +235,8 @@ auxiliary entity. Actions are not virtual-node predicates.
 `FlatHorizonEncoder(table_or_task, *, horizon_mode, <options>)` encodes **horizons**: one graph per root state, holding
 the root and the nodes below it (states reached from the root by actions) as state entities, so that a model sees a
 root and its candidate successors in one graph. It has the options of `FlatRelationEncoder` except `history` (a horizon
-has none), with `horizon_mode` required and `root_policy` and `parent_relation` new. It shares the batch format,
+has none), with `horizon_mode` required (`'full'`, `'delta'` or `'action'`; `None` raises `ValueError`, there is no
+horizon without a mode) and `root_policy` and `parent_relation` new. It shares the batch format,
 `schema`, `table`, `entity_names`, `describe` and pickling of the flat encoder, and a `FlatBatch` of a horizon encoder
 has `batch.schema.options['horizon_mode']` set. `EncodingSchema` takes the same three options.
 `encoder.encode(view, *, derived=None, goals=None, subgoals=None, framework=None, threads=1, pool=None,

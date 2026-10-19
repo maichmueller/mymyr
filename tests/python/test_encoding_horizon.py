@@ -48,10 +48,13 @@ def test_the_classes_take_their_own_options(blocks):
         encoding.FlatHorizonEncoder(blocks)
     with pytest.raises(TypeError):
         encoding.FlatHorizonEncoder(blocks, horizon_mode="full", history=True)
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: FlatHorizonEncoder needs a horizon_mode \('full', 'delta' or 'action'\)"):
         encoding.FlatHorizonEncoder(blocks, horizon_mode=None)
-    with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
+    with pytest.raises(ValueError, match=r"horizon_mode must be one of 'full', 'delta', 'action', got 'none'"):
         encoding.FlatHorizonEncoder(blocks, horizon_mode="none")
+    # the schema keeps None for no horizon
+    with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
+        encoding.EncodingSchema(blocks, horizon_mode="none")
     encoder = encoder_of(blocks)
     assert encoder.options["horizon_mode"] == "full" and encoder.options["root_policy"] == "include"
     assert encoding.EncodingSchema(blocks, horizon_mode="full", goal_derivations=()).schema_fingerprint == encoder.schema_fingerprint
