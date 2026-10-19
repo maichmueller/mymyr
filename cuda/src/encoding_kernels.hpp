@@ -1,7 +1,7 @@
 #pragma once
 // The launches of the relational encoder on the device (include/mymyr/cuda/encoding.hpp builds the parameters). The
-// encoding of a batch is four kernels on one stream, with no allocation and no synchronization, which a CUDA graph can
-// capture:
+// active width classes count and fill around one shared scan, with no allocation or synchronization, so a CUDA graph
+// can capture the launches:
 //   count  one group of 4, 8 or 32 lanes per graph counts its cells (encoding::detail::count_graph_group), writes the
 //          graph's totals and cell counts into the scratch, and flags invalid rows;
 //   scan   one inclusive scan over the scratch's totals, two kernels (cub::DeviceScan): the entities, the targets and,

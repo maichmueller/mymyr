@@ -985,6 +985,26 @@ TEST(DeviceEncoder, ScratchFreeWaitsForTheAcquiredStream)
     ctx->synchronize();
 }
 
+TEST(DeviceEncoder, ReleasingAHeldWorkspaceOrdersItsScratchFree)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, blocks_encoder());
+    device.reserve(1000, stream);
+    ctx->synchronize();
+    const auto keep_context = device.context().acquire();
+    {
+        StreamGate gate(stream);
+        {
+            auto lease = device.acquire(stream);
+            device.release(stream);
+        }
+        expect_blocked(ctx);
+    }
+    ctx->synchronize();
+}
+
 TEST(DeviceEncoder, AFailedFirstReserveLeavesTheStreamUnreserved)
 {
     SKIP_WITHOUT_GPU();

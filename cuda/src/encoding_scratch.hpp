@@ -62,8 +62,9 @@ struct EncodingExecution
 
 struct EncodingWorkspaceState
 {
-    EncodingAcquisition context;
+    // Completion is recorded before releasing the last scratch owner.
     std::shared_ptr<const DeviceBuffer> scratch;
+    EncodingAcquisition context;
     BatchShape shape;
     ScratchLayout layout;
 };

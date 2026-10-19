@@ -549,7 +549,7 @@ EncodingWorkspace DeviceEncoder::acquire(cudaStream_t stream) const
         throw std::invalid_argument("mymyr: encoding: reserve scratch again after a failed refresh");
     work->ready.wait_on(stream);
     return EncodingWorkspace(std::make_shared<detail::EncodingWorkspaceState>(
-        m_context->acquire(stream, work->last), work->scratch, work->shape, work->layout));
+        work->scratch, m_context->acquire(stream, work->last), work->shape, work->layout));
 }
 void DeviceEncoder::release(cudaStream_t stream)
 {
