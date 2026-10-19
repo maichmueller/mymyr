@@ -1211,6 +1211,7 @@ TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
 TEST(DeviceEncoderSchema, RefusesHistoryTargets)
 {
     encoding::FlatOptions o;
+    o.history = true;
     o.targets = {encoding::TargetSource::History};
     expect_schema_refusal(o, "history targets");
 }
