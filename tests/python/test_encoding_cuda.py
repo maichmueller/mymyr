@@ -1170,3 +1170,61 @@ def test_evaluated_derived_words_follow_the_encoding_stream(mode):
         result = encoder.encode(destination, **({"capacities": exact_capacities(host)} if mode == "capacity" else {}))
         stream.synchronize()
         same_batch(host, result)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_prepared_collation_keeps_ring_capacity_when_relations_grow(layout, index):
+    dev = gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string(
+        "(define (domain switches) (:requirements :strips) (:predicates (left) (right))"
+        " (:action left_on :parameters () :precondition (and) :effect (left))"
+        " (:action right_on :parameters () :precondition (and) :effect (right)))")
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem p) (:domain switches) (:init) (:goal (and)))"))
+    one = task.successor_states(task.initial_state)[0]
+    two = max(task.successor_states(one), key=lambda state: sum(int(word).bit_count() for word in state.words))
+    empty_rows = np.asarray(task.encode([task.initial_state, task.initial_state]))
+    populated_rows = np.asarray(task.encode([two, one]))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, index_dtype=index, include_static=False,
+                                           include_actions=False, goal_derivations=())
+    empty_host, populated_host = encoder.encode(empty_rows), encoder.encode(populated_rows)
+    assert empty_host.entity_ref.size == empty_host.relation_args.size == 0
+    assert populated_host.entity_ref.size > 0 and populated_host.relation_args.size > 0
+    caps = dict(graphs=3, entities=8, args=16, targets=0)
+    rows, populated = to_device(empty_rows, dev), to_device(populated_rows, dev)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream.wait_stream(torch.cuda.default_stream())
+        ring = encoder.device_stream(3)
+        ring.append(rows)
+        ring.flush(capacities=caps)
+        stream.synchronize()
+        producer = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(producer, stream=stream):
+            ring.append(rows)
+            source = ring.flush(capacities=caps)
+        producer.replay()
+        stream.synchronize()
+        plan = encoding.DeviceCollator([source])
+        # Check the backing pointers before any replay can populate the empty live arrays.
+        prepared = plan._prepared[4][0]
+        for name in ("entity_role", "entity_ref", "relation_args"):
+            assert source._arrays[name].numel() > 0
+            assert prepared[name].data_ptr() == source._arrays[name].data_ptr() != 0
+        plan.encode(capacities=caps)
+        stream.synchronize()
+        consumer = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(consumer, stream=stream):
+            result = plan.encode(capacities=caps)
+        for values, host_rows in ((populated, populated_rows), (rows, empty_rows), (populated, populated_rows)):
+            if values is not rows:
+                rows.copy_(values)
+            else:
+                rows.zero_()
+            producer.replay()
+            consumer.replay()
+            stream.synchronize()
+            same_batch(encoder.encode(host_rows, capacities=caps), result)

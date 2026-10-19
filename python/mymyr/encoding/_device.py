@@ -805,7 +805,8 @@ class DeviceCollator:
         from mymyr.rl.torch._ops import _stream
 
         encoder = first._encoder
-        arrays = [batch.as_dict("torch") for batch in batches]
+        # Keep capacity storage: empty live views have null data pointers.
+        arrays = [batch._arrays.copy() for batch in batches]
         inputs = [_pointers({**a, "sizes": batch._sizes}) for a, batch in zip(arrays, batches, strict=True)]
         counts = [batch.num_graphs for batch in batches]
         native = NativeCollator(encoder, first.device.index, _stream(first.device), inputs, counts)
