@@ -1088,7 +1088,7 @@ void bind_encoding(nb::module_& parent)
             "flushes return (default NumPy).")
         .def(
             "device_stream",
-            [](nb::handle self, u64 capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals)
+            [](nb::handle self, IntArg capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals)
             {
                 return Arg<ann::EncodingDeviceStream>(nb::module_::import_("mymyr.encoding._device").attr("DeviceFlatStream")(
                     self, capacity, "device"_a = device, "goals"_a = goals, "derived"_a = derived,

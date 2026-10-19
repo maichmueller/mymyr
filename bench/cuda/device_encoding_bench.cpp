@@ -356,7 +356,13 @@ struct StreamSession
             cuda::check(cudaGraphLaunch(append_flush.exec, stream), "warm stream");
             cuda::check(cudaGraphLaunch(collate.exec, stream), "warm collation");
         }
+        encoding::FlatSizes ring_sizes, collated_sizes;
+        cuda::check(cudaMemcpyAsync(&ring_sizes, ring_out.sizes, sizeof(ring_sizes), cudaMemcpyDeviceToHost, stream), "ring sizes");
+        cuda::check(cudaMemcpyAsync(&collated_sizes, out.sizes, sizeof(collated_sizes), cudaMemcpyDeviceToHost, stream), "collated sizes");
         cuda::check(cudaStreamSynchronize(stream), "warm stream");
+        if (std::memcmp(&ring_sizes, &base.host_sizes, sizeof(ring_sizes)) ||
+            std::memcmp(&collated_sizes, &base.host_sizes, sizeof(collated_sizes)))
+            throw std::runtime_error("the device stream or collation sizes differ from the host encoding");
     }
     void measure(cudaStream_t stream, u32 replays)
     {

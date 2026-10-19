@@ -724,6 +724,7 @@ class DeviceFlatStream:
 
     def __len__(self) -> int:
         """The number of live rows; waits for the device and cannot be read during capture."""
+        self._check_stream()
         return int(self.device_status[1].item())
 
     def append(self, states: Any, task_ids: Any = None, *, derived: Any = None, goals: Any = None) -> None:

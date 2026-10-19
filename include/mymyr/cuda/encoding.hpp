@@ -241,8 +241,8 @@ public:
     /// the batch is written and sizes.overflow says why. With `out.zero_unused`, the unused tails are zero and
     /// overflow zeros all output arrays. The rows, outputs and `launch.order` are device memory the
     /// stream may read and write. Throws std::invalid_argument for input that can be checked without reading device
-    /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, derived words that
-    /// are needed and missing, a launch that needs more shared memory than a block has).
+    /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, axiom bodies beyond
+    /// the device matcher limits without supplied derived words, a launch that needs more shared memory than a block has).
     void encode(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
                 const LaunchConfig& launch = {}) const;
     /// The same on `stream` with a workspace acquired for this one call: requires a reservation for the stream.
@@ -336,7 +336,8 @@ public:
     [[nodiscard]] u64 graphs() const noexcept;
     [[nodiscard]] u64 scratch_bytes() const noexcept;
     void encode(void* scratch, u64 bytes, const DeviceOutput& out) const;
-    /// count writes sizes with capacity unbounded; fill reuses its scratch, with no intervening use of it.
+    /// count writes sizes with capacity unbounded; fill reuses its scratch and unchanged source arrays,
+    /// with no intervening use of that scratch.
     void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes) const;
     void fill(void* scratch, u64 bytes, const DeviceOutput& out) const;
 private:

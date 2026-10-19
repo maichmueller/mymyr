@@ -116,6 +116,10 @@ detail::EncodingFacts context_facts(const encoding::EncodingContext& host, const
         facts.axioms.resize(host.table().size());
         for (u32 i = 0; i < host.table().size(); ++i)
         {
+            const auto instance = ed::instance_view(v, i);
+            if (!ed::reads_derived(instance, false, false) && !ed::reads_derived(instance, true, false) &&
+                !ed::reads_derived(instance, true, true))
+                continue;
             const Task& task = *host.table().instance(i).task;
             auto& axioms = facts.axioms[i];
             for (const auto& st : task.compiled().strata)
@@ -159,7 +163,8 @@ EncodingAcquisition::~EncodingAcquisition()
     if (m_facts)
         for (const auto& axioms : m_facts->axioms)
             if (axioms.task)
-                axioms.task->release(m_stream, m_last);
+                try { axioms.task->release(m_stream, m_last); }
+                catch (...) { (void)cudaStreamSynchronize(m_stream); }
 }
 
 std::shared_ptr<DeviceEncodingContext> DeviceEncodingContext::upload(ContextPtr ctx,
