@@ -1449,12 +1449,16 @@ TEST(DeviceCollate, ChecksWideTotalsBeforeAnyIndexWrite)
     cuda::check(cudaMemcpyAsync(empty_offsets.data(), zero.data(), sizeof(zero), cudaMemcpyHostToDevice, stream), "upload offsets");
     cuda::DeviceCollationBatch batch;
     batch.graphs = 1;
+    // Implicit entity arrays represent the large count without entity storage.
+    batch.stored.entity_arrays = false;
+    batch.arrays.task_ids = static_cast<i32*>(empty_offsets.data());
+    batch.arrays.num_objects = static_cast<i32*>(source.data()) + 1;
     batch.arrays.entity_offsets = source.data();
     batch.arrays.relation_offsets = empty_offsets.data();
     batch.arrays.relation_arg_offsets = empty_offsets.data();
     cuda::DeviceCollator collator(ctx, {batch, batch}, stream);
     const cuda::BatchShape shape{2, 0, 0, 0};
-    const auto layout = cuda::output_layout(shape, encoding::IndexType::I32, 0);
+    const auto layout = cuda::output_layout(shape, encoding::IndexType::I32, 0, batch.stored);
     cuda::DeviceBuffer scratch(ctx, collator.scratch_bytes(), stream), block(ctx, layout.bytes, stream);
     cuda::check(cudaMemsetAsync(block.data(), 0x7b, block.size(), stream), "initialize canary");
     const auto out = cuda::output_of(layout, shape, block.data());
