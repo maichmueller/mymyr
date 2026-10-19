@@ -148,6 +148,8 @@ struct DeviceOutput
     encoding::FlatBuffers arrays;
     encoding::BatchShape capacities;
     encoding::FlatSizes* sizes = nullptr;
+    /// Zero the variable arrays' unused tails, and all output arrays on overflow, in the fill kernel.
+    bool zero_unused = false;
 };
 /// The destinations in the device block `block` of output_layout(shape, ...), with the capacities of `shape`
 /// (the graph capacity bounds every per-graph and per-cell array).
@@ -267,7 +269,8 @@ public:
     /// captured in a CUDA graph (acquire the workspace before capture and hold it through the last replay). The batch writes
     /// `out.sizes` with its true sizes; if they exceed the capacities or the index type, or a row is invalid (a task id
     /// outside the table, a row or goal mask narrower than its instance, a bit its instance does not have), nothing of
-    /// the batch is written and sizes.overflow says why. The rows, outputs and `launch.order` are device memory the
+    /// the batch is written and sizes.overflow says why. With `out.zero_unused`, the unused tails are zero and
+    /// overflow zeros all output arrays. The rows, outputs and `launch.order` are device memory the
     /// stream may read and write. Throws std::invalid_argument for input that can be checked without reading device
     /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, derived words that
     /// are needed and missing, a launch that needs more shared memory than a block has).

@@ -52,11 +52,11 @@ def _tasks_of(encoder):
     return list(tasks) if tasks is not None else [table]
 
 
-def _host(batch):
-    """A device batch as host arrays (one copy of its arrays; waits for the device), any other batch as it is."""
+def _host(batch, graph):
+    """A device graph as host arrays (waits for that graph), or a host batch and its graph unchanged."""
     if isinstance(batch, DeviceFlatBatch):
-        return _Host(batch)
-    return batch
+        return _Host(batch, int(graph)), 0
+    return batch, graph
 
 
 def _check(encoder, batch, graph):
@@ -168,14 +168,15 @@ def _names(encoder, batch, graph):
 
 def entity_names(encoder, batch, graph):
     """The names of the entities of graph ``graph`` of ``batch`` in entity order (see the module's naming rules)."""
-    batch = _host(batch)
+    batch, graph = _host(batch, graph)
     graph = _check(encoder, batch, graph)
     return _names(encoder, batch, graph)[1]
 
 
 def describe(encoder, batch, graph):
     """A GraphDescription of graph ``graph`` of ``batch``: its entities and its relations' tuples by name."""
-    batch = _host(batch)
+    original_graph = int(graph)
+    batch, graph = _host(batch, graph)
     graph = _check(encoder, batch, graph)
     g, names = _names(encoder, batch, graph)
     entities = tuple((g.entity_role_names[int(role)], name) for role, name in zip(g.role.tolist(), names))
@@ -184,4 +185,4 @@ def describe(encoder, batch, graph):
         rows = g.tuples(relation)
         if len(rows):
             relations[name] = tuple(tuple(names[int(e)] for e in row) for row in rows)
-    return GraphDescription(graph, g.task_id, entities, relations)
+    return GraphDescription(original_graph, g.task_id, entities, relations)

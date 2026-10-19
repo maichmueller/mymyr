@@ -1268,3 +1268,84 @@ TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
 }
 
 }
+
+namespace
+{
+TEST(DeviceEncoder, FillZerosUnusedTailsAndOverflowOutputsWhenRequested)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = test::pddl_task("blocks", "smedium");
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+        for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+            for (const u64 graphs : {0u, 2u})
+            {
+                encoding::FlatOptions options;
+                options.layout = layout;
+                options.index = index;
+                options.targets = {encoding::TargetSource::Goal};
+                const auto host = encoding::FlatEncoder::create(task, options);
+                cuda::DeviceEncoder device(ctx, host);
+                auto shape = device.worst_case(graphs);
+                if (!graphs)
+                    shape.entities = shape.args = shape.targets = 10;
+                device.reserve(shape, stream);
+                const auto& initial = host->table().instance(0).init;
+                std::vector<u64> rows(initial.begin(), initial.end());
+                rows.insert(rows.end(), initial.begin(), initial.end());
+                cuda::DeviceBuffer states(ctx, rows.size() * sizeof(u64), stream);
+                cuda::check(cudaMemcpyAsync(states.data(), rows.data(), states.size(), cudaMemcpyHostToDevice, stream), "states");
+                cuda::DeviceEncodeInput in;
+                in.graphs = graphs;
+                in.states = static_cast<const u64*>(states.data());
+                in.state_stride = in.state_words = host->table().words();
+                for (const bool overflow : {false, true})
+                {
+                    auto capacity = shape;
+                    if (overflow)
+                    {
+                        ++capacity.graphs;
+                        capacity.entities = capacity.args = capacity.targets = 1;
+                    }
+                    const auto offsets = device.output_layout(capacity);
+                    cuda::DeviceBuffer block(ctx, offsets.bytes, stream);
+                    cuda::check(cudaMemsetAsync(block.data(), 0x5a, block.size(), stream), "dirty outputs");
+                    auto out = cuda::output_of(offsets, capacity, block.data());
+                    out.zero_unused = true;
+                    device.encode(in, out, stream);
+                    std::vector<std::byte> bytes(block.size());
+                    cuda::check(cudaMemcpyAsync(bytes.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "outputs");
+                    cuda::check(cudaStreamSynchronize(stream), "outputs");
+                    encoding::FlatSizes sizes;
+                    std::memcpy(&sizes, bytes.data() + offsets.sizes, sizeof sizes);
+                    const bool failed = overflow && graphs != 0;
+                    EXPECT_EQ(sizes.overflow != 0, failed);
+                    const u64 I = index == encoding::IndexType::I32 ? 4 : 8;
+                    const auto zeros = [&](u64 at, u64 begin, u64 end, u64 width)
+                    {
+                        EXPECT_TRUE(std::all_of(bytes.begin() + static_cast<std::ptrdiff_t>(at + begin * width),
+                                                bytes.begin() + static_cast<std::ptrdiff_t>(at + end * width),
+                                                [](std::byte value) { return value == std::byte{0}; }));
+                    };
+                    zeros(offsets.entity_role, failed ? 0 : sizes.entities, capacity.entities, 1);
+                    zeros(offsets.entity_ref, failed ? 0 : sizes.entities, capacity.entities, I);
+                    zeros(offsets.relation_args, failed ? 0 : sizes.args, capacity.args, I);
+                    zeros(offsets.target_entity, failed ? 0 : sizes.targets, capacity.targets, I);
+                    zeros(offsets.target_group, failed ? 0 : sizes.targets, capacity.targets, 1);
+                    if (failed)
+                    {
+                        const u64 cells = capacity.graphs * host->schema().num_relations();
+                        zeros(offsets.task_ids, 0, capacity.graphs, 4);
+                        zeros(offsets.num_objects, 0, capacity.graphs, I);
+                        zeros(offsets.entity_offsets, 0, capacity.graphs + 1, I);
+                        zeros(offsets.relation_counts, 0, cells, I);
+                        zeros(offsets.relation_offsets, 0, cells + 1, I);
+                        zeros(offsets.relation_arg_offsets, 0, cells + 1, I);
+                        zeros(offsets.goal_complete, 0, capacity.graphs, 1);
+                        zeros(offsets.target_offsets, 0, capacity.graphs + 1, I);
+                    }
+                }
+            }
+}
+}

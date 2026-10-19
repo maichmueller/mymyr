@@ -691,9 +691,15 @@ bool is_numpy_array(nb::handle value)
 /// An array object that lives in CUDA memory: DLPack's device, or a __cuda_array_interface__.
 bool is_device_array(nb::handle value)
 {
-    if (value.is_none() || is_numpy_array(value) || nb::isinstance<PyState>(value))
+    const PyTypeObject* type = Py_TYPE(value.ptr());
+    if (value.is_none() || type == &PyList_Type || type == &PyTuple_Type || type == &PyLong_Type ||
+        is_numpy_array(value) || type == reinterpret_cast<PyTypeObject*>(nb::type<PyState>().ptr()))
         return false;
-    return is_cuda_array(value) || PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__");
+    const nb::handle cls = value.type();
+    if (PyObject_HasAttrString(cls.ptr(), "__dlpack_device__"))
+        return is_cuda_array(value);
+    return PyObject_HasAttrString(cls.ptr(), "__cuda_array_interface__") ||
+           PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__");
 }
 
 /// Whether an argument of `encode` is a CUDA device array; with `masks`, a tuple of the goal masks of which one is.
@@ -713,12 +719,12 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
                   ActionsArg actions_arg, Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
                   CapacitiesArg capacities_in)
 {
+    const u32 threads = threads_arg(threads_in);
     if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg, true))
         return Arg<ann::EncodingBatch>(
             nb::module_::import_("mymyr.encoding._device")
                 .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,
                                 threads_in, pool_in, capacities_in ? nb::object(*capacities_in) : nb::none()));
-    const u32 threads = threads_arg(threads_in);
     const std::optional<encoding::BatchShape> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema().has_targets()))
                       : std::nullopt;
@@ -945,6 +951,7 @@ void bind_encoding(nb::module_& parent)
                 out["overflow"] = self.sizes->overflowed();
                 out["capacity_overflow"] = (self.sizes->overflow & encoding::k_overflow_capacity) != 0;
                 out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
+                out["invalid_input"] = false;
                 return out;
             },
             "After an encoding with capacities: the true entities, tuples and args of the batch and whether it "
@@ -1028,9 +1035,9 @@ void bind_encoding(nb::module_& parent)
             "graphs"_a, nb::kw_only(), "device"_a = nb::none(), "stream"_a = nb::none(),
             "Makes the device workspace of `stream` (a torch.cuda.Stream or a cudaStream_t; default: torch's current "
             "stream of `device`, default the current CUDA device) hold batches of up to `graphs` rows, uploading the "
-            "encoder's context to the device if that has not happened. Encoding rows on the device does this on demand "
-            "for the first call on a stream; call it before capturing a CUDA graph on a stream, since a capture cannot "
-            "allocate. Raises ValueError for options the device does not encode.")
+            "encoder's context to the device if needed. Exact encodes reserve on demand. Capacity encodes use "
+            "torch-owned scratch and need no reservation, including during capture. "
+            "Raises ValueError for options the device does not encode.")
         .def(
             "release_device",
             [](nb::handle self, Arg<ann::Any> device, StreamArg stream)
@@ -1039,8 +1046,7 @@ void bind_encoding(nb::module_& parent)
             },
             nb::kw_only(), "device"_a = nb::none(), "stream"_a = nb::none(),
             "Frees the device workspace of `stream`, or of every stream of `device` (default: the current CUDA device) "
-            "without one. The uploaded context stays with the encoder. Do not release a workspace that a captured CUDA "
-            "graph can still replay.")
+            "without one. The uploaded context stays with the encoder. Captured capacity scratch belongs to its graph.")
         .def(
             "stream",
             [](PyFlatEncoder& self, Arg<ann::Framework> framework)
