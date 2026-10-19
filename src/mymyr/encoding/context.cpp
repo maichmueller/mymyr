@@ -197,7 +197,7 @@ InstanceRows build_instance(const rl::TaskTable& table, u32 index, const std::ve
                                       static_padded.begin() + static_cast<std::ptrdiff_t>(s * static_width + logical));
             std::sort(rows.begin(), rows.end());
             rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-            cell.op = static_cast<u32>(CellOp::Static);
+            cell.op = static_cast<u32>(schema.shared_statics() ? CellOp::SharedStatic : CellOp::Static);
             cell.a = static_rows;
             for (const std::vector<i32>& row : rows)
             {
@@ -549,6 +549,8 @@ std::shared_ptr<const EncodingContext> EncodingContext::create(rl::TaskTablePtr 
     for (u32 id = 0; id < own->num_relations(); ++id)
         relation_arity.push_back(own->relation(id).arity);
     builder.add("relation_arity", rl::DType::U32, {static_cast<i64>(relation_arity.size())}, relation_arity);
+    builder.add("static_relations", rl::DType::U32, {static_cast<i64>(own->static_relations().size())},
+                std::vector<u32>(own->static_relations().begin(), own->static_relations().end()));
     context->m_num_virtual = static_cast<u32>(virtual_relation.size());
     context->m_arrays = builder.build();
     context->m_table = std::move(table);
@@ -560,7 +562,7 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
 {
     const std::byte* base = block ? block : m_arrays.block();
     // the arrays are in the order create() adds them: inst, cell, slot_args, derived_args, static_args, goal_words,
-    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity
+    // goal_args, action_schemas, schema_arity, relation_virtual, virtual_relation, relation_arity, static_relations
     const auto& arrays = m_arrays.arrays();
     auto at = [&](usize k) { return base + arrays[k].offset; };
     detail::ContextView v;
@@ -582,6 +584,8 @@ detail::ContextView EncodingContext::view(const std::byte* block) const noexcept
         v.num_virtual = m_num_virtual;
     }
     v.relation_arity = reinterpret_cast<const u32*>(at(11));
+    v.static_relations = reinterpret_cast<const u32*>(at(12));
+    v.num_static = static_cast<u32>(m_schema->static_relations().size());
     v.max_arity = m_max_arity;
     v.num_relations = m_schema->num_relations();
     return v;

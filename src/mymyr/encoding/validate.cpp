@@ -1,6 +1,8 @@
 #include "mymyr/encoding/validate.hpp"
 
+#include <algorithm>
 #include <bit>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -86,6 +88,132 @@ void check_offsets(const Ints& offsets, u64 end, const char* name)
     if (static_cast<u64>(offsets[offsets.size - 1]) != end)
         fail(std::string(name) + " does not end at the size of the array it indexes");
 }
+/// An offsets array of at least `count` entries (a capacity bundle pads it) whose entries from `count` on repeat the
+/// last entry before them.
+const rl::ArrayInfo* padded_offsets(const rl::ArrayBundle& batch, const char* name, rl::DType dtype, u64 count, bool wide)
+{
+    const rl::ArrayInfo* info = batch.find(name);
+    if (!info)
+        fail(std::string("the array ") + name + " is missing");
+    if (info->dtype != dtype)
+        fail(std::string("the array ") + name + " has the wrong dtype");
+    if (info->shape.size() != 1 || info->shape[0] < static_cast<i64>(count))
+        fail(std::string("the array ") + name + " is shorter than the batch needs");
+    const Ints data{batch.data(*info), info->elements(), wide};
+    for (u64 i = count; i < info->elements(); ++i)
+        if (data[i] != data[count - 1])
+            fail(std::string("the array ") + name + " does not repeat its last entry past the batch");
+    return info;
+}
+
+/// The static blocks of a batch with shared statics, checked against the schema and the graphs: the instance, the
+/// objects and what the tuples use of each block.
+struct StaticBlocks
+{
+    std::vector<i32> ids;                 // the instance of each block, ascending
+    std::vector<i64> objects;             // the objects of each block's instance
+    std::vector<bool> auxiliary;          // some tuple of the block uses the auxiliary entity
+    std::vector<std::vector<i64>> keys;   // the predicate keys the tuples of the block use
+    [[nodiscard]] usize find(i32 id) const
+    {
+        return static_cast<usize>(std::ranges::lower_bound(ids, id) - ids.begin());
+    }
+};
+
+StaticBlocks check_static_blocks(const rl::ArrayBundle& batch, const EncodingSchema& schema, const i32* task_ids,
+                                 const Ints& num_objects, u64 G, rl::DType itype, bool wide)
+{
+    constexpr const char* names[] = {"static_task_ids", "static_offsets", "static_arg_offsets", "static_args",
+                                     "static_relations"};
+    const std::span<const u32> relations = schema.static_relations();
+    const u64 Rs = relations.size();
+    // the instances of the graphs, with their objects
+    std::map<i32, i64> instances;
+    for (u64 g = 0; g < G; ++g)
+    {
+        const auto [at, inserted] = instances.emplace(task_ids[g], num_objects[g]);
+        if (!inserted && at->second != num_objects[g])
+            fail("graphs " + std::to_string(g) + " and an earlier one of instance " + std::to_string(task_ids[g]) +
+                 " have different num_objects");
+    }
+    StaticBlocks blocks;
+    for (const auto& [id, objects] : instances)
+    {
+        blocks.ids.push_back(id);
+        blocks.objects.push_back(objects);
+    }
+    const u64 Ib = blocks.ids.size();
+    blocks.auxiliary.assign(Ib, false);
+    blocks.keys.resize(Ib);
+    const Ints stored_relations = Ints{batch.data(*array(batch, names[4], itype, {static_cast<i64>(Rs)})), Rs, wide};
+    for (u64 k = 0; k < Rs; ++k)
+        if (stored_relations[k] != static_cast<i64>(relations[k]))
+            fail("static_relations does not list the schema's static relations");
+    const auto* ids_info = padded_array(batch, names[0], rl::DType::I32, Ib, false);
+    const i32* stored_ids = static_cast<const i32*>(batch.data(*ids_info));
+    for (u64 b = 0; b < Ib; ++b)
+        if (stored_ids[b] != blocks.ids[b])
+            fail("static_task_ids is not the ascending list of the graphs' instances");
+    const u64 cells = Ib * Rs + 1;
+    const rl::ArrayInfo* tuple_info = padded_offsets(batch, names[1], itype, cells, wide);
+    const rl::ArrayInfo* arg_info = padded_offsets(batch, names[2], itype, cells, wide);
+    const Ints tuples{batch.data(*tuple_info), cells, wide};
+    const Ints arg_offsets{batch.data(*arg_info), cells, wide};
+    check_offsets(tuples, static_cast<u64>(tuples[cells - 1]), "static_offsets");
+    check_offsets(arg_offsets, static_cast<u64>(arg_offsets[cells - 1]), "static_arg_offsets");
+    const u64 total_args = static_cast<u64>(arg_offsets[cells - 1]);
+    const Ints args{batch.data(*padded_array(batch, names[3], itype, total_args, wide)), total_args, wide};
+    for (u64 b = 0; b < Ib; ++b)
+        for (u64 k = 0; k < Rs; ++k)
+        {
+            const u64 segment = b * Rs + k;
+            const u32 relation = relations[k];
+            const u32 arity = schema.relation(relation).arity;
+            const auto roles = schema.slot_roles(relation);
+            const u64 n = static_cast<u64>(tuples[segment + 1] - tuples[segment]);
+            const std::string where = "the static block of instance " + std::to_string(blocks.ids[b]) + ", relation " +
+                                      schema.relation(relation).name;
+            if (static_cast<u64>(arg_offsets[segment + 1] - arg_offsets[segment]) != n * arity)
+                fail("static_offsets and static_arg_offsets disagree in " + where);
+            for (u64 t = 0; t < n; ++t)
+            {
+                const u64 at = static_cast<u64>(arg_offsets[segment]) + t * arity;
+                for (u32 position = 0; position < arity; ++position)
+                {
+                    const i64 id = args[at + position];
+                    switch (roles[position])
+                    {
+                        case SlotRole::Argument:
+                            if (id < 0 || id >= blocks.objects[b])
+                                fail("a tuple of " + where + " has an object outside its instance");
+                            break;
+                        case SlotRole::Auxiliary:
+                            if (id != blocks.objects[b])
+                                fail("a tuple of " + where + " has an auxiliary entity that is not num_objects");
+                            blocks.auxiliary[b] = true;
+                            break;
+                        case SlotRole::Predicate:
+                            if (id != schema.virtual_key(relation))
+                                fail("a tuple of " + where + " has the key of another predicate");
+                            blocks.keys[b].push_back(id);
+                            break;
+                        default: fail("a static relation has a slot of another role");
+                    }
+                }
+                if (t > 0)
+                {
+                    u32 position = 0;
+                    while (position < arity && args[at + position] == args[at - arity + position])
+                        ++position;
+                    if (position == arity)
+                        fail("a tuple occurs twice in " + where);
+                    if (args[at + position] < args[at - arity + position])
+                        fail("the tuples of " + where + " are not ascending");
+                }
+            }
+        }
+    return blocks;
+}
 }  // namespace
 
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
@@ -110,15 +238,20 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
         fail("index_dtype does not match the schema's index type");
     if (batch.scalar("schema_fingerprint", 0) != std::bit_cast<i64>(schema.fingerprint()))
         fail("schema_fingerprint does not match the schema");
-    if (batch.scalar("statics") != 0)
-        fail("statics is not 0");
+    const bool shared = schema.shared_statics();
+    if (batch.scalar("statics") != (shared ? 1 : 0))
+        fail(std::string("statics is not ") + (shared ? "1" : "0"));
+    for (const char* name : {"static_task_ids", "static_offsets", "static_arg_offsets", "static_args", "static_relations"})
+        if ((batch.find(name) != nullptr) != shared)
+            fail(shared ? std::string("the array ") + name + " is missing"
+                        : std::string("the array ") + name + " must be omitted: the schema repeats its statics");
     const bool wide = index_dtype == 1;
     const rl::DType itype = wide ? rl::DType::I64 : rl::DType::I32;
     auto ints = [&](const rl::ArrayInfo& info) { return Ints{batch.data(info), info.elements(), wide}; };
     auto g_i64 = static_cast<i64>(G);
     auto r_i64 = static_cast<i64>(R);
 
-    array(batch, "task_ids", rl::DType::I32, {g_i64});
+    const i32* task_ids = static_cast<const i32*>(batch.data(*array(batch, "task_ids", rl::DType::I32, {g_i64})));
     const Ints num_objects = ints(*array(batch, "num_objects", itype, {g_i64}));
     const Ints entity_offsets = ints(*array(batch, "entity_offsets", itype, {g_i64 + 1}));
     if (entity_offsets[0] != 0)
@@ -176,6 +309,9 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
     check_offsets(tuple_offsets, static_cast<u64>(tuple_offsets[G * R]), "relation_offsets");
     check_offsets(arg_offsets, total_args, "relation_arg_offsets");
 
+    StaticBlocks blocks;
+    if (shared)
+        blocks = check_static_blocks(batch, schema, task_ids, num_objects, G, itype, wide);
     constexpr u8 k_object = static_cast<u8>(EntityRole::Object);
     constexpr u8 k_auxiliary = static_cast<u8>(EntityRole::Auxiliary);
     constexpr u8 k_goal = static_cast<u8>(EntityRole::Goal);
@@ -245,6 +381,8 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             const std::string where = "cell (" + std::to_string(g) + ", " + schema.relation(static_cast<u32>(r)).name + ")";
             if (stored_counts && counts[g * R + r] != tuple_offsets[cell + 1] - tuple_offsets[cell])
                 fail("relation_offsets and relation_counts disagree in " + where);
+            if (shared && n != 0 && schema.relation(static_cast<u32>(r)).lane == Lane::Static)
+                fail(where + " has tuples, the schema shares its static tuples");
             if (static_cast<u64>(arg_offsets[cell + 1] - arg_offsets[cell]) != n * arity)
                 fail("relation_arg_offsets and relation_counts disagree in " + where);
             const bool goal_target = roles.front() == SlotRole::GoalTarget;
@@ -323,6 +461,21 @@ void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
             fail("graph " + std::to_string(g) + " has goal entities that no tuple of a plain goal relation starts with");
         if (actions != action_entities)
             fail("graph " + std::to_string(g) + " has action entities that no action tuple starts with");
+        if (shared)
+        {
+            // the static tuples of the graph's instance are among its tuples: they use the entities they name
+            const usize block = blocks.find(task_ids[g]);
+            auxiliary_used = auxiliary_used || blocks.auxiliary[block];
+            for (const i64 key : blocks.keys[block])
+            {
+                i64 node = 0;
+                while (node < virtual_entities && entity_ref[virtual_start + node] != key)
+                    ++node;
+                if (node == virtual_entities)
+                    fail("graph " + std::to_string(g) + " has no virtual node for the predicate of a static tuple");
+                virtual_used[static_cast<usize>(node)] = true;
+            }
+        }
         for (i64 v = 0; v < virtual_entities; ++v)
         {
             if (!virtual_used[static_cast<usize>(v)])

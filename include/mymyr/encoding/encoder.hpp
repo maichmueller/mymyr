@@ -32,7 +32,28 @@
 //   target_group         u8  [T]       the group of each target (TargetGroup: 0 goal)
 // and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0:
 // int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
-// tuples are repeated in every graph).
+// tuples are repeated in every graph; 1: they are shared, see below).
+//
+// Shared statics. With FlatOptions::statics = Shared the cells of the static relations (EncodingSchema::
+// static_relations, R_s of them) are empty in every graph: relation_counts is 0 there, the segments have no tuple, and
+// the static tuples of an instance are stored once for the batch, in its static block. The batch holds the blocks of the
+// distinct instances of its graphs, in ascending instance order (so that the blocks of a slice of the graphs are those of
+// the batch the slice needs, in the same order), and these arrays (I_b blocks):
+//   static_task_ids      i32 [I_b]            the instance of each block, ascending
+//   static_offsets       I   [I_b * R_s + 1]  the tuples of static relation s in block b: segment b * R_s + s, the tuples
+//                                             [static_offsets[b * R_s + s], static_offsets[b * R_s + s + 1])
+//   static_arg_offsets   I   [I_b * R_s + 1]  the same offsets into static_args
+//   static_args          I   [A_s]            the tuples' entities, tuple after tuple, Relation::arity per tuple, in the
+//                                             lexicographic order of the objects
+//   static_relations     I   [R_s]            the relation ids of the static relations, ascending
+// A static tuple's entity ids are graph-local, 0-based: an object is its instance-local id and the auxiliary entity is
+// num_objects. A model adds entity_offsets[g] to the ids of every graph g it applies the block of its instance
+// task_ids[g] to (the block is found by searching task_ids[g] in static_task_ids). With predicate virtual nodes the
+// predicate slot of a static tuple is not an entity id but the predicate's key, the entity_ref of its virtual node: the
+// node is the entity of the graph with role predicate_virtual and that entity_ref. The graph's entities, and with them
+// every other array, are those of the repeated form (the auxiliary entity and the virtual nodes of the static tuples are
+// there), except that the tuples of a graph do not include the static ones: the entity_ref of a goal entity indexes the
+// graph's tuples of this batch.
 //
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
@@ -158,25 +179,33 @@ public:
     /// The capacity form into a new bundle whose variable-size arrays (the entity arrays, relation_args and the target
     /// entity and group arrays) have the capacities' sizes. The arrays hold the batch in their first `sizes.entities` / `sizes.args` entries and are zero
     /// beyond; if `sizes.overflow` is set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
-    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
-                                                                         const BatchShape& capacities,
-                                                                         ThreadPool& pool, EncodeScratch& scratch,
-                                                                         FlatSizes& sizes) const;
+    /// With shared statics the static blocks have capacities too (`static_capacities`: the arrays static_task_ids and
+    /// static_args, and static_offsets and static_arg_offsets for that many blocks, have these sizes; the entries past
+    /// the batch's blocks are zero, the offsets past them repeat their last entry) and `static_sizes` receives the true
+    /// sizes; a static size past its capacity sets k_overflow_capacity. Both are required with shared statics and must
+    /// be null otherwise.
+    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(
+        const EncodeInput& in, const BatchShape& capacities, ThreadPool& pool, EncodeScratch& scratch,
+        FlatSizes& sizes, const StaticShape* static_capacities = nullptr, StaticSizes* static_sizes = nullptr) const;
 
     /// The capacity form, step one: checks the input (the exceptions of encode, except std::overflow_error), counts and
     /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not
-    /// fit the index type. `scratch` keeps the counts for fill().
-    [[nodiscard]] FlatSizes count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
+    /// fit the index type. `scratch` keeps the counts for fill(). With shared statics `static_sizes` (if not null)
+    /// receives the sizes of the static blocks, which also count for the index type.
+    [[nodiscard]] FlatSizes count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch,
+                                  StaticSizes* static_sizes = nullptr) const;
     /// Step two: writes the batch counted by the last count() of `scratch` (`in` and `sizes` must be that call's) into
-    /// `out`. Requires sizes.overflow == 0 and the buffers as described at FlatBuffers; throws std::invalid_argument
-    /// otherwise, and when `scratch` does not hold the count of `in`.
+    /// `out`, the static blocks included. Requires sizes.overflow == 0 and the buffers as described at FlatBuffers;
+    /// throws std::invalid_argument otherwise, and when `scratch` does not hold the count of `in`.
     void fill(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,
               EncodeScratch& scratch) const;
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
     /// returned sizes are true; if they overflow, no array of `out` is written. Entries of `out` past the sizes are
-    /// left as they were. Reuses the buffers of `scratch`.
+    /// left as they were. Reuses the buffers of `scratch`. `static_capacities` and `static_sizes` are as at
+    /// encode_capacity.
     FlatSizes encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
-                          ThreadPool& pool, EncodeScratch& scratch) const;
+                          ThreadPool& pool, EncodeScratch& scratch, const StaticShape* static_capacities = nullptr,
+                          StaticSizes* static_sizes = nullptr) const;
 
 private:
     FlatEncoder() = default;
@@ -186,9 +215,10 @@ private:
         std::shared_ptr<rl::ArrayBundle> bundle;
         FlatBuffers buffers;
     };
-    /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments and `targets`
-    /// targets.
-    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets) const;
+    /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments, `targets`
+    /// targets and, with shared statics, the static blocks of `statics`.
+    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets,
+                                      const StaticShape& statics) const;
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;

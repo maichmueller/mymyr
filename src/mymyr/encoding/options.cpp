@@ -27,6 +27,7 @@ constexpr std::array<std::string_view, 5> k_derivations = {"plain", "satisfied",
 constexpr std::array<std::string_view, 4> k_sources = {"goal", "subgoal", "action", "history"};
 constexpr std::array<std::string_view, 2> k_layouts = {"graph", "relation"};
 constexpr std::array<std::string_view, 2> k_entity_arrays = {"auto", "always"};
+constexpr std::array<std::string_view, 2> k_statics = {"repeat", "shared"};
 constexpr std::array<std::string_view, 2> k_index_types = {"int32", "int64"};
 constexpr std::array<std::string_view, 4> k_modes = {"none", "full", "delta", "action"};
 constexpr std::array<std::string_view, 3> k_roots = {"include", "exclude", "encode_only"};
@@ -36,6 +37,7 @@ std::string_view to_string(GoalDerivation value) noexcept { return k_derivations
 std::string_view to_string(TargetSource value) noexcept { return k_sources[static_cast<usize>(value)]; }
 std::string_view to_string(Layout value) noexcept { return k_layouts[static_cast<usize>(value)]; }
 std::string_view to_string(EntityArrays value) noexcept { return k_entity_arrays[static_cast<usize>(value)]; }
+std::string_view to_string(Statics value) noexcept { return k_statics[static_cast<usize>(value)]; }
 std::string_view to_string(IndexType value) noexcept { return k_index_types[static_cast<usize>(value)]; }
 std::string_view to_string(HorizonMode value) noexcept { return k_modes[static_cast<usize>(value)]; }
 std::string_view to_string(RootPolicy value) noexcept { return k_roots[static_cast<usize>(value)]; }
@@ -53,6 +55,7 @@ std::optional<EntityArrays> parse_entity_arrays(std::string_view text) noexcept
 {
     return parse<EntityArrays>(k_entity_arrays, text);
 }
+std::optional<Statics> parse_statics(std::string_view text) noexcept { return parse<Statics>(k_statics, text); }
 std::optional<IndexType> parse_index_type(std::string_view text) noexcept
 {
     return parse<IndexType>(k_index_types, text);
@@ -64,6 +67,13 @@ std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept
 std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept
 {
     return parse<RootPolicy>(k_roots, text);
+}
+
+void require_repeated_statics(const FlatOptions& options, std::string_view family)
+{
+    if (options.statics == Statics::Shared)
+        invalid("statics='shared' is not supported by the " + std::string(family) +
+                " encoding: its graphs hold the static tuples among their own tuples");
 }
 
 FlatOptions normalized(const FlatOptions& options)

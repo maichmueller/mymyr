@@ -456,6 +456,9 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     schema->m_goal_complete = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });
+    for (u32 id = 0; id < schema->m_relations.size(); ++id)
+        if (schema->m_relations[id].lane == Lane::Static)
+            schema->m_static_relations.push_back(id);
     const FlatOptions& o = schema->m_options;
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
                                   !o.predicate_virtual_nodes && !o.include_actions &&
@@ -471,6 +474,8 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         hasher.text("omit relation_counts");
     if (schema->m_implicit_entities)
         hasher.text("omit entity_role, entity_ref");
+    if (o.statics == Statics::Shared)
+        hasher.text("shared statics");
     hasher.integer(o.targets.bits());
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));

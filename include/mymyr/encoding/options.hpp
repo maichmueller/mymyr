@@ -89,6 +89,15 @@ enum class EntityArrays : u8
     Always,
 };
 
+/// Where the tuples of the static relations (the static predicates, the types included) live. Repeat writes them into
+/// every graph. Shared leaves the static relations empty in the graphs and writes the static tuples of each instance
+/// once for the batch, in static blocks (encoder.hpp), with graph-local entity ids.
+enum class Statics : u8
+{
+    Repeat,
+    Shared,
+};
+
 /// The integer type of every index, count and offset array.
 enum class IndexType : u8
 {
@@ -159,6 +168,8 @@ struct FlatOptions
     /// Always stores the entity arrays; Auto omits them when the schema allows it
     /// (EncodingSchema::implicit_entity_arrays).
     EntityArrays entity_arrays = EntityArrays::Always;
+    /// Whether the static tuples are repeated in every graph or stored once per instance (see Statics).
+    Statics statics = Statics::Repeat;
     HorizonOptions horizon{};
 
     [[nodiscard]] friend bool operator==(const FlatOptions&, const FlatOptions&) noexcept = default;
@@ -174,13 +185,20 @@ struct FlatOptions
 /// - a parent relation, or a root policy other than Include, without a horizon mode.
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
+/// Throws std::invalid_argument ("mymyr: encoding: ...") if the options store the static tuples once per instance. An
+/// encoding family whose graphs need the static tuples among their own tuples calls it where it builds its schema;
+/// `family` names the family in the message.
+void require_repeated_statics(const FlatOptions& options, std::string_view family);
+
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
-/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "none", "full", "delta",
-/// "action"; "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no enumerator.
+/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "repeat", "shared"; "int32", "int64"; "none",
+/// "full", "delta", "action"; "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no
+/// enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
 [[nodiscard]] std::string_view to_string(Layout value) noexcept;
 [[nodiscard]] std::string_view to_string(EntityArrays value) noexcept;
+[[nodiscard]] std::string_view to_string(Statics value) noexcept;
 [[nodiscard]] std::string_view to_string(IndexType value) noexcept;
 [[nodiscard]] std::string_view to_string(HorizonMode value) noexcept;
 [[nodiscard]] std::string_view to_string(RootPolicy value) noexcept;
@@ -188,6 +206,7 @@ struct FlatOptions
 [[nodiscard]] std::optional<TargetSource> parse_target_source(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
 [[nodiscard]] std::optional<EntityArrays> parse_entity_arrays(std::string_view text) noexcept;
+[[nodiscard]] std::optional<Statics> parse_statics(std::string_view text) noexcept;
 [[nodiscard]] std::optional<IndexType> parse_index_type(std::string_view text) noexcept;
 [[nodiscard]] std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept;
 [[nodiscard]] std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept;

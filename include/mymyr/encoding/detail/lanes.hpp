@@ -15,6 +15,9 @@
 //     is the lexicographic order of the atoms' objects;
 //   - Derived cell: the same over the derived words;
 //   - Static cell: the instance's static tuples of the predicate, sorted and without duplicates;
+//   - Shared static cell (statics shared): the same tuples, but they are not a graph's: the cell counts 0 tuples in
+//     every graph, and the tuples are written once per instance by fill_static_block. The cell still decides which
+//     entities the graph has (the auxiliary entity of a nullary static atom, the virtual node of the predicate);
 //   - a nullary predicate's atom is the unary tuple [auxiliary entity];
 //   - Goal cell, plain: one tuple per goal literal of the cell's predicate and sign, which is each set bit of the goal's
 //     positive (negative) mask in the cell's slot range, merged in lexicographic order with the cell's constant part,
@@ -89,6 +92,7 @@ enum class CellOp : u32
     Static = 2,
     Action = 3,        // the ground actions of the schemas a..b of ContextView::action_schemas
     ActionTarget = 4,  // the same; the action entities are also listed as targets
+    SharedStatic = 5,  // the instance's static tuples of one predicate, kept in the batch's static blocks, not in a graph
 };
 
 /// The variants of a goal cell: the plain goal literals (with the goal entity in front of each tuple for PlainTarget) and
@@ -191,6 +195,8 @@ struct ContextView
     const u32* virtual_relation = nullptr;  // [num_virtual]
     u32 num_virtual = 0;
     const u32* relation_arity = nullptr;  // [num_relations] the encoded arity of each relation
+    const u32* static_relations = nullptr;  // [num_static] the relations of the static lane, ascending
+    u32 num_static = 0;
 };
 
 /// One instance of a context, resolved to pointers and counts.
@@ -218,6 +224,8 @@ struct InstanceView
     const u32* relation_virtual;
     const u32* virtual_relation;
     u32 num_virtual;
+    const u32* static_relations;
+    u32 num_static;
 };
 
 MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
@@ -256,6 +264,8 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.relation_virtual = c.relation_virtual;
     v.virtual_relation = c.virtual_relation;
     v.num_virtual = c.num_virtual;
+    v.static_relations = c.static_relations;
+    v.num_static = c.num_static;
     return v;
 }
 
@@ -820,7 +830,17 @@ MYMYR_HD u32 cell_count(const InstanceView& v, const Cell& c, const RowInput& in
         return goal_cell_count(c, goal_words(v, in), in);
     if (is_action_op(c.op))
         return action_cell_count(v, c, in.actions);
+    if (c.op == static_cast<u32>(CellOp::SharedStatic))
+        return 0u;
     return c.b - c.a;
+}
+
+/// Whether a cell whose count in this graph is `n` gives the graph its entities (the auxiliary entity of a nullary
+/// predicate, the virtual node of a predicate): it has a tuple, or it is a shared static cell, whose tuples live in the
+/// static block of the instance and belong to every graph of it.
+MYMYR_HD bool cell_present(const Cell& c, u32 n)
+{
+    return n != 0 || (c.op == static_cast<u32>(CellOp::SharedStatic) && c.a != c.b);
 }
 
 
@@ -839,7 +859,7 @@ MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
             t.targets += n;
         return;
     }
-    if (c.logical_arity == 0 && n > 0)
+    if (c.logical_arity == 0 && cell_present(c, n))
         t.flags |= k_graph_auxiliary;
     if (is_goal_op(c.op) && goal_op_mode(c.op) == GoalMode::PlainTarget)
     {
@@ -907,7 +927,7 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32*
         if (cell_counts)
             cell_counts[i] = n;
         accumulate_cell(t, cells[i], n);
-        if (virtual_nodes && n)
+        if (virtual_nodes && cell_present(cells[i], n))
         {
             const u32 p = v.relation_virtual[cells[i].relation];
             if (p != k_no_virtual)
@@ -962,7 +982,7 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
             continue;
         sink(i, c, n);
         accumulate_cell(t, c, n);
-        if (virtual_nodes && n)
+        if (virtual_nodes && cell_present(c, n))
         {
             const u32 p = v.relation_virtual[c.relation];
             if (p != k_no_virtual)
@@ -1027,7 +1047,7 @@ MYMYR_HD u32 virtual_ranks(const InstanceView& v, const RowInput& in, const u32*
         const u32 p = v.relation_virtual[list.cells[i].relation];
         if (p == k_no_virtual || rank[p])
             continue;
-        if (cell_counts ? cell_counts[i] != 0 : cell_count(v, list.cells[i], in) != 0)
+        if (cell_present(list.cells[i], cell_counts ? cell_counts[i] : cell_count(v, list.cells[i], in)))
             rank[p] = 1;
     }
     u32 used = 0;
@@ -1590,6 +1610,8 @@ MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& 
 {
     if (is_action_op(c.op))
         return fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst);
+    if (c.op == static_cast<u32>(CellOp::SharedStatic))
+        return 0;
     const u64 pred = predicate_entity(v, cursor, c.relation);
     if (!is_goal_op(c.op))
         return fill_cell<I>(v, c, in, entity_base, auxiliary, pred, dst);
@@ -1963,5 +1985,64 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
     if (counts)
         for (u32 q = r + grp.lane(); q < R; q += grp.size())
             counts[q] = static_cast<I>(0);
+}
+
+// ------------------------------------------------------------------------------------------------ static blocks
+
+/// The static block of an instance holds the tuples of its shared static cells, one segment per static relation of the
+/// context (ContextView::static_relations, ascending; a relation the instance has no cell for is an empty segment), in
+/// the lexicographic order of the objects. Its entity ids are graph-local: an object is its instance-local id and the
+/// auxiliary entity of a nullary tuple is `num_objects`; with predicate virtual nodes the predicate slot of a tuple holds
+/// the predicate's key, the `entity_ref` of its virtual node, because which entity is the node depends on the graph. The
+/// block depends on the instance alone, so any graph of it, whatever the row, adds its entity base to the ids.
+struct StaticTotals
+{
+    u64 tuples;
+    u64 args;
+};
+
+/// The tuples and the arguments of the instance's static block.
+MYMYR_HD StaticTotals static_block_totals(const InstanceView& v)
+{
+    StaticTotals t{0, 0};
+    for (u32 i = 0; i < v.num_plain_cells; ++i)
+    {
+        const Cell& c = v.plain_cells[i];
+        if (c.op == static_cast<u32>(CellOp::SharedStatic))
+        {
+            t.tuples += c.b - c.a;
+            t.args += static_cast<u64>(c.b - c.a) * c.arity;
+        }
+    }
+    return t;
+}
+
+/// Writes the instance's static block: the segments [segment, segment + v.num_static) of `tuple_offsets` and
+/// `arg_offsets` (the positions at which each segment starts, counted from `tuple_base` and `arg_base`) and the
+/// arguments of its tuples from `args + arg_base` on. The ends of the offset arrays are the caller's.
+template<class I>
+MYMYR_HD void fill_static_block(const InstanceView& v, u64 segment, u64 tuple_base, u64 arg_base, I* tuple_offsets,
+                                I* arg_offsets, I* args)
+{
+    const RowInput none{nullptr, nullptr};
+    u64 tuples = tuple_base, positions = arg_base;
+    u32 i = 0;
+    for (u32 s = 0; s < v.num_static; ++s)
+    {
+        const u32 relation = v.static_relations[s];
+        while (i < v.num_plain_cells && v.plain_cells[i].relation < relation)
+            ++i;
+        tuple_offsets[segment + s] = static_cast<I>(tuples);
+        arg_offsets[segment + s] = static_cast<I>(positions);
+        if (i == v.num_plain_cells || v.plain_cells[i].relation != relation ||
+            v.plain_cells[i].op != static_cast<u32>(CellOp::SharedStatic))
+            continue;
+        Cell cell = v.plain_cells[i];
+        cell.op = static_cast<u32>(CellOp::Static);
+        const u64 key = has_virtual_nodes(v) ? v.virtual_relation[v.relation_virtual[relation]] : k_no_entity;
+        const u32 n = fill_cell<I>(v, cell, none, 0, v.num_objects, key, args + positions);
+        tuples += n;
+        positions += static_cast<u64>(n) * cell.arity;
+    }
 }
 }  // namespace mymyr::encoding::detail
