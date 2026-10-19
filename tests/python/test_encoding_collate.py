@@ -37,3 +37,11 @@ def test_collation_refuses_incompatible_batches(option):
 def test_collation_requires_a_batch_to_establish_its_schema():
     with pytest.raises(ValueError, match="^mymyr: encoding: collate needs at least one batch"):
         encoding.collate([])
+
+
+@pytest.mark.parametrize("capacity", [0, -1, 1.5, True])
+def test_device_stream_capacity_validation_precedes_device_construction(capacity):
+    pytest.importorskip("torch")
+    encoder = encoding.FlatRelationEncoder(text_task("gripper__prob05"))
+    with pytest.raises(ValueError, match="^mymyr: encoding: a device stream needs a positive integer capacity"):
+        encoder.device_stream(capacity)

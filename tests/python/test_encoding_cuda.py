@@ -1064,13 +1064,6 @@ def test_device_row_stream_wraps_and_flushes_live_rows(cases, layout, index, giv
     assert int(ring.device_overflow.item()) == 0
 
 
-@pytest.mark.parametrize("capacity", [0, -1, 1.5, True])
-def test_device_stream_capacity_validation_precedes_device_construction(capacity):
-    encoder = encoding.FlatRelationEncoder(text_task("gripper__prob05"))
-    with pytest.raises(ValueError, match="^mymyr: encoding: a device stream needs a positive integer capacity"):
-        encoder.device_stream(capacity)
-
-
 def test_device_row_stream_append_and_flush_are_capturable(cases):
     dev = gpu()
     case = cases["philosophers"]
