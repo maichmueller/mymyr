@@ -1224,7 +1224,8 @@ void define_encoder_common(nb::class_<Py>& cls)
             "(`[-]` for a negative literal; a nullary literal is `[+](handempty)[g]`), a subgoal entity "
             "`[+](on a b)[sg]` (`[ssg]`, `[sssg]` for the higher levels), an action entity `(unstack a b)`, a history "
             "step `history:<dt>#<i>` (i counts the graph's history steps from 0), a history target "
-            "`history:<dt>#<i>:[+](on a b)`, a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
+            "`history:<dt>#<i>:[+](on a b)`, a state entity of a horizon graph `target:<k>` (k is the index of its node "
+            "in the graph; the root is `target:0`), a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
             "`auxiliary`, a goal literal that two relations list) are told apart by position only. The names are built "
             "from the batch's arrays and the task; nothing is stored in the batch.")
         .def(
