@@ -269,7 +269,7 @@ public:
     /// outside the table, a row or goal mask narrower than its instance, a bit its instance does not have), nothing of
     /// the batch is written and sizes.overflow says why. The rows, outputs and `launch.order` are device memory the
     /// stream may read and write. Throws std::invalid_argument for input that can be checked without reading device
-    /// memory (more graphs than the workspace's shape, arrays that do not match the schema, derived words that
+    /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, derived words that
     /// are needed and missing, a launch that needs more shared memory than a block has).
     void encode(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
                 const LaunchConfig& launch = {}) const;

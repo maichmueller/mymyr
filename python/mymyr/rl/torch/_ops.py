@@ -651,9 +651,9 @@ def encode_flat(
     [N or 1, D]) with the capacities ``graphs``, ``entities``, ``args`` and ``targets`` (0 without target sources).
     ``encoder`` is a :func:`register` handle of the encoder. Returns the 14 arrays of ``DeviceFlatBatch.array_names``
     (arrays that the schema does not store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them.
-    Nothing waits for the device, and a batch that does not fit its capacities is all zero with the overflow flags in
-    ``sizes``. To capture it in a CUDA graph, call ``encoder.reserve_device`` on the capture stream first and keep the
-    encoder registered while the graph can replay."""
+    A batch exceeding ``graphs`` raises before launch. Nothing waits for the device, and a batch that exceeds its
+    array capacities is all zero with the overflow flags in ``sizes``. To capture it in a CUDA graph, call
+    ``encoder.reserve_device`` on the capture stream first and keep the encoder registered while the graph can replay."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):
