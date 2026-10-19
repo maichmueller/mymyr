@@ -420,17 +420,17 @@ import mymyr
 from mymyr import encoding
 import mymyr.encoding.jax as ej
 
-task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
-encoder = encoding.FlatRelationEncoder(task)
-words = np.asarray(task.encode([task.initial_state] + task.successor_states(task.initial_state)))
+gripper = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+gripper_encoder = encoding.FlatRelationEncoder(gripper)
+words = np.asarray(gripper.encode([gripper.initial_state] + gripper.successor_states(gripper.initial_state)))
 rows = jnp.asarray(words.view(np.uint32))                 # uint32 halves of the u64 words: [N, 2 W]
 
-host = encoder.encode(words)
+host = gripper_encoder.encode(words)
 capacities = dict(graphs=len(words), entities=int(host.entity_offsets[-1]), args=2 * int(host.relation_arg_offsets[-1]))
-batch = jax.jit(lambda r: ej.encode(encoder, r, capacities=capacities))(rows)
-assert isinstance(batch, ej.JaxFlatBatch) and batch.relation_args.shape == (capacities["args"],)
-assert int(batch.overflow) == 0                           # usable inside jit; batch.sizes reads it on the host
-assert np.array_equal(np.asarray(batch.relation_args)[: batch.sizes["args"]], host.relation_args)
+jax_batch = jax.jit(lambda r: ej.encode(gripper_encoder, r, capacities=capacities))(rows)
+assert isinstance(jax_batch, ej.JaxFlatBatch) and jax_batch.relation_args.shape == (capacities["args"],)
+assert int(jax_batch.overflow) == 0                       # usable inside jit; jax_batch.sizes reads it on the host
+assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["args"]], host.relation_args)
 ```
 
 - **Rows.** JAX has no 64-bit types by default, so rows are the u64 words of each state as `uint32` halves, low half
