@@ -1468,3 +1468,35 @@ TEST(DeviceCollate, ChecksWideTotalsBeforeAnyIndexWrite)
     EXPECT_NE(result.sizes.overflow & encoding::k_overflow_index, 0u);
     EXPECT_EQ(result.block[layout.task_ids], std::byte{0x7b});
 }
+
+TEST(DeviceRowStream, MixedWidthsReadOnlyTheirInstanceWords)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const auto table = wide_table();
+    const auto batch = make_batch(table, 33, false, 173);
+    ASSERT_GT(batch.words, 64u);
+    const DeviceRows rows(ctx, stream, batch);
+    auto config = configs().back();
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+        for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+        {
+            config.options.layout = layout;
+            config.options.index = index;
+            const auto encoder = encoding::FlatEncoder::create(table, config.options);
+            const auto reference = host_reference(*encoder, host_input(batch, 33, config.inputs));
+            const cuda::BatchShape shape{37, reference.sizes.entities, reference.sizes.args, reference.sizes.targets};
+            const auto out_layout = cuda::output_layout(shape, index, encoder->schema().num_relations(),
+                                                        cuda::output_arrays(encoder->schema()));
+            cuda::DeviceBuffer block(ctx, out_layout.bytes, stream);
+            const auto output = cuda::output_of(out_layout, shape, block.data());
+            cuda::DeviceRowStream ring(ctx, encoder, 37, stream, true, false, true);
+            for (int pass = 0; pass < 3; ++pass)
+            {
+                ring.append(rows.input(batch, 33, config.inputs));
+                ring.flush(output);
+                expect_same_arrays(*reference.bundle, download_encoding(ctx, stream, out_layout, block));
+            }
+        }
+}
