@@ -427,9 +427,11 @@ def test_invalid_combinations_give_the_error_of_the_schema(options, match):
 
 def test_horizon_mode_none_is_spelled_none_not_as_a_string():
     task = text_task("gripper__prob05")
-    for cls in (encoding.EncodingSchema, encoding.FlatHorizonEncoder):
-        with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
-            cls(task, goal_derivations=(), horizon_mode="none")
+    # only the schema has a horizon_mode None: the horizon encoder needs a mode
+    with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action' or None"):
+        encoding.EncodingSchema(task, goal_derivations=(), horizon_mode="none")
+    with pytest.raises(ValueError, match="horizon_mode must be one of 'full', 'delta', 'action', got 'none'"):
+        encoding.FlatHorizonEncoder(task, goal_derivations=(), horizon_mode="none")
 
 
 @pytest.mark.parametrize(
