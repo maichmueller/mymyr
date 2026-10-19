@@ -13,12 +13,14 @@
 // reserved workspace, and whether the device's sizes equal the host encoder's.
 
 // With --streams, also times captured append, flush, append plus flush and four-slice collation. Append and flush
-// arrays hold one replay per sample; combined and collation arrays hold --replays calls per sample.
+// arrays hold one replay per sample; combined and collation arrays hold --replays calls per sample. Tasks with
+// derived atoms also time supplied derived words, prepared on the host before any timing.
 
 #include "mymyr/cuda/encoding.hpp"
 #include "../../cuda/src/encoding_scratch.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/frontend/domain.hpp"
+#include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -168,7 +170,7 @@ struct Session
     encoding::Layout layout;
     std::shared_ptr<const encoding::FlatEncoder> host;
     std::unique_ptr<cuda::DeviceEncoder> device;
-    cuda::DeviceBuffer states, block;
+    cuda::DeviceBuffer states, derived, block;
     cuda::DeviceEncodeInput input;
     cuda::DeviceOutput output;
     cuda::OutputLayout layout_of;
@@ -184,7 +186,7 @@ struct Session
     cuda::LaunchConfig launch;
 
     Session(const cuda::ContextPtr& ctx, cudaStream_t stream, rl::TaskTablePtr table, encoding::Layout l, const std::vector<u64>& rows,
-            u32 words, u64 n, const cuda::LaunchConfig& config)
+            u32 words, u64 n, const cuda::LaunchConfig& config, bool supplied_derived = false)
         : layout(l), launch(config)
     {
         encoding::FlatOptions options;
@@ -194,6 +196,24 @@ struct Session
         // the host's sizes size the output
         encoding::EncodeInput in;
         in.states = {rows.data(), n, words, 0, 0};
+        std::vector<u64> derived_rows;
+        const u32 dw = host->table().derived_words();
+        if (supplied_derived && dw)
+        {
+            derived_rows.resize(n * dw, 0);
+            const auto workspace = host->table().task(0)->workspace();
+            const auto& instance = host->table().instance(0);
+            for (u64 g = 0; g < n; ++g)
+            {
+                workspace->engine().set_state(rows.data() + g * words, instance.words);
+                workspace->engine().build_view();
+                workspace->axioms().evaluate();
+                if (instance.derived_words)
+                    std::copy_n(workspace->engine().derived(), instance.derived_words, derived_rows.data() + g * dw);
+            }
+            in.derived = derived_rows.data();
+            in.derived_stride = dw;
+        }
         ThreadPool pool(1);
         encoding::EncodeScratch scratch_of_host;
         host_sizes = host->count(in, pool, scratch_of_host);
@@ -209,6 +229,13 @@ struct Session
         input.states = static_cast<const u64*>(states.data());
         input.state_stride = words;
         input.state_words = words;
+        if (!derived_rows.empty())
+        {
+            derived = cuda::DeviceBuffer(ctx, derived_rows.size() * sizeof(u64), stream);
+            cuda::check(cudaMemcpyAsync(derived.data(), derived_rows.data(), derived.size(), cudaMemcpyHostToDevice, stream), "upload derived rows");
+            input.derived = static_cast<const u64*>(derived.data());
+            input.derived_stride = dw;
+        }
         // an eager encode first, outside any capture, for the sizes
         device->encode(input, output, stream, launch);
         encoding::FlatSizes device_sizes;
@@ -429,13 +456,19 @@ int main(int argc, char** argv)
         cuda::Stream stream;
         Session graph_major(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch);
         Session relation_major(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch);
+        std::unique_ptr<Session> graph_given, relation_given;
+        if (graph_major.host->context().max_derived_words())
+        {
+            graph_given = std::make_unique<Session>(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch, true);
+            relation_given = std::make_unique<Session>(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch, true);
+        }
         std::unique_ptr<StreamSession> stream_graph, stream_relation;
         if (a.streams)
         {
             stream_graph = std::make_unique<StreamSession>(ctx, stream, graph_major, rows);
             stream_relation = std::make_unique<StreamSession>(ctx, stream, relation_major, rows);
         }
-        std::vector<double> graph_times, relation_times, eager_times;
+        std::vector<double> graph_times, relation_times, eager_times, graph_given_times, relation_given_times;
         for (u32 r = 0; r < a.rounds; ++r)
         {
             if (stream_graph)
@@ -443,13 +476,16 @@ int main(int argc, char** argv)
                 (r % 2 ? stream_relation : stream_graph)->measure(stream, a.replays);
                 (r % 2 ? stream_graph : stream_relation)->measure(stream, a.replays);
             }
-            // the three timings alternate, the first rotating
-            for (u32 k = 0; k < 3; ++k)
-                switch ((r + k) % 3)
+            // The first timing rotates so each mode occupies every position across rounds.
+            const u32 modes = graph_given ? 5 : 3;
+            for (u32 k = 0; k < modes; ++k)
+                switch ((r + k) % modes)
                 {
                     case 0: graph_times.push_back(replay_us(stream, graph_major, a.replays)); break;
                     case 1: relation_times.push_back(replay_us(stream, relation_major, a.replays)); break;
-                    default: eager_times.push_back(eager_us(stream, graph_major)); break;
+                    case 2: eager_times.push_back(eager_us(stream, graph_major)); break;
+                    case 3: graph_given_times.push_back(replay_us(stream, *graph_given, a.replays)); break;
+                    default: relation_given_times.push_back(replay_us(stream, *relation_given, a.replays)); break;
                 }
         }
         std::printf("{\"n\":%llu,\"words\":%u,\"replays\":%u,\"rounds\":%u,\"times_us\":{", static_cast<unsigned long long>(a.n),
@@ -459,10 +495,20 @@ int main(int argc, char** argv)
         print_times("relation", relation_times);
         std::printf(",");
         print_times("eager", eager_times);
+        if (graph_given)
+        {
+            std::printf(","); print_times("graph_given", graph_given_times);
+            std::printf(","); print_times("relation_given", relation_given_times);
+        }
         std::printf("},");
         print_layout("graph", graph_major);
         std::printf(",");
         print_layout("relation", relation_major);
+        if (graph_given)
+        {
+            std::printf(","); print_layout("graph_given", *graph_given);
+            std::printf(","); print_layout("relation_given", *relation_given);
+        }
         if (stream_graph)
         {
             std::printf(",\"streams\":{");
