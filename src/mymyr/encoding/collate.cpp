@@ -196,7 +196,7 @@ std::shared_ptr<const rl::ArrayBundle> collate(std::span<const std::shared_ptr<c
     const auto& first = *batches.front();
     for (const auto& b : batches)
     {
-        for (const char* field : {"version", "schema_fingerprint", "num_relations", "layout", "index_dtype", "statics"})
+        for (const char* field : {"version", "layout", "index_dtype", "statics", "schema_fingerprint", "num_relations"})
             if (b->scalar(field) != first.scalar(field))
                 invalid(std::string("collate received mixed ") + field);
         if (b->arrays().size() != first.arrays().size()) invalid("collate received different stored arrays");

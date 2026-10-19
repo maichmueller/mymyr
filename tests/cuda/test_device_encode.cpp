@@ -1436,3 +1436,31 @@ TEST(DeviceCollate, RolloutSlicesEqualOneEncodeWithEmptySlicesAndCapture)
             }
 }
 }
+
+TEST(DeviceCollate, ChecksWideTotalsBeforeAnyIndexWrite)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const std::array<i32, 2> offsets{0, 0x7fffffff};
+    const std::array<i32, 1> zero{0};
+    cuda::DeviceBuffer source(ctx, sizeof(offsets), stream), empty_offsets(ctx, sizeof(zero), stream);
+    cuda::check(cudaMemcpyAsync(source.data(), offsets.data(), sizeof(offsets), cudaMemcpyHostToDevice, stream), "upload offsets");
+    cuda::check(cudaMemcpyAsync(empty_offsets.data(), zero.data(), sizeof(zero), cudaMemcpyHostToDevice, stream), "upload offsets");
+    cuda::DeviceCollationBatch batch;
+    batch.graphs = 1;
+    batch.arrays.entity_offsets = source.data();
+    batch.arrays.relation_offsets = empty_offsets.data();
+    batch.arrays.relation_arg_offsets = empty_offsets.data();
+    cuda::DeviceCollator collator(ctx, {batch, batch}, stream);
+    const cuda::BatchShape shape{2, 0, 0, 0};
+    const auto layout = cuda::output_layout(shape, encoding::IndexType::I32, 0);
+    cuda::DeviceBuffer scratch(ctx, collator.scratch_bytes(), stream), block(ctx, layout.bytes, stream);
+    cuda::check(cudaMemsetAsync(block.data(), 0x7b, block.size(), stream), "initialize canary");
+    const auto out = cuda::output_of(layout, shape, block.data());
+    collator.encode(scratch.data(), scratch.size(), out);
+    const auto result = download_encoding(ctx, stream, layout, block);
+    EXPECT_EQ(result.sizes.entities, 2 * u64{0x7fffffff});
+    EXPECT_NE(result.sizes.overflow & encoding::k_overflow_index, 0u);
+    EXPECT_EQ(result.block[layout.task_ids], std::byte{0x7b});
+}

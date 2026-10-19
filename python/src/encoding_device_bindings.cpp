@@ -453,6 +453,7 @@ public:
                        const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u32)>& allocate)
     {
         nb::gil_scoped_release release;
+        std::lock_guard lock(m_mutex);
         cuda::DeviceGuard guard(m_device);
         if (capturing(m_device, m_stream)) refuse("exact collation cannot be captured: pass capacities");
         if (!m_sizes)
@@ -477,6 +478,7 @@ private:
     std::unique_ptr<cuda::DeviceCollator> m_collator;
     std::unique_ptr<cuda::DeviceBuffer> m_sizes;
     cuda::PinnedLease m_staging;
+    std::mutex m_mutex;
 };
 }  // namespace
 

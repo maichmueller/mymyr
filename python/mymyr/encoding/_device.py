@@ -775,50 +775,74 @@ class DeviceFlatStream:
         return result
 
 
-def collate_device(batches: list[DeviceFlatBatch], capacities: Any = None) -> DeviceFlatBatch:
-    """Concatenate device batches with one count/scan/fill, rebuilding layout offsets on the device."""
-    torch = _torch()
-    first = batches[0]
-    for batch in batches:
-        if batch.device != first.device:
-            raise _error("collate received mixed CUDA devices")
-        if batch._fingerprint != first._fingerprint:
-            raise _error("collate received mixed schemas")
-        for option in ("layout", "index_dtype", "statics"):
-            if batch._options[option] != first._options[option]:
-                raise _error(f"collate received mixed {option}")
-    if torch.cuda.is_current_stream_capturing():
-        raise _error("prepare a DeviceCollator outside capture for captured collation")
-    from mymyr._core._encoding import DeviceCollator
-    from mymyr.rl.torch._ops import _stream
+class DeviceCollator:
+    """A prepared list of CUDA batches for repeated or captured rollout collation.
 
-    encoder = first._encoder
-    arrays = [batch.as_dict("torch") for batch in batches]
-    inputs = [_pointers({**a, "sizes": batch._sizes}) for a, batch in zip(arrays, batches, strict=True)]
-    counts = [batch.num_graphs for batch in batches]
-    native = DeviceCollator(encoder, first.device.index, _stream(first.device), inputs, counts)
-    scratch = torch.empty(native.scratch_bytes, dtype=torch.uint8, device=first.device)
-    layout = layout_of(encoder)
-    graphs = sum(counts)
-    out: dict[str, Any] = {}
-    caps = None if capacities is None else _capacities(capacities, layout)
-    if caps is None:
-        def allocate(entities: int, tuples: int, args: int, targets: int, flags: int) -> list[int]:
-            if flags & _OVERFLOW_INDEX:
-                raise OverflowError("mymyr: encoding: collated totals exceed the index type")
-            if flags:
-                raise _error("cannot collate an overflowed batch")
-            for name, (shape, dtype) in layout.specs(torch, graphs, entities, args, targets).items():
-                if name != "sizes":
-                    out[name] = torch.empty(shape, dtype=dtype, device=first.device)
-            return _pointers(out)
-        native.encode_exact(scratch.data_ptr(), scratch.numel(), allocate)
-        out["sizes"] = None
-    else:
-        if caps[0] < graphs:
-            raise _error("collated graphs exceed the output capacity")
-        out = _outputs(torch, layout.specs(torch, graphs, *caps[1:]), first.device)
-        native.encode(_pointers(out), [graphs, *caps[1:]], scratch.data_ptr(), scratch.numel())
-    result = DeviceFlatBatch(encoder, out, exact=caps is None)
-    result._keepalive = (native, scratch, batches, arrays)
-    return result
+    Construct outside capture on the stream that will encode the batches. The batch tensors keep their addresses;
+    values may be updated in stream order before each encode. Capacity calls allocate output and scratch through
+    torch, including its CUDA graph pool. Keep this object and the returned batch alive through the final replay.
+    """
+
+    def __init__(self, batches: Any):
+        batches = list(batches)
+        if not batches or not all(isinstance(batch, DeviceFlatBatch) for batch in batches):
+            raise _error("a DeviceCollator needs at least one device batch")
+        torch = _torch()
+        first = batches[0]
+        for batch in batches:
+            if batch.device != first.device:
+                raise _error("collate received mixed CUDA devices")
+            for option in ("layout", "index_dtype", "statics"):
+                if batch._options.get(option, "repeat") != first._options.get(option, "repeat"):
+                    raise _error(f"collate received mixed {option}")
+            if batch._fingerprint != first._fingerprint:
+                raise _error("collate received mixed schemas")
+        if torch.cuda.is_current_stream_capturing():
+            raise _error("prepare a DeviceCollator outside capture for captured collation")
+        from mymyr._core._encoding import DeviceCollator as NativeCollator
+        from mymyr.rl.torch._ops import _stream
+
+        encoder = first._encoder
+        arrays = [batch.as_dict("torch") for batch in batches]
+        inputs = [_pointers({**a, "sizes": batch._sizes}) for a, batch in zip(arrays, batches, strict=True)]
+        counts = [batch.num_graphs for batch in batches]
+        native = NativeCollator(encoder, first.device.index, _stream(first.device), inputs, counts)
+        self._prepared = (torch, first, encoder, native, arrays, batches, counts)
+        self._stream = _stream(first.device)
+
+    def encode(self, *, capacities: Any = None) -> DeviceFlatBatch:
+        """Concatenate the prepared graphs; a capacity call never waits and is capturable."""
+        from mymyr.rl.torch._ops import _stream
+        torch, first, encoder, native, arrays, batches, counts = self._prepared
+        if _stream(first.device) != self._stream:
+            raise _error("use the collator on the torch stream that constructed it")
+        scratch = torch.empty(native.scratch_bytes, dtype=torch.uint8, device=first.device)
+        layout = layout_of(encoder)
+        graphs = sum(counts)
+        out: dict[str, Any] = {}
+        caps = None if capacities is None else _capacities(capacities, layout)
+        if caps is None:
+            def allocate(entities: int, tuples: int, args: int, targets: int, flags: int) -> list[int]:
+                if flags & _OVERFLOW_INDEX:
+                    raise OverflowError("mymyr: encoding: collated totals exceed the index type")
+                if flags:
+                    raise _error("cannot collate an overflowed batch")
+                for name, (shape, dtype) in layout.specs(torch, graphs, entities, args, targets).items():
+                    if name != "sizes":
+                        out[name] = torch.empty(shape, dtype=dtype, device=first.device)
+                return _pointers(out)
+            native.encode_exact(scratch.data_ptr(), scratch.numel(), allocate)
+            out["sizes"] = None
+        else:
+            if caps[0] < graphs:
+                raise _error("collated graphs exceed the output capacity")
+            out = _outputs(torch, layout.specs(torch, graphs, *caps[1:]), first.device)
+            native.encode(_pointers(out), [graphs, *caps[1:]], scratch.data_ptr(), scratch.numel())
+        result = DeviceFlatBatch(encoder, out, exact=caps is None)
+        result._keepalive = (native, scratch, batches, arrays)
+        return result
+
+
+def collate_device(batches: list[DeviceFlatBatch], capacities: Any = None) -> DeviceFlatBatch:
+    """Concatenate device batches with one count/scan/fill, rebuilding offsets on the device."""
+    return DeviceCollator(batches).encode(capacities=capacities)

@@ -359,8 +359,9 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   (`[N, D]`, for instance `rl.expand(table, rows, derived=True).succ` and `.derived` moved to the device), `goals` the
   goal masks `(goal_pos, goal_neg)` or `(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)` with `N` rows or a
   single shared row. All of them are on one device or all on the host; a call mixing the two raises `ValueError`.
-  The derived words must be given when a graph reads derived atoms (a schema with derived relations or derived goal
-  literals): the device does not evaluate derived atoms.
+  Supplied derived words take precedence. When they are absent and a graph reads derived atoms, the device axiom
+  evaluator runs on the encoder stream into its scratch. Tasks with no required derived atoms keep the ordinary
+  encoder launches and scratch size. A body beyond the device matcher limits requires supplied words.
 - **Refused.** `actions=` (the action relations are not encoded on the device), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
   prefix; `threads` has no effect. A row that is invalid (a task id outside the table, a row or goal mask narrower
@@ -527,3 +528,47 @@ captured thread and warp fill launches.
 `scratch_bytes(acquisition, shape)` sizes scratch for that acquired generation. Its bounds, launch classes and derived
 word requirements remain attached to the acquisition across refreshes. A split count/fill uses the same acquisition,
 scratch address and shape in both calls; a refresh between them preserves that layout.
+
+### Device row streams and collation
+
+`encoder.device_stream(capacity, device=None, goals=False, derived=False, derived_goals=False)` creates a
+`DeviceFlatStream` bound to the current torch stream. Its ring stores table-width state words and int32 task ids,
+with optional derived words and positive/negative fluent and derived goal masks. Choose the optional columns at
+construction; every append supplies the same columns. Without a derived column, the encoder evaluates axioms when
+its schema needs them. The mutable stream stays host-only.
+
+```python
+ring = encoder.device_stream(1024, device=0)
+ring.append(cuda_rows, cuda_task_ids)
+batch = ring.flush(capacities=dict(graphs=1024, entities=32768, args=262144))
+```
+
+Append copies all rows or sets `ring.device_overflow` without changing the ring. The flag stays set until
+`ring.clear()`. The device status is int64 `[head, live_rows, overflow]`; `len(ring)` reads the live count and waits.
+Flush encodes the live rows once, advances the circular head and resets the tail, all on the ring's stream.
+`batch.device_graphs` gives its live graph count without a host read; `batch.num_graphs` reads that count and waits.
+Tensor properties have capacity shapes and zero tails. `as_dict()` exports the compact live batch and waits for its
+counts. Append and capacity flush can be captured. Construct the ring before capture and keep it, its inputs and
+returned batches alive through the final replay.
+
+`encoding.collate(batches)` concatenates host or CUDA batches in list order. Empty slices retain their schema; the
+list must contain at least one batch. The result equals one encode of all rows in the same order. Entity references
+stay local to their graph; entity ids and offsets receive the appropriate prefixes. Relation-major cells are
+interleaved by relation across the slices. Mixed schemas, layouts, index types, static representations or devices
+raise `ValueError`. Overflowed inputs are refused. Host collation allocates exact arrays; device collation accepts
+`capacities=` and reports overflow through `device_sizes`. All accumulated totals use uint64 before index checks.
+
+For repeated or captured device collation, prepare `encoding.DeviceCollator(batches)` outside capture and call
+`collator.encode(capacities=...)` on the same stream. It uploads the slice descriptors once; each encode runs count,
+scan and fill without a host loop over graphs. Keep the collator, source tensors and returned batches alive through
+all replays. A call without capacities waits once for exact output sizes.
+
+The C++ forms are `cuda::DeviceRowStream(context, encoder, capacity, stream, goals, derived, derived_goals)` with
+`append`, `flush(DeviceOutput)`, `clear`, and `status()`; and `cuda::DeviceCollator(context, batch_views, stream)` with
+caller scratch sized by `scratch_bytes()`. `DeviceOutput::graphs` optionally receives a live graph count. Host
+`encoding::collate` is declared in `mymyr/encoding/collate.hpp` and takes a span of shared array bundles.
+
+`DeviceEncoder::scratch_bytes(encoder, shape)` also sizes caller scratch before constructing a device encoder.
+Derived evaluation storage is included in every scratch size query, with table-width derived rows and the largest
+instance view. Split count/fill reuses the derived rows produced by count. Acquired generations retain their axiom
+tables and scratch requirements across refreshes.

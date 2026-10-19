@@ -94,3 +94,20 @@ TEST(EncodingCollate, RefusesMixedLayoutsIndexTypesAndSchemas)
     }
 }
 }
+
+TEST(EncodingCollate, ChecksCombinedWideTotalsBeforeAllocatingIndexArrays)
+{
+    rl::ArrayBundle::Builder builder;
+    builder.scalar("version", 1); builder.scalar("num_graphs", 1); builder.scalar("num_relations", 0);
+    builder.scalar("layout", 0); builder.scalar("index_dtype", 0); builder.scalar("statics", 0);
+    builder.scalar("schema_fingerprint", 0);
+    builder.add("task_ids", rl::DType::I32, {1}, std::vector<i32>{0});
+    builder.add("num_objects", rl::DType::I32, {1}, std::vector<i32>{0x7fffffff});
+    builder.add("entity_offsets", rl::DType::I32, {2}, std::vector<i32>{0, 0x7fffffff});
+    builder.add("relation_offsets", rl::DType::I32, {1}, std::vector<i32>{0});
+    builder.add("relation_arg_offsets", rl::DType::I32, {1}, std::vector<i32>{0});
+    builder.add_uninitialized("relation_args", rl::DType::I32, {0});
+    const auto batch = std::make_shared<const rl::ArrayBundle>(builder.build());
+    const std::vector<std::shared_ptr<const rl::ArrayBundle>> batches{batch, batch};
+    EXPECT_THROW((void)encoding::collate(batches), std::overflow_error);
+}

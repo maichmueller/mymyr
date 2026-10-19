@@ -27,6 +27,7 @@ struct DeviceCollator::Impl
     ContextPtr context;
     cudaStream_t stream;
     detail::CollationParams params;
+    OutputArrays stored;
     DeviceBuffer slices;
     PinnedLease staging;
     Event uploaded;
@@ -42,6 +43,7 @@ struct DeviceCollator::Impl
         if (capture != cudaStreamCaptureStatusNone) invalid("prepare the device collator outside capture");
         if (batches.empty()) invalid("collate needs at least one batch");
         const auto& first = batches.front();
+        stored = first.stored;
         params.relations = first.relations;
         params.index64 = first.index == encoding::IndexType::I64;
         params.relation_major = first.layout == encoding::Layout::Relation;
@@ -51,10 +53,10 @@ struct DeviceCollator::Impl
         for (u64 i = 0; i < batches.size(); ++i)
         {
             const auto& b = batches[i];
-            if (b.schema_fingerprint != first.schema_fingerprint) invalid("collate received mixed schemas");
             if (b.layout != first.layout) invalid("collate received mixed layouts");
             if (b.index != first.index) invalid("collate received mixed index types");
             if (b.shared_statics != first.shared_statics) invalid("collate received mixed statics");
+            if (b.schema_fingerprint != first.schema_fingerprint) invalid("collate received mixed schemas");
             if (b.shared_statics) invalid("device collate requires repeated statics");
             if (b.relations != first.relations || b.stored != first.stored) invalid("collate received different stored arrays");
             host[i] = {b, params.graphs};
@@ -92,6 +94,18 @@ struct DeviceCollator::Impl
             if (!a.entity_offsets || !a.relation_offsets || !a.relation_arg_offsets ||
                 (params.graphs && (!a.task_ids || !a.num_objects)))
                 invalid("device collation needs the batch output arrays");
+            if (stored.entity_arrays ? (output.capacities.entities && (!a.entity_role || !a.entity_ref))
+                                     : (a.entity_role || a.entity_ref))
+                invalid("collation entity arrays do not match the schema");
+            if (stored.counts ? (params.graphs && params.relations && !a.relation_counts) : bool(a.relation_counts))
+                invalid("collation counts do not match the schema");
+            if (stored.goal_complete ? (params.graphs && !a.goal_complete) : bool(a.goal_complete))
+                invalid("collation goal flags do not match the schema");
+            if (bool(a.target_offsets) != stored.targets ||
+                (stored.targets ? (output.capacities.targets && (!a.target_entity || !a.target_group))
+                                : (a.target_entity || a.target_group)))
+                invalid("collation target arrays do not match the schema");
+            if (output.capacities.args && !a.relation_args) invalid("collation arguments are null");
         }
         auto p = params;
         p.totals = static_cast<detail::CollationTotals*>(scratch);

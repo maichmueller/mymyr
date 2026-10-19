@@ -53,6 +53,9 @@ struct EncodingGraphDescription
 struct EncodingBatch
 {
 };
+struct EncodingDeviceStream
+{
+};
 struct EncodingEntityArrays
 {
 };
@@ -96,6 +99,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingBatch>
 {
     static constexpr auto Name = const_name("FlatBatch | mymyr._typing.DeviceFlatBatch");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingDeviceStream>
+{
+    static constexpr auto Name = const_name("mymyr._typing.DeviceFlatStream");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
@@ -1082,9 +1090,9 @@ void bind_encoding(nb::module_& parent)
             "device_stream",
             [](nb::handle self, u64 capacity, Arg<ann::Any> device, bool goals, bool derived, bool derived_goals)
             {
-                return nb::module_::import_("mymyr.encoding._device").attr("DeviceFlatStream")(
+                return Arg<ann::EncodingDeviceStream>(nb::module_::import_("mymyr.encoding._device").attr("DeviceFlatStream")(
                     self, capacity, "device"_a = device, "goals"_a = goals, "derived"_a = derived,
-                    "derived_goals"_a = derived_goals);
+                    "derived_goals"_a = derived_goals));
             },
             "capacity"_a, nb::kw_only(), "device"_a = nb::none(), "goals"_a = false, "derived"_a = false,
             "derived_goals"_a = false,
