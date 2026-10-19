@@ -404,6 +404,73 @@ A capture without it raises a `ValueError` that says so, and so does an encoding
 its input tensors where they were captured: write new rows in place and replay. Keep the encoder registered while the
 graph can replay, and do not release its workspace.
 
+## Encoding inside JAX
+
+`mymyr.encoding.jax.encode(encoder, states, task_ids=None, *, derived=None, goals=None, capacities=None, threads=1)` is
+`encoder.encode` as the XLA FFI target `mymyr_encode_flat`, so a jitted function, a `lax.scan` body or a `jax.vmap`
+can encode states. On the CPU the target runs the host encoder, on CUDA the device kernels on XLA's stream; both return
+the arrays of the host encoder's capacity form bit for bit, so a function gives the same batch wherever it runs. It
+needs a mymyr built with jaxlib's XLA FFI headers (as `mymyr.rl.jax`).
+
+```python needs-jax
+import jax
+import jax.numpy as jnp
+import numpy as np
+import mymyr
+from mymyr import encoding
+import mymyr.encoding.jax as ej
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+encoder = encoding.FlatRelationEncoder(task)
+words = np.asarray(task.encode([task.initial_state] + task.successor_states(task.initial_state)))
+rows = jnp.asarray(words.view(np.uint32))                 # uint32 halves of the u64 words: [N, 2 W]
+
+host = encoder.encode(words)
+capacities = dict(graphs=len(words), entities=int(host.entity_offsets[-1]), args=2 * int(host.relation_arg_offsets[-1]))
+batch = jax.jit(lambda r: ej.encode(encoder, r, capacities=capacities))(rows)
+assert isinstance(batch, ej.JaxFlatBatch) and batch.relation_args.shape == (capacities["args"],)
+assert int(batch.overflow) == 0                           # usable inside jit; batch.sizes reads it on the host
+assert np.array_equal(np.asarray(batch.relation_args)[: batch.sizes["args"]], host.relation_args)
+```
+
+- **Rows.** JAX has no 64-bit types by default, so rows are the u64 words of each state as `uint32` halves, low half
+  first (`[N, 2 W]`, or one row `[2 W]`), as `mymyr.rl.jax` takes them; `uint64` or `int64` words (`[N, W]`, with
+  `jax_enable_x64` or as NumPy arrays) and `int32` halves are accepted too. `task_ids` is `int32` `[N]` (required for a
+  table of several instances), `derived` the rows' derived words, and `goals` the masks `(goal_pos, goal_neg)` or all
+  four, with `N` rows or one row for all, as in `encoder.encode`.
+- **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=, args=,
+  targets=)` (`targets` only with target sources; `graphs` at least `N`): the per-graph arrays have `N` entries, the
+  variable-size arrays the capacities' sizes, zero past the batch. `batch.device_sizes` is `uint32` `[5, 2]`, the five
+  64-bit words entities, tuples, args, targets and the overflow flags (1: a capacity, 2: the index type, 4: an invalid
+  row) as halves; `batch.overflow` is the flags as a `uint32` scalar for use inside the function, and `batch.sizes`
+  reads them on the host. A batch that does not fit, or has an invalid row, is all zero with its flag set. An eager call
+  without capacities waits once for the batch's sizes and returns exact arrays (`ValueError` for an invalid row,
+  `OverflowError` when `int32` indices do not suffice); a traced call without them raises `ValueError`.
+- **`JaxFlatBatch`** is a pytree with the arrays of `FlatBatch` under the same names, dtypes and shapes (an array the
+  schema does not store raises `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities` and
+  `as_dict(framework=None)` (`'jax'`, `'dlpack'` or `'numpy'`). It is returned from jitted functions and stacked by
+  `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
+  the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
+- **What it encodes.** What the device encodes, on both platforms: a schema the device refuses (action, subgoal or
+  history targets, subgoal levels, horizons) and rows without their derived words where a graph reads derived atoms
+  raise `ValueError` (`mymyr: encoding: ...`) when the function is traced. Action relations need an expansion, which
+  JAX cannot pass, so their tuples are never encoded here. In a mymyr built without the CUDA backend, only the
+  CPU target exists and the CPU encoder evaluates missing derived words.
+- **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
+  `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place
+  of the encoder, so a function can hold the integer only); the registry keeps the encoder, its table and its device
+  contexts until `ej.unregister(encoder or handle)`. Every compiled function that calls the encoder holds it as well,
+  so it keeps working after the encoder is unregistered and every Python reference to it is gone; the encoder is freed
+  when the last of these executables is (`jax.clear_caches()` and dropping the jitted functions). A function traced
+  after `unregister` registers the encoder again, or fails if it holds only the handle.
+- **On CUDA** the first call of a compiled function on a device uploads the encoder's context there (before XLA runs
+  or traces the call); every call then enqueues memsets of its outputs and the encoding kernels on XLA's stream, with
+  the device scratch as one more result of the call that XLA allocates, and nothing else: no allocation,
+  synchronization or event. The target is registered command-buffer compatible, as the environment targets of
+  `mymyr.rl.jax`, so XLA may trace it into its CUDA graphs (`--xla_gpu_enable_command_buffer` with `CUSTOM_CALL`).
+- **On the CPU** `threads` sets the host encoder's worker threads (0: one per hardware thread); the arrays do not
+  depend on it. A call holds the encoder's host scratch, so the CPU calls of one encoder run one at a time.
+
 ## Names
 
 A batch stores no names. `encoder.entity_names(batch, graph)` returns the names of the entities of graph `graph` in

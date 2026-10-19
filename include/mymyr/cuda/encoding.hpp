@@ -242,6 +242,13 @@ public:
     [[nodiscard]] u64 scratch_bytes(const BatchShape& shape) const;
     /// The exact byte count for a held generation, including one held across refresh().
     [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape) const;
+    /// scratch_bytes(shape) of a device encoder of `encoder` on the current CUDA device (the scan's temporary storage
+    /// depends on the device), without uploading a context.
+    [[nodiscard]] static u64 scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape);
+    /// Whether encode() needs the derived words of the rows for `encoder` (see DeviceEncodeInput::derived): for rows
+    /// without goal masks, with goal masks over the fluent slots, or with derived goal masks too. Computed on the host.
+    [[nodiscard]] static bool needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks,
+                                            bool derived_goal_masks);
 
     /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
     /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.

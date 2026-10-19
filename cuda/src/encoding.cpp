@@ -441,6 +441,16 @@ u64 DeviceEncoder::scratch_bytes(const EncodingAcquisition& context, const Batch
     DeviceGuard guard(m_ctx->device());
     return detail::scratch_layout(shape, context.m_facts->bounds, options().layout, schema().num_relations()).bytes;
 }
+u64 DeviceEncoder::scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape)
+{
+    const auto facts = context_facts(encoder.context());
+    return detail::scratch_layout(shape, facts.bounds, encoder.schema().options().layout, encoder.schema().num_relations())
+        .bytes;
+}
+bool DeviceEncoder::needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks, bool derived_goal_masks)
+{
+    return context_facts(encoder.context()).reads_derived[goal_masks ? (derived_goal_masks ? 2 : 1) : 0];
+}
 u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
 {
     std::shared_lock lock(m_state_mutex);
