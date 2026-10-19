@@ -1133,7 +1133,7 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         }
         catch (const std::invalid_argument& e)
         {
-            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
+            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizon relations"),
                       std::string::npos)
                 << c.what << ": " << e.what();
         }
