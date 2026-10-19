@@ -997,7 +997,6 @@ void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb
     const i32* ids = import_task_ids(field("task_ids"), horizon.graphs, table.size(), rows.ids_copy, rows.ids_keep);
     if (horizon.graphs && table.size() > 1 && !ids)
         throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
-    table.check_task_ids(ids, horizon.graphs);
     rows.input.task_ids = ids;
     // States given as objects belong to the task of their graph (the encoder reports offsets that are not valid)
     if (!states.owner_tasks.empty())

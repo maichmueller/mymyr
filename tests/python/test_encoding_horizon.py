@@ -260,7 +260,7 @@ def test_a_flat_encoder_does_not_take_a_view(blocks):
         (lambda v: {"edge_dst": np.full_like(np.asarray(v.edge_dst), 999)}, "edge 0 of graph 0 of the horizon has an endpoint"),
         (lambda v: {"edge_schema": np.full_like(np.asarray(v.edge_schema), 999)}, "edge 0 of graph 0 .* a schema outside"),
         (lambda v: {"edge_offsets": np.array([0, 1, 2], np.int32)}, "edge_offsets must have"),
-        (lambda v: {"task_ids": np.array([5], np.int32)}, "task id 5"),
+        (lambda v: {"task_ids": np.array([5], np.int32)}, "task id 5 of graph 0 of the horizon"),
         (lambda v: {"edge_src": np.asarray(v.edge_src)[:-1]}, "edge_src has"),
     ],
 )
