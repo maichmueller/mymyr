@@ -266,7 +266,7 @@ struct Destination
     Guarded<I> num_objects, entity_offsets, relation_counts, relation_offsets, relation_arg_offsets, relation_args,
         entity_ref;
     Guarded<u8> entity_role;
-    Destination(u64 G, u64 R, const FlatCapacities& cap)
+    Destination(u64 G, u64 R, const BatchShape& cap)
         : task_ids(G), num_objects(G), entity_offsets(G + 1), relation_counts(G * R), relation_offsets(G * R + 1),
           relation_arg_offsets(G * R + 1), relation_args(cap.args), entity_ref(cap.entities), entity_role(cap.entities)
     {
@@ -302,22 +302,23 @@ void run_capacity_cases(const FlatOptions& options)
     const auto expected = encoder->encode(input_of(rows));
     const u64 G = rows.size();
     const u64 R = encoder->schema().num_relations();
-    FlatCapacities exact;
+    BatchShape exact;
+    exact.graphs = G;
     exact.entities = static_cast<u64>(ints(*expected, "entity_offsets").back());
-    exact.tuples = static_cast<u64>(ints(*expected, "relation_offsets").back());
+    const u64 tuples = static_cast<u64>(ints(*expected, "relation_offsets").back());
     exact.args = static_cast<u64>(ints(*expected, "relation_arg_offsets").back());
     ASSERT_GT(exact.entities, 0u);
     ASSERT_GT(exact.args, 0u);
 
     ThreadPool pool(3);
     EncodeScratch scratch;
-    auto run = [&](const FlatCapacities& cap, bool expect_fit)
+    auto run = [&](const BatchShape& cap, bool expect_fit)
     {
         Destination<I> destination(G, R, cap);
         const FlatSizes sizes = encoder->encode_into(input_of(rows), cap, destination.buffers(), pool, scratch);
         // the sizes are true, whatever the capacities
         EXPECT_EQ(sizes.entities, exact.entities);
-        EXPECT_EQ(sizes.tuples, exact.tuples);
+        EXPECT_EQ(sizes.tuples, tuples);
         EXPECT_EQ(sizes.args, exact.args);
         EXPECT_TRUE(destination.guards_intact());
         if (expect_fit)
@@ -349,12 +350,11 @@ void run_capacity_cases(const FlatOptions& options)
         }
     };
     run(exact, true);
-    run({exact.entities + 100, exact.tuples + 100, exact.args + 100}, true);
-    run({exact.entities - 1, exact.tuples, exact.args}, false);
-    run({exact.entities, exact.tuples - 1, exact.args}, false);
-    run({exact.entities, exact.tuples, exact.args - 1}, false);
-    run({0, 0, 0}, false);
-    run({exact.entities, exact.tuples, 0}, false);
+    run({G, exact.entities + 100, exact.args + 100}, true);
+    run({G, exact.entities - 1, exact.args}, false);
+    run({G, exact.entities, exact.args - 1}, false);
+    run({G, 0, 0}, false);
+    run({G, exact.entities, 0}, false);
 
     // count() and fill() separately; fill refuses another input
     const FlatSizes sizes = encoder->count(input_of(rows), pool, scratch);
@@ -448,8 +448,7 @@ TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
     {
         const auto encoder = FlatEncoder::create(table, options_with(layout));
         const auto expected = encoder->encode(input_of(rows));
-        const FlatCapacities exact{static_cast<u64>(ints(*expected, "entity_offsets").back()),
-                                   static_cast<u64>(ints(*expected, "relation_offsets").back()),
+        const BatchShape exact{rows.size(), static_cast<u64>(ints(*expected, "entity_offsets").back()),
                                    static_cast<u64>(ints(*expected, "relation_arg_offsets").back())};
         ThreadPool pool(2);
         EncodeScratch scratch;
@@ -457,7 +456,7 @@ TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
         const auto same = encoder->encode_capacity(input_of(rows), exact, pool, scratch, sizes);
         EXPECT_EQ(sizes.overflow, 0u);
         expect_same_bytes(*expected, *same);
-        const FlatCapacities roomy{exact.entities + 7, exact.tuples, exact.args + 5};
+        const BatchShape roomy{rows.size(), exact.entities + 7, exact.args + 5};
         const auto padded = encoder->encode_capacity(input_of(rows), roomy, pool, scratch, sizes);
         EXPECT_EQ(sizes.overflow, 0u);
         validate(*padded, encoder->schema());
@@ -472,7 +471,7 @@ TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
                                 [](i64 v) { return v == 0; }));
         // too small: true sizes, every array zero
         const auto short_bundle = encoder->encode_capacity(
-            input_of(rows), {exact.entities, exact.tuples, exact.args - 1}, pool, scratch, sizes);
+            input_of(rows), {rows.size(), exact.entities, exact.args - 1}, pool, scratch, sizes);
         EXPECT_EQ(sizes.overflow, k_overflow_capacity);
         EXPECT_EQ(sizes.args, exact.args);
         for (const rl::ArrayInfo& info : short_bundle->arrays())
@@ -623,8 +622,7 @@ TEST(EncoderOmitted, AnEncodeIntoNeedsNullArraysExactlyWhereTheSchemaOmitsThem)
     const test::Rows rows = mixed_rows(*table, 20, 8);
     const u64 G = rows.size(), R = encoder->schema().num_relations();
     const auto expected = encoder->encode(input_of(rows));
-    const FlatCapacities exact{static_cast<u64>(ints(*expected, "entity_offsets").back()),
-                               static_cast<u64>(ints(*expected, "relation_offsets").back()),
+    const BatchShape exact{rows.size(), static_cast<u64>(ints(*expected, "entity_offsets").back()),
                                static_cast<u64>(ints(*expected, "relation_arg_offsets").back())};
     Destination<i32> destination(G, R, exact);
     FlatBuffers buffers = destination.buffers();

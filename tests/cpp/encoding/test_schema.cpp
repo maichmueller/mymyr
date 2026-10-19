@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <utility>
+
 #include <algorithm>
 #include <random>
 
@@ -191,7 +193,14 @@ TEST(EncodingSchema, HorizonCatalogs)
 TEST(EncodingSchema, ActionSchemasOfOneNameAndArityShareARelation)
 {
     DomainSignature d = blocks();
-    d.schemas = {{"stop", 1}, {"go", 2}, {"stop", 1}, {"stop", 1}};
+    d.schemas.clear();
+    for (const auto& [name, arity] : {std::pair{"stop", 1u}, std::pair{"go", 2u},
+                                     std::pair{"stop", 1u}, std::pair{"stop", 1u}})
+    {
+        auto& action = d.schemas.emplace_back();
+        action.name = name;
+        action.arity = arity;
+    }
     const auto schema = EncodingSchema::create(d);
     EXPECT_EQ(schema->relation(*schema->find("stop")).schema, 0);
     const auto map = schema->schema_relations();

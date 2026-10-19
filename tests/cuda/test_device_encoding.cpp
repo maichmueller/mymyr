@@ -3,6 +3,8 @@
 #include "../cpp/encoding/support.hpp"
 #include "context_probe.hpp"
 #include "mymyr/cuda/encoding.hpp"
+#include "../../cuda/src/encoding_scratch.hpp"
+#include "../../cuda/src/encoding_kernels.hpp"
 
 #include <gtest/gtest.h>
 
@@ -517,10 +519,7 @@ TEST(DeviceEncoder, AHeldAcquisitionIsEnoughToLaunchInsideACapture)
     cuda::DeviceBuffer out(ctx, test::k_probe_width * 8, stream);
     const u32 kernels = captured_kernels(stream, [&]
     {
-        const cuda::ScratchView scratch = work.scratch_view();
-        EXPECT_NE(scratch.flags, nullptr);
-        EXPECT_NE(scratch.totals, nullptr);
-        cuda::check(cudaMemsetAsync(scratch.flags, 0, 64, work.stream()), "memset flags");
+        EXPECT_GT(work.scratch_bytes(), 0u);
         test::launch_context_probe(work.view(), 1, static_cast<u64*>(out.data()), work.stream());
     });
     EXPECT_EQ(kernels, 1u);  // the probe; the memset is not a kernel node
@@ -615,7 +614,7 @@ TEST(DeviceEncoder, ScratchHoldsOneScanOfTheTotals)
         for (const u64 cells : {u64{0}, u64{6}, u64{170}})
         {
             const cuda::GraphBounds bounds{9, 97, 161, cells};
-            const auto narrow = cuda::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Graph, 7);
+            const auto narrow = cuda::detail::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Graph, 7);
             EXPECT_FALSE(narrow.wide);
             EXPECT_EQ(narrow.flags, 0u);
             EXPECT_EQ(narrow.totals, 64u);
@@ -630,16 +629,16 @@ TEST(DeviceEncoder, ScratchHoldsOneScanOfTheTotals)
             EXPECT_LE(narrow.scan_temp, 64 + 63 + 16 * (graphs + 1) + 4 * graphs * cells + 63);
             // the width follows the bounds: larger output capacities never switch to u64
             const auto roomy =
-                cuda::scratch_layout({graphs, u64{1} << 40, u64{1} << 40, u64{1} << 40}, bounds, encoding::Layout::Graph, 7);
+                cuda::detail::scratch_layout({graphs, u64{1} << 40, u64{1} << 40, u64{1} << 40}, bounds, encoding::Layout::Graph, 7);
             EXPECT_FALSE(roomy.wide);
             EXPECT_EQ(roomy.bytes, narrow.bytes);
             // entities, targets, tuples and arguments together decide it
             const cuda::GraphBounds big{u64{1} << 32, 1, 1, cells};
-            const auto wide = cuda::scratch_layout({graphs, 0, 0}, big, encoding::Layout::Graph, 7);
+            const auto wide = cuda::detail::scratch_layout({graphs, 0, 0}, big, encoding::Layout::Graph, 7);
             EXPECT_TRUE(wide.wide);
             EXPECT_EQ(wide.cell_counts, round_up(64 + 32 * (graphs + 1)));
             // relation-major: the entity and target rows and the cell row; no cell counts
-            const auto rm = cuda::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Relation, 7);
+            const auto rm = cuda::detail::scratch_layout({graphs, 9 * graphs, 161 * graphs}, bounds, encoding::Layout::Relation, 7);
             EXPECT_FALSE(rm.wide);
             EXPECT_TRUE(rm.relation_major);
             EXPECT_EQ(rm.scan_length, 2 * (graphs + 1) + 7 * graphs + 1);
@@ -648,10 +647,10 @@ TEST(DeviceEncoder, ScratchHoldsOneScanOfTheTotals)
             EXPECT_LE(rm.scan_temp, 64 + 63 + 8 * (graphs + 1) + 4 * (7 * graphs + 1) + 63);
         }
     const u64 quarter = std::numeric_limits<u32>::max() / 4;
-    EXPECT_FALSE(cuda::scratch_layout({1, 0, 0}, {quarter, quarter, quarter, 0, quarter}, encoding::Layout::Graph).wide);
-    EXPECT_TRUE(cuda::scratch_layout({1, 0, 0}, {quarter + 1, quarter + 1, quarter + 1, 0, quarter + 1}, encoding::Layout::Graph).wide);
+    EXPECT_FALSE(cuda::detail::scratch_layout({1, 0, 0}, {quarter, quarter, quarter, 0, quarter}, encoding::Layout::Graph).wide);
+    EXPECT_TRUE(cuda::detail::scratch_layout({1, 0, 0}, {quarter + 1, quarter + 1, quarter + 1, 0, quarter + 1}, encoding::Layout::Graph).wide);
     // the argument row is not scanned relation-major
-    EXPECT_FALSE(cuda::scratch_layout({1, 0, 0}, {quarter, quarter, u64{1} << 40, 0, quarter}, encoding::Layout::Relation, 1).wide);
+    EXPECT_FALSE(cuda::detail::scratch_layout({1, 0, 0}, {quarter, quarter, u64{1} << 40, 0, quarter}, encoding::Layout::Relation, 1).wide);
 }
 
 TEST(DeviceEncoder, OverflowIsRejectedBeforeAllocation)
@@ -662,10 +661,10 @@ TEST(DeviceEncoder, OverflowIsRejectedBeforeAllocation)
     EXPECT_THROW((void)cuda::output_layout({1, 0, huge}, encoding::IndexType::I32, 1), std::overflow_error);
     EXPECT_THROW((void)cuda::output_layout({1, 0, 0, huge}, encoding::IndexType::I32, 1, {true, true, true, true}), std::overflow_error);
     EXPECT_THROW((void)cuda::output_layout({2, 0, 0}, encoding::IndexType::I64, huge), std::overflow_error);
-    EXPECT_THROW((void)cuda::scratch_layout({huge, 0, 0}, {}, encoding::Layout::Graph), std::overflow_error);
-    EXPECT_THROW((void)cuda::scratch_layout({huge, 0, 0}, {}, encoding::Layout::Relation, 3), std::overflow_error);
-    EXPECT_THROW((void)cuda::scratch_layout({2, 0, 0}, {0, 0, 0, huge}, encoding::Layout::Graph), std::overflow_error);
-    EXPECT_THROW((void)cuda::scratch_layout({u64{1} << 40, 0, 0}, {}, encoding::Layout::Relation, u64{1} << 40), std::overflow_error);
+    EXPECT_THROW((void)cuda::detail::scratch_layout({huge, 0, 0}, {}, encoding::Layout::Graph), std::overflow_error);
+    EXPECT_THROW((void)cuda::detail::scratch_layout({huge, 0, 0}, {}, encoding::Layout::Relation, 3), std::overflow_error);
+    EXPECT_THROW((void)cuda::detail::scratch_layout({2, 0, 0}, {0, 0, 0, huge}, encoding::Layout::Graph), std::overflow_error);
+    EXPECT_THROW((void)cuda::detail::scratch_layout({u64{1} << 40, 0, 0}, {}, encoding::Layout::Relation, u64{1} << 40), std::overflow_error);
 }
 
 std::shared_ptr<const encoding::FlatEncoder> blocks_encoder(encoding::IndexType index)
@@ -721,7 +720,7 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
     const u64 output = round_up(4 * G) + round_up(4 * G) + round_up(4 * (G + 1)) + round_up(G * b.entities) +
                        round_up(4 * G * b.entities) + round_up(4 * G * R) + 2 * round_up(4 * (G * R + 1)) +
                        round_up(4 * G * b.args) + 64;
-    EXPECT_EQ(device.bytes_needed(worst), device.scratch_layout(worst).bytes + output);
+    EXPECT_EQ(device.bytes_needed(worst), cuda::detail::scratch_layout(worst, device.bounds(), device.options().layout, device.schema().num_relations()).bytes + output);
     EXPECT_EQ(device.bytes_needed(G), device.bytes_needed(worst));
     // a smaller batch needs less, a batch with fewer entities and arguments needs less
     EXPECT_LT(device.bytes_needed(G / 2), device.bytes_needed(G));
@@ -763,8 +762,17 @@ TEST(DeviceEncoder, PinnedBytesNeededOfBlocks)
     EXPECT_EQ(device.bounds().args, 161u);
     EXPECT_EQ(device.bounds().cells, 6u);
     EXPECT_EQ(encoder->schema().num_relations(), 25u);
-    const auto scratch = device.scratch_layout(device.worst_case(1000));
+    const auto scratch = cuda::detail::scratch_layout(device.worst_case(1000), device.bounds(), device.options().layout, device.schema().num_relations());
     EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1041472u);
+}
+
+void touch_scratch(const cuda::DeviceEncoder& device, const cuda::EncodingWorkspace& work, const cuda::ContextPtr& ctx)
+{
+    cuda::DeviceBuffer buffer(ctx, sizeof(encoding::FlatSizes), work.stream());
+    cuda::DeviceOutput out;
+    out.capacities.graphs = work.shape().graphs;
+    out.sizes = static_cast<encoding::FlatSizes*>(buffer.data());
+    device.count(work, {}, out);
 }
 
 TEST(DeviceEncoder, ReserveRetainsScratchAndOutputsBelongToTheCaller)
@@ -778,23 +786,23 @@ TEST(DeviceEncoder, ReserveRetainsScratchAndOutputsBelongToTheCaller)
     EXPECT_THROW((void)device.acquire(), std::invalid_argument);
     device.reserve(u64{4096});
     const auto lease = device.acquire();
-    const auto address = lease.scratch->data();
-    const u64 bytes = device.scratch_layout(device.reserved()).bytes;
+    const auto held_bytes = lease.scratch_bytes();
+    const u64 bytes = cuda::detail::scratch_layout(device.reserved(), device.bounds(), device.options().layout, device.schema().num_relations()).bytes;
     EXPECT_EQ(device.reserved_bytes(), bytes);
     EXPECT_EQ(device.bytes_needed(device.reserved()), bytes + device.reserved_layout().bytes);
     cuda::DeviceBuffer output(ctx, device.reserved_layout().bytes);
-    EXPECT_NE(output.data(), address);
+    EXPECT_NE(output.data(), nullptr);
     device.reserve(u64{1});
     device.reserve(u64{4096});
     device.reserve(cuda::BatchShape{10, 1, 1});
-    EXPECT_EQ(device.acquire().scratch->data(), address);
+    EXPECT_EQ(device.acquire().scratch_bytes(), held_bytes);
     EXPECT_EQ(device.reserved(), device.worst_case(4096));
     device.reserve(cuda::BatchShape{8192, 1, 1});
     EXPECT_EQ(device.reserved().graphs, 8192u);
     EXPECT_EQ(device.reserved().entities, device.worst_case(4096).entities);
-    EXPECT_EQ(device.reserved_bytes(), device.scratch_layout(device.reserved()).bytes);
-    EXPECT_NE(device.acquire().scratch->data(), address);
-    EXPECT_EQ(lease.scratch->data(), address);
+    EXPECT_EQ(device.reserved_bytes(), cuda::detail::scratch_layout(device.reserved(), device.bounds(), device.options().layout, device.schema().num_relations()).bytes);
+    EXPECT_GT(device.acquire().scratch_bytes(), held_bytes);
+    EXPECT_EQ(lease.scratch_bytes(), held_bytes);
     ctx->synchronize();
 }
 
@@ -811,12 +819,12 @@ TEST(DeviceEncoder, StreamsHaveIndependentScratch)
     {
         auto one = device.acquire(first);
         auto two = device.acquire(second);
-        EXPECT_NE(one.scratch->data(), two.scratch->data());
-        EXPECT_EQ(one.context.generation, two.context.generation);
-        EXPECT_EQ(one.shape.graphs, 1000u);
-        EXPECT_EQ(two.shape.graphs, 2000u);
-        cuda::check(cudaMemsetAsync(one.scratch->data(), 1, one.scratch->size(), first), "memset first");
-        cuda::check(cudaMemsetAsync(two.scratch->data(), 2, two.scratch->size(), second), "memset second");
+        EXPECT_NE(one.scratch_bytes(), two.scratch_bytes());
+        EXPECT_EQ(one.view().inst, two.view().inst);
+        EXPECT_EQ(one.shape().graphs, 1000u);
+        EXPECT_EQ(two.shape().graphs, 2000u);
+        touch_scratch(device, one, ctx);
+        touch_scratch(device, two, ctx);
     }
     first.synchronize();
     second.synchronize();
@@ -846,14 +854,14 @@ TEST(DeviceEncoder, RefreshResizesScratchWhenTheCellBoundGrows)
     EXPECT_TRUE(device.refresh(grown));
     EXPECT_GT(device.bounds().cells, cells);
     EXPECT_GT(device.reserved_bytes(stream), before);
-    EXPECT_EQ(device.reserved_bytes(stream), device.scratch_layout(device.reserved(stream)).bytes);
+    EXPECT_EQ(device.reserved_bytes(stream), cuda::detail::scratch_layout(device.reserved(stream), device.bounds(), device.options().layout, device.schema().num_relations()).bytes);
     const auto next = device.acquire(stream);
-    EXPECT_NE(next.scratch, old.scratch);
-    EXPECT_NE(next.context.generation, old.context.generation);
-    EXPECT_EQ(next.context.number, old.context.number + 1);
-    EXPECT_EQ(old.scratch->size(), before);
+    EXPECT_NE(next.scratch_bytes(), old.scratch_bytes());
+    EXPECT_NE(next.view().inst, old.view().inst);
+    EXPECT_EQ(next.generation(), old.generation() + 1);
+    EXPECT_EQ(old.scratch_bytes(), before);
     device.reserve(1000, stream);
-    EXPECT_EQ(device.reserved_bytes(stream), device.scratch_layout(device.reserved(stream)).bytes);
+    EXPECT_EQ(device.reserved_bytes(stream), cuda::detail::scratch_layout(device.reserved(stream), device.bounds(), device.options().layout, device.schema().num_relations()).bytes);
 }
 
 TEST(DeviceEncoder, DerivedRelationsAreAcceptedWhateverTheInstancesSlots)
@@ -887,7 +895,7 @@ TEST(DeviceEncoder, OversizedReservationsLeaveExistingScratchIntact)
     const u64 huge = std::numeric_limits<u64>::max();
     EXPECT_THROW((void)device.worst_case(huge), std::overflow_error);
     EXPECT_THROW(device.reserve(cuda::BatchShape{huge, 0, 0}), std::overflow_error);
-    EXPECT_EQ(device.acquire().scratch, old.scratch);
+    EXPECT_EQ(device.acquire().scratch_bytes(), old.scratch_bytes());
     EXPECT_EQ(device.reserved().graphs, 10u);
 }
 
@@ -903,7 +911,7 @@ TEST(DeviceEncoder, CombinedCapacityOverflowLeavesScratchIntact)
     // Each output shape fits u64 on its own; their componentwise maximum does not.
     (void)cuda::output_layout({1, 0, large}, encoding::IndexType::I32, encoder->schema().num_relations());
     EXPECT_THROW(device.reserve(cuda::BatchShape{1, 0, large}), std::overflow_error);
-    EXPECT_EQ(device.acquire().scratch, old.scratch);
+    EXPECT_EQ(device.acquire().scratch_bytes(), old.scratch_bytes());
     EXPECT_EQ(device.reserved(), (cuda::BatchShape{1, large, 0}));
 }
 
@@ -924,7 +932,7 @@ TEST(DeviceEncoder, ConcurrentStreamsReserveAndAcquireIndependently)
             {
                 device.reserve(n * (i + 1), stream);
                 auto lease = device.acquire(stream);
-                cuda::check(cudaMemsetAsync(lease.scratch->data(), i, lease.scratch->size(), stream), "memset scratch");
+                touch_scratch(device, lease, ctx);
             }
         }
         catch (...) { errors[i] = std::current_exception(); }
@@ -951,7 +959,7 @@ TEST(DeviceEncoder, CallerReserveStreamMayBeDestroyedFirst)
         cuda::Stream stream;
         device->reserve(1000, stream);
         auto lease = device->acquire(stream);
-        cuda::check(cudaMemsetAsync(lease.scratch->data(), 0, lease.scratch->size(), stream), "memset scratch");
+        touch_scratch(*device, lease, ctx);
     }
     device.reset();
     ctx->synchronize();
@@ -972,6 +980,26 @@ TEST(DeviceEncoder, ScratchFreeWaitsForTheAcquiredStream)
         StreamGate gate(stream);
         { auto lease = device->acquire(stream); }
         device.reset();
+        expect_blocked(ctx);
+    }
+    ctx->synchronize();
+}
+
+TEST(DeviceEncoder, ReleasingAHeldWorkspaceOrdersItsScratchFree)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, blocks_encoder());
+    device.reserve(1000, stream);
+    ctx->synchronize();
+    const auto keep_context = device.context().acquire();
+    {
+        StreamGate gate(stream);
+        {
+            auto lease = device.acquire(stream);
+            device.release(stream);
+        }
         expect_blocked(ctx);
     }
     ctx->synchronize();
@@ -1116,3 +1144,127 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         }
 }
 }  // namespace
+
+namespace
+{
+void expect_schema_refusal(encoding::FlatOptions options, const char* message)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const auto schema = encoding::EncodingSchema::create(*table, options);
+    try
+    {
+        cuda::DeviceEncoder::check_schema(*schema);
+        FAIL() << "the schema was accepted";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_EQ(std::string(e.what()), std::string("mymyr: encoding: the device does not encode ") + message);
+    }
+}
+TEST(DeviceEncoderSchema, RefusesSubgoalLevels)
+{
+    encoding::FlatOptions o;
+    o.max_goal_level = 1;
+    expect_schema_refusal(o, "subgoal levels");
+}
+TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
+{
+    encoding::FlatOptions o;
+    o.max_goal_level = 1;
+    o.targets = {encoding::TargetSource::Subgoal};
+    expect_schema_refusal(o, "subgoal targets");
+}
+TEST(DeviceEncoderSchema, RefusesHistoryTargets)
+{
+    encoding::FlatOptions o;
+    o.targets = {encoding::TargetSource::History};
+    expect_schema_refusal(o, "history targets");
+}
+TEST(DeviceEncoderSchema, RefusesActionTargets)
+{
+    encoding::FlatOptions o;
+    o.targets = {encoding::TargetSource::Action};
+    expect_schema_refusal(o, "action targets");
+}
+TEST(DeviceEncoderSchema, RefusesFullHorizons)
+{
+    encoding::FlatOptions o;
+    o.horizon.mode = encoding::HorizonMode::Full;
+    expect_schema_refusal(o, "horizons");
+}
+TEST(DeviceEncoderSchema, RefusesDeltaHorizons)
+{
+    encoding::FlatOptions o;
+    o.horizon.mode = encoding::HorizonMode::Delta;
+    o.goal_derivations = {encoding::GoalDerivation::AddedSatisfied};
+    expect_schema_refusal(o, "horizons");
+}
+TEST(DeviceEncoderSchema, RefusesActionHorizons)
+{
+    encoding::FlatOptions o;
+    o.horizon.mode = encoding::HorizonMode::Action;
+    expect_schema_refusal(o, "horizons");
+}
+}
+
+namespace
+{
+TEST(DeviceEncoder, AutomaticCountLanesTryTheNextSharedMemoryConfiguration)
+{
+    SKIP_WITHOUT_GPU();
+    std::string predicates, effects, init;
+    for (u32 p = 0; p < 400; ++p)
+    {
+        const auto name = "p" + std::to_string(p);
+        predicates += " (" + name + ")";
+        effects += " (not (" + name + "))";
+        init += " (" + name + ")";
+    }
+    const auto domain = frontend::Domain::from_string("(define (domain many) (:requirements :strips) (:predicates" +
+        predicates + ") (:action clear :parameters () :precondition (and) :effect (and" + effects + ")))" );
+    const auto task = Task::create(*domain->instantiate_string("(define (problem p) (:domain many) (:init" + init +
+        ") (:goal (and)))"));
+    auto options = test::encoder_options();
+    options.predicate_virtual_nodes = true;
+    const auto host = encoding::FlatEncoder::create(task, options);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, host);
+    const auto shape = device.worst_case(1);
+    device.reserve(shape, stream);
+    const auto output_layout = device.output_layout(shape);
+    const auto& initial = host->table().instance(0).init;
+    cuda::DeviceBuffer states(ctx, initial.size() * sizeof(u64), stream), block(ctx, output_layout.bytes, stream);
+    cuda::check(cudaMemcpyAsync(states.data(), initial.data(), states.size(), cudaMemcpyHostToDevice, stream), "state");
+    cuda::DeviceEncodeInput in;
+    in.graphs = 1;
+    in.states = static_cast<const u64*>(states.data());
+    in.state_stride = host->table().words();
+    in.state_words = host->table().words();
+    const auto out = cuda::output_of(output_layout, shape, block.data());
+    cuda::LaunchConfig forced;
+    forced.count_lanes = 4;
+    EXPECT_THROW(device.encode(in, out, stream, forced), std::invalid_argument);
+    EXPECT_NO_THROW(device.encode(in, out, stream));
+    encoding::FlatSizes sizes;
+    cuda::check(cudaMemcpyAsync(&sizes, out.sizes, sizeof sizes, cudaMemcpyDeviceToHost, stream), "sizes");
+    cuda::check(cudaStreamSynchronize(stream), "sizes");
+    EXPECT_EQ(sizes.overflow, 0u);
+}
+TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
+{
+    SKIP_WITHOUT_GPU();
+    for (const bool index64 : {false, true})
+        for (const bool warp : {false, true})
+        {
+            const u64 dynamic = cuda::detail::fill_shared_bytes(0, 32, warp, true);
+            const u64 total = cuda::detail::fill_shared_required(0, 32, warp, true, index64);
+            ASSERT_GT(total, dynamic);
+            const u64 extra = total - dynamic;
+            const u32 relations = static_cast<u32>((cuda::detail::k_shared_limit - extra) / 8 + 1);
+            EXPECT_LE(cuda::detail::fill_shared_bytes(0, relations, warp, true), cuda::detail::k_shared_limit);
+            EXPECT_GT(cuda::detail::fill_shared_required(0, relations, warp, true, index64), cuda::detail::k_shared_limit);
+        }
+}
+
+}

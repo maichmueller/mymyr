@@ -133,7 +133,7 @@ def same_batch(host, device):
 def exact_capacities(batch, factor=1):
     sizes = {
         "entities": int(batch.entity_offsets[-1]),
-        "tuples": int(batch.relation_offsets[-1]),
+        "graphs": batch.num_graphs,
         "args": int(batch.relation_arg_offsets[-1]),
         "targets": 0,
     }
@@ -247,7 +247,7 @@ def test_capacity_form_equals_host_exact_short_zero_and_ample(cases, layout, nam
     exact = exact_capacities(host_encode(encoder, case))
     short = dict(exact, args=exact["args"] - 1)
     for caps in (exact, exact_capacities(host_encode(encoder, case), 2), short, dict(exact, entities=exact["entities"] - 1),
-                 {"entities": 0, "tuples": 0, "args": 0, "targets": 0}):
+                 {"entities": 0, "graphs": case.rows.shape[0], "args": 0, "targets": 0}):
         host = host_encode(encoder, case, capacities=caps)
         batch = device_encode(encoder, case, dev, capacities=caps)
         same_batch(host, batch)
@@ -335,12 +335,12 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     with pytest.raises(ValueError, match=prefix + "capacities needs the keys"):
         encoder.encode(rows, ids, capacities={"entities": 1})
     with pytest.raises(ValueError, match=prefix + "capacities has the unknown key 'tuple'"):
-        encoder.encode(rows, ids, capacities={"entities": 1, "tuples": 1, "args": 1, "tuple": 1})
+        encoder.encode(rows, ids, capacities={"entities": 1, "graphs": rows.shape[0], "args": 1, "tuple": 1})
     with pytest.raises(ValueError, match=prefix + r"capacities\['args'\] must be at least 0"):
-        encoder.encode(rows, ids, capacities={"entities": 1, "tuples": 1, "args": -1})
+        encoder.encode(rows, ids, capacities={"entities": 1, "graphs": rows.shape[0], "args": -1})
     with pytest.raises(ValueError, match=prefix + "the schema has targets"):
         encoding.FlatRelationEncoder(case.source, target_sources=("goal",)).encode(
-            rows, ids, capacities={"entities": 1, "tuples": 1, "args": 1})
+            rows, ids, capacities={"entities": 1, "graphs": rows.shape[0], "args": 1})
     if case.ids is not None:
         with pytest.raises(ValueError, match=prefix + "task_ids are required for a table of several instances"):
             encoder.encode(rows)
@@ -391,7 +391,7 @@ def test_the_index_overflow_flag_and_error_of_a_narrow_index_type(cases):
     encoder = encoding.FlatRelationEncoder(case.source, index_dtype="int32")
     # a batch whose cells exceed the int32 index range cannot be built: the flag is reported by the capacities that no
     # array could hold, through the capacity flag
-    batch = device_encode(encoder, case, dev, capacities={"entities": 1, "tuples": 1, "args": 1})
+    batch = device_encode(encoder, case, dev, capacities={"entities": 1, "graphs": case.rows.shape[0], "args": 1})
     assert batch.sizes["capacity_overflow"] and not batch.sizes["index_overflow"]
 
 
@@ -529,7 +529,7 @@ def test_names_and_descriptions_of_a_device_batch_equal_the_host_ones(cases, lay
         assert encoder.entity_names(batch, g) == encoder.entity_names(host, g)
         assert encoder.describe(batch, g) == encoder.describe(host, g)
         assert encoder.describe(capacity, g) == encoder.describe(host, g)
-    over = device_encode(encoder, case, dev, capacities={"entities": 0, "tuples": 0, "args": 0, "targets": 0})
+    over = device_encode(encoder, case, dev, capacities={"entities": 0, "graphs": case.rows.shape[0], "args": 0, "targets": 0})
     with pytest.raises(ValueError, match="overflowed its capacities"):
         encoder.describe(over, 0)
     with pytest.raises(IndexError):
@@ -562,7 +562,7 @@ def op_inputs(case, dev, goals=None):
 
 def call_op(handle, rows, ids, derived, g, caps):
     return torch.ops.mymyr.encode_flat(
-        handle, rows, ids, derived, g[0], g[1], g[2], g[3], caps["entities"], caps["tuples"], caps["args"], caps["targets"]
+        handle, rows, ids, derived, g[0], g[1], g[2], g[3], caps["graphs"], caps["entities"], caps["args"], caps["targets"]
     )
 
 
@@ -608,7 +608,7 @@ def test_the_fake_implementation_gives_the_shapes_of_the_capacities(cases):
     case = cases["gripper"]
     encoder = encoding.FlatRelationEncoder(case.source, target_sources=("goal",))
     handle = rt.register(encoder)
-    caps = {"entities": 70, "tuples": 300, "args": 500, "targets": 11}
+    caps = {"graphs": len(case.rows), "entities": 70, "args": 500, "targets": 11}
     rows, ids, derived, g = op_inputs(case, dev)
     real = call_op(handle, rows, ids, derived, g, caps)
     with FakeTensorMode() as mode:
@@ -630,7 +630,7 @@ def test_the_op_compiles_without_graph_breaks(cases):
 
     def fn(rows, ids):
         out = torch.ops.mymyr.encode_flat(
-            handle, rows, ids, None, None, None, None, None, caps["entities"], caps["tuples"], caps["args"], caps["targets"]
+            handle, rows, ids, None, None, None, None, None, caps["graphs"], caps["entities"], caps["args"], caps["targets"]
         )
         return out[8] + 1, out[-1]
 
@@ -759,3 +759,23 @@ def test_outputs_that_do_not_hold_the_graphs_are_refused_before_any_launch(cases
     with pytest.raises(ValueError, match="^mymyr: encoding: the output 'task_ids' has"):
         encoder.encode(rows)
     assert not launched
+
+
+def test_graph_capacity_is_checked_before_device_encoding(cases):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source)
+    caps = exact_capacities(host_encode(encoder, case))
+    caps["graphs"] = len(case.rows) - 1
+    with pytest.raises(ValueError, match="more graphs than the output capacity"):
+        device_encode(encoder, case, dev, capacities=caps)
+    handle = rt.register(encoder)
+    rows, ids, derived, goals = op_inputs(case, dev)
+    try:
+        with pytest.raises(ValueError, match="more graphs than the output capacity"):
+            call_op(handle, rows, ids, derived, goals, caps)
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode() as mode, pytest.raises(ValueError, match="more graphs than the output capacity"):
+            call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
+    finally:
+        rt.unregister(handle)
