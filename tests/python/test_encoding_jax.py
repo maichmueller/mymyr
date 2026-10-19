@@ -59,6 +59,18 @@ def platforms():
 PLATFORMS = platforms()
 
 
+@pytest.fixture(autouse=True)
+def release_encoders():
+    """Unregisters the encoders a test registered and drops its compiled functions, which frees their device contexts
+    (the registry keeps an encoder until it is unregistered)."""
+    before = set(ej._registrations)
+    yield
+    for handle in set(ej._registrations) - before:
+        ej.unregister(handle)
+    jax.clear_caches()
+    gc.collect()
+
+
 def device(platform):
     return jax.devices("gpu")[0] if platform == "cuda" else jax.devices("cpu")[0]
 
