@@ -1524,7 +1524,7 @@ void bind_encoding(nb::module_& parent)
         "schema does not read may be None. task_ids: the instance of each graph [G] (required for a table of several "
         "instances). derived: the derived atom words of each node row [M, D] (default: evaluated here). goals, "
         "subgoals: as in FlatRelationEncoder.encode, but per graph [G, ...] (or one row shared by all graphs). "
-        "framework, threads, pool and capacities are as in FlatRelationEncoder.encode (capacities needs the key "
+        "framework, threads, pool and capacities are as in FlatRelationEncoder.encode (capacities' 'graphs' bounds the horizons, not the node rows, and it needs the key "
         "'targets': the candidate nodes). A state entity's `entity_ref` is the node's index in its graph, so the row of "
         "the node in `nodes` is node_offsets[g] + entity_ref. Raises ValueError (\"mymyr: encoding: ...\", naming the "
         "graph) for invalid input.");
