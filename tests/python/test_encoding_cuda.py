@@ -536,9 +536,13 @@ def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mod
     rows = torch.zeros_like(source)
     stream = torch.cuda.Stream(dev)
     held_scratch = []
+    # Warm both streams so a blocking first allocation cannot hide the delayed write.
+    encoder.encode(rows)
+    encoder.encode(rows, capacities=caps)
     torch.cuda.synchronize()
     try:
         with torch.cuda.stream(stream):
+            encoder.encode(rows)
             encoder.encode(rows, capacities=caps)
         stream.synchronize()
         if wrong_stream:
