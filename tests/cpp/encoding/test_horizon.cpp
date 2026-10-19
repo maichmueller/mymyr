@@ -1267,6 +1267,64 @@ TEST(Horizon, TheEdgeTuplesAreCanonicalWhateverTheEdges)
             }
 }
 
+TEST(Horizon, TheEdgeTuplesAreCanonicalForEveryShapeOfEdgeList)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    constexpr int nodes = 300;
+    u64 state = 12345;
+    const auto next = [&](u64 bound)
+    {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<i32>((state >> 33) % bound);
+    };
+    using Edges = std::vector<std::array<i32, 2>>;
+    // a large group of one source whose destinations come in descending order (insertion would move quadratically)
+    Edges star;
+    for (int round = 0; round < 2; ++round)
+        for (i32 dst = nodes - 1; dst >= 1; --dst)
+            star.push_back({0, dst});
+    // edges grouped by source, each group in a random order and with repeats
+    Edges grouped;
+    for (i32 src = 0; src < nodes; ++src)
+        for (int k = 0, size = 1 + next(6); k < size; ++k)
+            grouped.push_back({src, next(nodes)});
+    // edges in no order at all, with repeats, self-loops and edges to and from the root
+    Edges shuffled;
+    for (int k = 0; k < 4 * nodes; ++k)
+        shuffled.push_back({next(nodes), next(nodes)});
+    // already canonical, strictly ascending
+    Edges ascending;
+    for (i32 src = 0; src < 40; ++src)
+        for (i32 dst = 0; dst < nodes; dst += 7)
+            ascending.push_back({src, dst});
+    // a group that breaks the order of the sources late
+    Edges late = grouped;
+    late.push_back({0, 5});
+    for (const Edges& edges : {star, grouped, shuffled, ascending, late, Edges{}})
+    {
+        const test::Horizon h = dag_graph(*table, nodes, edges);
+        for (const RootPolicy root : k_roots)
+            for (const bool actions : {false, true})
+            {
+                FlatOptions options = horizon_options(HorizonMode::Full, root);
+                options.horizon.parent_relation = true;
+                options.include_actions = actions;
+                const auto encoder = FlatEncoder::create(table, options);
+                const auto batch = encoder->encode(h.input());
+                EXPECT_NO_THROW(validate(*batch, encoder->schema()));
+                expect_reference(*encoder, h, *batch);
+                std::set<std::pair<i32, i32>> distinct;
+                for (const auto& edge : edges)
+                    if (root != RootPolicy::Exclude || (edge[0] != 0 && edge[1] != 0))
+                        distinct.insert({edge[0], edge[1]});
+                std::vector<std::string> expected;
+                for (const auto& [src, dst] : distinct)
+                    expected.push_back("s" + std::to_string(src) + ",s" + std::to_string(dst));
+                EXPECT_EQ(decode(*batch, encoder->schema())[0].at("_parent_"), expected);
+            }
+    }
+}
+
 TEST(Horizon, GraphsWithoutEdgesNeedNoEdgeArrays)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));

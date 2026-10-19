@@ -111,7 +111,7 @@ struct HPass
         {
             const u64 e = first_edge(g);
             out.edges = edges_of(g);
-            out.order = s.edge_order.data() + 2 * e + 2 * g;
+            out.order = s.edge_order.data() + 3 * e + 2 * g + 2 * first_node(g);
             out.src = h.edge_src ? h.edge_src + e : nullptr;
             out.dst = h.edge_dst ? h.edge_dst + e : nullptr;
             out.schema = h.edge_schema ? h.edge_schema + e : nullptr;
@@ -549,7 +549,7 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         s.derived = std::make_unique_for_overwrite<u64[]>(s.derived_capacity);
     }
     if (edges_used)
-        s.edge_order.resize(horizon_order_words(0) * graphs + 2 * edges);
+        s.edge_order.resize(horizon_order_words(0, 0) * graphs + 3 * edges + 2 * nodes);
     const u32 members = members_for(nodes, pool);
     s.members.resize(members);
     s.bounds.clear();
