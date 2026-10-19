@@ -14,7 +14,10 @@
 //
 // Action rows. An appended expansion row names the state it belongs to; the stream stores the labels of the rows
 // (schema and binding) of each state and nothing else. A flush encodes with one expansion made of the stored rows,
-// graph after graph, so the entity_ref of an action entity reads as encode() gives it for an expansion of the same states.
+// graph after graph, so the entity_ref of an action entity reads as encode() gives it for an expansion of the same states:
+// the expansion row of an action entity of the state that was row k of an append with expansion x is
+// x.offsets[k] + entity_ref. Graph j of a flush is the j-th appended row (FlatStream) or the row of indices()[j]
+// (FlatMutableStream).
 //
 // Errors. Invalid rows raise std::invalid_argument ("mymyr: encoding: ...") when they are appended where the rows alone
 // show it (a task id out of range, a row narrower than its instance, goal masks narrower than their instance, a
@@ -23,7 +26,8 @@
 // stores none of its rows, and a flush that raises keeps the rows.
 //
 // Threads. Every call locks the stream: calls from several threads are serialized, and a flush holds the stream while
-// it encodes.
+// it encodes. A flush encodes with working memory that belongs to the calling thread and is kept between calls, so a
+// flush on a thread that has encoded before does not grow it again.
 
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/encoding/encoder.hpp"
@@ -55,8 +59,8 @@ public:
     /// Drops every row.
     void clear();
 
-    /// Encodes the rows held and empties the stream, on the members of `pool` (as FlatEncoder::encode). If the
-    /// encoding throws, the rows are kept.
+    /// Encodes the rows held and empties the stream, on the members of `pool` (as FlatEncoder::encode): graph j of the
+    /// batch is the j-th row appended. If the encoding throws, the rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);
     /// The capacity form (FlatEncoder::encode_capacity): the rows are dropped iff the batch fits (sizes.overflow == 0),
     /// so that a flush that overflowed can be repeated with larger capacities.
@@ -99,7 +103,8 @@ public:
     /// The indices of the rows held, ascending: the order of the graphs of a flush.
     [[nodiscard]] std::vector<i64> indices() const;
 
-    /// Encodes the rows held, in ascending order of their indices, on the members of `pool`. The rows are kept.
+    /// Encodes the rows held, in ascending order of their indices, on the members of `pool`: graph j of the batch is the
+    /// row of indices()[j]. The rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);
     /// The capacity form (FlatEncoder::encode_capacity). The rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const BatchShape& capacities,

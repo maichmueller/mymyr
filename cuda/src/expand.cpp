@@ -1143,7 +1143,7 @@ void DeviceExpander::pad(const rl::Expansion& flat, u64 rows, rl::PaddedExpansio
     u32* d = I.dctl();
     check(cudaMemsetAsync(d + k_overflow, 0, sizeof(u32), s), "cudaMemsetAsync");
     lifted::Flat f{flat.offsets, flat.capacity, flat.succ, flat.words + flat.numeric_words, flat.schema, flat.binding, flat.label_width, flat.goal, flat.derived, flat.derived_words};
-    lifted::Padded p{out.K, out.index, out.mask, out.count, out.succ, out.words + out.numeric_words, out.schema, out.binding, out.label_width,
+    lifted::Padded p{out.k, out.index, out.mask, out.count, out.succ, out.words + out.numeric_words, out.schema, out.binding, out.label_width,
                      out.goal, d + k_overflow, out.derived, out.derived_words};
     if (flat.numeric_words)
         check(numeric::launch_pad(f, rows, p, flat.numeric_words, s), "numeric::launch_pad");

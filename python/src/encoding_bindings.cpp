@@ -728,7 +728,7 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
     PyFlatBatch output;
     output.framework = parse_framework(framework, state_arg);
     output.schema = self.encoder->schema_ptr();
-    thread_local encoding::EncodeScratch scratch;
+    encoding::EncodeScratch& scratch = encoding::EncodeScratch::of_this_thread();
     run_on_pool(self, threads, pool_in,
                 [&](ThreadPool& pool)
                 {
@@ -798,9 +798,10 @@ std::vector<i64> index_list(nb::handle obj)
 {
     if (nb::isinstance<nb::int_>(obj))
         return {int_arg<i64>(obj, "index")};
+    // a contiguous int64 array is copied as it is; any other array or sequence is read item by item
     using Array = nb::ndarray<const i64, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
     Array array;
-    if (!nb::isinstance<nb::sequence>(obj) && nb::try_cast(obj, array, true))
+    if (nb::try_cast(obj, array, false))
         return std::vector<i64>(array.data(), array.data() + array.shape(0));
     if (nb::isinstance<nb::str>(obj) || !nb::isinstance<nb::sequence>(obj))
         throw nb::type_error("mymyr: encoding: indices must be an int, a sequence of ints or an integer array");
@@ -1116,8 +1117,8 @@ void bind_encoding(nb::module_& parent)
             "Encodes the rows held, in the order they were appended, and empties the stream: the result equals "
             "`encoder.encode(rows, ...)` over the same rows bit for bit. framework, threads, pool and capacities are "
             "as in `encode`; `framework` defaults to the stream's. The graph g of the batch is the g-th appended row. "
-            "With `actions`, the action rows are those appended for each state, so `entity_ref` of an action "
-            "entity is what `encode` gives for the same expansion. If the "
+            "With `actions`, the action rows are those appended for each state: the expansion row of an action "
+            "entity of the state that was row k of an append with expansion x is `x.offsets[k] + entity_ref`. If the "
             "encoding raises (or, with `capacities`, overflows: `sizes['overflow']`), the rows are kept, so that the "
             "flush can be repeated with larger capacities. A stream without rows flushes to a batch of no graphs.")
         .def(
@@ -1187,18 +1188,32 @@ void bind_encoding(nb::module_& parent)
         .def(
             "flush", &flush_stream<PyFlatMutableStream>, nb::kw_only(), "framework"_a = nb::none(), "threads"_a = 1,
             "pool"_a = nb::none(), "capacities"_a = nb::none(),
-            "Encodes the rows held in ascending order of their indices and keeps them. framework, threads, pool and "
-            "capacities are as in `encode`; `framework` defaults to the stream's. With `actions`, the action rows "
-            "are those given for each state, so `entity_ref` of an action entity is what `encode` gives for the same "
-            "expansion. A stream without rows flushes to a batch of no graphs.")
+            "Encodes the rows held in ascending order of their indices and keeps them: the graph j of the batch is the "
+            "row of `indices()[j]`. framework, threads, pool and capacities are as in `encode`; `framework` defaults "
+            "to the stream's. With `actions`, the action rows are those given for each state: the expansion row of an "
+            "action entity of the state that was row k of an append or update with expansion x is "
+            "`x.offsets[k] + entity_ref`. A stream without rows flushes to a batch of no graphs.")
         .def(
             "clear", [](PyFlatMutableStream& self) { self.stream->clear(); }, "Drops every row.")
         .def(
             "indices", [](PyFlatMutableStream& self) { return int64_array(self.stream->indices()); },
             "The indices of the rows held, ascending: the order of the graphs of a flush.")
         .def(
-            "__contains__", [](const PyFlatMutableStream& self, i64 index) { return self.stream->contains(index); },
-            "index"_a, "Whether a row is held under `index`.")
+            "__contains__", [](const PyFlatMutableStream& self, Arg<ann::Any> index)
+            {
+                // a value that is not an integer, or not a 64-bit one, is no index of a row
+                i64 value = 0;
+                if (!PyIndex_Check(index.ptr()))
+                    return false;
+                const nb::object integer = nb::steal(PyNumber_Index(index.ptr()));
+                if (!integer.is_valid())
+                {
+                    PyErr_Clear();
+                    return false;
+                }
+                return nb::try_cast<i64>(integer, value) && self.stream->contains(value);
+            },
+            "index"_a.none(), "Whether a row is held under `index`; False for a value that is not a 64-bit integer.")
         .def("__len__", [](const PyFlatMutableStream& self) { return self.stream->size(); }, "The rows held.")
         .def_prop_ro(
             "encoder", [](const PyFlatMutableStream& self) { return nb::typed<nb::object, PyFlatEncoder>(self.encoder); },

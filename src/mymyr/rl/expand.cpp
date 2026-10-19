@@ -496,7 +496,7 @@ void pad(const Expansion& flat, u64 rows, PaddedExpansion& out)
 {
     if (!flat.offsets)
         throw std::invalid_argument("mymyr: pad: the flat expansion has no offsets");
-    const u32 K = out.K, W = out.words, L = out.label_width, NN = out.numeric_words;
+    const u32 K = out.k, W = out.words, L = out.label_width, NN = out.numeric_words;
     const u32 RW = W + NN, FW = flat.words + flat.numeric_words;
     if (out.succ && flat.succ && W < flat.words)
         throw std::invalid_argument("mymyr: pad: padded rows narrower than the flat rows");

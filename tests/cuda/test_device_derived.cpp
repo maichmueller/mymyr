@@ -232,7 +232,7 @@ TEST(DeviceExpandDerived, PaddedViewEqualsHost)
         x.offsets = const_cast<i32*>(f.offsets.data());
         x.total = f.total;
         rl::PaddedExpansion p;
-        p.K = K;
+        p.k = K;
         p.derived_words = dw;
         p.derived = hp.data();
         rl::pad(x, N, p);
@@ -250,7 +250,7 @@ TEST(DeviceExpandDerived, PaddedViewEqualsHost)
     x.offsets = static_cast<i32*>(offsets.data());
     x.total = f.total;
     rl::PaddedExpansion p;
-    p.K = K;
+    p.k = K;
     p.derived_words = dw;
     p.derived = static_cast<u64*>(out.data());
     ex.pad(x, N, p);
