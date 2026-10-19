@@ -237,6 +237,17 @@ bool edge_skipped(const Graph& h, const Cell& c, u32 e)
     return h.exclude && (h.src[e] == 0 || h.dst[e] == 0);
 }
 
+/// The tuples of a sibling or cousin cell in the graph.
+[[gnu::noinline]] u32 kin_cell_count(const Graph& h, bool cousin)
+{
+    u64 n = 0;
+    for (u32 node = h.exclude ? 1u : 0u; node < h.count; ++node)
+        n += kin_count(h.kin->view, cousin, node, h.exclude, h.kin->out.data(), h.kin->work.data());
+    if (n > std::numeric_limits<u32>::max())
+        throw std::overflow_error("mymyr: encoding: a horizon graph has too many sibling or cousin tuples");
+    return static_cast<u32>(n);
+}
+
 /// The tuples of cell `c` in the graph.
 u32 cell_count(const Cell& c, const Graph& h)
 {
@@ -248,15 +259,8 @@ u32 cell_count(const Cell& c, const Graph& h)
             n += edge_skipped(h, c, e) ? 0u : 1u;
         return n;
     }
-    if (kin_kind(kind))
-    {
-        u64 n = 0;
-        for (u32 node = h.exclude ? 1u : 0u; node < h.count; ++node)
-            n += kin_count(h.kin->view, kind == HorizonKind::Cousin, node, h.exclude, h.kin->out.data(), h.kin->work.data());
-        if (n > std::numeric_limits<u32>::max())
-            throw std::overflow_error("mymyr: encoding: a horizon graph has too many sibling or cousin tuples");
-        return static_cast<u32>(n);
-    }
+    if (kin_kind(kind)) [[unlikely]]
+        return kin_cell_count(h, kind == HorizonKind::Cousin);
     const auto [first, last] = scope_of(c, h.count);
     if (kind == HorizonKind::Facts && horizon_low(c.op) == static_cast<u32>(CellOp::Static))
         return (last - first) * (c.b - c.a);
@@ -305,6 +309,18 @@ void emit_node(const Cell& c, const Graph& h, u32 node, Out& out)
         out.put(node, v.goal_args + u64{k++} * stride);
 }
 
+/// Calls out.put_pair(node, other) for the tuples of a sibling or cousin cell, in order.
+template<class Out>
+[[gnu::noinline]] void emit_kin_cell(const Graph& h, bool cousin, Out& out)
+{
+    for (u32 node = h.exclude ? 1u : 0u; node < h.count; ++node)
+    {
+        const u32 n = kin_row(h.kin->view, cousin, node, h.exclude, h.kin->out.data(), h.kin->work.data());
+        for (u32 i = 0; i < n; ++i)
+            out.put_pair(node, h.kin->out[i]);
+    }
+}
+
 /// Calls out.put(node, objects) / out.put_pair(src, dst) for the tuples of cell `c`, in order.
 template<class Out>
 void emit_cell(const Cell& c, const Graph& h, Out& out)
@@ -324,15 +340,9 @@ void emit_cell(const Cell& c, const Graph& h, Out& out)
                 out.put_pair(static_cast<u32>(h.src[e]), static_cast<u32>(h.dst[e]));
         return;
     }
-    if (kin_kind(kind))
+    if (kin_kind(kind)) [[unlikely]]
     {
-        for (u32 node = h.exclude ? 1u : 0u; node < h.count; ++node)
-        {
-            const u32 n = kin_row(h.kin->view, kind == HorizonKind::Cousin, node, h.exclude, h.kin->out.data(),
-                                  h.kin->work.data());
-            for (u32 i = 0; i < n; ++i)
-                out.put_pair(node, h.kin->out[i]);
-        }
+        emit_kin_cell(h, kind == HorizonKind::Cousin, out);
         return;
     }
     const auto [first, last] = scope_of(c, h.count);
