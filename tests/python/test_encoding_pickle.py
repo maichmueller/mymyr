@@ -20,6 +20,7 @@ OPTION_SETS = [
          target_sources=("goal", "action"), predicate_virtual_nodes=True, emit_counts=False, equality=True,
          nullary=False, include_static=False),
     dict(entity_arrays="auto", goal_derivations=(), include_actions=False, include_derived=False),
+    dict(statics="shared", predicate_virtual_nodes=True, target_sources=("goal",)),
 ]
 TASKS = ["gripper__prob05", "blocks__probBLOCKS-8-0", "philosophers__p03-phil4"]
 DIGEST = """
@@ -51,7 +52,7 @@ def same(a, b):
         assert np.array_equal(first[key], second[key]), key
 
 
-@pytest.mark.parametrize("options", OPTION_SETS, ids=["default", "all-lanes", "plain"])
+@pytest.mark.parametrize("options", OPTION_SETS, ids=["default", "all-lanes", "plain", "shared"])
 @pytest.mark.parametrize("name", TASKS)
 def test_a_pickle_round_trip_gives_an_encoder_with_equal_output(name, options):
     task = text_task(name)

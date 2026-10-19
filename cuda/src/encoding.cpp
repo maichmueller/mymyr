@@ -395,6 +395,7 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
     if (o.max_goal_level != 0) refuse("subgoal levels");
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
+    if (o.statics == encoding::Statics::Shared) refuse("shared statics (statics='shared')");
     constexpr encoding::TargetSources targets{encoding::TargetSource::Goal};
     constexpr encoding::GoalDerivations goals{encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied,
                                              encoding::GoalDerivation::Unsatisfied};

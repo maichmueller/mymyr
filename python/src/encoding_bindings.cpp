@@ -55,6 +55,9 @@ struct EncodingBatch
 struct EncodingEntityArrays
 {
 };
+struct EncodingStatics
+{
+};
 }
 
 namespace nanobind::detail
@@ -73,6 +76,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingEntityArrays>
 {
     static constexpr auto Name = const_name("typing.Literal['auto', 'always']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingStatics>
+{
+    static constexpr auto Name = const_name("typing.Literal['repeat', 'shared']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingHorizonMode>
@@ -170,6 +178,7 @@ struct PyFlatBatch
     std::shared_ptr<const encoding::EncodingSchema> schema;
     Framework framework = Framework::Numpy;
     std::optional<encoding::FlatSizes> sizes;  // set by an encoding with capacities
+    std::optional<encoding::StaticSizes> static_sizes;  // the same for the static blocks of shared statics
 };
 
 // ------------------------------------------------------------------------------------------------ options
@@ -216,7 +225,8 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
                                      bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
                                      nb::handle index_dtype, bool emit_counts, nb::handle entity_arrays,
-                                     nb::handle horizon_mode, nb::handle root_policy, bool parent_relation)
+                                     nb::handle statics, nb::handle horizon_mode, nb::handle root_policy,
+                                     bool parent_relation)
 {
     using namespace encoding;
     FlatOptions options;
@@ -239,6 +249,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.index = choice(index_dtype, "index_dtype", parse_index_type, "'int32', 'int64'");
     options.emit_counts = emit_counts;
     options.entity_arrays = choice(entity_arrays, "entity_arrays", parse_entity_arrays, "'auto', 'always'");
+    options.statics = choice(statics, "statics", parse_statics, "'repeat', 'shared'");
     if (!horizon_mode.is_none())
     {
         options.horizon.mode =
@@ -278,6 +289,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["index_dtype"] = std::string(encoding::to_string(o.index));
     out["emit_counts"] = o.emit_counts;
     out["entity_arrays"] = std::string(encoding::to_string(o.entity_arrays));
+    out["statics"] = std::string(encoding::to_string(o.statics));
     const bool horizon = o.horizon.mode != encoding::HorizonMode::None;
     out["horizon_mode"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.mode)))) : nb::none();
     out["root_policy"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.root)))) : nb::none();
@@ -300,7 +312,10 @@ constexpr const char* k_option_doc =
     "(cell (g, r) is segment r * G + g instead of g * R + r). emit_counts=False omits relation_counts (the tuples of "
     "a segment are the difference of two relation_offsets). entity_arrays='auto' omits entity_role and entity_ref "
     "when every entity is an object or the auxiliary entity (no target_sources, predicate_virtual_nodes, "
-    "include_actions or horizon_mode). horizon_mode, root_policy, parent_relation: the horizon variants "
+    "include_actions or horizon_mode). statics='shared' leaves the static relations empty in the graphs and stores the "
+    "static tuples of each instance once per batch (static_task_ids, static_offsets, static_arg_offsets, static_args, "
+    "static_relations; the entity ids in static_args are graph-local, see docs/encoding.md); the device does not encode "
+    "it. horizon_mode, root_policy, parent_relation: the horizon variants "
     "(root_policy defaults to 'include' and needs a horizon_mode for any other value). Raises ValueError for invalid "
     "combinations and for numeric tasks.";
 
@@ -315,7 +330,7 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
         [make](Py* self, TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static,
                bool include_derived, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,
-               bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays,
+               bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingStatics> statics,
                Arg<ann::EncodingHorizonMode> horizon_mode, Arg<ann::EncodingRootPolicy> root_policy,
                bool parent_relation)
         {
@@ -323,14 +338,14 @@ void define_init(nb::class_<Py>& cls, Make make, const char* doc)
             const encoding::FlatOptions options = schema_options(
                 max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes,
                 include_actions, goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays,
-                horizon_mode, root_policy, parent_relation);
+                statics, horizon_mode, root_policy, parent_relation);
             make(self, reference, options);
         },
         "table"_a, nb::kw_only(), "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0,
         "include_static"_a = true, "include_derived"_a = true, "nullary"_a = true, "equality"_a = false,
         "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),
         "layout"_a = "graph", "index_dtype"_a = "int32", "emit_counts"_a = true, "entity_arrays"_a = "always",
-        "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(), "parent_relation"_a = false, doc);
+        "statics"_a = "repeat", "horizon_mode"_a = nb::none(), "root_policy"_a = nb::none(), "parent_relation"_a = false, doc);
 }
 
 // ------------------------------------------------------------------------------------------------ the catalog
@@ -507,10 +522,20 @@ nb::object batch_array(const PyFlatBatch& batch, const char* name)
 using PoolArg = Arg<PyPool>;
 using CapacitiesArg = std::optional<nb::typed<nb::dict, std::string, std::uint64_t>>;
 
-encoding::BatchShape capacities_of(const nb::dict& value, bool has_targets)
+/// The capacities of a call: the batch's and, with shared statics, those of the static blocks.
+struct Capacities
 {
+    encoding::BatchShape batch;
+    std::optional<encoding::StaticShape> statics;
+};
+
+Capacities capacities_of(const nb::dict& value, const encoding::EncodingSchema& schema)
+{
+    const bool has_targets = schema.has_targets();
+    const bool shared = schema.shared_statics();
     encoding::BatchShape out;
-    bool entities = false, graphs = false, args = false, targets = false;
+    encoding::StaticShape static_out;
+    bool entities = false, graphs = false, args = false, targets = false, static_instances = false, static_args = false;
     for (auto [key, item] : value)
     {
         const std::string name = text_of(key, "capacities key");
@@ -522,16 +547,28 @@ encoding::BatchShape capacities_of(const nb::dict& value, bool has_targets)
             out.args = int_arg<u64>(item, "capacities['args']"), args = true;
         else if (name == "targets")
             out.targets = int_arg<u64>(item, "capacities['targets']"), targets = true;
+        else if (name == "static_instances")
+            static_out.instances = int_arg<u64>(item, "capacities['static_instances']"), static_instances = true;
+        else if (name == "static_args")
+            static_out.args = int_arg<u64>(item, "capacities['static_args']"), static_args = true;
         else
             throw nb::value_error(("mymyr: encoding: capacities has the unknown key '" + name +
-                                   "'; the keys are 'entities', 'graphs', 'args' and 'targets'")
+                                   "'; the keys are 'entities', 'graphs', 'args', 'targets', 'static_instances' and "
+                                   "'static_args'")
                                       .c_str());
     }
     if (!(entities && graphs && args))
         throw nb::value_error("mymyr: encoding: capacities needs the keys 'entities', 'graphs' and 'args'");
     if (!targets && has_targets)
         throw nb::value_error("mymyr: encoding: the schema has targets: capacities needs the key 'targets' as well");
-    return out;
+    if (shared && !(static_instances && static_args))
+        throw nb::value_error(
+            "mymyr: encoding: the schema shares its statics: capacities needs the keys 'static_instances' and "
+            "'static_args' as well");
+    if (!shared && (static_instances || static_args))
+        throw nb::value_error(
+            "mymyr: encoding: the schema repeats its statics: capacities takes no 'static_instances' or 'static_args'");
+    return {out, shared ? std::optional(static_out) : std::nullopt};
 }
 
 /// The goal masks of the rows from `goals`, a pair (goal_pos, goal_neg) or a quadruple that adds the masks over the
@@ -719,9 +756,8 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
                 .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,
                                 threads_in, pool_in, capacities_in ? nb::object(*capacities_in) : nb::none()));
     const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::BatchShape> capacities =
-        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema().has_targets()))
-                      : std::nullopt;
+    const std::optional<Capacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema())) : std::nullopt;
     ImportedRows rows;
     import_rows(rows, *self.encoder, state_arg, task_ids, derived_arg, goals_arg, actions_arg);
 
@@ -735,8 +771,15 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
                     if (capacities)
                     {
                         encoding::FlatSizes sizes;
-                        output.arrays = self.encoder->encode_capacity(rows.input, *capacities, pool, scratch, sizes);
+                        encoding::StaticSizes static_sizes;
+                        const encoding::StaticShape* static_caps =
+                            capacities->statics ? &*capacities->statics : nullptr;
+                        output.arrays = self.encoder->encode_capacity(rows.input, capacities->batch, pool, scratch,
+                                                                      sizes, static_caps,
+                                                                      static_caps ? &static_sizes : nullptr);
                         output.sizes = sizes;
+                        if (static_caps)
+                            output.static_sizes = static_sizes;
                     }
                     else
                         output.arrays = self.encoder->encode(rows.input, pool, scratch);
@@ -778,6 +821,22 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"target_group",
      "uint8 [T]: the group of each target, an index into target_group_names (0: goal, 2: action). Absent like "
      "target_offsets."},
+    {"static_task_ids",
+     "int32 [I_b]: the instances whose static blocks the batch holds (the distinct instances of its graphs), ascending. "
+     "Present with statics='shared' only."},
+    {"static_offsets",
+     "index [I_b * R_s + 1]: the tuples of static relation k (k-th of static_relations) in the block of the b-th "
+     "instance are the segment b * R_s + k: [static_offsets[b * R_s + k], static_offsets[b * R_s + k + 1]). Present "
+     "with statics='shared' only."},
+    {"static_arg_offsets", "index [I_b * R_s + 1]: the same offsets into static_args."},
+    {"static_args",
+     "index [A_s]: the entities of the static tuples, tuple after tuple, `arity` per tuple of the relation, in "
+     "graph-local ids: an object is its instance-local id, the auxiliary entity is num_objects, and the predicate slot "
+     "of a predicate relation (predicate_virtual_nodes) holds the predicate's key, the entity_ref of its virtual "
+     "node. Add entity_offsets[g] to the ids of every graph g that uses the block of task_ids[g]."},
+    {"static_relations",
+     "index [R_s]: the relation ids of the static relations, ascending; the k-th is the relation of segment k of every "
+     "block."},
 };
 
 // ------------------------------------------------------------------------------------------------ streams
@@ -833,9 +892,8 @@ PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads
 {
     PyFlatEncoder& encoder = self.owner();
     const u32 threads = threads_arg(threads_in);
-    const std::optional<encoding::BatchShape> capacities =
-        capacities_in ? std::optional(capacities_of(*capacities_in, encoder.encoder->schema().has_targets()))
-                      : std::nullopt;
+    const std::optional<Capacities> capacities =
+        capacities_in ? std::optional(capacities_of(*capacities_in, encoder.encoder->schema())) : std::nullopt;
     PyFlatBatch output;
     output.framework = framework.is_none() ? self.framework : parse_framework(framework);
     output.schema = encoder.encoder->schema_ptr();
@@ -845,8 +903,14 @@ PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads
                     if (capacities)
                     {
                         encoding::FlatSizes sizes;
-                        output.arrays = self.stream->flush(pool, *capacities, sizes);
+                        encoding::StaticSizes static_sizes;
+                        const encoding::StaticShape* static_caps =
+                            capacities->statics ? &*capacities->statics : nullptr;
+                        output.arrays = self.stream->flush(pool, capacities->batch, sizes, static_caps,
+                                                           static_caps ? &static_sizes : nullptr);
                         output.sizes = sizes;
+                        if (static_caps)
+                            output.static_sizes = static_sizes;
                     }
                     else
                         output.arrays = self.stream->flush(pool);
@@ -941,12 +1005,19 @@ void bind_encoding(nb::module_& parent)
                 out["tuples"] = self.sizes->tuples;
                 out["args"] = self.sizes->args;
                 out["targets"] = self.sizes->targets;
+                if (self.static_sizes)
+                {
+                    out["static_instances"] = self.static_sizes->instances;
+                    out["static_tuples"] = self.static_sizes->tuples;
+                    out["static_args"] = self.static_sizes->args;
+                }
                 out["overflow"] = self.sizes->overflowed();
                 out["capacity_overflow"] = (self.sizes->overflow & encoding::k_overflow_capacity) != 0;
                 out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
                 return out;
             },
-            "After an encoding with capacities: the true entities, tuples and args of the batch and whether it "
+            "After an encoding with capacities: the true entities, tuples, args and targets of the batch (with shared "
+            "statics also its static_instances, static_tuples and static_args) and whether it "
             "overflowed (`overflow`: the batch is all zero), because of the capacities (`capacity_overflow`) or the "
             "index type (`index_overflow`); None otherwise.")
         .def(

@@ -548,6 +548,20 @@ def test_the_encoder_without_a_device_encoding_is_refused_clearly():
         encoder.reserve_device(8)
 
 
+def test_shared_statics_are_refused_by_the_device_before_any_launch():
+    dev = gpu()
+    task = text_task("gripper__prob05")
+    states = walk(task, steps=3, walks=1)
+    encoder = encoding.FlatRelationEncoder(task, statics="shared")
+    rows = to_device(np.asarray(task.encode(states)), dev)
+    message = "^mymyr: encoding: the device does not encode shared statics"
+    with pytest.raises(ValueError, match=message):
+        encoder.encode(rows)
+    with pytest.raises(ValueError, match=message):
+        encoder.reserve_device(8)
+    assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
+
+
 # ------------------------------------------------------------------------------------------------ the op
 
 OP_ARGS = 8

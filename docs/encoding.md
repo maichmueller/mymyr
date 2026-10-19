@@ -197,15 +197,16 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `target_offsets` | I `[G + 1]` | graph `g`'s targets are `[target_offsets[g], target_offsets[g + 1])`; present iff the schema has targets |
 | `target_entity` | I `[T]` | the entity of each target, graph after graph |
 | `target_group` | uint8 `[T]` | the group of each target (0: goal, 2: action) |
+| `static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations` | | the shared static tuples; present iff `statics='shared'` ([below](#shared-statics)) |
 
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),
 `schema_fingerprint` (the schema's fingerprint as a signed 64-bit value) and `statics` (0: the static tuples are
-repeated in every graph) come with `batch.as_dict()`.
+repeated in every graph, 1: [shared](#shared-statics)) come with `batch.as_dict()`.
 
 The tuples of a cell are the atoms of its predicate in the lexicographic order of their objects, so the atom slot
 layout of a task (`atoms='auto'`, `'reachable'`, `'dense'`) never reaches a model. A static tuple appears once per
-graph. In the graph layout, encoding a slice of a batch gives the slice of the batch's encoding with the offsets
+graph (with `statics='shared'`, once per instance of the batch). In the graph layout, encoding a slice of a batch gives the slice of the batch's encoding with the offsets
 rebased (`entity_ref` needs no rebase); in the relation layout a slice's cells lie in `R` separate runs, so it is
 encoded, not cut. An object's
 instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]` is its name.
@@ -214,6 +215,79 @@ instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]
 batch's framework. NumPy arrays are read-only; do not mutate the shared buffers through frameworks whose tensor APIs
 cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
 `batch.schema` is its `EncodingSchema`.
+
+## Shared statics
+
+The static tuples of an instance are the same in every state, yet by default every graph holds its own copy: a batch of
+a thousand states of one gripper task repeats the `ball`, `room` and `gripper` tuples a thousand times. `statics='shared'`
+stores them once per instance of the batch instead. The static relations (the relations of lane `static`, as
+`schema.relation_lanes` tells) are then empty in every graph (`relation_counts` is 0 in their cells), and five more
+arrays hold the tuples. With `S` static relations (`R_s = S`) and `I_b` distinct instances in the batch:
+
+| Array | dtype, shape | Meaning |
+|---|---|---|
+| `static_task_ids` | int32 `[I_b]` | the instances of the batch, ascending |
+| `static_relations` | I `[R_s]` | the relation ids of the static relations, ascending |
+| `static_offsets` | I `[I_b * R_s + 1]` | the tuples of the `k`-th static relation in the block of the `b`-th instance are the segment `b * R_s + k` |
+| `static_arg_offsets` | I `[I_b * R_s + 1]` | the same offsets into `static_args` |
+| `static_args` | I `[A_s]` | the entities of the static tuples, tuple after tuple, `relation_arities[r]` per tuple |
+
+The blocks come instance after instance in ascending order of the instance, relation after relation in the order of
+`static_relations`; the tuples of a cell are in the order they have in the repeated form, so the arrays are
+deterministic and do not depend on the threads, the pool or the order of the rows (a batch that permutes its rows gives
+the same blocks). The blocks of a batch are those of its distinct instances: a slice of the rows has the blocks of
+the instances it holds, so `block(task_ids[g])` is `searchsorted(static_task_ids, task_ids[g])`.
+
+The entities in `static_args` are **graph-local**, because the block belongs to the instance and not to a graph: an
+object is its instance-local id (`task.objects[id]`), the auxiliary entity of a nullary tuple is `num_objects`, and the
+predicate slot of a predicate relation (with `predicate_virtual_nodes`) holds the predicate's key, the `entity_ref` of
+its virtual node. A model that wants the repeated form adds `entity_offsets[g]` to the object and auxiliary ids of every
+graph `g` that uses the block of `task_ids[g]`, and looks the key up among the virtual nodes of `g`. A graph's
+entities are the same as in the repeated form: an object, auxiliary or virtual node that only a static tuple uses
+still exists in the graph. The `entity_ref` of a goal entity is its tuple index among the graph's own tuples, which in
+the shared form does not count the static tuples.
+
+```python
+import numpy as np
+import mymyr
+from mymyr import encoding
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+shared = encoding.FlatRelationEncoder(task, statics="shared")
+repeated = encoding.FlatRelationEncoder(task)
+states = [task.initial_state, task.successor_states(task.initial_state)[0]]
+small, full = shared.encode(states).as_dict(), repeated.encode(states).as_dict()
+
+arities = shared.schema.relation_arities
+k = 0                                               # the first static relation
+relation = int(small["static_relations"][k])
+for g in range(small["num_graphs"]):
+    block = int(np.searchsorted(small["static_task_ids"], small["task_ids"][g]))
+    lo, hi = small["static_arg_offsets"][block * len(small["static_relations"]) + k :][:2]
+    local = small["static_args"][lo:hi].reshape(-1, arities[relation])
+    rebuilt = local + small["entity_offsets"][g]    # no predicate slots without predicate_virtual_nodes
+    cell = g * small["num_relations"] + relation
+    lo, hi = full["relation_arg_offsets"][cell : cell + 2]
+    assert np.array_equal(rebuilt, full["relation_args"][lo:hi].reshape(-1, arities[relation]))
+    assert small["relation_counts"][g, relation] == 0   # the graph's own cell is empty
+```
+
+The rest of the batch follows the same rules as a repeated one:
+
+- **Layouts and index types** are as before; the static arrays are in the batch's index type.
+- **Slices.** Encoding a slice of a shared batch gives the slice of its graphs, rebased as in the repeated form, with the
+  blocks of the instances the slice holds. The block of an instance is the same in the slice and in the batch.
+- **Capacities.** `capacities` takes the keys `static_instances` (the blocks, `I_b`) and `static_args` (`A_s`) as well,
+  required with `statics='shared'` and refused otherwise. `static_task_ids` and `static_args` are zero after the
+  true sizes, `static_offsets` and `static_arg_offsets` repeat their last value, and `sizes` gains `static_instances`,
+  `static_tuples` and `static_args`. A batch that does not fit overflows like any capacity.
+- **Streams** flush the same batch as `encode` over the rows, with `capacities` as above.
+- **Names.** `entity_names` and `describe` give the same names and tuples as for the repeated batch; the static tuples
+  of a graph are listed in their relations, in the order of the repeated form.
+- **Validation.** The C++ `validate` also checks the blocks: the instances, the offsets, the
+  entities against the instance's objects and the sort order of the tuples.
+- **The device** does not encode shared statics: the device encoder and the torch op refuse them before any launch, with
+  a `mymyr: encoding:` message. Encode the rows on the host.
 
 ## Memory of batches
 
@@ -470,7 +544,8 @@ relations. An encoder has the same properties.
   targets together with a horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
   `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
-  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy). It does not
+  shape the output but not the catalog (target sources, layout, index type, horizon mode and root policy), and
+  `statics='shared'` (the repeated form adds nothing, so existing fingerprints are unchanged). It does not
   depend on declaration order, on predicate ids, on the process or on the build.
 
 ## C++
@@ -486,6 +561,14 @@ tuples, args, targets); `fill(in, sizes, buffers, pool, scratch)` then writes it
 sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scratch, sizes)` returns a bundle whose
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The host encoder
 runs on the CPU.
+
+With `FlatOptions::statics = Statics::Shared` (`schema.shared_statics()`) the calls take the capacity
+`StaticShape{instances, args}` and report `StaticSizes{instances, tuples, args}` after the batch's: `count(in, pool,
+scratch, &static_sizes)`, `encode_capacity(..., sizes, &static_shape, &static_sizes)`, `encode_into(..., scratch,
+&static_shape, &static_sizes)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
+(`static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations`), null iff the statics are
+repeated. `require_repeated_statics(options, family)` is the refusal that an encoding without shared statics (the
+device encoder) makes.
 
 `mymyr/cuda/encoding.hpp`, linked with `mymyr::cuda`, has the [device encoder](#encoding-on-the-device):
 `cuda::DeviceEncoder(context, encoder)` uploads the encoder's context, `reserve` and `acquire` give an

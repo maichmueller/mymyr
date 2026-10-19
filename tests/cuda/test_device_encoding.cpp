@@ -1186,6 +1186,12 @@ TEST(DeviceEncoderSchema, RefusesActionTargets)
     o.targets = {encoding::TargetSource::Action};
     expect_schema_refusal(o, "action targets");
 }
+TEST(DeviceEncoderSchema, RefusesSharedStatics)
+{
+    encoding::FlatOptions o;
+    o.statics = encoding::Statics::Shared;
+    expect_schema_refusal(o, "shared statics (statics='shared')");
+}
 TEST(DeviceEncoderSchema, RefusesFullHorizons)
 {
     encoding::FlatOptions o;
