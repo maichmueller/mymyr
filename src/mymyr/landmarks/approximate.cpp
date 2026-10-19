@@ -295,10 +295,8 @@ private:
         std::vector<std::vector<CanonicalAtom>> out;
         std::set<CanonicalAtom> expanded(m_landmarks.begin(), m_landmarks.end());
         std::vector<CanonicalAtom> frontier = m_landmarks;
-        for (usize depth = 0; !frontier.empty(); ++depth)
+        for (usize depth = 0; !frontier.empty() && depth < O.max_disjunctive_landmark_depth; ++depth)
         {
-            if (O.max_disjunctive_landmark_depth > 0 && depth >= O.max_disjunctive_landmark_depth)
-                break;
             std::vector<CanonicalAtom> next;
             for (CanonicalAtom a : frontier)
             {

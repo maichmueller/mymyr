@@ -225,7 +225,7 @@ def test_mixed_expand_equals_single(sets, name):
     tasks = sets[name]
     t = rl.TaskTable(tasks)
     states, ids = mixed_batch(t, tasks)
-    x = rl.expand(t, states, ids, goal=True, K=8)
+    x = rl.expand(t, states, ids, goal=True, k=8)
     check_rows(t, tasks, states, ids, x, K=8)
     assert x.num_objects == max(t.num_objects) and x.num_schemas == t.num_schemas
     # the actions are named by their rows' instances
@@ -263,10 +263,10 @@ def test_device_mixed_expand_equals_host(sets, name):
     tasks = sets[name]
     t = rl.TaskTable(tasks)
     states, ids = mixed_batch(t, tasks, per=6, seed=3)
-    host = rl.expand(t, states, ids, goal=True, K=16)
+    host = rl.expand(t, states, ids, goal=True, k=16)
     s = torch.from_numpy(states.view(np.int64)).to(dev)
     tid = torch.from_numpy(ids).to(dev)
-    d = rl.expand(t, s, tid, goal=True, K=16)
+    d = rl.expand(t, s, tid, goal=True, k=16)
     for f in ("succ", "parent", "schema", "binding", "goal", "offsets"):
         got = getattr(d, f).cpu().numpy()
         want = np.asarray(getattr(host, f))

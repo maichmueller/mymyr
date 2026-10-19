@@ -368,7 +368,7 @@ TEST(HorizonGraphs, AStateSpaceGivesTheGraphsOfItsExpansion)
         space_options.max_states = 20000;
         space_options.remove_if_unsolvable = false;
         const datasets::StateSpaceResult result = datasets::generate_state_space(task, space_options);
-        if (result.status != datasets::StateSpaceStatus::Ok)
+        if (result.status != search::SearchStatus::Exhausted)
             continue;  // the space is too large for the test
         ++tested;
         const datasets::StateSpace& space = *result.space;
@@ -413,7 +413,7 @@ TEST(HorizonGraphs, AStateOutsideTheSpaceIsRefused)
 {
     const TaskPtr task = test::pddl_task("blocks", "smedium");
     const auto result = datasets::generate_state_space(task);
-    ASSERT_EQ(result.status, datasets::StateSpaceStatus::Ok);
+    ASSERT_EQ(result.status, search::SearchStatus::Exhausted);
     const datasets::StateSpace& space = *result.space;
     SuccessorGraph graph{space.num_states(),
                          space.words(),

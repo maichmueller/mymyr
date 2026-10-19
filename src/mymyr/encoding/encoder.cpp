@@ -5,7 +5,6 @@
 #include "mymyr/core/bitset.hpp"
 #include "mymyr/task/workspace.hpp"
 
-#include <cassert>
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -75,7 +74,8 @@ bool same_input(const EncodeInput& a, const EncodeInput& b)
            ha.edge_src == hb.edge_src && ha.edge_dst == hb.edge_dst && ha.edge_schema == hb.edge_schema &&
            ha.edge_binding == hb.edge_binding && ha.label_width == hb.label_width &&
            same_layers(a.subgoals, b.subgoals) && same_layers(a.history.masks, b.history.masks) &&
-           a.history.dt == b.history.dt && a.history.count == b.history.count && a.states.data == b.states.data && a.states.rows == b.states.rows && a.states.words == b.states.words &&
+           a.history.dt == b.history.dt && a.history.count == b.history.count && a.states.data == b.states.data &&
+           a.states.rows == b.states.rows && a.states.words == b.states.words &&
            a.states.stride == b.states.stride && a.states.numeric_words == b.states.numeric_words &&
            a.task_ids == b.task_ids && a.derived == b.derived && a.derived_stride == b.derived_stride &&
            a.goal_pos == b.goal_pos && a.goal_neg == b.goal_neg && a.goal_stride == b.goal_stride &&
@@ -128,8 +128,8 @@ struct Pass
         if (in.history.masks.layers == 0)
             return 0;
         const u32 valid = history_valid(g);
-        const u32 k = context.schema().options().history_max_steps;
-        return k != 0 && valid > k ? k : valid;
+        const std::optional<u32> k = context.schema().options().history_max_steps;
+        return k && valid > *k ? *k : valid;
     }
 
     /// The cells of graph g of `v`'s instance.
@@ -181,15 +181,25 @@ struct Pass
         row.layers = &layers;
     }
 
-    /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff it
-    /// has any).
+    /// Computes the subgoal levels of a row that has subgoal layers, into `storage`; the state words, and so the
+    /// derived words of the row, are final. Out of line, like attach_layers.
+    [[gnu::noinline]] void bind_levels(const detail::InstanceView& v, const detail::RowInput& row,
+                                       detail::RowLayers& layers, std::vector<u64>& storage) const noexcept
+    {
+        if (layers.subgoals.layers == 0)
+            return;
+        storage.resize(detail::effective_layer_words(v, layers.subgoals));
+        layers.levels = detail::effective_layers(v, detail::goal_words(v, row), layers.subgoals, row.atoms, row.derived,
+                                                 storage.data());
+    }
+
+    /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff
+    /// it has any).
     template<bool Layered>
     [[nodiscard]] detail::RowInput row_input(u64 g, const detail::InstanceView& v, u32* starts, u32* cursors,
                                              detail::RowLayers& layers) const noexcept
     {
         detail::RowInput row{in.states.row(g), derived_of(g, v)};
-        if constexpr (Layered)
-            attach_layers(g, layers, row);
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -213,6 +223,8 @@ struct Pass
                            starts,
                            cursors};
         }
+        if constexpr (Layered)
+            attach_layers(g, layers, row);
         return row;
     }
 
@@ -265,7 +277,7 @@ void count_range(const Pass& p, u32 t)
     m.narrow_subgoals = m.bad_subgoal_bits = m.narrow_history = m.bad_history_bits = m.bad_history_count = k_none;
     m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
-    const bool keep_counts = p.relation_major || p.view.num_virtual != 0;
+    const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.layered;
     if (p.starts_stride)
     {
         m.action_starts.resize((hi - lo) * p.starts_stride);
@@ -322,6 +334,8 @@ void count_range(const Pass& p, u32 t)
                 std::copy_n(engine.derived(), bits::words_for(task.atoms().derived_slots()), dst);
             }
         }
+        if (Layered && input.layers)
+            p.bind_levels(v, input, layers, m.effective);
         const detail::CellList cells = detail::cell_list<Layered>(v, input);
         u32* cell_counts = nullptr;
         if (keep_counts)
@@ -333,7 +347,8 @@ void count_range(const Pass& p, u32 t)
         detail::GraphTotals& totals = m.totals[g - lo];
         totals = detail::count_graph<Layered>(v, input, cell_counts, m.virtual_scratch.data());
         if (totals.flags & (detail::k_graph_bad_row | detail::k_graph_bad_goal | detail::k_graph_bad_action_order |
-                            detail::k_graph_bad_action_label | detail::k_graph_bad_layers | detail::k_graph_bad_history))
+                            detail::k_graph_bad_action_label | detail::k_graph_bad_layers |
+                            detail::k_graph_bad_history))
         {
             if (totals.flags & detail::k_graph_bad_row)
                 m.bad_bits = std::min(m.bad_bits, g);
@@ -395,6 +410,8 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const detail::RowInput row = p.row_input<Layered>(
             g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
             m.action_cursors.data(), layers);
+        if (Layered && row.layers)
+            p.bind_levels(v, row, layers, m.effective);
         entity_offsets[g] = static_cast<I>(entity);
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         if (p.relation_major)
@@ -724,85 +741,48 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return encode(in, pool, scratch);
 }
 
-namespace
-{
-/// The arrays of a bundle that allocate() built, in the order it adds them: task_ids, num_objects, entity_offsets,
-/// [entity_role, entity_ref], [relation_counts], relation_offsets, relation_arg_offsets, relation_args,
-/// [goal_complete], [target_offsets, target_entity, target_group], [history_offsets, history_entity, history_dt].
-FlatBuffers buffers_of(rl::ArrayBundle& bundle, bool entity_arrays, bool counts, bool goal_complete, bool targets,
-                       bool history)
-{
-    FlatBuffers out;
-    const auto& arrays = bundle.arrays();
-    usize next = 0;
-    auto take = [&](const char* name)
-    {
-        assert(arrays[next].name == name);
-        return bundle.mutable_data(arrays[next++]);
-    };
-    out.task_ids = static_cast<i32*>(take("task_ids"));
-    out.num_objects = take("num_objects");
-    out.entity_offsets = take("entity_offsets");
-    if (entity_arrays)
-    {
-        out.entity_role = static_cast<u8*>(take("entity_role"));
-        out.entity_ref = take("entity_ref");
-    }
-    if (counts)
-        out.relation_counts = take("relation_counts");
-    out.relation_offsets = take("relation_offsets");
-    out.relation_arg_offsets = take("relation_arg_offsets");
-    out.relation_args = take("relation_args");
-    if (goal_complete)
-        out.goal_complete = static_cast<u8*>(take("goal_complete"));
-    if (targets)
-    {
-        out.target_offsets = take("target_offsets");
-        out.target_entity = take("target_entity");
-        out.target_group = static_cast<u8*>(take("target_group"));
-    }
-    if (history)
-    {
-        out.history_offsets = take("history_offsets");
-        out.history_entity = take("history_entity");
-        out.history_dt = static_cast<i32*>(take("history_dt"));
-    }
-    return out;
-}
-}  // namespace
-
-rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const
+FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const
 {
     const IndexType index = m_schema->options().index;
     const u64 R = m_schema->num_relations();
     const rl::DType itype = index == IndexType::I64 ? rl::DType::I64 : rl::DType::I32;
+    constexpr usize absent = std::numeric_limits<usize>::max();
     rl::ArrayBundle::Builder builder;
-    builder.add_uninitialized("task_ids", rl::DType::I32, shape1(graphs));
-    builder.add_uninitialized("num_objects", itype, shape1(graphs));
-    builder.add_uninitialized("entity_offsets", itype, shape1(graphs + 1));
+    usize count = 0;
+    auto reserve = [&](const char* name, rl::DType dtype, const rl::ArrayShape& shape)
+    {
+        builder.add_uninitialized(name, dtype, shape);
+        return count++;
+    };
+    const usize task_ids = reserve("task_ids", rl::DType::I32, shape1(graphs));
+    const usize num_objects = reserve("num_objects", itype, shape1(graphs));
+    const usize entity_offsets = reserve("entity_offsets", itype, shape1(graphs + 1));
+    usize entity_role = absent, entity_ref = absent, relation_counts = absent, goal_complete = absent,
+          target_offsets = absent, target_entity = absent, target_group = absent, history_offsets = absent,
+          history_entity = absent, history_dt = absent;
     if (!m_schema->implicit_entity_arrays())
     {
-        builder.add_uninitialized("entity_role", rl::DType::U8, shape1(entities));
-        builder.add_uninitialized("entity_ref", itype, shape1(entities));
+        entity_role = reserve("entity_role", rl::DType::U8, shape1(entities));
+        entity_ref = reserve("entity_ref", itype, shape1(entities));
     }
     if (m_schema->emits_counts())
-        builder.add_uninitialized("relation_counts", itype, shape2(graphs, R));
-    builder.add_uninitialized("relation_offsets", itype, shape1(graphs * R + 1));
-    builder.add_uninitialized("relation_arg_offsets", itype, shape1(graphs * R + 1));
-    builder.add_uninitialized("relation_args", itype, shape1(args));
+        relation_counts = reserve("relation_counts", itype, shape2(graphs, R));
+    const usize relation_offsets = reserve("relation_offsets", itype, shape1(graphs * R + 1));
+    const usize relation_arg_offsets = reserve("relation_arg_offsets", itype, shape1(graphs * R + 1));
+    const usize relation_args = reserve("relation_args", itype, shape1(args));
     if (m_schema->has_goal_complete())
-        builder.add_uninitialized("goal_complete", rl::DType::U8, shape1(graphs));
+        goal_complete = reserve("goal_complete", rl::DType::U8, shape1(graphs));
     if (m_schema->has_targets())
     {
-        builder.add_uninitialized("target_offsets", itype, shape1(graphs + 1));
-        builder.add_uninitialized("target_entity", itype, shape1(targets));
-        builder.add_uninitialized("target_group", rl::DType::U8, shape1(targets));
+        target_offsets = reserve("target_offsets", itype, shape1(graphs + 1));
+        target_entity = reserve("target_entity", itype, shape1(targets));
+        target_group = reserve("target_group", rl::DType::U8, shape1(targets));
     }
     if (m_schema->has_history())
     {
-        builder.add_uninitialized("history_offsets", itype, shape1(graphs + 1));
-        builder.add_uninitialized("history_entity", itype, shape1(history));
-        builder.add_uninitialized("history_dt", rl::DType::I32, shape1(history));
+        history_offsets = reserve("history_offsets", itype, shape1(graphs + 1));
+        history_entity = reserve("history_entity", itype, shape1(history));
+        history_dt = reserve("history_dt", rl::DType::I32, shape1(history));
     }
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
@@ -811,7 +791,27 @@ rl::ArrayBundle FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 ta
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
     builder.scalar("statics", 0);
-    return builder.build();
+    Allocation allocation{std::make_shared<rl::ArrayBundle>(builder.build()), {}};
+    rl::ArrayBundle& bundle = *allocation.bundle;
+    auto at = [&](usize i) -> void* { return i == absent ? nullptr : bundle.mutable_data(bundle.arrays()[i]); };
+    FlatBuffers& out = allocation.buffers;
+    out.task_ids = static_cast<i32*>(at(task_ids));
+    out.num_objects = at(num_objects);
+    out.entity_offsets = at(entity_offsets);
+    out.entity_role = static_cast<u8*>(at(entity_role));
+    out.entity_ref = at(entity_ref);
+    out.relation_counts = at(relation_counts);
+    out.relation_offsets = at(relation_offsets);
+    out.relation_arg_offsets = at(relation_arg_offsets);
+    out.relation_args = at(relation_args);
+    out.goal_complete = static_cast<u8*>(at(goal_complete));
+    out.target_offsets = at(target_offsets);
+    out.target_entity = at(target_entity);
+    out.target_group = static_cast<u8*>(at(target_group));
+    out.history_offsets = at(history_offsets);
+    out.history_entity = at(history_entity);
+    out.history_dt = static_cast<i32*>(at(history_dt));
+    return allocation;
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in, ThreadPool& pool,
@@ -831,13 +831,9 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(graphs * R + 1, index, "relation cells");
         detail::check_index_range(graphs + 1, index, "graphs");
     }
-    auto bundle = std::make_shared<rl::ArrayBundle>(
-        allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history));
-    fill(in, sizes,
-         buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(), m_schema->has_goal_complete(),
-                    m_schema->has_targets(), m_schema->has_history()),
-         pool, scratch);
-    return bundle;
+    Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history);
+    fill(in, sizes, allocation.buffers, pool, scratch);
+    return std::move(allocation.bundle);
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in,
@@ -850,10 +846,10 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();
-    auto bundle = std::make_shared<rl::ArrayBundle>(
-        allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history));
-    const FlatBuffers out = buffers_of(*bundle, !m_schema->implicit_entity_arrays(), m_schema->emits_counts(),
-                                       m_schema->has_goal_complete(), m_schema->has_targets(), m_schema->has_history());
+    Allocation allocation =
+        allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history);
+    const FlatBuffers out = allocation.buffers;
+    const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
     // the entries a batch does not use are zero, and an overflowing batch is all zero
     auto zero = [](void* data, u64 from, u64 to, usize width)

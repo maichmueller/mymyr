@@ -433,6 +433,7 @@ TEST(EncoderThreads, ASmallBatchRunsOnTheCallingThread)
 
 TEST(EncoderCapacity, ExactShortAndZeroCapacitiesWriteNothingPastThem)
 {
+    test::dirty_recycled_blocks();
     run_capacity_cases<i32>(options_with(Layout::Graph));
     run_capacity_cases<i32>(options_with(Layout::Relation));
     run_capacity_cases<i64>(options_with(Layout::Relation, IndexType::I64));
@@ -440,6 +441,7 @@ TEST(EncoderCapacity, ExactShortAndZeroCapacitiesWriteNothingPastThem)
 
 TEST(EncoderCapacity, ABundleAtCapacityHoldsTheBatchThenZeros)
 {
+    test::dirty_recycled_blocks();
     const auto table = two_instance_table();
     const test::Rows rows = mixed_rows(*table, 20, 6);
     for (const Layout layout : {Layout::Graph, Layout::Relation})
@@ -534,6 +536,7 @@ TEST(EncoderOmitted, WithoutCountsTheOffsetsStillGiveThem)
 
 TEST(EncoderOmitted, ImplicitEntityArraysAreTheObjectsThenTheAuxiliaryEntity)
 {
+    test::dirty_recycled_blocks();
     const auto table = two_instance_table();
     const test::Rows rows = mixed_rows(*table, 30, 4);
     FlatOptions options = options_with(Layout::Graph);

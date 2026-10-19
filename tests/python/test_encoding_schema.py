@@ -124,8 +124,9 @@ def test_helper_predicates_are_stable_with_quantified_actions_in_other_domains()
 
 
 def test_catalog_metadata_is_consistent():
-    schema = EncodingSchema(text_task("philosophers__p03-phil4"), max_goal_level=1, goal_derivations=["plain", "unsatisfied"],
-                            target_sources=["goal", "subgoal", "history"], history=True, predicate_virtual_nodes=True)  # fmt: skip
+    schema = EncodingSchema(text_task("philosophers__p03-phil4"), max_goal_level=1,
+                            goal_derivations=["plain", "unsatisfied"], target_sources=["goal", "subgoal", "history"],
+                            history=True, predicate_virtual_nodes=True)  # fmt: skip
     n = schema.num_relations
     columns = [
         schema.relation_names, schema.relation_arities, schema.relation_logical_arities, schema.relation_lanes,
@@ -188,8 +189,8 @@ def test_nullary_and_derived_predicates_follow_the_options():
 
 def test_options_round_trip_and_normalize():
     task = text_task("gripper__prob05")
-    schema = EncodingSchema(task, goal_derivations=("satisfied", "plain", "satisfied"), target_sources=["history", "goal"],
-                            history=True, history_max_steps=3)
+    schema = EncodingSchema(task, goal_derivations=("satisfied", "plain", "satisfied"),
+                            target_sources=["history", "goal"], history=True, history_max_steps=3)
     assert schema.options["goal_derivations"] == ("plain", "satisfied")
     assert schema.options["target_sources"] == ("goal", "history")
     assert schema.options["history"] is True and schema.options["history_max_steps"] == 3
@@ -202,7 +203,7 @@ def test_options_round_trip_and_normalize():
 
 
 # ------------------------------------------------------------------------------------------------ fingerprint
-PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0x1A9BE3C01D8DC4E2, 0x2F5279FDFE082E1C, 0xCCB27EEFA062F265
+PIN_DELTA, PIN_TARGETS, PIN_EXCLUDE = 0xF3C870FB1B1D5A8F, 0x2F5279FDFE082E1C, 0x069637BAFBF3C417
 FINGERPRINT_VARIANTS = {
     "goal_derivations": {"goal_derivations": ["plain"]},
     "goal_derivations_unsat": {"goal_derivations": ["plain", "satisfied", "unsatisfied"]},

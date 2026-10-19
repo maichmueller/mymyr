@@ -109,8 +109,8 @@ def test_capacity_pool_and_threads(name):
         for k in range(idx.shape[1]):
             want = full.derived[idx[i, k]] if idx[i, k] >= 0 else np.zeros_like(full.derived[0])
             assert np.array_equal(p.derived[i, k], want)
-    assert rl.expand(task, states, K=8).padded.derived is None
-    assert rl.expand(task, states, K=8, derived=True).padded.derived.shape[:2] == (len(states), 8)
+    assert rl.expand(task, states, k=8).padded.derived is None
+    assert rl.expand(task, states, k=8, derived=True).padded.derived.shape[:2] == (len(states), 8)
 
 
 def test_expand_into_destination():
@@ -291,13 +291,13 @@ def same(device_array, host_array):
 def test_device_words_equal_the_host(case):
     torch = torch_cuda()
     table, rows, ids = encode_rows(device_cases()[case])
-    host = rl.expand(table, rows, ids, goal=True, derived=True, K=48)
+    host = rl.expand(table, rows, ids, goal=True, derived=True, k=48)
     dev = torch.from_numpy(rows.view(np.int64)).cuda()
     dev_ids = torch.from_numpy(ids).cuda() if ids is not None else None
     D = host.derived_words
     assert D > 0 and host.total > 0
 
-    x = rl.expand(table, dev, dev_ids, goal=True, derived=True, K=48)
+    x = rl.expand(table, dev, dev_ids, goal=True, derived=True, k=48)
     assert x.derived.device.type == "cuda" and x.derived_words == D
     assert same(x.derived, host.derived)
     for field in ("succ", "goal", "parent", "schema", "binding", "offsets"):
@@ -306,7 +306,7 @@ def test_device_words_equal_the_host(case):
     assert same(x.pad(3).derived, host.pad(3).derived)
 
     # every other output is unchanged by asking for the words, and none are returned unasked
-    plain = rl.expand(table, dev, dev_ids, goal=True, K=48)
+    plain = rl.expand(table, dev, dev_ids, goal=True, k=48)
     assert plain.derived is None and plain.padded.derived is None
     assert torch.equal(plain.goal, x.goal) and torch.equal(plain.succ, x.succ)
 

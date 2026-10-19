@@ -284,7 +284,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
                                      nb::handle index_dtype, bool emit_counts, nb::handle entity_arrays,
                                      nb::handle horizon_mode, nb::handle root_policy, bool parent_relation,
                                      bool sibling_relation, bool cousin_relation, bool history,
-                                     nb::handle history_max_steps)
+                                     nb::handle history_max_steps, bool horizon_optional)
 {
     using namespace encoding;
     FlatOptions options;
@@ -309,10 +309,10 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.entity_arrays = choice(entity_arrays, "entity_arrays", parse_entity_arrays, "'auto', 'always'");
     if (!horizon_mode.is_none())
     {
-        options.horizon.mode =
-            choice(horizon_mode, "horizon_mode", parse_horizon_mode, "'full', 'delta', 'action' or None");
+        const std::string allowed = horizon_optional ? "'full', 'delta', 'action' or None" : "'full', 'delta', 'action'";
+        options.horizon.mode = choice(horizon_mode, "horizon_mode", parse_horizon_mode, allowed);
         if (options.horizon.mode == HorizonMode::None)  // None is the spelling of no horizon
-            option_error("horizon_mode", "'full', 'delta', 'action' or None", horizon_mode);
+            option_error("horizon_mode", allowed, horizon_mode);
     }
     if (!root_policy.is_none())
         options.horizon.root =
@@ -321,7 +321,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.horizon.sibling_relation = sibling_relation;
     options.horizon.cousin_relation = cousin_relation;
     options.history = history;
-    options.history_max_steps = int_arg<u32>(history_max_steps, "history_max_steps", 0);
+    options.history_max_steps = opt_int_arg<u32>(history_max_steps, "history_max_steps", 1);
     return options;
 }
 
@@ -357,7 +357,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["sibling_relation"] = o.horizon.sibling_relation;
     out["cousin_relation"] = o.horizon.cousin_relation;
     out["history"] = o.history;
-    out["history_max_steps"] = o.history_max_steps;
+    out["history_max_steps"] = o.history_max_steps ? nb::object(nb::cast(*o.history_max_steps)) : nb::none();
     return out;
 }
 
@@ -366,7 +366,7 @@ constexpr const char* k_option_doc =
     "added_unsatisfied for the delta horizon). max_goal_level: subgoal levels beyond the goal (0 to 3): the "
     "relations `[sg]`, `[ssg]`, `[sssg]` of each level hold the literals of the `subgoals` layers of a row. history: "
     "the history relations `[+]p[hist]` / `[-]p[hist]` hold the literals of the `history` steps of a row; "
-    "history_max_steps: only the newest this many steps of a row are encoded (0: all). "
+    "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
     "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
     "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
@@ -425,10 +425,15 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                             nb::handle history_max_steps)
     {
         const TableRef reference = table_of(table);
+        if ((H == HorizonArgs::Required || H == HorizonArgs::Rooted) && horizon_mode.is_none())
+            throw nb::value_error(
+                "mymyr: encoding: a horizon encoder needs a horizon_mode ('full', 'delta' or 'action'); "
+                "FlatRelationEncoder encodes states without a horizon");
         const encoding::FlatOptions options = schema_options(
             max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
             goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays, horizon_mode, root_policy,
-            parent_relation, sibling_relation, cousin_relation, history, history_max_steps);
+            parent_relation, sibling_relation, cousin_relation, history, history_max_steps,
+            H == HorizonArgs::Optional);
         make(self, reference, options);
     };
     if constexpr (H == HorizonArgs::Optional)
@@ -444,7 +449,7 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             },
             "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "horizon_mode"_a = nb::none(),
             "root_policy"_a = nb::none(), "parent_relation"_a = false, "sibling_relation"_a = false,
-            "cousin_relation"_a = false, "history"_a = false, "history_max_steps"_a = 0, doc);
+            "cousin_relation"_a = false, "history"_a = false, "history_max_steps"_a.none() = nb::none(), doc);
     }
     else if constexpr (H == HorizonArgs::Absent)
     {
@@ -455,7 +460,7 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                 construct(self, MYMYR_ENCODING_PASS, nb::none(), nb::none(), false, false, false, history,
                           history_max_steps);
             },
-            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "history"_a = false, "history_max_steps"_a = 0, doc);
+            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "history"_a = false, "history_max_steps"_a.none() = nb::none(), doc);
     }
     else if constexpr (H == HorizonArgs::Required)
     {
@@ -469,12 +474,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                         Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingRootPolicy> root_policy,
                         bool parent_relation, bool sibling_relation, bool cousin_relation)
             {
-                if (horizon_mode.is_none())
-                    throw nb::value_error(
-                        "mymyr: encoding: horizon_mode is None (no horizon): FlatRelationEncoder encodes states; a "
-                        "horizon encoder needs 'full', 'delta' or 'action'");
                 construct(self, MYMYR_ENCODING_PASS, horizon_mode, root_policy, parent_relation, sibling_relation,
-                          cousin_relation, false, nb::int_(0));
+                          cousin_relation, false, nb::none());
             },
             "table"_a, nb::kw_only(), "horizon_mode"_a.none(), MYMYR_ENCODING_DEFAULTS, "root_policy"_a = nb::none(),
             "parent_relation"_a = false, "sibling_relation"_a = false, "cousin_relation"_a = false, doc);
@@ -491,10 +492,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                         Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingRootPolicy> root_policy,
                         bool parent_relation, bool sibling_relation, bool cousin_relation)
             {
-                if (horizon_mode.is_none())
-                    throw nb::value_error("mymyr: encoding: horizon_mode must be 'full', 'delta' or 'action', not None");
                 construct(self, MYMYR_ENCODING_PASS, horizon_mode, root_policy, parent_relation, sibling_relation,
-                          cousin_relation, false, nb::int_(0));
+                          cousin_relation, false, nb::none());
             },
             "table"_a, nb::kw_only(), "horizon_mode"_a.none() = "full", MYMYR_ENCODING_DEFAULTS,
             "root_policy"_a = "encode_only", "parent_relation"_a = true, "sibling_relation"_a = false,
@@ -509,7 +508,7 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             {
                 const nb::str fixed_mode(H == HorizonArgs::Transition ? "full" : "delta");
                 construct(self, MYMYR_ENCODING_PASS, fixed_mode, root_policy, parent_relation, false, false, false,
-                          nb::int_(0));
+                          nb::none());
             },
             "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "root_policy"_a = "exclude", "parent_relation"_a = false,
             doc);
@@ -789,8 +788,9 @@ LayerArray import_layer_array(rlimp::Imports& imports, nb::handle value, const c
     if (!out.data)
         throw nb::type_error((std::string("mymyr: encoding: ") + name + " must be an array, not None").c_str());
     if (static_cast<u64>(lead[0]) != rows && !(may_share && lead[0] == 1))
-        throw nb::value_error((std::string("mymyr: encoding: ") + name + " has " + std::to_string(lead[0]) + " rows: one per state (" +
-                               std::to_string(rows) + (may_share ? ") or a single shared row" : ")"))
+        throw nb::value_error((std::string("mymyr: encoding: ") + name + " has " + std::to_string(lead[0]) +
+                               " rows: one per state (" + std::to_string(rows) +
+                               (may_share ? ") or a single shared row" : ")"))
                                   .c_str());
     out.rows = static_cast<u64>(lead[0]);
     out.layers = static_cast<u32>(lead[1]);
@@ -837,8 +837,8 @@ usize layer_tuple_size(nb::handle value, const char* shape_message, std::initial
     throw nb::value_error(shape_message);
 }
 
-/// The subgoal layers of the rows from `subgoals`, a pair (pos, neg) or a quadruple that adds the masks over the derived
-/// slots: arrays [N, L, W] or [1, L, W] (the layers of every row) of 64-bit words or 32-bit halves.
+/// The subgoal layers of the rows from `subgoals`, a pair (pos, neg) or a quadruple that adds the masks over the
+/// derived slots: arrays [N, L, W] or [1, L, W] (the layers of every row) of 64-bit words or 32-bit halves.
 void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, encoding::EncodeInput& input)
 {
     constexpr const char* k_shape =
@@ -856,11 +856,13 @@ void import_subgoals(rlimp::Imports& imports, nb::handle subgoals, u64 rows, enc
 void import_history(rlimp::Imports& imports, std::vector<i32>& dt_copy, std::vector<i32>& count_copy,
                     nb::handle history, u64 count_rows, encoding::HistoryInput& out)
 {
-    constexpr const char* k_shape = "mymyr: encoding: history must be (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
-                                    "dt, count, derived_pos, derived_neg)";
+    constexpr const char* k_shape =
+        "mymyr: encoding: history must be (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, dt, count, derived_pos, "
+        "derived_neg)";
     const usize size = layer_tuple_size(history, k_shape, {3, 4, 6});
-    static constexpr const char* names[] = {"history[0] (pos)", "history[1] (neg)", "history[2] (dt)",
-                                            "history[3] (count)", "history[4] (derived_pos)", "history[5] (derived_neg)"};
+    static constexpr const char* names[] = {"history[0] (pos)",         "history[1] (neg)",
+                                            "history[2] (dt)",          "history[3] (count)",
+                                            "history[4] (derived_pos)", "history[5] (derived_neg)"};
     import_layer_pair(imports, history, 0, names, count_rows, false, false, out.masks);
     const i64 steps = out.masks.layers;
     out.dt = imports.ints32(history[2], names[2], {static_cast<i64>(count_rows), steps}, dt_copy);
@@ -1097,7 +1099,6 @@ void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb
     const i32* ids = import_task_ids(field("task_ids"), horizon.graphs, table.size(), rows.ids_copy, rows.ids_keep);
     if (horizon.graphs && table.size() > 1 && !ids)
         throw nb::value_error("mymyr: encoding: task_ids are required for a multi-instance table");
-    table.check_task_ids(ids, horizon.graphs);
     rows.input.task_ids = ids;
     // States given as objects belong to the task of their graph (the encoder reports offsets that are not valid)
     if (!states.owner_tasks.empty())
@@ -1240,8 +1241,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"entity_ref",
      "index [E]: an object's instance-local id; a goal, subgoal or history target entity's tuple (its index among the "
      "graph's tuples in graph-major order); an action entity's first row among its graph's rows of the expansion given "
-     "as `actions` (the expansion row is actions.offsets[g] + entity_ref); a history step's index among the valid steps "
-     "of its row (step entity_ref of the row's `history`); a predicate virtual node's key (the id of its "
+     "as `actions` (the expansion row is actions.offsets[g] + entity_ref); a history step's index among the valid "
+     "steps of its row (step entity_ref of the row's `history`); a predicate virtual node's key (the id of its "
      "predicate's state relation); -1 for the auxiliary entity. The same in both layouts. Absent when implicit."},
     {"relation_counts",
      "index [G, R]: the tuples of each (graph, relation) cell, indexed (g, r) in both layouts. Absent with "
@@ -1265,7 +1266,8 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "uint8 [T]: the group of each target, an index into target_group_names (0: goal, 1: subgoal, 2: action, 3: "
      "history). Absent like target_offsets."},
     {"history_offsets",
-     "index [G + 1]: graph g's history steps are [history_offsets[g], history_offsets[g + 1]). Absent without history."},
+     "index [G + 1]: graph g's history steps are [history_offsets[g], history_offsets[g + 1]). Absent without "
+     "history."},
     {"history_entity",
      "index [S]: the entity of each history step, graph after graph in step order (oldest first). Absent like "
      "history_offsets."},
@@ -1349,6 +1351,8 @@ ResultDict build_horizon(TableArg table_in, StatesLike roots_in, TaskIdsArg task
     const u32 threads = threads_arg(threads_in);
     const TableRef reference = table_of(table_in);
     const rl::TaskTable& table = *reference.table;
+    if (table.numeric_words() != 0)
+        throw nb::value_error("mymyr: encoding: the table is numeric: horizons of numeric states are not encoded");
     ImportedRows rows;
     const i32* ids = import_state_rows(rows, table, roots_in, task_ids);
     PyPool* held = pool_arg(pool_in);
@@ -1534,7 +1538,8 @@ void define_encoder_common(nb::class_<Py, Extra...>& cls, const char* class_name
             "(`[-]` for a negative literal; a nullary literal is `[+](handempty)[g]`), a subgoal entity "
             "`[+](on a b)[sg]` (`[ssg]`, `[sssg]` for the higher levels), an action entity `(unstack a b)`, a history "
             "step `history:<dt>#<i>` (i counts the graph's history steps from 0), a history target "
-            "`history:<dt>#<i>:[+](on a b)`, a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
+            "`history:<dt>#<i>:[+](on a b)`, a state entity of a horizon graph `target:<k>` (k is the index of its node "
+            "in the graph; the root is `target:0`), a predicate virtual node `predicate:on`. Entities of a graph that carry the same name (an object called "
             "`auxiliary`, a goal literal that two relations list) are told apart by position only. The names are built "
             "from the batch's arrays and the task; nothing is stored in the batch.")
         .def(
@@ -1604,9 +1609,9 @@ void bind_encoding(nb::module_& parent)
                 out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
                 return out;
             },
-            "After an encoding with capacities: the true entities, tuples, args and targets of the batch (and its history "
-            "steps, if the schema has history) and whether it overflowed (`overflow`: the batch is all zero), because "
-            "of the capacities (`capacity_overflow`) or the index type (`index_overflow`); None otherwise.")
+            "After an encoding with capacities: the true entities, tuples, args and targets of the batch (and its "
+            "history steps, if the schema has history) and whether it overflowed (`overflow`: the batch is all zero), "
+            "because of the capacities (`capacity_overflow`) or the index type (`index_overflow`); None otherwise.")
         .def(
             "as_dict",
             [](const PyFlatBatch& self, Arg<ann::Framework> framework)
@@ -1660,8 +1665,8 @@ void bind_encoding(nb::module_& parent)
              "(rl.expand's default); an expansion made with witness_pruning=True gives the pruned set of actions. "
              "subgoals: the subgoal layers of each row, (pos, neg) or (pos, neg, derived_pos, derived_neg): masks "
              "[N, L, W] ([N, L, D]), or [1, L, W] for layers shared by all rows, with L at most max_goal_level; layer "
-             "l fills the relations of level l + 1. A literal that the goal or a lower layer has is encoded once, at its "
-             "lowest level. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
+             "l fills the relations of level l + 1. A literal that the goal or a lower layer has is encoded once, at "
+             "its lowest level. history: the history of each row, (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, "
              "dt, count, derived_pos, derived_neg): masks [N, H, W] ([N, H, D]) of its steps oldest first, dt "
              "[N, H] integers and count [N] the valid steps of each row (a prefix; None: all H); only the newest "
              "history_max_steps of them are encoded. `mymyr.encoding.subgoal_masks` and `history_masks` build both "
@@ -1746,12 +1751,14 @@ void bind_encoding(nb::module_& parent)
     nb::class_<PyFlatRootedHorizonEncoder, PyFlatHorizonEncoder> rooted_class(
         module, "FlatRootedHorizonEncoder",
         "A FlatHorizonEncoder for horizons seen from their root: the root is an encoded state entity (`target:0`) that is "
-        "not a target candidate, and the `_parent_` relation holds the edges. With `sibling_relation` the relation "
-        "`_sibling_` holds every ordered pair (i, j) of different nodes that some node has an edge to both, and with "
-        "`cousin_relation` the relation `_cousin_` every ordered pair (i, j) of different nodes with an edge p -> i and an "
-        "edge q -> j where p and q are different siblings. Both are sets over the merged nodes of the horizon (parallel "
-        "edges count once, all parents of a node count), in ascending (i, j) order. It encodes what FlatHorizonEncoder "
-        "encodes, with other defaults: horizon_mode 'full', root_policy 'encode_only', parent_relation True.");
+        "not a target candidate, and the `_parent_` relation holds the edges. The parents of a node are the sources of "
+        "the `_parent_` edges into it (parallel edges count once, every distinct parent counts, a self-loop does not, and "
+        "with root_policy 'exclude' the root's edges are no parent edges). With `sibling_relation` the relation "
+        "`_sibling_` holds every ordered pair (i, j) of different nodes with a parent in common, and with "
+        "`cousin_relation` the relation `_cousin_` every ordered pair (i, j) of different nodes with a parent p of i and a "
+        "parent q of j that are different siblings. Both are sets over the merged nodes of the horizon, in ascending "
+        "(i, j) order. It encodes what FlatHorizonEncoder encodes, with other defaults: horizon_mode 'full', root_policy "
+        "'encode_only', parent_relation True.");
     static const std::string rooted_doc =
         std::string("The rooted horizon encoder of a Task, TaskHandle or one-domain TaskTable. ") + k_option_doc +
         k_horizon_option_doc;

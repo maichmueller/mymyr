@@ -19,12 +19,13 @@
 // The result does not depend on the pool or its size: expansion is deterministic, and merging and numbering are done
 // in a fixed order.
 //
-// Memory. The graphs of a call are held in memory, graph after graph: nodes * words * 8 bytes plus the edges
-// (4 * (3 + label_width) bytes each) and, while merging, a hash table of 8 bytes per node. HorizonBuild::depth bounds the
-// nodes of a graph by the number of states within that many actions of the root, HorizonBuild::max_nodes by a number
-// of your choice (the call refuses a graph above it, or stops adding nodes to it with `truncate`). Expansion runs in
-// chunks of at most k_horizon_chunk states, so the working memory beyond the result is bounded by the successors of a
-// chunk.
+// Memory. All the graphs of a call are built at once and held in memory. While they are built every node takes
+// 8 * words + 8 bytes (its row, its graph and number) and, when merging, 8 more for its hash and 8 to 16 for the hash
+// table; every edge takes 4 * (4 + label_width) bytes. The result (8 * words bytes per node, 4 * (3 + label_width) per
+// edge) is written from them, so the peak is about the sum of the two. HorizonBuild::depth bounds the nodes of a graph by
+// the number of states within that many actions of the root, HorizonBuild::max_nodes by a number of your choice (the
+// call refuses a graph above it, or stops adding nodes to it with `truncate`). Expansion runs in chunks of at most
+// k_horizon_chunk states, so the working memory beyond the above is bounded by the successors of a chunk.
 
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/encoding/encoder.hpp"

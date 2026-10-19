@@ -20,7 +20,7 @@ inline StateSpacePtr space_of(TaskPtr task)
     StateSpaceOptions o;
     o.remove_if_unsolvable = false;
     StateSpaceResult r = generate_state_space(std::move(task), o);
-    EXPECT_EQ(r.status, StateSpaceStatus::Ok);
+    EXPECT_EQ(r.status, search::SearchStatus::Exhausted);
     return r.space;
 }
 

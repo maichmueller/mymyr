@@ -328,7 +328,8 @@ def test_subgoal_tuples_and_subgoal_entities_are_compared():
     for i in subgoals:
         role, name = actual.entities[i]
         moved = copy(actual)
-        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if name.endswith("[sg]") else name.replace("[ssg]", "[sg]"))
+        higher = name.endswith("[sg]")
+        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if higher else name.replace("[ssg]", "[sg]"))
         assert {m.kind for m in compare(expected, moved, context)} == {"entity"}
         lost = copy(actual)
         del lost.entities[i]
@@ -341,7 +342,8 @@ def test_the_numbering_of_subgoal_entities_is_excused_but_their_names_are_not():
     swapped = copy(actual)
     swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
     assert compare(expected, swapped, context) == []
-    assert {m.kind for m in compare(expected, swapped, context, [n for n in NAMES if n != "subgoal_entity_order"])} == {"entity"}
+    strict = [n for n in NAMES if n != "subgoal_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, strict)} == {"entity"}
 
 
 def test_history_tuples_history_steps_and_history_targets_are_compared():
@@ -443,6 +445,29 @@ def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that
             extra.tuples[relation] = actual.tuples[relation] + actual.tuples[relation][:1]
             assert [(m.kind, m.where) for m in compare(expected, extra, context)] == [("tuple", relation)]
     assert found
+
+
+def test_a_goal_literal_without_a_slot_that_a_layer_lists_is_compared_in_the_native_goal():
+    for prefix, config, state in (("f08", "C4_L1", "s3"), ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
+        expected, actual, context = goal_case(config, state, prefix)
+        assert compare(expected, actual, context) == []
+        goal = goal_literals(context)
+        slotless = [parse_literal(text) for kind, _, text in context.dropped
+                    if kind == "subgoal" and parse_literal(text) in goal]
+        assert slotless
+        for literal in slotless:
+            entity = literal_text(*literal) + "[g]"
+            relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[g]"
+            assert ("goal", entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
+            missing = copy(actual)
+            missing.entities.remove(("goal", entity))
+            assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
+            twice = copy(actual)
+            twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+            assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+            fewer = copy(actual)
+            fewer.tuples[relation] = [t for t in actual.tuples[relation] if t[0] != entity]
+            assert ("tuple", relation) in {(m.kind, m.where) for m in compare(expected, fewer, context)}
 
 
 def test_a_nullary_literal_of_a_layer_is_a_tuple_over_the_auxiliary_entity():
@@ -857,6 +882,25 @@ def test_the_delta_relations_of_static_predicates_are_excused_only_while_empty()
     assert "delta_static_relations" in needed_differences(expected, actual, context)
 
 
+def test_the_relations_no_graph_fills_are_excused_only_while_empty_and_missing():
+    # the delta catalog: literal-level support relations
+    expected, actual, context = horizon_case("C7I", "f01", "s0")
+    own = {n for n, _ in actual.catalog}
+    support = [n for n, a in expected.catalog if a == 2 and n not in own
+               and re.search(r"^\[[+-]\]on\[(sat|unsat|sat\+|sat-)\]$", n)]
+    assert support
+    assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
+    filled = copy(expected)
+    filled.tuples = {**expected.tuples, support[0]: [("target:1", "a", "b")]}
+    assert {m.kind for m in compare(filled, actual, context)} >= {"catalog", "tuple"}
+    # the split catalog: the relation of the nodes of a static predicate
+    expected, actual, context = horizon_case("C7G", "f08", "s0")
+    own = {n for n, _ in actual.catalog}
+    anchored = [n for n, _ in expected.catalog if n == "fixed[state]"]
+    assert anchored and anchored[0] not in own
+    assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
+
+
 def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horizon():
     expected, actual, context = horizon_case("C7T", "f01", "s2")
     assert ("target:0", "c", "b") in actual.tuples["[+]on[g]"]
@@ -870,7 +914,7 @@ def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horiz
     assert any(m.kind == "tuple" for m in compare(expected, moved, context))
 
 
-def test_the_edge_arrays_give_the_action_and_parent_tuples_one_per_edge_in_order():
+def test_the_edge_arrays_give_the_action_and_parent_tuples_whatever_the_order_and_multiplicity_of_the_edges():
     fixture, task = load(prefix_path("f01"))
     record = next(r for r in fixture["encodings"] if r["config"] == "C7C" and r["state"] == "s2")
     view = encoding_view(task, record)
@@ -878,15 +922,19 @@ def test_the_edge_arrays_give_the_action_and_parent_tuples_one_per_edge_in_order
     graph = native_graph(encoder, encoder.encode(view), 0, [task], COMPARED_LANES)
     assert graph.tuples["_parent_"] == [("target:0", "target:1"), ("target:0", "target:2"), ("target:1", "target:3"),
                                         ("target:2", "target:4")]
-    order = np.array([3, 1, 0, 2])
-    permuted = type(view)(
-        view.nodes, view.node_offsets, view.edge_offsets, np.asarray(view.edge_src)[order],
-        np.asarray(view.edge_dst)[order], np.asarray(view.edge_schema)[order], np.asarray(view.edge_binding)[order],
-        view.task_ids)
-    graph = native_graph(encoder, encoder.encode(permuted), 0, [task], COMPARED_LANES)
-    assert graph.tuples["_parent_"] == [("target:2", "target:4"), ("target:0", "target:2"), ("target:0", "target:1"),
-                                        ("target:1", "target:3")]
     assert graph.unordered == ()
+
+    def with_edges(order):
+        return type(view)(
+            view.nodes, view.node_offsets, np.array([0, len(order)], np.int32), np.asarray(view.edge_src)[order],
+            np.asarray(view.edge_dst)[order], np.asarray(view.edge_schema)[order], np.asarray(view.edge_binding)[order],
+            view.task_ids)
+
+    # the edges reordered, and one of them twice, give the same graph
+    for order in (np.array([3, 1, 0, 2]), np.array([2, 0, 3, 1, 0, 3])):
+        again = native_graph(encoder, encoder.encode(with_edges(order)), 0, [task], COMPARED_LANES)
+        assert again == graph
+        assert again.unordered == ()
 
 
 @pytest.mark.parametrize("path, config", [c for c in case_params() if c.values[1].startswith("C7")])
@@ -902,7 +950,7 @@ def test_the_candidate_nodes_are_the_targets_of_the_horizon_graph(path, config):
         groups = {placed.encoder.target_group_names[int(g)] for g in batch.target_group[first:last]}
         recorded = record["outputs"]["targets"]
         assert names == recorded["names"], (record["state"], names)
-        assert groups <= set(recorded["groups"]) | set()
+        assert groups <= set(recorded["groups"])
 
 
 # ------------------------------------------------------------------------------------------------ transitions and kinship

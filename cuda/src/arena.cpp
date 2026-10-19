@@ -81,6 +81,16 @@ void DeviceArena::commit(u64 n)
     m_device_size += n;
 }
 
+void DeviceArena::truncate(u64 n)
+{
+    if (n >= m_device_size)
+        return;
+    wait();
+    m_device_size = n;
+    m_host_size = std::min(m_host_size, n);
+    m_issued = std::min(m_issued, n);
+}
+
 void DeviceArena::append_from_host(const void* src, u64 n)
 {
     if (n == 0)

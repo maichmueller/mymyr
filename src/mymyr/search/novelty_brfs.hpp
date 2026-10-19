@@ -457,7 +457,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
     SearchObserver* const obs = env.obs;
     Successors& succ = env.succ;
     IwPassStatistics& st = out.st;
-    st.arity = pc.arity;
+    st.width = pc.arity;
     const bool slow = env.slow();
     const bool ordered = env.layers && env.layers->ordered();
     const bool limit_layer = ordered && env.layers->limited();
@@ -940,7 +940,7 @@ void novelty_pass(Env& env, StateView root, Pruner& pruner, const PassConfig& pc
             if (st.expanded >= progress_next)
             {
                 progress_next += interval;
-                if (!obs->on_progress(st.statistics()))
+                if (!obs->on_progress(st.stats()))
                 {
                     finish(SearchStatus::Cancelled);
                     break;
@@ -1117,21 +1117,21 @@ IwResult novelty_ladder(Env& env, u32 first, u32 top, bool placeholder, RunPass&
     auto push = [&](const IwPassStatistics& p)
     {
         r.passes.push_back(p);
-        add_pass(r.total, p);
+        add_pass(r.stats, p);
         if (env.root)
-            env.root->on_pass(p.arity, p.statistics());
+            env.root->on_pass(p.width, p.stats());
     };
     if (placeholder)
     {
         IwPassStatistics p;
-        p.arity = 0;
+        p.width = 0;
         p.placeholder = true;
         push(p);
     }
     if (env.goal.statically_false())
     {
         IwPassStatistics p;
-        p.arity = first;
+        p.width = first;
         p.status = SearchStatus::Unsolvable;
         push(p);
         r.status = SearchStatus::Unsolvable;
@@ -1160,9 +1160,7 @@ IwResult novelty_ladder(Env& env, u32 first, u32 top, bool placeholder, RunPass&
             r.message = e.what();
             return r;
         }
-        r.peak_table_bytes = std::max(r.peak_table_bytes, po.table_bytes);
-        r.peak_node_bytes = std::max(r.peak_node_bytes, po.node_bytes);
-        r.total.memory_bytes = std::max(r.total.memory_bytes, po.table_bytes + po.node_bytes);
+        r.stats.memory_bytes = std::max(r.stats.memory_bytes, po.table_bytes + po.node_bytes);
         push(po.st);
         if (po.st.status == SearchStatus::Solved)
         {
@@ -1195,7 +1193,7 @@ inline void finish_result(Env& env, const State& root, IwResult& r)
     {
         if (r.status == SearchStatus::Solved)
             env.root->on_solution(r.plan, r.cost);
-        env.root->on_end(r.status, r.total);
+        env.root->on_end(r.status, r.stats);
     }
 }
 
@@ -1259,20 +1257,20 @@ private:
     novelty::NoveltyTable m_table;
 };
 
-/// The classic IW ladder on this engine: arity 0 (or the optimized IW(1) placeholder), then IW(1..max_arity).
+/// The classic IW ladder on this engine: arity 0 (or the optimized IW(1) placeholder), then IW(1..max_width).
 /// Equal to search::iw() pass for pass (tests/cpp/search/test_iw_variants.cpp); additionally supports ordered
 /// layers, coordination and state tracking.
-inline IwResult classic_ladder(Env& env, StateView root, u32 max_arity, bool optimize_iw1, WidthZero width_zero, const novelty::TableOptions& tables)
+inline IwResult classic_ladder(Env& env, StateView root, u32 max_width, bool optimize_iw1, WidthZero width_zero, const novelty::TableOptions& tables)
 {
-    if (max_arity > novelty::k_max_arity)
+    if (max_width > novelty::k_max_arity)
     {
         IwResult r;
         r.status = SearchStatus::Failed;
-        r.message = "IW arity " + std::to_string(max_arity) + " exceeds the maximum " + std::to_string(novelty::k_max_arity);
+        r.message = "IW arity " + std::to_string(max_width) + " exceeds the maximum " + std::to_string(novelty::k_max_arity);
         return r;
     }
-    const bool optimize = optimize_iw1 && max_arity == 1;
-    return novelty_ladder(env, optimize ? 1 : 0, max_arity, optimize,
+    const bool optimize = optimize_iw1 && max_width == 1;
+    return novelty_ladder(env, optimize ? 1 : 0, max_width, optimize,
                           [&](u32 k, PassOut& po)
                           {
                               if (k == 0)

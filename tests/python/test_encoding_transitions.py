@@ -17,6 +17,8 @@ from conftest import TASKS, text_task, walk
 from python_children import run_code
 from test_encoding import derived_words
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
 VIEW_FIELDS = ("nodes", "node_offsets", "edge_offsets", "edge_src", "edge_dst", "edge_schema", "edge_binding", "task_ids")
 ADDED = ("plain", "added_satisfied", "added_unsatisfied")
 
@@ -281,6 +283,16 @@ def test_a_state_space_gives_the_horizons_of_its_expansion(philosophers, space):
         encoding.horizon_of_space(space, ids, 3, max_nodes=7)
 
 
+def test_a_numeric_table_and_an_unlabelled_space_have_no_horizons(philosophers):
+    numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    with pytest.raises(ValueError, match="^mymyr: encoding: the table is numeric"):
+        encoding.horizon(numeric, [numeric.initial_state], 1)
+    unlabelled = datasets.generate(philosophers, max_states=100_000, remove_if_unsolvable=False, labels=False).space
+    assert unlabelled is not None
+    with pytest.raises(ValueError, match="^mymyr: encoding: the state space has no transition labels"):
+        encoding.horizon_of_space(unlabelled, [0], 1)
+
+
 # ------------------------------------------------------------------------------------------------ classes
 def test_the_classes_and_their_options(blocks):
     rooted = encoding.FlatRootedHorizonEncoder(blocks)
@@ -315,9 +327,9 @@ def test_the_classes_and_their_options(blocks):
         encoding.FlatRootedHorizonEncoder(blocks, history=True)
     with pytest.raises(TypeError):
         encoding.FlatRelationEncoder(blocks, sibling_relation=True)
-    with pytest.raises(ValueError, match="horizon_mode"):
+    with pytest.raises(ValueError, match="a horizon encoder needs a horizon_mode"):
         encoding.FlatRootedHorizonEncoder(blocks, horizon_mode=None)
-    with pytest.raises(ValueError, match="horizon_mode is None"):
+    with pytest.raises(ValueError, match="a horizon encoder needs a horizon_mode"):
         encoding.FlatHorizonEncoder(blocks, horizon_mode=None)
     with pytest.raises(ValueError, match="sibling_relation needs a horizon mode"):
         encoding.EncodingSchema(blocks, sibling_relation=True)
@@ -352,29 +364,47 @@ def dag_view(table, task, edges, nodes=7):
         edge_binding=np.zeros((len(edges), width), np.int32), task_ids=np.zeros(1, np.int32))
 
 
-KIN_EDGES = [(0, 1), (0, 2), (0, 1), (1, 3), (2, 3), (1, 4), (2, 5), (3, 6), (4, 0)]
-KIN_SIBLINGS = [(1, 2), (2, 1), (3, 4), (3, 5), (4, 3), (5, 3)]
-KIN_COUSINS = [(0, 6), (3, 4), (3, 5), (4, 3), (4, 5), (5, 3), (5, 4), (6, 0)]
+# (edges, nodes, siblings, cousins, siblings without the root's edges, cousins without them), worked out by hand: the parents
+# of a node are the sources of its edges (parallel edges once, self-loops left out), siblings share a parent, cousins have
+# parents that are siblings; under root_policy exclude the root's edges are no parent edges
+KIN_CASES = {
+    # node 3 has two parents, the edge 0 -> 1 is given twice, 4 -> 0 leads back to the root
+    "two parents": ([(0, 1), (0, 2), (0, 1), (1, 3), (2, 3), (1, 4), (2, 5), (3, 6), (4, 0)], 7,
+                    [(1, 2), (2, 1), (3, 4), (3, 5), (4, 3), (5, 3)],
+                    [(0, 6), (3, 4), (3, 5), (4, 3), (4, 5), (5, 3), (5, 4), (6, 0)],
+                    [(3, 4), (3, 5), (4, 3), (5, 3)], []),
+    # node 4 has a self-loop (not a parent) and the parents 1 and 2
+    "self-loop": ([(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 5), (4, 4), (5, 2), (2, 6)], 7,
+                  [(1, 2), (1, 3), (2, 1), (2, 3), (3, 1), (3, 2), (4, 6), (6, 4)],
+                  [(4, 5), (4, 6), (5, 4), (5, 6), (6, 4), (6, 5)],
+                  [(4, 6), (6, 4)], []),
+    # 3 and 4 have both parents 1 and 2
+    "diamond": ([(0, 1), (0, 2), (1, 3), (1, 4), (2, 3), (2, 4)], 5,
+                [(1, 2), (2, 1), (3, 4), (4, 3)], [(3, 4), (4, 3)], [(3, 4), (4, 3)], []),
+}
 
 
+@pytest.mark.parametrize("case", sorted(KIN_CASES))
 @pytest.mark.parametrize("root_policy", ["include", "encode_only", "exclude"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_sibling_and_cousin_pairs_of_a_dag_by_hand(blocks, root_policy, layout):
+def test_sibling_and_cousin_pairs_of_a_dag_by_hand(blocks, case, root_policy, layout):
+    edges, nodes, siblings, cousins, siblings_wr, cousins_wr = KIN_CASES[case]
     table = rl.as_table(blocks)
-    view = dag_view(table, blocks, KIN_EDGES)
+    view = dag_view(table, blocks, edges, nodes)
     encoder = encoding.FlatHorizonEncoder(
         blocks, horizon_mode="full", root_policy=root_policy, parent_relation=True, sibling_relation=True,
         cousin_relation=True, include_actions=False, goal_derivations=(), layout=layout)
     description = encoder.describe(encoder.encode(view), 0)
-    skip = root_policy == "exclude"
+    exclude = root_policy == "exclude"
 
     def named(pairs):
-        return [(f"target:{i}", f"target:{j}") for i, j in pairs if not (skip and 0 in (i, j))]
+        return [(f"target:{i}", f"target:{j}") for i, j in pairs]
 
-    assert list(description.relations["_sibling_"]) == named(KIN_SIBLINGS)
-    assert list(description.relations["_cousin_"]) == named(KIN_COUSINS)
-    parents = [(f"target:{s}", f"target:{d}") for s, d in KIN_EDGES if not (skip and 0 in (s, d))]
-    assert list(description.relations["_parent_"]) == parents  # one tuple per edge, parallel edges included
+    assert list(description.relations.get("_sibling_", [])) == named(siblings_wr if exclude else siblings)
+    assert list(description.relations.get("_cousin_", [])) == named(cousins_wr if exclude else cousins)
+    # _parent_ has one tuple per distinct edge, self-loops included, ordered by (source, destination)
+    parents = sorted({(s, d) for s, d in edges if not (exclude and 0 in (s, d))})
+    assert list(description.relations["_parent_"]) == named(parents)
 
 
 def test_kinship_of_a_tree_and_of_a_self_loop(blocks):
@@ -387,10 +417,14 @@ def test_kinship_of_a_tree_and_of_a_self_loop(blocks):
                                             ("target:4", "target:3")]
     assert sorted(relations["_cousin_"]) == sorted([("target:3", "target:5"), ("target:5", "target:3"),
                                                     ("target:4", "target:5"), ("target:5", "target:4")])
-    # a self-loop makes a node its own parent: 0 -> 0, 0 -> 1: node 1 has the sibling 0 (they share the parent 0)
+    # a self-loop does not make a node a parent: 0 -> 0, 0 -> 1 leaves node 1 without a sibling, and 1 -> 1 with 0 -> 1, 0 -> 2
+    # leaves 1 and 2 siblings of each other only
     loop = encoder.describe(encoder.encode(dag_view(table, blocks, [(0, 0), (0, 1)], 2)), 0).relations
-    assert list(loop["_sibling_"]) == [("target:0", "target:1"), ("target:1", "target:0")]
-    assert "_cousin_" not in loop
+    assert "_sibling_" not in loop and "_cousin_" not in loop
+    assert list(loop["_parent_"]) == [("target:0", "target:0"), ("target:0", "target:1")]
+    both = encoder.describe(encoder.encode(dag_view(table, blocks, [(0, 1), (1, 1), (0, 2)], 3)), 0).relations
+    assert list(both["_sibling_"]) == [("target:1", "target:2"), ("target:2", "target:1")]
+    assert "_cousin_" not in both
     # no edges, no pairs
     assert "_sibling_" not in encoder.describe(encoder.encode(dag_view(table, blocks, [], 3)), 0).relations
 

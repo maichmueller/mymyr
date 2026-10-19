@@ -125,7 +125,7 @@ TEST(LayerOrdersFork, IwAndBrfsEqualTheForks)
         if (r["algo"].str == "iw")
         {
             IwOptions o;
-            o.max_arity = static_cast<u32>(r["k"].num);
+            o.max_width = static_cast<u32>(r["k"].num);
             o.layers = ordering(r);
             const IwResult m = iw(task, o);
             EXPECT_STREQ(mymyr::parity::reference_status_name(m.status), status.c_str()) << what;

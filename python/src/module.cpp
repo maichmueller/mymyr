@@ -17,6 +17,7 @@
 #include "arrays.hpp"
 #include "py_task.hpp"
 
+#include "mymyr/core/block_cache.hpp"
 #include "mymyr/core/hash.hpp"
 #include "mymyr/version.hpp"
 
@@ -116,6 +117,16 @@ NB_MODULE(_core, m)
 #endif
     },
           "Whether the extension was built for free-threaded CPython (Py_GIL_DISABLED).");
+    m.def("trim_block_cache", [] { mymyr::trim_block_cache(); }, nb::call_guard<nb::gil_scoped_release>(),
+          "Returns the memory of recycled output blocks to the operating system.\n\n"
+          "Batch outputs (encodings, expansions, table batches) of more than 128 KiB are served from a cache of "
+          "recycled blocks, so that repeated calls do not pay for fresh memory pages. The cache holds at most 4 blocks "
+          "of up to 4 MiB per thread and, shared by all threads, at most 8 blocks and 512 MiB in all (no block above "
+          "256 MiB); a shared block that nothing takes within 256 later acquires of such blocks is released by itself. "
+          "This frees what the calling thread's cache and the shared cache hold; the caches of other threads are "
+          "freed when those threads end, and arrays that still use a block keep it.");
+    m.def("block_cache_bytes", [] { return mymyr::block_cache_bytes(); },
+          "The bytes that the calling thread's block cache and the shared block cache hold (see trim_block_cache).");
     m.def("hash_rows", &hash_rows, "states"_a,
           "Hash each row of a (N, W) uint64 state-word matrix (trailing zero words ignored). Zero-copy input.");
     mymyr::python::bind_formalism(m);

@@ -128,7 +128,7 @@ struct TaskOptions
     bool numeric_tolerant = false;
     u32 fc_auto_free_params = 4;
     /// Work bound of the relaxed-reachability analysis behind Atoms::Auto and Atoms::Reachable, in steps of its joins:
-    /// a count, not a time, so whether it suffices is a property of the task. 0: unbounded.
+    /// a count, not a time, so whether it suffices is a property of the task. ~u64{0}: unbounded.
     u64 reachability_budget = k_reachability_budget;
 };
 

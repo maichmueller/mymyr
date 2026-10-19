@@ -161,8 +161,6 @@ public:
         return node;
     }
 
-    std::vector<u64> take_rows() { return std::move(m_rows); }
-
 private:
     void insert(u32 node) noexcept
     {

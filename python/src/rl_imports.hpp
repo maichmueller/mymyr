@@ -140,15 +140,18 @@ public:
             const bool is_signed = im.dtype.code == dl::k_int;
             switch (im.dtype.bits)
             {
-                case 8: v = is_signed ? i64{static_cast<const i8*>(im.data)[k]} : i64{static_cast<const u8*>(im.data)[k]}; break;
-                case 16: v = is_signed ? i64{static_cast<const i16*>(im.data)[k]} : i64{static_cast<const u16*>(im.data)[k]}; break;
+                case 8:
+                    v = is_signed ? i64{static_cast<const i8*>(im.data)[k]} : i64{static_cast<const u8*>(im.data)[k]};
+                    break;
+                case 16:
+                    v = is_signed ? i64{static_cast<const i16*>(im.data)[k]} : i64{static_cast<const u16*>(im.data)[k]};
+                    break;
                 case 32: v = i64{static_cast<const u32*>(im.data)[k]}; break;
                 default:
                 {
                     const u64 raw = static_cast<const u64*>(im.data)[k];
-                    v = is_signed ? static_cast<i64>(raw)
-                                  : (raw > static_cast<u64>(std::numeric_limits<i64>::max()) ? std::numeric_limits<i64>::max()
-                                                                                              : static_cast<i64>(raw));
+                    constexpr u64 largest = static_cast<u64>(std::numeric_limits<i64>::max());
+                    v = is_signed ? static_cast<i64>(raw) : static_cast<i64>(std::min(raw, largest));
                 }
             }
             if (v < std::numeric_limits<i32>::lowest() || v > std::numeric_limits<i32>::max())

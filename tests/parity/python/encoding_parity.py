@@ -311,8 +311,7 @@ def native_graph(encoder, batch, row, tasks, lanes=None):
         if relation not in rows:
             continue
         keys = rows[relation]
-        edges = encoder.options["horizon_mode"] is not None and encoder.relation_lanes[relation] in ("action", "parent")
-        if not edges and any(a >= b for a, b in zip(keys, keys[1:])):
+        if any(a >= b for a, b in zip(keys, keys[1:])):
             unordered.append(names[relation])
         tuples[names[relation]] = [tuple(entities[x][1] for x in key) for key in keys]
     catalog = [(names[i], encoder.relation_logical_arities[i]) for i in selected]
@@ -637,6 +636,31 @@ def _delta_static_relations(expected, actual, context):
     return replace(expected, catalog=[c for c in expected.catalog if c[0] not in dropped]), actual
 
 
+def _never_filled_relations(expected, actual, context):
+    """The catalogs of mifrost's horizons list relations that no graph has tuples in, and the native catalog leaves them
+    out: the delta mode's literal-level support relations (``[+]p[sat]``, ``[-]p[unsat]``, ``[+]p[sat+]``, ``[-]p[sat-]``,
+    without a goal level; the native encoder has no support literals) and the state-anchored relation of a static
+    predicate in the split catalog (``fixed[state]``; the static atoms are the root's). The expectation drops these
+    entries of the catalog while the reference has no tuple in them and the native catalog lacks them."""
+    if context.dag is None:
+        return expected, actual
+    static = {p.name for p in context.task.formalism.predicates if p.kind == "static"}
+    own = {name for name, _ in actual.catalog}
+    levels = {"g", "sg", "ssg", "sssg"}
+
+    def never_filled(name):
+        sign, predicate, decoration = HORIZON_RELATION.match(name).groups()
+        marks = re.findall(r"\[([a-z+\-]+)\]", decoration)
+        if any(m in levels for m in marks):
+            return False
+        return (sign is not None and any(m in ("sat", "unsat", "sat+", "sat-") for m in marks)) or (
+            marks == ["state"] and predicate in static)
+
+    dropped = {name for name, _ in expected.catalog
+               if name not in own and not expected.tuples.get(name) and never_filled(name)}
+    return replace(expected, catalog=[c for c in expected.catalog if c[0] not in dropped]), actual
+
+
 def _static_literal_at_nodes(expected, actual, context):
     """mifrost evaluates the goal at the nodes below the root without the static atoms: a static atom does not hold
     there, so a positive static literal that holds is not satisfied at them, and a negative one is satisfied. The
@@ -817,8 +841,8 @@ def _literal_without_slot(expected, actual, context):
     or a history step. The native encoder takes masks over the atoms that have slots, so such a literal cannot be
     given to it (the harness leaves it out, and ``Context.dropped`` lists it). The expectation drops what mifrost made
     of exactly those literals: their entity, their tuples (the argument rows of their relations when the graph has no
-    target entities) and their satisfaction tuples. When such a literal is also a goal literal, mifrost leaves it out
-    of the goal too, whatever its value; the goal entity and tuples of the native graph are dropped for it."""
+    target entities) and their satisfaction tuples. A literal that is also a goal literal is in the goal of the native
+    graph, and mifrost's copy of it is moved onto that goal tuple by ``repeated_literal``; nothing is dropped for it."""
     if not context.dropped or context.dag is not None:
         return expected, actual
     goal = goal_literals(context)
@@ -841,15 +865,13 @@ def _literal_without_slot(expected, actual, context):
         sign = "+" if positive else "-"
         text = literal_text(positive, predicate, arguments)
         if kind == "subgoal":
+            if (positive, predicate, arguments) in goal:
+                continue  # a goal literal is in the goal of both graphs; repeated_literal moves the reference's copy
             suffix = _level_suffix(where)
             relation = f"[{sign}]{predicate}[{suffix}]"
             satisfaction = [relation + "[sat]", relation + "[unsat]"]
             drop("expected", "subgoal", f"{text}[{suffix}]", relation)
             drop_satisfaction("expected", satisfaction, arguments)
-            if (positive, predicate, arguments) in goal:
-                relation = f"[{sign}]{predicate}[g]"
-                drop("actual", "goal", f"{text}[g]", relation)
-                drop_satisfaction("actual", [relation + "[sat]", relation + "[unsat]"], arguments)
         else:
             relation, entity = f"[{sign}]{predicate}[hist]", f"{where}:{text}"
             entities, tuples = graphs["expected"]
@@ -906,8 +928,8 @@ REGISTRY = (
         "unrecorded_successors",
         "A transition record of the reference lists one successor of its state; the native transition encoders encode "
         "all of them in the graph of the state.",
-        "the state entities of the successors the record does not list and the tuples over them, in the graph of a "
-        "transition config",
+        "the state entities of the successors the record does not list and the tuples over them, and the auxiliary "
+        "entity when no tuple is left over it, in the graph of a transition config",
         (("f01", "C8A"), ("f01", "C8AN"), ("f01", "C8B"), ("f01", "C8BN"), ("f02", "C8A"), ("f03", "C8B"),
          ("f05", "C8B"), ("f08", "C8A"), ("f08", "C8AN"), ("f08", "C8B"), ("f08", "C8BN"), ("f09", "C8A"),
          ("f10", "C8AN"), ("f10", "C8B"), ("f10", "C8BN"), ("f11", "C8A"), ("f12", "C8A"), ("f13", "C8AN")),
@@ -947,6 +969,17 @@ REGISTRY = (
         "the reference has no tuple in them",
         (("f08", "C7B"), ("f09", "C7C")),
         _delta_static_relations,
+    ),
+    Difference(
+        "never_filled_horizon_relations",
+        "mifrost's horizon catalogs list relations that no graph has a tuple in: the delta mode's relations of the "
+        "literals themselves (`[+]p[sat]`, `[-]p[unsat]`, `[+]p[sat+]`, `[-]p[sat-]`, which have no goal level) and, in the "
+        "split catalog, the relation of the nodes of a static predicate (`fixed[state]`). The native catalog lists a "
+        "relation only if a graph can have a tuple in it: it has no support literals, and static atoms are the root's.",
+        "the catalog entries of those relations, only when the reference has no tuple in them and the native catalog "
+        "lacks them",
+        (("f01", "C7I"), ("f08", "C7G")),
+        _never_filled_relations,
     ),
     Difference(
         "static_literal_at_nodes",
@@ -1004,8 +1037,8 @@ REGISTRY = (
         "literal_without_slot",
         "A literal over a static predicate, or over an atom that no state can make true, has no slot, so the "
         "native subgoal and history inputs cannot hold it; mifrost encodes it.",
-        "the entities and tuples that mifrost made of the literals the harness left out of the native inputs, and the "
-        "native goal entity and tuples of such a literal that is also a goal literal",
+        "the entities and tuples that mifrost made of the literals the harness left out of the native inputs, except "
+        "those of a literal that is also a goal literal",
         (("f08", "C3S"), ("f08", "C5A"), ("f08", "C5BN")),
         _literal_without_slot,
     ),
@@ -1016,7 +1049,8 @@ REGISTRY = (
         "the other levels.",
         "the subgoal entity and the equal tuples of the highest level of a literal that is listed in several levels, "
         "and its satisfaction tuples",
-        (("f01", "C4_L1"), ("f01", "C4_L2"), ("f08", "C4_L1N"), ("f09", "C4_L2")),
+        (("f01", "C4_L1"), ("f01", "C4_L2"), ("f08", "C4_L1"), ("f08", "C4_L1N"), ("f08", "C4_L2"), ("f08", "C4_L2N"),
+         ("f09", "C4_L2"), ("f13", "C4_L1N")),
         _repeated_literal,
     ),
     Difference(

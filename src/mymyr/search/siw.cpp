@@ -38,7 +38,7 @@ SiwResult siw(const Task& task, const SiwOptions& options)
         {
             if (s == SearchStatus::Solved)
                 c.observer->on_solution(r.plan, r.cost);
-            c.observer->on_end(s, r.total);
+            c.observer->on_end(s, r.stats);
         }
         return r;
     };
@@ -69,16 +69,14 @@ SiwResult siw(const Task& task, const SiwOptions& options)
         SiwSubproblem sub;
         sub.unsatisfied_at_start = task_goal.unsatisfied(succ, cur.view(), prepared);
         const detail::GoalTest sub_goal = detail::GoalTest::counter(task, sub.unsatisfied_at_start);
-        IwResult ir = detail::run_ladder(c, cur.view(), sub_goal, options.max_arity);
+        IwResult ir = detail::run_ladder(c, cur.view(), sub_goal, options.max_width);
         sub.status = ir.status;
         sub.passes = std::move(ir.passes);
         sub.plan_length = static_cast<u32>(ir.plan.size());
         sub.effective_width = ir.effective_width;
         for (const IwPassStatistics& p : sub.passes)
-            detail::add_pass(r.total, p);
-        r.peak_table_bytes = std::max(r.peak_table_bytes, ir.peak_table_bytes);
-        r.peak_node_bytes = std::max(r.peak_node_bytes, ir.peak_node_bytes);
-        r.total.memory_bytes = std::max(r.total.memory_bytes, ir.total.memory_bytes);
+            detail::add_pass(r.stats, p);
+        r.stats.memory_bytes = std::max(r.stats.memory_bytes, ir.stats.memory_bytes);
         r.subproblems.push_back(std::move(sub));
         if (ir.status != SearchStatus::Solved)
         {

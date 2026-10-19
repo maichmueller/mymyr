@@ -23,14 +23,14 @@ inline constexpr usize k_cache_line = 64;
 inline constexpr u64 k_scan_tile = 128;
 inline constexpr u64 k_none = std::numeric_limits<u64>::max();
 
-/// The kinship lists of the graph a member is working on (detail/horizon.hpp KinView) and the room of kin_row.
-struct KinScratch
+/// The kin scratch of the graphs of a member's slice (horizon relations _sibling_ and _cousin_): per graph, the words
+/// of horizon_kin_words followed by its far lists, from the count to the fill. Made when the schema needs it, behind a
+/// pointer so that the members of the other schemas stay small.
+struct KinStore
 {
-    std::vector<u32> child_offsets, children, parent_offsets, parents, far_offsets, far;
-    std::vector<u32> out, work;     // the room of kin_row: the most entries of any node
-    std::vector<u32> first, second; // the edges ordered by destination, then by source; gathered candidates
-    KinView view;
-    bool cousin = false;            // whether the far lists were built
+    std::vector<u32> words;
+    std::vector<u64> at;    // [slice graphs] where the words of each graph start
+    u64 overflow = k_none;  // the first graph with more far list entries or tuples than 32 bits count
 };
 
 /// The state of one pool member: it counts a contiguous slice of the graphs and later fills the same slice, so that the
@@ -40,7 +40,7 @@ struct alignas(k_cache_line) Member
     // pass one
     std::vector<GraphTotals> totals;  // the slice's graphs
     std::vector<u32> cell_counts;     // the slice's cells, graph after graph, in cell order (relation-major or
-                                      // with predicate virtual nodes)
+                                      // with predicate virtual nodes or layers)
     std::vector<u32> action_starts;   // [slice graphs, starts_stride] the run starts of each graph's rows
     std::vector<u32> action_cursors;  // [num_schemas] the cursors of the merge of one action relation's runs
     std::vector<u64> tally;           // [R] tuples per relation in the slice (relation-major)
@@ -51,6 +51,7 @@ struct alignas(k_cache_line) Member
     u64 narrow_history = k_none, bad_history_bits = k_none, bad_history_count = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
     u64 bad_edge = k_none;  // horizon: the first graph with an invalid edge
+    std::vector<u64> effective;        // the subgoal levels of the row being counted or filled (effective_layers)
     std::vector<u32> virtual_scratch;  // [predicates] the virtual ranks of one graph
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice
@@ -59,7 +60,7 @@ struct alignas(k_cache_line) Member
     // pass two
     std::vector<u64> run_tuples, run_args;  // [R] the running positions
     std::vector<u32> tile_counts;           // [R, k_scan_tile] the counts of the tile being scanned
-    std::unique_ptr<KinScratch> kin;        // horizon: the kinship of one graph, made when the schema needs it
+    std::unique_ptr<KinStore> kin;          // horizon: the kinship of the slice's graphs, made when the schema needs it
 };
 }  // namespace detail
 
@@ -75,6 +76,7 @@ struct EncodeScratch::Impl
     u64 derived_capacity = 0;
     u64 derived_stride = 0;
     std::vector<u64> bounds;  // horizon: the first graph of each member, and the graphs (members + 1 entries)
+    std::vector<u32> edge_order;  // horizon: the canonical edge lists of every graph (horizon_order_words per graph)
     std::vector<detail::Member> members;
 };
 

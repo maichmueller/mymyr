@@ -2,7 +2,7 @@
 // Serialized iterated width.
 //
 //   mymyr::search::SiwOptions o;
-//   o.max_arity = 2;
+//   o.max_width = 2;
 //   mymyr::search::SiwResult r = mymyr::search::siw(*task, o);
 //
 // SIW runs the IW ladder (search/iw.hpp, with all of its conventions and options) repeatedly: each subproblem starts
@@ -22,7 +22,7 @@
 
 namespace mymyr::search
 {
-/// SIW takes the IW options: max_arity is the width limit of every subproblem's ladder.
+/// SIW takes the IW options: max_width is the width limit of every subproblem's ladder.
 using SiwOptions = IwOptions;
 
 struct SiwSubproblem
@@ -42,12 +42,10 @@ struct SiwResult
     double cost = 0;  // the plan's cost under the task's metric, from the start state; 0 unless solved
     std::optional<State> goal_state;
     std::vector<SiwSubproblem> subproblems;  // including a last one that failed
-    SearchStatistics total;                  // over every pass of every subproblem
+    SearchStatistics stats;                  // over every pass of every subproblem (memory_bytes: the largest pass's)
     u32 max_effective_width = 0;             // over the solved subproblems
     std::string message;
     u32 fluent_slots = 0;
-    u64 peak_table_bytes = 0;
-    u64 peak_node_bytes = 0;
 };
 
 [[nodiscard]] SiwResult siw(const Task& task, const SiwOptions& options = {});

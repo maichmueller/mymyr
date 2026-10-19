@@ -137,8 +137,12 @@ def test_options(tmp_path, depot):
     s = datasets.state_space(task, remove_if_unsolvable=False)
     assert s.num_states == 2 and s.num_unsolvable_states == 2 and s.unit_goal_distance(0) == -1
     assert s.cost_goal_distance(0) == float("inf")
-    # max_states: fails iff the space has max(max_states, 2) states or more
+    # max_states: fails iff the space has max(max_states, 1) states or more
     assert datasets.generate(depot, max_states=40320).status == search.Status.OUT_OF_STATES
+    for threads in (1, 4):
+        for limit in (0, 1, 10, 40320):
+            r = datasets.generate(depot, max_states=limit, threads=threads)
+            assert r.status == search.Status.OUT_OF_STATES and r.stats.states == max(limit, 1), (threads, limit)
     assert datasets.generate(depot, max_states=40321, threads=2).status == search.Status.EXHAUSTED
     assert datasets.generate(depot, max_seconds=0.0).status == search.Status.OUT_OF_TIME
     # without labels

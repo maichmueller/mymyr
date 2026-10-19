@@ -32,7 +32,7 @@ namespace
 IwOptions with_k(u32 k)
 {
     IwOptions o;
-    o.max_arity = k;
+    o.max_width = k;
     return o;
 }
 
@@ -267,7 +267,7 @@ TEST_P(IwOracle, EqualsTheForkSemantics)
     to.atoms = p.v.atoms;
     const auto task = Task::from_text_file(task_path(p.task), to);
     IwOptions o;
-    o.max_arity = p.v.max_arity;
+    o.max_width = p.v.max_arity;
     o.width_zero = p.v.width_zero;
     o.witness_pruning = p.v.witness;
     o.canonical_order = p.v.canonical;
@@ -295,7 +295,7 @@ TEST_P(IwOracle, EqualsTheForkSemantics)
         sp.max_expanded = p.v.max_expanded;
         const RefPass ref = ref_pass(*task, root, sp, task_goal(*task));
         expect_pass(r.passes[at], ref, "arity " + std::to_string(k));
-        EXPECT_EQ(r.passes[at].arity, k);
+        EXPECT_EQ(r.passes[at].width, k);
         if (ref.status == SearchStatus::Solved)
         {
             EXPECT_EQ(r.status, SearchStatus::Solved);
@@ -307,7 +307,7 @@ TEST_P(IwOracle, EqualsTheForkSemantics)
     }
     if (r.status != SearchStatus::Solved && r.status != SearchStatus::OutOfStates)
     {
-        EXPECT_EQ(r.passes.back().arity, p.v.single_pass >= 0 ? static_cast<u32>(p.v.single_pass) : p.v.max_arity);
+        EXPECT_EQ(r.passes.back().width, p.v.single_pass >= 0 ? static_cast<u32>(p.v.single_pass) : p.v.max_arity);
     }
 }
 
@@ -366,8 +366,8 @@ TEST(IwSemantics, LineTaskByHand)
         EXPECT_EQ(r.plan.size(), 4u);
         EXPECT_EQ(r.effective_width, 1u);
         EXPECT_EQ(r.cost, 4.0);
-        EXPECT_EQ(r.total.expanded, 6u);
-        EXPECT_EQ(r.total.generated, 10u);
+        EXPECT_EQ(r.stats.expanded, 6u);
+        EXPECT_EQ(r.stats.generated, 10u);
         ASSERT_EQ(r.plan.size(), 4u);
         EXPECT_EQ(task->format(r.plan[3].label()), "(move o3 o4)");
     }
@@ -560,10 +560,10 @@ TEST(IwControl, ObserverEventsMatchTheStatistics)
         EXPECT_EQ(rec.ends, 1u);
         EXPECT_EQ(rec.end_status, r.status);
         EXPECT_EQ(rec.passes, r.passes.size());
-        EXPECT_EQ(rec.expands, r.total.expanded);
-        EXPECT_EQ(rec.generates, r.total.generated);
-        EXPECT_EQ(rec.news, r.total.generated - r.total.pruned);
-        EXPECT_EQ(rec.prunes, r.total.pruned);
+        EXPECT_EQ(rec.expands, r.stats.expanded);
+        EXPECT_EQ(rec.generates, r.stats.generated);
+        EXPECT_EQ(rec.news, r.stats.generated - r.stats.pruned);
+        EXPECT_EQ(rec.prunes, r.stats.pruned);
         EXPECT_EQ(rec.solutions, r.status == SearchStatus::Solved ? 1u : 0u);
     }
 }
@@ -687,7 +687,7 @@ TEST(IwControl, BlockedStatesAreNeverEntered)
             EXPECT_FALSE(blocked.count(*r.goal_state));
         }
         // the optimized IW(1) root rule respects them too
-        o.max_arity = 1;
+        o.max_width = 1;
         o.control.observer = nullptr;
         const IwResult r1 = iw(*task, o);
         sp.k = 1;

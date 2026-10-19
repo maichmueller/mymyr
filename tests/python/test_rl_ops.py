@@ -82,7 +82,7 @@ def test_prefix_and_schema_masks_equal_the_labels(name):
     for i in range(n):
         want[i, exp.schema[off[i] : off[i + 1]]] = True
     assert np.array_equal(sm, want)
-    pad = exp.pad(0)
+    pad = exp.pad()
     for depth in range(exp.label_width):
         m = rl.prefix_masks(exp, schema, prefix, depth)
         assert m.dtype == np.bool_ and m.shape == (n, task.num_objects)

@@ -990,7 +990,7 @@ BestFirstResult run(const Task& task, const BestFirstOptions& o, const char* alg
     {
         // a long evaluation (the lifted fallback) ran past the deadline or was cancelled
         r.status = c->interrupted_status();
-        c->finish(r.stats.states, r.store_bytes);
+        c->finish(r.stats.states, r.stats.memory_bytes);
     }
     catch (const std::exception& e)
     {

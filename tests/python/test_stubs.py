@@ -160,7 +160,7 @@ def test_stubs_parse_and_are_typed():
         assert ("def from_pddl(domain: mymyr._core.Domain | str | os.PathLike, problems: str | os.PathLike | "
                 "Sequence[str | os.PathLike], *, atoms: str = 'auto',") in rl
         assert ("numeric_storage: str = 'auto', numeric_quantum: float = 0.0, numeric_tolerant: bool = False, "
-                "reachability_budget: int = 33554432, threads: int = 1) -> TaskTable:") in rl
+                "reachability_budget: int | None = 33554432, threads: int = 1) -> TaskTable:") in rl
     # knowledge bases and tuple graphs
     ds = (d / "_datasets.pyi").read_text()
     assert ("def tuple_graphs(space: StateSpace, *, width: int = 0, dominance_pruning: bool = True, threads: int = 1) -> "

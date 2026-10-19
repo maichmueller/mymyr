@@ -646,15 +646,13 @@ search::SearchStatistics brfs_stats(const BrfsResult& r)
             .states = r.states,
             .pruned = r.pruned,
             .seconds = r.search_s,
-            .memory_bytes = r.store_bytes};
+            .memory_bytes = r.memory_bytes};
 }
 
-/// A best-first result's stats; memory_bytes is store_bytes, which every best-first search fills.
+/// A best-first result's stats.
 search::SearchStatistics best_first_stats(const search::BestFirstResult& r)
 {
-    search::SearchStatistics s = r.stats;
-    s.memory_bytes = std::max(s.memory_bytes, r.store_bytes);
-    return s;
+    return r.stats;
 }
 
 // ------------------------------------------------------------------------------------------------ parallel rollouts and portfolio: results
@@ -902,14 +900,14 @@ search::SearchStatistics dec_stats(nb::handle h)
 
 nb::tuple enc(const search::IwPassStatistics& p)
 {
-    return nb::make_tuple(p.arity, status_int(p.status), p.expanded, p.generated, p.generated_in_tree, p.skipped, p.blocked,
+    return nb::make_tuple(p.width, status_int(p.status), p.expanded, p.generated, p.generated_in_tree, p.skipped, p.blocked,
                           p.seconds, p.placeholder);
 }
 search::IwPassStatistics dec_pass(nb::handle h)
 {
     Fields f(h, "IW pass statistics");
     search::IwPassStatistics p;
-    p.arity = f.get<u32>();
+    p.width = f.get<u32>();
     p.status = f.status();
     p.expanded = f.get<u64>();
     p.generated = f.get<u64>();
@@ -1057,8 +1055,8 @@ search::RolloutIwStatistics dec_rollout_stats(nb::handle h)
 nb::tuple enc(const Owner& o, const search::IwResult& r)
 {
     return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, state_or_none(o, r.goal_state),
-                          enc_list(r.passes, [](const auto& x) { return enc(x); }), enc(r.total), r.effective_width, r.message,
-                          r.fluent_slots, r.peak_table_bytes, r.peak_node_bytes);
+                          enc_list(r.passes, [](const auto& x) { return enc(x); }), enc(r.stats), r.effective_width, r.message,
+                          r.fluent_slots);
 }
 search::IwResult dec_iw(const Owner& o, nb::handle h)
 {
@@ -1070,12 +1068,10 @@ search::IwResult dec_iw(const Owner& o, nb::handle h)
     r.cost = f.get<double>();
     r.goal_state = dec_state(o, f.next());
     r.passes = dec_list<search::IwPassStatistics>(f.next(), what, dec_pass);
-    r.total = dec_stats(f.next());
+    r.stats = dec_stats(f.next());
     r.effective_width = f.get<u32>();
     r.message = f.get<std::string>();
     r.fluent_slots = f.get<u32>();
-    r.peak_table_bytes = f.get<u64>();
-    r.peak_node_bytes = f.get<u64>();
     f.done();
     return r;
 }
@@ -1084,7 +1080,7 @@ nb::tuple enc(const Owner& o, const search::SiwResult& r)
 {
     return nb::make_tuple(status_int(r.status), enc_plan(r.plan), enc_plan(r.partial_plan), r.cost,
                           state_or_none(o, r.goal_state), enc_list(r.subproblems, [](const auto& x) { return enc(x); }),
-                          enc(r.total), r.max_effective_width, r.message, r.fluent_slots, r.peak_table_bytes, r.peak_node_bytes);
+                          enc(r.stats), r.max_effective_width, r.message, r.fluent_slots);
 }
 search::SiwResult dec_siw(const Owner& o, nb::handle h)
 {
@@ -1097,12 +1093,10 @@ search::SiwResult dec_siw(const Owner& o, nb::handle h)
     r.cost = f.get<double>();
     r.goal_state = dec_state(o, f.next());
     r.subproblems = dec_list<search::SiwSubproblem>(f.next(), what, dec_subproblem);
-    r.total = dec_stats(f.next());
+    r.stats = dec_stats(f.next());
     r.max_effective_width = f.get<u32>();
     r.message = f.get<std::string>();
     r.fluent_slots = f.get<u32>();
-    r.peak_table_bytes = f.get<u64>();
-    r.peak_node_bytes = f.get<u64>();
     f.done();
     return r;
 }
@@ -1111,8 +1105,7 @@ nb::tuple enc(const Owner& o, const search::BestFirstResult& r)
 {
     return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, state_or_none(o, r.goal_state), enc(r.stats),
                           r.evaluations, r.dead_ends, r.reopened, r.expanded_until_last_jump, r.layers, r.initial_h,
-                          enc(r.heuristic), r.setup_seconds, r.algorithm, r.store, r.queue, r.message, r.store_bytes,
-                          r.fluent_slots);
+                          enc(r.heuristic), r.setup_seconds, r.algorithm, r.store, r.queue, r.message, r.fluent_slots);
 }
 void dec_best_first(const Owner& o, Fields& f, search::BestFirstResult& r, const char* what)
 {
@@ -1133,7 +1126,6 @@ void dec_best_first(const Owner& o, Fields& f, search::BestFirstResult& r, const
     r.store = f.get<std::string>();
     r.queue = f.get<std::string>();
     r.message = f.get<std::string>();
-    r.store_bytes = f.get<u64>();
     r.fluent_slots = f.get<u32>();
 }
 
@@ -1142,9 +1134,9 @@ nb::tuple enc(const Owner& o, const BrfsResult& r)
     nb::list layers;
     for (const auto& l : r.layer_counts)
         layers.append(nb::make_tuple(l[0], l[1], l[2]));
-    return nb::make_tuple(status_int(r.status), r.states, r.expanded, r.generated, r.pruned, r.goal_states, r.layers, layers,
+    return nb::make_tuple(status_int(r.status), r.states, r.expanded, r.generated, r.pruned, r.num_goal_states, r.layers, layers,
                           r.exhausted, r.solved, enc_plan(r.plan), r.cost, state_or_none(o, r.goal_state), r.search_s,
-                          r.words, r.fluent_slots, r.store_bytes, r.fingerprint, r.threads, r.store, r.message);
+                          r.words, r.fluent_slots, r.memory_bytes, r.fingerprint, r.threads_used, r.store, r.message);
 }
 BrfsResult dec_brfs(const Owner& o, nb::handle h)
 {
@@ -1156,7 +1148,7 @@ BrfsResult dec_brfs(const Owner& o, nb::handle h)
     r.expanded = f.get<u64>();
     r.generated = f.get<u64>();
     r.pruned = f.get<u64>();
-    r.goal_states = f.get<u64>();
+    r.num_goal_states = f.get<u64>();
     r.layers = f.get<u32>();
     r.layer_counts = dec_list<std::array<u64, 3>>(f.next(), what, [&](nb::handle x) {
         Fields l(x, what);
@@ -1172,9 +1164,9 @@ BrfsResult dec_brfs(const Owner& o, nb::handle h)
     r.search_s = f.get<double>();
     r.words = f.get<u32>();
     r.fluent_slots = f.get<u32>();
-    r.store_bytes = f.get<u64>();
+    r.memory_bytes = f.get<u64>();
     r.fingerprint = f.get<u64>();
-    r.threads = f.get<u32>();
+    r.threads_used = f.get<u32>();
     r.store = f.get<std::string>();
     r.message = f.get<std::string>();
     f.done();
@@ -1184,7 +1176,7 @@ BrfsResult dec_brfs(const Owner& o, nb::handle h)
 nb::tuple enc(const Owner& o, const search::RolloutIwResult& r)
 {
     return nb::make_tuple(status_int(r.status), enc_plan(r.plan), r.cost, state_or_none(o, r.goal_state),
-                          enc(r.statistics), r.root_solved, r.message, r.fluent_slots);
+                          enc(r.rollout), r.root_solved, r.message, r.fluent_slots);
 }
 search::RolloutIwResult dec_rollout_iw(const Owner& o, nb::handle h)
 {
@@ -1195,7 +1187,7 @@ search::RolloutIwResult dec_rollout_iw(const Owner& o, nb::handle h)
     r.plan = dec_plan(*o.core->task, f.next(), what);
     r.cost = f.get<double>();
     r.goal_state = dec_state(o, f.next());
-    r.statistics = dec_rollout_stats(f.next());
+    r.rollout = dec_rollout_stats(f.next());
     r.root_solved = f.get<bool>();
     r.message = f.get<std::string>();
     r.fluent_slots = f.get<u32>();
@@ -1229,7 +1221,7 @@ nb::tuple enc(const Owner& o, const search::RolloutResult& r)
         by_atom.append(nb::make_tuple(c, i));
     for (const auto& [c, row] : r.co_occurrence)
         rows.append(nb::make_tuple(c, enc_atoms(row)));
-    return nb::make_tuple(enc(o, r.search), enc_atoms(r.reached_fluent_atoms), enc_atoms(r.reached_derived_atoms), r.num_states,
+    return nb::make_tuple(enc(o, r.search), enc_atoms(r.reached_fluent_atoms), enc_atoms(r.reached_derived_atoms), r.num_created_states,
                           enc_list(r.landing_states, [&](const auto& x) { return enc(o, x); }), by_atom, rows);
 }
 search::RolloutResult dec_rollout(const Owner& o, nb::handle h)
@@ -1241,7 +1233,7 @@ search::RolloutResult dec_rollout(const Owner& o, nb::handle h)
     r.search = dec_iw(o, f.next());
     r.reached_fluent_atoms = dec_atoms(T, f.next(), what);
     r.reached_derived_atoms = dec_atoms(T, f.next(), what);
-    r.num_states = f.get<u64>();
+    r.num_created_states = f.get<u64>();
     r.landing_states = dec_list<search::LandingState>(f.next(), what, [&](nb::handle x) { return dec_landing(o, x); });
     auto atom = [&](Fields& p)
     {
@@ -1475,11 +1467,11 @@ search::ActionOrdering parse_ordering(nb::handle h)
         return search::ActionOrdering::InOrder;
     if (s == "randomized")
         return search::ActionOrdering::Randomized;
-    if (s == "direct_goal_achiever_first" || s == "dgaf")
+    if (s == "direct_goal_achiever_first")
         return search::ActionOrdering::DirectGoalAchieverFirst;
-    if (s == "goal_regression_relevance" || s == "regression")
+    if (s == "goal_regression_relevance")
         return search::ActionOrdering::GoalRegressionRelevance;
-    if (s == "mixed_regression_random" || s == "mixed")
+    if (s == "mixed_regression_random")
         return search::ActionOrdering::MixedRegressionRandom;
     throw nb::value_error("mymyr: ordering must be an ActionOrdering or one of 'in_order', 'randomized', "
                           "'direct_goal_achiever_first', 'goal_regression_relevance', 'mixed_regression_random'");
@@ -1906,7 +1898,7 @@ std::unique_ptr<heuristics::Heuristic> perfect_of_task(const Owner& o, heuristic
     }
     if (!r.space)
         throw nb::value_error((std::string("mymyr: heuristic='perfect' needs the task's whole state space, and its generation stopped (") +
-                               datasets::to_string(r.status) + " after " + std::to_string(r.states) +
+                               search::to_string(r.status) + " after " + std::to_string(r.states) +
                                " states); raise max_states / max_seconds or pass Heuristic.perfect(space)")
                                   .c_str());
     return heuristics::perfect(std::move(r.space), costs);
@@ -2025,13 +2017,13 @@ PyBestFirstResult bf_call(BfFn fn, nb::handle task, nb::handle heuristic, nb::ha
 
 // ------------------------------------------------------------------------------------------------ IW / SIW
 
-search::IwOptions iw_options(ControlScope& cs, const Owner& o, u32 max_arity, nb::handle width_zero, bool optimize_iw1,
+search::IwOptions iw_options(ControlScope& cs, const Owner& o, u32 max_width, nb::handle width_zero, bool optimize_iw1,
                              bool witness_pruning, bool canonical_order, nb::handle start,
                              nb::handle transition_ordering = nb::none())
 {
     search::IwOptions opts;
     opts.control = cs.control;
-    opts.max_arity = max_arity;
+    opts.max_width = max_width;
     const std::string wz = str_arg(width_zero, "width_zero");
     if (wz == "expand_depth_one")
         opts.width_zero = search::WidthZero::ExpandDepthOne;
@@ -2264,7 +2256,7 @@ void bind_search(nb::module_& parent)
 
     auto iw_pass = nb::class_<search::IwPassStatistics>(m, "IwPass", "The counts of one IW(k) pass of a ladder.");
     bind_stats_pickle(iw_pass, [](const search::IwPassStatistics& x) { return enc(x); }, dec_pass);
-    iw_pass.def_ro("width", &search::IwPassStatistics::arity, "The pass's novelty width k.")
+    iw_pass.def_ro("width", &search::IwPassStatistics::width, "The pass's novelty width k.")
         .def_ro("status", &search::IwPassStatistics::status, "How the pass ended (Status).")
         .def_ro("expanded", &search::IwPassStatistics::expanded, "Non-goal states popped and expanded.")
         .def_ro("generated", &search::IwPassStatistics::generated, "Transitions generated from expanded states.")
@@ -2277,10 +2269,10 @@ void bind_search(nb::module_& parent)
         .def_ro("seconds", &search::IwPassStatistics::seconds, "Wall time of the pass, in seconds.")
         .def_ro("placeholder", &search::IwPassStatistics::placeholder,
                 "The empty width-0 entry of an optimized IW(1) ladder (the pass did not run).")
-        .def_prop_ro("stats", [](const search::IwPassStatistics& p) { return p.statistics(); },
+        .def_prop_ro("stats", [](const search::IwPassStatistics& p) { return p.stats(); },
                      "The pass's counts as Statistics.")
         .def("__repr__", [](const search::IwPassStatistics& p) {
-            return "IwPass(width=" + std::to_string(p.arity) + ", status=" + search::to_string(p.status) +
+            return "IwPass(width=" + std::to_string(p.width) + ", status=" + search::to_string(p.status) +
                    ", expanded=" + std::to_string(p.expanded) + ", generated=" + std::to_string(p.generated) +
                    ", generated_in_tree=" + std::to_string(p.generated_in_tree) + ")";
         });
@@ -2303,7 +2295,7 @@ void bind_search(nb::module_& parent)
         });
 
     auto heuristic_stats = nb::class_<heuristics::HeuristicStats>(
-        m, "HeuristicStatistics", "The counts of a heuristic's evaluator (Heuristic.stats, BestFirstResult.heuristic).");
+        m, "HeuristicStatistics", "The counts of a heuristic's evaluator (Heuristic.counters, BestFirstResult.heuristic).");
     bind_stats_pickle(heuristic_stats, [](const heuristics::HeuristicStats& x) { return enc(x); }, dec_heuristic_stats);
     heuristic_stats.def_ro("evaluations", &heuristics::HeuristicStats::evaluations, "States evaluated.")
         .def_ro("grounded", &heuristics::HeuristicStats::grounded, "Evaluations by the grounded relaxation.")
@@ -2323,7 +2315,7 @@ void bind_search(nb::module_& parent)
         "The result of iw and iw_pass: the common result fields, one IwPass per width run in `passes`, and the width "
         "of the pass that solved the task.");
     bind_result_fields(iw_result, [](const PyIwResult& x) -> const search::IwResult& { return x.r; },
-                       [](const PyIwResult& x) { return x.r.total; });
+                       [](const PyIwResult& x) { return x.r.stats; });
     iw_result
         .def_prop_ro("passes", [](const PyIwResult& x) { return x.r.passes; },
                      "The passes run (a list of IwPass), index = width.")
@@ -2335,7 +2327,7 @@ void bind_search(nb::module_& parent)
         .def("__repr__", [](const PyIwResult& x) {
             return std::string("IwResult(status=") + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
-                   ", effective_width=" + std::to_string(x.r.effective_width) + ", " + stats_repr(x.r.total) + ")";
+                   ", effective_width=" + std::to_string(x.r.effective_width) + ", " + stats_repr(x.r.stats) + ")";
         });
 
     auto siw_result = nb::class_<PySiwResult>(
@@ -2343,7 +2335,7 @@ void bind_search(nb::module_& parent)
         "The result of siw: the common result fields (plan: the whole plan when solved, else empty) and one "
         "SiwSubproblem per subproblem.");
     bind_result_fields(siw_result, [](const PySiwResult& x) -> const search::SiwResult& { return x.r; },
-                       [](const PySiwResult& x) { return x.r.total; });
+                       [](const PySiwResult& x) { return x.r.stats; });
     siw_result
         .def_prop_ro("partial_plan", [](const PySiwResult& x) { return plan_list(x.o, x.r.partial_plan); },
                      "Unless solved: the subplans of the subproblems solved before the one that failed, from the "
@@ -2359,7 +2351,7 @@ void bind_search(nb::module_& parent)
                    (x.r.partial_plan.empty() ? std::string{}
                                              : ", partial_plan_length=" + std::to_string(x.r.partial_plan.size())) +
                    ", cost=" + cost_repr(x.r.cost) + ", subproblems=" + std::to_string(x.r.subproblems.size()) + ", " +
-                   stats_repr(x.r.total) + ")";
+                   stats_repr(x.r.stats) + ")";
         });
 
     auto novelty_stats = nb::class_<search::AStarIwNoveltyStatistics>(m, "AStarIwNoveltyStatistics",
@@ -2427,7 +2419,7 @@ void bind_search(nb::module_& parent)
     brfs_result
         .def_prop_ro("exhausted", [](const PyBrfsResult& x) { return x.r.exhausted; },
                      "The whole reachable space was expanded (with stop_at_goal=False also when solved).")
-        .def_prop_ro("num_goal_states", [](const PyBrfsResult& x) { return x.r.goal_states; },
+        .def_prop_ro("num_goal_states", [](const PyBrfsResult& x) { return x.r.num_goal_states; },
                      "Goal states expanded.")
         .def_prop_ro("layers", [](const PyBrfsResult& x) { return x.r.layers; },
                      "Layers expanded (the last one partly when the search stopped inside it).")
@@ -2441,7 +2433,7 @@ void bind_search(nb::module_& parent)
                      "With layer_stats=True: per expanded layer (expanded, generated, new states); else empty.")
         .def_prop_ro("store", [](const PyBrfsResult& x) { return x.r.store; },
                      "The state store used: 'flat', 'chunked', 'compact' or 'concurrent'.")
-        .def_prop_ro("threads_used", [](const PyBrfsResult& x) { return x.r.threads; }, "Threads the search ran on.")
+        .def_prop_ro("threads_used", [](const PyBrfsResult& x) { return x.r.threads_used; }, "Threads the search ran on.")
         .def_prop_ro("fingerprint", [](const PyBrfsResult& x) { return x.r.fingerprint; },
                      "With fingerprint=True: a hash over (id, state) of every stored state; else 0.")
         .def("__reduce__", [](const PyBrfsResult& x) { return result_reduce("brfs", x.o, enc(x.o, x.r)); })
@@ -2496,9 +2488,9 @@ void bind_search(nb::module_& parent)
         "= successors not novel, cut by a bound or blocked) and the Rollout IW counters in `rollout`.");
     bind_result_fields(rollout_iw_result,
                        [](const PyRolloutIwResult& x) -> const search::RolloutIwResult& { return x.r; },
-                       [](const PyRolloutIwResult& x) { return x.r.statistics.statistics(); });
+                       [](const PyRolloutIwResult& x) { return x.r.rollout.stats(); });
     rollout_iw_result
-        .def_prop_ro("rollout", [](const PyRolloutIwResult& x) { return x.r.statistics; },
+        .def_prop_ro("rollout", [](const PyRolloutIwResult& x) { return x.r.rollout; },
                      "The Rollout IW counters (RolloutIwStatistics).")
         .def_prop_ro("root_solved", [](const PyRolloutIwResult& x) { return x.r.root_solved; },
                      "The reachable width-1 space was exhausted (relative to the depth and incumbent bounds).")
@@ -2509,7 +2501,7 @@ void bind_search(nb::module_& parent)
         .def("__repr__", [](const PyRolloutIwResult& x) {
             return std::string("RolloutIwResult(status=") + search::to_string(x.r.status) +
                    ", plan_length=" + std::to_string(x.r.plan.size()) + ", cost=" + cost_repr(x.r.cost) +
-                   ", rollouts=" + std::to_string(x.r.statistics.rollouts) + ", root_solved=" +
+                   ", rollouts=" + std::to_string(x.r.rollout.rollouts) + ", root_solved=" +
                    (x.r.root_solved ? "True" : "False") + ")";
         });
 
@@ -2533,7 +2525,7 @@ void bind_search(nb::module_& parent)
         "One rollout of find_rollouts_parallel: the common result fields of its IW ladder, its passes, and what its "
         "private state repository recorded. Atoms are GroundAtoms, equal across rollouts and thread counts.");
     bind_result_fields(rollout_result, [](const PyRolloutResult& x) -> const search::IwResult& { return x.get().search; },
-                       [](const PyRolloutResult& x) { return x.get().search.total; });
+                       [](const PyRolloutResult& x) { return x.get().search.stats; });
     rollout_result
         .def_prop_ro("seed", [](const PyRolloutResult& x) { return x.seed; }, "The rollout's seed.")
         .def_prop_ro("passes", [](const PyRolloutResult& x) { return x.get().search.passes; },
@@ -2546,8 +2538,9 @@ void bind_search(nb::module_& parent)
         .def_prop_ro("reached_derived_atoms",
                      [](const PyRolloutResult& x) { return atom_list(x.o, x.get().reached_derived_atoms); },
                      "The derived atoms true in some state the rollout created (ascending by canonical id).")
-        .def_prop_ro("num_states", [](const PyRolloutResult& x) { return x.get().num_states; },
-                     "Distinct states the rollout created.")
+        .def_prop_ro("num_created_states", [](const PyRolloutResult& x) { return x.get().num_created_states; },
+                     "Distinct states the rollout created: every successor of every expanded state, pruned or not, "
+                     "across all passes, the start state included (stats.states counts the states the passes stored).")
         .def_prop_ro("landing_states",
                      [](const PyRolloutResult& x) {
                          nb::typed<nb::list, PyLandingState> out{nb::list()};
@@ -2572,7 +2565,7 @@ void bind_search(nb::module_& parent)
         .def("__repr__", [](const PyRolloutResult& x) {
             const search::RolloutResult& r = x.get();
             return "RolloutResult(seed=" + std::to_string(x.seed) + ", status=" + search::to_string(r.search.status) +
-                   ", num_states=" + std::to_string(r.num_states) + ", reached_fluent_atoms=" +
+                   ", num_created_states=" + std::to_string(r.num_created_states) + ", reached_fluent_atoms=" +
                    std::to_string(r.reached_fluent_atoms.size()) + ", landing_states=" +
                    std::to_string(r.landing_states.size()) + ")";
         });
@@ -2715,10 +2708,9 @@ void bind_search(nb::module_& parent)
 
     // heuristics ------------------------------------------------------------------------------------------------------
     nb::class_<PyHeuristic>(m, "Heuristic",
-                            "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count' "
-                            "('gc'), 'max' ('hmax'), 'add' ('hadd'), 'ff' ('hff'), 'set_additive' ('hsa', 'setadd'), "
-                            "'h2', 'lmcut' ('lm_cut': LM-cut, admissible), 'lmcount' ('lm_count', 'landmark_count': "
-                            "LAMA's landmark count, path-dependent); the perfect heuristic h* comes from "
+                            "A heuristic of a task: h(state) -> float (+inf: dead end). kind: 'blind', 'goal_count', "
+                            "'max', 'add', 'ff', 'set_additive', 'h2', 'lmcut' (LM-cut, admissible), 'lmcount' "
+                            "(LAMA's landmark count, path-dependent); the perfect heuristic h* comes from "
                             "a state space: Heuristic.perfect(space).\n\ncosts: 'auto' (the default: the task's objective, i.e. 'unit' "
                             "for a task without action costs and metric, else 'real'), 'unit' (every action 1) or "
                             "'real' (the task's action costs: zero and fractional costs exact up to 6 decimal places, "
@@ -2910,8 +2902,8 @@ void bind_search(nb::module_& parent)
                                                      costs_name(self.options.costs), evaluation_name(self.options.evaluation)));
             },
             "A heuristic pickles as its specification and is built again when unpickled (its grounding included); "
-            "a perfect heuristic as its state space. stats start from zero.")
-        .def_prop_ro("stats", [](PyHeuristic& self) {
+            "a perfect heuristic as its state space. counters start from zero.")
+        .def_prop_ro("counters", [](PyHeuristic& self) {
             heuristics::HeuristicStats st;
             {
                 nb::gil_scoped_release release;  // never block on the mutex while attached
@@ -3812,9 +3804,9 @@ void bind_search(nb::module_& parent)
                      "rollouts from the root over a tree of action sequences, pruned by the minimum depth of each "
                      "fluent atom, until a goal is found (the goal is tested on generation), the root is solved "
                      "(EXHAUSTED; root_solved) or a budget stops it.\n\nordering: an ActionOrdering or its name "
-                     "('in_order', 'randomized', 'direct_goal_achiever_first' / 'dgaf', 'goal_regression_relevance' / "
-                     "'regression', 'mixed_regression_random' / 'mixed'); seed: of the randomized orderings (a "
-                     "SplitMix64; the same seed gives the same run on every platform); max_rollouts (FAILED when hit); "
+                     "('in_order', 'randomized', 'direct_goal_achiever_first', 'goal_regression_relevance', "
+                     "'mixed_regression_random'); seed: of the randomized orderings (a "
+                     "SplitMix64; the same seed gives the same run on every platform); max_rollouts (OUT_OF_STATES when hit); "
                      "incumbent_bound: a plan of this length is known elsewhere. max_states counts generated tree "
                      "nodes; there is no max_expanded. ",
                     k_control_doc,
@@ -3837,7 +3829,7 @@ void bind_search(nb::module_& parent)
             opts.iw = iw_options(cs, o, int_arg<u32>(max_width, "max_width"), width_zero, optimize_iw1, witness_pruning,
                                  canonical_order, start);
             opts.seeds = int_list_arg<u64>(seeds, "seeds");
-            opts.num_threads = threads_arg(threads, "threads");
+            opts.threads = threads_arg(threads, "threads");
             if (auto v = opt_int_arg<u32>(max_next_layer_states, "max_next_layer_states", 0))
                 opts.max_next_layer_states = *v;
             opts.report_landing_states = report_landing_states;
@@ -3915,8 +3907,8 @@ void bind_search(nb::module_& parent)
             search::PortfolioOptions opts;
             opts.control = cs.control;
             opts.num_rollout_workers = int_arg<u32>(num_rollout_workers, "num_rollout_workers");
-            opts.num_threads = threads_arg(threads, "threads");
-            opts.base_seed = int_arg<u64>(seed, "seed");
+            opts.threads = threads_arg(threads, "threads");
+            opts.seed = int_arg<u64>(seed, "seed");
             opts.rollout_orderings = parse_orderings(rollout_orderings);
             opts.canonical_order = canonical_order;
             if (!start.is_none())

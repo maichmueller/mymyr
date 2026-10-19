@@ -122,12 +122,13 @@ struct HorizonOptions
     RootPolicy root = RootPolicy::Include;
     /// Adds the relation `_parent_` (state slot, state slot) between a node and its parent. Needs a horizon mode.
     bool parent_relation = false;
-    /// Adds the relation `_sibling_` (state slot, state slot) between two nodes that some node has an edge to both of
-    /// (they share a parent), as the pair in both orders. Needs a horizon mode.
+    /// Adds the relation `_sibling_` (state slot, state slot) between two nodes that share a parent, as the pair in
+    /// both orders. The parents of a node are the sources of the distinct parent edges into it (the edges of
+    /// `_parent_`, which the root policy decides), a self-loop excluded. Needs a horizon mode.
     bool sibling_relation = false;
-    /// Adds the relation `_cousin_` (state slot, state slot) between two nodes whose parents are siblings: an edge from
-    /// p to the one, an edge from q to the other, p != q, and some node with an edge to both p and q. Both orders.
-    /// Needs a horizon mode.
+    /// Adds the relation `_cousin_` (state slot, state slot) between two nodes whose parents are siblings: a parent p
+    /// of the one, a parent q of the other, p != q, and a node that is a parent of both p and q. Both orders. Needs a
+    /// horizon mode.
     bool cousin_relation = false;
 
     [[nodiscard]] friend constexpr bool operator==(const HorizonOptions&, const HorizonOptions&) noexcept = default;
@@ -162,8 +163,8 @@ struct FlatOptions
     /// relations `[+]p[hist]` and `[-]p[hist]` with one entity per step. A batch then has the arrays history_offsets,
     /// history_entity and history_dt. Without it the history relations stay empty.
     bool history = false;
-    /// With history, the newest this many steps of a row are encoded (0: all of them).
-    u32 history_max_steps = 0;
+    /// With history, the newest this many steps of a row are encoded (at least 1; nullopt: all of them).
+    std::optional<u32> history_max_steps = std::nullopt;
     Layout layout = Layout::Graph;
     IndexType index = IndexType::I32;
     /// Stores `relation_counts`. Without it, the tuples of a cell are the difference of two consecutive
@@ -179,7 +180,8 @@ struct FlatOptions
 
 /// Checks the options and returns them in normal form. Throws std::invalid_argument ("mymyr: encoding: ...") for
 /// - max_goal_level above 3, or subgoal targets without subgoal levels;
-/// - history targets or history_max_steps without history, or history together with a horizon mode;
+/// - history targets or history_max_steps without history, history_max_steps of 0, or history together with a horizon
+///   mode;
 /// - action targets without action relations (include_actions);
 /// - goal or subgoal targets without the plain goal derivation: only the plain goal relations carry the target slot;
 /// - added goal derivations without the delta horizon mode;

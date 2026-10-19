@@ -232,7 +232,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     const auto t_start = Clock::now();
     BrfsResult r;
     r.store = "device";
-    r.threads = 0;
+    r.threads_used = 0;
     const bool witness = o.witness_pruning, canonical = o.canonical_order;
 
     if (const std::string why = ChunkGenerator::search_unsupported(*task); !why.empty())
@@ -246,7 +246,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
     const u32 S = gen->num_schemas(), L = gen->label_width();
     const bool host = gen->needs_host(witness);
     W = bucket(task->words() + task->numeric_slots());
-    const u64 budget = std::min<u64>(o.max_states, state_set::k_max_states);
+    const u64 budget = std::clamp<u64>(o.max_states, 1, state_set::k_max_states);
     const u64 expected = o.expected_states ? o.expected_states : (o.max_states != ~u64{0} ? budget : 0);
     const u64 cap0 = expected ? expected + expected / 8 + 1024 : u64{1} << 16;
     states = std::make_unique<DeviceArena>(ctx, W * 8, cap0, host);  // the mirror only when the CPU reads parents
@@ -359,7 +359,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             if (x.first == 0)
             {
                 ++st.chunks;
-                r.goal_states += 1;
+                r.num_goal_states += 1;
                 stop = true;
                 r.solved = true;
                 goal_id = ck.b;
@@ -507,7 +507,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
         r.layers += hl->layers;
         r.expanded += hl->expanded;
         r.generated += hl->generated;
-        r.goal_states += hl->goal_states;
+        r.num_goal_states += hl->goal_states;
         first_goal = std::min<u64>(first_goal, hl->first_goal);
         if (hl->chunks)
             ratios[ratio_at++ % k_window] = static_cast<double>(hl->max_ratio) / 256;
@@ -786,7 +786,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                         throw std::logic_error("mymyr: device BrFS: a sorted segment found no scratch (internal error)");
                     r.expanded += ck.ns;
                     r.generated += x.candidates;
-                    r.goal_states += x.goals;
+                    r.num_goal_states += x.goals;
                     if (x.goals)
                         first_goal = std::min<u64>(first_goal, ck.b + x.first);
                     count += x.fresh;
@@ -796,7 +796,7 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
                     if (ck.before_goal)
                     {
                         // the parents before the first goal state are expanded: stop there (the CPU's order)
-                        r.goal_states += 1;
+                        r.num_goal_states += 1;
                         stop = true;
                         r.solved = true;
                         goal_id = ck.b + ck.ns;
@@ -821,12 +821,59 @@ DeviceBrfsResult DeviceBrfs::Impl::run()
             b = le;
     }
     check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+    if (budget_hit && count >= budget)
+    {
+        // The CPU stops at the state that fills the store, inside the expansion of its parent; the device commits
+        // whole chunks. The last chunk is cut back to that state: the states keep the ids [0, budget) (the CPU's), and
+        // the counts become the CPU's, with the parents after that state's parent and the parent's later transitions
+        // recounted on the host.
+        u32 rec[2];
+        check(cudaMemcpyAsync(rec, nodes->device_data() + (budget - 1) * nodes->record_bytes(), sizeof rec,
+                              cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync (budget)");
+        check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+        if (rec[0] != k_no_parent)
+        {
+            const u64 p = rec[0], E = r.expanded;  // the parents [0, E) were expanded
+            std::vector<u64> rows((E - p) * W);
+            check(cudaMemcpyAsync(rows.data(), states->device_data() + p * W * sizeof(u64), rows.size() * sizeof(u64),
+                                  cudaMemcpyDeviceToHost, s), "cudaMemcpyAsync (budget)");
+            check(cudaStreamSynchronize(s), "cudaStreamSynchronize");
+            const WorkspaceLease lease = task->workspace();
+            Successors& succ = lease->successors();
+            for (u64 id = p; id < E; ++id)
+            {
+                const State state = numeric::decode(*task, rows.data() + (id - p) * W, W);
+                succ.prepare(state.view());
+                u64 transitions = 0;
+                succ.generate<true>([&](u32, const ObjectId*, const Delta&) { ++transitions; return true; }, witness,
+                                    canonical);
+                if (id == p)
+                    r.generated -= transitions - (u64{rec[1]} + 1);
+                else
+                {
+                    r.generated -= transitions;
+                    r.num_goal_states -= succ.goal_holds() ? 1 : 0;
+                }
+            }
+            r.expanded = p + 1;
+            if (r.solved && goal_id > p)  // the goal state after the parents of a chunk: never reached
+            {
+                r.solved = false;
+                r.num_goal_states -= 1;
+            }
+            if (first_goal > p)
+                first_goal = ~u64{0};
+        }
+        count = budget;
+        states->truncate(count);
+        nodes->truncate(count);
+    }
     r.search_s = std::chrono::duration<double>(Clock::now() - t0).count();
     r.states = count;
     r.exhausted = exhausted;
     r.words = task->words();
     r.fluent_slots = task->atoms().fluent_slots();
-    r.store_bytes = states->capacity() * W * 8 + nodes->capacity() * 8 + slots * 8;
+    r.memory_bytes = states->capacity() * W * 8 + nodes->capacity() * 8 + slots * 8;
     fold_events();
     st.uploads = gen->uploads();
     const GeneratorStats gs = gen->stats();

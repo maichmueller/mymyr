@@ -36,11 +36,15 @@ class HorizonView:
     - ``truncated``: uint8 [G], set where ``horizon`` stopped a graph at ``max_nodes``; None when not known. The encoders
       do not read it.
 
-    The edges are used as given: a node may have several incoming edges or none, and the encoder neither sorts nor
-    merges them. An action relation holds one tuple per edge and a parent relation one tuple per edge, in the order of
-    the edges of the graph. The edge arrays that the schema does not read (the encoder needs the edges of a schema with
-    action or parent relations only, ``edge_schema`` and ``edge_binding`` of one with action relations only) may be
-    None. The arrays are read where they are; they must stay unchanged during the call.
+    The edges may come in any order and be repeated, and a node may have several incoming edges or none: the encoder
+    works from their canonical form, so the batch does not depend on how the view was made. An action relation holds one
+    tuple per distinct (destination, objects) of its edges, ordered by destination and then objects; the parent relation
+    one tuple per distinct (source, destination), ordered by it, a self-loop included; the sibling and cousin relations
+    are read from the parent edges without the self-loops. Under ``root_policy='exclude'`` an edge into the root has no
+    action tuple and an edge that touches the root no parent, sibling or cousin tuple. The edge arrays that the schema
+    does not read (the encoder needs the edges of a schema with action, parent, sibling or cousin relations only,
+    ``edge_schema`` and ``edge_binding`` of one with action relations only) may be None. The arrays are read where they
+    are; they must stay unchanged during the call.
     """
 
     nodes: SupportsDLPack | Sequence[State]
@@ -85,9 +89,11 @@ def horizon(
     ``merge=False`` every successor row is a node of its own and the graph is a tree. The graphs, their numbering and
     their order do not depend on ``threads`` or ``pool`` nor on the process.
 
-    Memory. The result is held in memory: ``8 * W * nodes + 4 * (3 + L) * edges`` bytes for W state words per node and
-    L action label columns per edge, and ``8 * nodes`` more while the nodes are merged; expansion works in chunks, so
-    nothing else grows with the number of nodes. The number of nodes of a graph is at most the number of
+    Memory. All the graphs of a call are built at once and held in memory. While they are built every node takes
+    ``8 * W + 8`` bytes (W state words, its graph and number) and, when merging, 8 more for its hash and 8 to 16 for the
+    hash table; every edge takes ``4 * (4 + L)`` bytes (L action label columns). The result (``8 * W * nodes + 4 * (3 +
+    L) * edges`` bytes) is then written from them, so the peak is about the sum of the two; expansion works in chunks,
+    so nothing else grows with the number of nodes. The number of nodes of a graph is at most the number of
     states within ``depth`` actions of its root, which can grow exponentially with the depth. ``max_nodes`` bounds it:
     a graph that would hold more nodes than ``max_nodes`` (the root included) raises ValueError, or with
     ``truncate=True`` stops growing instead: a successor that is not yet a node is left out together with its edge

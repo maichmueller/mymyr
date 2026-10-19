@@ -182,8 +182,8 @@ Nullary literals in a layer are unary tuples over the auxiliary entity, which th
 ### History
 
 With `history=True` the history relations `[+]on[hist]` and `[-]on[hist]` of the schema hold the literals of the steps of
-a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (0, the default: all of
-them). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
+a row's `history`. Of a row's valid steps only the **newest** `history_max_steps` are encoded (`None`, the default: all of
+them; otherwise at least 1). Each encoded step is one **history step entity** (entity role 5, after the action entities), in step order,
 oldest first; the batch lists them in `history_offsets` `[G + 1]`, `history_entity` `[S]` (the entity of each step) and
 `history_dt` int32 `[S]` (its `dt`). The `entity_ref` of a step entity is the step's index among the row's valid steps
 (not among the encoded ones: step `entity_ref` of the row's `history` is `history[2][g, entity_ref]` for its `dt` and
@@ -235,8 +235,8 @@ auxiliary entity. Actions are not virtual-node predicates.
 `FlatHorizonEncoder(table_or_task, *, horizon_mode, <options>)` encodes **horizons**: one graph per root state, holding
 the root and the nodes below it (states reached from the root by actions) as state entities, so that a model sees a
 root and its candidate successors in one graph. It has the options of `FlatRelationEncoder` except `history` (a horizon
-has none), with `horizon_mode` required and `root_policy`, `parent_relation`, `sibling_relation` and `cousin_relation`
-new. It shares the batch format,
+has none), with `horizon_mode` required (`'full'`, `'delta'` or `'action'`; `None` raises `ValueError`, there is no
+horizon without a mode) and `root_policy`, `parent_relation`, `sibling_relation` and `cousin_relation` new. It shares the batch format,
 `schema`, `table`, `entity_names`, `describe` and pickling of the flat encoder, and a `FlatBatch` of a horizon encoder
 has `batch.schema.options['horizon_mode']` set. `EncodingSchema` takes the same five options (`horizon_mode=None` there is no horizon; `FlatHorizonEncoder` with
 `horizon_mode=None` raises `ValueError`, as a horizon encoder has no such mode).
@@ -256,13 +256,16 @@ the rows of one batch of states plus offsets and edges, as `rl.expand` produces 
 | `edge_binding` | int32 `[E, L]`: the objects of an edge's ground action (`L` at least the table's `label_width`; only the schema's arity entries of a row are read) |
 | `task_ids` | int32 `[G]`: the instance of each graph (required for a table of several instances) |
 
-The edges are used as given. There is one **action tuple** and one **`_parent_` tuple** per edge, in the order of the
-edges of the graph: the encoder neither sorts nor merges them, so two edges with the same endpoints and action give two
-equal tuples, a node with several incoming edges has several parents, and a node with none has none. (The tuples of
-every other relation are in the canonical order of the flat encoder.) `rl.expand` rows are a valid edge list: the rows of
-a state's successors, `schema`, `binding`, with `edge_src` the state's node and `edge_dst` the node you made of the
-successor. The edge arrays a schema does not read (all of them without action and parent relations, `edge_schema` and
-`edge_binding` without action relations) may be `None`. `derived` is per node row `[M, D]`; `goals` and `subgoals` are
+**The edges.** The graph is a dag: a node may have several parents, an edge may lead back to the root or to its own
+source, and the edges may come in any order and more than once. The **action tuples** of a relation are the distinct
+`(dst node, objects)` of the edges whose schema belongs to it, ordered by destination node and then objects, and the
+**`_parent_` tuples** are the distinct `(src, dst)` pairs in ascending order; so reordering or repeating the edges does
+not change the batch, a node that several edges reach with the same action has one action tuple, and a node with several
+parents has one `_parent_` tuple for each. (The tuples of every other relation are in the canonical order of the flat
+encoder.) `rl.expand` rows are a valid edge list: the rows of a state's successors, `schema`, `binding`, with `edge_src`
+the state's node and `edge_dst` the node you made of the successor. The edge arrays a schema does not read (all of them
+without action and parent relations, `edge_schema` and `edge_binding` without action relations) and the arrays of a batch
+without any edge may be `None`. `derived` is per node row `[M, D]`; `goals` and `subgoals` are
 per graph (`[G, ...]`, or one row for all graphs) and replace the instance's goal and layers for that graph.
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon encoder has no
 `stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. The device encoder refuses a horizon
@@ -280,8 +283,9 @@ batch lists them in `target_entity`, so the schema has targets (the capacity for
 **Root policies.** `include` (the default) makes the root node 0 a state entity and a target candidate. `encode_only`
 gives it a state entity but does not list it as a target. `exclude` has no state entity for the root: the graph's
 entities are the nodes 1 and up, and the root's relations are the plain ones (no state slot): the root's atoms are
-tuples without a state argument, and an edge into or out of the root gives no action tuple and no `_parent_` tuple.
-The root has no entity at all; its relations say what it holds.
+tuples without a state argument. An edge into the root gives no action tuple (the action tuples start with the state of
+their destination) and an edge that touches the root no `_parent_` tuple; an edge out of the root keeps its action tuple,
+which names the node it leads to. The root has no entity at all; its relations say what it holds.
 
 **Modes.** Every relation of a node has the node's state entity as its first argument (the slot role `state`):
 
@@ -298,6 +302,9 @@ The root has no entity at all; its relations say what it holds.
   those it makes false, relative to the root. A node equal to its root (a self-loop's end) has no delta tuples.
 - `action`: the root's state and, for every edge, the action that leads to its target node: the action relation of the
   schema holds `(dst node, o_1, ..., o_k)`. The nodes carry no facts of their own.
+
+The catalog lists only relations a graph can have tuples in: a static predicate has no delta relation and no relation
+of the nodes (its atoms are the root's), and the added-satisfaction relations exist per goal level.
 
 **Nullary relations.** The atoms and goal literals of nullary predicates are tuples over the graph's auxiliary entity,
 in front of which stands the state entity (`handempty(node, auxiliary)`); the graph has the auxiliary entity exactly when
@@ -345,8 +352,10 @@ truncate=False, merge=True)` does the same over a `datasets.StateSpace` generate
 - **Determinism.** The view does not depend on `threads`, on `pool` or on the process: expansion is deterministic and
   merging and numbering follow the fixed order above. `threads=0` uses one per hardware thread; `pool` is a
   `mymyr.rl.ThreadPool`.
-- **Memory.** The view is held in memory, graph after graph: `8 * W * nodes + 4 * (3 + L) * edges` bytes for `W` state
-  words and `L` action label columns, and `8 * nodes` more while the nodes are merged; expansion runs in chunks of 4096
+- **Memory.** All the graphs of a call are built at once and held in memory. While they are built every node takes
+  `8 * W + 8` bytes (`W` state words, its graph and number) and, when merging, `8` more for its hash and `8` to `16` for
+  the hash table; every edge takes `4 * (4 + L)` bytes (`L` action label columns). The view (`8 * W * nodes + 4 * (3 + L) *
+  edges` bytes) is then written from them, so the peak is about the sum of the two; expansion runs in chunks of 4096
   states, so nothing else grows with the number of nodes. The nodes of a graph are the states within `depth` actions of
   its root, which grows exponentially with `depth`, so bound it: `max_nodes` is the most nodes of a graph (the root
   included; `None` is unbounded). A graph that would have more raises `ValueError` ("mymyr: encoding: graph 3 of the horizon would have
@@ -362,18 +371,20 @@ defaults of a graph seen from its root: the root is the state entity `target:0`,
 and `_parent_` holds the edges. `FlatHorizonEncoder` takes `sibling_relation` and `cousin_relation` too, as does
 `EncodingSchema`; each needs a horizon mode.
 
-The relations `_sibling_` and `_cousin_` (slot roles `state`, `state`) relate the nodes of a graph through its edges, as
-sets over the merged nodes. Let the parents of a node `x` be the nodes with an edge to `x`: parallel edges count once, a
-self-loop makes a node its own parent, every parent counts.
+The relations `_sibling_` and `_cousin_` (slot roles `state`, `state`) relate the nodes of a graph through its `_parent_`
+edges, as sets over the merged nodes. The parents of a node `x` are the sources of the `_parent_` edges into `x`: parallel
+edges count once, every distinct parent counts, a self-loop does not (a node is never its own parent), and under
+`root_policy='exclude'` the root has no entity, so its edges are no parent edges: it is nobody's parent and nobody's child.
 
 - `_sibling_(i, j)` holds iff `i != j` and `i` and `j` have a parent in common.
 - `_cousin_(i, j)` holds iff `i != j` and some parent `p` of `i` and some parent `q` of `j` are different siblings
   (`p != q`, `_sibling_(p, q)`).
 
-Both relations list each pair in both orders, in ascending `(i, j)` order of the nodes' indices. Under
-`root_policy='exclude'` the root has no entity, so pairs that touch node 0 are left out. The pair lists grow with the
-square of a node's parents' fan-out: a dense dag (a wide horizon of a task with many applicable actions) can give
-`_sibling_` and `_cousin_` far more tuples than it has edges, and the encoding time grows with them. An example, the dag with the
+Both relations list each pair in both orders, in ascending `(i, j)` order of the nodes' indices. A tree has the usual
+meaning: siblings share a parent, cousins have parents that are siblings; edges that give a node a second parent make
+more siblings and cousins (a node is related through each of its parents). The pair lists grow with the square of a
+node's parents' fan-out: a dense dag (a wide horizon of a task with many applicable actions) can give `_sibling_` and
+`_cousin_` far more tuples than it has edges, and the encoding time grows with them. An example, the dag with the
 edges `0->1, 0->2, 0->1 (again), 1->3, 2->3, 1->4, 2->5, 3->6, 4->0`:
 
 | | parents | children |
@@ -390,7 +401,9 @@ edges `0->1, 0->2, 0->1 (again), 1->3, 2->3, 1->4, 2->5, 3->6, 4->0`:
 sibling of 1's other child 4 and of 2's other child 5, and 4 and 5 (parents 1 and 2) are not siblings. `_cousin_` is
 `(0,6) (3,4) (3,5) (4,3) (4,5) (5,3) (5,4) (6,0)`: the siblings 1 and 2 make a child of 1 and a different child of 2
 cousins (children of 1: 3 and 4; of 2: 3 and 5; so `(3,5)`, `(4,3)`, `(4,5)` and their reverses), and the siblings 3 and
-4 make their children 6 and 0 cousins; 5 has no children. A tree has the usual meaning: siblings share a parent, cousins have parents that are siblings.
+4 make their children 6 and 0 cousins; 5 has no children. With `root_policy='exclude'` the edges `0->1`, `0->2` and `4->0`
+are not parent edges: `_sibling_` is `(3,4) (3,5) (4,3) (5,3)` and `_cousin_` is empty. A self-loop does not make
+relatives: with the edge `4->4` added, nothing above changes.
 
 ### Transitions
 
@@ -465,6 +478,33 @@ instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]
 batch's framework. NumPy arrays are read-only; do not mutate the shared buffers through frameworks whose tensor APIs
 cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
 `batch.schema` is its `EncodingSchema`.
+
+## Memory of batches
+
+A batch is one block of memory. Fresh memory costs a kernel page fault per 4 KiB page, which for a batch of tens of
+megabytes is several times the work of filling it, so released blocks are kept and handed out again with their pages
+still mapped. The same cache serves the other batch outputs (`mymyr.rl.expand`, table batches). It is bounded:
+
+| Block size | Served by | Bound |
+|---|---|---|
+| up to 128 KiB | the system allocator | not cached by mymyr |
+| up to 4 MiB | a cache private to the thread that releases the block | 4 blocks per thread |
+| above 4 MiB | a cache shared by all threads | 8 blocks and 512 MiB in all; a block above 256 MiB is never kept |
+
+A block returns to the cache of the thread that drops its last reference, whichever thread made it. Blocks are
+anonymous memory mappings, so dropping one gives its memory back to the operating system. A shared block that no
+acquire takes within the 256 acquires of blocks above 128 KiB that follow its release is dropped by itself, so a one-off
+huge batch does not stay resident. `mymyr.block_cache_bytes()` reports what the calling thread's cache and the shared
+cache hold, and `mymyr.trim_block_cache()` frees all of it; other threads' private caches are freed when those threads
+end. Arrays that a batch still owns keep their memory either way.
+
+```python
+big = encoder.encode([state] * 20000)  # a batch of several megabytes
+del big  # its block goes back to the cache
+assert mymyr.block_cache_bytes() > 0
+mymyr.trim_block_cache()  # and back to the system
+assert mymyr.block_cache_bytes() == 0
+```
 
 ## Layouts and omitted arrays
 
@@ -616,7 +656,7 @@ relations. An encoder has the same properties.
 - **Invalid combinations** raise `ValueError`: `max_goal_level` outside 0 to 3; subgoal targets without
   `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
-  targets together with a horizon mode; history targets or `history_max_steps` without `history`; `history` together with a
+  targets together with a horizon mode; history targets or `history_max_steps` without `history`; a `history_max_steps` of 0; `history` together with a
   horizon mode; the action horizon mode without `include_actions`; `parent_relation`, `sibling_relation`,
   `cousin_relation` or a `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
@@ -630,8 +670,8 @@ relations. An encoder has the same properties.
 max_nodes, truncate, merge}[, pool, scratch])` (and an overload over a `SuccessorGraph`, the transitions of a state
 space) returns `HorizonGraphs`, the arrays of a view with `input()` the `HorizonInput`; `transition_graphs(table,
 parents, task_ids, expansion)` makes the depth-one graphs of an existing expansion. The kinship of `_sibling_` and
-`_cousin_` is computed per graph from its edges alone by `MYMYR_HD` functions over a POD view
-(`mymyr/encoding/detail/horizon.hpp`: `KinView`, `kin_count`, `kin_row`).
+`_cousin_` is built per graph from the canonical parent edges by `MYMYR_HD` functions over scratch words
+(`mymyr/encoding/detail/horizon.hpp`: `horizon_kin_words`, `horizon_kin_prepare`, `horizon_kin_fill_far`).
 
 `mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
 encoder, and `encode(EncodeInput{states, task_ids, derived, derived_stride, goal_pos, goal_neg, goal_stride, goal_words, ..., actions, subgoals, history})`

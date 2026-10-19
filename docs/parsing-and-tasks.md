@@ -168,7 +168,7 @@ and `task.options` returns them:
 | Option | Values | Effect |
 | --- | --- | --- |
 | `atoms` | `'auto'` (default), `'reachable'`, `'dense'`, `'lazy'` | how atoms get their slots (below) |
-| `reachability_budget` | steps, default `2**25`; `0` is unbounded | work bound of the analysis behind `'auto'` and `'reachable'` |
+| `reachability_budget` | steps, default `2**25`; `None` is unbounded | work bound of the analysis behind `'auto'` and `'reachable'` |
 | `numeric_storage` | `'auto'` (default), `'i32'`, `'f64'` | the type of a numeric slot; `'auto'` is `'i32'` when every value of the task stays integral and no quantum is set, else `'f64'` |
 | `numeric_quantum` | `0` (default) or `q > 0` | stored values snap to multiples of `q` |
 | `numeric_tolerant` | `False` (default) | tolerant numeric semantics: values below 1e6 snap to a 1e-9 grid, comparisons use a 1e-9 tolerance |
