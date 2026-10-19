@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <random>
+#include <stdexcept>
+#include <string>
 
 using namespace mymyr;
 using namespace mymyr::encoding;
@@ -34,7 +36,10 @@ bool has(const EncodingSchema& schema, std::string_view name) { return schema.fi
 
 std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 {
-    const auto span = schema.slot_roles(*schema.find(name));
+    const auto id = schema.find(name);
+    if (!id)
+        throw std::out_of_range("the schema has no relation " + std::string(name));
+    const auto span = schema.slot_roles(*id);
     return {span.begin(), span.end()};
 }
 
@@ -165,7 +170,8 @@ TEST(EncodingSchema, HorizonCatalogs)
     EXPECT_EQ(roles(*d, "on"), (std::vector<SlotRole>{R::Argument, R::Argument}));
     EXPECT_EQ(roles(*d, "[+]on"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
     EXPECT_EQ(roles(*d, "[-]on[g][sat-]"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
-    EXPECT_EQ(roles(*d, "[+]on[sat+]"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
+    EXPECT_EQ(roles(*d, "[+]on[g][sat+]"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
+    EXPECT_FALSE(has(*d, "[+]on[sat+]"));  // a literal-level relation has no goal level: no graph fills it
     EXPECT_EQ(roles(*d, "_parent_"), (std::vector<SlotRole>{R::State, R::State}));
     EXPECT_EQ(roles(*d, "stack"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
     EXPECT_EQ(d->relation(*d->find("_parent_")).lane, Lane::Parent);
