@@ -3,7 +3,7 @@
 //
 //   mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W [--n 16384] [--rounds 20]
 //                               [--replays 10] [--device 0] [--secondary-problem P.pddl]
-//                               [--lanes 4|8|32] [--fill auto|thread|warp]
+//                               [--lanes 4|8|32] [--fill auto|thread|warp] [--streams]
 //
 // FILE holds the state rows, little-endian u64 [rows, W]; they are tiled to --n graphs. For each of the graph-major and
 // the relation-major layout the encode of the batch is captured into a CUDA graph on a stream and replayed --replays
@@ -11,6 +11,9 @@
 // followed by a synchronize on the host clock. The rounds of the three timings alternate, the first rotating. The object
 // also reports, for each layout, the nodes of the captured graph (kernels, memsets, anything else), the scratch of the
 // reserved workspace, and whether the device's sizes equal the host encoder's.
+
+// With --streams, also times captured append, flush, append plus flush and four-slice collation. Append and flush
+// arrays hold one replay per sample; combined and collation arrays hold --replays calls per sample.
 
 #include "mymyr/cuda/encoding.hpp"
 #include "../../cuda/src/encoding_scratch.hpp"
@@ -37,7 +40,7 @@ namespace
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W "
-                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|warp]\n",
+                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|warp] [--streams]\n",
                  message);
     std::exit(2);
 }
@@ -50,6 +53,7 @@ struct Args
     u32 rounds = 20, replays = 10;
     int device = 0;
     cuda::LaunchConfig launch;
+    bool streams = false;
 };
 
 Args parse(int argc, char** argv)
@@ -80,6 +84,8 @@ Args parse(int argc, char** argv)
             a.rounds = static_cast<u32>(std::stoul(value()));
         else if (flag == "--replays")
             a.replays = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--streams")
+            a.streams = true;
         else if (flag == "--device")
             a.device = std::stoi(value());
         else if (flag == "--lanes")
@@ -185,8 +191,6 @@ struct Session
         options.goal_derivations = {};
         options.layout = l;
         host = encoding::FlatEncoder::create(std::move(table), options);
-        if (host->context().max_derived_words() != 0)
-            throw std::runtime_error("the task has derived atoms; the device encoder takes their words as input");
         // the host's sizes size the output
         encoding::EncodeInput in;
         in.states = {rows.data(), n, words, 0, 0};
@@ -214,6 +218,7 @@ struct Session
                       device_sizes.args == host_sizes.args && device_sizes.targets == host_sizes.targets &&
                       device_sizes.overflow == 0 && host_sizes.overflow == 0;
         scratch = cuda::detail::scratch_layout(shape, device->bounds(), l, host->schema().num_relations());
+        scratch.bytes = device->scratch_bytes(shape);
         cells = device->bounds().cells;
         // the captured encode
         work.emplace(device->acquire(stream));
@@ -241,7 +246,8 @@ struct Session
     }
 };
 
-double replay_us(cudaStream_t stream, const Session& s, u32 replays)
+template<class Operation>
+double replay_us(cudaStream_t stream, const Operation& s, u32 replays)
 {
     cudaEvent_t start = nullptr, stop = nullptr;
     cuda::check(cudaEventCreate(&start), "event");
@@ -266,12 +272,121 @@ double eager_us(cudaStream_t stream, const Session& s)
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
 }
 
+struct CapturedOperation
+{
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    NodeCounts nodes;
+    template<class F> void capture(cudaStream_t stream, F&& operation)
+    {
+        cuda::check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "begin capture");
+        std::exception_ptr error;
+        try { operation(); } catch (...) { error = std::current_exception(); }
+        cuda::check(cudaStreamEndCapture(stream, &graph), "end capture");
+        if (error) std::rethrow_exception(error);
+        nodes = count_nodes(graph);
+        cuda::check(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+    }
+    ~CapturedOperation()
+    {
+        if (exec) (void)cudaGraphExecDestroy(exec);
+        if (graph) (void)cudaGraphDestroy(graph);
+    }
+};
+
+struct StreamSession
+{
+    cuda::DeviceRowStream ring;
+    cuda::DeviceEncodeInput input;
+    cuda::DeviceBuffer ring_output, collate_output, scratch;
+    std::vector<cuda::DeviceBuffer> parts;
+    std::unique_ptr<cuda::DeviceCollator> collator;
+    CapturedOperation append, flush, append_flush, collate;
+    std::vector<double> append_times, flush_times, append_flush_times, collate_times;
+
+    StreamSession(const cuda::ContextPtr& ctx, cudaStream_t stream, const Session& base, const std::vector<u64>& rows)
+        : ring(ctx, base.host, base.input.graphs + 1, stream), input(base.input)
+    {
+        const auto& sizes = base.host_sizes;
+        const cuda::BatchShape ring_shape{input.graphs + 1, sizes.entities, sizes.args, sizes.targets};
+        const auto ring_layout = base.device->output_layout(ring_shape);
+        ring_output = cuda::DeviceBuffer(ctx, ring_layout.bytes, stream);
+        const auto ring_out = cuda::output_of(ring_layout, ring_shape, ring_output.data());
+        append.capture(stream, [&] { ring.append(input); });
+        flush.capture(stream, [&] { ring.flush(ring_out); });
+        append_flush.capture(stream, [&] { ring.append(input); ring.flush(ring_out); });
+        std::vector<cuda::DeviceCollationBatch> batches;
+        u64 first = 0;
+        ThreadPool pool(1);
+        encoding::EncodeScratch host_scratch;
+        for (const u64 count : {input.graphs / 3, u64{0}, input.graphs / 3, input.graphs - 2 * (input.graphs / 3)})
+        {
+            encoding::EncodeInput host_input;
+            host_input.states = {rows.data() + first * input.state_stride, count, input.state_words, input.state_stride, 0};
+            const auto part_sizes = base.host->count(host_input, pool, host_scratch);
+            const cuda::BatchShape shape{count, part_sizes.entities, part_sizes.args, part_sizes.targets};
+            const auto layout = base.device->output_layout(shape);
+            parts.emplace_back(ctx, layout.bytes, stream);
+            const auto out = cuda::output_of(layout, shape, parts.back().data());
+            auto part = input;
+            part.states += first * input.state_stride;
+            part.graphs = count;
+            base.device->encode(part, out, stream);
+            cuda::DeviceCollationBatch batch;
+            batch.arrays = out.arrays;
+            batch.sizes = out.sizes;
+            batch.graphs = count;
+            batch.relations = base.host->schema().num_relations();
+            batch.schema_fingerprint = base.host->schema().fingerprint();
+            batch.layout = base.layout;
+            batch.index = base.host->schema().options().index;
+            batch.stored = cuda::output_arrays(base.host->schema());
+            batches.push_back(batch);
+            first += count;
+        }
+        collator = std::make_unique<cuda::DeviceCollator>(ctx, std::move(batches), stream);
+        scratch = cuda::DeviceBuffer(ctx, collator->scratch_bytes(), stream);
+        const cuda::BatchShape shape{input.graphs, sizes.entities, sizes.args, sizes.targets};
+        const auto layout = base.device->output_layout(shape);
+        collate_output = cuda::DeviceBuffer(ctx, layout.bytes, stream);
+        const auto out = cuda::output_of(layout, shape, collate_output.data());
+        collate.capture(stream, [&] { collator->encode(scratch.data(), scratch.size(), out); });
+        for (int i = 0; i < 3; ++i)
+        {
+            cuda::check(cudaGraphLaunch(append_flush.exec, stream), "warm stream");
+            cuda::check(cudaGraphLaunch(collate.exec, stream), "warm collation");
+        }
+        cuda::check(cudaStreamSynchronize(stream), "warm stream");
+    }
+    void measure(cudaStream_t stream, u32 replays)
+    {
+        ring.clear();
+        append_times.push_back(replay_us(stream, append, 1));
+        flush_times.push_back(replay_us(stream, flush, 1));
+        append_flush_times.push_back(replay_us(stream, append_flush, replays));
+        collate_times.push_back(replay_us(stream, collate, replays));
+    }
+};
+
 void print_times(const char* name, const std::vector<double>& times)
 {
     std::printf("\"%s\":[", name);
     for (usize i = 0; i < times.size(); ++i)
         std::printf("%s%.3f", i ? "," : "", times[i]);
     std::printf("]");
+}
+
+void print_streams(const char* name, const StreamSession& s)
+{
+    std::printf("\"%s\":{", name);
+    print_times("append_us", s.append_times); std::printf(",");
+    print_times("flush_us", s.flush_times); std::printf(",");
+    print_times("append_flush_us", s.append_flush_times); std::printf(",");
+    print_times("collate_us", s.collate_times);
+    std::printf(",\"append_kernels\":%u,\"flush_kernels\":%u,\"append_flush_kernels\":%u,\"collate_kernels\":%u,"
+                "\"collate_scratch_bytes\":%llu}", s.append.nodes.kernels, s.flush.nodes.kernels,
+                s.append_flush.nodes.kernels, s.collate.nodes.kernels,
+                static_cast<unsigned long long>(s.collator->scratch_bytes()));
 }
 
 void print_layout(const char* name, const Session& s)
@@ -308,9 +423,20 @@ int main(int argc, char** argv)
         cuda::Stream stream;
         Session graph_major(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch);
         Session relation_major(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch);
+        std::unique_ptr<StreamSession> stream_graph, stream_relation;
+        if (a.streams)
+        {
+            stream_graph = std::make_unique<StreamSession>(ctx, stream, graph_major, rows);
+            stream_relation = std::make_unique<StreamSession>(ctx, stream, relation_major, rows);
+        }
         std::vector<double> graph_times, relation_times, eager_times;
         for (u32 r = 0; r < a.rounds; ++r)
         {
+            if (stream_graph)
+            {
+                (r % 2 ? stream_relation : stream_graph)->measure(stream, a.replays);
+                (r % 2 ? stream_graph : stream_relation)->measure(stream, a.replays);
+            }
             // the three timings alternate, the first rotating
             for (u32 k = 0; k < 3; ++k)
                 switch ((r + k) % 3)
@@ -331,6 +457,12 @@ int main(int argc, char** argv)
         print_layout("graph", graph_major);
         std::printf(",");
         print_layout("relation", relation_major);
+        if (stream_graph)
+        {
+            std::printf(",\"streams\":{");
+            print_streams("graph", *stream_graph); std::printf(","); print_streams("relation", *stream_relation);
+            std::printf("}");
+        }
         std::printf("}\n");
         return 0;
     }

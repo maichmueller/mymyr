@@ -779,7 +779,8 @@ class DeviceCollator:
     """A prepared list of CUDA batches for repeated or captured rollout collation.
 
     Construct outside capture on the stream that will encode the batches. The batch tensors keep their addresses;
-    values may be updated in stream order before each encode. Capacity calls allocate output and scratch through
+    values may be updated in stream order before each encode, with graph counts and array shapes fixed.
+    Capacity calls allocate output and scratch through
     torch, including its CUDA graph pool. Keep this object and the returned batch alive through the final replay.
     """
 

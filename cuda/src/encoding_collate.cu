@@ -123,10 +123,11 @@ template<class I> __global__ void fill_kernel(CollationParams p)
         zero(out.target_group, bad ? 0 : sizes.targets, p.output.capacities.targets);
         if (bad)
         {
-            zero(out.task_ids, 0, p.graphs); zero(as<I>(out.num_objects), 0, p.graphs);
-            zero(as<I>(out.entity_offsets), 0, p.graphs + 1); zero(as<I>(out.relation_counts), 0, cells);
-            zero(as<I>(out.relation_offsets), 0, cells + 1); zero(as<I>(out.relation_arg_offsets), 0, cells + 1);
-            zero(out.goal_complete, 0, p.graphs); zero(as<I>(out.target_offsets), 0, p.graphs + 1);
+            const u64 graphs = p.output.capacities.graphs, capacity_cells = graphs * p.relations;
+            zero(out.task_ids, 0, graphs); zero(as<I>(out.num_objects), 0, graphs);
+            zero(as<I>(out.entity_offsets), 0, graphs + 1); zero(as<I>(out.relation_counts), 0, capacity_cells);
+            zero(as<I>(out.relation_offsets), 0, capacity_cells + 1); zero(as<I>(out.relation_arg_offsets), 0, capacity_cells + 1);
+            zero(out.goal_complete, 0, graphs); zero(as<I>(out.target_offsets), 0, graphs + 1);
         }
     }
     if (sizes.overflow) return;
