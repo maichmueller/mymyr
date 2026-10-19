@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -70,30 +71,53 @@ void check_extension(const encoding::EncodingContext& current, const encoding::E
 }
 
 /// What the device needs to know about a context: the bounds of its graphs, and whether the graphs of some instance read
-/// derived words, by the goals of the rows (none, over the fluent slots, also over the derived slots).
+/// derived words, by the goals of the rows (none, over the fluent slots, also over the derived slots) and by subgoal
+/// layers over the derived slots.
 detail::EncodingFacts context_facts(const encoding::EncodingContext& host)
 {
     namespace ed = encoding::detail;
     const auto v = host.view();
+    const encoding::EncodingSchema& schema = host.schema();
     detail::EncodingFacts facts;
     facts.derived_words = host.max_derived_words();
     GraphBounds& bounds = facts.bounds;
+    const bool levels = schema.has_subgoals();
+    const bool history = schema.has_history();
+    bounds.levels = levels ? schema.options().max_goal_level : 0;
+    bounds.history = history;
     for (u32 i = 0; i < host.table().size(); ++i)
     {
         const ed::InstanceView inst = ed::instance_view(v, i);
         facts.widths.push_back(ed::graph_width(inst));
         bounds.words = std::max<u64>(bounds.words, std::max(inst.words, inst.derived_words));
+        bounds.state_words = std::max<u64>(bounds.state_words, inst.words);
+        bounds.derived_words = std::max<u64>(bounds.derived_words, inst.derived_words);
         facts.reads_derived[0] = facts.reads_derived[0] || ed::reads_derived(inst, false, false);
         facts.reads_derived[1] = facts.reads_derived[1] || ed::reads_derived(inst, true, false);
         facts.reads_derived[2] = facts.reads_derived[2] || ed::reads_derived(inst, true, true);
-        // the graph of a row has the cells of the instance's goal or of the row's own goal, and no action cells
-        for (const ed::CellList list : {ed::cell_list(inst, false, false), ed::cell_list(inst, true, false)})
+        facts.reads_derived_layers = facts.reads_derived_layers || (inst.needs_derived & ed::k_needs_row_goal_derived) != 0;
+        // the graph of a row has the cells of the instance's goal or of the row's own goal and, with subgoal layers
+        // or history steps, their cells, and no action cells
+        for (const ed::CellList list : {ed::cell_list(inst, false, false, levels, history),
+                                        ed::cell_list(inst, true, false, levels, history)})
         {
             u64 tuples = 0, args = 0, targets = 0;
+            u64 step_tuples = 0, step_args = 0, step_targets = 0;
             bool nullary = false;
             for (u32 c = 0; c < list.count; ++c)
             {
                 const ed::Cell& cell = list.cells[c];
+                if (ed::is_history_op(cell.op))
+                {
+                    // every step of a row may have a tuple for each slot of the cell
+                    const u64 n = cell.b - cell.a;
+                    step_tuples = add(step_tuples, n);
+                    step_args = add(step_args, mul(n, cell.arity));
+                    if (ed::history_op_target(cell.op))
+                        step_targets = add(step_targets, n);
+                    nullary = nullary || (n > 0 && cell.logical_arity == 0);
+                    continue;
+                }
                 const u64 n = u64{cell.b - cell.a} + (ed::is_goal_op(cell.op) ? cell.d - cell.c : 0u);
                 tuples = add(tuples, n);
                 args = add(args, mul(n, cell.arity));
@@ -101,20 +125,43 @@ detail::EncodingFacts context_facts(const encoding::EncodingContext& host)
                     targets = add(targets, n);
                 nullary = nullary || (n > 0 && cell.logical_arity == 0);
             }
-            // objects, the auxiliary entity, one entity per goal target and one per predicate virtual node
+            // objects, the auxiliary entity, one entity per goal or subgoal target and one per predicate virtual node
             const u64 entities = add(add(inst.num_objects, nullary ? 1 : 0), add(targets, inst.num_virtual));
             bounds.entities = std::max(bounds.entities, entities);
             bounds.tuples = std::max(bounds.tuples, tuples);
             bounds.args = std::max(bounds.args, args);
             bounds.targets = std::max(bounds.targets, targets);
             bounds.cells = std::max<u64>(bounds.cells, list.count);
+            // a history step has an entity, and one more per tuple of a history target cell
+            bounds.step_entities = std::max(bounds.step_entities, add(1, step_targets));
+            bounds.step_tuples = std::max(bounds.step_tuples, step_tuples);
+            bounds.step_args = std::max(bounds.step_args, step_args);
+            bounds.step_targets = std::max(bounds.step_targets, step_targets);
         }
     }
     return facts;
 }
-BatchShape worst_shape(u64 graphs, const GraphBounds& bounds)
+/// The steps of a row's history a worst case allows: those of the longest history given, at most history_max_steps.
+/// With `strict`, a schema that encodes every step needs the longest history.
+u64 history_steps_of(const encoding::EncodingSchema& schema, u64 history_steps, bool strict)
 {
-    return {graphs, mul(graphs, bounds.entities), mul(graphs, bounds.args), mul(graphs, bounds.targets)};
+    if (!schema.has_history())
+        return 0;
+    const std::optional<u32> limit = schema.options().history_max_steps;
+    if (limit)
+        return history_steps ? std::min<u64>(history_steps, *limit) : *limit;
+    if (history_steps == 0 && strict)
+        throw std::invalid_argument(
+            "mymyr: encoding: the schema encodes every history step: give the most steps one row's history has");
+    return history_steps;
+}
+BatchShape worst_shape(u64 graphs, const GraphBounds& bounds, u64 steps)
+{
+    return {graphs,
+            mul(graphs, add(bounds.entities, mul(steps, bounds.step_entities))),
+            mul(graphs, add(bounds.args, mul(steps, bounds.step_args))),
+            mul(graphs, add(bounds.targets, mul(steps, bounds.step_targets))),
+            mul(graphs, steps)};
 }
 }  // namespace
 
@@ -266,13 +313,15 @@ OutputArrays output_arrays(const encoding::EncodingSchema& schema)
     arrays.counts = schema.emits_counts();
     arrays.goal_complete = schema.has_goal_complete();
     arrays.targets = schema.has_targets();
+    arrays.history = schema.has_history();
     return arrays;
 }
 
 OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u64 relations, const OutputArrays& arrays)
 {
     const u64 I = index == encoding::IndexType::I32 ? 4 : 8;
-    const u64 G = shape.graphs, E = shape.entities, A = shape.args, T = shape.targets, GR = mul(G, relations);
+    const u64 G = shape.graphs, E = shape.entities, A = shape.args, T = shape.targets, S = shape.history,
+              GR = mul(G, relations);
     OutputLayout out;
     out.arrays = arrays;
     u64 at = 0;
@@ -294,6 +343,9 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.target_offsets, arrays.targets ? mul(I, add(G, 1)) : 0);
     place(out.target_entity, arrays.targets ? mul(I, T) : 0);
     place(out.target_group, arrays.targets ? T : 0);
+    place(out.history_offsets, arrays.history ? mul(I, add(G, 1)) : 0);
+    place(out.history_entity, arrays.history ? mul(I, S) : 0);
+    place(out.history_dt, arrays.history ? mul(4, S) : 0);
     place(out.sizes, sizeof(encoding::FlatSizes));
     out.bytes = at;
     return out;
@@ -318,6 +370,9 @@ DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void
     b.target_offsets = at(layout.target_offsets, a.targets);
     b.target_entity = at(layout.target_entity, a.targets);
     b.target_group = static_cast<u8*>(at(layout.target_group, a.targets));
+    b.history_offsets = at(layout.history_offsets, a.history);
+    b.history_entity = at(layout.history_entity, a.history);
+    b.history_dt = static_cast<i32*>(at(layout.history_dt, a.history));
     out.capacities = shape;
     out.sizes = static_cast<encoding::FlatSizes*>(at(layout.sizes, true));
     return out;
@@ -325,30 +380,44 @@ DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void
 
 namespace detail
 {
-u64 ScratchLayout::scanned(u64 graphs) const
+u64 ScratchLayout::history_at(u64 graphs) const
 {
+    if (!history)
+        return 0;
     if (!relation_major)
         return mul(4, add(graphs, 1));
     return add(add(mul(2, add(graphs, 1)), mul(graphs, relations)), 1);
+}
+u64 ScratchLayout::scanned(u64 graphs) const
+{
+    return history ? add(history_at(graphs), add(graphs, 1))
+                   : (relation_major ? add(add(mul(2, add(graphs, 1)), mul(graphs, relations)), 1)
+                                     : mul(4, add(graphs, 1)));
 }
 ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds, encoding::Layout layout, u64 relations)
 {
     ScratchLayout out;
     out.relation_major = layout == encoding::Layout::Relation;
     out.relations = relations;
+    out.history = bounds.history;
     const u64 G = shape.graphs;
     // the largest value of the scan: the sum of the totals of every row (the argument row only graph-major)
     u64 scanned = add(add(mul(G, bounds.entities), mul(G, bounds.targets)), mul(G, bounds.tuples));
     if (!out.relation_major)
         scanned = add(scanned, mul(G, bounds.args));
-    out.wide = scanned > std::numeric_limits<u32>::max();
+    // the steps of a history are not bounded by the schema
+    out.wide = bounds.history || scanned > std::numeric_limits<u32>::max();
     out.scan_length = out.scanned(G);
     out.flags = 0;
     out.totals = k_flag_bytes;
     out.cell_counts = round_up(add(k_flag_bytes, mul(out.wide ? 8 : 4, out.scan_length)));
     out.cell_stride = bounds.cells;
     out.cell_entries = out.relation_major ? 0 : mul(G, bounds.cells);
-    out.scan_temp = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
+    // the levels of the subgoal layers of a graph: three planes (plain, satisfied, unsatisfied) per level, sign and slot
+    // kind, over the instance's words (and its derived words)
+    out.level_stride = mul(mul(bounds.levels, 6), add(bounds.state_words, bounds.derived_words));
+    out.level_storage = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
+    out.scan_temp = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
     out.scan_temp_bytes = totals_scan_temp_bytes(out.scan_length, out.wide);
     out.bytes = add(out.scan_temp, round_up(out.scan_temp_bytes));
     return out;
@@ -362,6 +431,8 @@ ScratchView scratch_view(const ScratchLayout& layout, void* block) noexcept
     out.totals = base + layout.totals;
     out.cell_counts = reinterpret_cast<u32*>(base + layout.cell_counts);
     out.cell_stride = layout.cell_stride;
+    out.level_storage = reinterpret_cast<u64*>(base + layout.level_storage);
+    out.level_stride = layout.level_stride;
     out.scan_temp = base + layout.scan_temp;
     out.scan_temp_bytes = layout.scan_temp_bytes;
     out.wide = layout.wide;
@@ -390,13 +461,10 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
 {
     const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
-    if (o.targets.contains(encoding::TargetSource::Subgoal)) refuse("subgoal targets");
-    if (o.targets.contains(encoding::TargetSource::History)) refuse("history targets");
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
-    if (o.max_goal_level != 0) refuse("subgoal levels");
-    if (o.history) refuse("history steps");
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
-    constexpr encoding::TargetSources targets{encoding::TargetSource::Goal};
+    constexpr encoding::TargetSources targets{encoding::TargetSource::Goal, encoding::TargetSource::Subgoal,
+                                              encoding::TargetSource::History};
     constexpr encoding::GoalDerivations goals{encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied,
                                              encoding::GoalDerivation::Unsatisfied};
     if (o.targets.bits() & ~targets.bits()) refuse("these target sources");
@@ -425,7 +493,10 @@ GraphBounds DeviceEncoder::bounds() const
     std::shared_lock lock(m_state_mutex);
     return m_bounds;
 }
-BatchShape DeviceEncoder::worst_case(u64 graphs) const { return worst_shape(graphs, bounds()); }
+BatchShape DeviceEncoder::worst_case(u64 graphs, u64 history_steps) const
+{
+    return worst_shape(graphs, bounds(), history_steps_of(schema(), history_steps, true));
+}
 OutputLayout DeviceEncoder::output_layout(const BatchShape& shape) const
 {
     return cuda::output_layout(shape, options().index, schema().num_relations(), output_arrays(schema()));
@@ -449,11 +520,11 @@ u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
     const auto output = output_layout(shape);
     return add(detail::scratch_layout(shape, m_bounds, options().layout, schema().num_relations()).bytes, output.bytes);
 }
-u64 DeviceEncoder::bytes_needed(u64 graphs) const
+u64 DeviceEncoder::bytes_needed(u64 graphs, u64 history_steps) const
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    const auto shape = worst_shape(graphs, m_bounds);
+    const auto shape = worst_shape(graphs, m_bounds, history_steps_of(schema(), history_steps, true));
     return add(detail::scratch_layout(shape, m_bounds, options().layout, schema().num_relations()).bytes,
                output_layout(shape).bytes);
 }
@@ -468,7 +539,8 @@ void DeviceEncoder::reserve_workspace(Workspace& work, const BatchShape& shape)
 {
     std::lock_guard lock(work.mutex);
     const BatchShape want{std::max(shape.graphs, work.shape.graphs), std::max(shape.entities, work.shape.entities),
-                          std::max(shape.args, work.shape.args), std::max(shape.targets, work.shape.targets)};
+                          std::max(shape.args, work.shape.args), std::max(shape.targets, work.shape.targets),
+                          std::max(shape.history, work.shape.history)};
     (void)output_layout(want);
     const auto layout = detail::scratch_layout(want, m_bounds, options().layout, schema().num_relations());
     if (!work.scratch || layout != work.layout)
@@ -515,7 +587,7 @@ void DeviceEncoder::reserve(u64 graphs, cudaStream_t stream)
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    reserve_locked(worst_shape(graphs, m_bounds), stream);
+    reserve_locked(worst_shape(graphs, m_bounds, history_steps_of(schema(), 0, false)), stream);
 }
 BatchShape DeviceEncoder::reserved(cudaStream_t stream) const
 {
@@ -643,7 +715,45 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the derived goal row stride is smaller than its width");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
-    if (graphs && !in.derived && facts.reads_derived[in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0])
+    const encoding::LayerInput& sub = in.subgoals;
+    const encoding::HistoryInput& hist = in.history;
+    const auto check_layers = [](const encoding::LayerInput& l, const char* what, bool rows_share)
+    {
+        if (l.layers == 0)
+            return;
+        if (!l.pos || !l.neg)
+            invalid(std::string(what) + " need both their positive and negative masks");
+        if ((l.derived_pos == nullptr) != (l.derived_neg == nullptr))
+            invalid(std::string(what) + " need both their positive and negative derived masks");
+        if (l.stride < u64{l.layers} * l.words && !(rows_share && l.stride == 0))
+            invalid(std::string("the row stride of the ") + what + " is smaller than their layers");
+        if (l.derived_pos && l.derived_stride < u64{l.layers} * l.derived_words &&
+            !(rows_share && l.derived_stride == 0))
+            invalid(std::string("the derived row stride of the ") + what + " is smaller than their layers");
+    };
+    if (sub.layers != 0)
+    {
+        if (!schema.has_subgoals())
+            invalid("subgoal layers are given, but the schema has no subgoal relations");
+        if (sub.layers > opts.max_goal_level)
+            invalid(std::to_string(sub.layers) + " subgoal layers are given, the schema has " +
+                    std::to_string(opts.max_goal_level) + " levels");
+        check_layers(sub, "subgoal layers", true);
+    }
+    if (hist.masks.layers != 0 || hist.count)
+    {
+        if (!schema.has_history())
+            invalid("history steps are given, but the schema has no history relations");
+        if (hist.masks.layers != 0 && !hist.dt)
+            invalid("the history steps need their dt");
+        if (hist.masks.layers == 0 && (hist.masks.pos || hist.masks.neg || hist.dt))
+            invalid("history masks or dt are given without steps");
+        check_layers(hist.masks, "history steps", false);
+    }
+    if (graphs &&
+        !in.derived &&
+        (facts.reads_derived[in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0] ||
+         (sub.layers != 0 && sub.derived_pos && facts.reads_derived_layers)))
         invalid("the device does not evaluate derived atoms: pass the derived words of the rows (derived)");
     const OutputArrays arrays = output_arrays(schema);
     const encoding::FlatBuffers& a = out.arrays;
@@ -670,6 +780,11 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             invalid("relation_args is null");
         if (arrays.targets && out.capacities.targets && (!a.target_entity || !a.target_group))
             invalid("the target arrays are null");
+        if ((a.history_offsets != nullptr) != arrays.history ||
+            (!arrays.history && (a.history_entity != nullptr || a.history_dt != nullptr)))
+            invalid("the history arrays must be given iff the schema has history");
+        if (arrays.history && out.capacities.history && (!a.history_entity || !a.history_dt))
+            invalid("the history arrays are null");
     }
     if (launch.count_lanes != 0 && launch.count_lanes != 4 && launch.count_lanes != 8 && launch.count_lanes != 32)
         invalid("the count kernel runs 4, 8 or 32 lanes per graph");
@@ -728,13 +843,17 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.goal_derived_neg = in.goal_derived_neg;
     p.goal_derived_stride = in.goal_derived_stride;
     p.goal_derived_words = in.goal_derived_words;
+    p.layers = {sub, hist, opts.history_max_steps.value_or(0)};
+    p.layered = p.layers.layered();
+    p.level_storage = scratch.level_storage;
+    p.level_stride = scratch.level_stride;
     p.order = launch.order;
     p.sizes = out.sizes;
     if (phase == Phase::Count)
     {
         // counting reports the sizes against no capacity
         constexpr u64 unbounded = std::numeric_limits<u64>::max();
-        p.capacities = {graphs, unbounded, unbounded, unbounded};
+        p.capacities = {graphs, unbounded, unbounded, unbounded, unbounded};
     }
     else
     {
@@ -749,6 +868,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.totals = scratch.totals;
     p.wide = scratch.wide;
     p.segments = mul(2, add(graphs, 1));
+    p.history_at = layout.history_at(graphs);
     p.flags = scratch.flags;
     p.cell_counts = scratch.cell_counts;
     p.cell_stride = scratch.cell_stride;

@@ -35,13 +35,15 @@ struct Destination
     {
         return {graphs, at<I>("num_objects"), at<I>("relation_counts"), at<I>("relation_offsets"),
                 at<I>("relation_arg_offsets"), at<I>("relation_args"), at<u8>("entity_role"), at<I>("entity_ref"),
-                at<u8>("goal_complete"), at<I>("target_offsets"), at<I>("target_entity"), at<u8>("target_group")};
+                at<u8>("goal_complete"), at<I>("target_offsets"), at<I>("target_entity"), at<u8>("target_group"),
+                at<I>("history_offsets"), at<I>("history_entity"), at<i32>("history_dt")};
     }
 };
 
 auto totals(const ed::GraphTotals& t)
 {
-    return std::tuple{t.entities, t.tuples, t.args, t.targets, t.goal_entities, t.actions, t.virtuals, t.flags};
+    return std::tuple{t.entities, t.tuples, t.args,  t.targets,        t.goal_entities, t.actions,
+                      t.virtuals, t.flags,  t.subgoal_entities, t.history_steps, t.history_targets};
 }
 
 template<class I>
@@ -55,7 +57,7 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
     Destination expected(*reference), plain(*reference), grouped(*reference);
     for (Destination* dst : {&plain, &grouped})
         for (const char* name : {"num_objects", "relation_counts", "relation_args", "entity_role", "entity_ref",
-                                 "goal_complete", "target_entity", "target_group"})
+                                 "goal_complete", "target_entity", "target_group", "history_entity", "history_dt"})
             dst->dirty(name);
     for (Destination* dst : {&plain, &grouped})
     {
@@ -65,11 +67,12 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
                 dst->dirty(name);
                 dst->at<I>(name)[G * R] = expected.at<I>(name)[G * R];
             }
-        if (dst->at<I>("target_offsets"))
-        {
-            dst->dirty("target_offsets");
-            dst->at<I>("target_offsets")[G] = expected.at<I>("target_offsets")[G];
-        }
+        for (const char* name : {"target_offsets", "history_offsets"})
+            if (dst->at<I>(name))
+            {
+                dst->dirty(name);
+                dst->at<I>(name)[G] = expected.at<I>(name)[G];
+            }
     }
     struct Positions
     {
@@ -93,6 +96,21 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
                 row.goal_derived_neg = batch.goal_derived_neg.data() + g * batch.derived_words;
             }
         }
+        // the rows' subgoal layers and history steps, and the levels of the layers
+        const ed::LayerSource source{in.subgoals, in.history, encoder->schema().options().history_max_steps.value_or(0)};
+        ed::RowLayers layers;
+        std::vector<u64> storage;
+        if (source.layered())
+        {
+            ASSERT_EQ(ed::layer_validity(v, source, g), ed::LayerValidity::Valid);
+            if (ed::bind_layers(source, g, layers))
+            {
+                row.layers = &layers;
+                storage.assign(ed::effective_layer_words(v, layers.subgoals), 0);
+                ed::bind_levels(ed::SoloGroup{}, v, row, layers, storage.data());
+            }
+        }
+        const u64 history = expected.at<I>("history_offsets") ? static_cast<u64>(expected.at<I>("history_offsets")[g]) : 0;
         const u32 cells = ed::cell_list(v, row).count;
         std::vector<u32> a(cells), b(cells), va(v.num_virtual), vb(v.num_virtual);
         const auto ta = ed::count_graph(v, row, a.data(), va.data());
@@ -105,15 +123,16 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
         {
             const u64 tuple = static_cast<u64>(expected.at<I>("relation_offsets")[g * R]);
             const u64 arg = static_cast<u64>(expected.at<I>("relation_arg_offsets")[g * R]);
-            ed::fill_graph<I>(v, row, g, tuple, arg, entity, ta, plain.out<I>(G), target, va.data(), a.data());
+            ed::fill_graph<I>(v, row, g, tuple, arg, entity, ta, plain.out<I>(G), target, va.data(), a.data(), history);
             ed::fill_graph_group<I>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb, grouped.out<I>(G), target,
-                                    vb.data(), b.data());
+                                    vb.data(), b.data(), history);
         }
         else
         {
-            ed::fill_graph_positioned<I>(v, row, g, entity, ta, plain.out<I>(G), positions, target, va.data(), a.data());
+            ed::fill_graph_positioned<I>(v, row, g, entity, ta, plain.out<I>(G), positions, target, va.data(), a.data(),
+                                         history);
             ed::fill_graph_positioned_group<I>(ed::SoloGroup{}, v, row, g, entity, tb, grouped.out<I>(G), positions,
-                                               target, vb.data(), b.data());
+                                               target, vb.data(), b.data(), history);
         }
     }
     EXPECT_EQ(plain.arrays, expected.arrays);
@@ -166,6 +185,27 @@ TEST_P(EncodingLaneCorpus, EverySupportedOptionEqualsThePlainForms)
             }
 }
 INSTANTIATE_TEST_SUITE_P(Corpus, EncodingLaneCorpus, ::testing::Range(u32{0}, u32{11}));
+
+TEST(EncodingLaneGroups, SubgoalLevelsAndHistoryEqualThePlainForms)
+{
+    for (const auto& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        auto batch = make_batch(c.table, 33, c.walk, 13);
+        add_layered_rows(batch, 3, 4, 14);
+        for (const Config& config : layered_configs())
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            {
+                compare<i32>(batch, config, layout);
+                compare<i64>(batch, config, layout);
+            }
+            if (HasFatalFailure())
+                return;
+        }
+    }
+}
 }
 
 namespace

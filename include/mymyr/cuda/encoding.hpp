@@ -107,11 +107,18 @@ using encoding::BatchShape;
 
 /// Conservative maxima per graph over the instances of the context, covering every lane the device encodes: the state,
 /// static and derived cells, the nullary (auxiliary) entity, the goal cells of the instance's goal and of a row's own
-/// goal, the goal targets and one entity per predicate virtual node. `words` is the widest row of an instance (state
-/// or derived words), `cells` the longest cell list of a graph.
+/// goal, the subgoal levels, the goal and subgoal targets and one entity per predicate virtual node. `words` is the
+/// widest row of an instance (state or derived words), `cells` the longest cell list of a graph (with its subgoal and
+/// history cells). The history steps of a row add per step: one entity, the tuples of the history cells and their
+/// arguments, and one entity and target per history-target tuple (the `step_` bounds, which are zero without history).
+/// `state_words` and `derived_words` are the widest state and derived rows, `levels` the subgoal levels of the schema.
 struct GraphBounds
 {
     u64 entities = 0, tuples = 0, args = 0, cells = 0, targets = 0, words = 0;
+    u64 state_words = 0, derived_words = 0;
+    u64 step_entities = 0, step_tuples = 0, step_args = 0, step_targets = 0;
+    u32 levels = 0;
+    bool history = false;
 };
 
 /// Which arrays a batch stores (see encoding/encoder.hpp). entity_role and entity_ref come together, as do the three
@@ -122,6 +129,7 @@ struct OutputArrays
     bool counts = true;
     bool goal_complete = false;
     bool targets = false;
+    bool history = false;  // history_offsets, history_entity and history_dt
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
@@ -132,7 +140,7 @@ struct OutputLayout
 {
     u64 task_ids = 0, num_objects = 0, entity_offsets = 0, entity_role = 0, entity_ref = 0, relation_counts = 0,
         relation_offsets = 0, relation_arg_offsets = 0, relation_args = 0, goal_complete = 0, target_offsets = 0,
-        target_entity = 0, target_group = 0, sizes = 0;
+        target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0, sizes = 0;
     u64 bytes = 0;
     OutputArrays arrays;
 };
@@ -176,6 +184,12 @@ struct DeviceEncodeInput
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    // The subgoal layers and the history steps of each row, with the layouts and rules of encoding::EncodeInput (device
+    // pointers). The schema needs subgoal levels (at least as many as layers) or history; `history.dt` [graphs, layers]
+    // is required with the masks. A row whose history count lies outside [0, layers], or whose layers or steps are
+    // narrower than its instance or set a bit it does not have, is invalid.
+    encoding::LayerInput subgoals{};
+    encoding::HistoryInput history{};
 };
 
 enum class FillMode : u8
@@ -221,7 +235,7 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode.
+    /// Throws std::invalid_argument for a schema the device does not encode (action targets, horizons, ...).
     static void check_schema(const encoding::EncodingSchema& schema);
 
     /// Each stream has its own scratch.
@@ -234,12 +248,16 @@ public:
     [[nodiscard]] const encoding::FlatOptions& options() const noexcept { return m_schema->options(); }
     [[nodiscard]] const DeviceEncodingContext& context() const noexcept { return *m_context; }
     [[nodiscard]] GraphBounds bounds() const;
-    [[nodiscard]] BatchShape worst_case(u64 graphs) const;
+    /// The capacities that hold any batch of `graphs` rows. With history, `history_steps` is the most steps one row's
+    /// history has (the width of the history input); at most history_max_steps are encoded, which is also the number of
+    /// steps when `history_steps` is 0. A schema that encodes every step needs `history_steps`
+    /// (std::invalid_argument without it).
+    [[nodiscard]] BatchShape worst_case(u64 graphs, u64 history_steps = 0) const;
     /// The arrays a batch of this schema stores, and their layout in a block.
     [[nodiscard]] OutputLayout output_layout(const BatchShape& shape) const;
     /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;
-    [[nodiscard]] u64 bytes_needed(u64 graphs) const;
+    [[nodiscard]] u64 bytes_needed(u64 graphs, u64 history_steps = 0) const;
     /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes.
     [[nodiscard]] u64 scratch_bytes(const BatchShape& shape) const;
     /// The exact byte count for a held generation, including one held across refresh().

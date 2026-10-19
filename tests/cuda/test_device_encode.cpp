@@ -52,6 +52,8 @@ bool full_suite()
 struct DeviceRows
 {
     cuda::DeviceBuffer states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg;
+    cuda::DeviceBuffer layer_pos, layer_neg, layer_derived_pos, layer_derived_neg;
+    cuda::DeviceBuffer step_pos, step_neg, step_derived_pos, step_derived_neg, step_dt, step_count;
 
     DeviceRows(const cuda::ContextPtr& ctx, cudaStream_t stream, const Batch& b)
     {
@@ -69,6 +71,16 @@ struct DeviceRows
         upload(goal_neg, b.goal_neg);
         upload(goal_derived_pos, b.goal_derived_pos);
         upload(goal_derived_neg, b.goal_derived_neg);
+        upload(layer_pos, b.layer_pos);
+        upload(layer_neg, b.layer_neg);
+        upload(layer_derived_pos, b.layer_derived_pos);
+        upload(layer_derived_neg, b.layer_derived_neg);
+        upload(step_pos, b.step_pos);
+        upload(step_neg, b.step_neg);
+        upload(step_derived_pos, b.step_derived_pos);
+        upload(step_derived_neg, b.step_derived_neg);
+        upload(step_dt, b.step_dt);
+        upload(step_count, b.step_count);
         cuda::check(cudaStreamSynchronize(stream), "upload rows");
     }
 
@@ -99,6 +111,14 @@ struct DeviceRows
                 in.goal_derived_words = b.derived_words;
             }
         }
+        const auto words = [](const cuda::DeviceBuffer& buffer) { return static_cast<const u64*>(buffer.data()); };
+        if (inputs.layers)
+            in.subgoals = layer_view(b, inputs.layers, words(layer_pos), words(layer_neg), words(layer_derived_pos),
+                                     words(layer_derived_neg));
+        if (inputs.history)
+            in.history = history_view(b, inputs, words(step_pos), words(step_neg), words(step_derived_pos),
+                                      words(step_derived_neg), static_cast<const i32*>(step_dt.data()),
+                                      static_cast<const i32*>(step_count.data()));
         return in;
     }
 };
@@ -158,7 +178,10 @@ void expect_same_arrays(const rl::ArrayBundle& host, const DeviceResult& device)
                             {"goal_complete", l.goal_complete, a.goal_complete},
                             {"target_offsets", l.target_offsets, a.targets},
                             {"target_entity", l.target_entity, a.targets},
-                            {"target_group", l.target_group, a.targets}};
+                            {"target_group", l.target_group, a.targets},
+                            {"history_offsets", l.history_offsets, a.history},
+                            {"history_entity", l.history_entity, a.history},
+                            {"history_dt", l.history_dt, a.history}};
     for (const Array& array : arrays)
     {
         const rl::ArrayInfo* info = host.find(array.name);
@@ -177,6 +200,7 @@ void expect_sizes(const encoding::FlatSizes& expected, const encoding::FlatSizes
     EXPECT_EQ(actual.tuples, expected.tuples);
     EXPECT_EQ(actual.args, expected.args);
     EXPECT_EQ(actual.targets, expected.targets);
+    EXPECT_EQ(actual.history, expected.history);
     EXPECT_EQ(actual.overflow, expected.overflow);
 }
 
@@ -196,7 +220,26 @@ Reference host_reference(const encoding::FlatEncoder& encoder, const encoding::E
     return r;
 }
 
-cuda::BatchShape shape_of(u64 graphs, const encoding::FlatSizes& s) { return {graphs, s.entities, s.args, s.targets}; }
+cuda::BatchShape shape_of(u64 graphs, const encoding::FlatSizes& s)
+{
+    return {graphs, s.entities, s.args, s.targets, s.history};
+}
+
+/// The configurations of the matrix and the layered ones, each with the batches they run on: the rows of every batch
+/// have subgoal layers and history steps.
+std::vector<Config> all_configs()
+{
+    std::vector<Config> out = configs();
+    for (Config& c : layered_configs())
+        out.push_back(std::move(c));
+    return out;
+}
+Batch layered_batch(const rl::TaskTablePtr& table, u64 count, bool walk, u64 seed)
+{
+    Batch b = make_batch(table, count, walk, seed);
+    add_layered_rows(b, 3, 4, seed + 1000);
+    return b;
+}
 
 // ------------------------------------------------------------------------------------------------ configurations
 
@@ -221,9 +264,9 @@ TEST(DeviceEncode, EqualsTheHostEncoderBitForBit)
     for (const Corpus& c : corpus())
     {
         SCOPED_TRACE(c.name);
-        const Batch batch = make_batch(c.table, max_n, c.walk, 13);
+        const Batch batch = layered_batch(c.table, max_n, c.walk, 13);
         const DeviceRows rows(ctx, stream, batch);
-        for (const Config& config : configs())
+        for (const Config& config : all_configs())
         {
             SCOPED_TRACE(config.name);
             for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
@@ -268,13 +311,13 @@ TEST(DeviceEncode, EveryLaunchConfigurationGivesTheSameBytes)
     for (const Corpus& c : corpus())
     {
         SCOPED_TRACE(c.name);
-        const Batch batch = make_batch(c.table, n, c.walk, 17);
+        const Batch batch = layered_batch(c.table, n, c.walk, 17);
         const DeviceRows rows(ctx, stream, batch);
-        // a rich configuration: goals with targets, virtual nodes, row goals
-        const Config config = configs().back();
+        // rich configurations: goals with targets, virtual nodes, row goals; and with subgoal levels and history
+        for (const Config& config : {configs().back(), layered_configs()[9]})
         for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
         {
-            SCOPED_TRACE(layout == encoding::Layout::Graph ? "graph-major" : "relation-major");
+            SCOPED_TRACE(std::string(config.name) + (layout == encoding::Layout::Graph ? " graph-major" : " relation-major"));
             const auto encoder =
                 encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I32));
             cuda::DeviceEncoder device(ctx, encoder);
@@ -657,9 +700,9 @@ TEST(DeviceEncode, ACapturedEncodeReplaysWithinTheWidthClassLaunchBudget)
     for (const Corpus& c : corpus())
     {
         SCOPED_TRACE(c.name);
-        const Batch batch = make_batch(c.table, n, c.walk, 41);
+        const Batch batch = layered_batch(c.table, n, c.walk, 41);
         const DeviceRows rows(ctx, stream, batch);
-        for (const Config& config : {configs()[1], configs()[4], configs().back()})
+        for (const Config& config : {configs()[1], configs()[4], configs().back(), layered_configs()[7], layered_configs()[9]})
             for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
             {
                 SCOPED_TRACE(std::string(config.name) + (layout == encoding::Layout::Graph ? " graph-major" : " relation-major"));
@@ -770,9 +813,9 @@ TEST(DeviceEncode, CountingThenFillingEqualsTheHostEncoderBitForBit)
     for (const Corpus& c : corpus())
     {
         SCOPED_TRACE(c.name);
-        const Batch batch = make_batch(c.table, n, c.walk, 53);
+        const Batch batch = layered_batch(c.table, n, c.walk, 53);
         const DeviceRows rows(ctx, stream, batch);
-        for (const Config& config : configs())
+        for (const Config& config : all_configs())
         {
             SCOPED_TRACE(config.name);
             for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
@@ -1187,3 +1230,352 @@ TEST(DeviceEncode, CallerScratchRejectsAForeignAcquisitionBeforeLaunch)
     cuda::check(cudaGraphDestroy(graph), "destroy");
 }
 }
+
+// ------------------------------------------------------------------------------------------------ layers and history
+
+namespace
+{
+/// The layered configuration with subgoal levels, history, their targets and row goals.
+Config rich_layered_config() { return layered_configs()[9]; }
+
+TEST(DeviceEncode, LayeredCapacitiesReportAsTheHostDoes)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[1];  // features: with derived atoms
+    const u64 n = 257;
+    const Batch batch = layered_batch(c.table, n, true, 109);
+    const DeviceRows rows(ctx, stream, batch);
+    const Config config = rich_layered_config();
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+        for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+        {
+            SCOPED_TRACE(layout == encoding::Layout::Graph ? "graph-major" : "relation-major");
+            const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, index));
+            cuda::DeviceEncoder device(ctx, encoder);
+            device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+            const auto host_in = host_input(batch, n, config.inputs);
+            const auto device_in = rows.input(batch, n, config.inputs);
+            ThreadPool pool(1);
+            encoding::EncodeScratch scratch;
+            const encoding::FlatSizes exact = encoder->count(host_in, pool, scratch);
+            ASSERT_GT(exact.targets, 0u);
+            ASSERT_GT(exact.history, 0u);
+            const encoding::BatchShape worst = device.worst_case(n, batch.steps);
+            EXPECT_GE(worst.entities, exact.entities);
+            EXPECT_GE(worst.args, exact.args);
+            EXPECT_GE(worst.targets, exact.targets);
+            EXPECT_GE(worst.history, exact.history);
+            struct Case
+            {
+                const char* name;
+                encoding::BatchShape caps;
+            };
+            const Case cases[] = {
+                {"exact", {n, exact.entities, exact.args, exact.targets, exact.history}},
+                {"roomy", {n, exact.entities + 7, exact.args + 5, exact.targets + 9, exact.history + 3}},
+                {"worst case", worst},
+                {"short entities", {n, exact.entities - 1, exact.args, exact.targets, exact.history}},
+                {"short args", {n, exact.entities, exact.args - 1, exact.targets, exact.history}},
+                {"short targets", {n, exact.entities, exact.args, exact.targets - 1, exact.history}},
+                {"short history", {n, exact.entities, exact.args, exact.targets, exact.history - 1}},
+                {"zero", {n, 0, 0, 0, 0}},
+            };
+            for (const Case& k : cases)
+            {
+                SCOPED_TRACE(k.name);
+                encoding::FlatSizes host_sizes;
+                const auto host = encoder->encode_capacity(host_in, k.caps, pool, scratch, host_sizes);
+                const DeviceResult result =
+                    run_device(device, ctx, stream, device_in, k.caps, &k.caps, {}, host_sizes.overflow ? 0xa5 : 0);
+                expect_sizes(host_sizes, result.sizes);
+                if (host_sizes.overflow)
+                {
+                    for (u64 b = 0; b < result.layout.sizes; ++b)
+                        ASSERT_EQ(result.block[b], std::byte{0xa5}) << b;
+                }
+                else
+                    expect_same_arrays(*host, result);
+                EXPECT_EQ(result.sizes.overflow != 0, std::string(k.name).find("short") != std::string::npos ||
+                                                          std::string(k.name) == "zero");
+            }
+        }
+}
+
+TEST(DeviceEncode, TheWorstCaseNeedsTheStepsOfAHistoryThatIsNotTruncated)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    const Corpus c = corpus()[0];
+    encoding::FlatOptions options = test::encoder_options();
+    options.history = true;
+    const auto all_steps = encoding::FlatEncoder::create(c.table, options);
+    cuda::DeviceEncoder device(ctx, all_steps);
+    EXPECT_THROW((void)device.worst_case(8), std::invalid_argument);
+    EXPECT_THROW((void)device.bytes_needed(8), std::invalid_argument);
+    const auto four = device.worst_case(8, 4);
+    EXPECT_EQ(four.history, 32u);
+    EXPECT_EQ(device.worst_case(8, 9).history, 72u);
+    EXPECT_GT(device.bytes_needed(8, 4), device.bytes_needed(8, 1));
+    options.history_max_steps = 3;
+    const auto limited = encoding::FlatEncoder::create(c.table, options);
+    cuda::DeviceEncoder limited_device(ctx, limited);
+    EXPECT_EQ(limited_device.worst_case(8).history, 24u);
+    EXPECT_EQ(limited_device.worst_case(8, 2).history, 16u);
+    EXPECT_EQ(limited_device.worst_case(8, 9).history, 24u);
+    EXPECT_NO_THROW(limited_device.reserve(8));
+    // a schema without history has no history capacity
+    const auto plain = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder plain_device(ctx, plain);
+    EXPECT_EQ(plain_device.worst_case(8, 4).history, 0u);
+}
+
+TEST(DeviceEncode, AnEmptyLayeredBatchFitsAnyCapacity)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus().front();
+    const Batch batch = layered_batch(c.table, 4, true, 113);
+    const DeviceRows rows(ctx, stream, batch);
+    const Config config = rich_layered_config();
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+    {
+        const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I32));
+        cuda::DeviceEncoder device(ctx, encoder);
+        device.reserve(cuda::BatchShape{4, 0, 0, 0, 0}, stream);
+        const auto host = host_reference(*encoder, host_input(batch, 0, config.inputs));
+        const DeviceResult result = run_device(device, ctx, stream, rows.input(batch, 0, config.inputs), {});
+        expect_sizes(host.sizes, result.sizes);
+        EXPECT_EQ(result.sizes.entities + result.sizes.tuples + result.sizes.args + result.sizes.history, 0u);
+        expect_same_arrays(*host.bundle, result);
+    }
+}
+
+TEST(DeviceEncode, InvalidLayersAndHistoryAreFlaggedAndNothingIsWritten)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];  // blocks: the second instance has more words
+    const u64 n = 40;
+    const Batch batch = layered_batch(c.table, n, true, 127);
+    const Config config = rich_layered_config();  // the newest two steps of a history are encoded
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+    {
+        SCOPED_TRACE(layout == encoding::Layout::Graph ? "graph-major" : "relation-major");
+        const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I32));
+        cuda::DeviceEncoder device(ctx, encoder);
+        device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+        const u64 W = batch.words;
+        const u32 H = batch.steps, L = batch.layers;
+        auto past_slots = [&](u64 row)
+        {
+            const u32 instance = static_cast<u32>(batch.task_ids[row]);
+            return c.table->task(instance)->atoms().fluent_slots();
+        };
+        auto has_room = [&](u64 row)
+        {
+            return past_slots(row) < c.table->instance(static_cast<u32>(batch.task_ids[row])).words * 64;
+        };
+        {
+            SCOPED_TRACE("a history count past the steps");
+            Batch bad = batch;
+            bad.step_count[7] = static_cast<i32>(H) + 1;
+            const DeviceRows rows(ctx, stream, bad);
+            expect_refused(device, *encoder, ctx, stream, host_input(bad, n, config.inputs), rows.input(bad, n, config.inputs));
+        }
+        {
+            SCOPED_TRACE("a negative history count");
+            Batch bad = batch;
+            bad.step_count[7] = -1;
+            const DeviceRows rows(ctx, stream, bad);
+            expect_refused(device, *encoder, ctx, stream, host_input(bad, n, config.inputs), rows.input(bad, n, config.inputs));
+        }
+        {
+            SCOPED_TRACE("a subgoal bit the instance does not have");
+            Batch bad = batch;
+            ASSERT_TRUE(has_room(9));
+            set_bit(bad.layer_pos.data() + (9 * L + 1) * W, past_slots(9));
+            const DeviceRows rows(ctx, stream, bad);
+            expect_refused(device, *encoder, ctx, stream, host_input(bad, n, config.inputs), rows.input(bad, n, config.inputs));
+        }
+        {
+            SCOPED_TRACE("a bit the instance does not have in a step that is encoded");
+            Batch bad = batch;
+            ASSERT_TRUE(has_room(11));
+            bad.step_count[11] = static_cast<i32>(H);
+            set_bit(bad.step_neg.data() + (11 * H + H - 1) * W, past_slots(11));
+            const DeviceRows rows(ctx, stream, bad);
+            expect_refused(device, *encoder, ctx, stream, host_input(bad, n, config.inputs), rows.input(bad, n, config.inputs));
+        }
+        for (const char* what : {"a step beyond the valid ones", "a step older than the newest two"})
+        {
+            SCOPED_TRACE(what);
+            // these steps are not read, whatever they hold
+            Batch bad = batch;
+            ASSERT_TRUE(has_room(13));
+            const bool beyond = what[7] == 'b';
+            bad.step_count[13] = beyond ? 1 : static_cast<i32>(H);
+            set_bit(bad.step_pos.data() + (13 * H + (beyond ? H - 1 : 0)) * W, past_slots(13));
+            const DeviceRows rows(ctx, stream, bad);
+            const auto host = host_reference(*encoder, host_input(bad, n, config.inputs));
+            const DeviceResult result =
+                run_device(device, ctx, stream, rows.input(bad, n, config.inputs), shape_of(n, host.sizes));
+            expect_sizes(host.sizes, result.sizes);
+            expect_same_arrays(*host.bundle, result);
+        }
+        ASSERT_GT(c.table->instance(1).words, 1u);
+        {
+            SCOPED_TRACE("subgoal layers narrower than the instance");
+            const DeviceRows rows(ctx, stream, batch);
+            auto in = rows.input(batch, n, config.inputs);
+            in.subgoals.words = 1;
+            auto host_in = host_input(batch, n, config.inputs);
+            host_in.subgoals.words = 1;
+            expect_refused(device, *encoder, ctx, stream, host_in, in);
+        }
+        {
+            SCOPED_TRACE("history steps narrower than the instance");
+            const DeviceRows rows(ctx, stream, batch);
+            auto in = rows.input(batch, n, config.inputs);
+            in.history.masks.words = 1;
+            auto host_in = host_input(batch, n, config.inputs);
+            host_in.history.masks.words = 1;
+            expect_refused(device, *encoder, ctx, stream, host_in, in);
+        }
+        {
+            // the batch itself is fine
+            const DeviceRows rows(ctx, stream, batch);
+            const auto host = host_reference(*encoder, host_input(batch, n, config.inputs));
+            const DeviceResult result =
+                run_device(device, ctx, stream, rows.input(batch, n, config.inputs), shape_of(n, host.sizes));
+            expect_same_arrays(*host.bundle, result);
+        }
+    }
+}
+
+TEST(DeviceEncode, TheCallRefusesLayersAndHistoryThatDoNotMatchTheSchema)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];
+    const u64 n = 8;
+    const Batch batch = layered_batch(c.table, n, true, 131);
+    const DeviceRows rows(ctx, stream, batch);
+    const Config config = rich_layered_config();
+    const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+    cuda::DeviceEncoder device(ctx, encoder);
+    device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+    const cuda::BatchShape shape = device.worst_case(n, batch.steps);
+    const cuda::OutputLayout layout = device.output_layout(shape);
+    cuda::DeviceBuffer block(ctx, layout.bytes, stream);
+    const cuda::DeviceOutput good = cuda::output_of(layout, shape, block.data());
+    const auto input = rows.input(batch, n, config.inputs);
+    EXPECT_NO_THROW(device.encode(input, good, stream));
+    auto expect_invalid = [&](const cuda::DeviceEncodeInput& in, const cuda::DeviceOutput& out)
+    { EXPECT_THROW(device.encode(in, out, stream), std::invalid_argument); };
+    {
+        auto in = input;
+        in.subgoals.layers = 4;  // the schema has three levels
+        expect_invalid(in, good);
+    }
+    {
+        auto in = input;
+        in.subgoals.neg = nullptr;
+        expect_invalid(in, good);
+    }
+    {
+        auto in = input;
+        in.subgoals.stride = 1;
+        expect_invalid(in, good);
+    }
+    {
+        auto in = input;
+        in.history.dt = nullptr;
+        expect_invalid(in, good);
+    }
+    {
+        auto in = input;
+        in.history.masks.pos = nullptr;
+        expect_invalid(in, good);
+    }
+    {
+        auto in = input;
+        in.history.masks.stride = 0;  // the rows of a history never share
+        expect_invalid(in, good);
+    }
+    {
+        auto out = good;
+        out.arrays.history_offsets = nullptr;  // the schema has history
+        expect_invalid(input, out);
+    }
+    {
+        auto out = good;
+        out.arrays.history_dt = nullptr;
+        expect_invalid(input, out);
+    }
+    // layers and steps for a schema that has neither
+    const auto plain = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder plain_device(ctx, plain);
+    plain_device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+    const cuda::BatchShape plain_shape{n, 100, 100, 0, 0};
+    const cuda::OutputLayout plain_layout = plain_device.output_layout(plain_shape);
+    cuda::DeviceBuffer plain_block(ctx, plain_layout.bytes, stream);
+    const cuda::DeviceOutput plain_out = cuda::output_of(plain_layout, plain_shape, plain_block.data());
+    EXPECT_NO_THROW(plain_device.encode(rows.input(batch, n, Inputs{}), plain_out, stream));
+    EXPECT_THROW(plain_device.encode(rows.input(batch, n, Inputs{true, false, false, 1}), plain_out, stream),
+                 std::invalid_argument);
+    EXPECT_THROW(plain_device.encode(rows.input(batch, n, Inputs{true, false, false, 0, true, true}), plain_out, stream),
+                 std::invalid_argument);
+    auto with_history_arrays = plain_out;
+    with_history_arrays.arrays.history_offsets = good.arrays.history_offsets;
+    EXPECT_THROW(plain_device.encode(rows.input(batch, n, Inputs{}), with_history_arrays, stream), std::invalid_argument);
+    // a schema with levels does not need layers in every call, and one with history not history
+    DeviceRows no_layers(ctx, stream, batch);
+    EXPECT_NO_THROW(device.encode(no_layers.input(batch, n, Inputs{true, true, true}), good, stream));
+}
+
+/// The scratch of a layered batch holds the levels of every graph; scratch_bytes sizes exactly that and a call with a
+/// scratch of that size equals the host.
+TEST(DeviceEncode, TheScratchOfLayeredSchemasHoldsTheLevels)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[1];
+    const u64 n = 300;
+    const Batch batch = layered_batch(c.table, n, true, 137);
+    const DeviceRows rows(ctx, stream, batch);
+    const Config config = rich_layered_config();
+    const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+    const auto plain = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    cuda::DeviceEncoder device(ctx, encoder), plain_device(ctx, plain);
+    const cuda::BatchShape shape{n, 0, 0, 0, 0};
+    // three levels over the words of the widest instance take scratch beyond that of a schema without levels
+    EXPECT_GT(device.scratch_bytes(shape), plain_device.scratch_bytes(shape));
+    const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+    const cuda::BatchShape out_shape = shape_of(n, host.sizes);
+    const auto context = device.context().acquire(stream);
+    const u64 bytes = device.scratch_bytes(shape);
+    cuda::DeviceBuffer scratch(ctx, bytes, stream);
+    const cuda::OutputLayout out_layout = device.output_layout(out_shape);
+    cuda::DeviceBuffer block(ctx, out_layout.bytes, stream);
+    cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), stream), "clear the output");
+    EXPECT_THROW(device.encode(context, scratch.data(), bytes - 64, shape, rows.input(batch, n, config.inputs),
+                               cuda::output_of(out_layout, out_shape, block.data())),
+                 std::invalid_argument);
+    device.encode(context, scratch.data(), bytes, shape, rows.input(batch, n, config.inputs),
+                  cuda::output_of(out_layout, out_shape, block.data()));
+    DeviceResult result;
+    result.layout = out_layout;
+    result.block.resize(block.size());
+    cuda::check(cudaMemcpyAsync(result.block.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "download");
+    cuda::check(cudaStreamSynchronize(stream), "download");
+    std::memcpy(&result.sizes, result.block.data() + out_layout.sizes, sizeof result.sizes);
+    expect_sizes(host.sizes, result.sizes);
+    expect_same_arrays(*host.bundle, result);
+}
+}  // namespace
