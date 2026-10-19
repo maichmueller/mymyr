@@ -193,7 +193,7 @@ def test_capacities_exact_roomy_short_and_zero(layout, index):
         batch = encoder.encode(states, capacities=exact, threads=threads)
         assert batch.sizes == {
             "entities": exact["entities"], "tuples": int(expected.relation_offsets[-1]), "args": exact["args"],
-            "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False,
+            "targets": 0, "overflow": False, "capacity_overflow": False, "index_overflow": False, "invalid_input": False,
         }
         same_arrays(batch, expected)
         roomy = {"entities": exact["entities"] + 9, "graphs": exact["graphs"], "args": exact["args"] + 13}
@@ -306,3 +306,24 @@ def test_graph_capacity_is_checked_before_encoding():
     encoder = encoder_of(task)
     with pytest.raises(ValueError, match="more graphs than the output capacity"):
         encoder.encode(states, capacities={"graphs": 1, "entities": 100, "args": 1000})
+
+
+def test_cpu_dlpack_device_takes_precedence_over_a_cuda_interface_descriptor():
+    task = text_task("gripper__prob05")
+    encoder = encoder_of(task)
+    rows = np.asarray(task.encode([task.initial_state]))
+
+    class Array:
+        def __dlpack_device__(self):
+            return rows.__dlpack_device__()
+
+        def __dlpack__(self, **kwargs):
+            return rows.__dlpack__(**kwargs)
+
+        @property
+        def __cuda_array_interface__(self):
+            raise AttributeError("host memory has no CUDA array interface")
+
+    batch = encoder.encode(Array())
+    assert isinstance(batch, encoding.FlatBatch)
+    np.testing.assert_array_equal(batch.relation_args, encoder.encode(rows).relation_args)

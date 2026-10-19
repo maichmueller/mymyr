@@ -18,8 +18,8 @@ rounds per mode.
     graph-major and relation-major, with `capacities=` measured from the CPU encoding of those rows. One encode is
     captured into a CUDA graph on a side stream and 10 replays are timed between CUDA events (median over the
     repeats); device_encode_graph_eager is the same call timed as one eager call plus a synchronize, on the host clock.
-    Every device run is built and warmed outside any capture, with the encoder's device workspace reserved on the
-    capture stream, and only one is alive at a time. They are skipped with the reason "not supported on the device"
+    Every device run is built and warmed outside any capture on the capture stream, and only one is alive at a time.
+    They are skipped with the reason "not supported on the device"
     on a build without a device encode path; on a build that has one the harness cannot drive, the run fails.
   - With --device-bench PATH the three device_encode modes come from the C++ driver mymyr_device_encoding_bench instead
     (the build's bench/cuda/device_encoding_bench.cpp): the harness writes the walk rows of the task to a file, the
@@ -448,14 +448,13 @@ def capture_stream(gpu):
 
 class DeviceRun:
     """`FlatRelationEncoder.encode` on device rows with `capacities=` measured from the CPU encoding of those rows.
-    The encoder's device workspace is reserved on `stream` (the stream the encode will be captured on; default: torch's
-    current stream) and the first encode runs there at construction, outside any capture: a capture cannot allocate, so
-    a later encode inside it takes nothing new. `close()` drops the encoder and the rows and waits for the device."""
+    The first encode runs on `stream` at construction, outside capture, to upload and acquire the context. Captured
+    calls allocate their scratch in the graph's private pool. `close()` drops the encoder and rows and waits for the
+    device."""
 
     def __init__(self, gpu, encoder, states, stream=None):
         self.gpu, self.encoder, self.states = gpu, encoder, states
         self.capacities = padded_capacities(capacities_of(encoder, host_rows(states)))
-        encoder.reserve_device(states.shape[0], stream=stream)
         with gpu.torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
             self.encode()
         gpu.sync()

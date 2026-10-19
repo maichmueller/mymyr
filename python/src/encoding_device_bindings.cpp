@@ -4,17 +4,15 @@
 // pointers that the Python side has checked (dtype, shape, device, contiguity) and keeps alive, on a stream the caller
 // names (torch's current stream): in stream order, like torch's own kernels, and without the DLPack imports.
 //
-// Each stream the encoder runs on has a slot with one held workspace (the scratch and a lease of the context
-// generation), made by the first call on the stream or by reserve() and kept until release(): a call takes nothing new
-// after that, which is what a CUDA graph capture needs. A capture on a stream whose slot cannot hold its batch is
-// refused (a reservation allocates and records events, which a capture does not allow). The calls of one slot take turns:
-// they share the scratch.
+// Each stream holds a context acquisition through release(). Capacity calls take caller-owned scratch, which can
+// belong to a graph's private allocator pool. Exact calls reuse a workspace and pinned sizes staging per stream.
 //
 //   encode:        everything on the stream, outputs sized by the capacities: no host synchronization, capturable.
 //   encode_exact:  counts, copies the sizes to the host and waits (the one synchronization), has `allocate` make the
 //                  outputs of exactly that size, and fills them.
 
 #include "arrays.hpp"
+#include "cuda_stream.hpp"
 #include "dlpack.hpp"
 #include "typing.hpp"
 
@@ -147,17 +145,6 @@ cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encodin
     return out;
 }
 
-/// The cudaStream_t of a stream handle: torch reports its default stream as 0 and the array API's handles 1 and 2 are the
-/// legacy and the per-thread default streams (the library would take 0 for the context's own stream).
-cudaStream_t stream_of(std::intptr_t handle)
-{
-    if (handle == 0 || handle == 1)
-        return cudaStreamLegacy;
-    if (handle == 2)
-        return cudaStreamPerThread;
-    return reinterpret_cast<cudaStream_t>(handle);
-}
-
 bool capturing(int device, cudaStream_t stream)
 {
     cuda::DeviceGuard guard(device);
@@ -170,6 +157,7 @@ bool capturing(int device, cudaStream_t stream)
 struct StreamSlot
 {
     std::mutex mutex;  // one call at a time: the calls share the scratch (and count and fill share its totals)
+    std::optional<cuda::EncodingAcquisition> context;
     std::optional<cuda::EncodingWorkspace> held;
     std::shared_ptr<cuda::DeviceBuffer> sizes;  // the FlatSizes of a count
     cuda::PinnedLease staging;                  // its host copy
@@ -211,10 +199,10 @@ public:
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);
-        ensure(*slot, stream_of(stream), graphs);
+        ensure(*slot, cuda_stream(stream), graphs);
     }
 
-    /// Frees the workspace of `stream` (stream != 0) or of every stream, and with `all` also the uploaded context.
+    /// Frees the exact workspace and acquisition of `stream`, or of every stream when absent.
     void release(std::optional<std::intptr_t> stream)
     {
         nb::gil_scoped_release release;
@@ -223,7 +211,7 @@ public:
             std::lock_guard lock(m_mutex);
             if (stream)
             {
-                const auto it = m_slots.find(stream_of(*stream));
+                const auto it = m_slots.find(cuda_stream(*stream));
                 if (it != m_slots.end())
                 {
                     dropped.emplace(it->first, std::move(it->second));
@@ -247,7 +235,7 @@ public:
         std::shared_ptr<StreamSlot> slot;
         {
             std::lock_guard lock(m_mutex);
-            const auto it = m_slots.find(stream_of(stream));
+            const auto it = m_slots.find(cuda_stream(stream));
             if (it != m_slots.end())
                 slot = it->second;
         }
@@ -258,28 +246,40 @@ public:
                 slot->syncs};
     }
 
-    /// Encodes the rows into `out` with `capacities` {graphs, entities, args, targets}. No synchronization.
+    /// Scratch bytes for these rows and this stream's acquired generation. No workspace reservation.
+    u64 scratch_bytes(std::intptr_t stream, u64 graphs)
+    {
+        nb::gil_scoped_release release;
+        const auto slot = slot_of(stream);
+        std::lock_guard lock(slot->mutex);
+        ensure_context(*slot, cuda_stream(stream));
+        return m_device_encoder->scratch_bytes(*slot->context, cuda::BatchShape{graphs, 0, 0, 0});
+    }
+
+    /// Encodes with caller-owned scratch. Its owner keeps it alive until the stream or captured graph is done.
     void encode(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
-                const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities)
+                const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
+                std::uintptr_t scratch, u64 bytes)
     {
         if (capacities.size() != 4)
             throw nb::value_error("mymyr: expected four capacities");
         const Rows rows = rows_of(row_fields);
         const encoding::BatchShape caps{capacities[0], capacities[1], capacities[2], capacities[3]};
-        const cuda::DeviceOutput out = output_of(outputs, caps);
+        cuda::DeviceOutput out = output_of(outputs, caps);
+        out.zero_unused = true;
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);
-        const cudaStream_t s = stream_of(stream);
-        ensure(*slot, s, rows.graphs);
+        ensure_context(*slot, cuda_stream(stream));
         check_rows(rows);
-        m_device_encoder->encode(*slot->held, input_of(rows), out);
+        m_device_encoder->encode(*slot->context, ptr<void>(scratch), bytes, cuda::BatchShape{rows.graphs, 0, 0, 0},
+                                 input_of(rows), out);
     }
 
-    /// Counts the rows, waits for the sizes, calls `allocate(entities, tuples, args, targets)` for the output pointers
-    /// (the order of `encode`'s `outputs`, the sizes pointer ignored) and fills them.
+    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, flags)` to check the flags
+    /// and return the graph extent and output pointers (the sizes pointer ignored), then fills them.
     void encode_exact(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
-                      const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64)>& allocate)
+                      const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u32)>& allocate)
     {
         const Rows rows = rows_of(row_fields);
         std::vector<std::uintptr_t> outputs;
@@ -287,11 +287,17 @@ public:
             nb::gil_scoped_release release;
             const auto slot = slot_of(stream);
             std::lock_guard lock(slot->mutex);
-            const cudaStream_t s = stream_of(stream);
+            const cudaStream_t s = cuda_stream(stream);
             if (capturing(m_device, s))
                 refuse("an encode without capacities waits for the batch's sizes and cannot be captured in a CUDA graph: "
                        "pass capacities");
             ensure(*slot, s, rows.graphs);
+            if (!slot->sizes)
+            {
+                slot->sizes = std::make_shared<cuda::DeviceBuffer>(m_device_encoder->context().context(),
+                                                                 sizeof(encoding::FlatSizes), s);
+                slot->staging = m_device_encoder->context().context()->lease_pinned(1, sizeof(encoding::FlatSizes));
+            }
             check_rows(rows);
             const cuda::DeviceEncodeInput in = input_of(rows);
             auto* device_sizes = static_cast<encoding::FlatSizes*>(slot->sizes->data());
@@ -305,17 +311,11 @@ public:
             cuda::check(cudaStreamSynchronize(s), "cudaStreamSynchronize (sizes)");
             ++slot->syncs;
             const encoding::FlatSizes sizes = *static_cast<const encoding::FlatSizes*>(slot->staging.data(0));
-            if (sizes.overflow & encoding::k_overflow_input)
-                refuse("a row is invalid: a task id outside the table, a state row or goal mask narrower than its instance, "
-                       "or a bit that its instance has no atom for");
-            if (sizes.overflow & encoding::k_overflow_index)
-                throw std::overflow_error(
-                    "mymyr: encoding: the batch needs more indices than its index type holds (entities " +
-                    std::to_string(sizes.entities) + ", tuples " + std::to_string(sizes.tuples) + ", args " +
-                    std::to_string(sizes.args) + ", targets " + std::to_string(sizes.targets) +
-                    "): use index_dtype='int64'");
-            outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets);  // takes the GIL itself
-            const encoding::BatchShape caps{rows.graphs, sizes.entities, sizes.args, sizes.targets};
+            outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.overflow);
+            if (outputs.size() != k_output_fields + 1)
+                refuse("expected the output graph extent and fourteen pointers");
+            const encoding::BatchShape caps{outputs.front(), sizes.entities, sizes.args, sizes.targets};
+            outputs.erase(outputs.begin());
             cuda::DeviceOutput out = output_of(outputs, caps);
             out.sizes = device_sizes;
             m_device_encoder->fill(*slot->held, in, out);
@@ -326,31 +326,32 @@ private:
     std::shared_ptr<StreamSlot> slot_of(std::intptr_t stream)
     {
         std::lock_guard lock(m_mutex);
-        auto& slot = m_slots[stream_of(stream)];
+        auto& slot = m_slots[cuda_stream(stream)];
         if (!slot)
             slot = std::make_shared<StreamSlot>();
         return slot;
     }
 
-    /// The held workspace of the slot holds `graphs` graphs: reserved and acquired now unless it does already. A
-    /// capture refuses that, naming the reservation that the caller makes before it.
+    /// A context acquisition is independent of the scratch size and survives workspace growth.
+    void ensure_context(StreamSlot& slot, cudaStream_t stream)
+    {
+        if (slot.context)
+            return;
+        if (capturing(m_device, stream))
+            refuse("warm the encoder on the capture stream before capture to acquire its uploaded context");
+        slot.context.emplace(m_device_encoder->context().acquire(stream));
+    }
+
+    /// The reusable exact workspace holds at least `graphs` rows; exact calls cannot be captured.
     void ensure(StreamSlot& slot, cudaStream_t stream, u64 graphs)
     {
         if (slot.held && slot.held->shape().graphs >= graphs)
             return;
         if (capturing(m_device, stream))
-            refuse("a CUDA graph capture needs the encoder's device workspace for at least " + std::to_string(graphs) +
-                   " rows on its stream, which it does not have: call encoder.reserve_device(" + std::to_string(graphs) +
-                   ", stream=<the capture stream>) before the capture");
+            refuse("cannot reserve an exact workspace during CUDA graph capture");
         // sized to a power of two so that batches that grow a little reserve again rarely
         const u64 want = std::bit_ceil(std::max<u64>(graphs, 1024));
         cuda::DeviceGuard guard(m_device);
-        if (!slot.sizes)
-        {
-            slot.sizes = std::make_shared<cuda::DeviceBuffer>(m_device_encoder->context().context(),
-                                                              sizeof(encoding::FlatSizes), stream);
-            slot.staging = m_device_encoder->context().context()->lease_pinned(1, sizeof(encoding::FlatSizes));
-        }
         m_device_encoder->reserve(cuda::BatchShape{want, 0, 0, 0}, stream);
         slot.held.reset();
         slot.held.emplace(m_device_encoder->acquire(stream));
@@ -396,11 +397,14 @@ void bind_encoding_device(nb::module_& parent)
              "Frees the workspace of `stream`, or of every stream.")
         .def("state", &DeviceEncoderHandle::state, "stream"_a,
              "[graphs reserved, scratch bytes, reservations made, host waits made] of a stream.")
+        .def("scratch_bytes", &DeviceEncoderHandle::scratch_bytes, "stream"_a, "graphs"_a,
+             "Scratch bytes for this stream's acquired context and graph count.")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
+             "scratch"_a, "bytes"_a,
              "Encodes the rows (15 integers: the graphs, then the pointers and strides of the arrays) into the 14 output "
              "pointers, with the capacities (graphs, entities, args, targets), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
-             "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets) for the 14 "
-             "output pointers and fills them, on `stream`.");
+             "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, flags) "
+             "to check the flags and return the graph extent and fourteen pointers, then fills them on `stream`.");
 }
 }  // namespace mymyr::python
