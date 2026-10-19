@@ -441,7 +441,7 @@ def test_count_index_overflow_is_reported_in_capacity_sizes(cases, monkeypatch):
 
     def outputs(torch_, specs, device):
         out = arrays(torch_, specs, device)
-        out["sizes"].copy_(torch.tensor([1 << 31, 0, 0, 0, 2], device=device))
+        out["sizes"].copy_(torch.tensor([1 << 31, 0, 0, 0, 0, 2], device=device))
         return out
 
     monkeypatch.setattr(encoding._device, "_outputs", outputs)
