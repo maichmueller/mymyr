@@ -371,7 +371,9 @@ self-loop makes a node its own parent, every parent counts.
   (`p != q`, `_sibling_(p, q)`).
 
 Both relations list each pair in both orders, in ascending `(i, j)` order of the nodes' indices. Under
-`root_policy='exclude'` the root has no entity, so pairs that touch node 0 are left out. An example, the dag with the
+`root_policy='exclude'` the root has no entity, so pairs that touch node 0 are left out. The pair lists grow with the
+square of a node's parents' fan-out: a dense dag (a wide horizon of a task with many applicable actions) can give
+`_sibling_` and `_cousin_` far more tuples than it has edges, and the encoding time grows with them. An example, the dag with the
 edges `0->1, 0->2, 0->1 (again), 1->3, 2->3, 1->4, 2->5, 3->6, 4->0`:
 
 | | parents | children |
