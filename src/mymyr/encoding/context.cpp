@@ -83,8 +83,7 @@ struct HorizonRelations
     std::vector<Cell> edge_cells;
 };
 
-/// The relation `id` of a horizon schema as its cells are made; none for the relations that stay empty (the ones over
-/// literals without a goal level, the state-anchored variant of a static predicate) and for the edge relations.
+/// The relation `id` of a horizon schema as its cells are made; none for the edge relations.
 std::optional<HorizonRelation> describe_horizon(const EncodingSchema& schema, u32 id)
 {
     using detail::HorizonKind;
@@ -110,11 +109,7 @@ std::optional<HorizonRelation> describe_horizon(const EncodingSchema& schema, u3
             d.minus = r.sign < 0;
         }
         else if (r.state_anchored)
-        {
-            if (r.lane == Lane::Static)
-                return std::nullopt;
             d.scope = HorizonScope::Nodes;
-        }
         else if (nodes_too && r.lane != Lane::Static)
             d.scope = HorizonScope::All;
         return d;
@@ -122,8 +117,6 @@ std::optional<HorizonRelation> describe_horizon(const EncodingSchema& schema, u3
         d.kind = HorizonKind::Goal;
         return d;
     case Lane::GoalSatisfaction:
-        if (!r.level || !r.derivation)
-            return std::nullopt;
         if (*r.derivation == GoalDerivation::Satisfied || *r.derivation == GoalDerivation::Unsatisfied)
         {
             d.kind = HorizonKind::Sat;

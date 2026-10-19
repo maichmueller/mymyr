@@ -297,6 +297,9 @@ The root has no entity at all; its relations say what it holds.
 - `action`: the root's state and, for every edge, the action that leads to its target node: the action relation of the
   schema holds `(dst node, o_1, ..., o_k)`. The nodes carry no facts of their own.
 
+The catalog lists only relations a graph can have tuples in: a static predicate has no delta relation and no relation
+of the nodes (its atoms are the root's), and the added-satisfaction relations exist per goal level.
+
 **Nullary relations.** The atoms and goal literals of nullary predicates are tuples over the graph's auxiliary entity,
 in front of which stands the state entity (`handempty(node, auxiliary)`); the graph has the auxiliary entity exactly when
 a nullary tuple exists. With `nullary=False` they are absent.

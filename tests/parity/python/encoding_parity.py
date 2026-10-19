@@ -634,6 +634,31 @@ def _delta_static_relations(expected, actual, context):
     return replace(expected, catalog=[c for c in expected.catalog if c[0] not in dropped]), actual
 
 
+def _never_filled_relations(expected, actual, context):
+    """The catalogs of mifrost's horizons list relations that no graph has tuples in, and the native catalog leaves them
+    out: the delta mode's literal-level support relations (``[+]p[sat]``, ``[-]p[unsat]``, ``[+]p[sat+]``, ``[-]p[sat-]``,
+    without a goal level; the native encoder has no support literals) and the state-anchored relation of a static
+    predicate in the split catalog (``fixed[state]``; the static atoms are the root's). The expectation drops these
+    entries of the catalog while the reference has no tuple in them and the native catalog lacks them."""
+    if context.dag is None:
+        return expected, actual
+    static = {p.name for p in context.task.formalism.predicates if p.kind == "static"}
+    own = {name for name, _ in actual.catalog}
+    levels = {"g", "sg", "ssg", "sssg"}
+
+    def never_filled(name):
+        sign, predicate, decoration = HORIZON_RELATION.match(name).groups()
+        marks = re.findall(r"\[([a-z+\-]+)\]", decoration)
+        if any(m in levels for m in marks):
+            return False
+        return (sign is not None and any(m in ("sat", "unsat", "sat+", "sat-") for m in marks)) or (
+            marks == ["state"] and predicate in static)
+
+    dropped = {name for name, _ in expected.catalog
+               if name not in own and not expected.tuples.get(name) and never_filled(name)}
+    return replace(expected, catalog=[c for c in expected.catalog if c[0] not in dropped]), actual
+
+
 def _static_literal_at_nodes(expected, actual, context):
     """mifrost evaluates the goal at the nodes below the root without the static atoms: a static atom does not hold
     there, so a positive static literal that holds is not satisfied at them, and a negative one is satisfied. The
@@ -896,6 +921,17 @@ REGISTRY = (
         "the reference has no tuple in them",
         (("f08", "C7B"), ("f09", "C7C")),
         _delta_static_relations,
+    ),
+    Difference(
+        "never_filled_horizon_relations",
+        "mifrost's horizon catalogs list relations that no graph has a tuple in: the delta mode's relations of the "
+        "literals themselves (`[+]p[sat]`, `[-]p[unsat]`, `[+]p[sat+]`, `[-]p[sat-]`, which have no goal level) and, in the "
+        "split catalog, the relation of the nodes of a static predicate (`fixed[state]`). The native catalog lists a "
+        "relation only if a graph can have a tuple in it: it has no support literals, and static atoms are the root's.",
+        "the catalog entries of those relations, only when the reference has no tuple in them and the native catalog "
+        "lacks them",
+        (("f01", "C7I"), ("f08", "C7G")),
+        _never_filled_relations,
     ),
     Difference(
         "static_literal_at_nodes",

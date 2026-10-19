@@ -838,6 +838,25 @@ def test_the_delta_relations_of_static_predicates_are_excused_only_while_empty()
     assert "delta_static_relations" in needed_differences(expected, actual, context)
 
 
+def test_the_relations_no_graph_fills_are_excused_only_while_empty_and_missing():
+    # the delta catalog: literal-level support relations
+    expected, actual, context = horizon_case("C7I", "f01", "s0")
+    own = {n for n, _ in actual.catalog}
+    support = [n for n, a in expected.catalog if a == 2 and n not in own
+               and re.search(r"^\[[+-]\]on\[(sat|unsat|sat\+|sat-)\]$", n)]
+    assert support
+    assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
+    filled = copy(expected)
+    filled.tuples = {**expected.tuples, support[0]: [("target:1", "a", "b")]}
+    assert {m.kind for m in compare(filled, actual, context)} >= {"catalog", "tuple"}
+    # the split catalog: the relation of the nodes of a static predicate
+    expected, actual, context = horizon_case("C7G", "f08", "s0")
+    own = {n for n, _ in actual.catalog}
+    anchored = [n for n, _ in expected.catalog if n == "fixed[state]"]
+    assert anchored and anchored[0] not in own
+    assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
+
+
 def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horizon():
     expected, actual, context = horizon_case("C7T", "f01", "s2")
     assert ("target:0", "c", "b") in actual.tuples["[+]on[g]"]
