@@ -390,13 +390,13 @@ struct ActionRows
 /// are layers, and its history steps are, oldest first.
 struct MaskLayers
 {
-    const u64* pos;
-    const u64* neg;
-    const u64* derived_pos;
-    const u64* derived_neg;
-    u32 layers;
-    u32 words;
-    u32 derived_words;
+    const u64* pos = nullptr;
+    const u64* neg = nullptr;
+    const u64* derived_pos = nullptr;
+    const u64* derived_neg = nullptr;
+    u32 layers = 0;
+    u32 words = 0;
+    u32 derived_words = 0;
 };
 
 /// The history steps a row uses: `masks.layers` of them, the newest of its valid steps (`first` is the index of the
@@ -404,9 +404,9 @@ struct MaskLayers
 /// each.
 struct HistoryRows
 {
-    MaskLayers masks;
-    const i32* dt;
-    u32 first;
+    MaskLayers masks{};
+    const i32* dt = nullptr;
+    u32 first = 0;
 };
 
 /// The masks of the subgoal levels of a row (effective_layers), at op - k_goal_op_base for the op of a goal cell of the
@@ -414,16 +414,17 @@ struct HistoryRows
 /// slots of the level, or the part of it that the state satisfies or does not), null where there is none.
 struct LevelPlanes
 {
-    const u64* plane[64];
+    const u64* plane[64]{};
 };
 
 /// The subgoal layers and history steps of a row; a row without either has no RowLayers. `levels` are the subgoal
-/// levels (effective_layers); `subgoals` are the layers as given, which only the checks of the row read.
+/// levels (effective_layers); `subgoals` are the layers as given, which only the checks of the row read. A RowLayers is
+/// always initialised: one that no row is bound to has no layers and no history steps.
 struct RowLayers
 {
-    MaskLayers subgoals;
-    HistoryRows history;
-    LevelPlanes levels;
+    MaskLayers subgoals{};
+    HistoryRows history{};
+    LevelPlanes levels{};
 };
 
 /// The subgoal layers and history a call gives its rows, and how many of a row's newest history steps are encoded
@@ -1113,11 +1114,12 @@ MYMYR_HD LevelPlanes effective_layers(const InstanceView& v, const GoalWords& go
 
 /// Computes the levels of a bound row's subgoal layers (`layers.subgoals`) into `layers.levels`, in `storage`
 /// (effective_layer_words of them), for the row's state words and goal. The lanes of the group share the work. The
-/// state words (and the derived words) of the row are final.
+/// state words (and the derived words) of the row are final. `layers` is read only if the row is bound to it
+/// (`row.layers == &layers`, which bind_layers returning true gives); a row without layers leaves it untouched.
 template<class Group>
 MYMYR_HD void bind_levels(const Group& grp, const InstanceView& v, const RowInput& row, RowLayers& layers, u64* storage)
 {
-    if (layers.subgoals.layers == 0)
+    if (row.layers != &layers || layers.subgoals.layers == 0)
         return;
     layers.levels = effective_layers_group(grp, v, goal_words(v, row), layers.subgoals, row.atoms, row.derived, storage);
 }

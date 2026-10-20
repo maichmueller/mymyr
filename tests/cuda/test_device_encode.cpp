@@ -1579,3 +1579,89 @@ TEST(DeviceEncode, TheScratchOfLayeredSchemasHoldsTheLevels)
     expect_same_arrays(*host.bundle, result);
 }
 }  // namespace
+
+namespace
+{
+TEST(DeviceEncode, RowsWithHistoryAndWithoutSubgoalLayersEqualTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    // a batch big enough that instances of both fill classes have rows, in which some rows have no history steps and none has
+    // subgoal layers: the layer storage of such a row is never bound
+    const u64 n = 600;
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const Batch batch = layered_batch(c.table, n, c.walk, 41);
+        const DeviceRows rows(ctx, stream, batch);
+        for (const Config& config : {layered_configs()[7], layered_configs()[9]})
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            {
+                const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I32));
+                cuda::DeviceEncoder device(ctx, encoder);
+                const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+                const cuda::BatchShape shape = shape_of(n, host.sizes);
+                device.reserve(shape, stream);
+                const DeviceResult result = run_device(device, ctx, stream, rows.input(batch, n, config.inputs), shape);
+                expect_sizes(host.sizes, result.sizes);
+                expect_same_arrays(*host.bundle, result);
+            }
+        }
+    }
+}
+
+TEST(DeviceEncode, LiveScratchRegionsNeverOverlap)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        for (const Config& config : all_configs())
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            {
+                const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I32));
+                cuda::DeviceEncoder device(ctx, encoder);
+                for (const u64 graphs : {u64{0}, u64{1}, u64{33}, u64{600}, u64{4097}})
+                {
+                    SCOPED_TRACE((layout == encoding::Layout::Graph ? "graph-major " : "relation-major ") + std::to_string(graphs));
+                    const cuda::detail::ScratchLayout s = cuda::detail::scratch_layout(
+                        cuda::BatchShape{graphs, 0, 0, 0}, device.bounds(), layout, encoder->schema().num_relations());
+                    struct Region
+                    {
+                        const char* name;
+                        u64 begin, size;
+                    };
+                    const u64 entry = s.wide ? 8 : 4;
+                    const Region regions[] = {{"flags", s.flags, 64},
+                                              {"totals", s.totals, entry * s.scan_length},
+                                              {"cell_counts", s.cell_counts, 4 * s.cell_entries},
+                                              {"level_storage", s.level_storage, 8 * graphs * s.level_stride},
+                                              {"scan_temp", s.scan_temp, s.scan_temp_bytes}};
+                    for (const Region& a : regions)
+                    {
+                        EXPECT_EQ(a.begin % 64, 0u) << a.name;
+                        EXPECT_LE(a.begin + a.size, s.bytes) << a.name;
+                        for (const Region& b : regions)
+                        {
+                            if (&a < &b && a.size != 0 && b.size != 0)
+                            {
+                                EXPECT_TRUE(a.begin + a.size <= b.begin || b.begin + b.size <= a.begin)
+                                    << a.name << " [" << a.begin << ", " << a.begin + a.size << ") overlaps " << b.name << " ["
+                                    << b.begin << ", " << b.begin + b.size << ")";
+                            }
+                        }
+                    }
+                    if (HasFailure())
+                        return;
+                }
+            }
+        }
+    }
+}
+}  // namespace

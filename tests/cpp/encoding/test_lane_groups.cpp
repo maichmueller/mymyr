@@ -210,6 +210,24 @@ TEST(EncodingLaneGroups, SubgoalLevelsAndHistoryEqualThePlainForms)
 
 namespace
 {
+TEST(EncodingLaneGroups, ARowWithoutLayersLeavesTheLayerStorageUntouched)
+{
+    const auto table = table_of("philosophers", {"p03-phil4"});
+    const auto encoder = encoding::FlatEncoder::create(table, configs().back().options);
+    const auto v = ed::instance_view(encoder->context().view(), 0);
+    const std::vector<u64> state(std::max<u32>(v.words, 1), 0);
+    const ed::RowInput row{state.data(), nullptr};
+    ASSERT_EQ(row.layers, nullptr);
+    // the layer storage of a row that has neither subgoal layers nor history steps is never set: whatever it holds
+    // (a kernel's local memory is not cleared) must not be read as layers
+    alignas(ed::RowLayers) unsigned char bytes[sizeof(ed::RowLayers)];
+    std::fill(std::begin(bytes), std::end(bytes), static_cast<unsigned char>(0xa5));
+    auto& layers = *reinterpret_cast<ed::RowLayers*>(bytes);
+    ed::bind_levels(ed::SoloGroup{}, v, row, layers, nullptr);
+    for (const unsigned char byte : bytes)
+        ASSERT_EQ(byte, 0xa5);
+}
+
 TEST(EncodingLaneGroups, GoalStridesRejectOverlapAndAllowBroadcast)
 {
     const auto table = table_of("philosophers", {"p03-phil4"});
