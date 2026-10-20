@@ -165,6 +165,50 @@ def test_the_graph_is_the_incidence_graph_of_the_tuples_in_both_layouts(name, in
         assert np.asarray(batches[0].node_label).dtype == np.int32 and np.asarray(batches[0].edge_label).dtype == np.int32
 
 
+def tuples_of_the_core(batch, g):
+    """The (relation, entities) pairs of graph ``g`` from the relation arrays, in graph-major tuple order."""
+    graphs, relations = batch.num_graphs, batch.num_relations
+    by_relation = batch.as_dict()["layout"] == 1
+    arities = batch.schema.relation_arities
+    out = []
+    for r in range(relations):
+        s = r * graphs + g if by_relation else g * relations + r
+        for t in range(int(batch.relation_offsets[s + 1] - batch.relation_offsets[s])):
+            begin = int(batch.relation_arg_offsets[s]) + t * arities[r]
+            out.append((r, tuple(int(e) for e in batch.relation_args[begin : begin + arities[r]])))
+    return out
+
+
+def tuples_of_the_graph(batch, g):
+    """The same pairs read from the Simple arrays alone: an atom node is a tuple, the edges into it give its entities."""
+    first, last = int(batch.node_offsets[g]), int(batch.node_offsets[g + 1])
+    entities = int(batch.entity_offsets[g + 1] - batch.entity_offsets[g])
+    k = len(batch.schema.simple_edge_label_names) // 2
+    begin, end = int(batch.edge_offsets[g]), int(batch.edge_offsets[g + 1])
+    sources, targets = np.asarray(batch.edge_index)[:, begin:end]
+    labels = np.asarray(batch.edge_label)[begin:end]
+    slots = {}
+    for source, target, label in zip(sources, targets, labels):
+        if label < k:
+            slots.setdefault(int(target), {})[int(label)] = int(source)
+    out = []
+    for atom in range(first + entities, last):
+        place = slots.get(atom, {})
+        out.append((int(batch.node_label[atom]) - ROLES, tuple(place[p] - first + int(batch.entity_offsets[g]) for p in sorted(place))))
+    return out
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_the_core_tuples_are_recovered_from_the_graph_alone(layout):
+    task = text_task("blocks__probBLOCKS-8-0")
+    states = walk(task, steps=8, walks=2)
+    encoder = both(task, layout=layout, goal_derivations=GOALS, target_sources=("goal", "action"))
+    batch = encoder.encode(states, actions=rl.expand(rl.as_table(task), states))
+    assert batch.relation_offsets[-1] > 0
+    for g in range(batch.num_graphs):
+        assert tuples_of_the_graph(batch, g) == tuples_of_the_core(batch, g)
+
+
 def test_layers_and_history_are_nodes_and_edges_like_the_other_tuples():
     task = text_task("blocks__probBLOCKS-8-0")
     states = walk(task, steps=10, walks=2)
