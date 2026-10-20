@@ -3,7 +3,8 @@
 FlatRelationEncoder encodes states of a Task or a one-domain rl.TaskTable into graphs: one graph per state, with the
 objects as entities and, for every relation of its EncodingSchema, the tuples of the state's atoms. The result is a
 FlatBatch of read-only arrays (batch.as_dict(framework) exports them to NumPy, torch, JAX or DLPack without a copy).
-Numeric tasks are rejected.
+For a numeric task, every fluent numeric function f has a relation ``[num]f`` with a tuple for each of its ground terms
+in the instance, and ``batch.numeric_values`` holds their values (``numeric_dtype``; NaN for a term without a value).
 
 encoder.stream() and encoder.mutable_stream() collect rows over time and encode them in one call per flush
 (FlatStream, FlatMutableStream); encoder.entity_names(batch, g) and encoder.describe(batch, g) name the entities and

@@ -252,9 +252,15 @@ StateBatch import_rows(nb::handle obj, u32 words, u32 NN)
         StateBatch b;
         if (seq)
             for (nb::handle item : nb::borrow<nb::sequence>(obj))
+            {
                 b.owners.push_back(state_of(item).core->task->uid());
+                b.owner_tasks.push_back(state_of(item).core->task);
+            }
         else
+        {
             b.owners.push_back(state_of(obj).core->task->uid());
+            b.owner_tasks.push_back(state_of(obj).core->task);
+        }
         b.packed = std::make_shared<std::vector<u64>>(states.size() * (W + NN), 0);
         for (usize i = 0; i < states.size(); ++i)
         {

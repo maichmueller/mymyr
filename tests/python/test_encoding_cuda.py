@@ -662,6 +662,17 @@ def test_the_encoder_without_a_device_encoding_is_refused_clearly():
         encoder.reserve_device(8)
 
 
+def test_numeric_relations_are_refused_clearly():
+    dev = gpu()
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    encoder = encoding.FlatRelationEncoder(task)
+    rows = to_device(np.asarray(task.encode([task.initial_state])), dev)
+    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode numeric relations"):
+        encoder.encode(rows)
+    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode numeric relations"):
+        encoder.reserve_device(8)
+
+
 # ------------------------------------------------------------------------------------------------ the op
 
 OP_ARGS = 8

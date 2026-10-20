@@ -523,12 +523,11 @@ def test_the_name_helpers_and_the_hgraph_view_need_the_relation_arrays():
     assert encoding.hgraph(mixed).num_graphs == len(states)
 
 
-def test_numeric_tasks_are_refused():
+def test_numeric_tasks_have_node_values():
     numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError, match="^mymyr: encoding: numeric"):
-        encoding.SimpleEncoder(numeric)
-    with pytest.raises(ValueError, match="^mymyr: encoding: numeric"):
-        encoding.FlatRelationEncoder(numeric, outputs=BOTH)
+    batch = encoding.SimpleEncoder(numeric).encode([numeric.initial_state])
+    assert batch.node_value.dtype == np.float32
+    assert np.array_equal(batch.node_value[batch.node_value != 0], numeric.initial_state.numeric_values()[numeric.initial_state.numeric_values() != 0].astype(np.float32))
 
 
 def test_the_device_does_not_encode_simple():

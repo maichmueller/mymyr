@@ -40,6 +40,9 @@ struct EncodingLayout
 struct EncodingIndexDtype
 {
 };
+struct EncodingNumericDtype
+{
+};
 struct EncodingHorizonMode
 {
 };
@@ -92,6 +95,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingIndexDtype>
 {
     static constexpr auto Name = const_name("typing.Literal['int32', 'int64']");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingNumericDtype>
+{
+    static constexpr auto Name = const_name("typing.Literal['float32', 'float64']");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingEntityArrays>
@@ -261,6 +269,7 @@ struct PyFlatBatch
     std::shared_ptr<const encoding::EncodingSchema> schema;
     Framework framework = Framework::Numpy;
     std::optional<encoding::FlatSizes> sizes;  // set by an encoding with capacities
+    u64 numeric_tuples = 0;                    // with sizes: the numeric tuples of the batch (its numeric_values)
 };
 
 // ------------------------------------------------------------------------------------------------ options
@@ -304,10 +313,10 @@ encoding::EnumSet<E> choice_set(nb::handle value, const char* name, Parse parse,
 }
 
 encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_static, bool include_derived,
-                                     bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
+                                     bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
-                                     nb::handle index_dtype, bool emit_counts, nb::handle entity_arrays,
-                                     nb::handle outputs, bool constant_labels, nb::handle horizon_mode, nb::handle root_policy, bool parent_relation,
+                                     nb::handle index_dtype, nb::handle numeric_dtype, bool emit_counts,
+                                     nb::handle entity_arrays, nb::handle outputs, bool constant_labels, nb::handle horizon_mode, nb::handle root_policy, bool parent_relation,
                                      bool sibling_relation, bool cousin_relation, bool history,
                                      nb::handle history_max_steps, bool horizon_optional)
 {
@@ -322,6 +331,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.max_goal_level = static_cast<u32>(level);
     options.include_static = include_static;
     options.include_derived = include_derived;
+    options.include_numeric = include_numeric;
     options.nullary = nullary;
     options.equality = equality;
     options.predicate_virtual_nodes = predicate_virtual_nodes;
@@ -330,6 +340,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
                                                "'goal', 'subgoal', 'action', 'history'");
     options.layout = choice(layout, "layout", parse_layout, "'graph', 'relation'");
     options.index = choice(index_dtype, "index_dtype", parse_index_type, "'int32', 'int64'");
+    options.numeric_dtype = choice(numeric_dtype, "numeric_dtype", parse_numeric_dtype, "'float32', 'float64'");
     options.emit_counts = emit_counts;
     options.entity_arrays = choice(entity_arrays, "entity_arrays", parse_entity_arrays, "'auto', 'always'");
     options.outputs = choice_set<Output>(outputs, "outputs", parse_output, "'relations', 'simple'");
@@ -368,6 +379,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["max_goal_level"] = o.max_goal_level;
     out["include_static"] = o.include_static;
     out["include_derived"] = o.include_derived;
+    out["include_numeric"] = o.include_numeric;
     out["nullary"] = o.nullary;
     out["equality"] = o.equality;
     out["predicate_virtual_nodes"] = o.predicate_virtual_nodes;
@@ -375,6 +387,7 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["target_sources"] = nb::tuple(texts_of(o.targets.members()));
     out["layout"] = std::string(encoding::to_string(o.layout));
     out["index_dtype"] = std::string(encoding::to_string(o.index));
+    out["numeric_dtype"] = std::string(encoding::to_string(o.numeric_dtype));
     out["emit_counts"] = o.emit_counts;
     out["entity_arrays"] = std::string(encoding::to_string(o.entity_arrays));
     out["outputs"] = nb::tuple(texts_of(o.outputs.members()));
@@ -397,15 +410,19 @@ constexpr const char* k_option_doc =
     "the history relations `[+]p[hist]` / `[-]p[hist]` hold the literals of the `history` steps of a row; "
     "history_max_steps: only the newest this many steps of a row are encoded (None: all). "
     "include_static / include_derived: the state relations of the static (types included) / derived "
-    "predicates. nullary: relations of the predicates without arguments (their atoms are tuples over the "
-    "graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
+    "predicates. include_numeric: one relation `[num]f` for each numeric function f of the domain that a state gives "
+    "values to (a fluent function; total-cost is not one), with one tuple per ground term of f in the instance "
+    "(over the term's objects; over the auxiliary entity for a nullary function) and its value in the batch's "
+    "numeric_values (node_value with the Simple graph); False ignores the numeric part of the states. numeric_dtype: "
+    "the dtype of numeric_values (a function term without a value is NaN). nullary: relations of the predicates "
+    "without arguments (their atoms are tuples over the graph's auxiliary entity). equality: relations of the equality predicate `=`. predicate_virtual_nodes: a predicate "
     "slot in the predicate relations' tuples: a graph gets a virtual entity (role predicate_virtual) for each predicate that "
     "has a tuple in it, numbered in catalog order, and none for the others; its entity_ref is the id of the predicate's "
     "state relation. include_actions: one relation per action schema. target_sources: "
     "which of goal, subgoal, action and history literals become entities that tuples refer to (goal and subgoal "
     "targets need the plain goal derivation, subgoal targets max_goal_level > 0, action targets include_actions, "
     "history targets history). layout, "
-    "index_dtype: how a batch is stored; layout='relation' stores the tuples relation by relation across the graphs "
+    "index_dtype: how the indices of a batch are stored; layout='relation' stores the tuples relation by relation across the graphs "
     "(cell (g, r) is segment r * G + g instead of g * R + r). emit_counts=False omits relation_counts (the tuples of "
     "a segment are the difference of two relation_offsets). entity_arrays='auto' omits entity_role and entity_ref "
     "when every entity is an object or the auxiliary entity (no target_sources, predicate_virtual_nodes, "
@@ -414,7 +431,7 @@ constexpr const char* k_option_doc =
     "edge_label; it needs entity_arrays='always' and no predicate_virtual_nodes, and without 'relations' the layout "
     "and emit_counts keep their defaults). constant_labels: with 'simple', each constant of the domain has a node label "
     "of its own (otherwise an object has the label of its role). Raises ValueError for invalid combinations and for "
-    "numeric tasks.";
+    "horizon encodings of a domain with numeric functions.";
 
 constexpr const char* k_horizon_option_doc =
     " horizon_mode, root_policy, parent_relation, sibling_relation, cousin_relation: the horizon variants "
@@ -439,19 +456,21 @@ enum class HorizonArgs
 // the options other than the horizon's, in the order of the signatures
 #define MYMYR_ENCODING_ARGS_BASE                                                                                       \
     TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived, \
-        bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions, TextSequenceArg target_sources, \
-        Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,                    \
-        Arg<ann::EncodingEntityArrays> entity_arrays
+        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,         \
+        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype,     \
+        Arg<ann::EncodingNumericDtype> numeric_dtype, bool emit_counts, Arg<ann::EncodingEntityArrays> entity_arrays
 #define MYMYR_ENCODING_ARGS MYMYR_ENCODING_ARGS_BASE, TextSequenceArg outputs, bool constant_labels
 #define MYMYR_ENCODING_PASS_BASE                                                                                       \
-    table, goal_derivations, max_goal_level, include_static, include_derived, nullary, equality,                       \
-        predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts, entity_arrays
+    table, goal_derivations, max_goal_level, include_static, include_derived, include_numeric, nullary, equality,       \
+        predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, numeric_dtype, emit_counts,     \
+        entity_arrays
 #define MYMYR_ENCODING_PASS MYMYR_ENCODING_PASS_BASE, outputs, constant_labels
 #define MYMYR_ENCODING_DEFAULTS_BASE                                                                                   \
     "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0, "include_static"_a = true,     \
-    "include_derived"_a = true, "nullary"_a = true, "equality"_a = false, "predicate_virtual_nodes"_a = false,          \
-    "include_actions"_a = true, "target_sources"_a = nb::tuple(), "layout"_a = "graph", "index_dtype"_a = "int32",      \
-    "emit_counts"_a = true, "entity_arrays"_a = "always"
+    "include_derived"_a = true, "include_numeric"_a = true, "nullary"_a = true, "equality"_a = false,                    \
+    "predicate_virtual_nodes"_a = false, "include_actions"_a = true, "target_sources"_a = nb::tuple(),                  \
+    "layout"_a = "graph", "index_dtype"_a = "int32", "numeric_dtype"_a = "float32", "emit_counts"_a = true,             \
+    "entity_arrays"_a = "always"
 #define MYMYR_ENCODING_DEFAULTS MYMYR_ENCODING_DEFAULTS_BASE, "outputs"_a = nb::make_tuple("relations"), "constant_labels"_a = false
 
 /// The constructor of the classes that are built from a table and the encoding options (EncodingSchema, the encoders):
@@ -469,8 +488,9 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                 "mymyr: encoding: a horizon encoder needs a horizon_mode ('full', 'delta' or 'action'); "
                 "FlatRelationEncoder encodes states without a horizon");
         const encoding::FlatOptions options = schema_options(
-            max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
-            goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays, outputs, constant_labels,
+            max_goal_level, include_static, include_derived, include_numeric, nullary, equality, predicate_virtual_nodes,
+            include_actions, goal_derivations, target_sources, layout, index_dtype, numeric_dtype, emit_counts,
+            entity_arrays, outputs, constant_labels,
             horizon_mode, root_policy, parent_relation, sibling_relation, cousin_relation, history, history_max_steps,
             H == HorizonArgs::Optional);
         make(self, reference, options);
@@ -520,9 +540,10 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             "__init__",
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
                         TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived,
-                        bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
-                        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
-                        Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,
+                        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes,
+                        bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
+                        Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingNumericDtype> numeric_dtype,
+                        bool emit_counts,
                         Arg<ann::EncodingEntityArrays> entity_arrays, TextSequenceArg outputs, bool constant_labels,
                         Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation, bool sibling_relation,
                         bool cousin_relation)
@@ -539,9 +560,10 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             "__init__",
             [construct](Py* self, TableArg table, Arg<ann::EncodingHorizonModeRequired> horizon_mode,
                         TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived,
-                        bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
-                        TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
-                        Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,
+                        bool include_numeric, bool nullary, bool equality, bool predicate_virtual_nodes,
+                        bool include_actions, TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
+                        Arg<ann::EncodingIndexDtype> index_dtype, Arg<ann::EncodingNumericDtype> numeric_dtype,
+                        bool emit_counts,
                         Arg<ann::EncodingEntityArrays> entity_arrays, TextSequenceArg outputs, bool constant_labels,
                         Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation, bool sibling_relation,
                         bool cousin_relation)
@@ -770,7 +792,7 @@ using CapacitiesArg = std::optional<nb::typed<nb::dict, std::string, std::uint64
 encoding::BatchShape capacities_of(const nb::dict& value, const encoding::EncodingSchema& schema)
 {
     encoding::BatchShape out;
-    bool entities = false, graphs = false, args = false, targets = false, history = false;
+    bool entities = false, graphs = false, args = false, targets = false, history = false, numeric = false;
     for (auto [key, item] : value)
     {
         const std::string name = text_of(key, "capacities key");
@@ -784,9 +806,11 @@ encoding::BatchShape capacities_of(const nb::dict& value, const encoding::Encodi
             out.targets = int_arg<u64>(item, "capacities['targets']"), targets = true;
         else if (name == "history")
             out.history = int_arg<u64>(item, "capacities['history']"), history = true;
+        else if (name == "numeric")
+            out.numeric = int_arg<u64>(item, "capacities['numeric']"), numeric = true;
         else
             throw nb::value_error(("mymyr: encoding: capacities has the unknown key '" + name +
-                                   "'; the keys are 'graphs', 'entities', 'args', 'targets' and 'history'")
+                                   "'; the keys are 'graphs', 'entities', 'args', 'targets', 'history' and 'numeric'")
                                       .c_str());
     }
     if (!(entities && graphs && args))
@@ -795,6 +819,8 @@ encoding::BatchShape capacities_of(const nb::dict& value, const encoding::Encodi
         throw nb::value_error("mymyr: encoding: the schema has targets: capacities needs the key 'targets' as well");
     if (!history && schema.has_history())
         throw nb::value_error("mymyr: encoding: the schema has history: capacities needs the key 'history' as well");
+    if (!numeric && schema.stores_numeric_values())
+        throw nb::value_error("mymyr: encoding: the schema has numeric values: capacities needs the key 'numeric' as well");
     return out;
 }
 
@@ -966,7 +992,7 @@ struct ImportedRows
 /// row (null: instance 0).
 const i32* import_state_rows(ImportedRows& rows, const rl::TaskTable& table, StatesLike state_arg, TaskIdsArg task_ids)
 {
-    rows.states = import_states(state_arg, packed_words(state_arg));
+    rows.states = import_rows(state_arg, packed_words(state_arg), table.numeric_words());
     const StateBatch& states = rows.states;
     const i32* ids = import_task_ids(task_ids, states.view.rows, table.size(), rows.ids_copy, rows.ids_keep);
     if (states.view.rows && table.size() > 1 && !ids)
@@ -1080,6 +1106,7 @@ PyFlatBatch run_encoding(PyFlatEncoder& self, ImportedRows& rows, Framework fram
                         encoding::FlatSizes sizes;
                         output.arrays = self.encoder->encode_capacity(rows.input, *capacities, pool, scratch, sizes);
                         output.sizes = sizes;
+                        output.numeric_tuples = scratch.numeric_tuples();
                     }
                     else
                         output.arrays = self.encoder->encode(rows.input, pool, scratch);
@@ -1407,6 +1434,14 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
     {"edge_label",
      "int32 [E]: the label of each Simple edge: k for the forward edge of position k, K + k for its reverse, K the "
      "largest arity of a relation; schema.simple_edge_label_names names them. Absent like node_offsets."},
+    {"numeric_values",
+     "float32 or float64 [T_num] (options numeric_dtype): the value of each numeric tuple (the tuples of the `[num]f` "
+     "relations), in the order in which the numeric tuples appear in relation_args: graph after graph in layout "
+     "'graph', relation after relation in layout 'relation'. NaN for a function term without a value. Absent without "
+     "numeric relations or the 'relations' output."},
+    {"node_value",
+     "float32 [V]: the value of each numeric atom node of the Simple graph (NaN: no value), 0 for every other node. Absent "
+     "without numeric relations or the 'simple' output."},
 };
 
 // ------------------------------------------------------------------------------------------------ streams
@@ -1588,6 +1623,7 @@ PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads
                         encoding::FlatSizes sizes;
                         output.arrays = self.stream->flush(pool, *capacities, sizes);
                         output.sizes = sizes;
+                        output.numeric_tuples = encoding::EncodeScratch::of_this_thread().numeric_tuples();
                     }
                     else
                         output.arrays = self.stream->flush(pool);
@@ -2016,6 +2052,8 @@ void bind_encoding(nb::module_& parent)
                 out["targets"] = self.sizes->targets;
                 if (self.schema->has_history())
                     out["history"] = self.sizes->history;
+                if (self.schema->stores_numeric_values())
+                    out["numeric"] = self.numeric_tuples;
                 out["overflow"] = self.sizes->overflowed();
                 out["capacity_overflow"] = (self.sizes->overflow & encoding::k_overflow_capacity) != 0;
                 out["index_overflow"] = (self.sizes->overflow & encoding::k_overflow_index) != 0;
@@ -2023,7 +2061,7 @@ void bind_encoding(nb::module_& parent)
                 return out;
             },
             "After an encoding with capacities: the true entities, tuples, args and targets of the batch (and its "
-            "history steps, if the schema has history) and whether it overflowed (`overflow`: the batch is all zero), "
+            "history steps, if the schema has history, and its numeric tuples, if it has numeric values) and whether it overflowed (`overflow`: the batch is all zero), "
             "because of the capacities (`capacity_overflow`) or the index type (`index_overflow`); None otherwise.")
         .def(
             "as_dict",
@@ -2033,7 +2071,8 @@ void bind_encoding(nb::module_& parent)
                 return ResultDict(nb::cast<nb::dict>(export_bundle(self.arrays, target, default_words(target))));
             },
             "framework"_a = nb::none(),
-            "The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics) and the "
+            "The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics and, with "
+            "numeric values, numeric_dtype) and the "
             "arrays of the batch, zero-copy, in the framework (default: the batch's).");
     for (const auto& [name, doc] : k_batch_arrays)
         batch.def_prop_ro(name, [name = name](const PyFlatBatch& self) { return ArrayOut(batch_array(self, name)); }, doc);

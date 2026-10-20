@@ -102,7 +102,7 @@ def horizon(
     thread) or ``pool`` (a ``mymyr.rl.ThreadPool``, one batch at a time) split the expansion.
 
     Raises ValueError ("mymyr: encoding: ...") for invalid states or task ids, a graph above ``max_nodes``, and more than
-    2^31 - 1 nodes or edges in the result; numeric tasks are not supported.
+    2^31 - 1 nodes or edges in the result, and for numeric tables (horizons of numeric states are not encoded).
     """
     return HorizonView(**_core._build_horizon(
         table, roots, task_ids, depth=depth, max_nodes=max_nodes, truncate=truncate, merge=merge, threads=threads,
