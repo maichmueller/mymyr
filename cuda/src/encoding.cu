@@ -326,6 +326,41 @@ __global__ void __launch_bounds__(k_block) sizes_kernel(const EncodeParams p)
         *p.sizes = sizes;
 }
 
+template<class T>
+__device__ void zero_tail(T* output, u64 begin, u64 end)
+{
+    if (!output)
+        return;
+    const u64 thread = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x;
+    for (u64 i = begin + thread; i < end; i += static_cast<u64>(gridDim.x) * blockDim.x)
+        output[i] = T{0};
+}
+
+template<class I>
+__device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
+{
+    const auto& a = p.out;
+    const bool overflow = sizes.overflow != 0;
+    zero_tail(a.entity_role, overflow ? 0 : sizes.entities, p.capacities.entities);
+    zero_tail(static_cast<I*>(a.entity_ref), overflow ? 0 : sizes.entities, p.capacities.entities);
+    zero_tail(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args);
+    zero_tail(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets);
+    zero_tail(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets);
+    if (overflow)
+    {
+        const u64 graphs = p.capacities.graphs;
+        const u64 cells = graphs * p.context.num_relations;
+        zero_tail(a.task_ids, 0, graphs);
+        zero_tail(static_cast<I*>(a.num_objects), 0, graphs);
+        zero_tail(static_cast<I*>(a.entity_offsets), 0, graphs + 1);
+        zero_tail(static_cast<I*>(a.relation_counts), 0, cells);
+        zero_tail(static_cast<I*>(a.relation_offsets), 0, cells + 1);
+        zero_tail(static_cast<I*>(a.relation_arg_offsets), 0, cells + 1);
+        zero_tail(a.goal_complete, 0, graphs);
+        zero_tail(static_cast<I*>(a.target_offsets), 0, graphs + 1);
+    }
+}
+
 template<class I, bool Warp, bool RelationMajor>
 __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
 {
@@ -343,6 +378,8 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
     const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, first, base);
     if (blockIdx.x == 0 && threadIdx.x == 0)
         *p.sizes = sizes;
+    if (p.zero_unused && p.first_class)
+        zero_unused<I>(p, sizes);
     if (sizes.overflow != 0)
         return;
 

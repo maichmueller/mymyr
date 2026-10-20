@@ -39,7 +39,7 @@ the states again; required on a device).
   graphs, entities, args, targets)``: the encoding of device rows by a ``FlatRelationEncoder`` (``register`` handle) with
   the capacities ``graphs``, ``entities``, ``args`` and ``targets`` (0 without target sources): a list of 14 tensors, the
   arrays of a batch in the order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty
-  tensor) and ``sizes`` int64 [5]. It waits for nothing and allocates only its outputs, on torch's current stream, so it
+  tensor) and ``sizes`` int64 [6]. It waits for nothing and allocates only its outputs, on torch's current stream, so it
   captures in a CUDA graph (after ``encoder.reserve_device`` on the capture stream) and traces under ``torch.compile``.
 - ``mymyr::expand_derived`` / ``mymyr::expand_flat_derived``: the same with the derived words of the successors as a
   seventh result, int64 [N, K, D] / [M, D] (D = ``table.derived_words``; the rows of ``rl.expand(..., derived=True)``).
@@ -121,8 +121,9 @@ def lookup(handle: int) -> Any:
         raise ValueError(f"mymyr: no object registered under handle {handle} (see mymyr.rl.torch.register)") from None
 
 
-def _stream(t: Tensor) -> Optional[int]:
-    return torch.cuda.current_stream(t.device).cuda_stream if t.device.type == "cuda" else None
+def _stream(t: Tensor | torch.device) -> Optional[int]:
+    device = t if isinstance(t, torch.device) else t.device
+    return torch.cuda.current_stream(device).cuda_stream if device.type == "cuda" else None
 
 
 # ------------------------------------------------------------------------------------------------ environments
@@ -623,7 +624,7 @@ def _(table, states, task_ids, capacity=None, witness_pruning=False):
 
 
 def _encode_flat_outputs(encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int) -> list[Tensor]:
-    layout = _device.layout_of(lookup(encoder))
+    layout = _device.layout_of(lookup(int(encoder)))
     n = states.shape[0] if states.ndim == 2 else 1
     if n > graphs:
         raise ValueError("mymyr: encoding: the batch has more graphs than the output capacity")
@@ -652,8 +653,9 @@ def encode_flat(
     ``encoder`` is a :func:`register` handle of the encoder. Returns the 14 arrays of ``DeviceFlatBatch.array_names``
     (arrays that the schema does not store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them.
     A batch exceeding ``graphs`` raises before launch. Nothing waits for the device, and a batch that exceeds its
-    array capacities is all zero with the overflow flags in ``sizes``. To capture it in a CUDA graph, call
-    ``encoder.reserve_device`` on the capture stream first and keep the encoder registered while the graph can replay."""
+    array capacities is all zero with the overflow flags in ``sizes``. Warm it on the capture stream to acquire its
+    context before capturing a CUDA graph, and keep the encoder registered while the graph can replay. Scratch belongs
+    to torch's allocator and needs no reservation."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):

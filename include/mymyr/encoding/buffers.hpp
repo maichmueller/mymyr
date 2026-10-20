@@ -8,14 +8,16 @@
 namespace mymyr::encoding
 {
 /// Capacities of the arrays of a batch: graphs bound the per-graph and per-cell arrays, entities the entity arrays,
-/// args the entries of relation_args, and targets the target_entity and target_group arrays. Tuple counts have no
-/// separate capacity because every tuple has at least one argument and no array is indexed by tuple alone.
+/// args the entries of relation_args, targets the target_entity and target_group arrays and history the history_entity
+/// and history_dt arrays. Tuple counts have no separate capacity because every tuple has at least one argument and no
+/// array is indexed by tuple alone.
 struct BatchShape
 {
     u64 graphs = 0;
     u64 entities = 0;
     u64 args = 0;
     u64 targets = 0;
+    u64 history = 0;
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
@@ -46,26 +48,28 @@ inline constexpr u32 k_overflow_input = 4;     // a row is invalid: a task id ou
                                                // calls report it here, host calls throw
 
 /// The true sizes of a batch (not clipped to any capacity) and whether the batch can be written. A POD, so that a
-/// device call can return it in the same form; its five 64-bit words are entities, tuples, args, targets and the
-/// overflow flags, and no byte of it is padding.
+/// device call can return it in the same form; its six 64-bit words are entities, tuples, args, targets, history
+/// and the overflow flags, and no byte of it is padding.
 struct FlatSizes
 {
     u64 entities = 0;
     u64 tuples = 0;
     u64 args = 0;
     u64 targets = 0;
+    u64 history = 0;
     u32 overflow = 0;  // k_overflow_* flags; 0: the batch fits
     u32 reserved = 0;  // always 0: the flags fill a 64-bit word
     [[nodiscard]] bool overflowed() const noexcept { return overflow != 0; }
 };
-static_assert(sizeof(FlatSizes) == 5 * sizeof(u64));
+static_assert(sizeof(FlatSizes) == 6 * sizeof(u64));
 
 /// The destination arrays of a batch of G graphs and R relations, typed by the index type of the options (int32 or
 /// int64). The caller owns them. Arrays of size G, G + 1, G * R or G * R + 1 must have that size; relation_args,
-/// entity_role, entity_ref, target_entity and target_group must hold at least the sizes of the batch (FlatSizes).
-/// entity_role and entity_ref must be null iff the schema has implicit entity arrays, relation_counts iff it does not
-/// store counts, goal_complete iff it has no goal relations, the three target arrays iff it has no targets. Nothing is
-/// written past the sizes: the entries of the variable-size arrays beyond them keep their old values.
+/// entity_role, entity_ref, target_entity, target_group, history_entity and history_dt must hold at least the sizes of
+/// the batch (FlatSizes). entity_role and entity_ref must be null iff the schema has implicit entity arrays,
+/// relation_counts iff it does not store counts, goal_complete iff it has no goal relations, the three target arrays
+/// iff it has no targets, the three history arrays iff it has no history. Nothing is written past the sizes: the
+/// entries of the variable-size arrays beyond them keep their old values.
 struct FlatBuffers
 {
     i32* task_ids = nullptr;
@@ -91,5 +95,8 @@ struct FlatBuffers
     void* static_arg_offsets = nullptr;
     void* static_args = nullptr;
     void* static_relations = nullptr;
+    void* history_offsets = nullptr;
+    void* history_entity = nullptr;
+    i32* history_dt = nullptr;
 };
 }

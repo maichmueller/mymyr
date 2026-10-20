@@ -89,8 +89,9 @@ def test_a_pickled_table_encoder_keeps_its_instances():
 def test_the_pickle_stores_the_table_the_options_and_the_fingerprint():
     task = text_task("blocks__probBLOCKS-8-0")
     encoder = encoding.FlatRelationEncoder(task, layout="relation", target_sources=("goal",))
-    restore, (table, options, fingerprint) = encoder.__reduce__()
+    restore, (name, table, options, fingerprint) = encoder.__reduce__()
     assert restore is _pickle._restore_flat_encoder
+    assert name == "FlatRelationEncoder"
     assert table is task
     assert options == encoder.options and options["layout"] == "relation"
     assert fingerprint == encoder.schema_fingerprint
@@ -124,20 +125,20 @@ class Tampered:
 def test_a_fingerprint_mismatch_at_load_raises(name):
     task = text_task(name)
     encoder = encoding.FlatRelationEncoder(task)
-    _, (table, options, fingerprint) = encoder.__reduce__()
-    assert _pickle._restore_flat_encoder(table, options, fingerprint).schema_fingerprint == fingerprint
+    _, (name, table, options, fingerprint) = encoder.__reduce__()
+    assert _pickle._restore_flat_encoder(name, table, options, fingerprint).schema_fingerprint == fingerprint
     for wrong in (fingerprint ^ 1, fingerprint ^ (1 << 63), 0):
         with pytest.raises(ValueError, match="mymyr: encoding: the pickled encoder's schema fingerprint"):
-            pickle.loads(pickle.dumps(Tampered((table, options, wrong))))
+            pickle.loads(pickle.dumps(Tampered((name, table, options, wrong))))
     # options that shape the output but not the catalog (the layout) change the fingerprint too
     other = encoding.FlatRelationEncoder(task, layout="relation")
     assert other.schema_fingerprint != fingerprint
     with pytest.raises(ValueError, match="mymyr: encoding: the pickled encoder's schema fingerprint"):
-        pickle.loads(pickle.dumps(Tampered((table, other.options, fingerprint))))
+        pickle.loads(pickle.dumps(Tampered((name, table, other.options, fingerprint))))
 
 
 def test_a_pickle_with_invalid_options_raises():
     task = text_task("gripper__prob05")
-    _, (table, options, fingerprint) = encoding.FlatRelationEncoder(task).__reduce__()
+    _, (name, table, options, fingerprint) = encoding.FlatRelationEncoder(task).__reduce__()
     with pytest.raises(ValueError, match="mymyr: encoding: layout must be one of"):
-        pickle.loads(pickle.dumps(Tampered((table, {**options, "layout": "diagonal"}, fingerprint))))
+        pickle.loads(pickle.dumps(Tampered((name, table, {**options, "layout": "diagonal"}, fingerprint))))

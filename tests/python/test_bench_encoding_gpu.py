@@ -284,9 +284,8 @@ def test_a_captured_device_encode_is_built_outside_the_capture_and_timed_with_ev
     calls = []
     gpu, encoder = FakeGpu(calls), FakeDeviceEncoder(real, calls)
     with bench.encode_session(gpu, encoder, FakeStates(rows), eager=False) as run:
-        # the capture stream's workspace is reserved and warmed up (an encode on that stream and a synchronize) before
-        # the capture, and one encode runs inside it
-        assert calls == [("reserve", 64, True), "stream_begin", "encode", "stream_end", "sync", "capture_begin", "encode",
+        # The context is warmed on the capture stream before capture, and one encode runs inside it.
+        assert calls == ["stream_begin", "encode", "stream_end", "sync", "capture_begin", "encode",
                          "capture_end"]
         calls.clear()
         assert run() == pytest.approx(50.0 * 1e3)

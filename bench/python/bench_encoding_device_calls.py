@@ -8,8 +8,9 @@ with interleaved rounds (every round runs every mode once), the ways of encoding
   - encode_capacities: `encoder.encode(rows, capacities=...)`, which allocates the arrays at the capacities and never
     waits (the synchronize after it is the timing's).
   - op_eager: `torch.ops.mymyr.encode_flat` called eagerly, with the same capacities.
-  - op_compiled: the op inside a `torch.compile(fullgraph=True)` function.
-  - op_graph: the op captured in a CUDA graph and replayed (REPLAYS replays between two CUDA events).
+  - op_dynamo_eager: the op inside `torch.compile(fullgraph=True, backend="eager")`. This measures Dynamo's overhead;
+    the eager backend executes the same opaque op and does not compile its implementation.
+  - op_graph: the compiled measurement: the op captured in a CUDA graph and replayed (REPLAYS replays between events).
   - cpu_exact / cpu_single: the host encoder on the same rows, one call over all rows and one call of a single row.
 
 All times are microseconds per encoded state (per call for cpu_single); the table prints the minimum and the median over
@@ -75,10 +76,9 @@ def bench_task(key, n, rounds, data):
         return torch.ops.mymyr.encode_flat(handle, states, None, None, None, None, None, None, caps["graphs"],
                                            caps["entities"], caps["args"], 0)
 
-    torch._dynamo.reset()  # a function compiled for another handle would retrace with symbolic handles and capacities
+    torch._dynamo.reset()
     compiled = torch.compile(lambda states: op(states), fullgraph=True, backend="eager")
     stream = torch.cuda.Stream(device)
-    encoder.reserve_device(n, stream=stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.stream(stream):
         op(drows)
@@ -106,7 +106,7 @@ def bench_task(key, n, rounds, data):
         Run("encode_exact", sync(lambda: encoder.encode(drows)), n),
         Run("encode_capacities", sync(lambda: encoder.encode(drows, capacities=caps)), n),
         Run("op_eager", sync(lambda: op(drows)), n),
-        Run("op_compiled", sync(lambda: compiled(drows)), n),
+        Run("op_dynamo_eager", sync(lambda: compiled(drows)), n),
         Run("op_graph", replays, n * REPLAYS, host=False),
         Run("cpu_exact", lambda: encoder.encode(rows), n),
         Run("cpu_single", lambda: encoder.encode(rows[:1]), 1),

@@ -93,14 +93,29 @@ FlatOptions normalized(const FlatOptions& options)
     if ((out.targets.contains(TargetSource::Goal) || out.targets.contains(TargetSource::Subgoal)) &&
         !out.goal_derivations.contains(GoalDerivation::Plain))
         invalid("goal and subgoal targets need the plain goal derivation: only its relations carry the target slot");
+    if (!out.history && out.targets.contains(TargetSource::History))
+        invalid("history targets need history");
+    if (!out.history && out.history_max_steps)
+        invalid("history_max_steps needs history");
+    if (out.history_max_steps && *out.history_max_steps == 0)
+        invalid("history_max_steps must be at least 1 (nullopt: all steps)");
+    if (out.history && horizon)
+        invalid("history cannot be combined with a horizon mode");
     if (horizon && !out.targets.empty())
         invalid("target sources cannot be combined with a horizon mode: the state nodes of a horizon are its targets");
+    if (horizon && out.statics == Statics::Shared)
+        invalid("statics='shared' cannot be combined with a horizon mode: the static tuples of a horizon graph are "
+                "anchored by its root's state node, so they are not those of the instance");
     if (out.horizon.mode == HorizonMode::Action && !out.include_actions)
         invalid("the action horizon mode needs the action relations (include_actions)");
     if (!horizon)
     {
         if (out.horizon.parent_relation)
             invalid("parent_relation needs a horizon mode");
+        if (out.horizon.sibling_relation)
+            invalid("sibling_relation needs a horizon mode");
+        if (out.horizon.cousin_relation)
+            invalid("cousin_relation needs a horizon mode");
         if (out.horizon.root != RootPolicy::Include)
             invalid("root_policy '" + std::string(to_string(out.horizon.root)) + "' needs a horizon mode");
     }

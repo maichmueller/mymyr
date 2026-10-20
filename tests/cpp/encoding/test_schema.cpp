@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <random>
+#include <stdexcept>
+#include <string>
 
 using namespace mymyr;
 using namespace mymyr::encoding;
@@ -36,14 +38,17 @@ bool has(const EncodingSchema& schema, std::string_view name) { return schema.fi
 
 std::vector<SlotRole> roles(const EncodingSchema& schema, std::string_view name)
 {
-    const auto span = schema.slot_roles(*schema.find(name));
+    const auto id = schema.find(name);
+    if (!id)
+        throw std::out_of_range("the schema has no relation " + std::string(name));
+    const auto span = schema.slot_roles(*id);
     return {span.begin(), span.end()};
 }
 
 using R = SlotRole;
 
-constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x5a56537a247d53c5, PIN_TARGETS = 0x31e6ae6fd252e8a1,
-                PIN_FULL = 0x8f230d9913e98bf7;
+constexpr u64 PIN_DEFAULT = 0x0f88d5dff3ee07cf, PIN_DELTA = 0x6922fd5d8c1ee19e, PIN_TARGETS = 0xed98cc0c8c0e4c86,
+                PIN_FULL = 0xf998a7b0c07c1bcd;
 
 TEST(EncodingSchema, DefaultCatalogIsSortedBytewise)
 {
@@ -83,6 +88,7 @@ TEST(EncodingSchema, SlotRolesFollowTheTargetsAndVirtualNodes)
 {
     FlatOptions options;
     options.targets = {TargetSource::Goal, TargetSource::History, TargetSource::Action};
+    options.history = true;
     options.predicate_virtual_nodes = true;
     options.max_goal_level = 1;
     options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Unsatisfied};
@@ -166,7 +172,8 @@ TEST(EncodingSchema, HorizonCatalogs)
     EXPECT_EQ(roles(*d, "on"), (std::vector<SlotRole>{R::Argument, R::Argument}));
     EXPECT_EQ(roles(*d, "[+]on"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
     EXPECT_EQ(roles(*d, "[-]on[g][sat-]"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
-    EXPECT_EQ(roles(*d, "[+]on[sat+]"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
+    EXPECT_EQ(roles(*d, "[+]on[g][sat+]"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
+    EXPECT_FALSE(has(*d, "[+]on[sat+]"));  // a literal-level relation has no goal level: no graph fills it
     EXPECT_EQ(roles(*d, "_parent_"), (std::vector<SlotRole>{R::State, R::State}));
     EXPECT_EQ(roles(*d, "stack"), (std::vector<SlotRole>{R::State, R::Argument, R::Argument}));
     EXPECT_EQ(d->relation(*d->find("_parent_")).lane, Lane::Parent);
@@ -246,6 +253,7 @@ TEST(EncodingSchema, FingerprintIgnoresDeclarationOrderAndTracksTheOutput)
     FlatOptions pin_targets;
     pin_targets.max_goal_level = 2;
     pin_targets.targets = {TargetSource::Goal, TargetSource::Subgoal, TargetSource::History, TargetSource::Action};
+    pin_targets.history = true;
     pin_targets.layout = Layout::Relation;
     pin_targets.index = IndexType::I64;
     EXPECT_EQ(EncodingSchema::create(d, pin_targets)->fingerprint(), PIN_TARGETS);
