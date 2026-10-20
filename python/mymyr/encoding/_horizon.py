@@ -84,9 +84,10 @@ def horizon(
     then by objects). A successor is a node when its state has not been reached in this graph before (``merge=True``,
     first seen wins: the node's number is that of its first appearance), otherwise the edge leads to the node of that
     state, so a state with several predecessors is one node with several incoming edges and a cycle is an edge to an
-    earlier node. The edges of a graph are ordered by source node, then canonically: one per (node, successor row), so
-    two actions that lead to the same state are two edges. The nodes of the deepest level are not expanded. With
-    ``merge=False`` every successor row is a node of its own and the graph is a tree. The graphs, their numbering and
+    earlier node. There is one edge per (node, successor row), so two actions that lead to the same state are two
+    edges. The edges of a graph are ordered by destination node, then by action schema, then by objects; edges that
+    agree keep the order of their source nodes and of ``rl.expand``. The nodes of the deepest level are not expanded.
+    With ``merge=False`` every successor row is a node of its own and the graph is a tree. The graphs, their numbering and
     their order do not depend on ``threads`` or ``pool`` nor on the process.
 
     Memory. All the graphs of a call are built at once and held in memory. While they are built every node takes

@@ -1277,7 +1277,7 @@ TEST(Horizon, TheEdgeTuplesAreCanonicalForEveryShapeOfEdgeList)
         return static_cast<i32>((state >> 33) % bound);
     };
     using Edges = std::vector<std::array<i32, 2>>;
-    // a group of one source that is larger than the buffer the groups are sorted in, with descending destinations
+    // one source with every destination twice, descending
     Edges star;
     for (int round = 0; round < 2; ++round)
         for (i32 dst = nodes - 1; dst >= 1; --dst)
@@ -1299,7 +1299,15 @@ TEST(Horizon, TheEdgeTuplesAreCanonicalForEveryShapeOfEdgeList)
     // a group that breaks the order of the sources late
     Edges late = grouped;
     late.push_back({0, 5});
-    for (const Edges& edges : {star, grouped, shuffled, ascending, late, Edges{}})
+    // ordered by destination, the sources in no order, with repeats (also apart) and self-loops
+    Edges by_destination;
+    for (i32 dst = 0; dst < nodes; ++dst)
+        for (int k = 0, size = next(5); k < size; ++k)
+            by_destination.push_back({k == 0 ? dst : next(nodes), dst});
+    // ordered by destination but for the last edge
+    Edges by_destination_late = by_destination;
+    by_destination_late.push_back({3, 2});
+    for (const Edges& edges : {star, grouped, shuffled, ascending, late, by_destination, by_destination_late, Edges{}})
     {
         const test::Horizon h = dag_graph(*table, nodes, edges);
         for (const RootPolicy root : k_roots)

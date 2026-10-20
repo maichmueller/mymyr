@@ -45,6 +45,7 @@ struct HPass
     bool exclude;
     bool include_root_target;
     const i32* schema_relation;
+    bool one_schema_per_relation;  // no two schemas share an action relation
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
     [[nodiscard]] u64 first_node(u64 g) const noexcept { return static_cast<u64>(in.horizon.node_offsets[g]); }
@@ -111,7 +112,8 @@ struct HPass
         {
             const u64 e = first_edge(g);
             out.edges = edges_of(g);
-            out.order = s.edge_order.data() + 3 * e + 2 * g + 2 * first_node(g);
+            out.order = s.edge_order.data() + k_order_words_per_edge * e + k_order_words_per_graph * g +
+                        k_order_words_per_node * first_node(g);
             out.src = h.edge_src ? h.edge_src + e : nullptr;
             out.dst = h.edge_dst ? h.edge_dst + e : nullptr;
             out.schema = h.edge_schema ? h.edge_schema + e : nullptr;
@@ -120,6 +122,7 @@ struct HPass
         }
         out.schema_relation = schema_relation;
         out.use_actions = actions;
+        out.one_schema_per_relation = one_schema_per_relation;
         out.use_parents = parents;
         out.use_cousins = cousins;
         out.exclude = exclude;
@@ -443,6 +446,20 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
                    out.relation_arg_offsets, fill_one, cells_of);
 }
 
+/// Whether no two action schemas share an action relation.
+bool one_schema_per_relation(const EncodingSchema& schema)
+{
+    std::vector<bool> seen(schema.num_relations(), false);
+    for (const i32 relation : schema.schema_relations())
+        if (relation >= 0)
+        {
+            if (seen[static_cast<usize>(relation)])
+                return false;
+            seen[static_cast<usize>(relation)] = true;
+        }
+    return true;
+}
+
 HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& context, u64 graphs, u32 members,
                 bool evaluate)
 {
@@ -464,7 +481,8 @@ HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& contex
                  o.horizon.cousin_relation,
                  o.horizon.root == RootPolicy::Exclude,
                  o.horizon.root == RootPolicy::Include,
-                 context.schema().schema_relations().data()};
+                 context.schema().schema_relations().data(),
+                 one_schema_per_relation(context.schema())};
 }
 }  // namespace
 
@@ -549,7 +567,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         s.derived = std::make_unique_for_overwrite<u64[]>(s.derived_capacity);
     }
     if (edges_used)
-        s.edge_order.resize(horizon_order_words(0, 0) * graphs + 3 * edges + 2 * nodes);
+        s.edge_order.resize(k_order_words_per_graph * graphs + k_order_words_per_edge * edges +
+                            k_order_words_per_node * nodes);
     const u32 members = members_for(nodes, pool);
     s.members.resize(members);
     s.bounds.clear();

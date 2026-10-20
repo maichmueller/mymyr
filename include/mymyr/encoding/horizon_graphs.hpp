@@ -7,9 +7,10 @@
 //     node (merging by the words of its row, within a graph) unless merging is off, in which case every successor is
 //     a node of its own. Nodes are numbered in the order they are first reached: the root is node 0, then, level by
 //     level, the successors of the nodes of the level before in node order, each node's successors in the canonical
-//     order of rl::expand (by schema, then by binding). An edge goes from a node to each successor of it, in the same
-//     order, so the edges of a graph are ordered by source node and then canonically; an edge to a state that is
-//     already a node leads to that node (a cycle, or a node with several parents). The states of the deepest level are
+//     order of rl::expand (by schema, then by binding). An edge goes from a node to each successor of it; the edges of a
+//     graph are ordered by destination node, then by schema, then by binding, and edges that agree keep the order of
+//     their source nodes and of rl::expand. An edge to a state that is already a node leads to that node (a cycle, or
+//     a node with several parents). The states of the deepest level are
 //     not expanded.
 //   - transition_graphs makes the depth-one graphs of states whose expansion exists already: node 0 is the state, node
 //     k its k-th successor row and edge k-1 leads to it (one node per successor row, nothing merged: a successor that
