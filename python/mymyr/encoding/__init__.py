@@ -23,6 +23,12 @@ horizon encoder for rooted graphs, with the root as an encoded node, the ``_pare
 the transitions of states (the horizons of depth one, with the successors' facts or their deltas) from the states
 themselves. Streams and the device do not encode horizons.
 
+SimpleEncoder encodes states into homogeneous graphs with integer node and edge labels, the form that standard graph
+neural networks consume: a node for each entity and for each tuple of the relational encoding and, for every position
+of a tuple, an edge from its entity to the tuple's node and one back (``outputs=('relations', 'simple')`` on any
+encoder gives the Simple graph next to the relation arrays). ``schema.simple_label_names`` and
+``schema.simple_edge_label_names`` name the labels.
+
 ``hgraph(batch)`` views a relation-major batch as a heterogeneous graph (HGraphView): a node type per relation and one
 for the entities, an edge type per relation and tuple position, the edges' entity ids a strided view of the batch's
 arguments. The view copies no tuple and keeps the batch alive.
@@ -42,6 +48,7 @@ from mymyr._core._encoding import (
     FlatTransitionEffectsEncoder,
     FlatTransitionEncoder,
     HGraphView,
+    SimpleEncoder,
 )
 from mymyr.encoding._device import DeviceFlatBatch
 from mymyr.encoding._hgraph import hgraph
@@ -63,6 +70,7 @@ __all__ = [
     "GraphDescription",
     "HGraphView",
     "HorizonView",
+    "SimpleEncoder",
     "hgraph",
     "history_masks",
     "horizon",

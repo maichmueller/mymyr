@@ -227,6 +227,12 @@ struct PyFlatEncoder
     }
 };
 
+/// The Simple encoder: a FlatRelationEncoder whose batches hold the Simple graph and no relation arrays.
+struct PySimpleEncoder : PyFlatEncoder
+{
+    using PyFlatEncoder::PyFlatEncoder;
+};
+
 /// The horizon encoder: the state of a FlatRelationEncoder (the two classes share it; the horizon encoder has no streams).
 struct PyFlatHorizonEncoder : PyFlatEncoder
 {
@@ -301,7 +307,7 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
                                      bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                                      nb::handle goal_derivations, nb::handle target_sources, nb::handle layout,
                                      nb::handle index_dtype, bool emit_counts, nb::handle entity_arrays,
-                                     nb::handle horizon_mode, nb::handle root_policy, bool parent_relation,
+                                     nb::handle outputs, bool constant_labels, nb::handle horizon_mode, nb::handle root_policy, bool parent_relation,
                                      bool sibling_relation, bool cousin_relation, bool history,
                                      nb::handle history_max_steps, bool horizon_optional)
 {
@@ -326,6 +332,8 @@ encoding::FlatOptions schema_options(nb::handle max_goal_level, bool include_sta
     options.index = choice(index_dtype, "index_dtype", parse_index_type, "'int32', 'int64'");
     options.emit_counts = emit_counts;
     options.entity_arrays = choice(entity_arrays, "entity_arrays", parse_entity_arrays, "'auto', 'always'");
+    options.outputs = choice_set<Output>(outputs, "outputs", parse_output, "'relations', 'simple'");
+    options.constant_labels = constant_labels;
     if (!horizon_mode.is_none())
     {
         const std::string allowed = horizon_optional ? "'full', 'delta', 'action' or None" : "'full', 'delta', 'action'";
@@ -369,6 +377,8 @@ nb::dict options_dict(const encoding::FlatOptions& o)
     out["index_dtype"] = std::string(encoding::to_string(o.index));
     out["emit_counts"] = o.emit_counts;
     out["entity_arrays"] = std::string(encoding::to_string(o.entity_arrays));
+    out["outputs"] = nb::tuple(texts_of(o.outputs.members()));
+    out["constant_labels"] = o.constant_labels;
     const bool horizon = o.horizon.mode != encoding::HorizonMode::None;
     out["horizon_mode"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.mode)))) : nb::none();
     out["root_policy"] = horizon ? nb::object(nb::cast(std::string(encoding::to_string(o.horizon.root)))) : nb::none();
@@ -399,7 +409,12 @@ constexpr const char* k_option_doc =
     "(cell (g, r) is segment r * G + g instead of g * R + r). emit_counts=False omits relation_counts (the tuples of "
     "a segment are the difference of two relation_offsets). entity_arrays='auto' omits entity_role and entity_ref "
     "when every entity is an object or the auxiliary entity (no target_sources, predicate_virtual_nodes, "
-    "include_actions, history or horizon_mode). Raises ValueError for invalid combinations and for numeric tasks.";
+    "include_actions, history or horizon_mode). outputs: what a batch stores, a collection of 'relations' (the "
+    "relation_* arrays) and 'simple' (the Simple graph: node_offsets, node_label, edge_offsets, edge_index and "
+    "edge_label; it needs entity_arrays='always' and no predicate_virtual_nodes, and without 'relations' the layout "
+    "and emit_counts keep their defaults). constant_labels: with 'simple', each constant of the domain has a node label "
+    "of its own (otherwise an object has the label of its role). Raises ValueError for invalid combinations and for "
+    "numeric tasks.";
 
 constexpr const char* k_horizon_option_doc =
     " horizon_mode, root_policy, parent_relation, sibling_relation, cousin_relation: the horizon variants "
@@ -408,7 +423,8 @@ constexpr const char* k_horizon_option_doc =
 
 /// Which options of the horizon a class that is built from a table takes, and their defaults: EncodingSchema takes
 /// them all and none is required; FlatRelationEncoder takes none; FlatHorizonEncoder requires `horizon_mode`;
-/// FlatRootedHorizonEncoder has a mode and defaults of its own; the transition encoders fix the mode.
+/// FlatRootedHorizonEncoder has a mode and defaults of its own; the transition encoders fix the mode; SimpleEncoder
+/// takes none and fixes the outputs to the Simple graph.
 enum class HorizonArgs
 {
     Optional,
@@ -417,22 +433,26 @@ enum class HorizonArgs
     Rooted,
     Transition,
     TransitionEffects,
+    Simple,
 };
 
 // the options other than the horizon's, in the order of the signatures
-#define MYMYR_ENCODING_ARGS                                                                                            \
+#define MYMYR_ENCODING_ARGS_BASE                                                                                       \
     TableArg table, TextSequenceArg goal_derivations, IntArg max_goal_level, bool include_static, bool include_derived, \
         bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions, TextSequenceArg target_sources, \
         Arg<ann::EncodingLayout> layout, Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,                    \
         Arg<ann::EncodingEntityArrays> entity_arrays
-#define MYMYR_ENCODING_PASS                                                                                            \
+#define MYMYR_ENCODING_ARGS MYMYR_ENCODING_ARGS_BASE, TextSequenceArg outputs, bool constant_labels
+#define MYMYR_ENCODING_PASS_BASE                                                                                       \
     table, goal_derivations, max_goal_level, include_static, include_derived, nullary, equality,                       \
         predicate_virtual_nodes, include_actions, target_sources, layout, index_dtype, emit_counts, entity_arrays
-#define MYMYR_ENCODING_DEFAULTS                                                                                        \
+#define MYMYR_ENCODING_PASS MYMYR_ENCODING_PASS_BASE, outputs, constant_labels
+#define MYMYR_ENCODING_DEFAULTS_BASE                                                                                   \
     "goal_derivations"_a = nb::make_tuple("plain", "satisfied"), "max_goal_level"_a = 0, "include_static"_a = true,     \
     "include_derived"_a = true, "nullary"_a = true, "equality"_a = false, "predicate_virtual_nodes"_a = false,          \
     "include_actions"_a = true, "target_sources"_a = nb::tuple(), "layout"_a = "graph", "index_dtype"_a = "int32",      \
     "emit_counts"_a = true, "entity_arrays"_a = "always"
+#define MYMYR_ENCODING_DEFAULTS MYMYR_ENCODING_DEFAULTS_BASE, "outputs"_a = nb::make_tuple("relations"), "constant_labels"_a = false
 
 /// The constructor of the classes that are built from a table and the encoding options (EncodingSchema, the encoders):
 /// the keyword arguments are parsed here once. `make(self, reference, options)` constructs the object.
@@ -450,8 +470,8 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                 "FlatRelationEncoder encodes states without a horizon");
         const encoding::FlatOptions options = schema_options(
             max_goal_level, include_static, include_derived, nullary, equality, predicate_virtual_nodes, include_actions,
-            goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays, horizon_mode, root_policy,
-            parent_relation, sibling_relation, cousin_relation, history, history_max_steps,
+            goal_derivations, target_sources, layout, index_dtype, emit_counts, entity_arrays, outputs, constant_labels,
+            horizon_mode, root_policy, parent_relation, sibling_relation, cousin_relation, history, history_max_steps,
             H == HorizonArgs::Optional);
         make(self, reference, options);
     };
@@ -481,6 +501,19 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             },
             "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS, "history"_a = false, "history_max_steps"_a.none() = nb::none(), doc);
     }
+    else if constexpr (H == HorizonArgs::Simple)
+    {
+        cls.def(
+            "__init__",
+            [construct](Py* self, MYMYR_ENCODING_ARGS_BASE, bool constant_labels, bool history,
+                        IntArg history_max_steps)
+            {
+                construct(self, MYMYR_ENCODING_PASS_BASE, TextSequenceArg(nb::make_tuple("simple")), constant_labels,
+                          nb::none(), nb::none(), false, false, false, history, history_max_steps);
+            },
+            "table"_a, nb::kw_only(), MYMYR_ENCODING_DEFAULTS_BASE, "constant_labels"_a = false, "history"_a = false,
+            "history_max_steps"_a.none() = nb::none(), doc);
+    }
     else if constexpr (H == HorizonArgs::Required)
     {
         cls.def(
@@ -490,8 +523,9 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                         bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                         TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
                         Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,
-                        Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingRootPolicy> root_policy,
-                        bool parent_relation, bool sibling_relation, bool cousin_relation)
+                        Arg<ann::EncodingEntityArrays> entity_arrays, TextSequenceArg outputs, bool constant_labels,
+                        Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation, bool sibling_relation,
+                        bool cousin_relation)
             {
                 construct(self, MYMYR_ENCODING_PASS, horizon_mode, root_policy, parent_relation, sibling_relation,
                           cousin_relation, false, nb::none());
@@ -508,8 +542,9 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
                         bool nullary, bool equality, bool predicate_virtual_nodes, bool include_actions,
                         TextSequenceArg target_sources, Arg<ann::EncodingLayout> layout,
                         Arg<ann::EncodingIndexDtype> index_dtype, bool emit_counts,
-                        Arg<ann::EncodingEntityArrays> entity_arrays, Arg<ann::EncodingRootPolicy> root_policy,
-                        bool parent_relation, bool sibling_relation, bool cousin_relation)
+                        Arg<ann::EncodingEntityArrays> entity_arrays, TextSequenceArg outputs, bool constant_labels,
+                        Arg<ann::EncodingRootPolicy> root_policy, bool parent_relation, bool sibling_relation,
+                        bool cousin_relation)
             {
                 construct(self, MYMYR_ENCODING_PASS, horizon_mode, root_policy, parent_relation, sibling_relation,
                           cousin_relation, false, nb::none());
@@ -533,8 +568,11 @@ void define_init(nb::class_<Py, Extra...>& cls, Make make, const char* doc)
             doc);
     }
 }
+#undef MYMYR_ENCODING_ARGS_BASE
 #undef MYMYR_ENCODING_ARGS
+#undef MYMYR_ENCODING_PASS_BASE
 #undef MYMYR_ENCODING_PASS
+#undef MYMYR_ENCODING_DEFAULTS_BASE
 #undef MYMYR_ENCODING_DEFAULTS
 
 // ------------------------------------------------------------------------------------------------ the catalog
@@ -669,6 +707,24 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
             },
             "The roles of the entities of a graph; the role of an entity is its index. The auxiliary role is used by "
             "the nullary relations.")
+        .def_prop_ro(
+            "simple_label_names",
+            [schema_of](const Py& self) { return schema_of(self).simple_label_names(); },
+            "The node labels of the Simple graph, indexed by label: the entity roles (entity_role_names), then the "
+            "relations (relation_names), then, with constant_labels, the constants of the domain. The vocabulary is "
+            "the same whether or not the schema stores the Simple graph.")
+        .def_prop_ro(
+            "simple_edge_label_names",
+            [schema_of](const Py& self) { return schema_of(self).simple_edge_label_names(); },
+            "The edge labels of the Simple graph: '0' .. 'K-1' for the edge from the entity at that position of a tuple "
+            "to its atom node, then '0^-1' .. '(K-1)^-1' for the reverse edges, K the largest arity of a relation; "
+            "edge_label % K is the position.")
+        .def_prop_ro(
+            "simple_constants", [schema_of](const Py& self) { return schema_of(self).simple_constants(); },
+            "The domain constants that have a node label of their own (0 without constant_labels).")
+        .def_prop_ro(
+            "outputs", [schema_of](const Py& self) { return nb::tuple(texts_of(schema_of(self).options().outputs.members())); },
+            "What a batch stores: 'relations' (the relation_* arrays) and/or 'simple' (the Simple graph).")
         .def_prop_ro(
             "target_group_names",
             [](const Py&)
@@ -1336,6 +1392,21 @@ constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
      "index [S]: the entity of each history step, graph after graph in step order (oldest first). Absent like "
      "history_offsets."},
     {"history_dt", "int32 [S]: the dt of each history step. Absent like history_offsets."},
+    {"node_offsets",
+     "index [G + 1]: graph g's Simple nodes are [node_offsets[g], node_offsets[g + 1]): its entities in entity order, "
+     "then one node per tuple in graph-major tuple order. Absent without the Simple output."},
+    {"node_label",
+     "int32 [V]: the label of each Simple node: an entity's role, 9 + r for an atom of relation r (9 + R + j for the j-th "
+     "constant with constant_labels); schema.simple_label_names names them. Absent like node_offsets."},
+    {"edge_offsets",
+     "index [G + 1]: graph g's Simple edges are [edge_offsets[g], edge_offsets[g + 1]): all its forward edges in (tuple, "
+     "position) order, then all its reverse edges in the same order. Absent like node_offsets."},
+    {"edge_index",
+     "index [2, E]: row 0 the source and row 1 the target node of each Simple edge (batch-global node ids): the entity "
+     "to its atom (forward) and the atom to its entity (reverse). Absent like node_offsets."},
+    {"edge_label",
+     "int32 [E]: the label of each Simple edge: k for the forward edge of position k, K + k for its reverse, K the "
+     "largest arity of a relation; schema.simple_edge_label_names names them. Absent like node_offsets."},
 };
 
 // ------------------------------------------------------------------------------------------------ streams
@@ -2022,7 +2093,9 @@ void bind_encoding(nb::module_& parent)
              "'history' with history); the batch then has relation_args, the entity arrays, the target arrays and the "
              "history arrays of exactly the capacities' sizes (the first sizes['entities'] / sizes['args'] / "
              "sizes['targets'] / sizes['history'] entries hold the encoding, the rest is "
-             "zero) and `sizes` reports the true sizes. A batch that does not fit its "
+             "zero) and `sizes` reports the true sizes. The Simple arrays have 'entities' + 'args' nodes and 2 * 'args' "
+             "edges (edge_index is [2, 2 * 'args']), the first sizes['entities'] + sizes['tuples'] nodes and "
+             "2 * sizes['args'] edges holding the graph. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
              "set; nothing raises. Rows (and task_ids, derived, goals) in CUDA memory are encoded on the device into "
              "torch tensors: a DeviceFlatBatch is returned, actions, subgoals and history are refused, threads has no effect and pool is "
@@ -2069,6 +2142,32 @@ void bind_encoding(nb::module_& parent)
             "A stream of rows under indices you choose, whose rows can be replaced and removed (FlatMutableStream). "
             "framework: the framework of the batches its flushes return (default NumPy).")
     ;
+
+    nb::class_<PySimpleEncoder, PyFlatEncoder> simple_class(
+        module, "SimpleEncoder",
+        "Encodes states into homogeneous graphs with integer node and edge labels, the form that standard graph neural "
+        "networks consume: one graph per state with a node for each entity (an object, the auxiliary entity, a goal, "
+        "action or history entity, ...) and a node for each tuple of the relational encoding, and, for every position of "
+        "a tuple, an edge from the entity at that position to the tuple's node and one back. A node's label is the role of "
+        "its entity (0 to 8) or 9 + the relation of its tuple; an edge's label is its position k, or K + k for the reverse "
+        "edge, K the largest arity of a relation. The graph is exactly the relational encoding's tuples: nothing is merged "
+        "or renumbered, and a graph holds nothing that its state and instance do not have. A batch has the arrays "
+        "node_offsets, node_label, edge_offsets, edge_index and edge_label next to task_ids, num_objects, entity_offsets, "
+        "entity_role and entity_ref, and no relation arrays. It is a FlatRelationEncoder with outputs=('simple',): encode, "
+        "stream and the capacity form are the same (the device does not encode Simple).");
+    static const std::string simple_doc =
+        std::string("The Simple encoder of a Task, TaskHandle or one-domain TaskTable under the options of "
+                    "FlatRelationEncoder, except outputs, which is fixed. A layout other than 'graph' and emit_counts=False "
+                    "are refused (a batch has no relation arrays for them to shape), and so are entity_arrays='auto' "
+                    "(the graph keeps the entity arrays) and predicate_virtual_nodes (an atom's label names its "
+                    "predicate). ") +
+        k_option_doc;
+    define_init<HorizonArgs::Simple>(
+        simple_class,
+        [](PySimpleEncoder* self, const TableRef& reference, const encoding::FlatOptions& options)
+        { new (self) PySimpleEncoder{reference, encoding::FlatEncoder::create(reference.table, options)}; },
+        simple_doc.c_str());
+    define_reduce(simple_class, "SimpleEncoder");
 
     nb::class_<PyFlatHorizonEncoder> horizon_class(
         module, "FlatHorizonEncoder",

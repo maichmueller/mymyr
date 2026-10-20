@@ -74,6 +74,11 @@ def _check(encoder, batch, graph):
         )
     if batch.schema.schema_fingerprint != encoder.schema_fingerprint:
         raise ValueError("mymyr: encoding: the batch was encoded with another schema than this encoder's")
+    if "relations" not in batch.schema.outputs:
+        raise ValueError(
+            "mymyr: encoding: entity_names and describe read the tuples of the relation arrays; this batch holds only "
+            "the Simple graph (encode with outputs=('relations', 'simple'))"
+        )
     sizes = batch.sizes
     if sizes is not None and sizes["overflow"]:
         raise ValueError("mymyr: encoding: the batch overflowed its capacities and holds no graphs")

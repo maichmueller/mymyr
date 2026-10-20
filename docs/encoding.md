@@ -463,6 +463,9 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `history_entity` | I `[S]` | the entity of each history step, graph after graph, oldest first |
 | `history_dt` | int32 `[S]` | the `dt` of each history step |
 
+With `outputs` holding `'simple'`, a batch also has the [Simple graph](#the-simple-graph)'s arrays, and without
+`'relations'` it has none of the `relation_*` arrays.
+
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),
 `schema_fingerprint` (the schema's fingerprint as a signed 64-bit value) and `statics` (0: the static tuples are
@@ -568,6 +571,109 @@ assert len(atoms) == view.num_edges(at) == view.num_nodes("at")
 rooms = set(view.edge_index(("room", "0", "_symbol_"))[1].tolist())
 assert set(entities.tolist()) <= rooms
 assert view.ptr("_symbol_").tolist() == batch.entity_offsets.tolist()
+```
+
+## The Simple graph
+
+`SimpleEncoder(table_or_task, *, <options>, constant_labels=False)` encodes states into an ordinary homogeneous graph
+with integer node and edge labels, the form that standard graph neural networks consume (label embeddings with GIN-E,
+GATv2, PNA or a plain GCN). It is lossless with respect to the relational encoding: the graph is built from the same
+tuples, nothing is merged or renumbered, and a graph holds only its own entities and atoms. `SimpleEncoder` takes the
+options of `FlatRelationEncoder` and is one (`outputs=('simple',)`); `encode`, the streams and the capacity form are
+the same. Any encoder can store the Simple graph next to the relation arrays with `outputs=('relations', 'simple')`
+(`'relations'` alone is the default), and the horizon, rooted horizon and transition encoders take `outputs` as well.
+
+```python
+import numpy as np
+import mymyr
+from mymyr import encoding
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+state = task.initial_state
+encoder = encoding.SimpleEncoder(task, include_actions=False)
+batch = encoder.encode([state])
+full = encoding.FlatRelationEncoder(task, include_actions=False, outputs=("relations", "simple")).encode([state])
+
+# one node per entity, then one per tuple; two edges per tuple position
+assert batch.node_offsets[-1] == full.entity_offsets[-1] + full.relation_offsets[-1]
+assert batch.edge_offsets[-1] == 2 * full.relation_arg_offsets[-1]
+labels = encoder.schema.simple_label_names
+objects = int(batch.num_objects[0])
+assert [labels[i] for i in batch.node_label[:objects]] == ["object"] * objects
+assert {labels[i] for i in batch.node_label[objects:]} <= set(encoder.relation_names)
+
+# the first `at` atom is joined to its two objects, by the edges 0 and 1 into its node
+at = encoder.relation_id("at")
+atom = int(np.flatnonzero(batch.node_label == len(encoder.entity_role_names) + at)[0])
+into = batch.edge_index[1] == atom
+assert batch.edge_label[into].tolist() == [0, 1]
+first = int(full.relation_arg_offsets[at])
+assert batch.edge_index[0][into].tolist() == full.relation_args[first : first + 2].tolist()
+assert not hasattr(batch, "relation_args") and hasattr(full, "relation_args")
+```
+
+**Nodes.** Graph `g` has one node per entity in entity order, so the node of entity `j` is `node_offsets[g] + j`, followed
+by one node per tuple in graph-major tuple order (relation id, then tuple order). So `node_offsets[g + 1] -
+node_offsets[g]` is the graph's entities plus its tuples. The label of an entity node is its role (`entity_role`: 0 to 8;
+role 1 is unused without `predicate_virtual_nodes`, which Simple refuses); the label of a tuple's node is
+`9 + the relation id`. With `constant_labels=True` an object that is a constant of the domain has the label `9 + R + c`
+instead of 0, `c` the constant's index in the domain's constant list (`schema.simple_constants` of them), so that the
+label means the same object in every problem of the domain. `schema.simple_label_names` lists the role names, then the
+relation names, then the constant names; its length is the vocabulary size of `node_label`.
+
+**Edges.** For every tuple `t` (its node `a`) and every position `k` of its relation (the encoded arity, so a nullary
+atom has one position, its auxiliary entity), the entity `e` at that position gives two edges: `e -> a` with the label
+`k` and `a -> e` with the label `K + k`, `K` the largest encoded arity of a relation. A graph's edges are all its
+forward edges in (tuple, position) order, then all its reverse edges in the same order, so `edge_label % K` is the
+position (`relation_slot_roles` interprets it) and `edge_offsets[g + 1] - edge_offsets[g]` is twice the graph's tuple
+arguments. `schema.simple_edge_label_names` lists `'0' .. 'K-1'` and `'0^-1' .. '(K-1)^-1'`. Static, type, goal
+(with their derivation), subgoal and history atoms are tuple nodes like any other, and target, action, history and state
+entities are entity nodes joined through their slots, so a goal literal's status is in its label, for example
+`[+]on[g][unsat]`.
+
+| Array | dtype, shape | Meaning |
+|---|---|---|
+| `node_offsets` | I `[G + 1]` | graph `g`'s nodes are `[node_offsets[g], node_offsets[g + 1])`: `entity_offsets[g] +` the tuples of the graphs before it |
+| `node_label` | int32 `[V]` | the label of each node |
+| `edge_offsets` | I `[G + 1]` | graph `g`'s edges are `[edge_offsets[g], edge_offsets[g + 1])`: twice the tuple arguments before it |
+| `edge_index` | I `[2, E]` | row 0 the source, row 1 the target node of each edge (batch-global node ids) |
+| `edge_label` | int32 `[E]` | the label of each edge |
+
+A Simple-only batch has `task_ids`, `num_objects`, `entity_offsets`, `entity_role` and `entity_ref` (to map a node
+back to its entity), the scalars of every batch, and `simple_node_labels` and `simple_edge_labels` (the vocabulary
+sizes), and none of the `relation_*` arrays; with `outputs=('relations', 'simple')` it has them as well. The Simple
+arrays are the same in both layouts, and encoding rows alone, in a batch, in a stream or with capacities gives the same
+graphs: a graph encoded alone is the slice of the batch's arrays with the node ids shifted by `node_offsets[g]`. With
+capacities (`capacities=dict(graphs=..., entities=..., args=...)`) the Simple arrays have `entities + args` nodes
+and `2 * args` edges; the first `sizes['entities'] + sizes['tuples']` nodes and `2 * sizes['args']` edges hold the
+graphs and the rest is zero. `edge_index` is then `[2, 2 * args]`.
+
+**Refusals.** `predicate_virtual_nodes` (a tuple's node already names its predicate) and `entity_arrays='auto'`
+(the graph keeps the entity arrays) raise `ValueError` with Simple, and so do `layout='relation'` and `emit_counts=False`
+without the `'relations'` output, since the batch has no relation arrays for them to shape. `constant_labels` needs the
+`'simple'` output. The device does not encode Simple: an encoder with the Simple output raises `ValueError` ("the device
+does not encode Simple") for rows in CUDA memory. `entity_names` and `describe` read the relation arrays and raise for a
+Simple-only batch, and `hgraph` views relation arrays.
+
+```python needs-torch_geometric
+import torch_geometric
+from mymyr import encoding
+import mymyr
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+states = [task.initial_state] + task.successor_states(task.initial_state)[:2]
+batch = encoding.SimpleEncoder(task, include_actions=False).encode(states, framework="torch")
+
+graphs = []
+for g in range(batch.num_graphs):
+    nodes = slice(int(batch.node_offsets[g]), int(batch.node_offsets[g + 1]))
+    edges = slice(int(batch.edge_offsets[g]), int(batch.edge_offsets[g + 1]))
+    graphs.append(torch_geometric.data.Data(
+        x=batch.node_label[nodes].long(),
+        edge_index=batch.edge_index[:, edges].long() - int(batch.node_offsets[g]),
+        edge_attr=batch.edge_label[edges].long()))
+collated = torch_geometric.data.Batch.from_data_list(graphs)
+assert collated.num_graphs == 3 and collated.x.shape == (int(batch.node_offsets[-1]),)
 ```
 
 ## Streams
@@ -759,7 +865,7 @@ The names are a function of the batch and the task: they do not depend on the la
 
 ## Pickling
 
-A `FlatRelationEncoder` (or any other flat encoder: the horizon, rooted horizon and transition encoders) pickles as
+A `FlatRelationEncoder` (or any other flat encoder: `SimpleEncoder`, the horizon, rooted horizon and transition encoders) pickles as
 its class, its table (or task), its options and the fingerprint of its schema, so an encoder
 can go to worker processes with `multiprocessing` or `torch.multiprocessing`. Loading rebuilds the encoder from the
 table and the options and compares the schema fingerprint with the pickled one: an encoder that would encode otherwise
@@ -795,10 +901,12 @@ relations. An encoder has the same properties.
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
   targets together with a horizon mode; history targets or `history_max_steps` without `history`; a `history_max_steps` of 0; `history` together with a
   horizon mode; the action horizon mode without `include_actions`; `parent_relation`, `sibling_relation`,
-  `cousin_relation` or a `root_policy` other than `include` without a horizon mode.
+  `cousin_relation` or a `root_policy` other than `include` without a horizon mode; no `outputs`; `constant_labels`
+  without the `'simple'` output; the `'simple'` output with `predicate_virtual_nodes` or `entity_arrays='auto'`; and,
+  without the `'relations'` output, a `layout` other than `'graph'` or `emit_counts=False`.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, history and `history_max_steps`, horizon
-  mode and root policy), and which arrays are omitted: `relation_counts` (`emit_counts=False`) and `entity_role` /
+  mode and root policy), the outputs and, with `constant_labels`, the names of the constants, and which arrays are omitted: `relation_counts` (`emit_counts=False`) and `entity_role` /
   `entity_ref` (implicit entity arrays); an encoding that stores every array has one fingerprint however it was asked
   for. It does not depend on declaration order, on predicate ids, on the process or on the build.
 
@@ -810,6 +918,15 @@ space) returns `HorizonGraphs`, the arrays of a view with `input()` the `Horizon
 parents, task_ids, expansion)` makes the depth-one graphs of an existing expansion. The kinship of `_sibling_` and
 `_cousin_` is built per graph from the canonical parent edges by `MYMYR_HD` functions over scratch words
 (`mymyr/encoding/detail/horizon.hpp`: `horizon_kin_words`, `horizon_kin_prepare`, `horizon_kin_fill_far`).
+
+`FlatOptions::outputs` (`Output::Relations`, `Output::Simple`) and `FlatOptions::constant_labels` select the
+[Simple graph](#the-simple-graph); `FlatBuffers` has its arrays (`node_offsets`, `node_label`, `edge_offsets`,
+`edge_index` with the row distance `edge_stride`, `edge_label`) and `EncodingSchema` its vocabulary
+(`simple_label_names()`, `simple_edge_label_names()`, `simple_max_arity()`, `simple_constants()`). The graph is written
+in the count, scan and fill passes of the relation arrays, after the tuples of each graph, by `MYMYR_HD` functions over
+plain views in `mymyr/encoding/detail/lanes.hpp` (`simple_fill_graph` and its parts): they read the tuples' arguments
+the fill has just written, so a Simple-only encoding fills a scratch copy of the relation arrays, not the batch.
+`validate` checks the Simple arrays against the contract and, when both outputs are stored, against the relation arrays.
 
 `mymyr/encoding/hgraph.hpp` has the [HGraph view](#the-hgraph-view): `HGraphView::of(batch, schema)` (a relation-major
 `rl::ArrayBundle` and the `EncodingSchema` it was encoded for; `std::invalid_argument` for what the view refuses) holds
