@@ -409,7 +409,7 @@ struct StreamSession
             batches.push_back(cuda::collation_batch(*base.host, out.arrays, out.sizes, count));
             first += count;
         }
-        slices = batches.size();
+        this->slices = batches.size();
         collator = std::make_unique<cuda::DeviceCollator>(ctx, std::move(batches), stream);
         scratch = cuda::DeviceBuffer(ctx, collator->scratch_bytes(), stream);
         const cuda::BatchShape shape{n, sizes.entities, sizes.args, sizes.targets};

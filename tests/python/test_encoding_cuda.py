@@ -1089,7 +1089,7 @@ def test_device_row_stream_wraps_and_flushes_live_rows(cases, layout, index, giv
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_device_row_stream_flush_zeroes_the_tails_past_its_live_graphs(cases, layout, monkeypatch):
+def test_device_row_stream_flush_zeroes_the_per_graph_tails_and_leaves_the_variable_tails(cases, layout, monkeypatch):
     dev = gpu()
     case = cases["philosophers"]
     n = min(33, case.n)
@@ -1112,14 +1112,18 @@ def test_device_row_stream_flush_zeroes_the_tails_past_its_live_graphs(cases, la
         same_batch(host, batch)
         assert int(batch.device_graphs.item()) == count == batch.num_graphs
         sizes = batch.sizes
-        tails = {"task_ids": count, "num_objects": count, "entity_offsets": count + 1, "goal_complete": count,
-                 "target_offsets": count + 1, "relation_counts": count, "relation_offsets": count * relations + 1,
-                 "relation_arg_offsets": count * relations + 1, "entity_role": sizes["entities"],
-                 "entity_ref": sizes["entities"], "relation_args": sizes["args"], "target_entity": sizes["targets"],
-                 "target_group": sizes["targets"]}
-        for name, start in tails.items():
+        per_graph = {"task_ids": count, "num_objects": count, "entity_offsets": count + 1, "goal_complete": count,
+                     "target_offsets": count + 1, "relation_counts": count, "relation_offsets": count * relations + 1,
+                     "relation_arg_offsets": count * relations + 1}
+        for name, start in per_graph.items():
             if name in batch._arrays:
                 assert not torch.count_nonzero(batch._arrays[name][start:]).item(), (count, name)
+        # the flush writes nothing past the sizes of the variable arrays
+        variable = {"entity_role": sizes["entities"], "entity_ref": sizes["entities"], "relation_args": sizes["args"],
+                    "target_entity": sizes["targets"], "target_group": sizes["targets"]}
+        for name, start in variable.items():
+            if name in batch._arrays:
+                assert bool((batch._arrays[name][start:] == 0x5a).all()), (count, name)
 
 
 @pytest.mark.parametrize("option", [{"max_goal_level": 1}, {"history": True}])

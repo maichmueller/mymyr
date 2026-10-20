@@ -223,7 +223,6 @@ public:
         in.row_capacity = in.graphs;
         auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3]});
         out.graphs = ptr<u64>(graphs);
-        out.zero_unused = true;
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);

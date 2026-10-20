@@ -341,7 +341,7 @@ def _pointers(tensors: dict[str, Any]) -> list[int]:
 
 
 def _outputs(torch: Any, specs: dict, device: Any) -> dict[str, Any]:
-    """Independent uninitialized outputs; the fill kernel writes the used entries and zeros the tails."""
+    """Independent uninitialized outputs; the fill kernel writes the used entries and the tails it zeroes."""
     return {name: torch.empty(shape, dtype=dtype, device=device) for name, (shape, dtype) in specs.items()}
 
 
@@ -764,7 +764,8 @@ class DeviceFlatStream:
 
         Graph capacity covers the entire ring. Arrays are allocated at capacity; ``device_graphs`` gives the live
         graph count. ``num_graphs`` and exporting a compact dictionary read counts on the host and wait. Direct
-        tensor properties retain their capacities, including zero tails.
+        tensor properties retain their capacities: per-graph entries past the live graphs are zero, variable entries
+        past the sizes are left unwritten.
         """
         torch = _torch()
         self._check_stream()

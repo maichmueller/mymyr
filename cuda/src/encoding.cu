@@ -27,8 +27,8 @@ namespace
 {
 constexpr u32 k_block = k_encode_block;
 constexpr u32 k_warp = 32;
-/// The blocks of a live fill launch that stay to zero the unused tails when the live graphs need fewer: enough to keep
-/// the memory system busy, few enough that each one's sizes computation costs little.
+/// The blocks of a live fill launch that stay to zero the tails when the live graphs need fewer: enough to keep the
+/// memory system busy, few enough that each one's sizes computation costs little.
 constexpr u64 k_zero_blocks = 256;
 
 i64 scan_size(u64 n)
@@ -486,29 +486,48 @@ __global__ void __launch_bounds__(k_block) zero_history_kernel(const EncodeParam
         zero_tail(static_cast<I*>(p.out.history_offsets), 0, p.capacities.graphs + 1);
 }
 
+/// Zeroes output[begin, end) by `stride` threads, in 16-byte stores between the unaligned ends.
 template<class T>
 __device__ void zero_range(T* output, u64 begin, u64 end, u64 stride)
 {
-    if (!output)
+    static_assert(16 % sizeof(T) == 0);
+    if (!output || begin >= end)
         return;
-    for (u64 i = begin + static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x; i < end; i += stride)
-        output[i] = T{0};
+    constexpr u64 per = 16 / sizeof(T);
+    T* first = output + begin;
+    const u64 n = end - begin;
+    const u64 skew = (reinterpret_cast<std::uintptr_t>(first) % 16) / sizeof(T);
+    const u64 head = skew ? (per - skew < n ? per - skew : n) : 0;
+    const u64 vectors = (n - head) / per;
+    const u64 tail = head + vectors * per;
+    const u64 thread = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (thread < head)
+        first[thread] = T{0};
+    if (tail + thread < n)
+        first[tail + thread] = T{0};
+    uint4* words = reinterpret_cast<uint4*>(first + head);
+    for (u64 i = thread; i < vectors; i += stride)
+        words[i] = make_uint4(0, 0, 0, 0);
 }
 
-/// zero_unused for a live batch, whose graph count is below the graph capacity: the variable arrays past their sizes as
-/// zero_unused zeroes them, and every per-graph and per-cell array past the live graphs, by `stride` threads.
+/// The tails of a live batch, whose graph count is below the graph capacity, by `stride` threads: every per-graph and
+/// per-cell array past the live graphs, and with zero_unused the variable arrays past their sizes as zero_unused zeroes
+/// them.
 template<class I>
 __device__ void zero_unused_live(const EncodeParams& p, const enc::FlatSizes& sizes, u64 stride)
 {
     const auto& a = p.out;
     const bool overflow = sizes.overflow != 0;
-    zero_range(a.entity_role, overflow ? 0 : sizes.entities, p.capacities.entities, stride);
-    zero_range(static_cast<I*>(a.entity_ref), overflow ? 0 : sizes.entities, p.capacities.entities, stride);
-    zero_range(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args, stride);
-    zero_range(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets, stride);
-    zero_range(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets, stride);
-    zero_range(static_cast<I*>(a.history_entity), overflow ? 0 : sizes.history, p.capacities.history, stride);
-    zero_range(a.history_dt, overflow ? 0 : sizes.history, p.capacities.history, stride);
+    if (p.zero_unused)
+    {
+        zero_range(a.entity_role, overflow ? 0 : sizes.entities, p.capacities.entities, stride);
+        zero_range(static_cast<I*>(a.entity_ref), overflow ? 0 : sizes.entities, p.capacities.entities, stride);
+        zero_range(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args, stride);
+        zero_range(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets, stride);
+        zero_range(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets, stride);
+        zero_range(static_cast<I*>(a.history_entity), overflow ? 0 : sizes.history, p.capacities.history, stride);
+        zero_range(a.history_dt, overflow ? 0 : sizes.history, p.capacities.history, stride);
+    }
     const u64 G = overflow ? 0 : p.graphs, R = p.context.num_relations;
     // the offsets of a batch that fits keep their closing entry at G (or G * R)
     const u64 closed = overflow ? 0 : 1;
@@ -550,7 +569,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     }
     if constexpr (Live)
     {
-        if (p.zero_unused && p.first_class)
+        if (p.first_class)
             zero_unused_live<I>(p, sizes, blocks * blockDim.x);
     }
     else if (p.zero_unused && p.first_class)
@@ -665,7 +684,7 @@ __global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
         const EncodeParams q = live_params(p);
         const u64 threads = Warp ? q.graphs * k_warp : q.graphs;
         u64 active = (threads + k_block - 1) / k_block;
-        if (q.zero_unused && active < k_zero_blocks)
+        if (active < k_zero_blocks)
             active = k_zero_blocks < gridDim.x ? k_zero_blocks : gridDim.x;
         if (active == 0)
             active = 1;

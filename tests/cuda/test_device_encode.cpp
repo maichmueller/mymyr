@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -1367,6 +1368,35 @@ TEST(DeviceEncode, EvaluatedDerivedWordsEqualTheHostForMixedInstancesAndGoals)
     }
 }
 
+TEST(DeviceEncode, EvaluatedDerivedWordsEqualTheHostForManyRows)
+{
+    // the evaluation gives fewer rows more workers each: these batches cover every split of a block
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const std::vector<u64> sizes{1100, 2100, 4200, 8400, 17000};
+    for (const auto& c : corpus())
+    {
+        if (!c.table->derived_words())
+            continue;
+        SCOPED_TRACE(c.name);
+        const auto batch = make_batch(c.table, sizes.back(), c.walk, 131);
+        const DeviceRows rows(ctx, stream, batch);
+        auto config = configs().back();
+        config.inputs.derived = false;
+        const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+        cuda::DeviceEncoder device(ctx, encoder);
+        device.reserve(cuda::BatchShape{sizes.back(), 0, 0, 0}, stream);
+        for (const u64 n : sizes)
+        {
+            SCOPED_TRACE("N = " + std::to_string(n));
+            const auto reference = host_reference(*encoder, host_input(batch, n, config.inputs));
+            expect_same_arrays(*reference.bundle,
+                               run_device(device, ctx, stream, rows.input(batch, n, config.inputs), shape_of(n, reference.sizes)));
+        }
+    }
+}
+
 TEST(DeviceEncode, EvaluatedDerivedWordsReplayWithCallerScratch)
 {
     SKIP_WITHOUT_GPU();
@@ -1412,8 +1442,10 @@ namespace
 /// Every entry past what `graphs` graphs of `sizes` use is zero, up to the capacities of `shape`: the per-graph and
 /// per-cell arrays from the graphs on (the offset arrays after their closing entry) and the variable arrays from their
 /// sizes on.
-void expect_zero_tails(const DeviceResult& r, const cuda::BatchShape& shape, u64 graphs, u64 relations,
-                       encoding::IndexType index, const encoding::FlatSizes& sizes)
+/// The per-graph and per-cell entries past `graphs` are zero up to the capacities, and every byte of the variable arrays
+/// past `sizes` is `variable` (none: not checked).
+void expect_tails(const DeviceResult& r, const cuda::BatchShape& shape, u64 graphs, u64 relations,
+                  encoding::IndexType index, const encoding::FlatSizes& sizes, std::optional<std::byte> variable)
 {
     const u64 w = index == encoding::IndexType::I64 ? 8 : 4;
     const cuda::OutputLayout& l = r.layout;
@@ -1425,6 +1457,7 @@ void expect_zero_tails(const DeviceResult& r, const cuda::BatchShape& shape, u64
         u64 offset;
         bool present;
         u64 begin, end, width;
+        bool per_graph = true;
     };
     const Tail tails[] = {{"task_ids", l.task_ids, true, graphs, shape.graphs, 4},
                           {"num_objects", l.num_objects, true, graphs, shape.graphs, w},
@@ -1434,20 +1467,21 @@ void expect_zero_tails(const DeviceResult& r, const cuda::BatchShape& shape, u64
                           {"relation_counts", l.relation_counts, a.counts, cells, capacity_cells, w},
                           {"relation_offsets", l.relation_offsets, true, cells + 1, capacity_cells + 1, w},
                           {"relation_arg_offsets", l.relation_arg_offsets, true, cells + 1, capacity_cells + 1, w},
-                          {"entity_role", l.entity_role, a.entity_arrays, sizes.entities, shape.entities, 1},
-                          {"entity_ref", l.entity_ref, a.entity_arrays, sizes.entities, shape.entities, w},
-                          {"relation_args", l.relation_args, true, sizes.args, shape.args, w},
-                          {"target_entity", l.target_entity, a.targets, sizes.targets, shape.targets, w},
-                          {"target_group", l.target_group, a.targets, sizes.targets, shape.targets, 1}};
+                          {"entity_role", l.entity_role, a.entity_arrays, sizes.entities, shape.entities, 1, false},
+                          {"entity_ref", l.entity_ref, a.entity_arrays, sizes.entities, shape.entities, w, false},
+                          {"relation_args", l.relation_args, true, sizes.args, shape.args, w, false},
+                          {"target_entity", l.target_entity, a.targets, sizes.targets, shape.targets, w, false},
+                          {"target_group", l.target_group, a.targets, sizes.targets, shape.targets, 1, false}};
     for (const Tail& t : tails)
     {
-        if (!t.present)
+        if (!t.present || (!t.per_graph && !variable))
             continue;
         ASSERT_LE(t.offset + t.end * t.width, r.block.size()) << t.name;
-        u64 nonzero = 0;
+        const std::byte expected = t.per_graph ? std::byte{0} : *variable;
+        u64 differ = 0;
         for (u64 b = t.begin * t.width; b < t.end * t.width; ++b)
-            nonzero += r.block[t.offset + b] != std::byte{0};
-        EXPECT_EQ(nonzero, 0u) << t.name << " entries [" << t.begin << ", " << t.end << ")";
+            differ += r.block[t.offset + b] != expected;
+        EXPECT_EQ(differ, 0u) << t.name << " entries [" << t.begin << ", " << t.end << ")";
     }
 }
 
@@ -1513,7 +1547,7 @@ TEST(DeviceRowStream, WrapsAndReportsEveryFlushAfterADroppedAppendUntilClear)
                     ring.flush(out);
                     const auto dropped = download_encoding(ctx, stream, output_layout, block);
                     EXPECT_NE(dropped.sizes.overflow & encoding::k_overflow_capacity, 0u) << flush;
-                    expect_zero_tails(dropped, shape, 0, encoder->schema().num_relations(), index, {});
+                    expect_tails(dropped, shape, 0, encoder->schema().num_relations(), index, {}, std::nullopt);
                 }
                 ring.clear();
                 status = ring_status(ring, stream);
@@ -1530,7 +1564,7 @@ TEST(DeviceRowStream, WrapsAndReportsEveryFlushAfterADroppedAppendUntilClear)
             }
 }
 
-TEST(DeviceRowStream, AFlushZeroesTheTailsPastItsLiveGraphsUpToTheCapacities)
+TEST(DeviceRowStream, AFlushZeroesThePerGraphTailsAndWritesTheVariableTailsOnlyWhenAsked)
 {
     SKIP_WITHOUT_GPU();
     const auto ctx = device_context();
@@ -1555,20 +1589,25 @@ TEST(DeviceRowStream, AFlushZeroesTheTailsPastItsLiveGraphsUpToTheCapacities)
             cuda::DeviceRowStream ring(ctx, encoder, 64, stream, config.inputs.row_goals,
                                         config.inputs.derived && batch.derived_words,
                                         config.inputs.derived_goals && config.inputs.row_goals);
-            // 33 rows, then 5 rows from a circular start, then none: every flush into a block of 0xff bytes
-            for (const u64 n : {33u, 5u, 0u})
-            {
-                SCOPED_TRACE(testing::Message() << static_cast<int>(layout) << " " << static_cast<int>(index) << " " << n);
-                cuda::check(cudaMemsetAsync(block.data(), 0xff, block.size(), stream), "fill the output");
-                if (n) ring.append(rows.input(batch, n, config.inputs));
-                ring.flush(out);
-                const auto result = download_encoding(ctx, stream, output_layout, block);
-                const auto reference = host_reference(*encoder, host_input(batch, n, config.inputs));
-                expect_sizes(reference.sizes, result.sizes);
-                expect_same_arrays(*reference.bundle, result);
-                EXPECT_EQ(device_value(graph_count, stream), n);
-                expect_zero_tails(result, shape, n, relations, index, reference.sizes);
-            }
+            // 33 rows, then 5 rows from a circular start, then none: every flush into a block of 0xff bytes, whose
+            // variable tails a flush leaves as they are unless asked to zero them
+            for (const bool zero_unused : {false, true})
+                for (const u64 n : {33u, 5u, 0u})
+                {
+                    SCOPED_TRACE(testing::Message() << static_cast<int>(layout) << " " << static_cast<int>(index) << " "
+                                                    << zero_unused << " " << n);
+                    cuda::check(cudaMemsetAsync(block.data(), 0xff, block.size(), stream), "fill the output");
+                    if (n) ring.append(rows.input(batch, n, config.inputs));
+                    out.zero_unused = zero_unused;
+                    ring.flush(out);
+                    const auto result = download_encoding(ctx, stream, output_layout, block);
+                    const auto reference = host_reference(*encoder, host_input(batch, n, config.inputs));
+                    expect_sizes(reference.sizes, result.sizes);
+                    expect_same_arrays(*reference.bundle, result);
+                    EXPECT_EQ(device_value(graph_count, stream), n);
+                    expect_tails(result, shape, n, relations, index, reference.sizes,
+                                 zero_unused ? std::byte{0} : std::byte{0xff});
+                }
         }
 }
 
@@ -1707,7 +1746,7 @@ TEST(DeviceCollate, RolloutSlicesEqualOneEncodeWithEmptySlicesAndCapture)
                 expect_sizes(host.sizes, zeroed.sizes);
                 expect_same_arrays(*host.bundle, zeroed);
                 EXPECT_EQ(device_value(graph_count, stream), 33u);
-                expect_zero_tails(zeroed, wide, 33, encoder->schema().num_relations(), index, host.sizes);
+                expect_tails(zeroed, wide, 33, encoder->schema().num_relations(), index, host.sizes, std::byte{0});
             }
 }
 }

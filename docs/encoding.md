@@ -715,14 +715,15 @@ batch = ring.flush(capacities=dict(graphs=1024, entities=32768, args=262144))
 ```
 
 Append copies all rows or sets `ring.device_overflow` without changing the ring. The flag stays set until
-`ring.clear()`, and every flush while it is set reports `capacity_overflow` in its sizes with all arrays zero: a batch
+`ring.clear()`, and every flush while it is set reports `capacity_overflow` in its sizes with every per-graph array zero: a batch
 never silently lacks the rows of an append that did not fit. A device stream carries no subgoal layers or history
 steps: an encoder with `max_goal_level` above 0 or with `history` raises `ValueError`. The device status is int64 `[head, live_rows, overflow]`; `len(ring)` reads the live count and waits.
 Flush encodes the live rows once, advances the circular head and resets the tail, all on the ring's stream.
 `batch.device_graphs` gives its live graph count without a host read; `batch.num_graphs` reads that count and waits.
-Tensor properties have capacity shapes and zero tails: every per-graph and per-cell entry past the live graphs, and
-every variable entry past the sizes, is zero up to the capacities. The count, scan and fill of a flush
-are bounded by its live rows; only zeroing the per-graph and per-cell tails spans the capacity. `as_dict()` exports
+Tensor properties have capacity shapes: every per-graph and per-cell entry past the live graphs is zero up to the graph
+capacity, and the variable entries past the sizes are left unwritten (the arrays are not cleared), so read them up to
+the sizes or the offsets. The count, scan and fill of a flush are bounded by its live rows; only zeroing the per-graph
+and per-cell tails spans the capacity. `as_dict()` exports
 the compact live batch and waits for its
 counts. Append and capacity flush can be captured. Construct the ring before capture and keep it, its inputs and
 returned batches alive through the final replay.

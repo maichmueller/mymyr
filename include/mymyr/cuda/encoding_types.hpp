@@ -25,8 +25,8 @@ struct DeviceOutput
     encoding::FlatSizes* sizes = nullptr;
     /// Zero the variable arrays' unused tails, and all output arrays on overflow, in the fill kernel.
     bool zero_unused = false;
-    /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). With it, the
-    /// per-graph and per-cell arrays past those graphs are zero up to the graph capacity too (with zero_unused).
+    /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). The per-graph
+    /// and per-cell arrays past the live graphs of such an input are zero up to the graph capacity.
     u64* graphs = nullptr;
 };
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.

@@ -240,8 +240,9 @@ struct EncodingAxiomInstance
 /// The derived words of a batch of table rows, into the encoder's scratch: row i's closure at derived + i * derived_words
 /// (logical rows: row i reads source row (*row_start + i) mod row_capacity of a circular view), its view at
 /// views + i * view_words. One launch per object-bitset width class (class_ow[k], forward checking class_fc[k], which
-/// needs ow <= k_max_fc_ow), each over every row; a thread takes the rows of its class's instances and closes them with
-/// their instance's axioms, matchers and skipping data, as launch_axioms does stratum by stratum. Rows of instances that
+/// needs ow <= k_max_fc_ow), each over every row: the rows of its class's instances close with their instance's axioms,
+/// matchers and skipping data stratum by stratum, as launch_axioms does (the workers of a row split the bodies of flat
+/// strata; few rows get more workers each). Rows of instances that
 /// read no derived atoms under `mode` are skipped; rows of refused instances set *invalid (the first launch). Rows
 /// narrower than their instance get zero derived words (the encoder flags them).
 struct EncodingAxioms

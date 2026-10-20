@@ -10,6 +10,7 @@ namespace mymyr::cuda::lifted
 namespace
 {
 constexpr unsigned k_axiom_block = 128;
+constexpr u64 k_encoding_axioms_blocks = 512;  // the blocks an encoding evaluation aims for
 
 /// The body of axiom k over one parent: `emit` gets each binding of its body (Split: the part split_i of split_n, see
 /// run_fixed), with the device's matcher (rl::dev::device_fc: derived atoms are a set, the order never matters).
@@ -105,20 +106,30 @@ __global__ void __launch_bounds__(k_axiom_block) k_axioms(TaskView t, Parents p,
         close_axioms<OW, FC>(t, p, v, d, s_begin, s_end, i);
 }
 
-/// One thread per row of the batch closes its derived atoms: the rows whose instance has object-bitset width OW and
-/// reads derived atoms under the call's goal mode, each with its instance's task (instances[task id]), forward checking
-/// and semi-naive skipping. Rows of other instances keep their derived words and views untouched. `first`: the launch
+/// The rows of the batch close their derived atoms: the rows whose instance has object-bitset width OW and reads derived
+/// atoms under the call's goal mode, each with its instance's task (instances[task id]), forward checking and
+/// semi-naive skipping. A block takes `per_block` rows (a power of two up to 32), each row k_axiom_block / per_block
+/// workers: they clear and fill its view together, split the bodies of a flat stratum (one whose bodies read none of
+/// its heads, as launch_axioms runs them; its words are set atomically) and leave the rounds of the other strata to
+/// the row's first worker. Rows of other instances keep their derived words and views untouched. `first`: the launch
 /// also flags the rows of instances the device cannot evaluate.
 template<u32 OW, bool FC>
 __global__ void __launch_bounds__(k_axiom_block)
     k_encoding_axioms(const EncodingAxiomInstance* instances, u32 count, Parents p, Views v, Derived d, u64 rows,
-                      const i32* ids, u32 mode, bool first, u32* invalid, const u64* live, const u64* start, u64 capacity)
+                      const i32* ids, u32 mode, bool first, u32* invalid, const u64* live, const u64* start, u64 capacity,
+                      u32 per_block)
 {
+    __shared__ u32 block_strata;
     if (live && *live < rows)
         rows = *live;
     const u64 offset = start ? *start % capacity : 0;
-    for (u64 i = u64{blockIdx.x} * blockDim.x + threadIdx.x; i < rows; i += u64{gridDim.x} * blockDim.x)
+    const u32 workers = k_axiom_block / per_block;
+    const u32 lane = threadIdx.x % per_block, worker = threadIdx.x / per_block;
+    auto set = [](u64* w, u64 bit) { atomicOr(reinterpret_cast<unsigned long long*>(w), static_cast<unsigned long long>(bit)); };
+    // the loop bound is the same for every thread of the block, so the barriers inside are reached by all of them
+    for (u64 base = u64{blockIdx.x} * per_block; base < rows; base += u64{gridDim.x} * per_block)
     {
+        const u64 i = base + lane;
         u64 source = i;
         if (start)
         {
@@ -126,45 +137,102 @@ __global__ void __launch_bounds__(k_axiom_block)
             if (source >= capacity)
                 source -= capacity;
         }
-        const i32 id = ids ? ids[source] : 0;
-        if (id < 0 || static_cast<u32>(id) >= count)
-            continue;  // (the encoder flags the row)
-        const EncodingAxiomInstance& instance = instances[id];
-        if (!((instance.modes >> mode) & 1u))
-            continue;
-        if (instance.refused)
+        const EncodingAxiomInstance* instance = nullptr;
+        if (i < rows)
         {
-            if (first)
-                atomicOr(invalid, 1u);
-            continue;
-        }
-        const TaskView& t = instance.view;
-        if (t.ow != OW)
-            continue;
-        u64* der = d.data + i * d.words;
-        for (u32 w = 0; w < d.words; ++w)
-            der[w] = 0;
-        if (p.words < (u64{t.fluent_slots} + 63) / 64)
-            continue;
-        u64* view = v.data + i * v.words;
-        for (u64 w = 0, n = u64{t.view_rows} * OW; w < n; ++w)
-            view[w] = 0;
-        const u64* state = p.data + source * p.stride;
-        for (u32 slot = 0; slot < t.fluent_slots; ++slot)
-            if ((state[slot >> 6] >> (slot & 63)) & 1)
+            const i32 id = ids ? ids[source] : 0;
+            if (id >= 0 && static_cast<u32>(id) < count)  // (else the encoder flags the row)
             {
-                const u32* op = t.fluent_view_op + u64{slot} * 4;
-                if (op[0] != k_none)
-                    view[u64{op[0]} * OW + (op[1] >> 6)] |= u64{1} << (op[1] & 63);
-                if (op[2] != k_none)
-                    view[u64{op[2]} * OW + (op[3] >> 6)] |= u64{1} << (op[3] & 63);
+                instance = instances + id;
+                if (!((instance->modes >> mode) & 1u))
+                    instance = nullptr;
+                else if (instance->refused)
+                {
+                    if (first && worker == 0)
+                        atomicOr(invalid, 1u);
+                    instance = nullptr;
+                }
+                else if (instance->view.ow != OW)
+                    instance = nullptr;
             }
+        }
+        const TaskView* t = instance ? &instance->view : nullptr;
+        u64* der = d.data + i * d.words;
+        u64* view = v.data + i * v.words;
+        const u64* state = p.data + source * p.stride;
+        // rows narrower than their instance keep zero derived words
+        const bool evaluate = t && p.words >= (u64{t->fluent_slots} + 63) / 64;
+        if (t)
+            for (u32 w = worker; w < d.words; w += workers)
+                der[w] = 0;
+        if (evaluate)
+            for (u64 w = worker, n = u64{t->view_rows} * OW; w < n; w += workers)
+                view[w] = 0;
+        if (threadIdx.x == 0)
+            block_strata = 0;
+        __syncthreads();
+        if (evaluate)
+        {
+            for (u32 slot = worker; slot < t->fluent_slots; slot += workers)
+                if ((state[slot >> 6] >> (slot & 63)) & 1)
+                {
+                    const u32* op = t->fluent_view_op + u64{slot} * 4;
+                    if (op[0] != k_none)
+                        set(view + u64{op[0]} * OW + (op[1] >> 6), u64{1} << (op[1] & 63));
+                    if (op[2] != k_none)
+                        set(view + u64{op[2]} * OW + (op[3] >> 6), u64{1} << (op[3] & 63));
+                }
+            if (worker == 0)
+                atomicMax(&block_strata, t->n_strata);
+        }
+        __syncthreads();
+        const u32 strata = block_strata;
         Parents row = p;
         row.data = state;
         Derived row_derived = d;
         row_derived.data = der;
-        row_derived.reads = instance.reads;
-        close_axioms<OW, FC>(t, row, Views{view, v.words}, row_derived, 0, t.n_strata, 0);
+        row_derived.reads = instance ? instance->reads : nullptr;
+        const StateRef s{state, p.words, der, d.words};
+        u32 bind[k_max_depth];
+        for (u32 si = 0; si < strata; ++si)
+        {
+            if (evaluate && si < t->n_strata)
+            {
+                const u32* st = t->stratum + u64{si} * 3;
+                const u32 begin = st[0], axioms = st[1];
+                bool flat = row_derived.reads != nullptr;
+                for (u32 k = begin; flat && k < begin + axioms; ++k)
+                    flat = row_derived.reads[u64{k} * 2] == 0;
+                if (flat)
+                {
+                    const u32 split = axioms < workers ? workers / axioms : 1;
+                    for (u32 j = worker; j < axioms * split; j += workers)
+                    {
+                        const u32 k = begin + j / split;
+                        auto emit = [&](const u32* b)
+                        {
+                            const u32 slot = head_slot(*t, k, b, d);
+                            if (slot == k_none)
+                                return;
+                            const u64 bit = u64{1} << (slot & 63);
+                            if (der[slot >> 6] & bit)
+                                return;
+                            set(der + (slot >> 6), bit);
+                            const u32* op = t->derived_view_op + u64{slot} * 4;
+                            if (op[0] != k_none)
+                                set(view + u64{op[0]} * OW + (op[1] >> 6), u64{1} << (op[1] & 63));
+                            if (op[2] != k_none)
+                                set(view + u64{op[2]} * OW + (op[3] >> 6), u64{1} << (op[3] & 63));
+                        };
+                        run_body<OW, FC, true>(*t, k, s, view, bind, emit, split, j % split);
+                    }
+                }
+                else if (worker == 0)
+                    close_axioms<OW, FC>(*t, row, Views{view, v.words}, row_derived, si, si + 1, 0);
+            }
+            __syncthreads();
+        }
+        __syncthreads();  // block_strata is reset by the next rows
     }
 }
 
@@ -256,17 +324,22 @@ cudaError_t launch_encoding_axioms_ow(const EncodingAxioms& a, bool fc, bool fir
     Derived d;
     d.data = a.derived;
     d.words = a.derived_words;
-    const u64 wanted = (a.rows + k_axiom_block - 1) / k_axiom_block;
+    // rows per block: 32 once there are enough rows for k_encoding_axioms_blocks blocks, fewer (more workers per row)
+    // below
+    u32 per_block = 1;
+    while (per_block < 32 && a.rows >= u64{per_block} * 2 * k_encoding_axioms_blocks)
+        per_block *= 2;
+    const u64 wanted = (a.rows + per_block - 1) / per_block;
     const unsigned blocks = static_cast<unsigned>(wanted < 65535 ? wanted : 65535);
     if constexpr (OW <= k_max_fc_ow)
         if (fc)
         {
             k_encoding_axioms<OW, true><<<blocks, k_axiom_block, 0, stream>>>(a.instances, a.count, p, v, d, a.rows,
-                a.task_ids, a.mode, first, a.invalid, a.live, a.row_start, a.row_capacity);
+                a.task_ids, a.mode, first, a.invalid, a.live, a.row_start, a.row_capacity, per_block);
             return cudaGetLastError();
         }
     k_encoding_axioms<OW, false><<<blocks, k_axiom_block, 0, stream>>>(a.instances, a.count, p, v, d, a.rows,
-        a.task_ids, a.mode, first, a.invalid, a.live, a.row_start, a.row_capacity);
+        a.task_ids, a.mode, first, a.invalid, a.live, a.row_start, a.row_capacity, per_block);
     return cudaGetLastError();
 }
 

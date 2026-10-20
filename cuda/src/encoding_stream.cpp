@@ -126,9 +126,7 @@ void DeviceRowStream::append(const DeviceEncodeInput& in)
 void DeviceRowStream::flush(const DeviceOutput& output)
 {
     DeviceGuard guard(m_impl->context->device());
-    auto out = output;
-    out.zero_unused = true;
-    m_impl->encoder.encode(*m_impl->workspace, m_impl->ring, out);
+    m_impl->encoder.encode(*m_impl->workspace, m_impl->ring, output);
     finish_rows(const_cast<u64*>(status()), capacity(), stream());
 }
 void DeviceRowStream::clear()

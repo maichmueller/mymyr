@@ -347,8 +347,9 @@ public:
     /// Device uint64 [head, live rows, overflow]. Reading it on the host requires synchronization.
     [[nodiscard]] const u64* status() const noexcept;
     void append(const DeviceEncodeInput& input);
-    /// Capacity form. out.graphs, when nonnull, receives the number of encoded rows on the device.
-    /// Per-graph arrays hold capacity() graphs and unused entries are zero. Capturable.
+    /// Capacity form. out.graphs, when nonnull, receives the number of encoded rows on the device. Per-graph arrays
+    /// hold capacity() graphs, zero past the live ones; the variable arrays past the sizes are zero with
+    /// out.zero_unused and left unwritten without it, so that the work of a flush follows its live rows. Capturable.
     void flush(const DeviceOutput& out);
     void clear();
 private:
