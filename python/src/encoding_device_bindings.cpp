@@ -295,8 +295,6 @@ public:
                                                derived ? cuda::DerivedWords::Supplied : cuda::DerivedWords::Evaluated);
     }
 
-    void check_stream_schema() const { cuda::check_stream_schema(m_encoder->schema()); }
-
     /// Encodes with caller-owned scratch. Its owner keeps it alive until the stream or captured graph is done.
     void encode(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
                 const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
@@ -509,8 +507,10 @@ void bind_encoding_device(nb::module_& parent)
         .def("scratch_bytes", &DeviceEncoderHandle::scratch_bytes, "stream"_a, "graphs"_a, "derived"_a = false,
              "Scratch bytes for this stream's acquired context and graph count; `derived`: for rows whose derived "
              "words are given.")
-        .def("check_stream_schema", &DeviceEncoderHandle::check_stream_schema,
-             "Raises ValueError for a schema that a device stream cannot carry (subgoal layers, history steps).")
+        .def_static("check_stream_schema",
+                    [](nb::handle encoder) { cuda::check_stream_schema(flat_encoder_of(encoder)->schema()); }, "encoder"_a,
+                    "Raises ValueError for an encoder whose schema a device stream cannot carry (subgoal layers, "
+                    "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
              "Encodes the rows (15 integers: the graphs, then the pointers and strides of the arrays) into the 14 output "

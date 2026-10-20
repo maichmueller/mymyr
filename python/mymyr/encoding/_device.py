@@ -704,8 +704,8 @@ class DeviceFlatStream:
         if torch.cuda.is_current_stream_capturing():
             raise _error("construct the device stream outside capture")
         table = rl.as_table(encoder.table)
+        _native().check_stream_schema(encoder)
         self._native = _device_encoder(encoder, self.device.index)
-        self._native.check_stream_schema()
         # Acquiring the immutable context before capture is independent of the scratch allocation.
         self._native.scratch_bytes(self._stream_ptr, capacity)
         self.device_status = torch.zeros(3, dtype=torch.int64, device=self.device)

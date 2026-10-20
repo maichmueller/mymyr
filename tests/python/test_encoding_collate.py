@@ -45,7 +45,7 @@ def test_collation_refuses_batches_of_different_tables():
     assert a.as_dict()["table_fingerprint"] % 2**64 == one.fingerprint
     with pytest.raises(ValueError, match="^mymyr: encoding: collate received batches of different tables"):
         encoding.collate([a, b])
-    again = encoding.FlatRelationEncoder(two).encode(rows)
+    again = encoding.FlatRelationEncoder(two).encode(rows, np.array([0], dtype=np.int32))
     assert encoding.collate([b, again]).num_graphs == 2
 
 
