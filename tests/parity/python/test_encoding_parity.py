@@ -18,7 +18,7 @@ from encoding_parity import (
     HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
     goal_literals, literal_text, needed_differences,
     lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
-    sources_of,
+    sources_of, is_transition, recorded_successor,
 )
 
 IDS = [p.stem[:3] for p in FIXTURES]
@@ -55,7 +55,8 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
             found |= set(catalog["sources"]) - set(sources_of(config))
     assert found == set(PENDING_SOURCES)
     assert set(COMPARED_SOURCES) & set(PENDING_SOURCES) == set()
-    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation", "history", "goal_satisfaction", "parent")
+    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation", "history", "goal_satisfaction", "parent",
+                              "sibling", "cousin")
     assert [c for c in SUPPORTED if "action" in lanes_of(c)] == [c for c in SUPPORTED if "action" in sources_of(c)]
     assert all(("action" in lanes_of(c)) == SUPPORTED[c].get("include_actions", True) for c in SUPPORTED)
 
@@ -774,8 +775,26 @@ def test_the_horizon_configs_are_compared_on_every_required_fixture():
         if config.startswith("C7") and config in SUPPORTED:
             seen.setdefault(path.stem[:3], set()).add(config)
     assert required <= set(seen)
-    assert seen["f01"] == {"C7A", "C7AN", "C7B", "C7C", "C7D", "C7DN", "C7G", "C7H", "C7I", "C7J", "C7K", "C7S", "C7T"}
-    assert {c for c in PENDING_CONFIGS if c.startswith("C7")} == {"C7E", "C7EN", "C7F", "C7FN"}
+    assert seen["f01"] == {"C7A", "C7AN", "C7B", "C7C", "C7D", "C7DN", "C7E", "C7EN", "C7F", "C7FN", "C7G", "C7H", "C7I",
+                           "C7J", "C7K", "C7S", "C7T"}
+    assert not {c for c in PENDING_CONFIGS if c.startswith("C7")}
+
+
+def test_the_transition_configs_are_compared_on_every_fixture_that_has_them():
+    pending = {c for c in PENDING_CONFIGS if c.startswith("C8")}
+    assert pending == {"C8S"}
+    for path, config in fixture_cases():
+        if config.startswith("C8") and config not in pending:
+            assert config in SUPPORTED and is_transition(config)
+    seen = {}
+    for path, config in fixture_cases():
+        if is_transition(config):
+            seen.setdefault(path.stem[:3], set()).add(config)
+    assert seen == {
+        "f01": {"C8A", "C8AN", "C8B", "C8BN"}, "f02": {"C8A"}, "f03": {"C8B"}, "f05": {"C8B"},
+        "f08": {"C8A", "C8AN", "C8B", "C8BN"}, "f09": {"C8A"}, "f10": {"C8AN", "C8B", "C8BN"}, "f11": {"C8A"},
+        "f12": {"C8A"}, "f13": {"C8AN"},
+    }
 
 
 def test_a_horizon_graph_has_state_entities_named_by_their_node():
@@ -932,3 +951,66 @@ def test_the_candidate_nodes_are_the_targets_of_the_horizon_graph(path, config):
         recorded = record["outputs"]["targets"]
         assert names == recorded["names"], (record["state"], names)
         assert groups <= set(recorded["groups"])
+
+
+# ------------------------------------------------------------------------------------------------ transitions and kinship
+def swapped(graph, first, second):
+    """The graph with the state entities ``target:<first>`` and ``target:<second>`` exchanged."""
+    def rename(name):
+        return {f"target:{first}": f"target:{second}", f"target:{second}": f"target:{first}"}.get(name, name)
+
+    entities = [(role, rename(name)) for role, name in graph.entities]
+    return Graph(graph.catalog, entities, {n: [tuple(rename(x) for x in t) for t in ts] for n, ts in graph.tuples.items()},
+                 graph.unordered)
+
+
+@pytest.mark.parametrize("config, prefix, state", [("C8A", "f01", "s2"), ("C8B", "f03", "s1")])
+def test_a_transition_graph_holds_every_successor_and_the_record_lists_one(config, prefix, state):
+    expected, actual, context = horizon_case(config, prefix, state)
+    successors = [name for role, name in actual.entities if role == "state"]
+    assert len(successors) > 1 and successors == [f"target:{k}" for k in range(1, len(successors) + 1)]
+    assert [name for role, name in expected.entities if role == "state"] == ["_root_state_", "target:1"]
+    assert "unrecorded_successors" in needed_differences(expected, actual, context)
+    # without the allowed difference the other successors are the mismatch, and nothing else
+    found = compare(expected, actual, context, [n for n in NAMES if n != "unrecorded_successors"])
+    assert {m.kind for m in found} == {"entity", "tuple"}
+    assert {m.detail for m in found if m.kind == "entity"} == {f"unexpected ('state', 'target:{k}')"
+                                                                for k in range(2, len(successors) + 1)}
+    # a tuple of the recorded successor that goes missing, or sits on another successor, is a mismatch
+    node = recorded_successor(context)
+    keep, other = f"target:{node}", f"target:{1 if node != 1 else 2}"
+    name, tuples = next((n, ts) for n, ts in sorted(actual.tuples.items()) if any(keep in t for t in ts))
+    lost = copy(actual)
+    lost.tuples = {**actual.tuples, name: [t for t in tuples if keep not in t]}
+    assert any(m.where == name for m in compare(expected, lost, context))
+    moved = copy(actual)
+    moved.tuples = {**actual.tuples, name: [tuple(other if x == keep else x for x in t) for t in tuples]}
+    assert compare(expected, moved, context)
+    # the recorded successor is the one whose action and state the record names: another node's facts do not do
+    swap = next(k for k in range(1, len(successors) + 1) if k != node and swapped(actual, node, k).tuples != actual.tuples)
+    assert compare(expected, swapped(actual, node, swap), context)
+
+
+def test_the_unrecorded_successors_are_cut_only_from_the_graphs_of_transition_configs():
+    from encoding_parity import _unrecorded_successors
+
+    expected, actual, context = horizon_case("C7A", "f01", "s2")
+    assert _unrecorded_successors(expected, actual, context) == (expected, actual)
+    assert REGISTRY[0].name == "unrecorded_successors"
+    assert all(is_transition(config) for _, config in REGISTRY[0].cases)
+
+
+def test_the_sibling_and_cousin_pairs_of_a_recorded_horizon_are_checked():
+    expected, actual, context = horizon_case("C7F", "f01", "s2")
+    # the dag: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 4
+    assert actual.tuples["_sibling_"] == [("target:1", "target:2"), ("target:2", "target:1")]
+    assert actual.tuples["_cousin_"] == [("target:3", "target:4"), ("target:4", "target:3")]
+    for relation in ("_sibling_", "_cousin_"):
+        lost = copy(actual)
+        lost.tuples = {**actual.tuples, relation: actual.tuples[relation][:1]}
+        assert {(m.kind, m.where) for m in compare(expected, lost, context)} == {("tuple", relation)}
+        extra = copy(actual)
+        extra.tuples = {**actual.tuples, relation: actual.tuples[relation] + [("target:0", "target:3")]}
+        assert {(m.kind, m.where) for m in compare(expected, extra, context)} >= {("tuple", relation)}
+    _, plain_actual, _ = horizon_case("C7E", "f01", "s2")
+    assert "_sibling_" not in plain_actual.tuples and "_cousin_" not in plain_actual.tuples

@@ -1129,22 +1129,41 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
                   std::string::npos)
             << e.what();
     }
-    // horizon relations, in every mode
-    for (const encoding::HorizonMode mode :
-         {encoding::HorizonMode::Full, encoding::HorizonMode::Delta, encoding::HorizonMode::Action})
+    // horizon relations: every mode, the rooted horizon (parent, sibling and cousin relations), the transitions (the
+    // depth-one horizons: full or delta, the root excluded)
+    struct HorizonCase
+    {
+        const char* what;
+        encoding::HorizonMode mode;
+        encoding::RootPolicy root;
+        bool parent, sibling, cousin;
+    };
+    using enum encoding::HorizonMode;
+    using enum encoding::RootPolicy;
+    for (const HorizonCase& c : {HorizonCase{"full horizon", Full, Include, false, false, false},
+                                 HorizonCase{"delta horizon", Delta, Include, false, false, false},
+                                 HorizonCase{"action horizon", Action, Include, false, false, false},
+                                 HorizonCase{"rooted horizon", Full, EncodeOnly, true, true, true},
+                                 HorizonCase{"cousin relation", Action, Include, false, false, true},
+                                 HorizonCase{"transitions", Full, Exclude, false, false, false},
+                                 HorizonCase{"transition effects", Delta, Exclude, true, false, false}})
     {
         encoding::FlatOptions horizon = test::encoder_options();
-        horizon.horizon.mode = mode;
+        horizon.horizon.mode = c.mode;
+        horizon.horizon.root = c.root;
+        horizon.horizon.parent_relation = c.parent;
+        horizon.horizon.sibling_relation = c.sibling;
+        horizon.horizon.cousin_relation = c.cousin;
         try
         {
             cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, horizon));
-            ADD_FAILURE() << "the " << encoding::to_string(mode) << " horizon was accepted";
+            ADD_FAILURE() << "the " << c.what << " was accepted";
         }
         catch (const std::invalid_argument& e)
         {
             EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
                       std::string::npos)
-                << e.what();
+                << c.what << ": " << e.what();
         }
     }
     // subgoal and history relations

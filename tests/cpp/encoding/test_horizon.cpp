@@ -3,6 +3,7 @@
 #include "support.hpp"
 
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/encoding/stream.hpp"
 #include "mymyr/encoding/validate.hpp"
 #include "mymyr/task/workspace.hpp"
@@ -52,7 +53,6 @@ struct RefAtom
     std::string name;
     std::vector<i32> objects;
     [[nodiscard]] friend bool operator<(const RefAtom& a, const RefAtom& b) { return std::tie(a.name, a.objects) < std::tie(b.name, b.objects); }
-    [[nodiscard]] friend bool operator==(const RefAtom& a, const RefAtom& b) = default;
 };
 using AtomSet = std::set<RefAtom>;
 
@@ -283,6 +283,38 @@ std::vector<std::string> expected_tuples(const EncodingSchema& schema, const rl:
                 out.push_back(join({"s" + std::to_string(edge[0]), "s" + std::to_string(edge[1])}));
             break;
         }
+        case Lane::Sibling:
+        case Lane::Cousin:
+        {
+            // from the definition, over the parent edges the root policy keeps, without self-loops: siblings share a
+            // parent, cousins have parents that are siblings
+            std::vector<std::set<u32>> parents(nodes);
+            for (const auto& edge : g.edges)
+                if (edge[0] != edge[1] && !(exclude && (edge[0] == 0 || edge[1] == 0)))
+                    parents[static_cast<u32>(edge[1])].insert(static_cast<u32>(edge[0]));
+            auto siblings = [&](u32 a, u32 b)
+            {
+                if (a == b)
+                    return false;
+                return std::ranges::any_of(parents[a], [&](u32 p) { return parents[b].count(p) != 0; });
+            };
+            for (u32 a = 0; a < nodes; ++a)
+                for (u32 b = 0; b < nodes; ++b)
+                {
+                    if (a == b)
+                        continue;
+                    bool related = false;
+                    if (r.lane == Lane::Sibling)
+                        related = siblings(a, b);
+                    else
+                        for (const u32 p : parents[a])
+                            for (const u32 q : parents[b])
+                                related = related || siblings(p, q);
+                    if (related)
+                        out.push_back(join({"s" + std::to_string(a), "s" + std::to_string(b)}));
+                }
+            break;
+        }
         default: break;
     }
     std::sort(out.begin(), out.end());
@@ -436,6 +468,8 @@ TEST(Horizon, MatchesTheReference)
                         FlatOptions options = horizon_options(mode, root);
                         options.include_static = statics;
                         options.horizon.parent_relation = parent;
+                        options.horizon.sibling_relation = parent;
+                        options.horizon.cousin_relation = parent;
                         options.layout = layout;
                         options.index = parent ? IndexType::I64 : IndexType::I32;
                         SCOPED_TRACE(std::string(c.domain) + " " + std::string(to_string(mode)) + " " +
@@ -871,6 +905,258 @@ TEST(Horizon, InvalidInput)
     EXPECT_THROW(FlatStream{encoder}, std::invalid_argument);
 }
 
+/// A graph of `nodes` nodes, all equal to one state, with the given edges (an action 0 each).
+test::Horizon dag_graph(const rl::TaskTable& table, int nodes, const std::vector<std::array<i32, 2>>& edges)
+{
+    const test::Rows roots = test::random_walk(table, 0, 1, 2);
+    test::Horizon h;
+    h.words = roots.words;
+    h.label_width = table.label_width();
+    h.task_ids = {0};
+    for (int node = 0; node < nodes; ++node)
+        h.nodes.insert(h.nodes.end(), roots.data.begin(), roots.data.end());
+    for (const auto& edge : edges)
+    {
+        h.edge_src.push_back(edge[0]);
+        h.edge_dst.push_back(edge[1]);
+        h.edge_schema.push_back(0);
+        h.edge_binding.insert(h.edge_binding.end(), h.label_width, 0);
+    }
+    h.node_offsets = {0, nodes};
+    h.edge_offsets = {0, static_cast<i32>(edges.size())};
+    return h;
+}
+
+/// The pairs "s<i>,s<j>" in the order the relations list them.
+std::vector<std::string> pairs_of(const std::vector<std::array<int, 2>>& pairs)
+{
+    std::vector<std::string> out;
+    for (const auto& pair : pairs)
+        out.push_back("s" + std::to_string(pair[0]) + ",s" + std::to_string(pair[1]));
+    return out;
+}
+
+/// A dag and the pairs of `_sibling_` and `_cousin_` worked out by hand, with and without the root's edges.
+struct KinCase
+{
+    const char* name;
+    int nodes;
+    std::vector<std::array<i32, 2>> edges;
+    std::vector<std::array<int, 2>> siblings, cousins;              // the root is an ordinary node
+    std::vector<std::array<int, 2>> siblings_without_root, cousins_without_root;  // root_policy exclude
+};
+
+std::vector<KinCase> kin_cases()
+{
+    return {
+        // Node 3 has the parents 1 and 2, the edge 0 -> 1 is given twice, 4 -> 0 leads back to the root. Siblings share a
+        // parent: 1, 2 (parent 0), 3, 4 (parent 1), 3, 5 (parent 2). Cousins have parents that are siblings: 4 and 5 (parents
+        // 1 and 2), 3 and 4 (parents 2 and 1), 3 and 5 (parents 1 and 2), 6 and 0 (parents 3 and 4). Without the root
+        // there are no edges from or to node 0, so 1 and 2 share no parent and no node has cousins.
+        {"a dag with a node of two parents, a repeated edge and an edge to the root",
+         7,
+         {{0, 1}, {0, 2}, {0, 1}, {1, 3}, {2, 3}, {1, 4}, {2, 5}, {3, 6}, {4, 0}},
+         {{1, 2}, {2, 1}, {3, 4}, {3, 5}, {4, 3}, {5, 3}},
+         {{0, 6}, {3, 4}, {3, 5}, {4, 3}, {4, 5}, {5, 3}, {5, 4}, {6, 0}},
+         {{3, 4}, {3, 5}, {4, 3}, {5, 3}},
+         {}},
+        // Node 4 has a self-loop, which does not make it a parent, and node 4 has the parents 1 and 2. Siblings: 1, 2, 3
+        // (parent 0) and 4, 6 (parent 2). Cousins: 4 and 5 (parents 1 and 3, siblings), 5 and 6 (parents 3 and 2, siblings),
+        // 4 and 6 (parent 1 of 4 and parent 2 of 6, siblings). Without the root only 4 and 6 are siblings.
+        {"a dag with a self-loop and a node of two parents",
+         7,
+         {{0, 1}, {0, 2}, {0, 3}, {1, 4}, {2, 4}, {3, 5}, {4, 4}, {5, 2}, {2, 6}},
+         {{1, 2}, {1, 3}, {2, 1}, {2, 3}, {3, 1}, {3, 2}, {4, 6}, {6, 4}},
+         {{4, 5}, {4, 6}, {5, 4}, {5, 6}, {6, 4}, {6, 5}},
+         {{4, 6}, {6, 4}},
+         {}},
+        // 3 and 4 have both parents 1 and 2, so the union of the lists of their parents holds each of them twice.
+        {"a diamond whose two children share both parents",
+         5,
+         {{0, 1}, {0, 2}, {1, 3}, {1, 4}, {2, 3}, {2, 4}},
+         {{1, 2}, {2, 1}, {3, 4}, {4, 3}},
+         {{3, 4}, {4, 3}},
+         {{3, 4}, {4, 3}},
+         {}},
+    };
+}
+
+TEST(Horizon, KinshipOfADag)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    for (const KinCase& c : kin_cases())
+    {
+        const test::Horizon h = dag_graph(*table, c.nodes, c.edges);
+        for (const RootPolicy root : k_roots)
+            for (const Layout layout : {Layout::Graph, Layout::Relation})
+                for (const IndexType index : {IndexType::I32, IndexType::I64})
+                {
+                    FlatOptions options = horizon_options(HorizonMode::Full, root);
+                    options.horizon.sibling_relation = true;
+                    options.horizon.cousin_relation = true;
+                    options.horizon.parent_relation = true;
+                    options.include_actions = false;
+                    options.layout = layout;
+                    options.index = index;
+                    const auto encoder = FlatEncoder::create(table, options);
+                    const auto batch = encoder->encode(h.input());
+                    EXPECT_NO_THROW(validate(*batch, encoder->schema()));
+                    const Decoded decoded = decode(*batch, encoder->schema());
+                    const bool exclude = root == RootPolicy::Exclude;
+                    EXPECT_EQ(decoded[0].at("_sibling_"), pairs_of(exclude ? c.siblings_without_root : c.siblings))
+                        << c.name;
+                    EXPECT_EQ(decoded[0].at("_cousin_"), pairs_of(exclude ? c.cousins_without_root : c.cousins))
+                        << c.name;
+                    expect_reference(*encoder, h, *batch);
+                }
+    }
+    // the relations are symmetric, and either alone is allowed
+    const KinCase first = kin_cases()[0];
+    const test::Horizon h = dag_graph(*table, first.nodes, first.edges);
+    FlatOptions options = horizon_options(HorizonMode::Action, RootPolicy::Include);
+    options.horizon.cousin_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    EXPECT_FALSE(encoder->schema().find("_sibling_"));
+    const Decoded decoded = decode(*encoder->encode(h.input()), encoder->schema());
+    EXPECT_EQ(decoded[0].at("_cousin_"), pairs_of(first.cousins));
+}
+
+TEST(Horizon, ASelfLoopIsNotAParentButStaysAnEdge)
+{
+    // 0 -> 1, 1 -> 1, 0 -> 2: node 1 is its own child but not its own parent, so it has no sibling through itself
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Horizon h = dag_graph(*table, 3, {{0, 1}, {1, 1}, {0, 2}});
+    FlatOptions options = horizon_options(HorizonMode::Action, RootPolicy::Include);
+    options.horizon.parent_relation = true;
+    options.horizon.sibling_relation = true;
+    options.horizon.cousin_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    const Decoded decoded = decode(*encoder->encode(h.input()), encoder->schema());
+    EXPECT_EQ(decoded[0].at("_parent_"), pairs_of({{0, 1}, {0, 2}, {1, 1}}));
+    EXPECT_EQ(decoded[0].at("_sibling_"), pairs_of({{1, 2}, {2, 1}}));
+    EXPECT_TRUE(decoded[0].at("_cousin_").empty());
+    // a graph whose only edge is a self-loop has no relatives at all
+    const test::Horizon alone = dag_graph(*table, 2, {{1, 1}});
+    const Decoded none = decode(*encoder->encode(alone.input()), encoder->schema());
+    EXPECT_EQ(none[0].at("_parent_"), pairs_of({{1, 1}}));
+    EXPECT_TRUE(none[0].at("_sibling_").empty());
+    EXPECT_TRUE(none[0].at("_cousin_").empty());
+}
+
+TEST(Horizon, TheRootIsNoParentUnderExclude)
+{
+    // 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 4: with the root's edges 1 and 2 are siblings and 3 and 4 cousins; without them neither
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Horizon h = dag_graph(*table, 5, {{0, 1}, {0, 2}, {1, 3}, {2, 4}});
+    for (const RootPolicy root : k_roots)
+    {
+        FlatOptions options = horizon_options(HorizonMode::Action, root);
+        options.horizon.sibling_relation = true;
+        options.horizon.cousin_relation = true;
+        const auto encoder = FlatEncoder::create(table, options);
+        const Decoded decoded = decode(*encoder->encode(h.input()), encoder->schema());
+        const bool exclude = root == RootPolicy::Exclude;
+        EXPECT_EQ(decoded[0].at("_sibling_"), exclude ? std::vector<std::string>{} : pairs_of({{1, 2}, {2, 1}}));
+        EXPECT_EQ(decoded[0].at("_cousin_"), exclude ? std::vector<std::string>{} : pairs_of({{3, 4}, {4, 3}}));
+    }
+}
+
+test::Horizon horizon_of_built(const HorizonGraphs& graphs)
+{
+    test::Horizon h;
+    h.words = graphs.words;
+    h.label_width = graphs.label_width;
+    h.task_ids = graphs.task_ids;
+    h.nodes = graphs.nodes;
+    h.node_offsets = graphs.node_offsets;
+    h.edge_offsets = graphs.edge_offsets;
+    h.edge_src = graphs.edge_src;
+    h.edge_dst = graphs.edge_dst;
+    h.edge_schema = graphs.edge_schema;
+    h.edge_binding = graphs.edge_binding;
+    return h;
+}
+
+TEST(Horizon, TheKinshipOfBuiltGraphsFollowsTheDefinition)
+{
+    // merged logistics graphs of depth 2: nodes with several parents, self-loops, edges back to the root
+    const auto table = rl::TaskTable::single(test::pddl_task("logistics00", "probLOGISTICS-6-1"));
+    const test::Rows roots = test::random_walk(*table, 0, 4, 3);
+    HorizonBuild build;
+    build.depth = 2;
+    const HorizonGraphs graphs = build_horizon_graphs(*table, roots.view(), roots.task_ids.data(), build);
+    const test::Horizon h = horizon_of_built(graphs);
+    bool self_loop = false, two_parents = false, to_root = false;
+    for (u64 g = 0; g < graphs.graphs(); ++g)
+    {
+        std::map<i32, std::set<i32>> parents;
+        for (i32 e = graphs.edge_offsets[g]; e < graphs.edge_offsets[g + 1]; ++e)
+        {
+            const auto at = static_cast<usize>(e);
+            self_loop = self_loop || graphs.edge_src[at] == graphs.edge_dst[at];
+            to_root = to_root || graphs.edge_dst[at] == 0;
+            if (graphs.edge_src[at] != graphs.edge_dst[at])
+                parents[graphs.edge_dst[at]].insert(graphs.edge_src[at]);
+        }
+        for (const auto& entry : parents)
+            two_parents = two_parents || entry.second.size() > 1;
+    }
+    EXPECT_TRUE(self_loop && two_parents && to_root);
+    for (const RootPolicy root : k_roots)
+        for (const Layout layout : {Layout::Graph, Layout::Relation})
+        {
+            FlatOptions options = horizon_options(HorizonMode::Full, root);
+            options.horizon.parent_relation = true;
+            options.horizon.sibling_relation = true;
+            options.horizon.cousin_relation = true;
+            options.layout = layout;
+            const auto encoder = FlatEncoder::create(table, options);
+            const auto batch = encoder->encode(h.input());
+            expect_reference(*encoder, h, *batch);
+        }
+}
+
+TEST(Horizon, KinshipOfTrees)
+{
+    // a tree: the children of a node are its siblings, the children of its siblings the cousins of its children
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const test::Rows roots = test::random_walk(*table, 0, 2, 5);
+    const test::Horizon h = test::horizon_of(*table, roots, 2, 3);
+    FlatOptions options = horizon_options(HorizonMode::Delta, RootPolicy::EncodeOnly);
+    options.horizon.sibling_relation = true;
+    options.horizon.cousin_relation = true;
+    const auto encoder = FlatEncoder::create(table, options);
+    const Decoded decoded = decode(*encoder->encode(h.input()), encoder->schema());
+    bool any_cousins = false;
+    for (u64 g = 0; g < h.graphs(); ++g)
+    {
+        std::map<u32, std::vector<u32>> children;
+        for (i32 e = h.edge_offsets[g]; e < h.edge_offsets[g + 1]; ++e)
+            children[static_cast<u32>(h.edge_src[static_cast<usize>(e)])].push_back(static_cast<u32>(h.edge_dst[static_cast<usize>(e)]));
+        std::set<std::string> siblings, cousins;
+        for (const auto& [parent, list] : children)
+            for (const u32 a : list)
+                for (const u32 b : list)
+                    if (a != b)
+                        siblings.insert("s" + std::to_string(a) + ",s" + std::to_string(b));
+        for (const auto& [p, list_p] : children)
+            for (const auto& [q, list_q] : children)
+            {
+                if (p == q || !std::ranges::any_of(children, [&](const auto& entry) {
+                        return std::ranges::count(entry.second, p) && std::ranges::count(entry.second, q);
+                    }))
+                    continue;
+                for (const u32 a : list_p)
+                    for (const u32 b : list_q)
+                        cousins.insert("s" + std::to_string(a) + ",s" + std::to_string(b));
+            }
+        EXPECT_EQ(std::set<std::string>(decoded[g].at("_sibling_").begin(), decoded[g].at("_sibling_").end()), siblings);
+        EXPECT_EQ(std::set<std::string>(decoded[g].at("_cousin_").begin(), decoded[g].at("_cousin_").end()), cousins);
+        any_cousins = any_cousins || !cousins.empty();
+    }
+    EXPECT_TRUE(any_cousins);
+}
+
 // A dag over the `features` domain: node 2 is reached from two parents, an edge leads back to the root, node 1 has a
 // self-loop, and the edges 0 -> 1 `enable(b)` appear twice. The objects a and b are the ids `a` and `b`.
 struct DagEdge
@@ -978,6 +1264,72 @@ TEST(Horizon, TheEdgeTuplesAreCanonicalWhateverTheEdges)
                             : std::vector<std::string>{"s0,s1", "s0,s3", "s1,s1", "s1,s2", "s2,s0", "s3,s2"};
                 EXPECT_EQ(decoded[0].at("_parent_"), parents);
             }
+}
+
+TEST(Horizon, TheEdgeTuplesAreCanonicalForEveryShapeOfEdgeList)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    constexpr int nodes = 300;
+    u64 state = 12345;
+    const auto next = [&](u64 bound)
+    {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<i32>((state >> 33) % bound);
+    };
+    using Edges = std::vector<std::array<i32, 2>>;
+    // one source with every destination twice, descending
+    Edges star;
+    for (int round = 0; round < 2; ++round)
+        for (i32 dst = nodes - 1; dst >= 1; --dst)
+            star.push_back({0, dst});
+    // edges grouped by source, each group in a random order and with repeats
+    Edges grouped;
+    for (i32 src = 0; src < nodes; ++src)
+        for (int k = 0, size = 1 + next(6); k < size; ++k)
+            grouped.push_back({src, next(nodes)});
+    // edges in no order at all, with repeats, self-loops and edges to and from the root
+    Edges shuffled;
+    for (int k = 0; k < 4 * nodes; ++k)
+        shuffled.push_back({next(nodes), next(nodes)});
+    // already canonical, strictly ascending
+    Edges ascending;
+    for (i32 src = 0; src < 40; ++src)
+        for (i32 dst = 0; dst < nodes; dst += 7)
+            ascending.push_back({src, dst});
+    // a group that breaks the order of the sources late
+    Edges late = grouped;
+    late.push_back({0, 5});
+    // ordered by destination, the sources in no order, with repeats (also apart) and self-loops
+    Edges by_destination;
+    for (i32 dst = 0; dst < nodes; ++dst)
+        for (int k = 0, size = next(5); k < size; ++k)
+            by_destination.push_back({k == 0 ? dst : next(nodes), dst});
+    // ordered by destination but for the last edge
+    Edges by_destination_late = by_destination;
+    by_destination_late.push_back({3, 2});
+    for (const Edges& edges : {star, grouped, shuffled, ascending, late, by_destination, by_destination_late, Edges{}})
+    {
+        const test::Horizon h = dag_graph(*table, nodes, edges);
+        for (const RootPolicy root : k_roots)
+            for (const bool actions : {false, true})
+            {
+                FlatOptions options = horizon_options(HorizonMode::Full, root);
+                options.horizon.parent_relation = true;
+                options.include_actions = actions;
+                const auto encoder = FlatEncoder::create(table, options);
+                const auto batch = encoder->encode(h.input());
+                EXPECT_NO_THROW(validate(*batch, encoder->schema()));
+                expect_reference(*encoder, h, *batch);
+                std::set<std::pair<i32, i32>> distinct;
+                for (const auto& edge : edges)
+                    if (root != RootPolicy::Exclude || (edge[0] != 0 && edge[1] != 0))
+                        distinct.insert({edge[0], edge[1]});
+                std::vector<std::string> expected;
+                for (const auto& [src, dst] : distinct)
+                    expected.push_back("s" + std::to_string(src) + ",s" + std::to_string(dst));
+                EXPECT_EQ(decode(*batch, encoder->schema())[0].at("_parent_"), expected);
+            }
+    }
 }
 
 TEST(Horizon, GraphsWithoutEdgesNeedNoEdgeArrays)

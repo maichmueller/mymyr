@@ -11,7 +11,10 @@
 - ``compare``: every mismatch of a graph against its expectation, not only the first.
 - ``SUPPORTED``, ``PENDING_CONFIGS`` and ``PENDING_SOURCES``: which configurations and which relation sources of the
   fixtures the native encoder is compared on, and for the others which lane turns them on. The horizon configs (C7) are
-  encoded by FlatHorizonEncoder from the dags of their records (``horizon_dag``, ``horizon_view``).
+  encoded by FlatHorizonEncoder or FlatRootedHorizonEncoder from the dags of their records (``horizon_dag``,
+  ``horizon_view``); the transition configs (C8) by FlatTransitionEncoder or FlatTransitionEffectsEncoder from the
+  record's state, whose graph holds every successor of the state (the registry removes the successors a record does not
+  list).
 - ``random_walk_rows``: seeded, distinct states for property tests.
 """
 
@@ -883,7 +886,55 @@ def _literal_without_slot(expected, actual, context):
             replace(actual, entities=a_entities, tuples={n: ts for n, ts in a_tuples.items() if ts}))
 
 
+def recorded_successor(context):
+    """The node of the native transition graph that is the successor a record lists: ``1 + `` the index of the row of
+    the state's expansion that has the record's action and leads to the record's successor state."""
+    from mymyr import rl
+
+    task = context.task
+    state_path, successor_path = context.dag["nodes"]
+    action = context.dag["edges"][0][2]
+    rows = np.ascontiguousarray(task.encode([replay(task, state_path), replay(task, successor_path)]))
+    expansion = rl.expand(rl.as_table(task), rows[:1])
+    succ = np.asarray(expansion.succ)
+    row = next(r for r in range(int(expansion.offsets[1]))
+               if str(expansion.action(r)) == action and (succ[r] == rows[1]).all())
+    return row + 1
+
+
+def _unrecorded_successors(expected, actual, context):
+    """A record of a transition config lists one successor of its state; the native graph holds all of them. The native
+    graph is cut down to the state's relations and the recorded successor, the other successors' state entities and
+    the tuples over them removed, the recorded one renumbered ``target:1``, and the auxiliary entity dropped when no
+    tuple has it any more."""
+    if not is_transition(context.config):
+        return expected, actual
+    keep = f"target:{recorded_successor(context)}"
+    others = {name for role, name in actual.entities if role == "state" and name != keep}
+    entities = [("state", "target:1") if e == ("state", keep) else e
+                for e in actual.entities if not (e[0] == "state" and e[1] in others)]
+    tuples = {}
+    for name, ts in actual.tuples.items():
+        kept = [tuple("target:1" if x == keep else x for x in t) for t in ts if not others & set(t)]
+        if kept:
+            tuples[name] = kept
+    if not any(AUXILIARY in t for ts in tuples.values() for t in ts):
+        entities = [e for e in entities if e[0] != "auxiliary"]
+    return expected, replace(actual, entities=entities, tuples=tuples)
+
+
 REGISTRY = (
+    Difference(
+        "unrecorded_successors",
+        "A transition record of the reference lists one successor of its state; the native transition encoders encode "
+        "all of them in the graph of the state.",
+        "the state entities of the successors the record does not list and the tuples over them, and the auxiliary "
+        "entity when no tuple is left over it, in the graph of a transition config",
+        (("f01", "C8A"), ("f01", "C8AN"), ("f01", "C8B"), ("f01", "C8BN"), ("f02", "C8A"), ("f03", "C8B"),
+         ("f05", "C8B"), ("f08", "C8A"), ("f08", "C8AN"), ("f08", "C8B"), ("f08", "C8BN"), ("f09", "C8A"),
+         ("f10", "C8AN"), ("f10", "C8B"), ("f10", "C8BN"), ("f11", "C8A"), ("f12", "C8A"), ("f13", "C8AN")),
+        _unrecorded_successors,
+    ),
     Difference(
         "horizon_nullary_over_auxiliary",
         "mifrost's horizon graphs have no tuples in the relations of nullary predicates (its catalog lists them); the "
@@ -1124,15 +1175,34 @@ for _config, _options in {
     "C7S": dict(horizon_mode="delta", root_policy="exclude", goal_derivations=ADDED, include_actions=False,
                 max_goal_level=2),
     "C7T": dict(horizon_mode="full", max_goal_level=1),
+    "C7E": dict(horizon_mode="full", root_policy="encode_only", parent_relation=True),
+    "C7EN": dict(horizon_mode="full", root_policy="encode_only", parent_relation=True),
+    "C7F": dict(horizon_mode="full", root_policy="encode_only", parent_relation=True, sibling_relation=True,
+                cousin_relation=True),
+    "C7FN": dict(horizon_mode="full", root_policy="encode_only", parent_relation=True, sibling_relation=True,
+                 cousin_relation=True),
+    # the transition configs: the horizon of depth one of a state (their encoders fix the mode)
+    "C8A": dict(horizon_mode="full", root_policy="exclude", include_actions=False),
+    "C8AN": dict(horizon_mode="full", root_policy="exclude", include_actions=False),
+    "C8B": dict(horizon_mode="delta", root_policy="exclude", include_actions=False),
+    "C8BN": dict(horizon_mode="delta", root_policy="exclude", include_actions=False),
 }.items():
     SUPPORTED[_config] = _options
+# The encoder class of the configs that FlatHorizonEncoder does not encode.
+ENCODERS = {
+    "C7E": "FlatRootedHorizonEncoder", "C7EN": "FlatRootedHorizonEncoder", "C7F": "FlatRootedHorizonEncoder",
+    "C7FN": "FlatRootedHorizonEncoder", "C8A": "FlatTransitionEncoder", "C8AN": "FlatTransitionEncoder",
+    "C8B": "FlatTransitionEffectsEncoder", "C8BN": "FlatTransitionEffectsEncoder",
+}
+TRANSITION_CONFIGS = ("C8A", "C8AN", "C8B", "C8BN")
 # Relation sources of the fixtures' catalogs (inside a compared config) that the comparison leaves out, with the lane
 # that turns them on.
 PENDING_SOURCES = {
     "action": "actions (of the configs whose native encoder has no action relations)",
 }
-COMPARED_SOURCES = ("state", "goal", "goal_derivation", "history", "goal_satisfaction", "parent")
-COMPARED_LANES = ("fluent", "static", "derived", "goal", "goal_derivation", "history", "goal_satisfaction", "parent")
+COMPARED_SOURCES = ("state", "goal", "goal_derivation", "history", "goal_satisfaction", "parent", "sibling", "cousin")
+COMPARED_LANES = ("fluent", "static", "derived", "goal", "goal_derivation", "history", "goal_satisfaction", "parent",
+                  "sibling", "cousin")
 
 
 def sources_of(config):
@@ -1146,20 +1216,17 @@ def lanes_of(config):
 
 
 def is_horizon(config):
-    """Whether ``config`` is encoded by the horizon encoder."""
+    """Whether ``config`` is encoded as a horizon (by one of the horizon or transition encoders)."""
     return "horizon_mode" in SUPPORTED[config]
+
+
+def is_transition(config):
+    """Whether ``config`` is encoded from the state alone, as its transitions."""
+    return config in TRANSITION_CONFIGS
 
 
 # Configs that are not compared yet, with the lanes they need.
 PENDING_CONFIGS = {
-    "C7E": "goals, actions, horizon",
-    "C7EN": "goals, actions, horizon",
-    "C7F": "goals, actions, horizon",
-    "C7FN": "goals, actions, horizon",
-    "C8A": "goals, actions, transition",
-    "C8AN": "goals, actions, transition",
-    "C8B": "goals, actions, transition",
-    "C8BN": "goals, actions, transition",
     "C8S": "goals, actions, subgoals, transition",
     "C9A": "goals, HGraph",
     "C9B": "goals, HGraph",
@@ -1170,8 +1237,11 @@ PENDING_CONFIGS = {
 def native_encoder(task, config, **options):
     from mymyr import encoding
 
-    cls = encoding.FlatHorizonEncoder if is_horizon(config) else encoding.FlatRelationEncoder
-    return cls(task, **{**SUPPORTED[config], **options})
+    name = ENCODERS.get(config, "FlatHorizonEncoder" if is_horizon(config) else "FlatRelationEncoder")
+    effective = {**SUPPORTED[config], **options}
+    if is_transition(config):  # the class fixes the mode
+        del effective["horizon_mode"]
+    return getattr(encoding, name)(task, **effective)
 
 
 @dataclass
@@ -1266,8 +1336,11 @@ def record_context(fixture, task, state, config, record, dropped=()):
     history = None if steps is None else tuple((dt, tuple(literals)) for dt, literals in steps)
     layers = inputs.get("subgoal_layers")
     layers = None if layers is None else tuple(tuple(layer) for layer in layers)
-    return Context(fixture, task, state, config, given("goals"), given("actions"), layers, history, dropped,
-                   inputs.get("dag"))
+    dag = inputs.get("dag")
+    if "successor" in inputs:
+        successor = inputs["successor"]
+        dag = {"nodes": [state["path"], successor["path"]], "edges": [[0, 1, successor["action"]]]}
+    return Context(fixture, task, state, config, given("goals"), given("actions"), layers, history, dropped, dag)
 
 
 def horizon_dag(task, table, dag):
@@ -1326,6 +1399,14 @@ def encode_horizon_records(task, config, records):
     return placed
 
 
+def encode_transition_records(task, config, rows, records):
+    """The ``Placed`` graph of each transition record: the graph of its state, which holds all of the state's
+    successors (the records of a config are encoded in one batch)."""
+    encoder = native_encoder(task, config)
+    batch = encoder.encode(list(rows))
+    return [Placed(encoder, batch, i) for i in range(len(records))]
+
+
 def encode_records(task, config, rows, records):
     """The ``Placed`` graph of each record: the records without goal literals, subgoal layers or history in one batch,
     each other record alone, with its literals as the goal, its layers and its history (and, for a record with a
@@ -1333,6 +1414,8 @@ def encode_records(task, config, rows, records):
     the action lane."""
     from mymyr import rl
 
+    if is_transition(config):
+        return encode_transition_records(task, config, rows, records)
     if is_horizon(config):
         return encode_horizon_records(task, config, records)
     table = rl.as_table(task)

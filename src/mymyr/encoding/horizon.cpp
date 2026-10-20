@@ -11,6 +11,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
+#include <memory>
+#include <stdexcept>
 #include <string>
 
 namespace mymyr::encoding
@@ -37,9 +40,12 @@ struct HPass
     bool edges_used;
     bool actions;
     bool parents;
+    bool kin;      // the schema has a sibling or cousin relation
+    bool cousins;  // ... a cousin relation
     bool exclude;
     bool include_root_target;
     const i32* schema_relation;
+    bool one_schema_per_relation;  // no two schemas share an action relation
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
     [[nodiscard]] u64 first_node(u64 g) const noexcept { return static_cast<u64>(in.horizon.node_offsets[g]); }
@@ -106,7 +112,8 @@ struct HPass
         {
             const u64 e = first_edge(g);
             out.edges = edges_of(g);
-            out.order = s.edge_order.data() + 2 * e + 2 * g;
+            out.order = s.edge_order.data() + k_order_words_per_edge * e + k_order_words_per_graph * g +
+                        k_order_words_per_node * first_node(g);
             out.src = h.edge_src ? h.edge_src + e : nullptr;
             out.dst = h.edge_dst ? h.edge_dst + e : nullptr;
             out.schema = h.edge_schema ? h.edge_schema + e : nullptr;
@@ -115,7 +122,9 @@ struct HPass
         }
         out.schema_relation = schema_relation;
         out.use_actions = actions;
+        out.one_schema_per_relation = one_schema_per_relation;
         out.use_parents = parents;
+        out.use_cousins = cousins;
         out.exclude = exclude;
         out.root_target = include_root_target;
         return out;
@@ -155,6 +164,30 @@ void slice_graphs(const i32* node_offsets, u64 graphs, u32 members, std::vector<
                                      node_offsets);
 }
 
+/// Builds the kinship of a graph of the member's slice into its kin store: the children and parents lists and, for
+/// cousins, the far lists. False if the graph has more far list entries than 32 bits count.
+bool build_kin(const HPass& p, Member& m, u64 slot, HorizonGraph& h)
+{
+    KinStore& store = *m.kin;
+    const u64 words = horizon_kin_words(h.count, h.edges);
+    const u64 at = store.words.size();
+    store.at[slot] = at;
+    store.words.resize(at + words);
+    h.kin = store.words.data() + at;
+    h.far = nullptr;
+    const u64 far = horizon_kin_prepare(h);
+    if (far > std::numeric_limits<u32>::max())
+        return false;
+    if (p.cousins)
+    {
+        store.words.resize(at + words + far);
+        h.kin = store.words.data() + at;
+        h.far = h.kin + words;
+        horizon_kin_fill_far(h);
+    }
+    return true;
+}
+
 /// Pass one of a member: validates its graphs, evaluates the derived words of their nodes, counts them.
 void count_range(const HPass& p, u32 t)
 {
@@ -168,6 +201,14 @@ void count_range(const HPass& p, u32 t)
     m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = k_none;
     m.narrow_subgoals = m.bad_subgoal_bits = m.bad_edge = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
+    if (p.kin)
+    {
+        if (!m.kin)
+            m.kin = std::make_unique<KinStore>();
+        m.kin->words.clear();
+        m.kin->at.assign(hi - lo, 0);
+        m.kin->overflow = k_none;
+    }
     const bool keep_counts = p.relation_major || p.view.num_virtual != 0;
     if (p.relation_major)
         m.tally.assign(p.R, 0);
@@ -240,7 +281,7 @@ void count_range(const HPass& p, u32 t)
             }
         }
         RowLayers layers;
-        const HorizonGraph h = p.graph(g, v, layers);
+        HorizonGraph h = p.graph(g, v, layers);
         const RowInput& row = h.row;
         if (has_foreign_goal_bits(v, row))
         {
@@ -261,14 +302,26 @@ void count_range(const HPass& p, u32 t)
             cell_counts = m.cell_counts.data() + at;
         }
         canonical_horizon_edges(h);
+        if (p.kin && !build_kin(p, m, g - lo, h))
+        {
+            m.kin->overflow = std::min(m.kin->overflow, g);
+            continue;
+        }
+        bool too_many = false;
         const auto sink = [&](u32 i, const Cell& c, u32 n)
         {
+            too_many = too_many || n == std::numeric_limits<u32>::max();
             if (cell_counts)
                 cell_counts[i] = n;
             if (p.relation_major)
                 m.tally[c.relation] += n;
         };
         const GraphTotals totals = horizon_count_graph(v, h, list, m.virtual_scratch.data(), sink);
+        if (too_many)
+        {
+            m.kin->overflow = std::min(m.kin->overflow, g);
+            continue;
+        }
         m.totals[g - lo] = totals;
         m.entities += totals.entities;
         m.tuples += totals.tuples;
@@ -307,7 +360,12 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         const InstanceView v = instance_view(p.view, instance);
         const GraphTotals& totals = m.totals[g - lo];
         RowLayers layers;
-        const HorizonGraph h = p.graph(g, v, layers);
+        HorizonGraph h = p.graph(g, v, layers);
+        if (p.kin)
+        {
+            h.kin = m.kin->words.data() + m.kin->at[g - lo];
+            h.far = p.cousins ? h.kin + horizon_kin_words(h.count, h.edges) : nullptr;
+        }
         b.task_ids[g] = p.in.task_ids ? p.in.task_ids[g] : 0;
         const HorizonEntities entities = horizon_entities(v, h, totals, entity);
         entity_offsets[g] = static_cast<I>(entity);
@@ -388,6 +446,20 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
                    out.relation_arg_offsets, fill_one, cells_of);
 }
 
+/// Whether no two action schemas share an action relation.
+bool one_schema_per_relation(const EncodingSchema& schema)
+{
+    std::vector<bool> seen(schema.num_relations(), false);
+    for (const i32 relation : schema.schema_relations())
+        if (relation >= 0)
+        {
+            if (seen[static_cast<usize>(relation)])
+                return false;
+            seen[static_cast<usize>(relation)] = true;
+        }
+    return true;
+}
+
 HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& context, u64 graphs, u32 members,
                 bool evaluate)
 {
@@ -401,12 +473,16 @@ HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& contex
                  static_cast<u32>(context.schema().num_relations()),
                  o.layout == Layout::Relation,
                  evaluate,
-                 o.include_actions || o.horizon.parent_relation,
+                 o.include_actions || o.horizon.parent_relation || o.horizon.sibling_relation ||
+                     o.horizon.cousin_relation,
                  o.include_actions,
-                 o.horizon.parent_relation,
+                 o.horizon.parent_relation || o.horizon.sibling_relation || o.horizon.cousin_relation,
+                 o.horizon.sibling_relation || o.horizon.cousin_relation,
+                 o.horizon.cousin_relation,
                  o.horizon.root == RootPolicy::Exclude,
                  o.horizon.root == RootPolicy::Include,
-                 context.schema().schema_relations().data()};
+                 context.schema().schema_relations().data(),
+                 one_schema_per_relation(context.schema())};
 }
 }  // namespace
 
@@ -469,7 +545,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         if (!h.nodes.data)
             invalid("the node buffer is null");
     }
-    const bool edges_used = options.include_actions || options.horizon.parent_relation;
+    const bool edges_used = options.include_actions || options.horizon.parent_relation ||
+                            options.horizon.sibling_relation || options.horizon.cousin_relation;
     if (edges_used && edges)
     {
         if (!h.edge_src || !h.edge_dst)
@@ -490,7 +567,8 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         s.derived = std::make_unique_for_overwrite<u64[]>(s.derived_capacity);
     }
     if (edges_used)
-        s.edge_order.resize(horizon_order_words(0) * graphs + 2 * edges);
+        s.edge_order.resize(k_order_words_per_graph * graphs + k_order_words_per_edge * edges +
+                            k_order_words_per_node * nodes);
     const u32 members = members_for(nodes, pool);
     s.members.resize(members);
     s.bounds.clear();
@@ -503,9 +581,11 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     const HPass pass = make_pass(in, s, context, graphs, members, evaluate);
     run(pool, members, [&pass](u32 t) { count_range(pass, t); });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
-    u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, bad_edge = k_none;
+    u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none, bad_edge = k_none, too_big = k_none;
     for (const Member& m : s.members)
     {
+        if (m.kin)
+            too_big = std::min(too_big, m.kin->overflow);
         bad_id = std::min(bad_id, m.bad_id);
         narrow = std::min(narrow, m.narrow);
         bad_bits = std::min(bad_bits, m.bad_bits);
@@ -534,6 +614,9 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
         invalid("the subgoal layers of " + of_graph(narrow_subgoals) + " are narrower than its instance needs (" +
                 std::to_string(v.words) + " words, " + std::to_string(v.derived_words) + " derived words)");
     }
+    if (too_big != k_none)
+        throw std::overflow_error("mymyr: encoding: " + of_graph(too_big) +
+                                  " has more sibling, cousin or far list entries than 32 bits count");
     if (bad_edge != k_none)
     {
         const InstanceView v = instance_view(pass.view, pass.instance_of(bad_edge));
