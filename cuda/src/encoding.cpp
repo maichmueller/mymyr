@@ -717,11 +717,12 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the derived goal masks need the goal masks over the fluent slots");
     const encoding::LayerInput& sub = in.subgoals;
     const encoding::HistoryInput& hist = in.history;
-    const auto check_layers = [](const encoding::LayerInput& l, const char* what, bool rows_share)
+    // the masks of an empty batch may be null (an empty tensor has no data pointer), but not only one of them
+    const auto check_layers = [graphs](const encoding::LayerInput& l, const char* what, bool rows_share)
     {
         if (l.layers == 0)
             return;
-        if (!l.pos || !l.neg)
+        if ((l.pos == nullptr) != (l.neg == nullptr) || (graphs != 0 && !l.pos))
             invalid(std::string(what) + " need both their positive and negative masks");
         if ((l.derived_pos == nullptr) != (l.derived_neg == nullptr))
             invalid(std::string(what) + " need both their positive and negative derived masks");
@@ -744,7 +745,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     {
         if (!schema.has_history())
             invalid("history steps are given, but the schema has no history relations");
-        if (hist.masks.layers != 0 && !hist.dt)
+        if (hist.masks.layers != 0 && graphs != 0 && !hist.dt)
             invalid("the history steps need their dt");
         if (hist.masks.layers == 0 && (hist.masks.pos || hist.masks.neg || hist.dt))
             invalid("history masks or dt are given without steps");

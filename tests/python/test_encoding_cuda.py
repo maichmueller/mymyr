@@ -131,7 +131,7 @@ def device_encode(encoder, case, dev, goals=None, **kwargs):
         goals = tuple(to_device(g, dev) for g in goals)
     for key in ("subgoals", "history"):
         if kwargs.get(key) is not None:
-            kwargs[key] = tuple(to_device(x, dev) for x in kwargs[key])
+            kwargs[key] = tuple(None if x is None else to_device(x, dev) for x in kwargs[key])
     return encoder.encode(to_device(case.rows, dev), ids, derived=derived, goals=goals, **kwargs)
 
 
@@ -390,7 +390,8 @@ def layered_kwargs(case, options, **kwargs):
     subgoals, history = layered_rows(case, **kwargs)
     out = {}
     if options.get("max_goal_level"):
-        out["subgoals"] = subgoals
+        # the layers an encoder takes: at most as many as its levels
+        out["subgoals"] = tuple(np.ascontiguousarray(x[:, : options["max_goal_level"]]) for x in subgoals)
     if options.get("history"):
         out["history"] = history
     return out
@@ -521,7 +522,7 @@ def test_invalid_layers_and_history_are_flagged_or_raise(cases):
     slots = int(offsets[ids[row] + 1] - offsets[ids[row]])
     pos[row, 0, slots // 64] |= np.uint64(1) << np.uint64(slots % 64)
     bad = {**kwargs, "subgoals": (pos, *kwargs["subgoals"][1:])}
-    with pytest.raises(ValueError, match="a row is invalid"):
+    with pytest.raises(ValueError, match="set an atom bit its instance does not have"):
         host_encode(encoder, case, **bad)
     sizes = device_encode(encoder, case, dev, capacities=caps, **bad).sizes
     assert sizes["invalid_input"]
@@ -537,7 +538,7 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     prefix = "^mymyr: encoding: "
     with pytest.raises(ValueError, match=prefix + "actions are not encoded on the device"):
         encoder.encode(rows, ids, actions=rl.expand(rl.as_table(case.tasks[0]), case.rows[:1]))
-    with pytest.raises(ValueError, match=prefix + r"subgoals\[0\] \(pos\) must be"):
+    with pytest.raises(ValueError, match=prefix + r"'subgoals\[0\] \(pos\)' must be"):
         encoder.encode(rows, ids, subgoals=(rows, rows))
     with pytest.raises(ValueError, match=prefix + r"history must be \(pos, neg, dt\)"):
         encoder.encode(rows, ids, history=(rows, rows))
@@ -630,7 +631,7 @@ def test_count_index_overflow_raises_before_exact_allocation(cases, monkeypatch)
     native = encoding._device._device_encoder(encoder, 0)
 
     def count(self, stream, rows, allocate):
-        return allocate(1 << 31, 0, 0, 0, 2)
+        return allocate(1 << 31, 0, 0, 0, 0, 2)
 
     monkeypatch.setattr(type(native), "encode_exact", count)
     with pytest.raises(OverflowError, match="use index_dtype='int64'"):
@@ -1080,8 +1081,8 @@ def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
     layout = encoding._device.layout_of(encoder)
     real = type(layout).specs
 
-    def short(self, torch_, graphs, entities, args, targets):
-        return real(self, torch_, graphs - 1, entities, args, targets)
+    def short(self, torch_, graphs, entities, args, targets, history=0):
+        return real(self, torch_, graphs - 1, entities, args, targets, history)
 
     monkeypatch.setattr(type(layout), "specs", short)
     with pytest.raises(ValueError, match="^mymyr: encoding: the batch has more graphs than the output capacity"):
