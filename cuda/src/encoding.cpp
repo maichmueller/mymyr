@@ -396,6 +396,7 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     if (o.max_goal_level != 0) refuse("subgoal levels");
     if (o.history) refuse("history steps");
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
+    if (o.outputs != encoding::Outputs{encoding::Output::Relations}) refuse("Simple");
     constexpr encoding::TargetSources targets{encoding::TargetSource::Goal};
     constexpr encoding::GoalDerivations goals{encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied,
                                              encoding::GoalDerivation::Unsatisfied};

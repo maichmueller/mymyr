@@ -105,6 +105,9 @@ struct Pass
     u64 starts_stride;  // the words of run starts of one graph: num_schemas + 1 with expansion rows, else 0
     // some row may have subgoal layers or history steps
     bool layered = in.subgoals.layers != 0 || in.history.masks.layers != 0 || in.history.count != nullptr;
+    // the batch stores the Simple graph, which follows the fill of each graph with its cells' counts
+    bool simple = context.schema().emits_simple();
+    detail::SimpleParams simple_params{R, context.schema().simple_max_arity(), context.schema().simple_constants()};
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
 
@@ -282,7 +285,7 @@ void count_range(const Pass& p, u32 t)
     m.narrow_subgoals = m.bad_subgoal_bits = m.narrow_history = m.bad_history_bits = m.bad_history_count = k_none;
     m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
     m.virtual_scratch.resize(p.view.num_virtual);
-    const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.layered;
+    const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.layered || p.simple;
     if (p.starts_stride)
     {
         m.action_starts.resize((hi - lo) * p.starts_stride);
@@ -393,6 +396,10 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
                                   static_cast<I*>(b.history_offsets),
                                   static_cast<I*>(b.history_entity),
                                   b.history_dt};
+    const detail::SimpleOut<I> simple{static_cast<I*>(b.node_offsets), static_cast<I*>(b.edge_offsets), b.node_label,
+                                      static_cast<I*>(b.edge_index),
+                                      b.edge_index ? static_cast<I*>(b.edge_index) + b.edge_stride : nullptr,
+                                      b.edge_label};
     I* entity_offsets = static_cast<I*>(b.entity_offsets);
     Member& m = p.s.members[t];
     u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start,
@@ -418,6 +425,10 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         else
             detail::fill_graph<I, Layered>(v, row, g, tuple, arg, entity, totals, out, target, virtual_scratch,
                                            graph_counts, history);
+        if (p.simple)
+            detail::simple_fill_graph<I>(p.simple_params, simple, out, p.cells_of<Layered>(v, g), graph_counts,
+                                         p.relation_major, g,
+                                         {entity, totals.entities, tuple, totals.tuples, arg, totals.args});
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
@@ -658,13 +669,34 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
     const EncodingSchema& schema = *m_schema;
     const FlatOptions& options = schema.options();
     const u64 graphs = graphs_of(in);
-    if (!out.task_ids || !out.num_objects || !out.entity_offsets || !out.relation_offsets || !out.relation_arg_offsets)
+    const bool relations = schema.emits_relations();
+    if (!out.task_ids || !out.num_objects || !out.entity_offsets)
         invalid("a destination array of the batch is null");
-    if (sizes.args > 0 && !out.relation_args)
-        invalid("relation_args is null, the batch has tuple arguments");
-    if ((out.relation_counts != nullptr) != options.emit_counts)
-        invalid(options.emit_counts ? "relation_counts is null, the schema stores it"
-                                    : "relation_counts must be null, the schema omits it");
+    if (relations)
+    {
+        if (!out.relation_offsets || !out.relation_arg_offsets)
+            invalid("a destination array of the batch is null");
+        if (sizes.args > 0 && !out.relation_args)
+            invalid("relation_args is null, the batch has tuple arguments");
+        if ((out.relation_counts != nullptr) != options.emit_counts)
+            invalid(options.emit_counts ? "relation_counts is null, the schema stores it"
+                                        : "relation_counts must be null, the schema omits it");
+    }
+    else if (out.relation_offsets || out.relation_arg_offsets || out.relation_args || out.relation_counts)
+        invalid("the relation arrays must be null, the schema does not store them");
+    if (schema.emits_simple())
+    {
+        if (!out.node_offsets || !out.edge_offsets)
+            invalid("node_offsets or edge_offsets is null, the schema stores the Simple graph");
+        if (sizes.entities + sizes.tuples > 0 && !out.node_label)
+            invalid("node_label is null, the batch has nodes");
+        if (sizes.args > 0 && (!out.edge_index || !out.edge_label))
+            invalid("edge_index or edge_label is null, the batch has edges");
+        if (out.edge_stride < 2 * sizes.args)
+            invalid("edge_stride is below the batch's edges");
+    }
+    else if (out.node_offsets || out.node_label || out.edge_offsets || out.edge_index || out.edge_label)
+        invalid("the Simple arrays must be null, the schema does not store them");
     if ((out.entity_role != nullptr) != !schema.implicit_entity_arrays() ||
         (out.entity_ref != nullptr) != !schema.implicit_entity_arrays())
         invalid(schema.implicit_entity_arrays() ? "entity_role and entity_ref must be null, the schema omits them"
@@ -683,8 +715,23 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         invalid(schema.has_history() ? "a history array is null, the schema stores them"
                                      : "the history arrays must be null, the schema has no history");
     const u64 cells = graphs * schema.num_relations();
+    // an encoding without the relation arrays writes its tuples into scratch, from which the Simple graph is built
+    FlatBuffers work = out;
+    const usize index_bytes = options.index == IndexType::I64 ? 8 : 4;
+    if (!relations)
+    {
+        const u64 bytes = (2 * (cells + 1) + sizes.args) * index_bytes;
+        if (bytes > s.relation_scratch_bytes)
+        {
+            s.relation_scratch = std::make_unique_for_overwrite<std::byte[]>(bytes);
+            s.relation_scratch_bytes = bytes;
+        }
+        work.relation_offsets = s.relation_scratch.get();
+        work.relation_arg_offsets = s.relation_scratch.get() + (cells + 1) * index_bytes;
+        work.relation_args = s.relation_scratch.get() + 2 * (cells + 1) * index_bytes;
+    }
     if (schema.has_horizon())
-        fill_horizon(in, sizes, out, pool, scratch);
+        fill_horizon(in, sizes, work, pool, scratch);
     else
     {
         const bool evaluate = !in.derived && m_context->max_derived_words() > 0;
@@ -700,12 +747,12 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
                         evaluate,
                         in.actions ? u64{view.num_schemas} + 1 : 0};
         run(pool, members,
-            [&pass, &out, wide = options.index == IndexType::I64](u32 t)
+            [&pass, &work, wide = options.index == IndexType::I64](u32 t)
             {
                 if (pass.layered)
-                    wide ? fill_range<i64, true>(pass, out, t) : fill_range<i32, true>(pass, out, t);
+                    wide ? fill_range<i64, true>(pass, work, t) : fill_range<i32, true>(pass, work, t);
                 else
-                    wide ? fill_range<i64, false>(pass, out, t) : fill_range<i32, false>(pass, out, t);
+                    wide ? fill_range<i64, false>(pass, work, t) : fill_range<i32, false>(pass, work, t);
             });
     }
     auto close = [&]<class I>(I)
@@ -715,8 +762,13 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
             static_cast<I*>(out.target_offsets)[graphs] = static_cast<I>(sizes.targets);
         if (out.history_offsets)
             static_cast<I*>(out.history_offsets)[graphs] = static_cast<I>(sizes.history);
-        static_cast<I*>(out.relation_offsets)[cells] = static_cast<I>(sizes.tuples);
-        static_cast<I*>(out.relation_arg_offsets)[cells] = static_cast<I>(sizes.args);
+        static_cast<I*>(work.relation_offsets)[cells] = static_cast<I>(sizes.tuples);
+        static_cast<I*>(work.relation_arg_offsets)[cells] = static_cast<I>(sizes.args);
+        if (out.node_offsets)
+        {
+            static_cast<I*>(out.node_offsets)[graphs] = static_cast<I>(sizes.entities + sizes.tuples);
+            static_cast<I*>(out.edge_offsets)[graphs] = static_cast<I>(2 * sizes.args);
+        }
     };
     if (options.index == IndexType::I64)
         close(i64{});
@@ -745,7 +797,8 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return encode(in, pool, scratch);
 }
 
-FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const
+FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history,
+                                              u64 nodes, u64 edges) const
 {
     const IndexType index = m_schema->options().index;
     const u64 R = m_schema->num_relations();
@@ -763,17 +816,23 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     const usize entity_offsets = reserve("entity_offsets", itype, shape1(graphs + 1));
     usize entity_role = absent, entity_ref = absent, relation_counts = absent, goal_complete = absent,
           target_offsets = absent, target_entity = absent, target_group = absent, history_offsets = absent,
-          history_entity = absent, history_dt = absent;
+          history_entity = absent, history_dt = absent, relation_offsets = absent, relation_arg_offsets = absent,
+          relation_args = absent, node_offsets = absent, node_label = absent, edge_offsets = absent,
+          edge_index = absent, edge_label = absent;
+    const bool relations = m_schema->emits_relations(), simple = m_schema->emits_simple();
     if (!m_schema->implicit_entity_arrays())
     {
         entity_role = reserve("entity_role", rl::DType::U8, shape1(entities));
         entity_ref = reserve("entity_ref", itype, shape1(entities));
     }
-    if (m_schema->emits_counts())
-        relation_counts = reserve("relation_counts", itype, shape2(graphs, R));
-    const usize relation_offsets = reserve("relation_offsets", itype, shape1(graphs * R + 1));
-    const usize relation_arg_offsets = reserve("relation_arg_offsets", itype, shape1(graphs * R + 1));
-    const usize relation_args = reserve("relation_args", itype, shape1(args));
+    if (relations)
+    {
+        if (m_schema->emits_counts())
+            relation_counts = reserve("relation_counts", itype, shape2(graphs, R));
+        relation_offsets = reserve("relation_offsets", itype, shape1(graphs * R + 1));
+        relation_arg_offsets = reserve("relation_arg_offsets", itype, shape1(graphs * R + 1));
+        relation_args = reserve("relation_args", itype, shape1(args));
+    }
     if (m_schema->has_goal_complete())
         goal_complete = reserve("goal_complete", rl::DType::U8, shape1(graphs));
     if (m_schema->has_targets())
@@ -788,6 +847,14 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
         history_entity = reserve("history_entity", itype, shape1(history));
         history_dt = reserve("history_dt", rl::DType::I32, shape1(history));
     }
+    if (simple)
+    {
+        node_offsets = reserve("node_offsets", itype, shape1(graphs + 1));
+        node_label = reserve("node_label", rl::DType::I32, shape1(nodes));
+        edge_offsets = reserve("edge_offsets", itype, shape1(graphs + 1));
+        edge_index = reserve("edge_index", itype, shape2(2, edges));
+        edge_label = reserve("edge_label", rl::DType::I32, shape1(edges));
+    }
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
     builder.scalar("num_relations", static_cast<i64>(R));
@@ -795,6 +862,11 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
     builder.scalar("statics", 0);
+    if (simple)
+    {
+        builder.scalar("simple_node_labels", m_schema->simple_node_labels());
+        builder.scalar("simple_edge_labels", m_schema->simple_edge_labels());
+    }
     Allocation allocation{std::make_shared<rl::ArrayBundle>(builder.build()), {}};
     rl::ArrayBundle& bundle = *allocation.bundle;
     auto at = [&](usize i) -> void* { return i == absent ? nullptr : bundle.mutable_data(bundle.arrays()[i]); };
@@ -815,6 +887,12 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     out.history_offsets = at(history_offsets);
     out.history_entity = at(history_entity);
     out.history_dt = static_cast<i32*>(at(history_dt));
+    out.node_offsets = at(node_offsets);
+    out.node_label = static_cast<i32*>(at(node_label));
+    out.edge_offsets = at(edge_offsets);
+    out.edge_index = at(edge_index);
+    out.edge_stride = edges;
+    out.edge_label = static_cast<i32*>(at(edge_label));
     return allocation;
 }
 
@@ -834,8 +912,14 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         detail::check_index_range(sizes.history, index, "history steps");
         detail::check_index_range(graphs * R + 1, index, "relation cells");
         detail::check_index_range(graphs + 1, index, "graphs");
+        if (m_schema->emits_simple())
+        {
+            detail::check_index_range(sizes.entities + sizes.tuples, index, "nodes");
+            detail::check_index_range(2 * sizes.args, index, "edges");
+        }
     }
-    Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history);
+    Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history,
+                                     sizes.entities + sizes.tuples, 2 * sizes.args);
     fill(in, sizes, allocation.buffers, pool, scratch);
     return std::move(allocation.bundle);
 }
@@ -852,8 +936,8 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();
-    Allocation allocation =
-        allocate(graphs, capacities.entities, capacities.args, capacities.targets, capacities.history);
+    Allocation allocation = allocate(graphs, capacities.entities, capacities.args, capacities.targets,
+                                     capacities.history, capacities.entities + capacities.args, 2 * capacities.args);
     const FlatBuffers out = allocation.buffers;
     const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
@@ -863,7 +947,16 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
     if (fits)
     {
         fill(in, sizes, out, pool, scratch);
-        zero(out.relation_args, sizes.args, capacities.args, index_bytes);
+        if (out.relation_args)
+            zero(out.relation_args, sizes.args, capacities.args, index_bytes);
+        if (out.node_label)
+        {
+            zero(out.node_label, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
+            zero(out.edge_label, 2 * sizes.args, 2 * capacities.args, 4);
+            zero(out.edge_index, 2 * sizes.args, 2 * capacities.args, index_bytes);
+            zero(static_cast<std::byte*>(out.edge_index) + out.edge_stride * index_bytes, 2 * sizes.args,
+                 2 * capacities.args, index_bytes);
+        }
         if (out.entity_role)
         {
             zero(out.entity_role, sizes.entities, capacities.entities, 1);

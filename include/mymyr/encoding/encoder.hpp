@@ -40,6 +40,24 @@
 // int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
 // tuples are repeated in every graph).
 //
+// The Simple graph. With FlatOptions::outputs holding Simple, a batch also has the atom-object incidence graph of its
+// tuples (it needs the entity arrays), and without Relations in the outputs it has no relation arrays (relation_*) and
+// no relation_counts:
+//   node_offsets         I   [G + 1]   graph g's nodes are [node_offsets[g], node_offsets[g + 1])
+//   node_label           i32 [V]       the label of each node
+//   edge_offsets         I   [G + 1]   graph g's edges are [edge_offsets[g], edge_offsets[g + 1])
+//   edge_index           I   [2, E]    row 0 the source, row 1 the target node of each edge (batch-global ids)
+//   edge_label           i32 [E]       the label of each edge
+// and the scalars simple_node_labels and simple_edge_labels (the sizes of the label vocabularies). Graph g has one node
+// per entity (the node ids of its entities are the entity ids plus the tuples of the graphs before it) followed by one
+// node per tuple, in graph-major tuple order: V is the entities plus the tuples. Every tuple position gives two edges,
+// entity -> atom with the label k (the position) and atom -> entity with the label K + k, K the largest arity of a
+// relation (EncodingSchema::simple_max_arity): the graph's edges are all its forward edges in (tuple, position) order,
+// then all its reverse edges in the same order, so there are twice as many edges as tuple arguments. A node's label is
+// the role of its entity (0 to 8), or 9 + R + j for the j-th object when FlatOptions::constant_labels is set and the
+// object is the j-th constant of the domain, and 9 + r for an atom of relation r. The graph is the same in both layouts
+// and in every call form: the tuples are the ones above.
+//
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
 // layouts are a permutation of each other: task_ids, num_objects, entity_offsets, entity_role, entity_ref,
@@ -270,8 +288,9 @@ private:
         FlatBuffers buffers;
     };
     /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments, `targets`
-    /// targets and `history` history steps.
-    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const;
+    /// targets, `history` history steps and, with the Simple graph, `nodes` nodes and `edges` edges.
+    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history, u64 nodes,
+                                      u64 edges) const;
     /// count() and fill() for a horizon schema (horizon.cpp).
     [[nodiscard]] FlatSizes count_horizon(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
     void fill_horizon(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,

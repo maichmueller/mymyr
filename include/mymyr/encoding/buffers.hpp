@@ -49,8 +49,15 @@ static_assert(sizeof(FlatSizes) == 6 * sizeof(u64));
 /// entity_role, entity_ref, target_entity, target_group, history_entity and history_dt must hold at least the sizes of
 /// the batch (FlatSizes). entity_role and entity_ref must be null iff the schema has implicit entity arrays,
 /// relation_counts iff it does not store counts, goal_complete iff it has no goal relations, the three target arrays
-/// iff it has no targets, the three history arrays iff it has no history. Nothing is written past the sizes: the
-/// entries of the variable-size arrays beyond them keep their old values.
+/// iff it has no targets, the three history arrays iff it has no history. The relation arrays (relation_counts,
+/// relation_offsets, relation_arg_offsets, relation_args) are null iff the schema does not store them
+/// (EncodingSchema::emits_relations), the Simple arrays (node_offsets, node_label, edge_offsets, edge_index,
+/// edge_label) are null iff it does not store the Simple graph. Nothing is written past the sizes: the entries of the
+/// variable-size arrays beyond them keep their old values.
+///
+/// The Simple arrays hold the nodes (entities + tuples of the batch, at most entities + args) and edges (twice the
+/// args): node_label holds at least the nodes and edge_label at least the edges, and edge_index is two rows of
+/// `edge_stride` entries each (at least the edges), row 0 the sources and row 1 the targets.
 struct FlatBuffers
 {
     i32* task_ids = nullptr;
@@ -69,5 +76,11 @@ struct FlatBuffers
     void* history_offsets = nullptr;
     void* history_entity = nullptr;
     i32* history_dt = nullptr;
+    void* node_offsets = nullptr;   // [G + 1]
+    i32* node_label = nullptr;
+    void* edge_offsets = nullptr;   // [G + 1]
+    void* edge_index = nullptr;     // [2, edge_stride]
+    u64 edge_stride = 0;
+    i32* edge_label = nullptr;
 };
 }

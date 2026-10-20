@@ -45,6 +45,8 @@ struct HPass
     bool exclude;
     bool include_root_target;
     const i32* schema_relation;
+    bool simple;  // the batch stores the Simple graph
+    SimpleParams simple_params;
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
     [[nodiscard]] u64 first_node(u64 g) const noexcept { return static_cast<u64>(in.horizon.node_offsets[g]); }
@@ -206,7 +208,7 @@ void count_range(const HPass& p, u32 t)
         m.kin->at.assign(hi - lo, 0);
         m.kin->overflow = k_none;
     }
-    const bool keep_counts = p.relation_major || p.view.num_virtual != 0;
+    const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.simple;
     if (p.relation_major)
         m.tally.assign(p.R, 0);
     m.cell_counts.clear();
@@ -347,6 +349,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
                           nullptr,
                           nullptr,
                           nullptr};
+    const SimpleOut<I> simple{static_cast<I*>(b.node_offsets), static_cast<I*>(b.edge_offsets), b.node_label,
+                              static_cast<I*>(b.edge_index),
+                              b.edge_index ? static_cast<I*>(b.edge_index) + b.edge_stride : nullptr, b.edge_label};
     I* entity_offsets = static_cast<I*>(b.entity_offsets);
     Member& m = p.s.members[t];
     u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start;
@@ -433,6 +438,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         else if (counts)
             for (; r < R; ++r)
                 counts[r] = static_cast<I>(0);
+        if (p.simple)
+            simple_fill_graph<I>(p.simple_params, simple, out, list, graph_counts, p.relation_major, g,
+                                 {entity, totals.entities, tuple, totals.tuples, arg, totals.args});
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
@@ -464,7 +472,10 @@ HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& contex
                  o.horizon.cousin_relation,
                  o.horizon.root == RootPolicy::Exclude,
                  o.horizon.root == RootPolicy::Include,
-                 context.schema().schema_relations().data()};
+                 context.schema().schema_relations().data(),
+                 context.schema().emits_simple(),
+                 SimpleParams{static_cast<u32>(context.schema().num_relations()), context.schema().simple_max_arity(),
+                              context.schema().simple_constants()}};
 }
 }  // namespace
 

@@ -2479,4 +2479,136 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
         for (u32 q = r + grp.lane(); q < R; q += grp.size())
             counts[q] = static_cast<I>(0);
 }
+
+// ------------------------------------------------------------------------------------------------------ Simple
+//
+// The homogeneous atom-object incidence graph of a graph's tuples. Its nodes are the graph's entities, in entity order,
+// then one node per tuple (an atom), in the order of the graph's tuples in the graph-major layout (the cells' tuples in
+// relation order, whatever the layout of the relation arrays). Node j of graph g is the batch-global node
+// node_offsets[g] + j, where node_offsets[g] is the graph's entity base plus the tuples of the graphs before it, so the
+// node of the batch-global entity e of graph g is e + (the tuples before g).
+//
+// The label of an entity node is its role (0 to 8), or, for an object that is one of the first `constants` objects (the
+// domain's constants), 9 + R + its id; the label of an atom node is 9 + the id of its relation. For every tuple t (atom
+// node a) and every position k of its relation, the entity e at that position gives two edges: e -> a with label k and
+// a -> e with label K + k, K the largest encoded arity of a relation. A graph's edges are all its forward edges in
+// (tuple, position) order, then all its reverse edges in the same order: the edges of graph g start at 2 * (the
+// arguments before g), and the argument i of the graph (counted in graph-major tuple order) has the forward edge
+// 2 * (the arguments before g) + i and the reverse edge 2 * (the arguments before g) + (the graph's arguments) + i.
+//
+// The emitters read the arguments that the relation fill has written, so they follow it graph by graph with the cells'
+// counts of the graph.
+
+/// The roles that label an entity node (EntityRole): atom labels follow them.
+inline constexpr u32 k_simple_roles = 9;
+
+/// The vocabulary of the Simple graph.
+struct SimpleParams
+{
+    u32 relations;  // R: the relations of the schema
+    u32 max_arity;  // K: the largest encoded arity of a relation
+    u32 constants;  // the objects that get a label of their own (constant_labels), else 0
+};
+
+/// Where the Simple graph is written: pointers to the batch arrays.
+template<class I>
+struct SimpleOut
+{
+    I* node_offsets;  // [G + 1]
+    I* edge_offsets;  // [G + 1]
+    i32* node_label;  // [V]
+    I* edge_source;   // [E]: row 0 of edge_index
+    I* edge_target;   // [E]: row 1 of edge_index
+    i32* edge_label;  // [E]
+};
+
+/// The place and the size of one graph in the batch.
+struct SimpleGraph
+{
+    u64 entity_base;  // the graph's first entity (batch-global)
+    u64 entities;
+    u64 tuple_base;   // the tuples of the graphs before it
+    u64 tuples;
+    u64 arg_base;     // the tuple arguments of the graphs before it
+    u64 args;
+};
+
+/// Writes the node labels of the graph's entities. `entity_role` is the batch's entity_role.
+template<class I>
+MYMYR_HD void simple_fill_entities(const SimpleParams& params, const SimpleOut<I>& out, const u8* entity_role,
+                                   const SimpleGraph& graph)
+{
+    i32* label = out.node_label + graph.entity_base + graph.tuple_base;
+    const u8* role = entity_role + graph.entity_base;
+    const i32 constants_at = static_cast<i32>(k_simple_roles + params.relations);
+    for (u64 j = 0; j < graph.entities; ++j)
+        label[j] = role[j] == k_role_object && j < params.constants ? constants_at + static_cast<i32>(j)
+                                                                    : static_cast<i32>(role[j]);
+}
+
+/// Writes the atom nodes and the edges of the `n` tuples of one cell: `args` are the cell's arguments (batch-global
+/// entity ids, `arity` per tuple), `graph_tuple` is the index of the cell's first tuple among the graph's tuples and
+/// `graph_arg` the index of its first argument among the graph's arguments (both in graph-major order).
+template<class I>
+MYMYR_HD void simple_emit_cell(const SimpleParams& params, const SimpleOut<I>& out, const SimpleGraph& graph,
+                               u32 relation, u32 arity, u32 n, const I* args, u64 graph_tuple, u64 graph_arg)
+{
+    const i32 atom_label = static_cast<i32>(k_simple_roles + relation);
+    const i32 back = static_cast<i32>(params.max_arity);
+    const u64 shift = graph.tuple_base;
+    I* const forward_source = out.edge_source + 2 * graph.arg_base + graph_arg;
+    I* const forward_target = out.edge_target + 2 * graph.arg_base + graph_arg;
+    i32* const forward_label = out.edge_label + 2 * graph.arg_base + graph_arg;
+    I* const back_source = forward_source + graph.args;
+    I* const back_target = forward_target + graph.args;
+    i32* const back_label = forward_label + graph.args;
+    const u64 first_atom = graph.entity_base + graph.tuple_base + graph.entities + graph_tuple;
+    for (u32 k = 0; k < n; ++k)
+    {
+        const I atom = static_cast<I>(first_atom + k);
+        out.node_label[first_atom + k] = atom_label;
+        const u64 at = static_cast<u64>(k) * arity;
+        for (u32 slot = 0; slot < arity; ++slot)
+        {
+            const I entity = static_cast<I>(static_cast<u64>(args[at + slot]) + shift);
+            forward_source[at + slot] = entity;
+            forward_target[at + slot] = atom;
+            forward_label[at + slot] = static_cast<i32>(slot);
+            back_source[at + slot] = atom;
+            back_target[at + slot] = entity;
+            back_label[at + slot] = back + static_cast<i32>(slot);
+        }
+    }
+}
+
+/// Writes graph `g` of the Simple graph after its relation tuples are written: its entry of node_offsets and
+/// edge_offsets, the labels of its entities and its atoms, and its edges. `cells` are the graph's cells and
+/// `cell_counts` their tuple counts (the counts of count_graph, one per cell); `out` is the destination of the relation
+/// arrays (entity_role, relation_args and, relation-major, relation_arg_offsets). The end entries of the two offset
+/// arrays are the caller's.
+template<class I>
+MYMYR_HD void simple_fill_graph(const SimpleParams& params, const SimpleOut<I>& simple, const GraphOut<I>& out,
+                                const CellList& cells, const u32* cell_counts, bool relation_major, u64 g,
+                                const SimpleGraph& graph)
+{
+    simple.node_offsets[g] = static_cast<I>(graph.entity_base + graph.tuple_base);
+    simple.edge_offsets[g] = static_cast<I>(2 * graph.arg_base);
+    simple_fill_entities<I>(params, simple, out.entity_role, graph);
+    u64 graph_tuple = 0, graph_arg = 0;
+    for (u32 i = 0; i < cells.count; ++i)
+    {
+        const u32 n = cell_counts[i];
+        if (n == 0)
+            continue;
+        const Cell& c = cells.cells[i];
+        const u64 at = relation_major
+                           ? static_cast<u64>(out.relation_arg_offsets[cell_segment(true, g, c.relation, out.graphs,
+                                                                                    params.relations)])
+                           : graph.arg_base + graph_arg;
+        simple_emit_cell<I>(params, simple, graph, c.relation, c.arity, n, out.relation_args + at, graph_tuple,
+                            graph_arg);
+        graph_tuple += n;
+        graph_arg += static_cast<u64>(n) * c.arity;
+    }
+}
 }  // namespace mymyr::encoding::detail

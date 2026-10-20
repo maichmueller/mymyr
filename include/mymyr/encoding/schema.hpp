@@ -52,6 +52,9 @@ struct DomainSignature
     };
     std::vector<Predicate> predicates;
     std::vector<ActionSchema> schemas;
+    /// The constants of the domain, in declaration order: they are the first objects of every instance, so the
+    /// constant with index c is the object with id c.
+    std::vector<std::string> constants;
 
     /// The domain of a task table: its domain predicates (the front end's helper predicates for quantified conditions
     /// among them; the predicates only a problem's axioms define are not part of it) and its action schemas. Throws
@@ -235,9 +238,36 @@ public:
     /// Whether the schema has subgoal relations: goal relations of a level above 0, including the ones of a horizon.
     [[nodiscard]] bool has_subgoals() const noexcept { return m_subgoals; }
 
+    /// Whether a batch stores the relation arrays (relation_counts, relation_offsets, relation_arg_offsets and
+    /// relation_args): FlatOptions::outputs has Relations.
+    [[nodiscard]] bool emits_relations() const noexcept { return m_options.outputs.contains(Output::Relations); }
+    /// Whether a batch stores the Simple graph (node_offsets, node_label, edge_offsets, edge_index and edge_label):
+    /// FlatOptions::outputs has Simple.
+    [[nodiscard]] bool emits_simple() const noexcept { return m_options.outputs.contains(Output::Simple); }
+    /// The largest encoded arity of a relation, K: slot k of an atom's tuple labels its edge to the entity k, and the
+    /// edge back has the label K + k. At least 1.
+    [[nodiscard]] u32 simple_max_arity() const noexcept { return m_simple_max_arity; }
+    /// The domain's constants a node label of its own is given with FlatOptions::constant_labels (otherwise 0).
+    [[nodiscard]] u32 simple_constants() const noexcept { return m_simple_constants; }
+    /// The number of node labels of the Simple graph: the 9 entity roles, then one per relation, then one per
+    /// constant with constant_labels.
+    [[nodiscard]] u32 simple_node_labels() const noexcept
+    {
+        return static_cast<u32>(k_entity_role_names.size()) + num_relations() + m_simple_constants;
+    }
+    /// The number of edge labels of the Simple graph, 2K.
+    [[nodiscard]] u32 simple_edge_labels() const noexcept { return 2 * m_simple_max_arity; }
+    /// The name of each node label: the entity role names, then the relation names, then the constant names. Label
+    /// 9 + r is relation r; with constant_labels label 9 + R + c is the constant c.
+    [[nodiscard]] std::vector<std::string> simple_label_names() const;
+    /// The name of each edge label: "<k>" for the edge from the entity at position k of an atom to the atom, "<k>^-1"
+    /// for the edge back (label K + k).
+    [[nodiscard]] std::vector<std::string> simple_edge_label_names() const;
+
     /// A 64-bit hash of the catalog (names, lanes, arities, slot roles), the rule version, and the options that shape
     /// the encoded arrays beyond the catalog: the layout, the index type, whether relation_counts and the entity arrays
-    /// are stored, the target sources, the history lane with its step limit, and the horizon mode and root policy. It
+    /// are stored, the target sources, the history lane with its step limit, the horizon mode and root policy, and the
+    /// outputs and constant labels when they differ from the default (relations only, no constant labels). It
     /// does not depend on the declaration order of the domain, on predicate or schema ids, or on the process or the
     /// build.
     [[nodiscard]] u64 fingerprint() const noexcept { return m_fingerprint; }
@@ -253,6 +283,9 @@ private:
     std::vector<i32> m_virtual_key;
     std::vector<i32> m_virtual_rank;
     u32 m_num_virtual_predicates = 0;
+    u32 m_simple_max_arity = 1;
+    u32 m_simple_constants = 0;
+    std::vector<std::string> m_constants;
     bool m_implicit_entities = false;
     bool m_goal_complete = false;
     bool m_subgoals = false;

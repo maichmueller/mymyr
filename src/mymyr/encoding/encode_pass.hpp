@@ -8,6 +8,7 @@
 #include "mymyr/encoding/encoder.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <functional>
 #include <limits>
@@ -72,6 +73,8 @@ struct EncodeScratch::Impl
     FlatSizes sizes;
 
     std::vector<u32> arity;          // [R] the arguments per tuple of each relation
+    std::unique_ptr<std::byte[]> relation_scratch;  // the relation arrays of an encoding that does not store them
+    u64 relation_scratch_bytes = 0;
     std::unique_ptr<u64[]> derived;  // [rows, derived_stride] when the rows' derived words are evaluated here
     u64 derived_capacity = 0;
     u64 derived_stride = 0;
@@ -239,6 +242,8 @@ inline FlatSizes scan_members(EncodeScratch::Impl& s, const EncodingSchema& sche
                                                                                  : std::numeric_limits<i32>::max());
     if (entities > limit || tuples > limit || args > limit || targets > limit || history > limit ||
         graphs * R + 1 > limit || graphs + 1 > limit)
+        sizes.overflow |= k_overflow_index;
+    if (schema.emits_simple() && (entities + tuples > limit || 2 * args > limit))
         sizes.overflow |= k_overflow_index;
     return sizes;
 }

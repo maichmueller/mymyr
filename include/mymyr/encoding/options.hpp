@@ -69,8 +69,17 @@ enum class TargetSource : u8
     History,
 };
 
+/// What an encoding stores. Relations is the relation tuples (the relation_* arrays); Simple is the homogeneous
+/// atom-object incidence graph built from the same tuples (the node_*, edge_* arrays).
+enum class Output : u8
+{
+    Relations,
+    Simple,
+};
+
 using GoalDerivations = EnumSet<GoalDerivation>;
 using TargetSources = EnumSet<TargetSource>;
+using Outputs = EnumSet<Output>;
 
 /// Order of the tuples of a batch: Graph groups them by graph and then by relation, Relation by relation and then by
 /// graph (all tuples of a relation are contiguous across the graphs).
@@ -165,6 +174,13 @@ struct FlatOptions
     bool history = false;
     /// With history, the newest this many steps of a row are encoded (at least 1; nullopt: all of them).
     std::optional<u32> history_max_steps = std::nullopt;
+    /// The arrays a batch stores: the relation arrays, the Simple graph, or both. Simple needs no predicate virtual
+    /// nodes and stores the entity arrays; without Relations a batch has no relation arrays (and the layout and
+    /// emit_counts have no meaning, so they stay at their defaults).
+    Outputs outputs{Output::Relations};
+    /// Simple: an object that is a constant of the domain gets a node label of its own (otherwise every object has the
+    /// label of its role). Needs the Simple output.
+    bool constant_labels = false;
     Layout layout = Layout::Graph;
     IndexType index = IndexType::I32;
     /// Stores `relation_counts`. Without it, the tuples of a cell are the difference of two consecutive
@@ -187,12 +203,14 @@ struct FlatOptions
 /// - added goal derivations without the delta horizon mode;
 /// - targets together with a horizon mode (the state nodes are the targets of a horizon);
 /// - the action horizon mode without action relations;
-/// - a parent, sibling or cousin relation, or a root policy other than Include, without a horizon mode.
+/// - a parent, sibling or cousin relation, or a root policy other than Include, without a horizon mode;
+/// - no output, constant_labels without the Simple output, the Simple output with predicate virtual nodes or with
+///   entity_arrays = auto, and, without the Relations output, a layout other than Graph or emit_counts = false.
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
 /// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "none", "full", "delta",
-/// "action"; "include", "exclude", "encode_only"), and its inverse: nullopt for text that names no enumerator.
+/// "action"; "include", "exclude", "encode_only"; "relations", "simple"), and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
 [[nodiscard]] std::string_view to_string(Layout value) noexcept;
@@ -200,6 +218,7 @@ struct FlatOptions
 [[nodiscard]] std::string_view to_string(IndexType value) noexcept;
 [[nodiscard]] std::string_view to_string(HorizonMode value) noexcept;
 [[nodiscard]] std::string_view to_string(RootPolicy value) noexcept;
+[[nodiscard]] std::string_view to_string(Output value) noexcept;
 [[nodiscard]] std::optional<GoalDerivation> parse_goal_derivation(std::string_view text) noexcept;
 [[nodiscard]] std::optional<TargetSource> parse_target_source(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
@@ -207,4 +226,5 @@ struct FlatOptions
 [[nodiscard]] std::optional<IndexType> parse_index_type(std::string_view text) noexcept;
 [[nodiscard]] std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept;
 [[nodiscard]] std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept;
+[[nodiscard]] std::optional<Output> parse_output(std::string_view text) noexcept;
 }

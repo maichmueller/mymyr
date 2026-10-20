@@ -363,6 +363,16 @@ DomainSignature DomainSignature::of(const rl::TaskTable& table)
     }
     for (u32 s = 0; s < table.num_schemas(); ++s)
         domain.schemas.push_back({table.schema_names()[s], table.schema_arities()[s]});
+    if (table.size() != 0)
+    {
+        const formalism::TaskData& data = table.instance(0).task->data();
+        for (const formalism::Object& object : data.objects)
+        {
+            if (!object.constant)
+                break;
+            domain.constants.emplace_back(data.str(object.name));
+        }
+    }
     return domain;
 }
 
@@ -462,6 +472,13 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
                    r.level.value_or(0) > 0;
         });
     const FlatOptions& o = schema->m_options;
+    for (const Relation& relation : schema->m_relations)
+        schema->m_simple_max_arity = std::max(schema->m_simple_max_arity, relation.arity);
+    if (o.constant_labels)
+    {
+        schema->m_constants = domain.constants;
+        schema->m_simple_constants = static_cast<u32>(domain.constants.size());
+    }
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
                                   !o.predicate_virtual_nodes && !o.include_actions && !o.history &&
                                   o.horizon.mode == HorizonMode::None;
@@ -484,6 +501,18 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     }
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));
+    if (o.outputs != Outputs{Output::Relations})
+    {
+        hasher.text("outputs");
+        hasher.integer(o.outputs.bits());
+    }
+    if (o.constant_labels)
+    {
+        hasher.text("constant labels");
+        hasher.integer(domain.constants.size());
+        for (const std::string& constant : domain.constants)
+            hasher.text(constant);
+    }
     hasher.integer(schema->m_relations.size());
     for (u32 id = 0; id < schema->m_relations.size(); ++id)
     {
@@ -496,6 +525,29 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     }
     schema->m_fingerprint = hasher.value();
     return schema;
+}
+
+std::vector<std::string> EncodingSchema::simple_label_names() const
+{
+    std::vector<std::string> names;
+    names.reserve(simple_node_labels());
+    for (const std::string_view role : k_entity_role_names)
+        names.emplace_back(role);
+    for (const Relation& relation : m_relations)
+        names.push_back(relation.name);
+    names.insert(names.end(), m_constants.begin(), m_constants.end());
+    return names;
+}
+
+std::vector<std::string> EncodingSchema::simple_edge_label_names() const
+{
+    std::vector<std::string> names;
+    names.reserve(simple_edge_labels());
+    for (u32 k = 0; k < m_simple_max_arity; ++k)
+        names.push_back(std::to_string(k));
+    for (u32 k = 0; k < m_simple_max_arity; ++k)
+        names.push_back(std::to_string(k) + "^-1");
+    return names;
 }
 
 std::optional<u32> EncodingSchema::find(std::string_view name) const
