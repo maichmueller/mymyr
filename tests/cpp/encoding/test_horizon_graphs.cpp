@@ -33,7 +33,6 @@ struct Successor
     i32 schema;
     std::vector<i32> binding;
     Row row;
-    [[nodiscard]] friend bool operator==(const Successor&, const Successor&) = default;
 };
 
 std::vector<Successor> successors(const rl::TaskTable& table, const Row& state, i32 id)

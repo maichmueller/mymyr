@@ -53,7 +53,6 @@ struct RefAtom
     std::string name;
     std::vector<i32> objects;
     [[nodiscard]] friend bool operator<(const RefAtom& a, const RefAtom& b) { return std::tie(a.name, a.objects) < std::tie(b.name, b.objects); }
-    [[nodiscard]] friend bool operator==(const RefAtom& a, const RefAtom& b) = default;
 };
 using AtomSet = std::set<RefAtom>;
 
