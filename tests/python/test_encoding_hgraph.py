@@ -171,6 +171,8 @@ def test_empty_and_single_row_batches():
 
 # ------------------------------------------------------------------------------------------------ the nullary relations
 def test_a_nullary_relation_has_an_edge_to_the_auxiliary_entity_exactly_where_it_has_a_tuple():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
     task = mymyr.Task.from_pddl(ROOT / "tests/data/pddl/blocks/domain.pddl", ROOT / "tests/data/pddl/blocks/smedium.pddl")
     first = task.initial_state
     held = next(s for s in task.successor_states(first) if "handempty" not in {a.predicate.name for a in s.atoms()})
@@ -191,6 +193,8 @@ def test_a_nullary_relation_has_an_edge_to_the_auxiliary_entity_exactly_where_it
 
 
 def test_nullary_goal_literals_have_edges_to_the_auxiliary_entity():
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
     task = mymyr.Task.from_pddl(ROOT / "tests/data/pddl/blocks_flags/domain.pddl",
                                 ROOT / "tests/data/pddl/blocks_flags/p01.pddl")
     encoder = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False, goal_derivations=GOALS,
