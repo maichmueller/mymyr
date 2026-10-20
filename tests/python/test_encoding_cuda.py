@@ -898,6 +898,7 @@ def test_graph_capacity_is_checked_before_device_encoding(cases):
         rt.unregister(handle)
 
 
+@pytest.mark.needs_gil
 def test_the_op_refuses_host_rows_with_a_value_error():
     task = text_task("gripper__prob05")
     encoder = encoding.FlatRelationEncoder(task)
