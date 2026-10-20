@@ -11,6 +11,7 @@
 #include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/encoding/schema.hpp"
 #include "mymyr/encoding/stream.hpp"
+#include "mymyr/encoding/validate.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -18,6 +19,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
+#include <bit>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -69,6 +73,9 @@ struct EncodingHorizonModeRequired
 {
 };
 struct EncodingBatch
+{
+};
+struct EncodingArrays
 {
 };
 struct EncodingEntityArrays
@@ -146,6 +153,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingBatch>
 {
     static constexpr auto Name = const_name("FlatBatch | mymyr._typing.DeviceFlatBatch");
+};
+template<>
+struct type_caster<mymyr::python::ann::EncodingArrays>
+{
+    static constexpr auto Name = const_name("collections.abc.Mapping[str, typing.Any]");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
@@ -670,6 +682,10 @@ void define_schema_properties(nb::class_<Py>& cls, SchemaOf schema_of)
         .def_prop_ro(
             "schema_fingerprint", [schema_of](const Py& self) { return schema_of(self).fingerprint(); },
             "A 64-bit hash of the catalog and the options that shape the output; stable across processes and builds.")
+        .def_prop_ro(
+            "version", [](const Py&) { return encoding::k_schema_version; },
+            "The version of the catalog rules, which the fingerprint includes: schemas of different versions differ in "
+            "their catalog or its order for the same domain and options.")
         .def(
             "relation_id",
             [schema_of](const Py& self, const std::string& name)
@@ -1027,6 +1043,91 @@ PyFlatBatch run_encoding(PyFlatEncoder& self, ImportedRows& rows, Framework fram
     return run_encoding(self, rows, framework, threads, pool_in, capacities, [](ThreadPool&) {});
 }
 
+/// The destination arrays inside the bundle of `batch`, which must have been made for `caps` and `graphs` rows of
+/// `schema` (ValueError otherwise). The bundle is written in place: the batch was handed out as const, but its memory
+/// is the encoder's own block.
+encoding::FlatBuffers reusable_buffers(const encoding::EncodingSchema& schema, const PyFlatBatch& batch,
+                                       const encoding::BatchShape& caps, u64 graphs)
+{
+    auto refuse = [](const std::string& why) { throw nb::value_error(("mymyr: encoding: into " + why).c_str()); };
+    if (!batch.sizes)
+        refuse("must be a batch encoded with capacities");
+    if (batch.schema->fingerprint() != schema.fingerprint() || batch.schema->num_relations() != schema.num_relations())
+        refuse("is a batch of another schema");
+    if (batch.arrays->scalar("num_graphs") != static_cast<i64>(graphs))
+        refuse("has " + std::to_string(batch.arrays->scalar("num_graphs")) + " graphs, the call " + std::to_string(graphs));
+    encoding::FlatBuffers out;
+    auto at = [&](const char* name, u64 elements) -> void*
+    {
+        const rl::ArrayInfo* info = batch.arrays->find(name);
+        if (!info)
+            return nullptr;
+        if (elements != std::numeric_limits<u64>::max() && info->elements() != elements)
+            refuse(std::string("has ") + std::to_string(info->elements()) + " entries in '" + name +
+                   "', the capacities ask for " + std::to_string(elements));
+        return const_cast<void*>(batch.arrays->data(*info));
+    };
+    constexpr u64 any = std::numeric_limits<u64>::max();
+    out.task_ids = static_cast<i32*>(at("task_ids", any));
+    out.num_objects = at("num_objects", any);
+    out.entity_offsets = at("entity_offsets", any);
+    out.entity_role = static_cast<u8*>(at("entity_role", caps.entities));
+    out.entity_ref = at("entity_ref", caps.entities);
+    out.relation_counts = at("relation_counts", any);
+    out.relation_offsets = at("relation_offsets", any);
+    out.relation_arg_offsets = at("relation_arg_offsets", any);
+    out.relation_args = at("relation_args", caps.args);
+    out.goal_complete = static_cast<u8*>(at("goal_complete", any));
+    out.target_offsets = at("target_offsets", any);
+    out.target_entity = at("target_entity", caps.targets);
+    out.target_group = static_cast<u8*>(at("target_group", caps.targets));
+    out.history_offsets = at("history_offsets", any);
+    out.history_entity = at("history_entity", caps.history);
+    out.history_dt = static_cast<i32*>(at("history_dt", caps.history));
+    return out;
+}
+
+/// Encodes the imported rows into the arrays of `batch` (a batch of the same schema, rows and capacities), as
+/// encode_capacity does into a new one: the entries past the sizes are zero, and a batch that does not fit is all zero.
+void encode_into_batch(PyFlatEncoder& self, ImportedRows& rows, u32 threads, PoolArg pool_in,
+                       const encoding::BatchShape& caps, PyFlatBatch& batch)
+{
+    const encoding::EncodingSchema& schema = self.encoder->schema();
+    const encoding::FlatBuffers out = reusable_buffers(schema, batch, caps, rows.input.states.rows);
+    encoding::EncodeScratch& scratch = encoding::EncodeScratch::of_this_thread();
+    encoding::FlatSizes sizes;
+    run_on_pool(self, threads, pool_in,
+                [&](ThreadPool& pool) { sizes = self.encoder->encode_into(rows.input, caps, out, pool, scratch); });
+    const usize width = schema.options().index == encoding::IndexType::I64 ? 8 : 4;
+    auto zero = [](void* data, u64 from, u64 to, usize bytes)
+    { std::memset(static_cast<std::byte*>(data) + from * bytes, 0, (to - from) * bytes); };
+    if (sizes.overflowed())
+    {
+        for (const rl::ArrayInfo& info : batch.arrays->arrays())
+            std::memset(const_cast<void*>(batch.arrays->data(info)), 0, info.elements() * rl::dtype_bytes(info.dtype));
+    }
+    else
+    {
+        zero(out.relation_args, sizes.args, caps.args, width);
+        if (out.entity_role)
+        {
+            zero(out.entity_role, sizes.entities, caps.entities, 1);
+            zero(out.entity_ref, sizes.entities, caps.entities, width);
+        }
+        if (out.target_entity)
+        {
+            zero(out.target_entity, sizes.targets, caps.targets, width);
+            zero(out.target_group, sizes.targets, caps.targets, 1);
+        }
+        if (out.history_entity)
+        {
+            zero(out.history_entity, sizes.history, caps.history, width);
+            zero(out.history_dt, sizes.history, caps.history, 4);
+        }
+    }
+    batch.sizes = sizes;
+}
+
 /// A NumPy array, which is never on the device: the check that keeps host encodes at their cost.
 bool is_numpy_array(nb::handle value)
 {
@@ -1064,13 +1165,15 @@ bool on_device(nb::handle value, bool masks = false)
 Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
                                GoalsArg goals_arg, ActionsArg actions_arg, SubgoalsArg subgoals_arg,
                                HistoryArg history_arg, Arg<ann::Framework> framework, IntArg threads_in,
-                               PoolArg pool_in, CapacitiesArg capacities_in)
+                               PoolArg pool_in, CapacitiesArg capacities_in, Arg<PyFlatBatch> into)
 {
     const u32 threads = threads_arg(threads_in);
     if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg, true))
     {
         if (!subgoals_arg.is_none() || !history_arg.is_none())
             throw nb::value_error("mymyr: encoding: subgoals and history are not encoded on the device");
+        if (!into.is_none())
+            throw nb::value_error("mymyr: encoding: into is for rows in host memory");
         return Arg<ann::EncodingBatch>(
             nb::module_::import_("mymyr.encoding._device")
                 .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,
@@ -1082,6 +1185,15 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
     ImportedRows rows;
     import_rows(rows, *self.encoder, state_arg, task_ids, derived_arg, goals_arg, actions_arg, subgoals_arg,
                 history_arg);
+    if (!into.is_none())
+    {
+        if (!nb::isinstance<PyFlatBatch>(into))
+            throw nb::type_error("mymyr: encoding: into must be a FlatBatch");
+        if (!capacities)
+            throw nb::value_error("mymyr: encoding: into needs capacities");
+        encode_into_batch(self, rows, threads, pool_in, *capacities, nb::cast<PyFlatBatch&>(into));
+        return Arg<ann::EncodingBatch>(into);
+    }
     return Arg<ann::EncodingBatch>(
         nb::cast(run_encoding(self, rows, parse_framework(framework, state_arg), threads, pool_in, capacities)));
 }
@@ -1611,6 +1723,232 @@ void define_encoder_common(nb::class_<Py, Extra...>& cls, const char* class_name
     define_reduce(cls, class_name);
 }
 
+// ------------------------------------------------------------------------------------------------ batches from arrays
+
+using BatchArraysArg = Arg<ann::EncodingArrays>;
+using SizesArg = std::optional<nb::typed<nb::dict, std::string, ann::Any>>;
+
+constexpr const char* k_batch_scalars[] = {"version", "num_graphs", "num_relations", "layout",
+                                           "index_dtype", "schema_fingerprint", "statics"};
+
+bool is_batch_array_name(std::string_view name)
+{
+    for (const auto& entry : k_batch_arrays)
+        if (name == entry.first)
+            return true;
+    return false;
+}
+
+/// An integer scalar of a dictionary of batch arrays: a Python or NumPy integer (also 0-d).
+i64 batch_scalar_value(nb::handle value, const std::string& name)
+{
+    nb::object number = nb::steal(PyNumber_Index(value.ptr()));
+    if (!number.is_valid())
+    {
+        PyErr_Clear();
+        number = nb::steal(PyNumber_Long(value.ptr()));
+        if (!number.is_valid())
+        {
+            PyErr_Clear();
+            throw nb::type_error(("mymyr: encoding: the batch's '" + name + "' must be an integer").c_str());
+        }
+    }
+    int overflow = 0;
+    const long long out = PyLong_AsLongLongAndOverflow(number.ptr(), &overflow);
+    if (overflow != 0)
+    {
+        // a fingerprint above 2^63 - 1 is stored as the signed value of the same bits
+        const unsigned long long bits = PyLong_AsUnsignedLongLongMask(number.ptr());
+        return std::bit_cast<i64>(static_cast<u64>(bits));
+    }
+    if (out == -1 && PyErr_Occurred())
+        throw nb::python_error();
+    return out;
+}
+
+/// The array `value` of a batch (host memory, int32, int64 or uint8, at most two dimensions) as bytes in C order.
+void add_batch_array(rl::ArrayBundle::Builder& builder, const std::string& name, nb::handle value)
+{
+    nb::ndarray<nb::ro> array;
+    if (!nb::try_cast(value, array, false) || array.device_type() != nb::device::cpu::value)
+        throw nb::type_error(
+            ("mymyr: encoding: the batch's '" + name + "' must be an array in host memory (NumPy, or a DLPack array on the CPU)")
+                .c_str());
+    rl::DType dtype;
+    if (array.dtype() == nb::dtype<i32>())
+        dtype = rl::DType::I32;
+    else if (array.dtype() == nb::dtype<i64>())
+        dtype = rl::DType::I64;
+    else if (array.dtype() == nb::dtype<u8>() || array.dtype() == nb::dtype<bool>())
+        dtype = rl::DType::U8;
+    else
+        throw nb::type_error(("mymyr: encoding: the batch's '" + name + "' must be an int32, int64 or uint8 array").c_str());
+    if (array.ndim() < 1 || array.ndim() > 2)
+        throw nb::value_error(("mymyr: encoding: the batch's '" + name + "' must have one or two dimensions").c_str());
+    const usize item = array.dtype().bits / 8;
+    std::vector<i64> shape(array.ndim());
+    u64 count = 1;
+    for (usize i = 0; i < array.ndim(); ++i)
+        count *= static_cast<u64>(shape[i] = static_cast<i64>(array.shape(i)));
+    std::vector<std::byte> bytes(count * item);
+    const auto* base = static_cast<const std::byte*>(array.data());
+    if (array.ndim() == 1)
+    {
+        const i64 stride = array.stride(0);
+        for (u64 i = 0; i < count; ++i)
+            std::memcpy(bytes.data() + i * item, base + static_cast<i64>(i) * stride * static_cast<i64>(item), item);
+    }
+    else
+    {
+        const u64 columns = static_cast<u64>(shape[1]);
+        for (u64 r = 0; r < static_cast<u64>(shape[0]); ++r)
+            for (u64 c = 0; c < columns; ++c)
+                std::memcpy(bytes.data() + (r * columns + c) * item,
+                            base + (static_cast<i64>(r) * array.stride(0) + static_cast<i64>(c) * array.stride(1)) *
+                                       static_cast<i64>(item),
+                            item);
+    }
+    builder.add_bytes(rl::ArrayName(name), dtype, rl::ArrayShape(shape), std::move(bytes), false);
+}
+
+/// The sizes of a batch with capacities, from the dictionary `FlatBatch.sizes` gives.
+encoding::FlatSizes sizes_of(nb::handle dict)
+{
+    auto field = [&](const char* key) -> nb::object
+    {
+        nb::object value = nb::steal(PyObject_GetItem(dict.ptr(), nb::str(key).ptr()));
+        if (!value.is_valid())
+        {
+            PyErr_Clear();
+            return nb::none();
+        }
+        return value;
+    };
+    encoding::FlatSizes out;
+    auto number = [&](const char* key, u64& slot, bool required)
+    {
+        nb::object value = field(key);
+        if (value.is_none())
+        {
+            if (required)
+                throw nb::value_error(("mymyr: encoding: sizes has no '" + std::string(key) + "'").c_str());
+            return;
+        }
+        const i64 n = batch_scalar_value(value, key);
+        if (n < 0)
+            throw nb::value_error(("mymyr: encoding: sizes['" + std::string(key) + "'] is negative").c_str());
+        slot = static_cast<u64>(n);
+    };
+    number("entities", out.entities, true);
+    number("tuples", out.tuples, true);
+    number("args", out.args, true);
+    number("targets", out.targets, true);
+    number("history", out.history, false);
+    auto flag = [&](const char* key)
+    {
+        nb::object value = field(key);
+        return !value.is_none() && PyObject_IsTrue(value.ptr()) == 1;
+    };
+    out.overflow = (flag("capacity_overflow") ? encoding::k_overflow_capacity : 0) |
+                   (flag("index_overflow") ? encoding::k_overflow_index : 0) |
+                   (flag("invalid_input") ? encoding::k_overflow_input : 0);
+    return out;
+}
+
+/// A batch of `schema` from its arrays and scalars (the dictionary `FlatBatch.as_dict` gives, or what NumPy saves and
+/// loads of it): the arrays are copied, and the bundle is checked against the schema's array contract.
+PyFlatBatch batch_from_arrays(const PyEncodingSchema& schema, nb::handle arrays, nb::handle sizes_arg,
+                              Arg<ann::Framework> framework)
+{
+    if (!PyMapping_Check(arrays.ptr()) || !nb::hasattr(arrays, "keys"))
+        throw nb::type_error("mymyr: encoding: the arrays of a batch must be a mapping of names to arrays (as as_dict gives them)");
+    rl::ArrayBundle::Builder builder;
+    std::map<std::string, i64> scalars;
+    bool any_array = false;
+    nb::object keys = nb::steal(PyMapping_Keys(arrays.ptr()));
+    if (!keys.is_valid())
+        throw nb::python_error();
+    // the arrays in the order of the contract, so that the block does not depend on the order of the mapping
+    std::vector<std::pair<std::string, nb::object>> found;
+    for (nb::handle key : keys)
+    {
+        if (!nb::isinstance<nb::str>(key))
+            throw nb::type_error("mymyr: encoding: the names of a batch's arrays must be strings");
+        const std::string name = nb::cast<std::string>(key);
+        nb::object value = nb::steal(PyObject_GetItem(arrays.ptr(), key.ptr()));
+        if (!value.is_valid())
+            throw nb::python_error();
+        if (std::ranges::find(k_batch_scalars, name) != std::end(k_batch_scalars))
+            scalars[name] = batch_scalar_value(value, name);
+        else if (is_batch_array_name(name))
+            found.emplace_back(name, std::move(value));
+        else
+            throw nb::value_error(("mymyr: encoding: unknown batch array '" + name + "'").c_str());
+    }
+    for (const auto& entry : k_batch_arrays)
+        for (const auto& [name, value] : found)
+            if (name == entry.first)
+            {
+                add_batch_array(builder, name, value);
+                any_array = true;
+            }
+    for (const char* name : k_batch_scalars)
+    {
+        const auto at = scalars.find(name);
+        if (at == scalars.end())
+            throw nb::value_error(("mymyr: encoding: the batch has no '" + std::string(name) + "'").c_str());
+        builder.scalar(rl::ArrayName(name), at->second);
+    }
+    if (!any_array)
+        throw nb::value_error("mymyr: encoding: the batch has no arrays");
+    PyFlatBatch out;
+    out.schema = schema.schema;
+    out.framework = parse_framework(framework);
+    auto bundle = std::make_shared<const rl::ArrayBundle>(builder.build());
+    if (!sizes_arg.is_none())
+    {
+        const encoding::FlatSizes sizes = sizes_of(sizes_arg);
+        if (sizes.overflowed())
+        {
+            // a batch that did not fit its capacities is all zero and holds no encoding to check
+            for (const rl::ArrayInfo& info : bundle->arrays())
+            {
+                const auto* bytes = static_cast<const unsigned char*>(bundle->data(info));
+                for (u64 i = 0; i < info.elements() * rl::dtype_bytes(info.dtype); ++i)
+                    if (bytes[i] != 0)
+                        throw nb::value_error(
+                            ("mymyr: encoding: the sizes say the batch overflowed, but '" + std::string(info.name.view()) +
+                             "' is not zero")
+                                .c_str());
+            }
+        }
+        else
+        {
+            encoding::validate(*bundle, *schema.schema);
+            const bool wide = bundle->scalar("index_dtype") == 1;
+            auto last = [&](const char* name) -> u64
+            {
+                const rl::ArrayInfo* info = bundle->find(name);
+                if (!info || info->elements() == 0)
+                    return 0;
+                const auto* p = static_cast<const std::byte*>(bundle->data(*info));
+                const u64 at = info->elements() - 1;
+                return wide ? static_cast<u64>(reinterpret_cast<const i64*>(p)[at])
+                            : static_cast<u64>(reinterpret_cast<const i32*>(p)[at]);
+            };
+            if (sizes.entities != last("entity_offsets") || sizes.args != last("relation_arg_offsets") ||
+                (schema.schema->has_targets() && sizes.targets != last("target_offsets")) ||
+                (schema.schema->has_history() && sizes.history != last("history_offsets")))
+                throw nb::value_error("mymyr: encoding: the sizes do not match the batch's offsets");
+        }
+        out.sizes = sizes;
+    }
+    else
+        encoding::validate(*bundle, *schema.schema);
+    out.arrays = std::move(bundle);
+    return out;
+}
+
 std::shared_ptr<const encoding::FlatEncoder> flat_encoder_of(nb::handle obj)
 {
     return nb::cast<const PyFlatEncoder&>(obj).encoder;
@@ -1685,6 +2023,22 @@ void bind_encoding(nb::module_& parent)
             "arrays of the batch, zero-copy, in the framework (default: the batch's).");
     for (const auto& [name, doc] : k_batch_arrays)
         batch.def_prop_ro(name, [name = name](const PyFlatBatch& self) { return ArrayOut(batch_array(self, name)); }, doc);
+    batch.def_static(
+        "from_arrays",
+        [](const PyEncodingSchema& schema, BatchArraysArg arrays, SizesArg sizes, Arg<ann::Framework> framework)
+        {
+            const nb::object none = nb::none();
+            return batch_from_arrays(schema, arrays, sizes ? nb::handle(*sizes) : nb::handle(none), framework);
+        },
+        "schema"_a, "arrays"_a, nb::kw_only(), "sizes"_a = nb::none(), "framework"_a = nb::none(),
+        "The batch of `schema` (an EncodingSchema) that `arrays` holds: the dictionary `as_dict` gives (also after "
+        "numpy.savez and numpy.load, which turn the scalars into 0-d arrays). The arrays are copied, so the batch owns "
+        "its memory, and checked against the array contract of the schema: names, dtypes and shapes, the offsets, the "
+        "entity roles and references, the order and uniqueness of the tuples. ValueError (\"mymyr: encoding: ...\") "
+        "names the first violation, among them a batch of another schema (its `schema_fingerprint` differs) or a "
+        "version of the format this build does not read. `sizes`: the dictionary `sizes` of a batch encoded with "
+        "capacities, which makes the arrays with their capacities' sizes a batch again. framework: the framework of the "
+        "batch's exports (default NumPy).");
 
     nb::class_<PyFlatEncoder> encoder_class(
         module, "FlatRelationEncoder", nb::is_weak_referenceable(),
@@ -1705,7 +2059,7 @@ void bind_encoding(nb::module_& parent)
         .def("encode", &encode, "states"_a, "task_ids"_a = nb::none(), nb::kw_only(), "derived"_a = nb::none(),
              "goals"_a = nb::none(), "actions"_a = nb::none(), "subgoals"_a = nb::none(), "history"_a = nb::none(),
              "framework"_a = nb::none(), "threads"_a = 1, "pool"_a = nb::none(),
-             "capacities"_a = nb::none(),
+             "capacities"_a = nb::none(), "into"_a = nb::none(),
              "Encodes the rows `states` (an array of state words [N, W] of any DLPack framework, u64 words or u32 halves "
              "[N, 2W], or a State or list of States) into one graph each. task_ids: the instance of each row (required "
              "for a table of several instances). derived: the derived atom words of each row [N, D] (default: evaluated "
@@ -1743,7 +2097,12 @@ void bind_encoding(nb::module_& parent)
              "sizes['targets'] / sizes['history'] entries hold the encoding, the rest is "
              "zero) and `sizes` reports the true sizes. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
-             "set; nothing raises. Rows (and task_ids, derived, goals) in CUDA memory are encoded on the device into "
+             "set; nothing raises. into: a FlatBatch that an earlier call with the same capacities made for the same "
+             "number of rows of this schema; the encoding then overwrites its arrays in place and the call returns it, "
+             "with `sizes` updated (it needs capacities; ValueError if the batch does not fit the call). Every array "
+             "or tensor exported from that batch changes with it and nothing waits for readers, so use it only once the "
+             "batch's previous contents are no longer read. Rows (and task_ids, derived, goals) in CUDA memory are "
+             "encoded on the device into "
              "torch tensors: a DeviceFlatBatch is returned, actions, subgoals and history are refused, threads has no effect and pool is "
              "refused.")
         .def(
