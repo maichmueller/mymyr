@@ -147,6 +147,152 @@ env at instance 0 and keeps its instance) and draws what a torch `BatchedEnv` wi
 pool's env id is its index, and each reset and each autoresetting step of an env advances that env's counter, whichever
 send or thread steps it. `reset(task_ids=ids)` and `send(..., next_task_ids=ids)` override the draws.
 
+## Encoding the pool's states
+
+The [relational encoder](encoding.md) reads the arrays of a `CpuEnvPool` batch where they are. A pool created with
+`goals=True` carries the goal of every environment as masks (`goal_pos`, `goal_neg`), and the expansion of the batch's
+states, which `rl.expand` makes, is what the policy's actions index. One call encodes all of it:
+
+```python
+import numpy as np
+import mymyr
+from mymyr import encoding, rl
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+table = rl.as_table(task)
+encoder = encoding.FlatRelationEncoder(task, target_sources=("action",))
+pool = rl.CpuEnvPool(task, num_envs=4, seed=0, max_steps=20, goals=True)
+step = pool.reset()
+
+expansion = rl.expand(table, step.states, step.task_ids)
+batch = encoder.encode(step.states, step.task_ids, goals=(step.goal_pos, step.goal_neg), actions=expansion)
+assert batch.num_graphs == 4
+
+# the same call on copies of everything gives the same batch
+copies = encoder.encode(
+    np.array(step.states), np.array(step.task_ids), goals=(np.array(step.goal_pos), np.array(step.goal_neg)),
+    actions=rl.expand(table, np.array(step.states), np.array(step.task_ids)),
+)
+assert all(np.array_equal(batch.as_dict()[k], copies.as_dict()[k]) for k in batch.as_dict())
+```
+
+Nothing is copied on the way in: the states, task ids and goal masks are read in place, and the encoder takes the
+action rows (schemas and bindings) from the expansion instead of computing the applicable actions again. A table of
+several instances needs the batch's `task_ids`, which the pool provides. The batch owns its memory, so it stays valid
+when the pool moves on.
+
+### Action entities
+
+With action relations (`include_actions=True`, the default) and `actions=`, every distinct action of a state is an
+entity of its graph, listed as a target when the encoder has `target_sources=("action",)`. A policy that scores the
+action targets chooses entities, and `mymyr.encoding` maps a chosen entity back to the expansion:
+
+- `encoding.action_rows(batch, expansion, entities)` is the row of `expansion` of each chosen entity
+  (`expansion.offsets[g] + entity_ref` for the entity of graph `g`), so `expansion.succ[row]` is the successor the
+  action leads to and `expansion.action(row)` the action;
+- `encoding.action_indices(batch, entities)` is each entity's position among its own state's successors, which is what
+  `CpuEnvPool.step` (and every environment of `mymyr.rl`) takes as the action;
+- without `entities` both cover every action entity of the batch, in entity order
+  (`encoding.action_entities(batch)` lists their ids).
+
+An expansion lists an action once per action schema that produces it (a disjunctive precondition splits a schema), and
+an entity stands for the first of those rows. The small loop below encodes the pool's states, lets a random policy
+pick one action entity per graph, and steps the pool with it; the state each environment reaches is the successor in
+the entity's expansion row.
+
+```python
+rng = np.random.default_rng(0)
+total_reward = np.zeros(4)
+for _ in range(25):
+    expansion = rl.expand(table, step.states, step.task_ids)
+    batch = encoder.encode(step.states, step.task_ids, goals=(step.goal_pos, step.goal_neg), actions=expansion)
+
+    targets = np.asarray(batch.target_entity)[np.asarray(batch.target_group) == 2]   # the action targets (group 2)
+    owner = np.searchsorted(np.asarray(batch.entity_offsets), targets, side="right") - 1
+    chosen = np.array([rng.choice(targets[owner == g]) for g in range(batch.num_graphs)])
+
+    rows = encoding.action_rows(batch, expansion, chosen)
+    step = pool.step(step.env_ids, encoding.action_indices(batch, chosen))
+    reached = np.asarray(step.final_states)[:, : expansion.succ.shape[1]]
+    assert np.array_equal(reached, np.asarray(expansion.succ)[rows])
+    total_reward += np.asarray(step.reward)
+print(total_reward)
+```
+
+### Reusing a batch's memory
+
+`encode(..., capacities=...)` gives every array the same size from call to call, which `jax.jit` and a fixed-shape
+model need. A call takes new memory for its batch by default. Passing an earlier batch of the same capacities
+as `into=` (the same schema, the same number of rows) writes the encoding into that batch's arrays instead, and returns
+the batch:
+
+```python
+capacities = dict(graphs=4, entities=600, args=6000, targets=300)
+expansion = rl.expand(table, step.states, step.task_ids)
+reused = encoder.encode(step.states, step.task_ids, actions=expansion, capacities=capacities)
+exported = reused.relation_args                     # a view of the batch's memory
+before = np.array(exported)
+
+step = pool.step(step.env_ids, np.zeros(4, np.int32))
+expansion = rl.expand(table, step.states, step.task_ids)
+encoder.encode(step.states, step.task_ids, actions=expansion, capacities=capacities, into=reused)
+assert not np.array_equal(exported, before)         # the exported view shows the new batch
+```
+
+Reuse is opt-in because it aliases: every array and every tensor exported from the batch before the call (NumPy views,
+`as_dict("torch")`, `as_dict("jax")`) shares the memory that the call overwrites, and nothing waits for readers or
+copies on write. Use it when the previous contents are no longer read (a model that has consumed the tensors, a rollout
+step that is finished), and copy what must survive. The call raises `ValueError` before writing if the batch does not
+fit (another schema, another number of rows, other capacities, or a batch encoded without capacities). A batch that
+does not fit its capacities becomes all zero, as it does without `into=`, and `batch.sizes` says so.
+
+### Tensors and arrays
+
+The batch's arrays export without a copy to PyTorch and to JAX on the CPU; the tensors share the memory of the batch
+and keep it alive:
+
+```python needs-torch
+import torch
+
+tensors = batch.as_dict("torch")
+assert isinstance(tensors["relation_args"], torch.Tensor)
+assert tensors["relation_args"].data_ptr() == batch.relation_args.__array_interface__["data"][0]
+```
+
+```python needs-jax
+import jax
+
+arrays = batch.as_dict("jax")
+assert isinstance(arrays["relation_args"], jax.Array)
+assert arrays["relation_args"].unsafe_buffer_pointer() == batch.relation_args.__array_interface__["data"][0]
+```
+
+### Several domains
+
+Relation ids are scoped to a domain, so the rows of a suite of several domains have no common catalog. A
+`encoding.SuiteEncoder` holds one encoder per domain and encodes a mixed batch as a dictionary of batches, one per
+domain, together with each row's index in its batch:
+
+```python
+suite = rl.TaskSuite.group([task, mymyr.Task.from_text("tests/data/tasks/blocks__probBLOCKS-8-0.txt")])
+suite_encoder = encoding.SuiteEncoder(suite, target_sources=("action",))
+initial = [np.pad(np.asarray(t.encode([t.initial_state])), ((0, 0), (0, suite.words - t.words))) for t in suite.tasks]
+rows = np.concatenate([initial[1], initial[0], initial[1]])      # a row of the second domain, the first, the second
+result = suite_encoder.encode(rows, np.array([1, 0, 1], np.int32), actions=True)
+
+assert set(result) == {0, 1}                                   # the batches by domain; a domain without rows has none
+assert list(result.domain) == [1, 0, 1] and list(result.index) == [0, 0, 1]
+assert result[1].num_graphs == 2 and result[0].num_graphs == 1
+domain, graph = result.graph(2)                                # row 2 is graph 1 of the batch of domain 1
+assert (domain, graph) == (1, 1) and result.rows[1][graph] == 2
+```
+
+`result.domain[i]` and `result.index[i]` are the domain and the graph of row `i` of the call, `result.rows[d]` the rows
+of the call in domain `d`'s batch, and `result.expansions[d]` the expansion that domain's action entities index
+(`encoding.action_rows(result[d], result.expansions[d])`). The inputs of `encode` (`goals`, `derived`, `subgoals`,
+`history`) are given for all rows of the call and split by domain. A `CpuEnvPool` over a suite takes this path with
+`suite_encoder.encode(step.states, step.task_ids, goals=(step.goal_pos, step.goal_neg), actions=True)`.
+
 ## Gymnasium
 
 `mymyr.rl.gym` provides `Env`, a `gymnasium.Env` over a task, a `TaskTable` or a `TaskSuite`, and `VectorEnv`, a
