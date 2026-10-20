@@ -365,19 +365,23 @@ def test_the_vocabulary_is_documented_in_the_schema():
     assert set(names[int(batch.entity_offsets[-1]) :]) <= set(relations)
 
 
-def test_labels_are_the_same_in_every_instance_of_a_domain():
+@pytest.mark.parametrize("constant_labels", [False, True])
+@pytest.mark.parametrize("domain, problems", [("blocks", ("smedium", "probBLOCKS-8-0")), ("gripper", ("p01", "p02"))])
+def test_labels_are_the_same_in_every_instance_of_a_domain(domain, problems, constant_labels):
     needs_front_end()
-    directory = ROOT / "tests/data/pddl/blocks"
-    tasks = [mymyr.Task.from_pddl(directory / "domain.pddl", directory / f"{p}.pddl") for p in ("smedium", "probBLOCKS-8-0")]
-    options = {"include_actions": False}
+    directory = ROOT / "tests/data/pddl" / domain
+    tasks = [mymyr.Task.from_pddl(directory / "domain.pddl", directory / f"{p}.pddl") for p in problems]
+    options = {"include_actions": False, "constant_labels": constant_labels}
     alone = [encoding.SimpleEncoder(task, **options) for task in tasks]
-    together = encoding.SimpleEncoder(rl.TaskTable(tasks), **options)
+    table = rl.TaskTable(tasks)
+    together = encoding.SimpleEncoder(table, **options)
     assert alone[0].schema.simple_label_names == alone[1].schema.simple_label_names == together.schema.simple_label_names
     assert alone[0].schema_fingerprint == alone[1].schema_fingerprint == together.schema_fingerprint
-    table = rl.TaskTable(tasks)
+    assert (together.schema.simple_constants > 0) == (constant_labels and domain == "gripper")
     for i, task in enumerate(tasks):
         states = walk(task, steps=4, walks=1)
-        rows = np.pad(np.ascontiguousarray(task.encode(states)), ((0, 0), (0, table.words - task.encode(states).shape[1])))
+        words = np.ascontiguousarray(task.encode(states))
+        rows = np.pad(words, ((0, 0), (0, table.words - words.shape[1])))
         one = alone[i].encode(states)
         shared = together.encode(rows, [i] * len(states))
         for name in ("node_label", "edge_label", "node_offsets", "edge_offsets", "edge_index"):

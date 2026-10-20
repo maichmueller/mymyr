@@ -557,6 +557,32 @@ TEST(Simple, ThreadsGiveTheSameBatchAndTheCapacityFormHoldsItInItsFirstEntries)
     }
 }
 
+TEST(Simple, TheRelationMajorLayoutGivesTheSameGraphOnAnyNumberOfThreads)
+{
+    const Tables tables("blocks", {"smedium", "probBLOCKS-8-0"});
+    const auto& table = tables.table;
+    const test::Rows rows = rows_of(*table, 2300, 8);
+    for (const IndexType index : k_indices)
+    {
+        FlatOptions options = test::encoder_options();
+        options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied};
+        options.outputs = k_both;
+        options.layout = Layout::Relation;
+        options.index = index;
+        const auto encoder = FlatEncoder::create(table, options);
+        EncodeInput in;
+        in.states = rows.view();
+        in.task_ids = rows.task_ids.data();
+        EncodeScratch scratch;
+        ThreadPool one(1), many(4);
+        const auto expected = encoder->encode(in, one, scratch);
+        expect_simple_of(*expected, *expected, encoder->schema());
+        const auto threaded = encoder->encode(in, many, scratch);
+        expect_arrays_equal(*threaded, *expected, k_simple_names);
+        expect_arrays_equal(*threaded, *expected, {"relation_offsets", "relation_arg_offsets", "relation_args"});
+    }
+}
+
 TEST(Simple, StreamsFlushTheBatchEncodeGives)
 {
     const Tables tables("blocks", {"smedium", "probBLOCKS-8-0"});
