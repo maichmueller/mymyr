@@ -288,10 +288,30 @@ HorizonGraphs run(Source& source, std::vector<i32> task_ids, u64 graphs, const R
     out.edge_dst.resize(m);
     out.edge_schema.resize(m);
     out.edge_binding.resize(m * label_width);
-    std::vector<i32> next(out.edge_offsets.begin(), out.edge_offsets.end() - 1);
-    for (u64 e = 0; e < m; ++e)
+    // the edges of each graph in the order of their destinations, then action schemas, then objects; edges that agree
+    // keep the order they were found in
+    std::vector<u32> order(m);
     {
-        const u64 at = static_cast<u64>(next[edges.graph[e]]++);
+        std::vector<i32> next(out.edge_offsets.begin(), out.edge_offsets.end() - 1);
+        for (u64 e = 0; e < m; ++e)
+            order[static_cast<u64>(next[edges.graph[e]]++)] = static_cast<u32>(e);
+    }
+    const auto before = [&](u32 a, u32 b)
+    {
+        if (edges.dst[a] != edges.dst[b])
+            return edges.dst[a] < edges.dst[b];
+        if (edges.schema[a] != edges.schema[b])
+            return edges.schema[a] < edges.schema[b];
+        return std::lexicographical_compare(edges.binding.begin() + u64{a} * label_width,
+                                            edges.binding.begin() + u64{a + 1} * label_width,
+                                            edges.binding.begin() + u64{b} * label_width,
+                                            edges.binding.begin() + u64{b + 1} * label_width);
+    };
+    for (u64 g = 0; g < graphs; ++g)
+        std::stable_sort(order.begin() + out.edge_offsets[g], order.begin() + out.edge_offsets[g + 1], before);
+    for (u64 at = 0; at < m; ++at)
+    {
+        const u64 e = order[at];
         out.edge_src[at] = edges.src[e];
         out.edge_dst[at] = edges.dst[e];
         out.edge_schema[at] = edges.schema[e];

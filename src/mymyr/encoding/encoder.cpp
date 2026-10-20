@@ -293,13 +293,19 @@ void count_range(const Pass& p, u32 t)
     m.cell_counts.clear();
     for (u64 g = lo; g < hi; ++g)
     {
-        const u32 instance = p.instance_of(g);
-        const auto validity = detail::row_validity(p.view, p.in.task_ids ? p.in.task_ids[g] : 0, p.in.states.words,
-            p.in.goal_pos != nullptr, p.in.goal_words, p.in.goal_derived_pos != nullptr, p.in.goal_derived_words);
-        if (validity != detail::RowValidity::Valid)
+        const i32 id = p.in.task_ids ? p.in.task_ids[g] : 0;
+        if (id < 0 || static_cast<u32>(id) >= p.view.num_instances)
         {
-            u64& bad = validity == detail::RowValidity::BadTask ? m.bad_id :
-                       validity == detail::RowValidity::NarrowState ? m.narrow : m.narrow_goal;
+            m.bad_id = std::min(m.bad_id, g);
+            continue;
+        }
+        const u32 instance = static_cast<u32>(id);
+        const detail::InstanceView v = detail::instance_view(p.view, instance);
+        if (const auto validity = detail::row_validity(v, p.in.states.words, p.in.goal_pos != nullptr, p.in.goal_words,
+                                                       p.in.goal_derived_pos != nullptr, p.in.goal_derived_words);
+            validity != detail::RowValidity::Valid)
+        {
+            u64& bad = validity == detail::RowValidity::NarrowState ? m.narrow : m.narrow_goal;
             bad = std::min(bad, g);
             continue;
         }
@@ -308,7 +314,6 @@ void count_range(const Pass& p, u32 t)
             m.bad_slice = std::min(m.bad_slice, g);
             continue;
         }
-        const detail::InstanceView v = detail::instance_view(p.view, instance);
         if (Layered && refuse_layers(p, m, v, g))
             continue;
         detail::RowLayers layers;

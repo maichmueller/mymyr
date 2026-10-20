@@ -7,8 +7,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <map>
+#include <numeric>
 #include <set>
+#include <tuple>
 #include <vector>
 
 using namespace mymyr;
@@ -105,7 +108,24 @@ ReferenceGraph reference(const rl::TaskTable& table, const Row& root, u32 depth,
             }
         level = std::move(next);
     }
-    return g;
+    // the edges are ordered by destination, then schema, then binding; edges that agree keep their order of discovery
+    std::vector<usize> order(g.edges.size());
+    std::iota(order.begin(), order.end(), usize{0});
+    std::stable_sort(order.begin(), order.end(),
+                     [&](usize a, usize b)
+                     {
+                         return std::tie(g.edges[a][1], g.schemas[a], g.bindings[a]) <
+                                std::tie(g.edges[b][1], g.schemas[b], g.bindings[b]);
+                     });
+    ReferenceGraph sorted;
+    sorted.nodes = std::move(g.nodes);
+    for (const usize e : order)
+    {
+        sorted.edges.push_back(g.edges[e]);
+        sorted.schemas.push_back(g.schemas[e]);
+        sorted.bindings.push_back(std::move(g.bindings[e]));
+    }
+    return sorted;
 }
 
 void expect_graph(const HorizonGraphs& h, u64 g, const ReferenceGraph& ref)
