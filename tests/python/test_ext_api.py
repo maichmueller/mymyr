@@ -203,7 +203,11 @@ def test_a_refused_metric_is_an_error_of_the_c_api():
     assert r.stdout.splitlines() == ["task_numeric() failed"] * 2
 
 
-REFUSED_METRIC_THREADS = REFUSED_METRIC.replace("for _ in range(2):", "def call():") + """
+# each thread records its message and the main thread prints them after the joins: print from several threads is not
+# atomic per line
+REFUSED_METRIC_THREADS = REFUSED_METRIC.replace("for _ in range(2):", "messages = []\n\ndef call():").replace(
+    "print(e)", "messages.append(str(e))"
+) + """
 import faulthandler, threading
 assert not faulthandler.is_enabled()
 threads = [threading.Thread(target=call) for _ in range(8)]
@@ -211,6 +215,8 @@ for t in threads:
     t.start()
 for t in threads:
     t.join()
+for message in messages:
+    print(message)
 assert consumer.numeric_info(mymyr.Task(d.instantiate_string(
     "(define (problem q) (:domain d) (:init (= (x) 0)) (:goal (p)))")))[0] == 1
 print("done")
