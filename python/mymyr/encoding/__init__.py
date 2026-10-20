@@ -23,6 +23,10 @@ horizon encoder for rooted graphs, with the root as an encoded node, the ``_pare
 the transitions of states (the horizons of depth one, with the successors' facts or their deltas) from the states
 themselves. Streams and the device do not encode horizons.
 
+``hgraph(batch)`` views a relation-major batch as a heterogeneous graph (HGraphView): a node type per relation and one
+for the entities, an edge type per relation and tuple position, the edges' entity ids a strided view of the batch's
+arguments. The view copies no tuple and keeps the batch alive.
+
 EncodingSchema is the relation catalog of an encoding: the relations a batch holds, sorted by name, with their
 arities, lanes and slot roles, and a fingerprint. It is a function of the domain and the options alone.
 """
@@ -37,8 +41,10 @@ from mymyr._core._encoding import (
     FlatStream,
     FlatTransitionEffectsEncoder,
     FlatTransitionEncoder,
+    HGraphView,
 )
 from mymyr.encoding._device import DeviceFlatBatch
+from mymyr.encoding._hgraph import hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
@@ -55,7 +61,9 @@ __all__ = [
     "FlatTransitionEffectsEncoder",
     "FlatTransitionEncoder",
     "GraphDescription",
+    "HGraphView",
     "HorizonView",
+    "hgraph",
     "history_masks",
     "horizon",
     "horizon_of_space",

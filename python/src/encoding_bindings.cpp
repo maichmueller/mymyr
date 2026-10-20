@@ -8,6 +8,7 @@
 
 #include "mymyr/core/threads.hpp"
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/hgraph.hpp"
 #include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/encoding/schema.hpp"
 #include "mymyr/encoding/stream.hpp"
@@ -18,6 +19,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <charconv>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -72,6 +74,9 @@ struct EncodingBatch
 {
 };
 struct EncodingEntityArrays
+{
+};
+struct HGraphEdgeType
 {
 };
 }
@@ -151,6 +156,11 @@ template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
 {
     static constexpr auto Name = const_name("mymyr._core._rl.Expansion");
+};
+template<>
+struct type_caster<mymyr::python::ann::HGraphEdgeType>
+{
+    static constexpr auto Name = const_name("tuple[str, str, str]");
 };
 template<>
 struct type_caster<mymyr::python::ann::EncodingRootPolicy>
@@ -1611,6 +1621,277 @@ void define_encoder_common(nb::class_<Py, Extra...>& cls, const char* class_name
     define_reduce(cls, class_name);
 }
 
+// ------------------------------------------------------------------------------------------------ HGraph view
+
+/// The view of a batch and the batch itself (its framework is the default of the view's arrays).
+struct PyHGraphView
+{
+    encoding::HGraphView view;
+    PyFlatBatch batch;
+};
+
+/// An edge type of the view: the tuple (relation, position, `_symbol_`) or its reverse (`_symbol_`, position,
+/// relation).
+struct EdgeTypeRef
+{
+    u64 id = 0;
+    bool reverse = false;
+};
+
+using NodeTypeArg = Arg<std::string>;
+using EdgeTypeArg = Arg<ann::HGraphEdgeType>;
+
+Framework view_framework(const PyHGraphView& self, Arg<ann::Framework> framework)
+{
+    return framework.is_none() ? self.batch.framework : parse_framework(framework);
+}
+
+u32 node_type_of(const PyHGraphView& self, nb::handle value)
+{
+    if (!nb::isinstance<nb::str>(value))
+        throw nb::type_error("mymyr: encoding: a node type is a name (str)");
+    const std::string name = nb::cast<std::string>(value);
+    if (name == encoding::k_symbol_node_type)
+        return self.view.symbol_type();
+    if (const auto id = self.view.schema()->find(name))
+        return *id;
+    throw nb::key_error(("mymyr: encoding: no node type " + name).c_str());
+}
+
+EdgeTypeRef edge_type_of(const PyHGraphView& self, nb::handle value)
+{
+    if (!nb::isinstance<nb::tuple>(value) || nb::len(value) != 3 ||
+        !nb::isinstance<nb::str>(value[0]) || !nb::isinstance<nb::str>(value[1]) || !nb::isinstance<nb::str>(value[2]))
+        throw nb::type_error("mymyr: encoding: an edge type is a tuple (relation, position, '_symbol_') of three str, "
+                             "or the reverse ('_symbol_', position, relation)");
+    const std::string first = nb::cast<std::string>(value[0]), position = nb::cast<std::string>(value[1]),
+                      last = nb::cast<std::string>(value[2]);
+    const bool reverse = first == encoding::k_symbol_node_type;
+    if (reverse == (last == encoding::k_symbol_node_type))
+        throw nb::key_error(("mymyr: encoding: no edge type (" + first + ", " + position + ", " + last + ")").c_str());
+    const std::string& relation_name = reverse ? last : first;
+    u32 slot = 0;
+    const char* const begin = position.data();
+    const char* const end = begin + position.size();
+    const auto parsed = std::from_chars(begin, end, slot);
+    const auto relation = self.view.schema()->find(relation_name);
+    const auto id = relation && parsed.ec == std::errc{} && parsed.ptr == end && std::to_string(slot) == position
+                        ? self.view.find_edge_type(*relation, slot)
+                        : std::nullopt;
+    if (!id)
+        throw nb::key_error(("mymyr: encoding: no edge type (" + first + ", " + position + ", " + last + ")").c_str());
+    return {*id, reverse};
+}
+
+/// A new array of `count` indices of the batch's index type, written by `write(void* out)`.
+template<class Write>
+nb::object new_index_array(const PyHGraphView& self, u64 count, Framework framework, Write write)
+{
+    auto make = [&]<class T>()
+    {
+        auto values = std::make_shared<std::vector<T>>(count);
+        write(values->data());
+        ArraySpec spec;
+        spec.owner = values;
+        spec.data = values->data();
+        spec.dtype = std::is_same_v<T, i64> ? rl::DType::I64 : rl::DType::I32;
+        spec.shape = {static_cast<i64>(count)};
+        spec.readonly = true;
+        return export_array(std::move(spec), framework, default_words(framework));
+    };
+    return self.view.wide() ? make.template operator()<i64>() : make.template operator()<i32>();
+}
+
+/// The array of a row of the batch (no copy; strided for an edge row).
+nb::object row_array(const PyHGraphView& self, const encoding::IndexRow& row, Framework framework)
+{
+    ArraySpec spec;
+    spec.owner = std::shared_ptr<const void>(self.view.batch(), row.data());
+    spec.data = row.data();
+    spec.dtype = row.wide() ? rl::DType::I64 : rl::DType::I32;
+    spec.shape = {static_cast<i64>(row.size())};
+    spec.strides = {static_cast<i64>(row.stride())};
+    spec.readonly = true;
+    return export_array(std::move(spec), framework, default_words(framework));
+}
+
+nb::object arange_array(const PyHGraphView& self, u64 edge_type, Framework framework)
+{
+    return new_index_array(self, self.view.num_edges(edge_type), framework,
+                           [&](void* out) { self.view.edge_index_0(edge_type, out); });
+}
+
+nb::tuple edge_type_name(const encoding::HGraphView& view, u64 edge_type, bool reverse)
+{
+    const encoding::HGraphEdgeType type = view.edge_type(edge_type);
+    const std::string relation(view.node_type_name(type.relation)), slot = std::to_string(type.slot),
+                      symbol(encoding::k_symbol_node_type);
+    return reverse ? nb::make_tuple(symbol, slot, relation) : nb::make_tuple(relation, slot, symbol);
+}
+
+void bind_hgraph(nb::module_& module)
+{
+    nb::class_<PyHGraphView> hgraph(
+        module, "HGraphView",
+        "A relation-major FlatBatch as one heterogeneous graph, without copying its tuples. A node type is a relation "
+        "of the schema (its nodes are the relation's tuples, the atoms, numbered across the batch) or `_symbol_` (its "
+        "nodes are the entities of the graphs, numbered by their batch-global entity ids; the graph g's are "
+        "[entity_offsets[g], entity_offsets[g + 1])). The edge type (relation, k, '_symbol_') leads from each tuple "
+        "of the relation to the entity at position k of the tuple; its reverse (`_symbol_`, k, relation) has the same "
+        "edges the other way round. A nullary relation has one position, its auxiliary slot, so its edge goes to the "
+        "graph's auxiliary entity. Row 0 of an edge type is the tuple number (an arange, made when asked for) and "
+        "row 1 the entity ids: a strided view of the batch's `relation_args`. The view keeps the batch alive. "
+        "`mymyr.encoding.hgraph(batch)` makes one. The batch must be relation-major, encoded without "
+        "predicate_virtual_nodes and with the static tuples in every graph; ValueError otherwise. "
+        "All array methods return arrays of `framework` (default: the batch's); the index dtype is the batch's.");
+    hgraph
+        .def(
+            "__init__",
+            [](PyHGraphView* self, const PyFlatBatch& batch)
+            {
+                try
+                {
+                    new (self) PyHGraphView{encoding::HGraphView::of(batch.arrays, batch.schema), batch};
+                }
+                catch (const std::invalid_argument& error)
+                {
+                    throw nb::value_error(error.what());
+                }
+            },
+            "batch"_a,
+            "The view of `batch`, a FlatBatch of one of the single-state, horizon, rooted-horizon or transition "
+            "encoders. Raises ValueError for a graph-major batch, for predicate virtual nodes, and for shared static "
+            "tuples.")
+        .def_prop_ro(
+            "batch", [](const PyHGraphView& self) { return self.batch; }, "The FlatBatch that the view is of.")
+        .def_prop_ro(
+            "num_graphs", [](const PyHGraphView& self) { return self.view.num_graphs(); },
+            "The number of graphs of the batch.")
+        .def_prop_ro(
+            "node_types",
+            [](const PyHGraphView& self)
+            {
+                std::vector<std::string> names;
+                for (u32 type = 0; type < self.view.num_node_types(); ++type)
+                    names.emplace_back(self.view.node_type_name(type));
+                return names;
+            },
+            "The node types: the names of the schema's relations, in relation order, then `_symbol_`.")
+        .def_prop_ro(
+            "edge_types",
+            [](const PyHGraphView& self)
+            {
+                nb::list types;
+                for (u64 id = 0; id < self.view.num_edge_types(); ++id)
+                    types.append(edge_type_name(self.view, id, false));
+                return nb::typed<nb::list, ann::HGraphEdgeType>(types);
+            },
+            "The edge types (relation, position, '_symbol_'), for every relation in relation order and every "
+            "position of its tuples (the position is the slot number as a str, the positions of the relation's "
+            "`slot_roles`).")
+        .def_prop_ro(
+            "reverse_edge_types",
+            [](const PyHGraphView& self)
+            {
+                nb::list types;
+                for (u64 id = 0; id < self.view.num_edge_types(); ++id)
+                    types.append(edge_type_name(self.view, id, true));
+                return nb::typed<nb::list, ann::HGraphEdgeType>(types);
+            },
+            "The reverse of each edge type, in the same order: ('_symbol_', position, relation).")
+        .def(
+            "num_nodes",
+            [](const PyHGraphView& self, NodeTypeArg node_type)
+            { return self.view.num_nodes(node_type_of(self, node_type)); },
+            "node_type"_a, "The number of nodes of a node type in the whole batch: the tuples of the relation, or the entities.")
+        .def(
+            "ptr",
+            [](const PyHGraphView& self, NodeTypeArg node_type, Arg<ann::Framework> framework) -> ArrayOut
+            {
+                const u32 type = node_type_of(self, node_type);
+                const Framework fw = view_framework(self, framework);
+                if (type == self.view.symbol_type())
+                    return ArrayOut(row_array(self, self.view.symbol_ptr(), fw));
+                return ArrayOut(new_index_array(self, self.view.num_graphs() + 1, fw,
+                                                [&](void* out) { self.view.relation_ptr(type, out); }));
+            },
+            "node_type"_a, nb::kw_only(), "framework"_a = nb::none(),
+            "The first node of each graph in a node type, and the end: [G + 1] entries, graph g's nodes of the type "
+            "are [ptr[g], ptr[g + 1]). For `_symbol_` it is the batch's entity_offsets (no copy); for a relation the "
+            "tuple offsets of its graphs counted from the relation's first tuple (a new array).")
+        .def(
+            "num_edges",
+            [](const PyHGraphView& self, EdgeTypeArg edge_type)
+            { return self.view.num_edges(edge_type_of(self, edge_type).id); },
+            "edge_type"_a, "The number of edges of an edge type in the whole batch: the tuples of its relation.")
+        .def(
+            "edge_index_0",
+            [](const PyHGraphView& self, EdgeTypeArg edge_type, Arg<ann::Framework> framework) -> ArrayOut
+            {
+                const EdgeTypeRef ref = edge_type_of(self, edge_type);
+                const Framework fw = view_framework(self, framework);
+                return ArrayOut(ref.reverse ? row_array(self, self.view.edge_index_1(ref.id), fw)
+                                            : arange_array(self, ref.id, fw));
+            },
+            "edge_type"_a, nb::kw_only(), "framework"_a = nb::none(),
+            "Row 0 of an edge type, the source of each edge: for (relation, k, '_symbol_') the tuple numbers 0 .. n - 1 "
+            "(a new array), for the reverse type the entity ids (a view of the batch).")
+        .def(
+            "edge_index_1",
+            [](const PyHGraphView& self, EdgeTypeArg edge_type, Arg<ann::Framework> framework) -> ArrayOut
+            {
+                const EdgeTypeRef ref = edge_type_of(self, edge_type);
+                const Framework fw = view_framework(self, framework);
+                return ArrayOut(ref.reverse ? arange_array(self, ref.id, fw)
+                                            : row_array(self, self.view.edge_index_1(ref.id), fw));
+            },
+            "edge_type"_a, nb::kw_only(), "framework"_a = nb::none(),
+            "Row 1 of an edge type, the destination of each edge: for (relation, k, '_symbol_') the entity at position "
+            "k of each tuple, a strided read-only view of the batch's relation_args (no copy; its stride is the "
+            "relation's arity); for the reverse type the tuple numbers (a new array). A framework that cannot import "
+            "a strided DLPack tensor copies it.")
+        .def(
+            "edge_index",
+            [](const PyHGraphView& self, EdgeTypeArg edge_type, Arg<ann::Framework> framework)
+            {
+                const EdgeTypeRef ref = edge_type_of(self, edge_type);
+                const Framework fw = view_framework(self, framework);
+                nb::object tuples = arange_array(self, ref.id, fw);
+                nb::object entities = row_array(self, self.view.edge_index_1(ref.id), fw);
+                return ref.reverse ? nb::make_tuple(entities, tuples) : nb::make_tuple(tuples, entities);
+            },
+            "edge_type"_a, nb::kw_only(), "framework"_a = nb::none(),
+            "The pair (edge_index_0, edge_index_1) of an edge type.")
+        .def_prop_ro(
+            "entity_role",
+            [](const PyHGraphView& self) -> ArrayOut
+            {
+                const Framework fw = self.batch.framework;
+                if (const u8* stored = self.view.stored_entity_roles())
+                {
+                    ArraySpec spec;
+                    spec.owner = std::shared_ptr<const void>(self.view.batch(), stored);
+                    spec.data = stored;
+                    spec.dtype = rl::DType::U8;
+                    spec.shape = {static_cast<i64>(self.view.num_entities())};
+                    spec.readonly = true;
+                    return ArrayOut(export_array(std::move(spec), fw, default_words(fw)));
+                }
+                auto roles = std::make_shared<std::vector<u8>>(self.view.num_entities());
+                self.view.write_entity_roles(roles->data());
+                ArraySpec spec;
+                spec.owner = roles;
+                spec.data = roles->data();
+                spec.dtype = rl::DType::U8;
+                spec.shape = {static_cast<i64>(roles->size())};
+                spec.readonly = true;
+                return ArrayOut(export_array(std::move(spec), fw, default_words(fw)));
+            },
+            "The feature of the `_symbol_` nodes: the role of each entity [E] as uint8, an index into "
+            "schema.entity_role_names. The batch's entity_role array (no copy), or made from num_objects when the "
+            "batch's entity arrays are implicit.");
+}
+
 std::shared_ptr<const encoding::FlatEncoder> flat_encoder_of(nb::handle obj)
 {
     return nb::cast<const PyFlatEncoder&>(obj).encoder;
@@ -2032,5 +2313,7 @@ void bind_encoding(nb::module_& parent)
         .def_prop_ro(
             "encoder", [](const PyFlatMutableStream& self) { return nb::typed<nb::object, PyFlatEncoder>(self.encoder); },
             "The FlatRelationEncoder of the stream.");
+
+    bind_hgraph(module);
 }
 }
