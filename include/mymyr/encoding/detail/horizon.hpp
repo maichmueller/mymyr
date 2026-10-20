@@ -306,63 +306,63 @@ struct HorizonActionEdges
 };
 
 /// The parent edges of the graph, sorted by (source, destination) without repeats, written to `out`; returns their number.
-/// Under `exclude` the edges that touch the root are left out. Edges that come grouped by source (as the horizon builder writes
-/// them) are inserted in order into their group, as long as that stays cheap; the others are sorted by two stable counting
-/// passes (by destination, then by source) over the scratch `counts[2 * nodes]` and `tmp[edges]`, so the cost is linear
-/// in the edges and nodes either way.
+/// Under `exclude` the edges that touch the root are left out. Edges that come grouped by source (as the horizon builder
+/// writes them) in groups of at most 128 are sorted group by group in a local buffer; the others are sorted by two stable
+/// counting passes (by destination, then by source) over the scratch `counts[2 * nodes]` and `tmp[edges]`, so the cost is
+/// linear in the edges and nodes either way.
 MYMYR_HD u32 horizon_canonical_parents(const HorizonGraph& h, u32* out, u32* counts, u32* tmp)
 {
     const u32 nodes = h.count;
     const auto kept = [&](u32 e) { return !(h.exclude && (h.src[e] == 0 || h.dst[e] == 0)); };
-    u64 budget = 8u * u64{h.edges} + 64u;  // the moves insertion may make before the counting passes are cheaper
+    constexpr u32 k_run = 128;  // the edges of one source that are sorted in a local buffer
+    u64 keys[k_run];            // (destination << 32) | edge
     u32 n = 0;
     bool grouped = true;
-    u32 first = 0;
-    i32 cur_src = -1, last_dst = -1;  // the source of the current group and its largest destination
+    i32 cur_src = -1;
+    u32 run = 0;
+    const auto flush = [&]()
+    {
+        for (u32 i = 1; i < run; ++i)
+        {
+            const u64 x = keys[i];
+            u32 j = i;
+            for (; j > 0 && keys[j - 1u] > x; --j)
+                keys[j] = keys[j - 1u];
+            keys[j] = x;
+        }
+        for (u32 i = 0; i < run; ++i)
+            if (i == 0 || (keys[i] >> 32) != (keys[i - 1u] >> 32))
+                out[n++] = static_cast<u32>(keys[i]);
+        run = 0;
+    };
     for (u32 e = 0; e < h.edges; ++e)
     {
         const i32 src = h.src[e], dst = h.dst[e];
         if (h.exclude && (src == 0 || dst == 0))
             continue;
-        if (src > cur_src)
+        if (src != cur_src)
         {
-            first = n;
-            cur_src = src;
-            last_dst = dst;
-            out[n++] = e;
-        }
-        else if (src < cur_src)
-        {
-            grouped = false;
-            break;
-        }
-        else if (dst > last_dst)
-        {
-            last_dst = dst;
-            out[n++] = e;
-        }
-        else if (dst < last_dst)
-        {
-            u32 at = n;
-            while (at > first && h.dst[out[at - 1u]] > dst)
-                --at;
-            if (at > first && h.dst[out[at - 1u]] == dst)
-                continue;
-            const u32 moves = n - at;
-            if (moves > budget)
+            if (src < cur_src)
             {
                 grouped = false;
                 break;
             }
-            budget -= moves;
-            for (u32 i = n; i > at; --i)
-                out[i] = out[i - 1u];
-            out[at] = e;
-            ++n;
+            flush();
+            cur_src = src;
         }
+        if (run == k_run)
+        {
+            grouped = false;
+            break;
+        }
+        keys[run++] = (u64{static_cast<u32>(dst)} << 32) | e;
     }
     if (grouped)
+    {
+        flush();
         return n;
+    }
+
     n = 0;
     u32* by_dst = counts;
     u32* by_src = counts + nodes;

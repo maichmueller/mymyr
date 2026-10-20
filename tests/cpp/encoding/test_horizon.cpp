@@ -1277,7 +1277,7 @@ TEST(Horizon, TheEdgeTuplesAreCanonicalForEveryShapeOfEdgeList)
         return static_cast<i32>((state >> 33) % bound);
     };
     using Edges = std::vector<std::array<i32, 2>>;
-    // a large group of one source whose destinations come in descending order (insertion would move quadratically)
+    // a group of one source that is larger than the buffer the groups are sorted in, with descending destinations
     Edges star;
     for (int round = 0; round < 2; ++round)
         for (i32 dst = nodes - 1; dst >= 1; --dst)
