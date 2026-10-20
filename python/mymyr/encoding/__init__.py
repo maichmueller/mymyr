@@ -55,7 +55,7 @@ __all__ = [
 def collate(batches, *, capacities=None):
     """Concatenate encoded graphs in batch order, rebuilding offsets and shifting entity ids.
 
-    Batches must share a schema, layout, index type and static representation. Empty slices are allowed;
+    Batches must share a table, schema, layout, index type and static representation. Empty slices are allowed;
     the list itself must contain a batch to establish the schema. Host and CUDA batches cannot be mixed.
     """
     batches = list(batches)

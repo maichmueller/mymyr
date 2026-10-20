@@ -1277,6 +1277,10 @@ void define_encoder_common(nb::class_<Py>& cls)
     cls.def_prop_ro("table", [](const Py& self) { return TableArg(self.reference.obj); },
                     "The TaskTable (or TaskSuite) the encoder encodes states of.")
         .def_prop_ro(
+            "table_fingerprint", [](const Py& self) { return self.encoder->table_fingerprint(); },
+            "The fingerprint of the table (TaskTable.fingerprint), the batches' table_fingerprint: batches collate only "
+            "with batches of the same table, whose task ids name the same instances.")
+        .def_prop_ro(
             "schema", [](const Py& self) { return PyEncodingSchema{self.encoder->schema_ptr()}; },
             "The EncodingSchema of the encoder.")
         .def(
@@ -1409,8 +1413,9 @@ void bind_encoding(nb::module_& parent)
                 return ResultDict(nb::cast<nb::dict>(export_bundle(self.arrays, target, default_words(target))));
             },
             "framework"_a = nb::none(),
-            "The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics) and the "
-            "arrays of the batch, zero-copy, in the framework (default: the batch's).");
+            "The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, "
+            "table_fingerprint, statics) and the arrays of the batch, zero-copy, in the framework (default: the "
+            "batch's).");
     for (const auto& [name, doc] : k_batch_arrays)
         batch.def_prop_ro(name, [name = name](const PyFlatBatch& self) { return ArrayOut(batch_array(self, name)); }, doc);
 

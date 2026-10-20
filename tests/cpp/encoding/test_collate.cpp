@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <cstring>
 
 using namespace mymyr;
@@ -74,6 +75,25 @@ TEST(EncodingCollate, EmptySlicesRetainTheSchema)
     const std::vector<std::shared_ptr<const rl::ArrayBundle>> batches{empty, empty};
     same(*empty, *encoding::collate(batches));
     EXPECT_THROW((void)encoding::collate({}), std::invalid_argument);
+}
+
+TEST(EncodingCollate, RefusesBatchesOfDifferentTablesOverOneSchema)
+{
+    // Task ids name instances of their table: batches of two tables share the schema but not the ids' meaning.
+    const auto one = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const auto two = table_of("blocks", {"probBLOCKS-8-0", "smedium"});
+    const auto first = encoding::FlatEncoder::create(one, test::encoder_options());
+    const auto second = encoding::FlatEncoder::create(two, test::encoder_options());
+    ASSERT_EQ(first->schema().fingerprint(), second->schema().fingerprint());
+    ASSERT_NE(first->table_fingerprint(), second->table_fingerprint());
+    const auto a = first->encode(host_input(make_batch(one, 3, false, 151), 3, {}));
+    const auto b = second->encode(host_input(make_batch(two, 3, false, 157), 3, {}));
+    EXPECT_EQ(a->scalar("table_fingerprint"), std::bit_cast<i64>(first->table_fingerprint()));
+    const std::vector<std::shared_ptr<const rl::ArrayBundle>> mixed{a, b};
+    EXPECT_THROW((void)encoding::collate(mixed), std::invalid_argument);
+    const auto again = encoding::FlatEncoder::create(two, test::encoder_options());
+    const std::vector<std::shared_ptr<const rl::ArrayBundle>> same_table{b, again->encode(host_input(make_batch(two, 2, false, 163), 2, {}))};
+    EXPECT_EQ(encoding::collate(same_table)->scalar("num_graphs"), 5);
 }
 
 TEST(EncodingCollate, RefusesMixedLayoutsIndexTypesAndSchemas)

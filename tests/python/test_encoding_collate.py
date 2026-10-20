@@ -34,6 +34,21 @@ def test_collation_refuses_incompatible_batches(option):
         encoding.collate([first, second])
 
 
+def test_collation_refuses_batches_of_different_tables():
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode([task.initial_state]))
+    one, two = rl.TaskTable([task]), rl.TaskTable([task, text_task("gripper__prob05")])
+    first, second = encoding.FlatRelationEncoder(one), encoding.FlatRelationEncoder(two)
+    assert first.schema_fingerprint == second.schema_fingerprint
+    assert first.table_fingerprint == one.fingerprint != second.table_fingerprint == two.fingerprint
+    a, b = first.encode(rows), second.encode(rows, np.array([1], dtype=np.int32))
+    assert a.as_dict()["table_fingerprint"] % 2**64 == one.fingerprint
+    with pytest.raises(ValueError, match="^mymyr: encoding: collate received batches of different tables"):
+        encoding.collate([a, b])
+    again = encoding.FlatRelationEncoder(two).encode(rows)
+    assert encoding.collate([b, again]).num_graphs == 2
+
+
 def test_collation_requires_a_batch_to_establish_its_schema():
     with pytest.raises(ValueError, match="^mymyr: encoding: collate needs at least one batch"):
         encoding.collate([])

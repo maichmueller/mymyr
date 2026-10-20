@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -42,12 +43,16 @@ template<class I> I* data(rl::ArrayBundle& b, const char* name)
 {
     return static_cast<I*>(b.mutable_data(name));
 }
-template<class I> u64 last(const rl::ArrayBundle& b, const char* name)
+/// Refuses a stored array with fewer than `count` elements; absent arrays are not stored by any batch.
+void need(const rl::ArrayBundle& b, std::string_view name, u64 count)
 {
-    const auto& a = array(b, name);
-    if (!a.elements())
-        invalid(std::string("a collated offset array is empty: ") + name);
-    const auto value = static_cast<const I*>(b.data(a))[a.elements() - 1];
+    if (const auto* a = b.find(name); a && static_cast<u64>(a->elements()) < count)
+        invalid("a collated array is too short: " + std::string(name));
+}
+/// The closing entry `at` of an offset array whose length has been checked.
+template<class I> u64 closing(const rl::ArrayBundle& b, const char* name, u64 at)
+{
+    const auto value = data<I>(b, name)[at];
     if (value < 0)
         invalid("a collated offset is negative");
     return static_cast<u64>(value);
@@ -75,9 +80,26 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
         const auto graphs = b->scalar("num_graphs");
         if (graphs < 0)
             invalid("a collated batch has no graph count");
-        const u64 entities = last<I>(*b, "entity_offsets"), args = last<I>(*b, "relation_arg_offsets");
-        const u64 t = targets ? last<I>(*b, "target_offsets") : 0;
-        const u64 h = history ? last<I>(*b, "history_offsets") : 0;
+        // Every array is checked against the counts it is read with before anything is read.
+        const u64 n = static_cast<u64>(graphs), slice_cells = mul(n, relations);
+        for (const char* name : {"task_ids", "num_objects", "goal_complete"})
+            need(*b, name, n);
+        for (const char* name : {"entity_offsets", "target_offsets", "history_offsets"})
+            need(*b, name, add(n, 1));
+        need(*b, "relation_offsets", add(slice_cells, 1));
+        need(*b, "relation_arg_offsets", add(slice_cells, 1));
+        need(*b, "relation_counts", slice_cells);
+        const u64 entities = closing<I>(*b, "entity_offsets", n);
+        const u64 args = closing<I>(*b, "relation_arg_offsets", slice_cells);
+        const u64 t = targets ? closing<I>(*b, "target_offsets", n) : 0;
+        const u64 h = history ? closing<I>(*b, "history_offsets", n) : 0;
+        need(*b, "entity_role", entities);
+        need(*b, "entity_ref", entities);
+        need(*b, "relation_args", args);
+        need(*b, "target_entity", t);
+        need(*b, "target_group", t);
+        need(*b, "history_entity", h);
+        need(*b, "history_dt", h);
         slices.push_back({b.get(), G, static_cast<u64>(graphs), E, entities, args, t, h});
         G = add(G, static_cast<u64>(graphs)); E = add(E, entities); A = add(A, args); T = add(T, t); H = add(H, h);
     }
@@ -151,8 +173,6 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
             else if (name == "relation_counts") { start = mul(s.graph, relations); count = mul(s.graphs, relations); }
             else if (name != "task_ids" && name != "num_objects" && name != "goal_complete") continue;
             const u64 bytes = mul(count, rl::dtype_bytes(a.dtype));
-            if (source.elements() < count)
-                invalid("a collated array is too short: " + a.name.str());
             if (bytes)
                 std::memcpy(static_cast<std::byte*>(result->mutable_data(a.name.view())) + mul(start, rl::dtype_bytes(a.dtype)),
                             s.batch->data(source), bytes);
@@ -199,6 +219,8 @@ std::shared_ptr<const rl::ArrayBundle> collate(std::span<const std::shared_ptr<c
         for (const char* field : {"version", "layout", "index_dtype", "statics", "schema_fingerprint", "num_relations"})
             if (b->scalar(field) != first.scalar(field))
                 invalid(std::string("collate received mixed ") + field);
+        if (b->scalar("table_fingerprint") != first.scalar("table_fingerprint"))
+            invalid("collate received batches of different tables: their task ids name different instances");
         if (b->arrays().size() != first.arrays().size()) invalid("collate received different stored arrays");
         for (const auto& a : first.arrays())
             if (!b->find(a.name.view()) || b->find(a.name.view())->dtype != a.dtype)
