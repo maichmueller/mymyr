@@ -508,7 +508,7 @@ void bind_encoding_device(nb::module_& parent)
              "Scratch bytes for this stream's acquired context and graph count; `derived`: for rows whose derived "
              "words are given.")
         .def_static("check_stream_schema",
-                    [](nb::handle encoder) { cuda::check_stream_schema(flat_encoder_of(encoder)->schema()); }, "encoder"_a,
+                    [](Arg<ann::Any> encoder) { cuda::check_stream_schema(flat_encoder_of(encoder)->schema()); }, "encoder"_a,
                     "Raises ValueError for an encoder whose schema a device stream cannot carry (subgoal layers, "
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
