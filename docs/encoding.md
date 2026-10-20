@@ -521,6 +521,55 @@ without `target_sources`, `predicate_virtual_nodes`, `include_actions` and a hor
 and `encoder.implicit_entities` tell, `batch.implicit_entities` is the batch's flag). Omitted arrays raise
 `AttributeError` on the batch and are absent from `as_dict()`.
 
+## The HGraph view
+
+`encoding.hgraph(batch)` views a **relation-major** batch (`layout='relation'`) as one heterogeneous graph, the form that
+relational graph networks take: a node type for every relation of the schema, whose nodes are the relation's tuples (the
+atoms), and the node type `_symbol_`, whose nodes are the entities of the graphs. It copies no tuple and keeps the batch
+alive (the view and every array it hands out hold it), so it costs a few hundred nanoseconds per batch whatever the
+batch holds.
+
+- **Node types**: `view.node_types` lists the names of the schema's relations in relation order, then `_symbol_`.
+  `view.num_nodes(node_type)` counts the nodes in the whole batch (the relation's tuples, or the entities) and
+  `view.ptr(node_type)` is the first node of each graph and the end, `[G + 1]`. The atoms of a relation are numbered from
+  0 across the batch, graph after graph, in the order of the batch's tuples (`ptr` is a new array of `G + 1` entries).
+  The `_symbol_` nodes are numbered by the batch's entity ids, so `ptr('_symbol_')` is `batch.entity_offsets` itself and
+  an edge's entity needs no renumbering. Every entity is a `_symbol_` node: the objects, the auxiliary entity and the
+  goal, action, history and state entities. The node feature `view.entity_role` is the `entity_role` of the batch (made
+  from `num_objects` when the batch's entity arrays are implicit).
+- **Edge types**: there is one edge type `(relation, position, '_symbol_')` for every relation and position of its
+  tuples (`view.edge_types`; the position is the slot's number as text, the slots of `relation_slot_roles`). Its edge `i`
+  leads from tuple `i` of the relation to the entity at that position of the tuple. `view.reverse_edge_types` are the same
+  edges the other way round, `('_symbol_', position, relation)`. A nullary relation has one position, its auxiliary slot,
+  so its edge leads to the graph's auxiliary entity, which a graph has exactly when it has a nullary tuple.
+- **Edge index**: `view.edge_index(edge_type)` is the pair `(edge_index_0, edge_index_1)` of the edge type (also
+  `view.edge_index_0(...)` and `view.edge_index_1(...)`; `view.num_edges(edge_type)` is the length). For a forward type,
+  row 0 is the tuple numbers `0 .. n - 1`, made when asked for, and row 1 is the entity at the position of each tuple: a
+  read-only **strided view** of `batch.relation_args` (its stride is the relation's arity), not a copy. The reverse type
+  has the rows swapped. A framework that cannot import a strided DLPack tensor copies row 1 on import; NumPy and torch
+  share the memory.
+- **Other batches**: the view works on the batches of the horizon, rooted-horizon and transition encoders as on those of
+  `FlatRelationEncoder`; their action, parent, sibling and cousin relations are node and edge types like the others, and
+  their state entities are `_symbol_` nodes.
+- **Refusals**: `ValueError` for a graph-major batch (the strided run needs the relation's tuples to be contiguous across
+  the graphs), for `predicate_virtual_nodes` (the node type already is the predicate), for a batch whose static tuples
+  are not in every graph and for a batch that overflowed its capacities; `TypeError` for a device batch.
+
+```python
+relation_encoder = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False)
+batch = relation_encoder.encode([task.initial_state])
+view = encoding.hgraph(batch)
+
+at = ("at", "1", "_symbol_")              # (relation, position, '_symbol_'): the room of an `at` atom
+assert at in view.edge_types and ("_symbol_", "1", "at") in view.reverse_edge_types
+atoms, entities = view.edge_index(at)
+assert np.shares_memory(entities, batch.relation_args) and entities.strides == (2 * entities.itemsize,)
+assert len(atoms) == view.num_edges(at) == view.num_nodes("at")
+rooms = set(view.edge_index(("room", "0", "_symbol_"))[1].tolist())
+assert set(entities.tolist()) <= rooms
+assert view.ptr("_symbol_").tolist() == batch.entity_offsets.tolist()
+```
+
 ## Streams
 
 Rows that arrive one by one (a search expanding states, an actor stepping several environments) are encoded in one call
@@ -761,6 +810,13 @@ space) returns `HorizonGraphs`, the arrays of a view with `input()` the `Horizon
 parents, task_ids, expansion)` makes the depth-one graphs of an existing expansion. The kinship of `_sibling_` and
 `_cousin_` is built per graph from the canonical parent edges by `MYMYR_HD` functions over scratch words
 (`mymyr/encoding/detail/horizon.hpp`: `horizon_kin_words`, `horizon_kin_prepare`, `horizon_kin_fill_far`).
+
+`mymyr/encoding/hgraph.hpp` has the [HGraph view](#the-hgraph-view): `HGraphView::of(batch, schema)` (a relation-major
+`rl::ArrayBundle` and the `EncodingSchema` it was encoded for; `std::invalid_argument` for what the view refuses) holds
+the batch alive and answers in constant time per type: `num_nodes(type)`, `symbol_ptr()`, `relation_ptr(relation, out)`,
+`edge_type(i)` and `find_edge_type(relation, slot)`, `edge_index_1(i)` (an `IndexRow`: a pointer, a size and a stride
+into the batch's `relation_args`, with `wide()` for int64) and `edge_index_0(i, out)`, which writes the arange. The node
+types are the relations in relation order and then `symbol_type()`.
 
 `mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
 encoder, and `encode(EncodeInput{states, task_ids, derived, derived_stride, goal_pos, goal_neg, goal_stride, goal_words, ..., actions, subgoals, history})`

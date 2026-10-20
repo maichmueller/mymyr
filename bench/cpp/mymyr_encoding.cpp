@@ -25,8 +25,14 @@
 // apart, builder merges equal states (encoding::build_horizon_graphs, up to depth), transitions encodes the successors
 // of the rows (depth 1; expansion and encoding::transition_graphs). The line then also reports build_us_per_node, the
 // time to make the graphs per node of them.
+// With layout = relation (and no predicate virtual nodes) the line also reports the HGraph view of the timed batch
+// (encoding::HGraphView): hgraph_us_per_state is the time to build the view per state (graph), hgraph_over_encode that
+// time over the time of the encode (us_per_state or us_per_graph), and hgraph_full_us_per_state the view together with
+// every edge type's row 0 and every node type's ptr written (what a consumer that asks for all of them pays). They are
+// null otherwise.
 
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/hgraph.hpp"
 #include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
@@ -77,6 +83,55 @@ std::string batch_hash(const rl::ArrayBundle& bundle)
 }
 
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+/// The times of the HGraph view of a batch (best of 9 builds): building the view alone, and building it and writing the
+/// row 0 of every edge type and the ptr of every relation's node type. Not set (`ok` false) for a graph-major batch.
+struct HGraphTimes
+{
+    bool ok = false;
+    double view = 0, full = 0;
+};
+
+HGraphTimes time_hgraph(const std::shared_ptr<const rl::ArrayBundle>& bundle,
+                        const std::shared_ptr<const encoding::EncodingSchema>& schema)
+{
+    HGraphTimes times;
+    if (bundle->scalar("layout") != 1 || schema->options().predicate_virtual_nodes)
+        return times;
+    times.ok = true;
+    times.view = times.full = 1e300;
+    std::vector<i64> scratch;
+    volatile i64 sink = 0;
+    for (int rep = 0; rep < 9; ++rep)
+    {
+        const double t0 = now_s();
+        const auto view = encoding::HGraphView::of(bundle, schema);
+        const double t1 = now_s();
+        times.view = std::min(times.view, t1 - t0);
+        sink = sink + static_cast<i64>(view.num_edge_types());
+        u64 widest = view.num_graphs() + 1;
+        for (u32 r = 0; r < schema->num_relations(); ++r)
+            widest = std::max(widest, view.num_nodes(r));
+        scratch.assign(widest, 0);
+        const double t2 = now_s();
+        for (u64 e = 0; e < view.num_edge_types(); ++e)
+            view.edge_index_0(e, scratch.data());
+        for (u32 r = 0; r < schema->num_relations(); ++r)
+            view.relation_ptr(r, scratch.data());
+        times.full = std::min(times.full, (t1 - t0) + (now_s() - t2));
+        sink = sink + scratch[0];
+    }
+    return times;
+}
+
+/// `seconds` over `per` as microseconds with 6 decimals, or null when the view was not timed.
+std::string microseconds(const HGraphTimes& times, double seconds, double per)
+{
+    char text[32] = "null";
+    if (times.ok)
+        std::snprintf(text, sizeof text, "%.6f", seconds * 1e6 / per);
+    return text;
+}
 
 /// The action rows of a batch of states, with the arrays that the expansion points at.
 struct Expanded
@@ -345,18 +400,22 @@ int main(int argc, char** argv)
             }
             const long faults_per_call = (minor_faults() - faults0) / 5;
             const u64 nodes = graphs.nodes;
+            const HGraphTimes hgraph = time_hgraph(bundle, encoder->schema_ptr());
             const u64 cells = n * encoder->schema().num_relations();
             const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
             std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"horizon\": \"%s\", \"root\": \"%s\", "
                         "\"depth\": %u, \"nodes\": %llu, \"edges\": %zu, \"threads\": %u, \"us_per_graph\": %.3f, "
                         "\"us_per_node\": %.3f, \"source\": \"%s\", \"relations\": \"%s\", \"build_us_per_node\": %.3f, "
-                        "\"faults_per_call\": %ld, \"args\": %d, \"hash\": \"%s\"}\n",
+                        "\"faults_per_call\": %ld, \"args\": %d, \"hgraph_us_per_state\": %s, \"hgraph_over_encode\": %s, "
+                        "\"hgraph_full_us_per_state\": %s, \"hash\": \"%s\"}\n",
                         std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                         layout.c_str(), horizon.c_str(), std::string(encoding::to_string(options.horizon.root)).c_str(),
                         depth, static_cast<unsigned long long>(nodes), static_cast<size_t>(graphs.edges), threads,
                         best * 1e6 / static_cast<double>(n), best * 1e6 / static_cast<double>(nodes), source.c_str(),
                         relations.c_str(), build_best * 1e6 / static_cast<double>(nodes), faults_per_call,
-                        arg_offsets[cells], batch_hash(*bundle).c_str());
+                        arg_offsets[cells], microseconds(hgraph, hgraph.view, static_cast<double>(n)).c_str(),
+                        hgraph.ok ? std::to_string(hgraph.view / best).c_str() : "null",
+                        microseconds(hgraph, hgraph.full, static_cast<double>(n)).c_str(), batch_hash(*bundle).c_str());
             return 0;
         }
         const auto encoder = encoding::FlatEncoder::create(table, options);
@@ -515,6 +574,7 @@ int main(int argc, char** argv)
         const auto* offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_offsets")));
         const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
         const u64 cells = n * encoder->schema().num_relations();
+        const HGraphTimes hgraph = time_hgraph(bundle, encoder->schema_ptr());
         // the time of a call on one state is null when no single states were encoded
         char single_us[32] = "null";
         if (singles)
@@ -523,13 +583,17 @@ int main(int argc, char** argv)
                     "\"actions\": \"%s\", \"subgoals\": %u, \"history\": %u, \"threads\": %u, "
                     "\"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d, \"hash\": \"%s\"}\n",
+                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d, "
+                    "\"hgraph_us_per_state\": %s, \"hgraph_over_encode\": %s, \"hgraph_full_us_per_state\": %s, "
+                    "\"hash\": \"%s\"}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), goals.c_str(), actions.c_str(), levels, steps, threads,
                     best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
                     best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call, offsets[cells],
-                    arg_offsets[cells], batch_hash(*bundle).c_str());
+                    arg_offsets[cells], microseconds(hgraph, hgraph.view, static_cast<double>(n)).c_str(),
+                    hgraph.ok ? std::to_string(hgraph.view / best).c_str() : "null",
+                    microseconds(hgraph, hgraph.full, static_cast<double>(n)).c_str(), batch_hash(*bundle).c_str());
     }
     catch (const std::exception& error)
     {
