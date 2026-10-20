@@ -25,6 +25,9 @@
 // apart, builder merges equal states (encoding::build_horizon_graphs, up to depth), transitions encodes the successors
 // of the rows (depth 1; expansion and encoding::transition_graphs). The line then also reports build_us_per_node, the
 // time to make the graphs per node of them.
+// outputs = relations|simple|both (argv[18]) selects what the batch stores: the relation arrays (the default), the Simple
+// graph, or both. The Simple graph needs the graph-major layout and no predicate virtual nodes; the line reports its
+// nodes and edges (null without it) and the tuples and tuple arguments of the batch.
 // With layout = relation (and no predicate virtual nodes) the line also reports the HGraph view of the timed batch
 // (encoding::HGraphView): hgraph_us_per_state is the time to build the view per state (graph), hgraph_over_encode that
 // time over the time of the encode (us_per_state or us_per_graph), and hgraph_full_us_per_state the view together with
@@ -67,7 +70,7 @@ std::string batch_hash(const rl::ArrayBundle& bundle)
     for (const char* name : {"task_ids", "num_objects", "entity_offsets", "entity_role", "entity_ref", "relation_counts",
                              "relation_offsets", "relation_arg_offsets", "relation_args", "goal_complete",
                              "target_offsets", "target_entity", "target_group", "history_offsets", "history_entity",
-                             "history_dt"})
+                             "history_dt", "node_offsets", "node_label", "edge_offsets", "edge_index", "edge_label"})
     {
         const rl::ArrayInfo* info = bundle.find(name);
         if (!info)
@@ -80,6 +83,45 @@ std::string batch_hash(const rl::ArrayBundle& bundle)
     char text[24];
     std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(hash));
     return text;
+}
+
+/// The last entry of an index array of a batch, 0 for an array it does not have.
+i64 last_entry(const rl::ArrayBundle& bundle, const char* name)
+{
+    const rl::ArrayInfo* info = bundle.find(name);
+    if (!info || info->elements() == 0)
+        return 0;
+    const u64 at = info->elements() - 1;
+    return info->dtype == rl::DType::I64 ? static_cast<const i64*>(bundle.data(*info))[at]
+                                         : static_cast<i64>(static_cast<const i32*>(bundle.data(*info))[at]);
+}
+
+/// What a batch holds, from whichever of its arrays are stored: the tuples and tuple arguments, and the Simple graph's
+/// nodes and edges (-1 without it).
+struct BatchSizes
+{
+    i64 tuples, args, nodes, edges;
+};
+
+BatchSizes batch_sizes(const rl::ArrayBundle& bundle)
+{
+    BatchSizes sizes{0, 0, -1, -1};
+    if (bundle.find("relation_offsets"))
+    {
+        sizes.tuples = last_entry(bundle, "relation_offsets");
+        sizes.args = last_entry(bundle, "relation_arg_offsets");
+    }
+    if (bundle.find("node_offsets"))
+    {
+        sizes.nodes = last_entry(bundle, "node_offsets");
+        sizes.edges = last_entry(bundle, "edge_offsets");
+        if (!bundle.find("relation_offsets"))
+        {
+            sizes.tuples = sizes.nodes - last_entry(bundle, "entity_offsets");
+            sizes.args = sizes.edges / 2;
+        }
+    }
+    return sizes;
 }
 
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -299,6 +341,13 @@ int main(int argc, char** argv)
         if (!parsed)
             throw std::invalid_argument("layout must be graph or relation");
         options.layout = *parsed;
+        const std::string outputs = argc > 18 ? argv[18] : "relations";
+        if (outputs == "simple")
+            options.outputs = {encoding::Output::Simple};
+        else if (outputs == "both")
+            options.outputs = {encoding::Output::Relations, encoding::Output::Simple};
+        else if (outputs != "relations")
+            throw std::invalid_argument("outputs must be relations, simple or both");
         const std::string horizon = argc > 12 ? argv[12] : "off";
         if (horizon != "off")
         {
@@ -401,19 +450,20 @@ int main(int argc, char** argv)
             const long faults_per_call = (minor_faults() - faults0) / 5;
             const u64 nodes = graphs.nodes;
             const HGraphTimes hgraph = time_hgraph(bundle, encoder->schema_ptr());
-            const u64 cells = n * encoder->schema().num_relations();
-            const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
+            const BatchSizes sizes = batch_sizes(*bundle);
             std::printf("{\"task\": \"%s\", \"N\": %llu, \"layout\": \"%s\", \"horizon\": \"%s\", \"root\": \"%s\", "
                         "\"depth\": %u, \"nodes\": %llu, \"edges\": %zu, \"threads\": %u, \"us_per_graph\": %.3f, "
                         "\"us_per_node\": %.3f, \"source\": \"%s\", \"relations\": \"%s\", \"build_us_per_node\": %.3f, "
-                        "\"faults_per_call\": %ld, \"args\": %d, \"hgraph_us_per_state\": %s, \"hgraph_over_encode\": %s, "
+                        "\"faults_per_call\": %ld, \"args\": %lld, \"outputs\": \"%s\", \"simple_nodes\": %lld, "
+                        "\"simple_edges\": %lld, \"hgraph_us_per_state\": %s, \"hgraph_over_encode\": %s, "
                         "\"hgraph_full_us_per_state\": %s, \"hash\": \"%s\"}\n",
                         std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                         layout.c_str(), horizon.c_str(), std::string(encoding::to_string(options.horizon.root)).c_str(),
                         depth, static_cast<unsigned long long>(nodes), static_cast<size_t>(graphs.edges), threads,
                         best * 1e6 / static_cast<double>(n), best * 1e6 / static_cast<double>(nodes), source.c_str(),
                         relations.c_str(), build_best * 1e6 / static_cast<double>(nodes), faults_per_call,
-                        arg_offsets[cells], microseconds(hgraph, hgraph.view, static_cast<double>(n)).c_str(),
+                        static_cast<long long>(sizes.args), outputs.c_str(), static_cast<long long>(sizes.nodes),
+                        static_cast<long long>(sizes.edges), microseconds(hgraph, hgraph.view, static_cast<double>(n)).c_str(),
                         hgraph.ok ? std::to_string(hgraph.view / best).c_str() : "null",
                         microseconds(hgraph, hgraph.full, static_cast<double>(n)).c_str(), batch_hash(*bundle).c_str());
             return 0;
@@ -518,9 +568,16 @@ int main(int argc, char** argv)
             best_single = std::min(best_single, now_s() - t0);
         }
         const u64 R = encoder->schema().num_relations();
-        std::vector<i32> task_ids(n), num_objects(n), entity_offsets(n + 1), counts(n * R), tuple_offsets(n * R + 1),
-            arg_buffer(n * R + 1), entity_ref(bundle->find("entity_ref")->elements()),
-            args(bundle->find("relation_args")->elements());
+        const BatchSizes sizes = batch_sizes(*bundle);
+        const bool stores_relations = bundle->find("relation_args") != nullptr;
+        const bool stores_simple = bundle->find("node_label") != nullptr;
+        const u64 relation_cells = stores_relations ? n * R : 0;
+        std::vector<i32> task_ids(n), num_objects(n), entity_offsets(n + 1), counts(relation_cells),
+            tuple_offsets(stores_relations ? relation_cells + 1 : 0), arg_buffer(stores_relations ? relation_cells + 1 : 0),
+            entity_ref(bundle->find("entity_ref")->elements()), args(static_cast<u64>(sizes.args));
+        std::vector<i32> node_offsets(stores_simple ? n + 1 : 0), node_label(stores_simple ? entity_ref.size() + args.size() : 0),
+            edge_offsets(node_offsets.size()), edge_index(stores_simple ? 4 * args.size() : 0),
+            edge_label(stores_simple ? 2 * args.size() : 0);
         std::vector<u8> entity_role(entity_ref.size());
         std::vector<u8> goal_complete(n);
         const auto* targets_info = bundle->find("target_entity");
@@ -529,9 +586,24 @@ int main(int argc, char** argv)
         const auto* history_info = bundle->find("history_entity");
         std::vector<i32> history_offsets(history_info ? n + 1 : 0),
             history_entity(history_info ? history_info->elements() : 0), history_dt(history_entity.size());
-        encoding::FlatBuffers buffers{task_ids.data(),    num_objects.data(),  entity_offsets.data(),
-                                      entity_role.data(), entity_ref.data(),   counts.data(),
-                                      tuple_offsets.data(), arg_buffer.data(), args.data()};
+        encoding::FlatBuffers buffers{task_ids.data(), num_objects.data(), entity_offsets.data(), entity_role.data(),
+                                      entity_ref.data()};
+        if (stores_relations)
+        {
+            buffers.relation_counts = counts.data();
+            buffers.relation_offsets = tuple_offsets.data();
+            buffers.relation_arg_offsets = arg_buffer.data();
+            buffers.relation_args = args.data();
+        }
+        if (stores_simple)
+        {
+            buffers.node_offsets = node_offsets.data();
+            buffers.node_label = node_label.data();
+            buffers.edge_offsets = edge_offsets.data();
+            buffers.edge_index = edge_index.data();
+            buffers.edge_stride = 2 * args.size();
+            buffers.edge_label = edge_label.data();
+        }
         if (bundle->find("goal_complete"))
             buffers.goal_complete = goal_complete.data();
         if (targets_info)
@@ -571,9 +643,6 @@ int main(int argc, char** argv)
                 best_fill = std::min(best_fill, now_s() - t1);
             }
         }
-        const auto* offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_offsets")));
-        const auto* arg_offsets = static_cast<const i32*>(bundle->data(*bundle->find("relation_arg_offsets")));
-        const u64 cells = n * encoder->schema().num_relations();
         const HGraphTimes hgraph = time_hgraph(bundle, encoder->schema_ptr());
         // the time of a call on one state is null when no single states were encoded
         char single_us[32] = "null";
@@ -583,15 +652,18 @@ int main(int argc, char** argv)
                     "\"actions\": \"%s\", \"subgoals\": %u, \"history\": %u, \"threads\": %u, "
                     "\"us_per_state\": %.3f, "
                     "\"into_us_per_state\": %.3f, \"count_us_per_state\": %.3f, \"fill_us_per_state\": %.3f, "
-                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %d, \"args\": %d, "
+                    "\"single_us_per_call\": %s, \"faults_per_call\": %ld, \"tuples\": %lld, \"args\": %lld, "
+                    "\"outputs\": \"%s\", \"simple_nodes\": %lld, \"simple_edges\": %lld, "
                     "\"hgraph_us_per_state\": %s, \"hgraph_over_encode\": %s, \"hgraph_full_us_per_state\": %s, "
                     "\"hash\": \"%s\"}\n",
                     std::filesystem::path(argv[2]).stem().string().c_str(), static_cast<unsigned long long>(n),
                     layout.c_str(), goals.c_str(), actions.c_str(), levels, steps, threads,
                     best * 1e6 / static_cast<double>(n),
                     best_into * 1e6 / static_cast<double>(n), best_count * 1e6 / static_cast<double>(n),
-                    best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call, offsets[cells],
-                    arg_offsets[cells], microseconds(hgraph, hgraph.view, static_cast<double>(n)).c_str(),
+                    best_fill * 1e6 / static_cast<double>(n), single_us, faults_per_call,
+                    static_cast<long long>(sizes.tuples), static_cast<long long>(sizes.args), outputs.c_str(),
+                    static_cast<long long>(sizes.nodes), static_cast<long long>(sizes.edges),
+                    microseconds(hgraph, hgraph.view, static_cast<double>(n)).c_str(),
                     hgraph.ok ? std::to_string(hgraph.view / best).c_str() : "null",
                     microseconds(hgraph, hgraph.full, static_cast<double>(n)).c_str(), batch_hash(*bundle).c_str());
     }
