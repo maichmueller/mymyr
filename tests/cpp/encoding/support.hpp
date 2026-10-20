@@ -38,11 +38,15 @@ inline encoding::FlatOptions encoder_options()
 /// Rows of a batch over a table.
 struct Rows
 {
-    std::vector<u64> data;     // [n, row_words]
+    std::vector<u64> data;     // [n, words + numeric_words]
     std::vector<i32> task_ids;  // [n]
     u32 words = 0;              // atom words per row
+    u32 numeric_words = 0;      // numeric words per row (numeric tables)
     [[nodiscard]] u64 size() const noexcept { return task_ids.size(); }
-    [[nodiscard]] rl::StateBatchView view() const noexcept { return {data.data(), size(), words, 0, 0}; }
+    [[nodiscard]] rl::StateBatchView view() const noexcept
+    {
+        return {data.data(), size(), words, 0, numeric_words};
+    }
 };
 
 /// `n` rows of one instance: the initial state, then a seeded random walk that restarts at dead ends.
@@ -50,6 +54,8 @@ inline Rows random_walk(const rl::TaskTable& table, u32 instance, u64 n, u64 see
 {
     Rows rows;
     rows.words = table.words();
+    rows.numeric_words = table.numeric_words();
+    const u32 width = rows.words + rows.numeric_words;
     std::mt19937_64 rng(seed);
     const auto& init = table.instance(instance).init;
     std::vector<u64> current(init.begin(), init.end());
@@ -60,13 +66,14 @@ inline Rows random_walk(const rl::TaskTable& table, u32 instance, u64 n, u64 see
         rows.task_ids.push_back(id);
         rl::Expansion out;
         out.words = rows.words;
+        out.numeric_words = rows.numeric_words;
         out.capacity = 4096;
         std::vector<u64> succ;
         for (;;)
         {
-            succ.assign(out.capacity * rows.words, 0);
+            succ.assign(out.capacity * width, 0);
             out.succ = succ.data();
-            rl::expand(table, {current.data(), 1, rows.words, 0, 0}, &id, out);
+            rl::expand(table, {current.data(), 1, rows.words, 0, rows.numeric_words}, &id, out);
             if (!out.overflow())
                 break;
             out.capacity = out.total;
@@ -77,8 +84,8 @@ inline Rows random_walk(const rl::TaskTable& table, u32 instance, u64 n, u64 see
         else
         {
             const u64 pick = rng() % out.total;
-            current.assign(succ.begin() + static_cast<std::ptrdiff_t>(pick * rows.words),
-                           succ.begin() + static_cast<std::ptrdiff_t>((pick + 1) * rows.words));
+            current.assign(succ.begin() + static_cast<std::ptrdiff_t>(pick * width),
+                           succ.begin() + static_cast<std::ptrdiff_t>((pick + 1) * width));
         }
     }
     return rows;

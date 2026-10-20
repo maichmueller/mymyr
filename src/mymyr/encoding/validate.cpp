@@ -609,11 +609,134 @@ void validate_simple(const rl::ArrayBundle& batch, const EncodingSchema& schema)
 }
 }  // namespace
 
+namespace
+{
+/// The value at `i` of a float array of either width, as a double.
+f64 real_at(const void* data, bool wide, u64 i)
+{
+    if (wide)
+        return static_cast<const f64*>(data)[i];
+    return static_cast<f64>(static_cast<const f32*>(data)[i]);
+}
+
+bool same_real(f64 a, f64 b) { return (a != a && b != b) || a == b; }
+
+/// Whether the `size` bytes from `from` are zero.
+bool zero_past(const void* data, u64 from, u64 to, usize width)
+{
+    const auto* bytes = static_cast<const std::byte*>(data);
+    for (u64 i = from * width; i < to * width; ++i)
+        if (bytes[i] != std::byte{0})
+            return false;
+    return true;
+}
+
+/// The checks of the numeric values: their arrays exist iff the schema stores them, hold the value of every numeric tuple
+/// in the order of the numeric segments, are zero past the batch, and node_value agrees with them.
+void validate_numeric(const rl::ArrayBundle& batch, const EncodingSchema& schema)
+{
+    const bool values = schema.stores_numeric_values(), node_values = schema.stores_node_value();
+    if (values != (batch.find("numeric_values") != nullptr))
+        fail(values ? "numeric_values is missing" : "numeric_values must be omitted: the schema does not store it");
+    if (node_values != (batch.find("node_value") != nullptr))
+        fail(node_values ? "node_value is missing" : "node_value must be omitted: the schema does not store it");
+    if (!values && !node_values)
+        return;
+    const u64 G = static_cast<u64>(batch.scalar("num_graphs"));
+    const u64 R = schema.num_relations();
+    const bool wide_index = batch.scalar("index_dtype") == 1;
+    const bool relation_major = schema.options().layout == Layout::Relation;
+    const bool wide_values = schema.options().numeric_dtype == NumericDtype::F64;
+    auto ints = [&](const char* name)
+    {
+        const rl::ArrayInfo* info = batch.find(name);
+        if (!info)
+            fail(std::string("the array ") + name + " is missing");
+        return Ints{batch.data(*info), info->elements(), wide_index};
+    };
+    // where the values of each numeric segment start
+    std::vector<u64> start(G * R, 0);
+    u64 total = 0;
+    Ints tuple_offsets;
+    if (values)
+    {
+        tuple_offsets = ints("relation_offsets");
+        auto visit = [&](u64 g, u32 r)
+        {
+            const u64 cell = relation_major ? r * G + g : g * R + r;
+            start[g * R + r] = total;
+            total += static_cast<u64>(tuple_offsets[cell + 1] - tuple_offsets[cell]);
+        };
+        if (relation_major)
+            for (u32 r = schema.first_numeric_relation(); r < R; ++r)
+                for (u64 g = 0; g < G; ++g)
+                    visit(g, r);
+        else
+            for (u64 g = 0; g < G; ++g)
+                for (u32 r = schema.first_numeric_relation(); r < R; ++r)
+                    visit(g, r);
+        const rl::ArrayInfo* info = batch.find("numeric_values");
+        if (info->dtype != (wide_values ? rl::DType::F64 : rl::DType::F32))
+            fail("numeric_values has the wrong dtype");
+        if (info->shape.size() != 1 || info->shape[0] < static_cast<i64>(total))
+            fail("numeric_values is shorter than the batch needs");
+        if (!zero_past(batch.data(*info), total, info->elements(), wide_values ? 8 : 4))
+            fail("numeric_values is not zero past the batch");
+        if (batch.scalar("numeric_dtype") != (wide_values ? 1 : 0))
+            fail("numeric_dtype does not match the schema's numeric dtype");
+    }
+    if (!node_values)
+        return;
+    const Ints node_offsets = ints("node_offsets");
+    const Ints entity_offsets = ints("entity_offsets");
+    const u64 V = static_cast<u64>(node_offsets[G]);
+    const rl::ArrayInfo* info = batch.find("node_value");
+    if (info->dtype != rl::DType::F32)
+        fail("node_value has the wrong dtype");
+    if (info->shape.size() != 1 || info->shape[0] < static_cast<i64>(V))
+        fail("node_value is shorter than the batch needs");
+    if (!zero_past(batch.data(*info), V, info->elements(), 4))
+        fail("node_value is not zero past the batch");
+    const auto* node_value = static_cast<const f32*>(batch.data(*info));
+    const rl::ArrayInfo* labels = batch.find("node_label");
+    if (!labels)
+        fail("the array node_label is missing");
+    const auto* node_label = static_cast<const i32*>(batch.data(*labels));
+    const void* numeric = values ? batch.data(*batch.find("numeric_values")) : nullptr;
+    std::vector<u64> seen(R);
+    for (u64 g = 0; g < G; ++g)
+    {
+        const u64 first = static_cast<u64>(node_offsets[g]);
+        const u64 entities = static_cast<u64>(entity_offsets[g + 1] - entity_offsets[g]);
+        std::fill(seen.begin(), seen.end(), u64{0});
+        for (u64 n = first; n < static_cast<u64>(node_offsets[g + 1]); ++n)
+        {
+            const bool atom = n >= first + entities;
+            const i64 relation = atom ? node_label[n] - static_cast<i64>(detail::k_simple_roles) : -1;
+            if (!atom || relation < static_cast<i64>(schema.first_numeric_relation()) || relation >= static_cast<i64>(R))
+            {
+                if (node_value[n] != 0.0f)
+                    fail("node_value of a node of graph " + std::to_string(g) + " that is no numeric atom is not 0");
+                continue;
+            }
+            if (numeric)
+            {
+                const u64 at = start[g * R + static_cast<u64>(relation)] + seen[static_cast<u64>(relation)]++;
+                const f32 want = static_cast<f32>(real_at(numeric, wide_values, at));
+                if (!same_real(node_value[n], want))
+                    fail("node_value of a numeric atom of graph " + std::to_string(g) + " differs from its numeric value");
+            }
+        }
+    }
+}
+}  // namespace
+
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema)
 {
     if (schema.emits_relations())
         validate_relations(batch, schema);
     if (schema.emits_simple())
         validate_simple(batch, schema);
+    validate_numeric(batch, schema);
 }
 }  // namespace mymyr::encoding

@@ -395,6 +395,7 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
     if (o.max_goal_level != 0) refuse("subgoal levels");
     if (o.history) refuse("history steps");
+    if (schema.has_numeric()) refuse("numeric relations");
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
     if (o.outputs != encoding::Outputs{encoding::Output::Relations}) refuse("Simple");
     constexpr encoding::TargetSources targets{encoding::TargetSource::Goal};
@@ -411,6 +412,8 @@ DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::Fla
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
     m_schema = m_encoder->schema_ptr();
     check_schema(*m_schema);
+    if (m_encoder->table().numeric())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
     auto facts = context_facts(m_encoder->context());
     m_bounds = facts.bounds;
     m_context = DeviceEncodingContext::upload(m_ctx, m_encoder->context_ptr());

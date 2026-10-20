@@ -105,6 +105,13 @@ enum class IndexType : u8
     I64,
 };
 
+/// The floating-point type of `numeric_values`: the value of a numeric tuple is rounded to it (to nearest, ties to even).
+enum class NumericDtype : u8
+{
+    F32,
+    F64,
+};
+
 /// Which states a horizon encoding relates. Full encodes the complete state of every node, Delta the atoms a node
 /// adds to / deletes from its root, Action the root's state plus the actions that lead to the nodes.
 enum class HorizonMode : u8
@@ -155,6 +162,10 @@ struct FlatOptions
     bool include_static = true;
     /// Relations of the derived predicates in the state lane.
     bool include_derived = true;
+    /// One relation `[num]f` for each numeric function f of the domain that a state gives values to (a fluent function;
+    /// not total-cost), with one tuple per ground function term of the instance and its value in `numeric_values`.
+    /// Without it the numeric part of the states is ignored.
+    bool include_numeric = true;
     /// Relations of the nullary predicates. A nullary atom is a tuple over the graph's auxiliary entity, so that the
     /// fact has a node to attach to.
     bool nullary = true;
@@ -183,6 +194,8 @@ struct FlatOptions
     bool constant_labels = false;
     Layout layout = Layout::Graph;
     IndexType index = IndexType::I32;
+    /// The type of `numeric_values`; only a schema with numeric relations stores it.
+    NumericDtype numeric_dtype = NumericDtype::F32;
     /// Stores `relation_counts`. Without it, the tuples of a cell are the difference of two consecutive
     /// `relation_offsets` (in layout order).
     bool emit_counts = true;
@@ -209,13 +222,14 @@ struct FlatOptions
 [[nodiscard]] FlatOptions normalized(const FlatOptions& options);
 
 /// The text of an enumerator ("plain", "satisfied", "unsatisfied", "added_satisfied", "added_unsatisfied"; "goal",
-/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "none", "full", "delta",
+/// "subgoal", "action", "history"; "graph", "relation"; "auto", "always"; "int32", "int64"; "float32", "float64"; "none", "full", "delta",
 /// "action"; "include", "exclude", "encode_only"; "relations", "simple"), and its inverse: nullopt for text that names no enumerator.
 [[nodiscard]] std::string_view to_string(GoalDerivation value) noexcept;
 [[nodiscard]] std::string_view to_string(TargetSource value) noexcept;
 [[nodiscard]] std::string_view to_string(Layout value) noexcept;
 [[nodiscard]] std::string_view to_string(EntityArrays value) noexcept;
 [[nodiscard]] std::string_view to_string(IndexType value) noexcept;
+[[nodiscard]] std::string_view to_string(NumericDtype value) noexcept;
 [[nodiscard]] std::string_view to_string(HorizonMode value) noexcept;
 [[nodiscard]] std::string_view to_string(RootPolicy value) noexcept;
 [[nodiscard]] std::string_view to_string(Output value) noexcept;
@@ -224,6 +238,7 @@ struct FlatOptions
 [[nodiscard]] std::optional<Layout> parse_layout(std::string_view text) noexcept;
 [[nodiscard]] std::optional<EntityArrays> parse_entity_arrays(std::string_view text) noexcept;
 [[nodiscard]] std::optional<IndexType> parse_index_type(std::string_view text) noexcept;
+[[nodiscard]] std::optional<NumericDtype> parse_numeric_dtype(std::string_view text) noexcept;
 [[nodiscard]] std::optional<HorizonMode> parse_horizon_mode(std::string_view text) noexcept;
 [[nodiscard]] std::optional<RootPolicy> parse_root_policy(std::string_view text) noexcept;
 [[nodiscard]] std::optional<Output> parse_output(std::string_view text) noexcept;

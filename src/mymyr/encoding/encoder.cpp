@@ -53,6 +53,8 @@ rl::ArrayShape shape2(u64 n, u64 m) { return {static_cast<i64>(n), static_cast<i
 EncodeScratch::EncodeScratch() : m_impl(std::make_unique<Impl>()) {}
 EncodeScratch::~EncodeScratch() = default;
 
+u64 EncodeScratch::numeric_tuples() const noexcept { return m_impl->numeric_total; }
+
 EncodeScratch& EncodeScratch::of_this_thread()
 {
     thread_local EncodeScratch scratch;
@@ -107,6 +109,8 @@ struct Pass
     bool layered = in.subgoals.layers != 0 || in.history.masks.layers != 0 || in.history.count != nullptr;
     // the batch stores the Simple graph, which follows the fill of each graph with its cells' counts
     bool simple = context.schema().emits_simple();
+    // the dtype of the batch's numeric values
+    NumericDtype numeric_dtype = context.schema().options().numeric_dtype;
     detail::SimpleParams simple_params{R, context.schema().simple_max_arity(), context.schema().simple_constants()};
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
@@ -209,6 +213,8 @@ struct Pass
                                              detail::RowLayers& layers) const noexcept
     {
         detail::RowInput row{in.states.row(g), derived_of(g, v)};
+        if (in.states.numeric_words != 0)
+            row.numeric = row.atoms + in.states.words;
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -280,7 +286,7 @@ void count_range(const Pass& p, u32 t)
     const rl::TaskTable& table = p.context.table();
     Member& m = p.s.members[t];
     m.totals.assign(hi - lo, detail::GraphTotals{});
-    m.entities = m.tuples = m.args = m.targets = m.history = 0;
+    m.entities = m.tuples = m.args = m.targets = m.history = m.numeric = 0;
     m.bad_id = m.narrow = m.bad_bits = m.narrow_goal = m.bad_goal_bits = k_none;
     m.narrow_subgoals = m.bad_subgoal_bits = m.narrow_history = m.bad_history_bits = m.bad_history_count = k_none;
     m.bad_slice = m.bad_action_order = m.bad_action_label = k_none;
@@ -370,6 +376,7 @@ void count_range(const Pass& p, u32 t)
         m.args += totals.args;
         m.targets += totals.targets;
         m.history += totals.history_steps;
+        m.numeric += v.numeric_tuples;
         if (p.relation_major)
             for (u32 i = 0; i < cells.count; ++i)
                 m.tally[cells.cells[i].relation] += cell_counts[i];
@@ -395,15 +402,18 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
                                   b.target_group,
                                   static_cast<I*>(b.history_offsets),
                                   static_cast<I*>(b.history_entity),
-                                  b.history_dt};
+                                  b.history_dt,
+                                  p.numeric_dtype == NumericDtype::F32 ? static_cast<f32*>(b.numeric_values) : nullptr,
+                                  p.numeric_dtype == NumericDtype::F64 ? static_cast<f64*>(b.numeric_values) : nullptr,
+                                  p.s.sizes.tuples - p.s.numeric_total};
     const detail::SimpleOut<I> simple{static_cast<I*>(b.node_offsets), static_cast<I*>(b.edge_offsets), b.node_label,
                                       static_cast<I*>(b.edge_index),
                                       b.edge_index ? static_cast<I*>(b.edge_index) + b.edge_stride : nullptr,
-                                      b.edge_label};
+                                      b.edge_label, b.node_value};
     I* entity_offsets = static_cast<I*>(b.entity_offsets);
     Member& m = p.s.members[t];
     u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start,
-        history = m.history_start;
+        history = m.history_start, numeric = m.numeric_start;
     u32* virtual_scratch = m.virtual_scratch.empty() ? nullptr : m.virtual_scratch.data();
     // fills graph g; `graph_counts` are its cell counts (null unless the pass kept them)
     auto fill_one = [&](u64 g, const u32* graph_counts)
@@ -424,15 +434,17 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
                                                           graph_counts, history);
         else
             detail::fill_graph<I, Layered>(v, row, g, tuple, arg, entity, totals, out, target, virtual_scratch,
-                                           graph_counts, history);
+                                           graph_counts, history, numeric);
         if (p.simple)
             detail::simple_fill_graph<I>(p.simple_params, simple, out, p.cells_of<Layered>(v, g), graph_counts,
                                          p.relation_major, g,
-                                         {entity, totals.entities, tuple, totals.tuples, arg, totals.args});
+                                         {entity, totals.entities, tuple, totals.tuples, arg, totals.args, row.numeric,
+                                          v.numeric_storage});
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
         target += totals.targets;
+        numeric += v.numeric_tuples;
         if constexpr (Layered)
             history += totals.history_steps;
     };
@@ -514,11 +526,12 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     const rl::StateBatchView& states = in.states;
 
     // 1. check what does not depend on a row
-    if (states.numeric_words != 0)
-        invalid("numeric state rows are not supported");
+    if (states.numeric_words != table().numeric_words())
+        invalid("the state rows have " + std::to_string(states.numeric_words) + " numeric words, the table's rows have " +
+                std::to_string(table().numeric_words()));
     if (graphs && !states.data)
         invalid("the state buffer is null");
-    if (states.stride && states.stride < states.words)
+    if (states.stride && states.stride < u64{states.words} + states.numeric_words)
         invalid("the state row stride is smaller than its width");
     if (in.derived && in.derived_stride < context.max_derived_words())
         invalid("the derived row stride is smaller than the derived words of an instance");
@@ -714,6 +727,12 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         (sizes.history > 0 && (!out.history_entity || !out.history_dt)))
         invalid(schema.has_history() ? "a history array is null, the schema stores them"
                                      : "the history arrays must be null, the schema has no history");
+    if (schema.stores_numeric_values() ? (s.numeric_total > 0 && !out.numeric_values) : out.numeric_values != nullptr)
+        invalid(schema.stores_numeric_values() ? "numeric_values is null, the batch has numeric tuples"
+                                               : "numeric_values must be null, the schema does not store it");
+    if (schema.stores_node_value() ? (sizes.entities + sizes.tuples > 0 && !out.node_value) : out.node_value != nullptr)
+        invalid(schema.stores_node_value() ? "node_value is null, the batch has nodes"
+                                           : "node_value must be null, the schema does not store it");
     const u64 cells = graphs * schema.num_relations();
     // an encoding without the relation arrays writes its tuples into scratch, from which the Simple graph is built
     FlatBuffers work = out;
@@ -783,7 +802,8 @@ FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const BatchShape& capa
         invalid("the batch has more graphs than the output capacity");
     FlatSizes sizes = count(in, pool, scratch);
     if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
-        sizes.history > capacities.history)
+        sizes.history > capacities.history ||
+        (m_schema->stores_numeric_values() && scratch.numeric_tuples() > capacities.numeric))
         sizes.overflow |= k_overflow_capacity;
     if (!sizes.overflowed())
         fill(in, sizes, out, pool, scratch);
@@ -798,7 +818,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
 }
 
 FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history,
-                                              u64 nodes, u64 edges) const
+                                              u64 numeric, u64 nodes, u64 edges) const
 {
     const IndexType index = m_schema->options().index;
     const u64 R = m_schema->num_relations();
@@ -818,7 +838,7 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
           target_offsets = absent, target_entity = absent, target_group = absent, history_offsets = absent,
           history_entity = absent, history_dt = absent, relation_offsets = absent, relation_arg_offsets = absent,
           relation_args = absent, node_offsets = absent, node_label = absent, edge_offsets = absent,
-          edge_index = absent, edge_label = absent;
+          edge_index = absent, edge_label = absent, numeric_values = absent, node_value = absent;
     const bool relations = m_schema->emits_relations(), simple = m_schema->emits_simple();
     if (!m_schema->implicit_entity_arrays())
     {
@@ -855,6 +875,11 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
         edge_index = reserve("edge_index", itype, shape2(2, edges));
         edge_label = reserve("edge_label", rl::DType::I32, shape1(edges));
     }
+    const bool wide_values = m_schema->options().numeric_dtype == NumericDtype::F64;
+    if (m_schema->stores_numeric_values())
+        numeric_values = reserve("numeric_values", wide_values ? rl::DType::F64 : rl::DType::F32, shape1(numeric));
+    if (m_schema->stores_node_value())
+        node_value = reserve("node_value", rl::DType::F32, shape1(nodes));
     builder.scalar("version", 1);
     builder.scalar("num_graphs", static_cast<i64>(graphs));
     builder.scalar("num_relations", static_cast<i64>(R));
@@ -862,6 +887,8 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
     builder.scalar("statics", 0);
+    if (m_schema->stores_numeric_values())
+        builder.scalar("numeric_dtype", wide_values ? 1 : 0);
     if (simple)
     {
         builder.scalar("simple_node_labels", m_schema->simple_node_labels());
@@ -893,6 +920,8 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     out.edge_index = at(edge_index);
     out.edge_stride = edges;
     out.edge_label = static_cast<i32*>(at(edge_label));
+    out.numeric_values = at(numeric_values);
+    out.node_value = static_cast<f32*>(at(node_value));
     return allocation;
 }
 
@@ -919,7 +948,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
         }
     }
     Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history,
-                                     sizes.entities + sizes.tuples, 2 * sizes.args);
+                                     scratch.numeric_tuples(), sizes.entities + sizes.tuples, 2 * sizes.args);
     fill(in, sizes, allocation.buffers, pool, scratch);
     return std::move(allocation.bundle);
 }
@@ -932,12 +961,14 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         invalid("the batch has more graphs than the output capacity");
     sizes = count(in, pool, scratch);
     if (sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
-        sizes.history > capacities.history)
+        sizes.history > capacities.history ||
+        (m_schema->stores_numeric_values() && scratch.numeric_tuples() > capacities.numeric))
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();
     Allocation allocation = allocate(graphs, capacities.entities, capacities.args, capacities.targets,
-                                     capacities.history, capacities.entities + capacities.args, 2 * capacities.args);
+                                     capacities.history, capacities.numeric, capacities.entities + capacities.args,
+                                     2 * capacities.args);
     const FlatBuffers out = allocation.buffers;
     const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
     const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
@@ -949,6 +980,11 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         fill(in, sizes, out, pool, scratch);
         if (out.relation_args)
             zero(out.relation_args, sizes.args, capacities.args, index_bytes);
+        if (out.numeric_values)
+            zero(out.numeric_values, scratch.numeric_tuples(), capacities.numeric,
+                 m_schema->options().numeric_dtype == NumericDtype::F64 ? 8 : 4);
+        if (out.node_value)
+            zero(out.node_value, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
         if (out.node_label)
         {
             zero(out.node_label, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);

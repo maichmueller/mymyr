@@ -36,9 +36,11 @@
 //                                      (present iff the options have history)
 //   history_entity       I   [S]       the entity of each history step, graph after graph in step order
 //   history_dt           i32 [S]       the dt of each history step
+//   numeric_values       f32 or f64 [N]  the value of each numeric tuple (present iff the schema has numeric relations and
+//                                      stores the relation arrays), see below
 // and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0:
-// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
-// tuples are repeated in every graph).
+// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern), statics (0: the static
+// tuples are repeated in every graph) and, with numeric values, numeric_dtype (0: float32, 1: float64).
 //
 // The Simple graph. With FlatOptions::outputs holding Simple, a batch also has the atom-object incidence graph of its
 // tuples (it needs the entity arrays), and without Relations in the outputs it has no relation arrays (relation_*) and
@@ -48,6 +50,8 @@
 //   edge_offsets         I   [G + 1]   graph g's edges are [edge_offsets[g], edge_offsets[g + 1])
 //   edge_index           I   [2, E]    row 0 the source, row 1 the target node of each edge (batch-global ids)
 //   edge_label           i32 [E]       the label of each edge
+//   node_value           f32 [V]       the value of a numeric atom node, 0 for every other node (present iff the schema
+//                                      has numeric relations)
 // and the scalars simple_node_labels and simple_edge_labels (the sizes of the label vocabularies). Graph g has one node
 // per entity (the node ids of its entities are the entity ids plus the tuples of the graphs before it) followed by one
 // node per tuple, in graph-major tuple order: V is the entities plus the tuples. Every tuple position gives two edges,
@@ -57,6 +61,19 @@
 // the role of its entity (0 to 8), or 9 + R + j for the j-th object when FlatOptions::constant_labels is set and the
 // object is the j-th constant of the domain, and 9 + r for an atom of relation r. The graph is the same in both layouts
 // and in every call form: the tuples are the ones above.
+//
+// Numeric tuples. A numeric function of the domain that states give values to (a fluent function, not total-cost) is a
+// relation `[num]f`, with one tuple per ground term of f in the instance: the instance's numeric slots of f, in the
+// lexicographic order of their objects (the tuple of a nullary function is [auxiliary entity]). The numeric relations
+// follow all others in the catalog, so their tuples are the last ones of a graph, and a graph of an instance has the same
+// number of them whatever its state. The rows of a numeric table are [atom words | numeric words] (rl::StateBatchView
+// numeric_words equal to the table's) and the value of a tuple is the value of its slot in the row, undefined (NaN) until
+// an assign effect gives it one. numeric_values lists the values of the numeric tuples in the order in which the tuples
+// appear in relation_args (the numeric tuples of the segments in segment order), rounded to FlatOptions::numeric_dtype:
+// in the relation-major layout the values of one relation are consecutive, and
+// numeric_values[relation_offsets[s] - relation_offsets[first_numeric_relation() * G]] is the value of the first tuple of
+// numeric segment s; in the graph-major layout graph g's values follow those of the graphs before it. A schema that
+// stores only the Simple graph has no numeric_values; node_value gives every numeric atom node its value as a float.
 //
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
@@ -146,7 +163,8 @@ struct HistoryInput
 /// relations; the other edge arrays may be null then. A schema without either does not read the edges at all.
 struct HorizonInput
 {
-    rl::StateBatchView nodes;           // M node rows (numeric_words must be 0); the stride is honoured
+    rl::StateBatchView nodes;           // M node rows (numeric_words must be 0: horizons have no numeric part); the stride is
+                                        // honoured
     u64 graphs = 0;                     // G
     const i32* node_offsets = nullptr;  // [G + 1] strictly ascending from 0, the last at most nodes.rows
     const i32* edge_offsets = nullptr;  // [G + 1] ascending from 0
@@ -162,7 +180,7 @@ struct HorizonInput
 /// rows). Without one, `horizon` is empty.
 struct EncodeInput
 {
-    rl::StateBatchView states;      // N rows (numeric_words must be 0); the stride is honoured
+    rl::StateBatchView states;      // N rows (numeric_words must be the table's); the stride is honoured
     const i32* task_ids = nullptr;  // [N] the instance of each row; null: instance 0
     const u64* derived = nullptr;   // [N, derived_stride] the derived words of each row; null: evaluated here
     u64 derived_stride = 0;         // words from one row of `derived` to the next (at least max_derived_words())
@@ -215,6 +233,9 @@ public:
     /// (it is warm once the thread has encoded). It serves one call at a time, like any scratch.
     [[nodiscard]] static EncodeScratch& of_this_thread();
 
+    /// The numeric tuples of the batch the last count() counted (the length of its numeric_values).
+    [[nodiscard]] u64 numeric_tuples() const noexcept;
+
     struct Impl;
     [[nodiscard]] Impl& impl() noexcept { return *m_impl; }
 
@@ -240,7 +261,7 @@ public:
     /// invalid input (a task id out of range, a row narrower than its instance, a state or goal bit its instance does
     /// not have, a goal mask narrower than its instance, goal masks without their pair, subgoal layers or history steps
     /// that the schema has no relations for, that are narrower than their instance or set a bit it does not have, a
-    /// history count beyond its row's steps, numeric words, expansion rows that are not the canonical rows of their
+    /// history count beyond its row's steps, a number of numeric words other than the table's, expansion rows that are not the canonical rows of their
     /// state) and
     /// std::overflow_error when a count exceeds the index type.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in) const;
@@ -288,9 +309,10 @@ private:
         FlatBuffers buffers;
     };
     /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments, `targets`
-    /// targets, `history` history steps and, with the Simple graph, `nodes` nodes and `edges` edges.
-    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history, u64 nodes,
-                                      u64 edges) const;
+    /// targets, `history` history steps, `numeric` numeric values and, with the Simple graph, `nodes` nodes and `edges`
+    /// edges.
+    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history, u64 numeric,
+                                      u64 nodes, u64 edges) const;
     /// count() and fill() for a horizon schema (horizon.cpp).
     [[nodiscard]] FlatSizes count_horizon(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
     void fill_horizon(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,

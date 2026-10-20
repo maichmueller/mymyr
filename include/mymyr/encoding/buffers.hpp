@@ -8,9 +8,10 @@
 namespace mymyr::encoding
 {
 /// Capacities of the arrays of a batch: graphs bound the per-graph and per-cell arrays, entities the entity arrays,
-/// args the entries of relation_args, targets the target_entity and target_group arrays and history the history_entity
-/// and history_dt arrays. Tuple counts have no separate capacity because every tuple has at least one argument and no
-/// array is indexed by tuple alone.
+/// args the entries of relation_args, targets the target_entity and target_group arrays, history the history_entity
+/// and history_dt arrays, and numeric the entries of numeric_values (only a schema that stores numeric values has a
+/// numeric capacity; the true count is FlatEncoder::numeric_tuples). Tuple counts have no separate capacity because every
+/// tuple has at least one argument and no array is indexed by tuple alone.
 struct BatchShape
 {
     u64 graphs = 0;
@@ -18,6 +19,7 @@ struct BatchShape
     u64 args = 0;
     u64 targets = 0;
     u64 history = 0;
+    u64 numeric = 0;
     [[nodiscard]] friend bool operator==(const BatchShape&, const BatchShape&) noexcept = default;
 };
 
@@ -52,8 +54,10 @@ static_assert(sizeof(FlatSizes) == 6 * sizeof(u64));
 /// iff it has no targets, the three history arrays iff it has no history. The relation arrays (relation_counts,
 /// relation_offsets, relation_arg_offsets, relation_args) are null iff the schema does not store them
 /// (EncodingSchema::emits_relations), the Simple arrays (node_offsets, node_label, edge_offsets, edge_index,
-/// edge_label) are null iff it does not store the Simple graph. Nothing is written past the sizes: the entries of the
-/// variable-size arrays beyond them keep their old values.
+/// edge_label) are null iff it does not store the Simple graph. numeric_values is null iff the schema does not store
+/// numeric values (EncodingSchema::stores_numeric_values) and node_value iff it does not store node values
+/// (stores_node_value); numeric_values holds at least the batch's numeric tuples, node_value at least its nodes.
+/// Nothing is written past the sizes: the entries of the variable-size arrays beyond them keep their old values.
 ///
 /// The Simple arrays hold the nodes (entities + tuples of the batch, at most entities + args) and edges (twice the
 /// args): node_label holds at least the nodes and edge_label at least the edges, and edge_index is two rows of
@@ -82,5 +86,7 @@ struct FlatBuffers
     void* edge_index = nullptr;     // [2, edge_stride]
     u64 edge_stride = 0;
     i32* edge_label = nullptr;
+    void* numeric_values = nullptr;  // [T_num] float or double (FlatOptions::numeric_dtype)
+    f32* node_value = nullptr;       // [V]
 };
 }

@@ -44,6 +44,11 @@ namespace mymyr::encoding
 ///   position, then the reverse edges with the label K + position, each between the atom and the entity at that
 ///   position, an entity of the position's slot role; and, when the batch stores the relation arrays, the atoms and
 ///   edges are exactly the tuples of the relations in graph-major tuple order.
+/// - numeric_values is present iff the schema stores numeric values (a float32 or float64 array by numeric_dtype, which
+///   the scalar numeric_dtype repeats), holds one entry per tuple of the numeric relations in the order of their
+///   segments, and is zero past them; node_value is present iff the schema stores node values, is zero for every node
+///   that is no numeric atom and, when the relation arrays are stored, equals the numeric value of every numeric atom
+///   rounded to float32.
 /// The relation arrays are checked iff the schema stores them.
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
 }

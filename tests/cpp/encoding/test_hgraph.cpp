@@ -460,6 +460,58 @@ TEST(HGraphView, ANullaryRelationsEdgeLeadsToTheAuxiliaryEntity)
     EXPECT_GT(graphs_with_tuple, 0u);
 }
 
+TEST(HGraphView, NumericRelationsAreNodeTypesWhoseEdgesAreTheirTuples)
+{
+    const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
+    const auto table = rl::TaskTable::create({Task::create(*frontend::load_task(dir + "domain.pddl", dir + "p01.pddl")),
+                                              Task::create(*frontend::load_task(dir + "domain.pddl", dir + "p02.pddl"))});
+    test::Rows rows;
+    for (u32 i = 0; i < table->size(); ++i)
+    {
+        const test::Rows part = test::random_walk(*table, i, 10, 3 + i);
+        rows.words = part.words;
+        rows.numeric_words = part.numeric_words;
+        rows.data.insert(rows.data.end(), part.data.begin(), part.data.end());
+        rows.task_ids.insert(rows.task_ids.end(), part.task_ids.begin(), part.task_ids.end());
+    }
+    for (const IndexType index : k_indices)
+    {
+        FlatOptions options = test::encoder_options();
+        options.layout = Layout::Relation;
+        options.index = index;
+        const auto encoder = FlatEncoder::create(table, options);
+        EncodeInput in;
+        in.states = rows.view();
+        in.task_ids = rows.task_ids.data();
+        const auto batch = encoder->encode(in);
+        const HGraphView view = HGraphView::of(batch, encoder->schema_ptr());
+        const EncodingSchema& schema = encoder->schema();
+        const u64 G = rows.size();
+        ASSERT_TRUE(schema.has_numeric());
+        const auto offsets = ints(*batch, "relation_offsets");
+        const auto arg_offsets = ints(*batch, "relation_arg_offsets");
+        const auto args = ints(*batch, "relation_args");
+        for (u32 r = schema.first_numeric_relation(); r < schema.num_relations(); ++r)
+        {
+            SCOPED_TRACE(schema.relation(r).name);
+            EXPECT_EQ(view.node_type_name(r), schema.relation(r).name);
+            const u64 nodes = static_cast<u64>(offsets[(r + 1) * G] - offsets[r * G]);
+            EXPECT_GT(nodes, 0u);
+            EXPECT_EQ(view.num_nodes(r), nodes);
+            const u32 arity = schema.relation(r).arity;
+            for (u32 slot = 0; slot < arity; ++slot)
+            {
+                const auto id = view.find_edge_type(r, slot);
+                ASSERT_TRUE(id.has_value());
+                const IndexRow row = view.edge_index_1(*id);
+                ASSERT_EQ(row.size(), nodes);
+                for (u64 i = 0; i < nodes; ++i)
+                    ASSERT_EQ(row[i], args[static_cast<u64>(arg_offsets[r * G]) + i * arity + slot]);
+            }
+        }
+    }
+}
+
 TEST(HGraphView, TheEmptyBatchAndASingleRow)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));

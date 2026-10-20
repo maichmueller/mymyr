@@ -497,7 +497,7 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     if (in.history.masks.layers != 0 || in.history.count || in.history.dt)
         invalid("a horizon has no history steps");
     if (h.nodes.numeric_words != 0)
-        invalid("numeric state rows are not supported");
+        invalid("horizon encodings do not encode numeric state rows");
     if (h.nodes.stride && h.nodes.stride < h.nodes.words)
         invalid("the node row stride is smaller than its width");
     if (graphs && (!h.node_offsets || !h.edge_offsets))
