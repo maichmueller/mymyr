@@ -3,6 +3,7 @@ in the graphs, the static tuples of each instance are stored once per batch with
 the graphs rebuild the repeated batch exactly."""
 
 import pickle
+import random
 
 import numpy as np
 import pytest
@@ -13,7 +14,7 @@ from conftest import BLOCKS, text_task, walk
 
 TASKS = ["gripper__prob05", "blocks__probBLOCKS-8-0", "logistics00__probLOGISTICS-6-1", "philosophers__p03-phil4"]
 STATIC_ARRAYS = ("static_task_ids", "static_offsets", "static_arg_offsets", "static_args", "static_relations")
-GOAL_ROLE, VIRTUAL_ROLE = 2, 1
+TARGET_ROLES, VIRTUAL_ROLE = (2, 3, 6), 1
 PREDICATE_SLOT = 1
 OPTION_SETS = {
     "default": {},
@@ -77,7 +78,7 @@ def repeated_form(batch):
     if "entity_ref" in a:
         for g in range(graphs):
             for e in range(int(entity_offsets[g]), int(entity_offsets[g + 1])):
-                if a["entity_role"][e] != GOAL_ROLE:
+                if a["entity_role"][e] not in TARGET_ROLES:
                     continue
                 passed, r = 0, 0
                 while r < relations and passed + shared_tuples[g, r] <= a["entity_ref"][e]:
@@ -334,6 +335,101 @@ def test_names_and_descriptions_are_those_of_the_repeated_batch(options):
     )
     for g in range(len(states)):
         assert shared.describe(padded, g) == repeated.describe(b, g)
+
+
+def literal(atom, positive=True):
+    text = f"({' '.join([atom.predicate.name, *(o.name for o in atom.objects)])})"
+    return text if positive else f"(not {text})"
+
+
+def random_layers_and_history(states, levels, steps, seed):
+    """Random subgoal layers and histories of the states, as lists of literal strings."""
+    rng = random.Random(seed)
+    every = [a for s in states for a in s.atoms()]
+    layers = [
+        [[literal(a, rng.random() < 0.7) for a in rng.sample(every, rng.randrange(0, 5))] for _ in range(rng.randrange(0, levels + 1))]
+        for _ in states
+    ]
+    history = [
+        [
+            (-(steps - i), [literal(a, rng.random() < 0.7) for a in rng.sample(every, rng.randrange(0, 4))])
+            for i in range(rng.randrange(0, steps + 1))
+        ]
+        for _ in states
+    ]
+    return layers, history
+
+
+LAYERED = {
+    "subgoals": dict(max_goal_level=2, target_sources=("goal", "subgoal")),
+    "history": dict(history=True, history_max_steps=2, target_sources=("history",), predicate_virtual_nodes=True),
+    "both": dict(
+        max_goal_level=3,
+        history=True,
+        target_sources=("goal", "subgoal", "history", "action"),
+        predicate_virtual_nodes=True,
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("options", LAYERED.values(), ids=LAYERED.keys())
+@pytest.mark.parametrize("name", ["gripper__prob05", "logistics00__probLOGISTICS-6-1"])
+def test_subgoal_layers_and_history_steps_rebuild_the_repeated_batch(name, options, layout):
+    task = text_task(name)
+    states = walk(task, steps=8, walks=3)
+    common = dict(goal_derivations=("plain", "satisfied", "unsatisfied"), layout=layout, **options)
+    shared = encoding.FlatRelationEncoder(task, statics="shared", **common)
+    repeated = encoding.FlatRelationEncoder(task, **common)
+    layers, history = random_layers_and_history(states, 3, 4, seed=5)
+    kwargs = {"actions": rl.expand(rl.as_table(task), states)}
+    if common.get("max_goal_level"):
+        kwargs["subgoals"] = encoding.subgoal_masks(shared, [row[: common["max_goal_level"]] for row in layers])
+    if common.get("history"):
+        kwargs["history"] = encoding.history_masks(shared, history)
+    batch = assert_rebuilds(shared, repeated, states, **kwargs)
+    again = repeated.encode(states, **kwargs)
+    for g in range(len(states)):
+        assert shared.describe(batch, g) == repeated.describe(again, g)
+
+
+def test_a_stream_with_layers_and_history_flushes_the_shared_batch():
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatRelationEncoder(
+        task,
+        statics="shared",
+        max_goal_level=2,
+        history=True,
+        goal_derivations=("plain", "satisfied"),
+        target_sources=("goal", "subgoal", "history"),
+    )
+    states = walk(task, steps=8, walks=3)
+    layers, history = random_layers_and_history(states, 2, 3, seed=9)
+    subgoals = encoding.subgoal_masks(encoder, layers)
+    steps = encoding.history_masks(encoder, history)
+    expected = encoder.encode(states, subgoals=subgoals, history=steps).as_dict()
+    stream = encoder.stream()
+    stream.append(states, subgoals=subgoals, history=steps)
+    flushed = stream.flush().as_dict()
+    assert flushed.keys() == expected.keys()
+    assert all(np.array_equal(flushed[k], expected[k]) for k in expected)
+
+
+def test_horizon_encoders_refuse_shared_statics():
+    task = text_task("blocks__probBLOCKS-8-0")
+    message = "^mymyr: encoding: statics='shared' cannot be combined with a horizon mode"
+    with pytest.raises(ValueError, match=message):
+        encoding.EncodingSchema(task, horizon_mode="full", statics="shared")
+    for mode in ("full", "delta", "action"):
+        with pytest.raises(ValueError, match=message):
+            encoding.FlatHorizonEncoder(task, horizon_mode=mode, statics="shared")
+    with pytest.raises(ValueError, match=message):
+        encoding.FlatRootedHorizonEncoder(task, statics="shared")
+    with pytest.raises(ValueError, match=message):
+        encoding.FlatTransitionEncoder(task, statics="shared")
+    with pytest.raises(ValueError, match=message):
+        encoding.FlatTransitionEffectsEncoder(task, statics="shared")
+    assert encoding.FlatHorizonEncoder(task, horizon_mode="full").options["statics"] == "repeat"
 
 
 def test_a_pickled_encoder_keeps_its_statics():

@@ -11,7 +11,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <array>
 #include <map>
+#include <optional>
+#include <random>
 #include <set>
 
 using namespace mymyr;
@@ -80,8 +83,8 @@ FlatOptions shared_of(FlatOptions options)
 
 /// The arrays of the repeated batch that the shared batch `a` of `schema` stands for: the static cells of every graph
 /// from the block of its instance (ids shifted by the graph's first entity, the predicate keys replaced by the graph's
-/// virtual nodes), the offsets and counts that follow, and the goal entities' references counted among the tuples of the
-/// repeated graph.
+/// virtual nodes), the offsets and counts that follow, and the references of the goal, subgoal and history target
+/// entities counted among the tuples of the repeated graph.
 Arrays repeated_form(const EncodingSchema& schema, Arrays a)
 {
     const u64 G = a.at("task_ids").size();
@@ -139,12 +142,14 @@ Arrays repeated_form(const EncodingSchema& schema, Arrays a)
             }
         }
     }
-    // the references of the goal entities count the graph's tuples, the static ones included
+    // the references of the goal, subgoal and history target entities count the graph's tuples, the static ones
+    // included
     if (entity_arrays)
         for (u64 g = 0; g < G; ++g)
             for (i64 e = entity_offsets[g]; e < entity_offsets[g + 1]; ++e)
             {
-                if (a.at("entity_role")[static_cast<u64>(e)] != 2)
+                const i64 role = a.at("entity_role")[static_cast<u64>(e)];
+                if (role != 2 && role != 3 && role != 6)
                     continue;
                 i64& ref = a.at("entity_ref")[static_cast<u64>(e)];
                 u64 passed = 0, r = 0;
@@ -488,6 +493,220 @@ TEST(SharedStatics, ActionsAndTargetsKeepTheirReferences)
     }
 }
 
+// ------------------------------------------------------------------------------------------------ layers and history
+
+/// Random subgoal layers or history steps for the rows of `batch`: per row and layer a random subset of the instance's
+/// fluent and derived slots, as positive and as negative masks.
+struct RandomLayers
+{
+    std::vector<u64> pos, neg, derived_pos, derived_neg;  // [rows, layers, words]
+    u32 layers = 0, words = 0, derived_words = 0;
+    std::vector<i32> dt, count;  // [rows, layers], [rows]: the history's dt and valid steps
+
+    RandomLayers(const em::Batch& batch, u32 layer_count, u64 seed)
+    {
+        layers = layer_count;
+        words = batch.words;
+        derived_words = std::max(1u, batch.derived_words);
+        pos.assign(batch.count * layers * words, 0);
+        neg = pos;
+        derived_pos.assign(batch.count * layers * derived_words, 0);
+        derived_neg = derived_pos;
+        dt.assign(batch.count * layers, 0);
+        std::mt19937_64 rng(seed);
+        for (u64 g = 0; g < batch.count; ++g)
+        {
+            const Task& task = *batch.table->task(static_cast<u32>(batch.task_ids[g]));
+            count.push_back(static_cast<i32>(rng() % (layers + 1)));
+            for (u32 l = 0; l < layers; ++l)
+            {
+                dt[g * layers + l] = static_cast<i32>(rng() % 7) - 6;
+                if (rng() % 4 == 0)
+                    continue;  // an empty layer
+                const double density = std::array{0.02, 0.1, 0.3}[rng() % 3];
+                auto fill = [&](std::vector<u64>& positive, std::vector<u64>& negative, u32 slots, u32 width)
+                {
+                    for (u32 slot = 0; slot < slots; ++slot)
+                        if (std::uniform_real_distribution<double>(0, 1)(rng) < density)
+                            (rng() & 1 ? positive : negative)[(g * layers + l) * width + (slot >> 6)] |=
+                                u64{1} << (slot & 63);
+                };
+                fill(pos, neg, task.atoms().fluent_slots(), words);
+                fill(derived_pos, derived_neg, task.atoms().derived_slots(), derived_words);
+            }
+        }
+    }
+
+    [[nodiscard]] LayerInput masks() const
+    {
+        LayerInput in;
+        in.pos = pos.data();
+        in.neg = neg.data();
+        in.layers = layers;
+        in.words = words;
+        in.stride = u64{layers} * words;
+        in.derived_pos = derived_pos.data();
+        in.derived_neg = derived_neg.data();
+        in.derived_words = derived_words;
+        in.derived_stride = u64{layers} * derived_words;
+        return in;
+    }
+    [[nodiscard]] HistoryInput history() const
+    {
+        HistoryInput in;
+        in.masks = masks();
+        in.dt = dt.data();
+        in.count = count.data();
+        return in;
+    }
+};
+
+struct LayeredConfig
+{
+    const char* name;
+    u32 levels;
+    bool history;
+    std::optional<u32> max_steps;
+    bool virtual_nodes;
+    bool actions;
+};
+
+FlatOptions layered_options(const LayeredConfig& config)
+{
+    FlatOptions options = test::encoder_options();
+    options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied, GoalDerivation::Unsatisfied};
+    options.max_goal_level = config.levels;
+    options.targets = {TargetSource::Goal};
+    if (config.levels > 0)
+        options.targets.insert(TargetSource::Subgoal);
+    options.history = config.history;
+    options.history_max_steps = config.max_steps;
+    if (config.history)
+        options.targets.insert(TargetSource::History);
+    options.predicate_virtual_nodes = config.virtual_nodes;
+    options.include_actions = config.actions;
+    if (config.actions)
+        options.targets.insert(TargetSource::Action);
+    return options;
+}
+
+const LayeredConfig k_layered[] = {{"subgoals", 2, false, std::nullopt, false, false},
+                                   {"history", 0, true, std::nullopt, false, false},
+                                   {"history_newest_two", 0, true, 2, true, false},
+                                   {"subgoals_history_virtual", 3, true, std::nullopt, true, false},
+                                   {"subgoals_history_actions_virtual", 2, true, 3, true, true}};
+
+TEST(SharedStatics, SubgoalLayersAndHistoryStepsRebuildTheRepeatedFormOverTheCorpus)
+{
+    for (const em::Corpus& corpus : em::corpus())
+    {
+        const em::Batch batch = em::make_batch(corpus.table, 70, corpus.walk, 13);
+        const RandomLayers history(batch, 3, 21);
+        test::Rows rows;
+        rows.words = batch.words;
+        rows.data = batch.states;
+        rows.task_ids = batch.task_ids;
+        // the wide instances have thousands of actions per state
+        const auto expanded = std::string(corpus.name) == "wide" ? nullptr : expand_rows(*corpus.table, rows);
+        for (const LayeredConfig& config : k_layered)
+            for (const Shape& shape : k_shapes)
+            {
+                if (config.actions && !expanded)
+                    continue;
+                const RandomLayers subgoals(batch, std::max(config.levels, 1u), 34);
+                EncodeInput in = em::host_input(batch, batch.count, {});
+                if (config.levels > 0)
+                    in.subgoals = subgoals.masks();
+                if (config.history)
+                    in.history = history.history();
+                if (config.actions)
+                    in.actions = &expanded->x;
+                const FlatOptions options = em::with(layered_options(config), shape.layout, shape.index);
+                expect_same_as_repeated(corpus.table, options, in,
+                                        std::string(corpus.name) + "/" + config.name + "/" + shape.text());
+            }
+    }
+}
+
+TEST(SharedStatics, SubgoalAndHistoryTargetsAreInTheBatchesTheRebuildCompares)
+{
+    const rl::TaskTablePtr table = em::table_of("blocks", {"smedium", "probBLOCKS-8-0"});
+    const em::Batch batch = em::make_batch(table, 70, true, 13);
+    const RandomLayers subgoals(batch, 3, 34), history(batch, 3, 21);
+    EncodeInput in = em::host_input(batch, batch.count, {});
+    in.subgoals = subgoals.masks();
+    in.history = history.history();
+    const auto encoder = FlatEncoder::create(table, shared_of(layered_options(k_layered[3])));
+    const Arrays arrays = read(*encoder->encode(in));
+    std::map<i64, u64> per_role;
+    for (const i64 role : arrays.at("entity_role"))
+        ++per_role[role];
+    EXPECT_GT(per_role[3], 0u);
+    EXPECT_GT(per_role[5], 0u);
+    EXPECT_GT(per_role[6], 0u);
+}
+
+TEST(SharedStatics, ACapacityFlushWithHistoryKeepsBothKindsOfBlocks)
+{
+    const rl::TaskTablePtr table = em::table_of("blocks", {"smedium", "probBLOCKS-8-0"});
+    const em::Batch batch = em::make_batch(table, 40, true, 5);
+    const RandomLayers layers(batch, 3, 8);
+    EncodeInput in = em::host_input(batch, batch.count, {});
+    in.subgoals = layers.masks();
+    in.history = layers.history();
+    const auto encoder = FlatEncoder::create(table, shared_of(layered_options(k_layered[3])));
+    ThreadPool pool(2);
+    EncodeScratch scratch;
+    StaticSizes want_statics;
+    const FlatSizes want = encoder->count(in, pool, scratch, &want_statics);
+    ASSERT_GT(want.history, 0u);
+    const BatchShape capacities{50, want.entities + 3, want.args + 5, want.targets + 2, want.history + 4};
+    const StaticShape static_capacities{3, want_statics.args + 2};
+    FlatSizes sizes;
+    StaticSizes statics;
+    const auto padded = encoder->encode_capacity(in, capacities, pool, scratch, sizes, &static_capacities, &statics);
+    EXPECT_FALSE(sizes.overflowed());
+    EXPECT_EQ(sizes.history, want.history);
+    EXPECT_EQ(statics.instances, 2u);
+    EXPECT_EQ(statics.args, want_statics.args);
+    EXPECT_NO_THROW(validate(*padded, encoder->schema()));
+    // the batch equals the exact one in the first entries
+    const Arrays exact = read(*encoder->encode(in, pool, scratch));
+    const Arrays got = read(*padded);
+    for (const char* name : {"history_entity", "history_dt", "static_args", "static_task_ids"})
+        EXPECT_TRUE(std::equal(exact.at(name).begin(), exact.at(name).end(), got.at(name).begin())) << name;
+    // a history that does not fit its capacity overflows, and a static block that does not fit does too
+    const BatchShape tight{50, want.entities, want.args, want.targets, want.history - 1};
+    (void)encoder->encode_capacity(in, tight, pool, scratch, sizes, &static_capacities, &statics);
+    EXPECT_TRUE(sizes.overflowed());
+    const StaticShape small{1, 1};
+    (void)encoder->encode_capacity(in, capacities, pool, scratch, sizes, &small, &statics);
+    EXPECT_TRUE(sizes.overflowed());
+}
+
+TEST(SharedStatics, AStreamWithSubgoalLayersAndHistoryFlushesTheBatch)
+{
+    const rl::TaskTablePtr table = em::table_of("blocks", {"smedium", "probBLOCKS-8-0"});
+    const em::Batch batch = em::make_batch(table, 36, true, 6);
+    const RandomLayers layers(batch, 2, 9);
+    EncodeInput in = em::host_input(batch, batch.count, {});
+    in.subgoals = layers.masks();
+    in.history = layers.history();
+    const auto encoder = FlatEncoder::create(table, shared_of(layered_options(k_layered[3])));
+    ThreadPool pool(1);
+    EncodeScratch scratch;
+    const Arrays expected = read(*encoder->encode(in, pool, scratch));
+    FlatStream stream(encoder);
+    stream.append(in);
+    expect_equal(expected, read(*stream.flush(pool)), "append-only stream");
+    FlatMutableStream mutable_stream(encoder);
+    std::vector<i64> indices(batch.count);
+    for (u64 g = 0; g < batch.count; ++g)
+        indices[g] = static_cast<i64>(g);
+    mutable_stream.append(indices, in);
+    expect_equal(expected, read(*mutable_stream.flush(pool)), "mutable stream");
+}
+
 // ------------------------------------------------------------------------------------------------ validation
 
 /// A copy of `bundle` whose scalar `name` is `value`.
@@ -569,6 +788,32 @@ TEST(SharedStatics, FamiliesThatNeedPerGraphStaticsRefuse)
             const std::string message = e.what();
             EXPECT_EQ(message.rfind("mymyr: encoding: statics='shared' is not supported by the ", 0), 0u) << message;
             EXPECT_NE(message.find(family), std::string::npos) << message;
+        }
+}
+
+TEST(SharedStatics, HorizonSchemasRefuseSharedStatics)
+{
+    const rl::TaskTablePtr table = em::table_of("blocks", {"smedium"});
+    for (const HorizonMode mode : {HorizonMode::Full, HorizonMode::Delta, HorizonMode::Action})
+        for (const RootPolicy root : {RootPolicy::Include, RootPolicy::Exclude, RootPolicy::EncodeOnly})
+        {
+            FlatOptions options = test::encoder_options();
+            options.horizon.mode = mode;
+            options.horizon.root = root;
+            options.horizon.parent_relation = true;
+            EXPECT_NO_THROW((void)EncodingSchema::create(*table, options));
+            options.statics = Statics::Shared;
+            try
+            {
+                (void)EncodingSchema::create(*table, options);
+                ADD_FAILURE() << to_string(mode) << "/" << to_string(root);
+            }
+            catch (const std::invalid_argument& e)
+            {
+                EXPECT_NE(std::string(e.what()).find("statics='shared' cannot be combined with a horizon mode"),
+                          std::string::npos)
+                    << e.what();
+            }
         }
 }
 
