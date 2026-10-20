@@ -3,7 +3,9 @@
 // as C++23.
 
 #include "encoding_kernels.hpp"
+#include "live_scan.cuh"
 
+#include <algorithm>
 #include <cuda_runtime_api.h>
 #include <limits>
 #include <stdexcept>
@@ -25,6 +27,9 @@ namespace
 {
 constexpr u32 k_block = k_encode_block;
 constexpr u32 k_warp = 32;
+/// The blocks of a live fill launch that stay to zero the unused tails when the live graphs need fewer: enough to keep
+/// the memory system busy, few enough that each one's sizes computation costs little.
+constexpr u64 k_zero_blocks = 256;
 
 i64 scan_size(u64 n)
 {
@@ -96,16 +101,46 @@ struct Totals
     }
 };
 
-__device__ EncodeParams live_params(EncodeParams p)
+/// The parameters of a live launch with the live graph count: min(*graphs_device, graphs).
+__device__ EncodeParams live_params(const EncodeParams& params)
 {
+    EncodeParams p = params;
     if (p.graphs_device)
     {
         const u64 live = *p.graphs_device;
         p.graphs = live < p.graphs ? live : p.graphs;
-        p.segments = 2 * (p.graphs + 1);
     }
+    p.segments = 2 * (p.graphs + 1);
     return p;
 }
+
+/// The entries of the scanned array of a batch of `graphs` graphs (detail::ScratchLayout::scanned).
+__device__ u64 scanned_entries(const EncodeParams& p, u64 graphs)
+{
+    return p.relation_major ? 2 * (graphs + 1) + graphs * p.context.num_relations + 1 : 4 * (graphs + 1);
+}
+
+/// The live scan's input: entry i of the totals, in place. The count kernel of a live launch writes entry i + 1 of the
+/// scanned array at i, so the exclusive scan of the first scanned_entries - 1 entries leaves the inclusive scan of the
+/// array at the positions the fill kernel reads.
+template<class T>
+struct LiveTotals
+{
+    const T* data;
+    const u64* graphs_device;
+    u64 graphs;
+    u32 relations;
+    bool relation_major;
+    __device__ u64 live(u64 n) const
+    {
+        u64 g = graphs;
+        if (graphs_device)
+            g = *graphs_device < g ? *graphs_device : g;
+        const u64 items = (relation_major ? 2 * (g + 1) + g * relations + 1 : 4 * (g + 1)) - 1;
+        return items < n ? items : n;
+    }
+    __device__ u64 operator()(u64 i) const { return static_cast<u64>(data[i]); }
+};
 
 /// The instance and row of graph g, or false if the row is invalid for its instance (a task id outside the table, a state
 /// row or goal masks narrower than the instance). Nothing of an invalid row is read.
@@ -116,9 +151,17 @@ struct RowView
     u32 instance;
 };
 
+template<bool Live>
 __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
 {
-    const u64 source = p.row_start ? (*p.row_start + g) % p.row_capacity : g;
+    u64 source = g;
+    if constexpr (Live)
+        if (p.row_start)
+        {
+            source = *p.row_start % p.row_capacity + g;
+            if (source >= p.row_capacity)
+                source -= p.row_capacity;
+        }
     const i32 id = p.task_ids ? p.task_ids[source] : 0;
     if (ed::row_validity(p.context, id, p.state_words, p.goal_pos != nullptr, p.goal_words,
                          p.goal_derived_pos != nullptr, p.goal_derived_words) != ed::RowValidity::Valid)
@@ -127,7 +170,7 @@ __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
     r.v = ed::instance_view(p.context, r.instance);
     r.in = ed::RowInput{p.states + source * p.state_stride, nullptr};
     if (p.derived && ed::reads_derived(r.v, p.goal_pos != nullptr, p.goal_derived_pos != nullptr))
-        r.in.derived = p.derived + (p.derived_logical ? g : source) * p.derived_stride;
+        r.in.derived = p.derived + (Live && p.derived_logical ? g : source) * p.derived_stride;
     if (p.goal_pos)
     {
         r.in.goal_pos = p.goal_pos + source * p.goal_stride;
@@ -143,24 +186,46 @@ __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
 
 // ------------------------------------------------------------------------------------------------ count
 
-template<u32 Lanes>
-__global__ void __launch_bounds__(k_block) count_kernel(EncodeParams p)
+/// The count of the graphs. A live launch writes entry i + 1 of the scanned array at i (LiveTotals), every one of them
+/// (it has no clear before it), and clears the tile states of the scan.
+template<u32 Lanes, bool Live>
+__device__ __forceinline__ void count_graphs(const EncodeParams& p)
 {
-    p = live_params(p);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const u64 thread = static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x;
     const u64 gi = thread / Lanes;
     const Totals totals{p.totals, p.wide};
     const u64 row = p.graphs + 1;
-    // every row of the scanned array opens with a zero (the cell row of a relation-major batch is cleared before)
-    if (thread == 0)
+    constexpr u64 shift = Live ? 1 : 0;
+    if constexpr (Live)
     {
-        totals.set(0, 0);
-        totals.set(row, 0);
-        if (!p.relation_major)
+        if (thread == 0)
         {
-            totals.set(2 * row, 0);
-            totals.set(3 * row, 0);
+            totals.set(row - 1, 0);
+            totals.set(2 * row - 1, 0);
+            if (!p.relation_major)
+                totals.set(3 * row - 1, 0);
+        }
+        if (p.first_class)
+        {
+            const live_scan::State st = live_scan::state_at(static_cast<u64*>(p.scan_state), p.scan_tiles, 1, 0);
+            const u64 tiles = live_scan::tiles_for(scanned_entries(p, p.graphs) - 1);
+            for (u64 i = thread; i < tiles && i < st.tiles; i += static_cast<u64>(gridDim.x) * blockDim.x)
+                st.flag[i] = 0;
+        }
+    }
+    else
+    {
+        // every row of the scanned array opens with a zero (the cell row of a relation-major batch is cleared before)
+        if (thread == 0)
+        {
+            totals.set(0, 0);
+            totals.set(row, 0);
+            if (!p.relation_major)
+            {
+                totals.set(2 * row, 0);
+                totals.set(3 * row, 0);
+            }
         }
     }
     if (gi >= p.graphs)
@@ -177,14 +242,22 @@ __global__ void __launch_bounds__(k_block) count_kernel(EncodeParams p)
         virtual_nodes ? reinterpret_cast<u32*>(shared_bytes) + (threadIdx.x / Lanes) * virtual_nodes : nullptr;
     RowView r;
     ed::GraphTotals t = ed::empty_totals();
-    bool ok = row_of(p, g, r);
+    bool ok = row_of<Live>(p, g, r);
     if (p.classify && (ok ? warp_fill_for(r.v, p.relation_major) != p.warp_class : !p.first_class))
         return;
+    if constexpr (Live)
+        if (p.relation_major)
+        {
+            const u32 R = p.context.num_relations;
+            for (u32 relation = grp.lane(); relation < R; relation += Lanes)
+                totals.set(p.segments + ed::cell_segment(true, g, relation, p.graphs, R), 0);
+            grp.sync();
+        }
     if (ok)
     {
         if (p.relation_major)
         {
-            const u64 cells = p.segments + 1;
+            const u64 cells = p.segments + 1 - shift;
             t = ed::count_graph_group_into(
                 grp, r.v, r.in,
                 [&](u32, const ed::Cell& c, u32 n) { totals.set(cells + ed::cell_segment(true, g, c.relation, p.graphs, r.v.num_relations), n); },
@@ -204,13 +277,22 @@ __global__ void __launch_bounds__(k_block) count_kernel(EncodeParams p)
         atomicOr(p.flags, 1u);
         t = ed::empty_totals();
     }
-    totals.set(1 + g, t.entities);
-    totals.set(row + 1 + g, t.targets);
+    totals.set(1 + g - shift, t.entities);
+    totals.set(row + 1 + g - shift, t.targets);
     if (!p.relation_major)
     {
-        totals.set(2 * row + 1 + g, t.tuples);
-        totals.set(3 * row + 1 + g, t.args);
+        totals.set(2 * row + 1 + g - shift, t.tuples);
+        totals.set(3 * row + 1 + g - shift, t.args);
     }
+}
+
+template<u32 Lanes, bool Live>
+__global__ void __launch_bounds__(k_block) count_kernel(const EncodeParams p)
+{
+    if constexpr (Live)
+        count_graphs<Lanes, true>(live_params(p));
+    else
+        count_graphs<Lanes, false>(p);
 }
 
 // ------------------------------------------------------------------------------------------------ fill
@@ -290,9 +372,9 @@ __device__ u64 build_argument_table(const EncodeParams& p, const Totals& totals,
 __host__ __device__ constexpr u64 align8(u64 n) { return (n + 7) & ~u64{7}; }
 
 /// The true sizes of the batch from the scanned totals and the flags, with the overflow flags of the capacities, the index
-/// type and the rows. A relation-major batch builds its argument table into `first` (shared memory, every thread of the
-/// block takes part) and returns the base of its cell row in `base`.
-template<bool RelationMajor>
+/// type and the rows (and, live, of rows dropped before the encode). A relation-major batch builds its argument table into
+/// `first` (shared memory, every thread of the block takes part) and returns the base of its cell row in `base`.
+template<bool RelationMajor, bool Live>
 __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& totals, u64* first, u64& base)
 {
     const u64 G = p.graphs;
@@ -323,24 +405,37 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
         sizes.overflow |= enc::k_overflow_index;
     if (p.flags[0] != 0)
         sizes.overflow |= enc::k_overflow_input;
+    if constexpr (Live)
+        if (p.rows_overflow && *p.rows_overflow != 0)
+            sizes.overflow |= enc::k_overflow_capacity;
     return sizes;
 }
 
 /// One block writes the sizes of a counted batch: the second half of the counting, for a caller that sizes its outputs
 /// by them.
-template<bool RelationMajor>
-__global__ void __launch_bounds__(k_block) sizes_kernel(EncodeParams p)
+template<bool RelationMajor, bool Live>
+__device__ __forceinline__ void write_sizes(const EncodeParams& p)
 {
-    p = live_params(p);
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const Totals totals{p.totals, p.wide};
     u64 base = 0;
-    const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, reinterpret_cast<u64*>(shared_bytes), base);
+    const enc::FlatSizes sizes = batch_sizes<RelationMajor, Live>(p, totals, reinterpret_cast<u64*>(shared_bytes), base);
     if (threadIdx.x == 0)
     {
         *p.sizes = sizes;
-        if (p.output_graphs) *p.output_graphs = p.graphs;
+        if constexpr (Live)
+            if (p.output_graphs)
+                *p.output_graphs = p.graphs;
     }
+}
+
+template<bool RelationMajor, bool Live>
+__global__ void __launch_bounds__(k_block) sizes_kernel(const EncodeParams p)
+{
+    if constexpr (Live)
+        write_sizes<RelationMajor, true>(live_params(p));
+    else
+        write_sizes<RelationMajor, false>(p);
 }
 
 template<class T>
@@ -363,19 +458,6 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     zero_tail(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args);
     zero_tail(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets);
     zero_tail(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets);
-    if (p.graphs_device && !overflow)
-    {
-        const u64 G = p.graphs, C = G * p.context.num_relations;
-        const u64 cap = p.capacities.graphs, cells = cap * p.context.num_relations;
-        zero_tail(a.task_ids, G, cap);
-        zero_tail(static_cast<I*>(a.num_objects), G, cap);
-        zero_tail(static_cast<I*>(a.entity_offsets), G + 1, cap + 1);
-        zero_tail(static_cast<I*>(a.relation_counts), C, cells);
-        zero_tail(static_cast<I*>(a.relation_offsets), C + 1, cells + 1);
-        zero_tail(static_cast<I*>(a.relation_arg_offsets), C + 1, cells + 1);
-        zero_tail(a.goal_complete, G, cap);
-        zero_tail(static_cast<I*>(a.target_offsets), G + 1, cap + 1);
-    }
     if (overflow)
     {
         const u64 graphs = p.capacities.graphs;
@@ -391,10 +473,62 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     }
 }
 
-template<class I, bool Warp, bool RelationMajor>
-__global__ void __launch_bounds__(k_block) fill_kernel(EncodeParams p)
+/// zero_unused of the history arrays, after the fill has written the sizes: a launch of its own, so that the fills of
+/// batches without history arrays carry no code for them.
+template<class I>
+__global__ void __launch_bounds__(k_block) zero_history_kernel(const EncodeParams p)
 {
-    p = live_params(p);
+    const enc::FlatSizes sizes = *p.sizes;
+    const bool overflow = sizes.overflow != 0;
+    zero_tail(static_cast<I*>(p.out.history_entity), overflow ? 0 : sizes.history, p.capacities.history);
+    zero_tail(p.out.history_dt, overflow ? 0 : sizes.history, p.capacities.history);
+    if (overflow)
+        zero_tail(static_cast<I*>(p.out.history_offsets), 0, p.capacities.graphs + 1);
+}
+
+template<class T>
+__device__ void zero_range(T* output, u64 begin, u64 end, u64 stride)
+{
+    if (!output)
+        return;
+    for (u64 i = begin + static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x; i < end; i += stride)
+        output[i] = T{0};
+}
+
+/// zero_unused for a live batch, whose graph count is below the graph capacity: the variable arrays past their sizes as
+/// zero_unused zeroes them, and every per-graph and per-cell array past the live graphs, by `stride` threads.
+template<class I>
+__device__ void zero_unused_live(const EncodeParams& p, const enc::FlatSizes& sizes, u64 stride)
+{
+    const auto& a = p.out;
+    const bool overflow = sizes.overflow != 0;
+    zero_range(a.entity_role, overflow ? 0 : sizes.entities, p.capacities.entities, stride);
+    zero_range(static_cast<I*>(a.entity_ref), overflow ? 0 : sizes.entities, p.capacities.entities, stride);
+    zero_range(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args, stride);
+    zero_range(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets, stride);
+    zero_range(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets, stride);
+    zero_range(static_cast<I*>(a.history_entity), overflow ? 0 : sizes.history, p.capacities.history, stride);
+    zero_range(a.history_dt, overflow ? 0 : sizes.history, p.capacities.history, stride);
+    const u64 G = overflow ? 0 : p.graphs, R = p.context.num_relations;
+    // the offsets of a batch that fits keep their closing entry at G (or G * R)
+    const u64 closed = overflow ? 0 : 1;
+    const u64 cap = p.capacities.graphs, cells = cap * R;
+    zero_range(a.task_ids, G, cap, stride);
+    zero_range(static_cast<I*>(a.num_objects), G, cap, stride);
+    zero_range(static_cast<I*>(a.entity_offsets), G + closed, cap + 1, stride);
+    zero_range(static_cast<I*>(a.relation_counts), G * R, cells, stride);
+    zero_range(static_cast<I*>(a.relation_offsets), G * R + closed, cells + 1, stride);
+    zero_range(static_cast<I*>(a.relation_arg_offsets), G * R + closed, cells + 1, stride);
+    zero_range(a.goal_complete, G, cap, stride);
+    zero_range(static_cast<I*>(a.target_offsets), G + closed, cap + 1, stride);
+    zero_range(static_cast<I*>(a.history_offsets), G + closed, cap + 1, stride);
+}
+
+/// The fill of the graphs. `blocks` is the grid the loops over the cells and the tails stride with: the whole grid, or a
+/// live launch's active blocks.
+template<class I, bool Warp, bool RelationMajor, bool Live>
+__device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
+{
     extern __shared__ __align__(8) unsigned char shared_bytes[];
     const Totals totals{p.totals, p.wide};
     const u64 G = p.graphs;
@@ -406,13 +540,20 @@ __global__ void __launch_bounds__(k_block) fill_kernel(EncodeParams p)
 
     // the sizes, and whether the batch can be written at all
     u64 base = 0;
-    const enc::FlatSizes sizes = batch_sizes<RelationMajor>(p, totals, first, base);
+    const enc::FlatSizes sizes = batch_sizes<RelationMajor, Live>(p, totals, first, base);
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
         *p.sizes = sizes;
-        if (p.output_graphs) *p.output_graphs = p.graphs;
+        if constexpr (Live)
+            if (p.output_graphs)
+                *p.output_graphs = p.graphs;
     }
-    if (p.zero_unused && p.first_class)
+    if constexpr (Live)
+    {
+        if (p.zero_unused && p.first_class)
+            zero_unused_live<I>(p, sizes, blocks * blockDim.x);
+    }
+    else if (p.zero_unused && p.first_class)
         zero_unused<I>(p, sizes);
     if (sizes.overflow != 0)
         return;
@@ -436,7 +577,7 @@ __global__ void __launch_bounds__(k_block) fill_kernel(EncodeParams p)
         // the scanned cell row becomes the two offset arrays, one entry per thread and round
         const u64 cells = G * R;
         for (u64 s = p.first_class ? static_cast<u64>(blockIdx.x) * blockDim.x + threadIdx.x : cells + 1; s <= cells;
-             s += static_cast<u64>(gridDim.x) * blockDim.x)
+             s += (Live ? blocks : static_cast<u64>(gridDim.x)) * blockDim.x)
         {
             const u64 tuples = positions.tuples_before(s);
             out.relation_offsets[s] = static_cast<I>(tuples);
@@ -456,7 +597,7 @@ __global__ void __launch_bounds__(k_block) fill_kernel(EncodeParams p)
         return;
     }
     RowView r;
-    if (!row_of(p, g, r))
+    if (!row_of<Live>(p, g, r))
         return;  // not reached: an invalid row has set the input flag
     if (p.classify && warp_fill_for(r.v, p.relation_major) != p.warp_class)
         return;
@@ -514,6 +655,28 @@ __global__ void __launch_bounds__(k_block) fill_kernel(EncodeParams p)
     }
 }
 
+/// A live launch is sized for the capacity: the blocks past those of the live graphs (and past the k_zero_blocks that
+/// zero the tails) exit at once.
+template<class I, bool Warp, bool RelationMajor, bool Live>
+__global__ void __launch_bounds__(k_block) fill_kernel(const EncodeParams p)
+{
+    if constexpr (Live)
+    {
+        const EncodeParams q = live_params(p);
+        const u64 threads = Warp ? q.graphs * k_warp : q.graphs;
+        u64 active = (threads + k_block - 1) / k_block;
+        if (q.zero_unused && active < k_zero_blocks)
+            active = k_zero_blocks < gridDim.x ? k_zero_blocks : gridDim.x;
+        if (active == 0)
+            active = 1;
+        if (blockIdx.x >= active)
+            return;
+        fill_graphs<I, Warp, RelationMajor, true>(q, active);
+    }
+    else
+        fill_graphs<I, Warp, RelationMajor, false>(p, gridDim.x);
+}
+
 // ------------------------------------------------------------------------------------------------ launches
 
 u32 blocks_for(u64 threads)
@@ -524,32 +687,36 @@ u32 blocks_for(u64 threads)
     return static_cast<u32>(blocks);
 }
 
-template<u32 Lanes>
+template<u32 Lanes, bool Live>
 cudaError_t launch_count(const EncodeParams& p, cudaStream_t stream)
 {
-    count_kernel<Lanes><<<blocks_for(p.graphs * Lanes), k_block, count_shared_bytes(p.context.num_virtual, Lanes), stream>>>(p);
+    count_kernel<Lanes, Live><<<blocks_for(p.graphs * Lanes), k_block, count_shared_bytes(p.context.num_virtual, Lanes), stream>>>(p);
     return cudaPeekAtLastError();
 }
 
-template<class I, bool Warp, bool RelationMajor>
+template<class I, bool Warp, bool RelationMajor, bool Live>
 cudaError_t launch_fill_of(const EncodeParams& p, cudaStream_t stream)
 {
     const u64 threads = Warp ? p.graphs * k_warp : p.graphs;
     // the argument table of a relation-major batch is built by every block, and its offsets copy needs at least one
     // thread per cell round: a grid of the graphs' blocks is enough, the loop strides over the cells
-    fill_kernel<I, Warp, RelationMajor><<<blocks_for(threads), k_block,
+    fill_kernel<I, Warp, RelationMajor, Live><<<blocks_for(threads), k_block,
         fill_shared_bytes(p.context.num_virtual, p.context.num_relations, Warp, RelationMajor), stream>>>(p);
     return cudaPeekAtLastError();
 }
 
-template<class I>
+template<class I, bool Live>
 cudaError_t launch_fill_index(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
     if (shape.warp_fill)
-        return p.relation_major ? launch_fill_of<I, true, true>(p, stream) : launch_fill_of<I, true, false>(p, stream);
-    return p.relation_major ? launch_fill_of<I, false, true>(p, stream) : launch_fill_of<I, false, false>(p, stream);
+        return p.relation_major ? launch_fill_of<I, true, true, Live>(p, stream) : launch_fill_of<I, true, false, Live>(p, stream);
+    return p.relation_major ? launch_fill_of<I, false, true, Live>(p, stream) : launch_fill_of<I, false, false, Live>(p, stream);
 }
+
+u64 live_scan_bytes(u64 length) { return live_scan::buffer_words(live_scan::tiles_for(length - 1), 1) * sizeof(u64); }
 }  // namespace
+
+u64 live_scan_tiles(u64 length) { return live_scan::tiles_for(length ? length - 1 : 0); }
 
 u64 totals_scan_temp_bytes(u64 length, bool wide)
 {
@@ -557,7 +724,7 @@ u64 totals_scan_temp_bytes(u64 length, bool wide)
     const cudaError_t error = wide ? cub::DeviceScan::InclusiveSum(nullptr, bytes, static_cast<u64*>(nullptr), scan_size(length))
                                    : cub::DeviceScan::InclusiveSum(nullptr, bytes, static_cast<u32*>(nullptr), scan_size(length));
     cuda::check(error, "cub::DeviceScan::InclusiveSum (encoding scratch)");
-    return bytes;
+    return std::max<u64>(bytes, length ? live_scan_bytes(length) : 0);
 }
 
 u64 count_shared_bytes(u32 virtual_nodes, u32 lanes)
@@ -581,14 +748,16 @@ template<class Kernel> u64 static_shared(Kernel kernel)
 }
 template<class I, bool Warp, bool Relation> u64 fill_static()
 {
-    static const u64 bytes = static_shared(fill_kernel<I, Warp, Relation>);
+    static const u64 bytes = std::max(static_shared(fill_kernel<I, Warp, Relation, false>),
+                                      static_shared(fill_kernel<I, Warp, Relation, true>));
     return bytes;
 }
 }
 u64 count_shared_required(u32 virtual_nodes, u32 lanes)
 {
-    static const u64 a = static_shared(count_kernel<4>), b = static_shared(count_kernel<8>),
-                     c = static_shared(count_kernel<32>);
+    static const u64 a = std::max(static_shared(count_kernel<4, false>), static_shared(count_kernel<4, true>)),
+                     b = std::max(static_shared(count_kernel<8, false>), static_shared(count_kernel<8, true>)),
+                     c = std::max(static_shared(count_kernel<32, false>), static_shared(count_kernel<32, true>));
     return count_shared_bytes(virtual_nodes, lanes) + (lanes == 4 ? a : lanes == 8 ? b : c);
 }
 u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp, bool relation, bool index64)
@@ -600,12 +769,18 @@ u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp, bool relat
     return fill_shared_bytes(virtual_nodes, relations, warp, relation) + bytes;
 }
 
+cudaError_t launch_clear(const LaunchShape& shape, cudaStream_t stream)
+{
+    return cudaMemsetAsync(shape.zero_begin, 0, shape.zero_bytes, stream);
+}
+
 namespace
 {
 /// The clear, the count kernel and the scan: what both the whole encoding and the counting alone start with.
+template<bool Live>
 cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
-    cudaError_t error = cudaMemsetAsync(shape.zero_begin, 0, shape.zero_bytes, stream);
+    cudaError_t error = shape.cleared ? cudaSuccess : launch_clear(shape, stream);
     if (error != cudaSuccess)
         return error;
     bool first = true;
@@ -620,43 +795,37 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
         first = false;
         switch (shape.lanes)
         {
-        case 4: error = launch_count<4>(row, stream); break;
-        case 8: error = launch_count<8>(row, stream); break;
-        case 32: error = launch_count<32>(row, stream); break;
+        case 4: error = launch_count<4, Live>(row, stream); break;
+        case 8: error = launch_count<8, Live>(row, stream); break;
+        case 32: error = launch_count<32, Live>(row, stream); break;
         default: return cudaErrorInvalidValue;
         }
         if (error != cudaSuccess)
             return error;
     }
-    size_t temp_bytes = shape.scan_temp_bytes;
-    return p.wide ? cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u64*>(p.totals),
-                                                  scan_size(shape.scan_length), stream)
-                  : cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u32*>(p.totals),
-                                                  scan_size(shape.scan_length), stream);
-}
-}  // namespace
-
-cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
-{
-    const cudaError_t error = launch_counts(p, shape, stream);
-    if (error != cudaSuccess)
-        return error;
-    return launch_fill(p, shape, stream);
-}
-
-cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
-{
-    const cudaError_t error = launch_counts(p, shape, stream);
-    if (error != cudaSuccess)
-        return error;
-    if (p.relation_major)
-        sizes_kernel<true><<<1, k_block, align8(u64{p.context.num_relations} * 8), stream>>>(p);
+    if constexpr (Live)
+    {
+        const live_scan::State st = live_scan::state_at(static_cast<u64*>(p.scan_state), p.scan_tiles, 1, 0);
+        if (p.wide)
+            return live_scan::launch(LiveTotals<u64>{static_cast<u64*>(p.totals), p.graphs_device, p.graphs,
+                                                     p.context.num_relations, p.relation_major},
+                                     shape.scan_length - 1, static_cast<u64*>(p.totals), st, stream);
+        return live_scan::launch(LiveTotals<u32>{static_cast<u32*>(p.totals), p.graphs_device, p.graphs,
+                                                 p.context.num_relations, p.relation_major},
+                                 shape.scan_length - 1, static_cast<u32*>(p.totals), st, stream);
+    }
     else
-        sizes_kernel<false><<<1, k_block, 0, stream>>>(p);
-    return cudaPeekAtLastError();
+    {
+        size_t temp_bytes = shape.scan_temp_bytes;
+        return p.wide ? cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u64*>(p.totals),
+                                                      scan_size(shape.scan_length), stream)
+                      : cub::DeviceScan::InclusiveSum(shape.scan_temp, temp_bytes, static_cast<u32*>(p.totals),
+                                                      scan_size(shape.scan_length), stream);
+    }
 }
 
-cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+template<bool Live>
+cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
     bool first = true;
     for (u32 kind = 0; kind < 2; ++kind)
@@ -670,12 +839,50 @@ cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStr
         first = false;
         LaunchShape launch = shape;
         launch.warp_fill = kind != 0;
-        const cudaError_t error = p.index64 ? launch_fill_index<i64>(row, launch, stream)
-                                          : launch_fill_index<i32>(row, launch, stream);
+        const cudaError_t error = p.index64 ? launch_fill_index<i64, Live>(row, launch, stream)
+                                          : launch_fill_index<i32, Live>(row, launch, stream);
         if (error != cudaSuccess)
             return error;
     }
+    if constexpr (!Live)
+        if (p.zero_unused && (p.out.history_offsets || p.out.history_entity || p.out.history_dt))
+        {
+            const u64 entries = std::max(p.capacities.history, p.capacities.graphs + 1);
+            const u32 blocks = std::min<u32>(blocks_for(entries), 4096);
+            p.index64 ? zero_history_kernel<i64><<<blocks, k_block, 0, stream>>>(p)
+                      : zero_history_kernel<i32><<<blocks, k_block, 0, stream>>>(p);
+            return cudaPeekAtLastError();
+        }
     return cudaSuccess;
+}
+}  // namespace
+
+cudaError_t launch_encode(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+{
+    const cudaError_t error = shape.live ? launch_counts<true>(p, shape, stream) : launch_counts<false>(p, shape, stream);
+    if (error != cudaSuccess)
+        return error;
+    return launch_fill(p, shape, stream);
+}
+
+cudaError_t launch_count_sizes(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+{
+    const cudaError_t error = shape.live ? launch_counts<true>(p, shape, stream) : launch_counts<false>(p, shape, stream);
+    if (error != cudaSuccess)
+        return error;
+    const u64 shared = p.relation_major ? align8(u64{p.context.num_relations} * 8) : 0;
+    if (shape.live)
+        p.relation_major ? sizes_kernel<true, true><<<1, k_block, shared, stream>>>(p)
+                         : sizes_kernel<false, true><<<1, k_block, shared, stream>>>(p);
+    else
+        p.relation_major ? sizes_kernel<true, false><<<1, k_block, shared, stream>>>(p)
+                         : sizes_kernel<false, false><<<1, k_block, shared, stream>>>(p);
+    return cudaPeekAtLastError();
+}
+
+cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
+{
+    return shape.live ? launch_fills<true>(p, shape, stream) : launch_fills<false>(p, shape, stream);
 }
 
 }  // namespace mymyr::cuda::detail

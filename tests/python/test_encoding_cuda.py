@@ -1066,17 +1066,68 @@ def test_device_row_stream_wraps_and_flushes_live_rows(cases, layout, index, giv
     ring = encoder.device_stream(n + 4, derived=given)
     for _ in range(3):
         ring.append(rows, ids, derived=derived)
-        ring.append(rows[:5], None if ids is None else ids[:5], derived=None if derived is None else derived[:5])
-        assert int(ring.device_overflow.item()) == 1
         assert len(ring) == n
         batch = ring.flush(capacities=caps)
         assert batch.device_graphs is not None
         same_batch(host, batch)
         assert len(ring) == 0
-    empty = ring.flush(capacities=caps)
-    same_batch(encoder.encode(case.rows[:0], None if case.ids is None else case.ids[:0]), empty)
+    # an append that does not fit is dropped, and every flush until clear() reports it
+    ring.append(rows, ids, derived=derived)
+    ring.append(rows[:5], None if ids is None else ids[:5], derived=None if derived is None else derived[:5])
+    assert int(ring.device_overflow.item()) == 1
+    assert len(ring) == n
+    for _ in range(2):
+        dropped = ring.flush(capacities=caps)
+        assert dropped.sizes["capacity_overflow"]
+        assert not torch.count_nonzero(dropped.entity_offsets).item()
     ring.clear()
     assert int(ring.device_overflow.item()) == 0
+    empty = ring.flush(capacities=caps)
+    same_batch(encoder.encode(case.rows[:0], None if case.ids is None else case.ids[:0]), empty)
+    ring.append(rows, ids, derived=derived)
+    same_batch(host, ring.flush(capacities=caps))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_device_row_stream_flush_zeroes_the_tails_past_its_live_graphs(cases, layout, monkeypatch):
+    dev = gpu()
+    case = cases["philosophers"]
+    n = min(33, case.n)
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, target_sources=("goal",),
+                                           predicate_virtual_nodes=True)
+
+    def outputs(torch_, specs, device):
+        return {name: torch_.full(shape, 0x5a, dtype=dtype, device=device) for name, (shape, dtype) in specs.items()}
+
+    monkeypatch.setattr(encoding._device, "_outputs", outputs)
+    caps = exact_capacities(encoder.encode(case.rows[:n]), factor=2)
+    caps["graphs"] = 64
+    ring = encoder.device_stream(64)
+    relations = encoder.schema.num_relations
+    for count in (n, 5, 0):
+        if count:
+            ring.append(to_device(case.rows[:count], dev))
+        batch = ring.flush(capacities=caps)
+        host = encoder.encode(case.rows[:count])
+        same_batch(host, batch)
+        assert int(batch.device_graphs.item()) == count == batch.num_graphs
+        sizes = batch.sizes
+        tails = {"task_ids": count, "num_objects": count, "entity_offsets": count + 1, "goal_complete": count,
+                 "target_offsets": count + 1, "relation_counts": count, "relation_offsets": count * relations + 1,
+                 "relation_arg_offsets": count * relations + 1, "entity_role": sizes["entities"],
+                 "entity_ref": sizes["entities"], "relation_args": sizes["args"], "target_entity": sizes["targets"],
+                 "target_group": sizes["targets"]}
+        for name, start in tails.items():
+            if name in batch._arrays:
+                assert not torch.count_nonzero(batch._arrays[name][start:]).item(), (count, name)
+
+
+@pytest.mark.parametrize("option", [{"max_goal_level": 1}, {"history": True}])
+def test_device_row_stream_refuses_subgoal_layers_and_history(cases, option):
+    gpu()
+    encoder = encoding.FlatRelationEncoder(cases["gripper"].source, **option)
+    with pytest.raises(ValueError, match="^mymyr: encoding: a device stream carries no subgoal layers or history steps"):
+        encoder.device_stream(8)
 
 
 def test_device_row_stream_append_and_flush_are_capturable(cases):
@@ -1134,6 +1185,19 @@ def test_device_collation_of_rollout_slices_equals_one_encode(cases, layout, ind
                encoding.collate([batches[1], batches[1]]))
     with pytest.raises(ValueError, match="^mymyr: encoding: collate received mixed host and device"):
         encoding.collate([host, batches[0]])
+    other = encoding.FlatRelationEncoder(rl.TaskTable(list(case.tasks) * 2),
+                                         layout=layout, index_dtype=index, target_sources=("goal",),
+                                         predicate_virtual_nodes=True)
+    assert other.table_fingerprint != encoder.table_fingerprint
+    foreign = other.encode(rows[:3], torch.zeros(3, dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="^mymyr: encoding: collate received batches of different tables"):
+        encoding.DeviceCollator([batches[0], foreign])
+    wide = {**exact_capacities(host, factor=2), "graphs": n + 9}
+    tails = plan.encode(capacities=wide)
+    same_batch(encoder.encode(case.rows[:n], None if case.ids is None else case.ids[:n], capacities=wide), tails)
+    for name in ("task_ids", "num_objects", "entity_offsets", "relation_offsets", "relation_arg_offsets"):
+        start = n + 1 if name == "entity_offsets" else n * encoder.schema.num_relations + 1 if "relation" in name else n
+        assert not torch.count_nonzero(tails._arrays[name][start:]).item(), name
     bad = encoder.encode(rows, ids, capacities={**caps, "args": 0})
     invalid_plan = encoding.DeviceCollator([bad])
     with pytest.raises(ValueError, match="^mymyr: encoding: cannot collate an overflowed batch"):

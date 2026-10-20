@@ -1,6 +1,7 @@
 // ChunkGenerator: the host driver of the lifted successor kernels (include/mymyr/cuda/generator.hpp).
 
 #include "mymyr/cuda/generator.hpp"
+#include "axiom_reads.hpp"
 #include "mymyr/cuda/numeric_kernels.hpp"
 
 #include "mymyr/core/bitset.hpp"
@@ -40,44 +41,8 @@ void Scratch::track(std::shared_ptr<const LastUse> last)
         m_buf.track(m_last);
 }
 
-namespace
+namespace detail
 {
-using Clock = std::chrono::steady_clock;
-double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
-
-/// Goal flags of the rows are computed in chunks of at most this many bytes of views, derived bitsets and rows.
-constexpr u64 k_goal_budget = u64{64} << 20;
-
-/// Timed axiom launches between two folds of their events (each CUDA event holds host memory).
-constexpr usize k_axiom_events = 256;
-
-/// Parents per slice at least, for the CPU-fallback work of a chunk on the host's threads.
-constexpr u64 k_host_slice = 64;
-
-template<class T>
-void upload_vec(const ContextPtr& ctx, Scratch& dst, const std::vector<T>& v, cudaStream_t s)
-{
-    void* d = dst.ensure(ctx, v.size() * sizeof(T), s);
-    if (!v.empty())
-        check(cudaMemcpyAsync(d, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync (chunk upload)");
-}
-
-/// Why the axioms cannot run on the device (empty: they can).
-std::string axioms_reason(const plan::Compiled& C)
-{
-    for (const plan::Stratum& st : C.strata)
-        for (const plan::Axiom& x : st.axioms)
-        {
-            const plan::Matcher& m = x.body;
-            if (m.total > lifted::k_max_depth || m.steps.size() > lifted::k_max_depth)
-                return "an axiom body of " + std::to_string(m.total) + " parameters (the device kernels take at most " +
-                       std::to_string(lifted::k_max_depth) + ")";
-            if (!m.npre.empty() || !m.nchecks.empty())
-                return "numeric constraints in an axiom body";
-        }
-    return {};
-}
-
 /// Per axiom in plan_axiom order (strata, then their axioms): {the predicates of its stratum its body reads, as bits of
 /// their index in the stratum's head list; the bit of its head} (lifted::Derived::reads). All bits when a stratum has
 /// more than 64 head predicates.
@@ -138,6 +103,45 @@ std::vector<u64> axiom_reads(const plan::Compiled& C)
         }
     }
     return out;
+}
+}  // namespace detail
+
+namespace
+{
+using Clock = std::chrono::steady_clock;
+double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
+
+/// Goal flags of the rows are computed in chunks of at most this many bytes of views, derived bitsets and rows.
+constexpr u64 k_goal_budget = u64{64} << 20;
+
+/// Timed axiom launches between two folds of their events (each CUDA event holds host memory).
+constexpr usize k_axiom_events = 256;
+
+/// Parents per slice at least, for the CPU-fallback work of a chunk on the host's threads.
+constexpr u64 k_host_slice = 64;
+
+template<class T>
+void upload_vec(const ContextPtr& ctx, Scratch& dst, const std::vector<T>& v, cudaStream_t s)
+{
+    void* d = dst.ensure(ctx, v.size() * sizeof(T), s);
+    if (!v.empty())
+        check(cudaMemcpyAsync(d, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice, s), "cudaMemcpyAsync (chunk upload)");
+}
+
+/// Why the axioms cannot run on the device (empty: they can).
+std::string axioms_reason(const plan::Compiled& C)
+{
+    for (const plan::Stratum& st : C.strata)
+        for (const plan::Axiom& x : st.axioms)
+        {
+            const plan::Matcher& m = x.body;
+            if (m.total > lifted::k_max_depth || m.steps.size() > lifted::k_max_depth)
+                return "an axiom body of " + std::to_string(m.total) + " parameters (the device kernels take at most " +
+                       std::to_string(lifted::k_max_depth) + ")";
+            if (!m.npre.empty() || !m.nchecks.empty())
+                return "numeric constraints in an axiom body";
+        }
+    return {};
 }
 
 /// Whether the task evaluates numeric conditions or numeric effects on its states (total-cost effects aside).
@@ -301,7 +305,7 @@ ChunkGenerator::ChunkGenerator(ContextPtr ctx, TaskPtr task, cudaStream_t stream
         m_device_axioms = m_host_axioms_reason.empty();
         if (m_device_axioms)
         {
-            reads = axiom_reads(C);
+            reads = detail::axiom_reads(C);
             // flat strata: no body reads a head predicate of its own stratum (lifted::Strata)
             u32 at = 0;
             for (const plan::Stratum& st : C.strata)
@@ -476,7 +480,7 @@ void ChunkGenerator::host_work(const ChunkInput& in, bool witness, bool canonica
         Part& part = parts[t];
         const WorkspaceLease lease = m_task->workspace();
         Successors& succ = lease->successors();
-        detail::Engine& e = succ.engine();
+        mymyr::detail::Engine& e = succ.engine();
         std::vector<u64> tmp;
         for (u64 i = lo; i < hi; ++i)
         {
@@ -1068,7 +1072,7 @@ void ChunkGenerator::derived_rows(const u64* rows, u64 stride, u32 words, u64 n,
               "cudaMemcpy2DAsync");
         check(cudaStreamSynchronize(m_s), "cudaStreamSynchronize");
         const WorkspaceLease lease = m_task->workspace();
-        detail::Engine& e = lease->engine();
+        mymyr::detail::Engine& e = lease->engine();
         for (u64 i = 0; i < n; ++i)
         {
             const u64* row = src.data() + i * words;

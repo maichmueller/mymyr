@@ -3,7 +3,8 @@
 //
 //   mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W [--n 16384] [--rounds 20]
 //                               [--replays 10] [--device 0] [--secondary-problem P.pddl]
-//                               [--lanes 4|8|32] [--fill auto|thread|warp] [--streams]
+//                               [--lanes 4|8|32] [--fill auto|thread|warp] [--streams] [--collate-slices K]
+//                               [--ring-rows L] [--instances K]
 //
 // FILE holds the state rows, little-endian u64 [rows, W]; they are tiled to --n graphs. For each of the graph-major and
 // the relation-major layout the encode of the batch is captured into a CUDA graph on a stream and replayed --replays
@@ -12,9 +13,11 @@
 // also reports, for each layout, the nodes of the captured graph (kernels, memsets, anything else), the scratch of the
 // reserved workspace, and whether the device's sizes equal the host encoder's.
 
-// With --streams, also times captured append, flush, append plus flush and four-slice collation. Append and flush
-// arrays hold one replay per sample; combined and collation arrays hold --replays calls per sample. Tasks with
-// derived atoms also time supplied derived words, prepared on the host before any timing.
+// With --streams, also times captured append, flush, append plus flush and four-slice collation (--collate-slices K:
+// K slices of equal size). Append and flush arrays hold one replay per sample; combined and collation arrays hold
+// --replays calls per sample. --ring-rows L appends and flushes L rows in a ring of --n rows (default: --n rows in a
+// ring of --n + 1). Tasks with derived atoms also time supplied derived words, prepared on the host before any timing.
+// --instances K encodes over a table of K instances of the problem, row g of instance g % K.
 
 #include "mymyr/cuda/encoding.hpp"
 #include "../../cuda/src/encoding_scratch.hpp"
@@ -56,6 +59,8 @@ struct Args
     int device = 0;
     cuda::LaunchConfig launch;
     bool streams = false;
+    u64 collate_slices = 0, ring_rows = 0;
+    u32 instances = 1;
 };
 
 Args parse(int argc, char** argv)
@@ -88,6 +93,12 @@ Args parse(int argc, char** argv)
             a.replays = static_cast<u32>(std::stoul(value()));
         else if (flag == "--streams")
             a.streams = true;
+        else if (flag == "--collate-slices")
+            a.collate_slices = std::stoull(value());
+        else if (flag == "--ring-rows")
+            a.ring_rows = std::stoull(value());
+        else if (flag == "--instances")
+            a.instances = static_cast<u32>(std::stoul(value()));
         else if (flag == "--device")
             a.device = std::stoi(value());
         else if (flag == "--lanes")
@@ -110,6 +121,9 @@ Args parse(int argc, char** argv)
     if (a.domain.empty() || a.problem.empty() || a.rows.empty() || a.words == 0 || a.n == 0 || a.rounds == 0 ||
         a.replays == 0)
         usage("--domain, --problem, --rows and --words are required, the counts must be positive");
+    if (a.ring_rows > a.n || a.collate_slices > a.n || a.instances == 0 ||
+        (a.instances > 1 && !a.secondary_problem.empty()))
+        usage("--ring-rows and --collate-slices are at most --n; --instances is positive and excludes --secondary-problem");
     return a;
 }
 
@@ -170,7 +184,8 @@ struct Session
     encoding::Layout layout;
     std::shared_ptr<const encoding::FlatEncoder> host;
     std::unique_ptr<cuda::DeviceEncoder> device;
-    cuda::DeviceBuffer states, derived, block;
+    cuda::DeviceBuffer states, derived, block, task_ids;
+    std::vector<i32> ids;
     cuda::DeviceEncodeInput input;
     cuda::DeviceOutput output;
     cuda::OutputLayout layout_of;
@@ -196,6 +211,12 @@ struct Session
         // the host's sizes size the output
         encoding::EncodeInput in;
         in.states = {rows.data(), n, words, 0, 0};
+        if (host->table().size() > 1)
+        {
+            for (u64 g = 0; g < n; ++g)
+                ids.push_back(static_cast<i32>(g % host->table().size()));
+            in.task_ids = ids.data();
+        }
         std::vector<u64> derived_rows;
         const u32 dw = host->table().derived_words();
         if (supplied_derived && dw)
@@ -229,6 +250,12 @@ struct Session
         input.states = static_cast<const u64*>(states.data());
         input.state_stride = words;
         input.state_words = words;
+        if (!ids.empty())
+        {
+            task_ids = cuda::DeviceBuffer(ctx, ids.size() * sizeof(i32), stream);
+            cuda::check(cudaMemcpyAsync(task_ids.data(), ids.data(), task_ids.size(), cudaMemcpyHostToDevice, stream), "upload task ids");
+            input.task_ids = static_cast<const i32*>(task_ids.data());
+        }
         if (!derived_rows.empty())
         {
             derived = cuda::DeviceBuffer(ctx, derived_rows.size() * sizeof(u64), stream);
@@ -330,50 +357,62 @@ struct StreamSession
     std::unique_ptr<cuda::DeviceCollator> collator;
     CapturedOperation append, flush, append_flush, collate;
     std::vector<double> append_times, flush_times, append_flush_times, collate_times;
+    u64 slices = 0;
 
-    StreamSession(const cuda::ContextPtr& ctx, cudaStream_t stream, const Session& base, const std::vector<u64>& rows)
-        : ring(ctx, base.host, base.input.graphs + 1, stream), input(base.input)
+    StreamSession(const cuda::ContextPtr& ctx, cudaStream_t stream, const Session& base, const std::vector<u64>& rows,
+                  u64 ring_rows, u64 slices)
+        : ring(ctx, base.host, ring_rows ? base.input.graphs : base.input.graphs + 1, stream), input(base.input)
     {
         const auto& sizes = base.host_sizes;
-        const cuda::BatchShape ring_shape{input.graphs + 1, sizes.entities, sizes.args, sizes.targets};
+        const cuda::BatchShape ring_shape{ring.capacity(), sizes.entities, sizes.args, sizes.targets};
+        ThreadPool pool(1);
+        encoding::EncodeScratch host_scratch;
+        auto host_sizes_of = [&](u64 first, u64 count)
+        {
+            encoding::EncodeInput host_input;
+            host_input.states = {rows.data() + first * input.state_stride, count, input.state_words, input.state_stride, 0};
+            if (!base.ids.empty()) host_input.task_ids = base.ids.data() + first;
+            return base.host->count(host_input, pool, host_scratch);
+        };
+        auto appended = input;
+        if (ring_rows) appended.graphs = ring_rows;
+        const auto ring_expected = ring_rows ? host_sizes_of(0, ring_rows) : sizes;
         const auto ring_layout = base.device->output_layout(ring_shape);
         ring_output = cuda::DeviceBuffer(ctx, ring_layout.bytes, stream);
         const auto ring_out = cuda::output_of(ring_layout, ring_shape, ring_output.data());
+        input = appended;
         append.capture(stream, [&] { ring.append(input); });
         flush.capture(stream, [&] { ring.flush(ring_out); });
         append_flush.capture(stream, [&] { ring.append(input); ring.flush(ring_out); });
         std::vector<cuda::DeviceCollationBatch> batches;
         u64 first = 0;
-        ThreadPool pool(1);
-        encoding::EncodeScratch host_scratch;
-        for (const u64 count : {input.graphs / 3, u64{0}, input.graphs / 3, input.graphs - 2 * (input.graphs / 3)})
+        const u64 n = base.input.graphs;
+        std::vector<u64> counts{n / 3, u64{0}, n / 3, n - 2 * (n / 3)};
+        if (slices)
         {
-            encoding::EncodeInput host_input;
-            host_input.states = {rows.data() + first * input.state_stride, count, input.state_words, input.state_stride, 0};
-            const auto part_sizes = base.host->count(host_input, pool, host_scratch);
+            counts.assign(slices, n / slices);
+            counts.back() += n % slices;
+        }
+        for (const u64 count : counts)
+        {
+            const auto part_sizes = host_sizes_of(first, count);
             const cuda::BatchShape shape{count, part_sizes.entities, part_sizes.args, part_sizes.targets};
             const auto layout = base.device->output_layout(shape);
             parts.emplace_back(ctx, layout.bytes, stream);
             const auto out = cuda::output_of(layout, shape, parts.back().data());
-            auto part = input;
+            auto part = base.input;
             part.states += first * input.state_stride;
+            if (part.task_ids) part.task_ids += first;
+            if (part.derived) part.derived += first * part.derived_stride;
             part.graphs = count;
             base.device->encode(part, out, stream);
-            cuda::DeviceCollationBatch batch;
-            batch.arrays = out.arrays;
-            batch.sizes = out.sizes;
-            batch.graphs = count;
-            batch.relations = base.host->schema().num_relations();
-            batch.schema_fingerprint = base.host->schema().fingerprint();
-            batch.layout = base.layout;
-            batch.index = base.host->schema().options().index;
-            batch.stored = cuda::output_arrays(base.host->schema());
-            batches.push_back(batch);
+            batches.push_back(cuda::collation_batch(*base.host, out.arrays, out.sizes, count));
             first += count;
         }
+        slices = batches.size();
         collator = std::make_unique<cuda::DeviceCollator>(ctx, std::move(batches), stream);
         scratch = cuda::DeviceBuffer(ctx, collator->scratch_bytes(), stream);
-        const cuda::BatchShape shape{input.graphs, sizes.entities, sizes.args, sizes.targets};
+        const cuda::BatchShape shape{n, sizes.entities, sizes.args, sizes.targets};
         const auto layout = base.device->output_layout(shape);
         collate_output = cuda::DeviceBuffer(ctx, layout.bytes, stream);
         const auto out = cuda::output_of(layout, shape, collate_output.data());
@@ -387,7 +426,7 @@ struct StreamSession
         cuda::check(cudaMemcpyAsync(&ring_sizes, ring_out.sizes, sizeof(ring_sizes), cudaMemcpyDeviceToHost, stream), "ring sizes");
         cuda::check(cudaMemcpyAsync(&collated_sizes, out.sizes, sizeof(collated_sizes), cudaMemcpyDeviceToHost, stream), "collated sizes");
         cuda::check(cudaStreamSynchronize(stream), "warm stream");
-        if (std::memcmp(&ring_sizes, &base.host_sizes, sizeof(ring_sizes)) ||
+        if (std::memcmp(&ring_sizes, &ring_expected, sizeof(ring_sizes)) ||
             std::memcmp(&collated_sizes, &base.host_sizes, sizeof(collated_sizes)))
             throw std::runtime_error("the device stream or collation sizes differ from the host encoding");
     }
@@ -416,6 +455,9 @@ void print_streams(const char* name, const StreamSession& s)
     print_times("flush_us", s.flush_times); std::printf(",");
     print_times("append_flush_us", s.append_flush_times); std::printf(",");
     print_times("collate_us", s.collate_times);
+    std::printf(",\"ring_capacity\":%llu,\"ring_rows\":%llu,\"collate_slices\":%llu",
+                static_cast<unsigned long long>(s.ring.capacity()), static_cast<unsigned long long>(s.input.graphs),
+                static_cast<unsigned long long>(s.slices));
     std::printf(",\"append_kernels\":%u,\"flush_kernels\":%u,\"append_flush_kernels\":%u,\"collate_kernels\":%u,"
                 "\"collate_scratch_bytes\":%llu}", s.append.nodes.kernels, s.flush.nodes.kernels,
                 s.append_flush.nodes.kernels, s.collate.nodes.kernels,
@@ -443,8 +485,12 @@ int main(int argc, char** argv)
     {
         const Args a = parse(argc, argv);
         const TaskPtr task = Task::create(*frontend::load_task(a.domain, a.problem));
-        const auto table = a.secondary_problem.empty() ? rl::TaskTable::single(task) :
-            rl::TaskTable::create({task, Task::create(*frontend::load_task(a.domain, a.secondary_problem))});
+        std::vector<TaskPtr> tasks{task};
+        if (!a.secondary_problem.empty())
+            tasks.push_back(Task::create(*frontend::load_task(a.domain, a.secondary_problem)));
+        for (u32 k = 1; k < a.instances; ++k)
+            tasks.push_back(Task::create(*frontend::load_task(a.domain, a.problem)));
+        const auto table = rl::TaskTable::create(tasks);
         const u32 words = std::max(a.words, table->words());
         const auto raw = read_rows(a.rows, a.words, a.n);
         std::vector<u64> rows(a.n * words, 0);
@@ -465,8 +511,8 @@ int main(int argc, char** argv)
         std::unique_ptr<StreamSession> stream_graph, stream_relation;
         if (a.streams)
         {
-            stream_graph = std::make_unique<StreamSession>(ctx, stream, graph_major, rows);
-            stream_relation = std::make_unique<StreamSession>(ctx, stream, relation_major, rows);
+            stream_graph = std::make_unique<StreamSession>(ctx, stream, graph_major, rows, a.ring_rows, a.collate_slices);
+            stream_relation = std::make_unique<StreamSession>(ctx, stream, relation_major, rows, a.ring_rows, a.collate_slices);
         }
         std::vector<double> graph_times, relation_times, eager_times, graph_given_times, relation_given_times;
         for (u32 r = 0; r < a.rounds; ++r)
@@ -488,8 +534,8 @@ int main(int argc, char** argv)
                     default: relation_given_times.push_back(replay_us(stream, *relation_given, a.replays)); break;
                 }
         }
-        std::printf("{\"n\":%llu,\"words\":%u,\"replays\":%u,\"rounds\":%u,\"times_us\":{", static_cast<unsigned long long>(a.n),
-                    a.words, a.replays, a.rounds);
+        std::printf("{\"n\":%llu,\"words\":%u,\"instances\":%u,\"replays\":%u,\"rounds\":%u,\"times_us\":{",
+                    static_cast<unsigned long long>(a.n), a.words, table->size(), a.replays, a.rounds);
         print_times("graph", graph_times);
         std::printf(",");
         print_times("relation", relation_times);

@@ -1,8 +1,10 @@
 #include "mymyr/cuda/encoding.hpp"
 
+#include "axiom_reads.hpp"
 #include "encoding_kernels.hpp"
 #include "encoding_scratch.hpp"
 #include "mymyr/cuda/lifted.hpp"
+#include "mymyr/rl/task_arrays.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -70,23 +72,33 @@ void check_extension(const encoding::EncodingContext& current, const encoding::E
     }
 }
 
-/// What the device needs to know about a context: the bounds of its graphs, and whether the graphs of some instance read
-/// derived words, by the goals of the rows (none, over the fluent slots, also over the derived slots).
-detail::EncodingFacts context_facts(const encoding::EncodingContext& host, const ContextPtr& ctx = {})
+/// The facts of a context (detail::EncodingFacts). With `ctx`, the axioms of the instances whose graphs read derived
+/// atoms are exported and uploaded, those of `previous` (the facts of a context this one extends) reused; without it
+/// only their sizes are computed, which needs no export.
+std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingContext& host, const ContextPtr& ctx = {},
+                                                     const detail::EncodingFacts* previous = nullptr)
 {
     namespace ed = encoding::detail;
     const auto v = host.view();
-    detail::EncodingFacts facts;
+    auto out = std::make_shared<detail::EncodingFacts>();
+    detail::EncodingFacts& facts = *out;
     facts.derived_words = host.max_derived_words();
+    // subgoal layers over derived slots read derived atoms under every goal mode
+    const bool layers = host.schema().options().max_goal_level != 0;
     GraphBounds& bounds = facts.bounds;
-    for (u32 i = 0; i < host.table().size(); ++i)
+    const u32 instances = host.table().size();
+    std::vector<u32> modes(instances, 0);
+    for (u32 i = 0; i < instances; ++i)
     {
         const ed::InstanceView inst = ed::instance_view(v, i);
         facts.widths.push_back(ed::graph_width(inst));
         bounds.words = std::max<u64>(bounds.words, std::max(inst.words, inst.derived_words));
-        facts.reads_derived[0] = facts.reads_derived[0] || ed::reads_derived(inst, false, false);
-        facts.reads_derived[1] = facts.reads_derived[1] || ed::reads_derived(inst, true, false);
-        facts.reads_derived[2] = facts.reads_derived[2] || ed::reads_derived(inst, true, true);
+        for (u32 m = 0; m < 3; ++m)
+            if (ed::reads_derived(inst, m != 0, m == 2, layers))
+            {
+                modes[i] |= 1u << m;
+                facts.reads_derived[m] = true;
+            }
         // the graph of a row has the cells of the instance's goal or of the row's own goal, and no action cells
         for (const ed::CellList list : {ed::cell_list(inst, false, false), ed::cell_list(inst, true, false)})
         {
@@ -111,35 +123,107 @@ detail::EncodingFacts context_facts(const encoding::EncodingContext& host, const
             bounds.cells = std::max<u64>(bounds.cells, list.count);
         }
     }
-    if (facts.derived_words && (facts.reads_derived[0] || facts.reads_derived[1] || facts.reads_derived[2]))
+    if (!facts.derived_words || !(facts.reads_derived[0] || facts.reads_derived[1] || facts.reads_derived[2]))
+        return out;
+    facts.axioms.resize(instances);
+    for (u32 i = 0; i < instances; ++i)
     {
-        facts.axioms.resize(host.table().size());
-        for (u32 i = 0; i < host.table().size(); ++i)
+        auto& axioms = facts.axioms[i];
+        axioms.modes = modes[i];
+        if (!axioms.modes)
+            continue;
+        if (previous && i < previous->axioms.size() && previous->axioms[i].modes == axioms.modes &&
+            (previous->axioms[i].task || !previous->axioms[i].refusal.empty() || !ctx))
         {
-            const auto instance = ed::instance_view(v, i);
-            if (!ed::reads_derived(instance, false, false) && !ed::reads_derived(instance, true, false) &&
-                !ed::reads_derived(instance, true, true))
+            axioms = previous->axioms[i];
+            if (axioms.refusal.empty())
+                facts.axiom_view_words = std::max(facts.axiom_view_words, axioms.view_words);
+            continue;
+        }
+        const Task& task = *host.table().instance(i).task;
+        for (const auto& st : task.compiled().strata)
+            for (const auto& a : st.axioms)
+                if (a.body.total > lifted::k_max_depth || a.body.steps.size() > lifted::k_max_depth ||
+                    !a.body.npre.empty() || !a.body.nchecks.empty())
+                    axioms.refusal = "the axiom body exceeds the device matcher limits: pass derived words";
+        axioms.ow = host.table().instance(i).ow;
+        if (!(axioms.ow <= 8 || axioms.ow == 12 || axioms.ow == 16 || axioms.ow == 24 || axioms.ow == 32))
+            axioms.refusal = "the axiom object bitsets exceed the device limits: pass derived words";
+        if (!axioms.refusal.empty())
+            continue;
+        axioms.view_words = mul(rl::device_view_rows(task), axioms.ow);
+        facts.axiom_view_words = std::max(facts.axiom_view_words, axioms.view_words);
+        if (!ctx)
+            continue;
+        auto bundle = std::make_shared<const rl::ArrayBundle>(rl::device_arrays(task));
+        const auto view = rl::task_view(*bundle);
+        if (view.ow != axioms.ow || mul(view.view_rows, view.ow) != axioms.view_words)
+            throw std::logic_error("mymyr: encoding: an instance's exported view differs from its sizing");
+        for (u32 a = 0; a < view.n_axioms; ++a)
+            axioms.fc = axioms.fc || rl::dev::device_fc(rl::dev::axiom_matcher_flags(view, a), rl::dev::MatchOrder::Free);
+        axioms.fc = axioms.fc && axioms.ow <= lifted::k_max_fc_ow;
+        axioms.reads = detail::axiom_reads(task.compiled());
+        axioms.task = DeviceTask::upload(ctx, std::move(bundle));
+    }
+    // the launches of each goal mode: one per object-bitset width of its evaluated instances, and one that only flags
+    // the rows of refused instances when there is none
+    for (u32 m = 0; m < 3; ++m)
+    {
+        bool refused = false;
+        for (const auto& axioms : facts.axioms)
+        {
+            if (!((axioms.modes >> m) & 1u))
                 continue;
-            const Task& task = *host.table().instance(i).task;
-            auto& axioms = facts.axioms[i];
-            for (const auto& st : task.compiled().strata)
-                for (const auto& a : st.axioms)
-                    if (a.body.total > lifted::k_max_depth || a.body.steps.size() > lifted::k_max_depth ||
-                        !a.body.npre.empty() || !a.body.nchecks.empty())
-                        axioms.refusal = "the axiom body exceeds the device matcher limits: pass derived words";
-            const u32 ow = host.table().instance(i).ow;
-            if (!(ow <= 8 || ow == 12 || ow == 16 || ow == 24 || ow == 32))
-                axioms.refusal = "the axiom object bitsets exceed the device limits: pass derived words";
             if (!axioms.refusal.empty())
+            {
+                refused = true;
                 continue;
-            auto bundle = std::make_shared<const rl::ArrayBundle>(rl::device_arrays(task));
-            const auto view = rl::task_view(*bundle);
-            facts.axiom_view_words = std::max(facts.axiom_view_words, mul(view.view_rows, view.ow));
-            if (ctx)
-                axioms.task = DeviceTask::upload(ctx, std::move(bundle));
+            }
+            const auto it = std::ranges::find(facts.class_ow[m], axioms.ow);
+            if (it == facts.class_ow[m].end())
+            {
+                facts.class_ow[m].push_back(axioms.ow);
+                facts.class_fc[m].push_back(axioms.fc ? 1 : 0);
+            }
+            else if (axioms.fc)
+                facts.class_fc[m][static_cast<usize>(it - facts.class_ow[m].begin())] = 1;
+        }
+        if (refused && facts.class_ow[m].empty())
+        {
+            facts.class_ow[m].push_back(1);
+            facts.class_fc[m].push_back(0);
         }
     }
-    return facts;
+    return out;
+}
+
+/// The instances' lifted::EncodingAxiomInstance records followed by their reads, as uploaded: the bytes into `staging`
+/// (null: only the size) with the reads at device address `device`.
+u64 axiom_records(const detail::EncodingFacts& facts, std::byte* staging, const std::byte* device)
+{
+    const u64 head = round_up(mul(facts.axioms.size(), sizeof(lifted::EncodingAxiomInstance)));
+    u64 at = head;
+    for (u64 i = 0; i < facts.axioms.size(); ++i)
+    {
+        const auto& axioms = facts.axioms[i];
+        lifted::EncodingAxiomInstance record;
+        record.modes = axioms.modes;
+        record.refused = axioms.modes && !axioms.refusal.empty() ? 1 : 0;
+        if (axioms.task)
+        {
+            record.view = axioms.task->view();
+            if (!axioms.reads.empty())
+            {
+                record.reads = reinterpret_cast<const u64*>(device + at);
+                if (staging)
+                    std::memcpy(staging + at, axioms.reads.data(), axioms.reads.size() * sizeof(u64));
+                at = add(at, mul(axioms.reads.size(), sizeof(u64)));
+            }
+        }
+        if (staging)
+            std::memcpy(staging + i * sizeof(record), &record, sizeof(record));
+    }
+    return at;
 }
 BatchShape worst_shape(u64 graphs, const GraphBounds& bounds)
 {
@@ -172,9 +256,14 @@ std::shared_ptr<DeviceEncodingContext> DeviceEncodingContext::upload(ContextPtr 
 {
     if (!ctx || !host)
         throw std::invalid_argument("mymyr: encoding: a device context needs a device context and a host context");
+    return create(std::move(ctx), std::move(host), false, stream);
+}
+std::shared_ptr<DeviceEncodingContext> DeviceEncodingContext::create(ContextPtr ctx,
+    std::shared_ptr<const encoding::EncodingContext> host, bool facts, cudaStream_t stream)
+{
     DeviceGuard guard(ctx->device());
     auto out = std::shared_ptr<DeviceEncodingContext>(new DeviceEncodingContext(std::move(ctx), host));
-    out->copy(host, stream ? stream : out->m_ctx->stream());
+    out->copy(host, stream ? stream : out->m_ctx->stream(), facts);
     return out;
 }
 DeviceEncodingContext::DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host)
@@ -189,26 +278,43 @@ DeviceEncodingContext::~DeviceEncodingContext()
         catch (...) {}
     }
 }
-void DeviceEncodingContext::copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream)
+void DeviceEncodingContext::copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream,
+                                 bool with_facts)
 {
     if (m_generation)
     {
         m_ready.synchronize();
         m_staging = PinnedLease();
     }
-    auto facts = m_facts ? std::make_shared<const detail::EncodingFacts>(context_facts(*host, m_ctx)) : nullptr;
-    auto staging = m_ctx->lease_pinned(1, host->arrays().bytes());
-    std::memcpy(staging.data(0), host->arrays().block(), host->arrays().bytes());
-    auto block = std::make_shared<DeviceBuffer>(m_ctx, host->arrays().bytes());
+    // the instances a refresh adds are exported and uploaded; the others keep their uploads
+    std::shared_ptr<detail::EncodingFacts> facts = with_facts ? context_facts(*host, m_ctx, m_facts.get()) : nullptr;
+    const u64 context_bytes = host->arrays().bytes();
+    const u64 records_at = round_up(context_bytes);
+    const u64 record_bytes = facts && !facts->axioms.empty() ? axiom_records(*facts, nullptr, nullptr) : 0;
+    auto staging = m_ctx->lease_pinned(1, record_bytes ? add(records_at, record_bytes) : context_bytes);
+    std::memcpy(staging.data(0), host->arrays().block(), context_bytes);
+    auto block = std::make_shared<DeviceBuffer>(m_ctx, context_bytes);
+    if (record_bytes)
+    {
+        facts->axiom_block = std::make_shared<DeviceBuffer>(m_ctx, record_bytes);
+        (void)axiom_records(*facts, static_cast<std::byte*>(staging.data(0)) + records_at,
+                            static_cast<const std::byte*>(facts->axiom_block->data()));
+    }
     Event allocated;
     allocated.record(m_ctx->stream());
     allocated.wait_on(stream);
     auto last = std::make_shared<LastUse>(m_ctx->device());
     block->track(last);
+    if (record_bytes)
+        facts->axiom_block->track(last);
     try
     {
         check(cudaMemcpyAsync(block->data(), staging.data(0), block->size(), cudaMemcpyHostToDevice, stream),
               "cudaMemcpyAsync (encoding context)");
+        if (record_bytes)
+            check(cudaMemcpyAsync(facts->axiom_block->data(), static_cast<std::byte*>(staging.data(0)) + records_at,
+                                  record_bytes, cudaMemcpyHostToDevice, stream),
+                  "cudaMemcpyAsync (encoding axioms)");
         last->record(stream);
         m_ready.record(stream);
     }
@@ -234,7 +340,7 @@ bool DeviceEncodingContext::refresh(std::shared_ptr<const encoding::EncodingCont
     if (grown->table().size() == m_host->table().size())
         return false;
     DeviceGuard guard(m_ctx->device());
-    copy(grown, stream ? stream : m_ctx->stream());
+    copy(grown, stream ? stream : m_ctx->stream(), m_facts != nullptr);
     return true;
 }
 std::shared_ptr<const encoding::EncodingContext> DeviceEncodingContext::host() const
@@ -270,6 +376,8 @@ EncodingAcquisition DeviceEncodingContext::acquire(cudaStream_t stream, std::sha
     {
         last = use ? std::move(use) : std::make_shared<LastUse>(m_ctx->device());
         m_block->track(last);
+        if (m_facts && m_facts->axiom_block)
+            m_facts->axiom_block->track(last);
     }
     EncodingAcquisition held(m_view, m_block, m_generation, last, stream);
     held.m_facts = m_facts;
@@ -298,6 +406,25 @@ std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) cons
     check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
     std::memcpy(out.data(), staging.data(0), out.size());
     return out;
+}
+
+DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const encoding::FlatBuffers& arrays,
+                                     const encoding::FlatSizes* sizes, u64 graphs)
+{
+    const auto& schema = encoder.schema();
+    DeviceCollationBatch batch;
+    batch.arrays = arrays;
+    batch.sizes = sizes;
+    batch.graphs = graphs;
+    batch.relations = schema.num_relations();
+    batch.schema_fingerprint = schema.fingerprint();
+    batch.table_fingerprint = encoder.table_fingerprint();
+    batch.layout = schema.options().layout;
+    batch.index = schema.options().index;
+    batch.stored = output_arrays(schema);
+    batch.max_goal_level = schema.options().max_goal_level;
+    batch.history = schema.options().history;
+    return batch;
 }
 
 OutputArrays output_arrays(const encoding::EncodingSchema& schema)
@@ -408,6 +535,11 @@ ScratchLayout encoding_scratch_layout(const BatchShape& shape, const EncodingFac
     return out;
 }
 
+u64 required_bytes(const ScratchLayout& layout, bool evaluate) noexcept
+{
+    return evaluate || !layout.derived ? layout.bytes : layout.derived;
+}
+
 ScratchView scratch_view(const ScratchLayout& layout, void* block) noexcept
 {
     auto* base = static_cast<std::byte*>(block);
@@ -464,10 +596,8 @@ DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::Fla
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
     m_schema = m_encoder->schema_ptr();
     check_schema(*m_schema);
-    auto facts = context_facts(m_encoder->context(), m_ctx);
-    m_bounds = facts.bounds;
-    m_context = DeviceEncodingContext::upload(m_ctx, m_encoder->context_ptr());
-    m_context->m_facts = std::make_shared<const detail::EncodingFacts>(std::move(facts));
+    m_context = DeviceEncodingContext::create(m_ctx, m_encoder->context_ptr(), true, nullptr);
+    m_bounds = m_context->m_facts->bounds;
 }
 std::shared_ptr<const encoding::FlatEncoder> DeviceEncoder::encoder() const
 {
@@ -484,24 +614,29 @@ OutputLayout DeviceEncoder::output_layout(const BatchShape& shape) const
 {
     return cuda::output_layout(shape, options().index, schema().num_relations(), output_arrays(schema()));
 }
-u64 DeviceEncoder::scratch_bytes(const BatchShape& shape) const
+u64 DeviceEncoder::scratch_bytes(const BatchShape& shape, DerivedWords derived) const
 {
     std::shared_lock lock(m_state_mutex);
     DeviceGuard guard(m_ctx->device());
-    return detail::encoding_scratch_layout(shape, *m_context->m_facts, options().layout, schema().num_relations()).bytes;
+    return detail::required_bytes(
+        detail::encoding_scratch_layout(shape, *m_context->m_facts, options().layout, schema().num_relations()),
+        derived == DerivedWords::Evaluated);
 }
-u64 DeviceEncoder::scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape)
+u64 DeviceEncoder::scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape, DerivedWords derived)
 {
     const auto facts = context_facts(encoder.context());
-    return detail::encoding_scratch_layout(shape, facts, encoder.schema().options().layout,
-                                           encoder.schema().num_relations()).bytes;
+    return detail::required_bytes(detail::encoding_scratch_layout(shape, *facts, encoder.schema().options().layout,
+                                                                  encoder.schema().num_relations()),
+                                  derived == DerivedWords::Evaluated);
 }
-u64 DeviceEncoder::scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape) const
+u64 DeviceEncoder::scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape, DerivedWords derived) const
 {
     if (context.m_owner != m_context.get() || !context.m_facts)
         throw std::invalid_argument("mymyr: encoding: acquire the context from this device encoder");
     DeviceGuard guard(m_ctx->device());
-    return detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations()).bytes;
+    return detail::required_bytes(
+        detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations()),
+        derived == DerivedWords::Evaluated);
 }
 u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
 {
@@ -639,10 +774,9 @@ bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, 
     if (grown->schema().fingerprint() != m_schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the grown encoder has another schema or options");
     check_schema(grown->schema());
-    const detail::EncodingFacts facts = context_facts(grown->context());
     const bool copied = m_context->refresh(grown->context_ptr(), stream);
     m_encoder = std::move(grown);
-    m_bounds = facts.bounds;
+    m_bounds = m_context->facts()->bounds;
     std::vector<std::shared_ptr<Workspace>> workspaces;
     {
         std::lock_guard map_lock(m_workspace_mutex);
@@ -674,9 +808,15 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     const u64 graphs = in.graphs;
     const u64 R = schema.num_relations();
     const bool relation_major = opts.layout == encoding::Layout::Relation;
+    const u32 mode = in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0;
+    const bool evaluate = graphs && !in.derived && facts.reads_derived[mode];
+    const bool live = in.graphs_device || in.row_start || in.dropped || out.graphs;
 
-    if (!block || bytes < layout.bytes || reinterpret_cast<std::uintptr_t>(block) % 256)
+    if (!block || reinterpret_cast<std::uintptr_t>(block) % 256 || bytes < detail::required_bytes(layout, false))
         invalid("the scratch is null, too small, or not aligned to 256 bytes");
+    if (evaluate && (!layout.derived || !layout.axiom_views || bytes < layout.bytes))
+        invalid("the scratch has no room to evaluate the derived atoms the graphs read: pass derived words, or size the "
+                "scratch with DerivedWords::Evaluated");
 
     // what can be checked without reading device memory
     if (graphs > scratch_shape.graphs)
@@ -688,6 +828,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the workspace does not belong to this encoder");
     if (in.row_start && !in.row_capacity)
         invalid("a circular row view needs a positive capacity");
+    if (live && launch.order)
+        invalid("a launch order needs the graph count on the host: it cannot order a live row count");
     if (graphs && !in.states)
         invalid("the state buffer is null");
     if (in.state_stride < in.state_words)
@@ -706,11 +848,11 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the derived goal row stride is smaller than its width");
     if (in.goal_derived_pos && !in.goal_pos)
         invalid("the derived goal masks need the goal masks over the fluent slots");
-    const bool evaluate = graphs && !in.derived && facts.reads_derived[in.goal_pos ? (in.goal_derived_pos ? 2 : 1) : 0];
-    if (evaluate)
-        for (const auto& axioms : facts.axioms)
-            if (!axioms.refusal.empty())
-                invalid(axioms.refusal);
+    // the rows of a batch without task ids are instance 0's: a refusal of its axioms refuses the call; otherwise the
+    // rows of a refused instance are invalid rows (the input flag)
+    if (evaluate && !in.task_ids && !facts.axioms.empty() && ((facts.axioms[0].modes >> mode) & 1u) &&
+        !facts.axioms[0].refusal.empty())
+        invalid(facts.axioms[0].refusal);
     const OutputArrays arrays = output_arrays(schema);
     const encoding::FlatBuffers& a = out.arrays;
     if (!out.sizes)
@@ -732,6 +874,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if ((a.target_offsets != nullptr) != arrays.targets ||
             (!arrays.targets && (a.target_entity != nullptr || a.target_group != nullptr)))
             invalid("the target arrays must be given iff the schema has target sources");
+        if (a.history_offsets || a.history_entity || a.history_dt)
+            invalid("the history arrays must be null: the device does not encode history steps");
         if (out.capacities.args && !a.relation_args)
             invalid("relation_args is null");
         if (arrays.targets && out.capacities.targets && (!a.target_entity || !a.target_group))
@@ -780,34 +924,12 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     detail::EncodeParams p;
     p.context = context.view;
     p.graphs = graphs;
-    p.graphs_device = in.graphs_device;
-    p.row_start = in.row_start;
-    p.row_capacity = in.row_capacity;
-    p.output_graphs = out.graphs;
     p.states = in.states;
     p.state_stride = in.state_stride;
     p.state_words = in.state_words;
     p.task_ids = in.task_ids;
     p.derived = in.derived;
     p.derived_stride = in.derived_stride;
-    if (evaluate)
-    {
-        auto* base = static_cast<std::byte*>(block);
-        p.derived = reinterpret_cast<u64*>(base + layout.derived);
-        p.derived_stride = facts.derived_words;
-        p.derived_logical = true;
-        if (phase != Phase::Fill)
-            for (u32 i = 0; i < facts.axioms.size(); ++i)
-            {
-                const auto& task = facts.axioms[i].task;
-                if (task)
-                    check(lifted::launch_encoding_axioms(task->view(), in.states, in.state_stride, in.state_words,
-                          graphs, in.task_ids, i, reinterpret_cast<u64*>(base + layout.axiom_views),
-                          facts.axiom_view_words, const_cast<u64*>(p.derived), facts.derived_words, context.stream(),
-                          in.graphs_device, in.row_start, in.row_capacity),
-                          "encoding axiom kernels");
-            }
-    }
     p.goal_pos = in.goal_pos;
     p.goal_neg = in.goal_neg;
     p.goal_stride = in.goal_stride;
@@ -822,7 +944,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     {
         // counting reports the sizes against no capacity
         constexpr u64 unbounded = std::numeric_limits<u64>::max();
-        p.capacities = {graphs, unbounded, unbounded, unbounded};
+        p.capacities = {graphs, unbounded, unbounded, unbounded, unbounded};
     }
     else
     {
@@ -848,9 +970,54 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     shape.scan_temp = scratch.scan_temp;
     shape.scan_temp_bytes = scratch.scan_temp_bytes;
     shape.zero_begin = scratch.flags;
-    // An unassigned graph in an invalid launch order contributes zero totals.
+    shape.live = live;
+    // An unassigned graph in an invalid launch order contributes zero totals. A live count writes all of its totals.
     const u64 entry = layout.wide ? 8 : 4;
-    shape.zero_bytes = add(k_flag_bytes, mul(entry, shape.scan_length));
+    shape.zero_bytes = live ? k_flag_bytes : add(k_flag_bytes, mul(entry, shape.scan_length));
+    if (live)
+    {
+        p.graphs_device = in.graphs_device;
+        p.row_start = in.row_start;
+        p.row_capacity = in.row_capacity;
+        p.rows_overflow = in.dropped;
+        p.output_graphs = out.graphs;
+        p.scan_state = scratch.scan_temp;
+        p.scan_tiles = detail::live_scan_tiles(shape.scan_length);
+    }
+    if (evaluate)
+    {
+        auto* base = static_cast<std::byte*>(block);
+        p.derived = reinterpret_cast<u64*>(base + layout.derived);
+        p.derived_stride = facts.derived_words;
+        p.derived_logical = true;
+        if (phase != Phase::Fill && !facts.class_ow[mode].empty())
+        {
+            // the evaluation flags the rows of instances it cannot evaluate: the clear goes first
+            check(detail::launch_clear(shape, context.stream()), "encoding kernels (clear)");
+            shape.cleared = true;
+            lifted::EncodingAxioms ax;
+            ax.instances = static_cast<const lifted::EncodingAxiomInstance*>(facts.axiom_block->data());
+            ax.count = static_cast<u32>(facts.axioms.size());
+            ax.states = in.states;
+            ax.stride = in.state_stride;
+            ax.words = in.state_words;
+            ax.rows = graphs;
+            ax.task_ids = in.task_ids;
+            ax.mode = mode;
+            ax.views = reinterpret_cast<u64*>(base + layout.axiom_views);
+            ax.view_words = facts.axiom_view_words;
+            ax.derived = reinterpret_cast<u64*>(base + layout.derived);
+            ax.derived_words = facts.derived_words;
+            ax.invalid = scratch.flags;
+            ax.live = in.graphs_device;
+            ax.row_start = in.row_start;
+            ax.row_capacity = in.row_capacity;
+            ax.class_ow = facts.class_ow[mode].data();
+            ax.class_fc = facts.class_fc[mode].data();
+            ax.launches = static_cast<u32>(facts.class_ow[mode].size());
+            check(lifted::launch_encoding_axioms(ax, context.stream()), "encoding axiom kernels");
+        }
+    }
     switch (phase)
     {
     case Phase::Whole: check(detail::launch_encode(p, shape, context.stream()), "encoding kernels"); break;

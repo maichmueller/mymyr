@@ -345,9 +345,10 @@ def _outputs(torch: Any, specs: dict, device: Any) -> dict[str, Any]:
     return {name: torch.empty(shape, dtype=dtype, device=device) for name, (shape, dtype) in specs.items()}
 
 
-def _scratch(torch: Any, native: Any, stream: int, graphs: int, device: Any) -> Any:
-    """Per-call scratch, owned by the graph's private allocator pool during capture."""
-    return torch.empty(native.scratch_bytes(stream, graphs), dtype=torch.uint8, device=device)
+def _scratch(torch: Any, native: Any, stream: int, graphs: int, device: Any, derived: bool) -> Any:
+    """Per-call scratch, owned by the graph's private allocator pool during capture; `derived`: the rows' derived words
+    are given, so nothing is evaluated."""
+    return torch.empty(native.scratch_bytes(stream, graphs, derived), dtype=torch.uint8, device=device)
 
 
 def encode_arrays(
@@ -376,7 +377,7 @@ def encode_arrays(
             raise _error("the batch has more graphs than the output capacity")
         specs = layout.specs(torch, rows.graphs, entities, args, targets)
         out = _outputs(torch, specs, device)
-        scratch = _scratch(torch, native, stream, rows.graphs, device)
+        scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
         native.encode(stream, rows.fields, _pointers(out),
                       [out["task_ids"].shape[0], entities, args, targets], scratch.data_ptr(), scratch.numel())
     else:
@@ -550,6 +551,7 @@ class DeviceFlatBatch:
         self._device_graphs = None
         self._schema = encoder.schema
         self._fingerprint = encoder.schema_fingerprint
+        self._table_fingerprint = encoder.table_fingerprint
         self._options = encoder.options
         layout = layout_of(encoder)
         self._arrays = {name: arrays[name] for name in _ARRAYS if layout.present(name)}
@@ -612,8 +614,8 @@ class DeviceFlatBatch:
         return values
 
     def as_dict(self, framework: Optional[str] = None) -> dict[str, Any]:
-        """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics) and the arrays
-        of the batch. framework: ``"torch"`` or ``"dlpack"`` (default; the tensors, which speak DLPack) or ``"numpy"``
+        """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, table_fingerprint,
+        statics) and the arrays of the batch. framework: ``"torch"`` or ``"dlpack"`` (default; the tensors, which speak DLPack) or ``"numpy"``
         (copies to the host and waits for the device)."""
         scalars = {
             "version": 1,
@@ -622,6 +624,7 @@ class DeviceFlatBatch:
             "layout": 1 if self._options["layout"] == "relation" else 0,
             "index_dtype": 1 if self._options["index_dtype"] == "int64" else 0,
             "schema_fingerprint": _signed(self._fingerprint),
+            "table_fingerprint": _signed(self._table_fingerprint),
             "statics": 0,
         }
         arrays = self._arrays
@@ -702,6 +705,7 @@ class DeviceFlatStream:
             raise _error("construct the device stream outside capture")
         table = rl.as_table(encoder.table)
         self._native = _device_encoder(encoder, self.device.index)
+        self._native.check_stream_schema()
         # Acquiring the immutable context before capture is independent of the scratch allocation.
         self._native.scratch_bytes(self._stream_ptr, capacity)
         self.device_status = torch.zeros(3, dtype=torch.int64, device=self.device)
@@ -770,7 +774,7 @@ class DeviceFlatStream:
             raise _error("flush graph capacity must cover the entire device ring")
         out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:]), self.device)
         graphs = torch.empty(1, dtype=torch.int64, device=self.device)
-        scratch = _scratch(torch, self._native, self._stream_ptr, self.capacity, self.device)
+        scratch = _scratch(torch, self._native, self._stream_ptr, self.capacity, self.device, self._derived is not None)
         self._native.flush(self._stream_ptr, self._rows.fields, self.device_status.data_ptr(), _pointers(out),
                            [self.capacity, *caps[1:]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
         result = DeviceFlatBatch(self.encoder, out, exact=False)
@@ -802,6 +806,8 @@ class DeviceCollator:
                     raise _error(f"collate received mixed {option}")
             if batch._fingerprint != first._fingerprint:
                 raise _error("collate received mixed schemas")
+            if batch._table_fingerprint != first._table_fingerprint:
+                raise _error("collate received batches of different tables: their task ids name different instances")
         if torch.cuda.is_current_stream_capturing():
             raise _error("prepare a DeviceCollator outside capture for captured collation")
         from mymyr._core._encoding import DeviceCollator as NativeCollator
@@ -812,7 +818,8 @@ class DeviceCollator:
         arrays = [batch._arrays.copy() for batch in batches]
         inputs = [_pointers({**a, "sizes": batch._sizes}) for a, batch in zip(arrays, batches, strict=True)]
         counts = [batch.num_graphs for batch in batches]
-        native = NativeCollator(encoder, first.device.index, _stream(first.device), inputs, counts)
+        encoders = [batch._encoder for batch in batches]
+        native = NativeCollator(encoders, first.device.index, _stream(first.device), inputs, counts)
         self._prepared = (torch, first, encoder, native, arrays, batches, counts)
         self._stream = _stream(first.device)
 

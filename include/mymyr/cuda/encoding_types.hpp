@@ -25,7 +25,8 @@ struct DeviceOutput
     encoding::FlatSizes* sizes = nullptr;
     /// Zero the variable arrays' unused tails, and all output arrays on overflow, in the fill kernel.
     bool zero_unused = false;
-    /// Optional device scalar receiving the number of live graphs, including a dynamically sized row stream.
+    /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). With it, the
+    /// per-graph and per-cell arrays past those graphs are zero up to the graph capacity too (with zero_unused).
     u64* graphs = nullptr;
 };
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
@@ -51,22 +52,32 @@ struct DeviceEncodeInput
     u32 goal_derived_words = 0;
     /// Optional device count, bounded by `graphs`. A circular row view starts at *row_start modulo row_capacity.
     /// Counts and starts are read on the encoder's stream; derived inputs and goal masks use the same row order.
+    /// An encode with any of them (or with DeviceOutput::graphs) is sized for `graphs` rows but costs what the live rows
+    /// cost; it takes no launch order.
     const u64* graphs_device = nullptr;
     const u64* row_start = nullptr;
     u64 row_capacity = 0;
+    /// Optional device flag: nonzero says rows were dropped before this encode (an append to a full ring), and the batch
+    /// reports k_overflow_capacity.
+    const u64* dropped = nullptr;
 };
 
-/// One valid batch to concatenate. Pointers name arrays in device memory and remain live through all uses of a
-/// collator, including graph replays. Capacity tails are ignored; sizes, when supplied, reports input overflow.
+/// One valid batch to concatenate (cuda::collation_batch fills it from its encoder). Pointers name arrays in device
+/// memory and remain live through all uses of a collator, including graph replays. Capacity tails are ignored; sizes,
+/// when supplied, reports input overflow. table_fingerprint is rl::TaskTable::fingerprint of the encoder's table: the
+/// task ids of batches with different ones name different instances. max_goal_level and history are the schema's
+/// options: device collation carries no subgoal layers or history steps.
 struct DeviceCollationBatch
 {
     encoding::FlatBuffers arrays;
     const encoding::FlatSizes* sizes = nullptr;
-    u64 graphs = 0, relations = 0, schema_fingerprint = 0;
+    u64 graphs = 0, relations = 0, schema_fingerprint = 0, table_fingerprint = 0;
     encoding::Layout layout = encoding::Layout::Graph;
     encoding::IndexType index = encoding::IndexType::I32;
     bool shared_statics = false;
     OutputArrays stored;
+    u32 max_goal_level = 0;
+    bool history = false;
 };
 
 }

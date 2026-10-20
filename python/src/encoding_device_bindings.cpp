@@ -219,6 +219,7 @@ public:
         auto in = input_of(rows_of(ring));
         in.graphs_device = ptr<const u64>(status) + 1;
         in.row_start = ptr<const u64>(status);
+        in.dropped = ptr<const u64>(status) + 2;
         in.row_capacity = in.graphs;
         auto out = output_of(outputs, {capacities[0], capacities[1], capacities[2], capacities[3]});
         out.graphs = ptr<u64>(graphs);
@@ -285,14 +286,17 @@ public:
     }
 
     /// Scratch bytes for these rows and this stream's acquired generation. No workspace reservation.
-    u64 scratch_bytes(std::intptr_t stream, u64 graphs)
+    u64 scratch_bytes(std::intptr_t stream, u64 graphs, bool derived)
     {
         nb::gil_scoped_release release;
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);
         ensure_context(*slot, cuda_stream(stream));
-        return m_device_encoder->scratch_bytes(*slot->context, cuda::BatchShape{graphs, 0, 0, 0});
+        return m_device_encoder->scratch_bytes(*slot->context, cuda::BatchShape{graphs, 0, 0, 0},
+                                               derived ? cuda::DerivedWords::Supplied : cuda::DerivedWords::Evaluated);
     }
+
+    void check_stream_schema() const { cuda::check_stream_schema(m_encoder->schema()); }
 
     /// Encodes with caller-owned scratch. Its owner keeps it alive until the stream or captured graph is done.
     void encode(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
@@ -414,27 +418,18 @@ private:
 class DeviceCollatorHandle
 {
 public:
-    DeviceCollatorHandle(nb::handle encoder, int device, std::intptr_t stream,
+    DeviceCollatorHandle(const std::vector<nb::handle>& encoders, int device, std::intptr_t stream,
                          const std::vector<std::vector<std::uintptr_t>>& inputs, const std::vector<u64>& graphs)
         : m_device(device), m_stream(cuda_stream(stream))
     {
-        if (inputs.size() != graphs.size()) refuse("collation needs one graph count per batch");
-        const auto host = flat_encoder_of(encoder);
-        m_context = table_device_context(nb::getattr(encoder, "table"), nb::none(), device);
+        if (inputs.size() != graphs.size() || inputs.size() != encoders.size() || encoders.empty())
+            refuse("collation needs one encoder and one graph count per batch");
+        m_context = table_device_context(nb::getattr(encoders.front(), "table"), nb::none(), device);
         std::vector<cuda::DeviceCollationBatch> batches;
         for (usize i = 0; i < inputs.size(); ++i)
         {
             const auto output = output_of(inputs[i], {});
-            cuda::DeviceCollationBatch b;
-            b.arrays = output.arrays;
-            b.sizes = output.sizes;
-            b.graphs = graphs[i];
-            b.relations = host->schema().num_relations();
-            b.schema_fingerprint = host->schema().fingerprint();
-            b.layout = host->schema().options().layout;
-            b.index = host->schema().options().index;
-            b.stored = cuda::output_arrays(host->schema());
-            batches.push_back(b);
+            batches.push_back(cuda::collation_batch(*flat_encoder_of(encoders[i]), output.arrays, output.sizes, graphs[i]));
         }
         nb::gil_scoped_release release;
         m_collator = std::make_unique<cuda::DeviceCollator>(m_context, std::move(batches), m_stream);
@@ -512,8 +507,11 @@ void bind_encoding_device(nb::module_& parent)
              "Frees the workspace of `stream`, or of every stream.")
         .def("state", &DeviceEncoderHandle::state, "stream"_a,
              "[graphs reserved, scratch bytes, reservations made, host waits made] of a stream.")
-        .def("scratch_bytes", &DeviceEncoderHandle::scratch_bytes, "stream"_a, "graphs"_a,
-             "Scratch bytes for this stream's acquired context and graph count.")
+        .def("scratch_bytes", &DeviceEncoderHandle::scratch_bytes, "stream"_a, "graphs"_a, "derived"_a = false,
+             "Scratch bytes for this stream's acquired context and graph count; `derived`: for rows whose derived "
+             "words are given.")
+        .def("check_stream_schema", &DeviceEncoderHandle::check_stream_schema,
+             "Raises ValueError for a schema that a device stream cannot carry (subgoal layers, history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
              "Encodes the rows (15 integers: the graphs, then the pointers and strides of the arrays) into the 14 output "
@@ -523,10 +521,10 @@ void bind_encoding_device(nb::module_& parent)
              "to check the flags and return the graph extent and fourteen pointers, then fills them on `stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")
-        .def("__init__", [](DeviceCollatorHandle* self, Arg<ann::Any> encoder, int device, std::intptr_t stream,
+        .def("__init__", [](DeviceCollatorHandle* self, const std::vector<nb::handle>& encoders, int device, std::intptr_t stream,
                             const std::vector<std::vector<std::uintptr_t>>& inputs, const std::vector<u64>& graphs)
-             { new (self) DeviceCollatorHandle(encoder, device, stream, inputs, graphs); },
-             "encoder"_a, "device"_a, "stream"_a, "inputs"_a, "graphs"_a)
+             { new (self) DeviceCollatorHandle(encoders, device, stream, inputs, graphs); },
+             "encoders"_a, "device"_a, "stream"_a, "inputs"_a, "graphs"_a)
         .def_prop_ro("scratch_bytes", &DeviceCollatorHandle::scratch_bytes)
         .def("encode", &DeviceCollatorHandle::encode, "outputs"_a, "capacities"_a, "scratch"_a, "bytes"_a)
         .def("encode_exact", &DeviceCollatorHandle::encode_exact, "scratch"_a, "bytes"_a, "allocate"_a);

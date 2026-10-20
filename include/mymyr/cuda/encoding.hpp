@@ -90,7 +90,15 @@ public:
 private:
     friend class DeviceEncoder;
     DeviceEncodingContext(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host);
-    void copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream);
+    /// An upload that also builds the encoder's facts of every generation (bounds, widths and the axiom evaluation).
+    static std::shared_ptr<DeviceEncodingContext> create(ContextPtr ctx, std::shared_ptr<const encoding::EncodingContext> host,
+                                                         bool facts, cudaStream_t stream);
+    void copy(const std::shared_ptr<const encoding::EncodingContext>& host, cudaStream_t stream, bool facts);
+    [[nodiscard]] std::shared_ptr<const detail::EncodingFacts> facts() const
+    {
+        std::lock_guard lock(m_mutex);
+        return m_facts;
+    }
 
     ContextPtr m_ctx;
     std::shared_ptr<const encoding::EncodingContext> m_host;
@@ -106,6 +114,15 @@ private:
 
 using encoding::BatchShape;
 
+/// How the derived words of an encode's rows come, for the size of its scratch: evaluated on the device when a graph
+/// reads derived atoms and DeviceEncodeInput::derived is null, or always supplied (no room for an evaluation, which
+/// such an encode then refuses).
+enum class DerivedWords : u8
+{
+    Evaluated,
+    Supplied,
+};
+
 /// Conservative maxima per graph over the instances of the context, covering every lane the device encodes: the state,
 /// static and derived cells, the nullary (auxiliary) entity, the goal cells of the instance's goal and of a row's own
 /// goal, the goal targets and one entity per predicate virtual node. `words` is the widest row of an instance (state
@@ -116,6 +133,10 @@ struct GraphBounds
 };
 
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
+/// The collation view of a device batch of `graphs` graphs that `encoder` (or a device encoder over it) wrote.
+[[nodiscard]] DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder,
+                                                   const encoding::FlatBuffers& arrays,
+                                                   const encoding::FlatSizes* sizes, u64 graphs);
 
 /// Byte offsets in a caller-owned output block; each array begins at a multiple of 64 bytes. An array that the batch
 /// does not store has no bytes. The last array is the FlatSizes the encoding writes.
@@ -136,7 +157,7 @@ struct OutputLayout
 [[nodiscard]] DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void* block);
 
 /// Append all rows or set status[2] without writing when they do not fit. Status is device uint64
-/// [head, live rows, overflow]; the copy precedes the single thread's tail update. One stream orders all uses.
+/// [head, live rows, overflow]; a grid copies the rows, then one thread advances the tail. One stream orders all uses.
 /// The ring's columns have table-wide widths, fixed presence, and room for ring.graphs rows. Its status is zeroed
 /// before first use. The input's widths equal the columns' widths; row strides may differ or broadcast goals.
 void append_rows(const DeviceEncodeInput& input, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream);
@@ -144,6 +165,8 @@ void append_rows(const DeviceEncodeInput& input, const DeviceEncodeInput& ring, 
 void clear_rows(u64* status, u64 capacity, cudaStream_t stream);
 /// Empties the ring while preserving its sticky overflow flag.
 void finish_rows(u64* status, u64 capacity, cudaStream_t stream);
+/// Throws std::invalid_argument for a schema whose rows a device ring does not carry: subgoal layers and history steps.
+void check_stream_schema(const encoding::EncodingSchema& schema);
 
 enum class FillMode : u8
 {
@@ -207,12 +230,17 @@ public:
     /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;
     [[nodiscard]] u64 bytes_needed(u64 graphs) const;
-    /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes.
-    [[nodiscard]] u64 scratch_bytes(const BatchShape& shape) const;
-    /// Sizes scratch without uploading a context. Uses the current CUDA device for the scan storage query.
-    [[nodiscard]] static u64 scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape);
+    /// Bytes of device scratch, independent of the output capacities. The address must be aligned to 256 bytes. With
+    /// DerivedWords::Supplied, the scratch of encodes that pass their derived words: smaller where a graph reads derived
+    /// atoms (no room for their evaluation), equal otherwise.
+    [[nodiscard]] u64 scratch_bytes(const BatchShape& shape, DerivedWords derived = DerivedWords::Evaluated) const;
+    /// Sizes scratch without uploading a context or exporting a task. Uses the current CUDA device for the scan storage
+    /// query.
+    [[nodiscard]] static u64 scratch_bytes(const encoding::FlatEncoder& encoder, const BatchShape& shape,
+                                           DerivedWords derived = DerivedWords::Evaluated);
     /// The exact byte count for a held generation, including one held across refresh().
-    [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape) const;
+    [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape,
+                                    DerivedWords derived = DerivedWords::Evaluated) const;
 
     /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
     /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.
@@ -241,8 +269,10 @@ public:
     /// the batch is written and sizes.overflow says why. With `out.zero_unused`, the unused tails are zero and
     /// overflow zeros all output arrays. The rows, outputs and `launch.order` are device memory the
     /// stream may read and write. Throws std::invalid_argument for input that can be checked without reading device
-    /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, axiom bodies beyond
-    /// the device matcher limits without supplied derived words, a launch that needs more shared memory than a block has).
+    /// memory (more graphs than the workspace or output shape, arrays that do not match the schema, rows without task ids
+    /// and without supplied derived words whose instance 0 has axioms beyond the device limits, a launch that needs more
+    /// shared memory than a block has). Rows of another instance beyond those limits, without supplied derived words,
+    /// set the input flag of the batch.
     void encode(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
                 const LaunchConfig& launch = {}) const;
     /// The same on `stream` with a workspace acquired for this one call: requires a reservation for the stream.
@@ -261,7 +291,9 @@ public:
     void fill(const EncodingWorkspace& workspace, const DeviceEncodeInput& in, const DeviceOutput& out,
               const LaunchConfig& launch = {}) const;
 
-    /// The caller-owned scratch forms. `shape.graphs` bounds the batch, and `bytes` is at least scratch_bytes(shape).
+    /// The caller-owned scratch forms. `shape.graphs` bounds the batch, and `bytes` is at least scratch_bytes(shape), or
+    /// scratch_bytes(shape, DerivedWords::Supplied) for rows with supplied derived words (an encode that would evaluate
+    /// them in less than scratch_bytes(shape) throws std::invalid_argument).
     /// Obtain the acquisition from context().acquire(stream) before capture. It holds the context generation; keep it,
     /// the scratch, inputs and outputs alive through the last replay. These forms allocate and synchronize nothing.
     /// count() and fill() use the same acquisition, scratch address, shape, rows and launch configuration on one stream,
@@ -297,7 +329,9 @@ private:
     mutable std::unordered_map<cudaStream_t, std::shared_ptr<Workspace>> m_workspaces;
 };
 /// A device ring bound to one stream. Append copies device rows and inputs; flush encodes every live row once,
-/// advances the head and empties the ring on that stream. The overflow flag is sticky until clear().
+/// advances the head and empties the ring on that stream. The overflow flag is sticky until clear(), and every flush
+/// while it is set reports k_overflow_capacity (nothing of the batch is written): a batch never silently lacks the rows
+/// of an append that did not fit. The rows carry no subgoal layers or history steps (check_stream_schema).
 /// Construct outside capture and keep the ring, encoder and stream alive through the final replay. All operations
 /// on one ring are ordered on its stream; independent rings may run concurrently. The mutable stream is host-only.
 class DeviceRowStream
@@ -322,8 +356,8 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
-/// An uploaded list of batch views, bound to one stream. Construction validates common schema, layout, index type,
-/// statics and stored arrays; empty slices are accepted. Construct outside capture. encode/count/fill only launch
+/// An uploaded list of batch views, bound to one stream. Construction validates common schema, table, layout, index
+/// type, statics and stored arrays, and refuses subgoal layers and history steps; empty slices are accepted. Construct outside capture. encode/count/fill only launch
 /// count, scan and fill kernels, with caller-owned 256-byte-aligned scratch, and may be captured. Keep the collator,
 /// source arrays, scratch, output and stream alive through the final replay. No host loop visits individual graphs.
 class DeviceCollator

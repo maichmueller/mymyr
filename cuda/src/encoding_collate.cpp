@@ -1,6 +1,7 @@
 #include "encoding_collate.hpp"
 #include "mymyr/cuda/encoding.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -21,6 +22,9 @@ u64 mul(u64 a, u64 b)
         throw std::overflow_error("mymyr: encoding: device collation size overflow");
     return a * b;
 }
+u64 aligned(u64 bytes) { return add(bytes, 255) & ~u64{255}; }
+/// Resident blocks of the grid-stride count and fill per multiprocessor.
+constexpr u32 k_blocks_per_sm = 8;
 }
 struct DeviceCollator::Impl
 {
@@ -32,7 +36,7 @@ struct DeviceCollator::Impl
     PinnedLease staging;
     Event uploaded;
     bool has_upload = false;
-    u64 total_bytes = 0, temp_offset = 0;
+    u64 total_bytes = 0, cell_offset = 0, bad_offset = 0, temp_offset = 0;
 
     Impl(ContextPtr ctx, std::vector<DeviceCollationBatch> batches, cudaStream_t s)
         : context(std::move(ctx)), stream(s ? s : context->stream())
@@ -42,6 +46,10 @@ struct DeviceCollator::Impl
         if (capture != cudaStreamCaptureStatusNone) invalid("prepare the device collator outside capture");
         if (batches.empty()) invalid("collate needs at least one batch");
         const auto& first = batches.front();
+        int sms = 0;
+        check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, context->device()),
+              "query the multiprocessors");
+        params.grid = static_cast<u32>(std::max(sms, 1)) * k_blocks_per_sm;
         stored = first.stored;
         params.relations = first.relations;
         params.index64 = first.index == encoding::IndexType::I64;
@@ -56,15 +64,22 @@ struct DeviceCollator::Impl
             if (b.index != first.index) invalid("collate received mixed index types");
             if (b.shared_statics != first.shared_statics) invalid("collate received mixed statics");
             if (b.schema_fingerprint != first.schema_fingerprint) invalid("collate received mixed schemas");
+            if (b.table_fingerprint != first.table_fingerprint)
+                invalid("collate received batches of different tables: their task ids name different instances");
             if (b.shared_statics) invalid("device collate requires repeated statics");
+            if (b.max_goal_level != 0 || b.history || b.arrays.history_offsets || b.arrays.history_entity ||
+                b.arrays.history_dt)
+                invalid("device collation carries no subgoal layers or history steps");
             if (b.relations != first.relations || b.stored != first.stored) invalid("collate received different stored arrays");
             host[i] = {b, params.graphs};
             params.graphs = add(params.graphs, b.graphs);
         }
-        params.entries = add(add(params.graphs, mul(params.graphs, params.relations)), 1);
-        const u64 nbytes = mul(params.entries, sizeof(detail::CollationTotals));
-        temp_offset = add(nbytes, 255) & ~u64{255};
-        params.temp_bytes = detail::collation_scan_bytes(params.entries);
+        params.cells = mul(params.graphs, params.relations);
+        (void)add(params.cells, 1);
+        cell_offset = aligned(mul(add(params.graphs, 1), sizeof(detail::GraphCounts)));
+        bad_offset = add(cell_offset, aligned(mul(add(params.cells, 1), sizeof(detail::CellCounts))));
+        temp_offset = add(bad_offset, aligned(sizeof(u64)));
+        params.temp_bytes = detail::collation_scan_bytes(params.graphs, params.cells);
         total_bytes = add(temp_offset, params.temp_bytes);
         slices = DeviceBuffer(context, mul(batches.size(), sizeof(detail::CollationSlice)), stream);
         params.slices = static_cast<const detail::CollationSlice*>(slices.data());
@@ -115,10 +130,15 @@ struct DeviceCollator::Impl
                                 : (a.target_entity || a.target_group)))
                 invalid("collation target arrays do not match the schema");
             if (output.capacities.args && !a.relation_args) invalid("collation arguments are null");
+            if (a.history_offsets || a.history_entity || a.history_dt)
+                invalid("device collation carries no subgoal layers or history steps");
         }
         auto p = params;
-        p.totals = static_cast<detail::CollationTotals*>(scratch);
-        p.temp = static_cast<std::byte*>(scratch) + temp_offset;
+        auto* base = static_cast<std::byte*>(scratch);
+        p.graph_counts = reinterpret_cast<detail::GraphCounts*>(base);
+        p.cell_counts = reinterpret_cast<detail::CellCounts*>(base + cell_offset);
+        p.bad = reinterpret_cast<u64*>(base + bad_offset);
+        p.temp = base + temp_offset;
         p.output = output;
         check(detail::launch_collation(p, phase, stream), "device collation kernels");
     }

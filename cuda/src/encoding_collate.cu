@@ -2,6 +2,7 @@
 
 #include <cub/device/device_scan.cuh>
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -10,12 +11,19 @@ namespace mymyr::cuda::detail
 namespace
 {
 constexpr u32 k_block = 256;
-struct AddTotals
+__host__ __device__ u64 saturating(u64 a, u64 b) { return b > ~u64{0} - a ? ~u64{0} : a + b; }
+struct AddGraphs
 {
-    __host__ __device__ static u64 add(u64 a, u64 b) { return b > ~u64{0} - a ? ~u64{0} : a + b; }
-    __host__ __device__ CollationTotals operator()(const CollationTotals& a, const CollationTotals& b) const
+    __host__ __device__ GraphCounts operator()(const GraphCounts& a, const GraphCounts& b) const
     {
-        return {add(a.entities, b.entities), add(a.tuples, b.tuples), add(a.args, b.args), add(a.targets, b.targets)};
+        return {saturating(a.entities, b.entities), saturating(a.targets, b.targets)};
+    }
+};
+struct AddCells
+{
+    __host__ __device__ CellCounts operator()(const CellCounts& a, const CellCounts& b) const
+    {
+        return {saturating(a.tuples, b.tuples), saturating(a.args, b.args)};
     }
 };
 u32 blocks(u64 n) { return static_cast<u32>(n > u64{65535} * k_block ? 65535 : (n + k_block - 1) / k_block); }
@@ -39,22 +47,40 @@ __device__ const CollationSlice& slice_of(const CollationParams& p, u64 graph)
     }
     return p.slices[lo];
 }
-__device__ bool bad_source(const CollationParams& p)
+/// The graph and relation of output cell c.
+struct Cell
 {
-    for (u64 b = 0; b < p.batches; ++b)
-        if (p.slices[b].batch.sizes && p.slices[b].batch.sizes->overflow)
-            return true;
-    return false;
+    u64 graph, relation;
+};
+__device__ Cell cell_of(const CollationParams& p, u64 c)
+{
+    return p.relation_major ? Cell{c % p.graphs, c / p.graphs} : Cell{c / p.relations, c % p.relations};
 }
-template<class I> __global__ void count_kernel(CollationParams p)
+/// The cell of the slice's own batch that output cell `c` copies.
+__device__ u64 source_cell(const CollationParams& p, const CollationSlice& s, Cell c)
 {
-    const bool bad = bad_source(p);
-    for (u64 at = u64{blockIdx.x} * blockDim.x + threadIdx.x; at < p.entries; at += u64{gridDim.x} * blockDim.x)
+    const u64 local = c.graph - s.first;
+    return p.relation_major ? c.relation * s.batch.graphs + local : local * p.relations + c.relation;
+}
+
+template<class I> __global__ void __launch_bounds__(k_block) count_kernel(CollationParams p)
+{
+    const u64 thread = u64{blockIdx.x} * blockDim.x + threadIdx.x, step = u64{gridDim.x} * blockDim.x;
+    if (thread == 0)
     {
-        CollationTotals counts;
-        if (at && !bad)
+        u64 bad = 0;
+        for (u64 b = 0; b < p.batches; ++b)
+            if (p.slices[b].batch.sizes && p.slices[b].batch.sizes->overflow)
+                bad = 1;
+        *p.bad = bad;
+    }
+    const u64 entries = (p.graphs > p.cells ? p.graphs : p.cells) + 1;
+    for (u64 at = thread; at < entries; at += step)
+    {
+        if (at <= p.graphs)
         {
-            if (at <= p.graphs)
+            GraphCounts counts;
+            if (at)
             {
                 const u64 graph = at - 1;
                 const auto& s = slice_of(p, graph);
@@ -64,34 +90,42 @@ template<class I> __global__ void count_kernel(CollationParams p)
                 if (a.target_offsets)
                     counts.targets = static_cast<u64>(as<I>(a.target_offsets)[g + 1] - as<I>(a.target_offsets)[g]);
             }
-            else
+            p.graph_counts[at] = counts;
+        }
+        if (at <= p.cells)
+        {
+            CellCounts counts;
+            if (at)
             {
-                const u64 cell = at - p.graphs - 1;
-                const u64 graph = p.relation_major ? cell % p.graphs : cell / p.relations;
-                const u64 relation = p.relation_major ? cell / p.graphs : cell % p.relations;
-                const auto& s = slice_of(p, graph);
-                const u64 src = p.relation_major ? relation * s.batch.graphs + graph - s.first
-                                                 : (graph - s.first) * p.relations + relation;
+                const Cell cell = cell_of(p, at - 1);
+                const auto& s = slice_of(p, cell.graph);
+                const u64 src = source_cell(p, s, cell);
                 const auto& a = s.batch.arrays;
                 counts.tuples = static_cast<u64>(as<I>(a.relation_offsets)[src + 1] - as<I>(a.relation_offsets)[src]);
-                counts.args = static_cast<u64>(as<I>(a.relation_arg_offsets)[src + 1] - as<I>(a.relation_arg_offsets)[src]);
+                counts.args =
+                    static_cast<u64>(as<I>(a.relation_arg_offsets)[src + 1] - as<I>(a.relation_arg_offsets)[src]);
             }
+            p.cell_counts[at] = counts;
         }
-        p.totals[at] = counts;
     }
 }
 __device__ encoding::FlatSizes sizes_of(const CollationParams& p)
 {
-    const auto t = p.totals[p.entries - 1];
-    encoding::FlatSizes sizes{t.entities, t.tuples, t.args, t.targets};
+    const GraphCounts graphs = p.graph_counts[p.graphs];
+    const CellCounts cells = p.cell_counts[p.cells];
+    encoding::FlatSizes sizes;
+    sizes.entities = graphs.entities;
+    sizes.tuples = cells.tuples;
+    sizes.args = cells.args;
+    sizes.targets = graphs.targets;
     const u64 limit = p.index64 ? 0x7fffffffffffffffull : 0x7fffffffull;
     if (sizes.entities > limit || sizes.tuples > limit || sizes.args > limit || sizes.targets > limit ||
-        p.graphs >= limit || p.graphs * p.relations >= limit)
+        p.graphs >= limit || p.cells >= limit)
         sizes.overflow |= encoding::k_overflow_index;
     if (sizes.entities > p.output.capacities.entities || sizes.args > p.output.capacities.args ||
         sizes.targets > p.output.capacities.targets)
         sizes.overflow |= encoding::k_overflow_capacity;
-    if (bad_source(p)) sizes.overflow |= encoding::k_overflow_input;
+    if (*p.bad) sizes.overflow |= encoding::k_overflow_input;
     return sizes;
 }
 __global__ void sizes_kernel(CollationParams p) { *p.output.sizes = sizes_of(p); }
@@ -102,12 +136,43 @@ template<class T> __device__ void zero(T* dst, u64 begin, u64 end)
         for (u64 j = begin + u64{blockIdx.x} * blockDim.x + threadIdx.x; j < end; j += u64{gridDim.x} * blockDim.x)
             dst[j] = T{0};
 }
-template<class I> __global__ void fill_kernel(CollationParams p)
+/// The last index i in [lo, hi] with key(i) <= value: the graph (cell) that holds element `value` of a scanned array.
+template<class Key> __device__ u64 holder(const Key& key, u64 lo, u64 hi, u64 value)
+{
+    while (lo < hi)
+    {
+        const u64 mid = lo + (hi - lo + 1) / 2;
+        if (key(mid) <= value) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
+/// Calls body(element, holder) for every element in [0, total), the elements of a block side by side; the holders of a
+/// block's first and last element bracket the search of every element of the block. Uniform over the block.
+template<class Key, class Body> __device__ void for_elements(u64 total, u64 last, const Key& key, const Body& body)
+{
+    __shared__ u64 bracket[2];
+    const u64 step = u64{gridDim.x} * blockDim.x;
+    for (u64 base = u64{blockIdx.x} * blockDim.x; base < total; base += step)
+    {
+        const u64 end = total - base < blockDim.x ? total : base + blockDim.x;
+        if (threadIdx.x == 0)
+        {
+            bracket[0] = holder(key, 0, last, base);
+            bracket[1] = holder(key, bracket[0], last, end - 1);
+        }
+        __syncthreads();
+        const u64 at = base + threadIdx.x;
+        if (at < end)
+            body(at, holder(key, bracket[0], bracket[1], at));
+        __syncthreads();
+    }
+}
+template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(CollationParams p)
 {
     const auto sizes = sizes_of(p);
     const auto& out = p.output.arrays;
     const u64 thread = u64{blockIdx.x} * blockDim.x + threadIdx.x, step = u64{gridDim.x} * blockDim.x;
-    const u64 cells = p.graphs * p.relations;
     if (thread == 0)
     {
         *p.output.sizes = sizes;
@@ -115,25 +180,30 @@ template<class I> __global__ void fill_kernel(CollationParams p)
     }
     if (p.output.zero_unused)
     {
+        // The variable arrays past their sizes and the per-graph and per-cell arrays past the graphs, up to the
+        // capacities; everything on overflow.
         const bool bad = sizes.overflow;
-        zero(out.entity_role, bad ? 0 : sizes.entities, p.output.capacities.entities);
-        zero(as<I>(out.entity_ref), bad ? 0 : sizes.entities, p.output.capacities.entities);
-        zero(as<I>(out.relation_args), bad ? 0 : sizes.args, p.output.capacities.args);
-        zero(as<I>(out.target_entity), bad ? 0 : sizes.targets, p.output.capacities.targets);
-        zero(out.target_group, bad ? 0 : sizes.targets, p.output.capacities.targets);
-        if (bad)
-        {
-            const u64 graphs = p.output.capacities.graphs, capacity_cells = graphs * p.relations;
-            zero(out.task_ids, 0, graphs); zero(as<I>(out.num_objects), 0, graphs);
-            zero(as<I>(out.entity_offsets), 0, graphs + 1); zero(as<I>(out.relation_counts), 0, capacity_cells);
-            zero(as<I>(out.relation_offsets), 0, capacity_cells + 1); zero(as<I>(out.relation_arg_offsets), 0, capacity_cells + 1);
-            zero(out.goal_complete, 0, graphs); zero(as<I>(out.target_offsets), 0, graphs + 1);
-        }
+        const auto& capacities = p.output.capacities;
+        zero(out.entity_role, bad ? 0 : sizes.entities, capacities.entities);
+        zero(as<I>(out.entity_ref), bad ? 0 : sizes.entities, capacities.entities);
+        zero(as<I>(out.relation_args), bad ? 0 : sizes.args, capacities.args);
+        zero(as<I>(out.target_entity), bad ? 0 : sizes.targets, capacities.targets);
+        zero(out.target_group, bad ? 0 : sizes.targets, capacities.targets);
+        const u64 graphs = bad ? 0 : p.graphs, cells = bad ? 0 : p.cells, closing = bad ? 0 : 1;
+        const u64 capacity_cells = capacities.graphs * p.relations;
+        zero(out.task_ids, graphs, capacities.graphs);
+        zero(as<I>(out.num_objects), graphs, capacities.graphs);
+        zero(out.goal_complete, graphs, capacities.graphs);
+        zero(as<I>(out.entity_offsets), graphs + closing, capacities.graphs + 1);
+        zero(as<I>(out.target_offsets), graphs + closing, capacities.graphs + 1);
+        zero(as<I>(out.relation_counts), cells, capacity_cells);
+        zero(as<I>(out.relation_offsets), cells + closing, capacity_cells + 1);
+        zero(as<I>(out.relation_arg_offsets), cells + closing, capacity_cells + 1);
     }
     if (sizes.overflow) return;
     for (u64 g = thread; g <= p.graphs; g += step)
     {
-        const auto before = p.totals[g];
+        const GraphCounts before = p.graph_counts[g];
         as<I>(out.entity_offsets)[g] = static_cast<I>(before.entities);
         if (out.target_offsets) as<I>(out.target_offsets)[g] = static_cast<I>(before.targets);
         if (g == p.graphs) continue;
@@ -143,71 +213,87 @@ template<class I> __global__ void fill_kernel(CollationParams p)
         out.task_ids[g] = a.task_ids[local];
         as<I>(out.num_objects)[g] = as<I>(a.num_objects)[local];
         if (out.goal_complete) out.goal_complete[g] = a.goal_complete[local];
-        const u64 src_entity = static_cast<u64>(as<I>(a.entity_offsets)[local]);
-        const u64 shift = before.entities - src_entity;
-        const u64 n = p.totals[g + 1].entities - before.entities;
-        if (out.entity_role)
-            for (u64 j = 0; j < n; ++j)
-            {
-                out.entity_role[before.entities + j] = a.entity_role[src_entity + j];
-                as<I>(out.entity_ref)[before.entities + j] = as<I>(a.entity_ref)[src_entity + j];
-            }
-        if (out.target_offsets)
-        {
-            const u64 first = static_cast<u64>(as<I>(a.target_offsets)[local]);
-            const u64 count = p.totals[g + 1].targets - before.targets;
-            for (u64 j = 0; j < count; ++j)
-            {
-                as<I>(out.target_entity)[before.targets + j] = static_cast<I>(as<I>(a.target_entity)[first + j] + shift);
-                out.target_group[before.targets + j] = a.target_group[first + j];
-            }
-        }
     }
-    for (u64 c = thread; c <= cells; c += step)
+    for (u64 c = thread; c <= p.cells; c += step)
     {
-        const auto before = p.totals[p.graphs + c];
+        const CellCounts before = p.cell_counts[c];
         as<I>(out.relation_offsets)[c] = static_cast<I>(before.tuples);
         as<I>(out.relation_arg_offsets)[c] = static_cast<I>(before.args);
-        if (c == cells) continue;
-        const u64 g = p.relation_major ? c % p.graphs : c / p.relations;
-        const u64 r = p.relation_major ? c / p.graphs : c % p.relations;
-        const auto& s = slice_of(p, g);
-        const auto& a = s.batch.arrays;
-        const u64 local = g - s.first;
-        const u64 src = p.relation_major ? r * s.batch.graphs + local : local * p.relations + r;
-        const auto after = p.totals[p.graphs + c + 1];
-        if (out.relation_counts) as<I>(out.relation_counts)[g * p.relations + r] = static_cast<I>(after.tuples - before.tuples);
-        const u64 shift = p.totals[g].entities - static_cast<u64>(as<I>(a.entity_offsets)[local]);
-        const u64 start = static_cast<u64>(as<I>(a.relation_arg_offsets)[src]);
-        for (u64 j = 0; j < after.args - before.args; ++j)
-            as<I>(out.relation_args)[before.args + j] = static_cast<I>(as<I>(a.relation_args)[start + j] + shift);
+        if (c == p.cells || !out.relation_counts) continue;
+        const Cell cell = cell_of(p, c);
+        as<I>(out.relation_counts)[cell.graph * p.relations + cell.relation] =
+            static_cast<I>(p.cell_counts[c + 1].tuples - before.tuples);
     }
+    const auto entities_before = [&](u64 g) { return p.graph_counts[g].entities; };
+    // The entity id shift of graph g: its first output entity minus its first entity in its own batch.
+    const auto shift_of = [&](const CollationSlice& s, u64 g)
+    { return p.graph_counts[g].entities - static_cast<u64>(as<I>(s.batch.arrays.entity_offsets)[g - s.first]); };
+    if (out.entity_role)
+        for_elements(sizes.entities, p.graphs - 1, entities_before,
+                     [&](u64 e, u64 g)
+                     {
+                         const auto& s = slice_of(p, g);
+                         const auto& a = s.batch.arrays;
+                         const u64 src = static_cast<u64>(as<I>(a.entity_offsets)[g - s.first]) + e - entities_before(g);
+                         out.entity_role[e] = a.entity_role[src];
+                         as<I>(out.entity_ref)[e] = as<I>(a.entity_ref)[src];
+                     });
+    if (out.target_offsets)
+        for_elements(sizes.targets, p.graphs - 1, [&](u64 g) { return p.graph_counts[g].targets; },
+                     [&](u64 t, u64 g)
+                     {
+                         const auto& s = slice_of(p, g);
+                         const auto& a = s.batch.arrays;
+                         const u64 src =
+                             static_cast<u64>(as<I>(a.target_offsets)[g - s.first]) + t - p.graph_counts[g].targets;
+                         as<I>(out.target_entity)[t] = static_cast<I>(as<I>(a.target_entity)[src] + shift_of(s, g));
+                         out.target_group[t] = a.target_group[src];
+                     });
+    for_elements(sizes.args, p.cells - 1, [&](u64 c) { return p.cell_counts[c].args; },
+                 [&](u64 j, u64 c)
+                 {
+                     const Cell cell = cell_of(p, c);
+                     const auto& s = slice_of(p, cell.graph);
+                     const auto& a = s.batch.arrays;
+                     const u64 src = static_cast<u64>(as<I>(a.relation_arg_offsets)[source_cell(p, s, cell)]) + j -
+                                     p.cell_counts[c].args;
+                     as<I>(out.relation_args)[j] = static_cast<I>(as<I>(a.relation_args)[src] + shift_of(s, cell.graph));
+                 });
 }
 }
 
-u64 collation_scan_bytes(u64 entries)
+u64 collation_scan_bytes(u64 graphs, u64 cells)
 {
-    size_t bytes = 0;
-    const auto error = cub::DeviceScan::InclusiveScan(nullptr, bytes, static_cast<CollationTotals*>(nullptr), AddTotals{}, length(entries));
-    if (error != cudaSuccess)
+    size_t graph_bytes = 0, cell_bytes = 0;
+    if (cub::DeviceScan::InclusiveScan(nullptr, graph_bytes, static_cast<GraphCounts*>(nullptr), AddGraphs{},
+                                       length(graphs + 1)) != cudaSuccess ||
+        cub::DeviceScan::InclusiveScan(nullptr, cell_bytes, static_cast<CellCounts*>(nullptr), AddCells{},
+                                       length(cells + 1)) != cudaSuccess)
         throw std::runtime_error("mymyr: encoding: cannot query collation scan scratch");
-    return bytes;
+    return graph_bytes > cell_bytes ? graph_bytes : cell_bytes;
 }
 cudaError_t launch_collation(const CollationParams& p, int phase, cudaStream_t stream)
 {
-    const u32 grid = blocks(p.entries);
     if (phase != 2)
     {
+        const u32 grid = std::min(p.grid, blocks((p.graphs > p.cells ? p.graphs : p.cells) + 1));
         if (p.index64) count_kernel<i64><<<grid, k_block, 0, stream>>>(p);
         else count_kernel<i32><<<grid, k_block, 0, stream>>>(p);
         if (const auto e = cudaGetLastError(); e != cudaSuccess) return e;
         size_t bytes = p.temp_bytes;
-        if (const auto e = cub::DeviceScan::InclusiveScan(p.temp, bytes, p.totals, AddTotals{}, length(p.entries), stream);
-            e != cudaSuccess) return e;
+        if (const auto e = cub::DeviceScan::InclusiveScan(p.temp, bytes, p.graph_counts, AddGraphs{},
+                                                          length(p.graphs + 1), stream);
+            e != cudaSuccess)
+            return e;
+        bytes = p.temp_bytes;
+        if (const auto e =
+                cub::DeviceScan::InclusiveScan(p.temp, bytes, p.cell_counts, AddCells{}, length(p.cells + 1), stream);
+            e != cudaSuccess)
+            return e;
     }
     if (phase == 1) sizes_kernel<<<1, 1, 0, stream>>>(p);
-    else if (p.index64) fill_kernel<i64><<<grid, k_block, 0, stream>>>(p);
-    else fill_kernel<i32><<<grid, k_block, 0, stream>>>(p);
+    else if (p.index64) fill_kernel<i64><<<p.grid, k_block, 0, stream>>>(p);
+    else fill_kernel<i32><<<p.grid, k_block, 0, stream>>>(p);
     return cudaGetLastError();
 }
 }

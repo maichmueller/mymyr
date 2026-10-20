@@ -11,7 +11,7 @@ void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64
 {
     if (!in.graphs) return;
     auto invalid = [] { throw std::invalid_argument("mymyr: encoding: appended rows must match the device ring's columns and widths"); };
-    if (!status || !ring.graphs || !ring.states || !ring.task_ids || in.graphs_device || in.row_start ||
+    if (!status || !ring.graphs || !ring.states || !ring.task_ids || in.graphs_device || in.row_start || in.dropped ||
         !in.states || in.state_words != ring.state_words || in.state_stride < in.state_words ||
         ring.state_stride < ring.state_words)
         invalid();
@@ -27,7 +27,16 @@ void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64
 
 void finish_rows(u64* status, u64 capacity, cudaStream_t stream)
 {
+    if (!status || !capacity)
+        throw std::invalid_argument("mymyr: encoding: finish_rows needs ring status and a positive capacity");
     check(launch_clear_rows(status, capacity, false, stream), "finish encoding rows");
+}
+
+void check_stream_schema(const encoding::EncodingSchema& schema)
+{
+    const auto& o = schema.options();
+    if (o.max_goal_level != 0 || o.history)
+        throw std::invalid_argument("mymyr: encoding: a device stream carries no subgoal layers or history steps");
 }
 
 void clear_rows(u64* status, u64 capacity, cudaStream_t stream)
@@ -39,6 +48,14 @@ void clear_rows(u64* status, u64 capacity, cudaStream_t stream)
 
 struct DeviceRowStream::Impl
 {
+    static const ContextPtr& checked(const ContextPtr& ctx, const std::shared_ptr<const encoding::FlatEncoder>& host)
+    {
+        if (!host)
+            throw std::invalid_argument("mymyr: encoding: a device stream needs an encoder");
+        check_stream_schema(host->schema());
+        return ctx;
+    }
+
     ContextPtr context;
     DeviceEncoder encoder;
     cudaStream_t stream;
@@ -48,7 +65,7 @@ struct DeviceRowStream::Impl
 
     Impl(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> host, u64 capacity, cudaStream_t s,
          bool goals, bool derived, bool derived_goals)
-        : context(std::move(ctx)), encoder(context, host), stream(s ? s : context->stream())
+        : context(std::move(ctx)), encoder(checked(context, host), host), stream(s ? s : context->stream())
     {
         if (!capacity || (derived_goals && !goals))
             throw std::invalid_argument("mymyr: encoding: a device stream needs positive capacity and derived goals need fluent goals");
@@ -74,6 +91,7 @@ struct DeviceRowStream::Impl
         check(cudaMemsetAsync(status, 0, 3 * sizeof(u64), stream), "initialize encoding ring");
         ring.row_start = status;
         ring.graphs_device = status + 1;
+        ring.dropped = status + 2;
         ring.states = static_cast<u64*>(allocate(capacity, ring.state_words * sizeof(u64)));
         ring.task_ids = static_cast<i32*>(allocate(capacity, sizeof(i32)));
         if (derived && ring.derived_stride)
