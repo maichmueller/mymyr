@@ -133,7 +133,7 @@ detail::EncodingFacts context_facts(const encoding::EncodingContext& host)
             bounds.targets = std::max(bounds.targets, targets);
             bounds.cells = std::max<u64>(bounds.cells, list.count);
             // a history step has an entity, and one more per tuple of a history target cell
-            bounds.step_entities = std::max(bounds.step_entities, add(1, step_targets));
+            bounds.step_entities = std::max(bounds.step_entities, add(history ? 1 : 0, step_targets));
             bounds.step_tuples = std::max(bounds.step_tuples, step_tuples);
             bounds.step_args = std::max(bounds.step_args, step_args);
             bounds.step_targets = std::max(bounds.step_targets, step_targets);
