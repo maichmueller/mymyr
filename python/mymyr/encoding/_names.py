@@ -5,9 +5,16 @@ A batch stores no names. The naming rules, per entity role:
 - an object is named as in its task (``entity_ref`` is its index in ``task.objects``);
 - the auxiliary entity is ``auxiliary``;
 - a goal entity is named after the plain goal tuple it is the target of: ``[+](on c b)[g]``, ``[-](clear a)[g]``; a
-  nullary literal is ``[+](handempty)[g]``;
+  nullary literal is ``[+](handempty)[g]``; a subgoal entity likewise with the level of its relation,
+  ``[+](on c b)[sg]``, ``[ssg]``, ``[sssg]``;
 - an action entity is named after its action tuple: ``(unstack a b)``, the schema name followed by the objects;
-- a predicate virtual node is ``predicate:<name>`` after the predicate of its key relation (``entity_ref``).
+- a history step is ``history:<dt>#<i>``, with the dt of the step and ``i`` its position among the graph's history
+  steps, counted from 0; a history target is ``history:<dt>#<i>:[+](on c b)``, after the step and the literal of the
+  history tuple it is the target of;
+- a predicate virtual node is ``predicate:<name>`` after the predicate of its key relation (``entity_ref``);
+- a state entity of a horizon graph is ``target:<k>``, with ``k`` its ``entity_ref``: the node's index in its graph (the
+  root is ``target:0``; under the ``exclude`` root policy the graph has no entity for the root, and the root's relations
+  are the plain ones).
 """
 
 import re
@@ -18,11 +25,12 @@ import numpy as np
 from mymyr._core._encoding import FlatBatch
 from mymyr.encoding._device import DeviceFlatBatch, _Host
 
-_GOAL_RELATION = re.compile(r"^\[([+-])\](.+)\[g\]$")
+_TARGET_RELATION = re.compile(r"^\[([+-])\](.+?)(\[g\]|\[sg\]|\[ssg\]|\[sssg\]|\[hist\])$")
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 
-_OBJECT, _PREDICATE_VIRTUAL, _AUXILIARY = 0, 1, 8
+_OBJECT, _PREDICATE_VIRTUAL, _STATE, _AUXILIARY = 0, 1, 7, 8
 _ARGUMENT_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT = 0, 3, 4
+_SUBGOAL_TARGET_SLOT, _HISTORY_TARGET_SLOT, _HISTORY_SLOT = 5, 6, 7
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,12 @@ class _Graph:
         self.by_relation = encoder.options["layout"] == "relation"
         self.relations = batch.num_relations
         self.graphs = batch.num_graphs
+        self.history_dt = self.history_entities = None
+        if batch.schema.options["history"]:
+            offsets = np.asarray(batch.history_offsets)
+            first, last = int(offsets[graph]), int(offsets[graph + 1])
+            self.history_entities = np.asarray(batch.history_entity)[first:last].astype(np.int64)
+            self.history_dt = np.asarray(batch.history_dt)[first:last].astype(np.int64)
         entity_offsets = np.asarray(batch.entity_offsets)
         self.begin, self.end = int(entity_offsets[graph]), int(entity_offsets[graph + 1])
         if batch.implicit_entities:
@@ -145,15 +159,24 @@ def _names(encoder, batch, graph):
             names[i] = g.entity_role_names[_AUXILIARY]
         elif role == _PREDICATE_VIRTUAL:
             names[i] = f"predicate:{_base_predicate(g.names[ref])}"
-    # goal and action entities are the target of the tuple they stand for
+        elif role == _STATE:
+            names[i] = f"target:{ref}"
+    if g.history_entities is not None:
+        for step, (entity, dt) in enumerate(zip(g.history_entities.tolist(), g.history_dt.tolist())):
+            names[entity - g.begin] = f"history:{dt}#{step}"
+    # goal, subgoal, history target and action entities are the target of the tuple they stand for
     for relation, name in enumerate(g.names):
         roles = g.slot_roles[relation]
-        if _GOAL_TARGET_SLOT in roles:
-            position = roles.index(_GOAL_TARGET_SLOT)
-            sign, predicate = _GOAL_RELATION.match(name).groups()
+        target = next((r for r in (_GOAL_TARGET_SLOT, _SUBGOAL_TARGET_SLOT, _HISTORY_TARGET_SLOT) if r in roles), None)
+        if target is not None:
+            position = roles.index(target)
+            sign, predicate, suffix = _TARGET_RELATION.match(name).groups()
             for local, row in enumerate(g.tuples(relation)):
-                arguments = _argument_names(g, relation, local, objects)
-                names[int(row[position])] = f"[{sign}]({' '.join([predicate] + arguments)})[g]"
+                literal = f"[{sign}]({' '.join([predicate] + _argument_names(g, relation, local, objects))})"
+                if target == _HISTORY_TARGET_SLOT:
+                    names[int(row[position])] = f"{names[int(row[roles.index(_HISTORY_SLOT)])]}:{literal}"
+                else:
+                    names[int(row[position])] = f"{literal}{suffix}"
         elif _ACTION_SLOT in roles:
             position = roles.index(_ACTION_SLOT)
             schema = name.partition("#")[0]

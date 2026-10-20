@@ -1129,6 +1129,44 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
                   std::string::npos)
             << e.what();
     }
+    // horizon relations, in every mode
+    for (const encoding::HorizonMode mode :
+         {encoding::HorizonMode::Full, encoding::HorizonMode::Delta, encoding::HorizonMode::Action})
+    {
+        encoding::FlatOptions horizon = test::encoder_options();
+        horizon.horizon.mode = mode;
+        try
+        {
+            cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, horizon));
+            ADD_FAILURE() << "the " << encoding::to_string(mode) << " horizon was accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
+                      std::string::npos)
+                << e.what();
+        }
+    }
+    // subgoal and history relations
+    {
+        encoding::FlatOptions with_subgoals;
+        with_subgoals.max_goal_level = 1;
+        encoding::FlatOptions with_history;
+        with_history.history = true;
+        for (const auto& [refused_options, what] :
+             {std::pair{with_subgoals, "subgoal levels"}, std::pair{with_history, "history steps"}})
+            try
+            {
+                cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, refused_options));
+                ADD_FAILURE() << what << " were accepted";
+            }
+            catch (const std::invalid_argument& e)
+            {
+                EXPECT_NE(std::string(e.what()).find(std::string("the device does not encode ") + what),
+                          std::string::npos)
+                    << e.what();
+            }
+    }
     // everything else is encoded: goal relations, goal targets, virtual nodes, derived relations, both layouts
     const auto derived_table = rl::TaskTable::single(test::pddl_task("features", "p01"));
     for (const auto& t : {table, derived_table})
@@ -1167,6 +1205,20 @@ TEST(DeviceEncoderSchema, RefusesSubgoalLevels)
     o.max_goal_level = 1;
     expect_schema_refusal(o, "subgoal levels");
 }
+TEST(DeviceEncoderSchema, RefusesHistorySteps)
+{
+    encoding::FlatOptions o;
+    o.history = true;
+    expect_schema_refusal(o, "history steps");
+}
+TEST(DeviceEncoderSchema, RefusesHistoryStepsWithAMaximum)
+{
+    encoding::FlatOptions o;
+    o.history = true;
+    o.history_max_steps = 3;
+    o.targets = {encoding::TargetSource::Goal};
+    expect_schema_refusal(o, "history steps");
+}
 TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
 {
     encoding::FlatOptions o;
@@ -1177,6 +1229,7 @@ TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
 TEST(DeviceEncoderSchema, RefusesHistoryTargets)
 {
     encoding::FlatOptions o;
+    o.history = true;
     o.targets = {encoding::TargetSource::History};
     expect_schema_refusal(o, "history targets");
 }

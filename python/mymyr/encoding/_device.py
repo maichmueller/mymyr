@@ -16,8 +16,10 @@ private pool owns it through the last replay. Warm the encoder on the capture st
 no scratch reservation is needed. Exact calls reuse a workspace per stream; ``reserve_device`` can size it in advance
 and ``release_device`` frees it.
 
-The device evaluates axioms into scratch when a graph needs derived atoms and ``derived=`` is absent. Supplied
-derived words take precedence. Action relations (``actions=``) are not supported on the device.
+What the device does not encode: the action relations (``actions=``) and subgoal levels and history steps (an
+encoder with ``max_goal_level`` above 0 or with ``history`` is refused, and so are ``subgoals=`` and ``history=``). The
+device evaluates axioms into scratch when a graph needs derived atoms and ``derived=`` is absent; supplied derived
+words take precedence.
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ _ARRAYS = (
 )
 _OUTPUTS = (*_ARRAYS, "sizes")
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
-_SIZE_FIELDS = ("entities", "tuples", "args", "targets", "overflow")
+_SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4
 
 
@@ -357,8 +359,8 @@ def encode_arrays(
     capacities: Optional[tuple[int, int, int, int]],
     keep: Optional[list] = None,
 ) -> dict[str, Any]:
-    """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [5] int64 (entities,
-    tuples, args, targets, overflow flags; None without capacities)."""
+    """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [6] int64 (entities,
+    tuples, args, targets, history, overflow flags; None without capacities)."""
     torch = _torch()
     layout = layout_of(encoder)
     rows = _Rows(torch, states, task_ids, derived, goals)
@@ -586,8 +588,8 @@ class DeviceFlatBatch:
 
     @property
     def device_sizes(self) -> Optional[Any]:
-        """After an encoding with capacities: a device tensor int64 [5] with the true entities, tuples, args and targets
-        of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no host wait;
+        """After an encoding with capacities: a device tensor int64 [6] with the true entities, tuples, args, targets and
+        history steps (always 0) of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no host wait;
         None otherwise."""
         return self._sizes
 
@@ -601,6 +603,7 @@ class DeviceFlatBatch:
         if self._sizes is None:
             return None
         values = dict(zip(_SIZE_FIELDS, self._sizes.tolist(), strict=True))
+        del values["history"]  # the device encodes no history steps: the dict has the keys of a batch without them
         flags = values["overflow"]
         values["overflow"] = flags != 0
         values["capacity_overflow"] = bool(flags & _OVERFLOW_CAPACITY)

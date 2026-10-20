@@ -40,6 +40,7 @@ def native_options(entry):
             if key in kw:
                 out[key] = kw[key]
         out["nullary"] = not kw.get("ignore_zero_arity_relations", True)
+        out["history"] = "history" in kw.get("target_sources", ())
         out["predicate_virtual_nodes"] = bool(kw.get("use_predicate_virtual_nodes", False))
     else:
         out["horizon_mode"] = kw["transition_mode"]
@@ -96,21 +97,64 @@ SUPPORT_LITERALS = "flat_literals_relmo"  # mifrost's support_literals option is
 NO_STATIC = "flat_no_static"  # include_static=False drops the static relations from the catalog
 
 
+LITERAL_LEVEL_SUPPORT = re.compile(r"^\[[+-]\][^\[\]]+\[(sat|unsat|sat\+|sat-)\]$")
+
+
+def never_filled(entry, schema):
+    """The indices of mifrost's relations that no horizon graph has a tuple in, and the native catalog leaves out: the
+    delta mode's relations of the literals themselves (`[+]p[sat]`, `[-]p[unsat]`, `[+]p[sat+]`, `[-]p[sat-]`: they have no
+    goal level, and the native encoder has no support literals) and the state-anchored relation of a static predicate
+    (`fixed[state]`: the static atoms are the root's, no node has them)."""
+    if entry["kind"] == "flat":
+        return set()
+    static = {n for n, lane in zip(schema.relation_names, schema.relation_lanes) if lane == "static"}
+    return {
+        i
+        for i, name in enumerate(entry["names"])
+        if LITERAL_LEVEL_SUPPORT.match(name) or (name.endswith("[state]") and name[: -len("[state]")] in static)
+    }
+
+
 @needs_pddl
 @pytest.mark.parametrize("name", [n for n in CATALOGS if n not in (SUPPORT_LITERALS, NO_STATIC)])
 def test_catalog_equals_mifrost(tasks, name):
     entry = CATALOGS[name]
     schema = EncodingSchema(tasks[entry["domain"]], **native_options(entry))
-    assert native_catalog(schema) == mifrost_catalog(entry)
+    skipped = never_filled(entry, schema)
+    assert native_catalog(schema) == [row for i, row in enumerate(mifrost_catalog(entry)) if i not in skipped]
     nullary = [i for i, n in enumerate(schema.relation_logical_arities) if n == 0 and schema.relation_predicates[i] >= 0]
     assert bool(nullary) == native_options(entry)["nullary"]
     assert all(schema.relation_slot_roles[i][-1] == AUXILIARY_SLOT for i in nullary)
-    assert [SOURCE_OF_LANE[lane] for lane in schema.relation_lanes] == entry["sources"]
+    assert [SOURCE_OF_LANE[lane] for lane in schema.relation_lanes] == [
+        source for i, source in enumerate(entry["sources"]) if i not in skipped
+    ]
     assert schema.slot_role_names[:8] == [
         "argument_slot", "predicate_slot", "state_slot", "action_slot",
         "goal_target_slot", "subgoal_target_slot", "history_target_slot", "history_slot",
     ]  # fmt: skip
     assert len(schema.slot_role_names) == len(schema.entity_role_names) == 9
+
+
+@needs_pddl
+def test_the_relations_no_horizon_graph_fills_are_the_only_difference_to_the_horizon_catalogs(tasks):
+    delta_or_split = 0
+    for name, entry in CATALOGS.items():
+        if entry["kind"] == "flat":
+            continue
+        schema = EncodingSchema(tasks[entry["domain"]], **native_options(entry))
+        skipped = never_filled(entry, schema)
+        names = {entry["names"][i] for i in skipped}
+        # nothing the native catalog lists is skipped, and the skipped relations are of the two kinds only
+        assert not names & set(schema.relation_names), name
+        assert all(LITERAL_LEVEL_SUPPORT.match(n) or n.endswith("[state]") for n in names), name
+        kw = entry["kwargs"]
+        supports = {n for n in names if LITERAL_LEVEL_SUPPORT.match(n)}
+        anchored = names - supports
+        # the support relations exist in the delta catalogs, the static state relations in the split catalogs
+        assert bool(supports) == (kw["transition_mode"] == "delta"), name
+        assert bool(anchored) == (kw["transition_mode"] == "full" and kw["root_policy"] == "exclude"), name
+        delta_or_split += bool(names)
+    assert delta_or_split >= 4
 
 
 @needs_pddl

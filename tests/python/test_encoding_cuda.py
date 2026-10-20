@@ -265,7 +265,7 @@ def test_capacity_form_equals_host_exact_short_zero_and_ample(cases, layout, nam
         got = batch.sizes
         assert got["invalid_input"] is False
         assert got == host.sizes
-        assert batch.device_sizes.dtype == torch.int64 and batch.device_sizes.shape == (5,)
+        assert batch.device_sizes.dtype == torch.int64 and batch.device_sizes.shape == (6,)
         assert batch.relation_args.shape[0] == caps["args"]
     assert host_encode(encoder, case, capacities=short).sizes["overflow"] == (exact["args"] > 0)
 
@@ -313,6 +313,17 @@ def test_rows_of_other_producers_and_layouts_equal_host(cases):
     assert isinstance(batch.relation_args, torch.Tensor) and batch.relation_args.device == dev
 
 
+def test_an_encoder_with_subgoal_levels_or_history_is_refused_for_device_rows(cases):
+    dev = gpu()
+    case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
+    rows = to_device(case.rows, dev)
+    ids = None if case.ids is None else to_device(case.ids, dev)
+    for options, what in (({"max_goal_level": 1}, "subgoal levels"), ({"history": True}, "history steps")):
+        encoder = encoding.FlatRelationEncoder(case.source, **options)
+        with pytest.raises(ValueError, match=f"^mymyr: encoding: the device does not encode {what}"):
+            encoder.encode(rows, ids)
+
+
 def test_the_arguments_are_checked_before_any_launch(cases):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
@@ -322,6 +333,10 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     prefix = "^mymyr: encoding: "
     with pytest.raises(ValueError, match=prefix + "actions are not encoded on the device"):
         encoder.encode(rows, ids, actions=rl.expand(rl.as_table(case.tasks[0]), case.rows[:1]))
+    with pytest.raises(ValueError, match=prefix + "subgoals and history are not encoded on the device"):
+        encoder.encode(rows, ids, subgoals=(rows, rows))
+    with pytest.raises(ValueError, match=prefix + "subgoals and history are not encoded on the device"):
+        encoder.encode(rows, ids, history=(rows, rows, rows))
     with pytest.raises(ValueError, match=prefix + "pool is a pool of host threads"):
         encoder.encode(rows, ids, pool=rl.ThreadPool(2))
     for framework in ("numpy", "jax", "dlpack"):
@@ -427,7 +442,7 @@ def test_count_index_overflow_is_reported_in_capacity_sizes(cases, monkeypatch):
 
     def outputs(torch_, specs, device):
         out = arrays(torch_, specs, device)
-        out["sizes"].copy_(torch.tensor([1 << 31, 0, 0, 0, 2], device=device))
+        out["sizes"].copy_(torch.tensor([1 << 31, 0, 0, 0, 0, 2], device=device))
         return out
 
     monkeypatch.setattr(encoding._device, "_outputs", outputs)

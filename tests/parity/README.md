@@ -144,5 +144,14 @@ Encodings
   entity ids in mymyr and in the reference's backend order there; nullary atoms are unary tuples over one auxiliary
   entity in mymyr, which the reference lacks. `encoding_parity.REGISTRY` lists each such difference with its reason,
   its scope and the fixture cases that need it; a difference outside the registry fails.
+- Horizons (`FlatHorizonEncoder`, configs C7A to C7D, C7G to C7K, C7S, C7T; the rooted variants with sibling and cousin
+  relations are not compared): the fixtures' dags become one graph each, the nodes in the dag's order and the edges in
+  its order, one action and one `_parent_` tuple per edge. The reference names the root that a root policy excludes
+  `_root_state_`, an entity that none of its tuples mentions; mymyr has no entity for it. Nullary relations are tuples of a
+  node's state entity and the auxiliary entity in mymyr and empty in the reference. The reference lists delta relations
+  of static predicates, always empty; mymyr has none. The reference evaluates the goal at the nodes below the root
+  without the static atoms (a positive static literal that holds is unsatisfied there, a negative one satisfied); mymyr
+  uses them. A literal that two goal levels list is at the highest level, once per level, in the reference and at the
+  lowest, once, in mymyr.
 - Helper predicates for quantified conditions order their parameters by name in mymyr and by the reference's own
   traversal there; the fixtures map them.

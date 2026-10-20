@@ -55,9 +55,13 @@ public:
     /// virtual_relation (u32: the key relation of each virtual index), both empty without predicate virtual nodes, and
     /// relation_arity (u32 [relations]: the encoded arity of each relation). An instance has two lists of cells, each
     /// sorted by relation id with at most one cell per relation: the cells of a graph with the instance's goal, and the
-    /// cells of a graph whose row has goal masks of its own (the two lists share their state and action cells). Per-graph cell counts (detail::count_graph) are per cell, in the
-    /// order of the list the graph uses, not per relation. Every instance has a cell for each action relation of the
-    /// schema, whose tuples come from the expansion rows of a graph and not from its state.
+    /// cells of a graph whose row has goal masks of its own (the two lists share their state and action cells).
+    /// Per-graph cell counts (detail::count_graph) are per cell, in the order of the list the graph uses, not per
+    /// relation. With history or subgoal levels in the schema, an instance has twelve more lists (columns k_ext_lists
+    /// of inst): the four lists plus the cells of the subgoal layers (the relations of the levels above 0 over each
+    /// predicate's slots), of the history steps (the history relations), or of both, which a graph with such rows uses
+    /// (detail::cell_list). Every instance has a cell for each action relation of the schema, whose tuples come from
+    /// the expansion rows of a graph and not from its state.
     ///
     /// An instance's goal is its encoding goal (Task::encoding_goal()): a literal whose predicate has no goal relation
     /// in the schema (the equality and nullary predicates can be left out) is dropped, the others become mask bits or
@@ -78,9 +82,11 @@ public:
     /// The most derived words any instance that needs them has (0 if none does).
     [[nodiscard]] u32 max_derived_words() const noexcept { return m_max_derived_words; }
     /// Whether the graphs of the instance read the derived atoms of the state (detail::reads_derived).
-    [[nodiscard]] bool needs_derived(u32 instance, bool row_goals = false, bool row_derived_goals = false) const noexcept
+    [[nodiscard]] bool needs_derived(u32 instance, bool row_goals = false, bool row_derived_goals = false,
+                                     bool layer_derived_goals = false) const noexcept
     {
-        return detail::reads_derived(detail::instance_view(view(), instance), row_goals, row_derived_goals);
+        return detail::reads_derived(detail::instance_view(view(), instance), row_goals, row_derived_goals,
+                                     layer_derived_goals);
     }
 
 private:
