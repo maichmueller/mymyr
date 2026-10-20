@@ -562,5 +562,5 @@ def test_the_transition_encoders_refuse_what_they_do_not_do(blocks):
     # capacities work as for the other encoders
     sizes = encoder.encode(roots).sizes
     assert sizes is None
-    capacity = encoder.encode(roots, capacities={"entities": 4096, "tuples": 4096, "args": 8192, "targets": 4096})
+    capacity = encoder.encode(roots, capacities={"graphs": 1, "entities": 4096, "args": 8192, "targets": 4096})
     assert not capacity.sizes["overflow"]
