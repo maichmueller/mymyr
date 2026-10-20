@@ -53,6 +53,8 @@ def reference_horizons(table, roots, depth, merge=True):
                         following.append(target)
                     graph_edges.append((node, target, int(expansion.schema[r]), np.asarray(expansion.binding[r])))
             level = following
+        # the edges are ordered by destination, then schema, then objects; equal ones keep their order of discovery
+        graph_edges.sort(key=lambda e: (e[1], e[2], tuple(e[3])))
         nodes += rows
         edges += graph_edges
         node_offsets.append(len(nodes))

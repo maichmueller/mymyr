@@ -20,11 +20,12 @@
 // cells. The one thing a graph needs between its count and its fill is the canonical form of its edges
 // (canonical_horizon_edges): the action tuples are unique per (destination, action relation, objects) and ordered by
 // them, the `_parent_` tuples unique per (source, destination) and ordered by them, whatever the order and multiplicity
-// of the edges given: the action edges are grouped by destination by a counting pass, and only the edges of one group
-// are sorted; the parent edges are sorted by two counting passes, so the cost is linear in the edges for graphs of a
-// bounded degree. The canonical
-// lists are written into `HorizonGraph::order`, a scratch of the caller's of `horizon_order_words(nodes, edges)` words per
-// graph that must survive from the count to the fill.
+// of the edges given. Edges that come ordered by (destination, schema, objects), as the horizon builder writes them,
+// are canonicalized in one pass each; any other order is sorted (the action edges are grouped by destination by a
+// counting pass and only the edges of one group are sorted; the parent pairs are bucketed by source after a counting
+// pass by destination), so the cost is linear in the edges for graphs of a bounded degree either way. The canonical
+// lists are written into `HorizonGraph::order`, a scratch of the caller's of `horizon_order_words(nodes, edges)` words
+// per graph that must survive from the count to the fill.
 //
 // The relations `_sibling_` and `_cousin_` are read from the same canonical parent edges (the ones the root policy keeps,
 // without the self-loops): a graph's kinship (horizon_kin_prepare, horizon_kin_fill_far) is built into
@@ -104,15 +105,21 @@ struct HorizonGraph
     u32* kin;                    // horizon_kin_words(count, edges) words (null without sibling or cousin relations)
     u32* far;                    // the far lists of the cousins (null without a cousin relation)
     bool use_actions;            // the schema has action relations: the edges' schemas and bindings are read
+    bool one_schema_per_relation;  // no two schemas share an action relation
     bool use_parents;            // the canonical parent edges are needed: the schema has a parent, sibling or cousin relation
     bool use_cousins;            // the schema has the cousin relation
     bool exclude;                // the root has no entity
     bool root_target;            // the root is a target
 };
 
-/// The words of the scratch `HorizonGraph::order` of a graph with `nodes` nodes and `edges` edges: the two list sizes, the
-/// two lists, two counts per node and one more list of the edges.
-MYMYR_HD constexpr u64 horizon_order_words(u32 nodes, u32 edges) { return 2u + 3u * u64{edges} + 2u * u64{nodes}; }
+/// The words of the scratch `HorizonGraph::order` of a graph with `nodes` nodes and `edges` edges: the number of action
+/// edges and of parent pairs, the action edges, the destinations of the parent pairs, the offsets and fill counts of
+/// the parent lists of the nodes, and the scratch of the sorts (a count per node and a list of the edges).
+inline constexpr u64 k_order_words_per_graph = 3, k_order_words_per_edge = 3, k_order_words_per_node = 3;
+MYMYR_HD constexpr u64 horizon_order_words(u32 nodes, u32 edges)
+{
+    return k_order_words_per_graph + k_order_words_per_edge * u64{edges} + k_order_words_per_node * u64{nodes};
+}
 
 MYMYR_HD const u64* horizon_atoms(const HorizonGraph& h, u32 node) { return h.nodes + u64{node} * h.node_stride; }
 MYMYR_HD const u64* horizon_derived(const HorizonGraph& h, u32 node)
@@ -242,7 +249,7 @@ MYMYR_HD u32 horizon_sort_unique(u32* idx, u32 n, const Before& before)
 
 /// The edges `kept` accepts, sorted by `before` without repeats, written to `out`; returns their number. `kept.key` is the
 /// leading part of `before` (a node below `nodes`): the edges are grouped by it first, in place if they come grouped
-/// already (as the horizon builder writes the parent edges) and otherwise by a stable counting pass over `counts[nodes]`,
+/// already (as the horizon builder writes the action edges) and otherwise by a stable counting pass over `counts[nodes]`,
 /// and then every group is sorted on its own.
 template<class Edges, class Before>
 MYMYR_HD u32 horizon_canonical_list(u32* out, u32 edges, u32 nodes, u32* counts, const Edges& kept, const Before& before)
@@ -305,113 +312,160 @@ struct HorizonActionEdges
     MYMYR_HD u32 key(u32 e) const { return static_cast<u32>(h->dst[e]); }
 };
 
-/// The parent edges of the graph, sorted by (source, destination) without repeats, written to `out`; returns their number.
-/// Under `exclude` the edges that touch the root are left out. Edges that come grouped by source (as the horizon builder
-/// writes them) in groups of at most 128 are sorted group by group in a local buffer; the others are sorted by two stable
-/// counting passes (by destination, then by source) over the scratch `counts[2 * nodes]` and `tmp[edges]`, so the cost is
-/// linear in the edges and nodes either way.
-MYMYR_HD u32 horizon_canonical_parents(const HorizonGraph& h, u32* out, u32* counts, u32* tmp)
+/// The parent pairs of a graph, the distinct (source, destination) of its edges: for each source, in `dst` from
+/// `begin[source]` on, its `fill[source]` destinations in ascending order. The pairs in the order of their sources are
+/// the canonical parent tuples.
+struct HorizonParents
 {
-    const u32 nodes = h.count;
-    const auto kept = [&](u32 e) { return !(h.exclude && (h.src[e] == 0 || h.dst[e] == 0)); };
-    constexpr u32 k_run = 128;  // the edges of one source that are sorted in a local buffer
-    u64 keys[k_run];            // (destination << 32) | edge
-    u32 n = 0;
-    bool grouped = true;
-    i32 cur_src = -1;
-    u32 run = 0;
-    const auto flush = [&]()
-    {
-        for (u32 i = 1; i < run; ++i)
-        {
-            const u64 x = keys[i];
-            u32 j = i;
-            for (; j > 0 && keys[j - 1u] > x; --j)
-                keys[j] = keys[j - 1u];
-            keys[j] = x;
-        }
-        for (u32 i = 0; i < run; ++i)
-            if (i == 0 || (keys[i] >> 32) != (keys[i - 1u] >> 32))
-                out[n++] = static_cast<u32>(keys[i]);
-        run = 0;
-    };
-    for (u32 e = 0; e < h.edges; ++e)
-    {
-        const i32 src = h.src[e], dst = h.dst[e];
-        if (h.exclude && (src == 0 || dst == 0))
-            continue;
-        if (src != cur_src)
-        {
-            if (src < cur_src)
-            {
-                grouped = false;
-                break;
-            }
-            flush();
-            cur_src = src;
-        }
-        if (run == k_run)
-        {
-            grouped = false;
-            break;
-        }
-        keys[run++] = (u64{static_cast<u32>(dst)} << 32) | e;
-    }
-    if (grouped)
-    {
-        flush();
-        return n;
-    }
+    const u32* dst;
+    const u32* begin;
+    const u32* fill;
+};
 
-    n = 0;
-    u32* by_dst = counts;
-    u32* by_src = counts + nodes;
-    for (u32 k = 0; k < 2u * nodes; ++k)
-        counts[k] = 0;
-    for (u32 e = 0; e < h.edges; ++e)
-        if (kept(e))
-        {
-            ++by_dst[h.dst[e]];
-            ++by_src[h.src[e]];
-        }
-    u32 at_dst = 0, at_src = 0;
-    for (u32 k = 0; k < nodes; ++k)
-    {
-        const u32 cd = by_dst[k], cs = by_src[k];
-        by_dst[k] = at_dst;
-        by_src[k] = at_src;
-        at_dst += cd;
-        at_src += cs;
-    }
-    for (u32 e = 0; e < h.edges; ++e)
-        if (kept(e))
-            tmp[by_dst[h.dst[e]]++] = e;
-    for (u32 i = 0; i < at_dst; ++i)
-        out[by_src[h.src[tmp[i]]]++] = tmp[i];
-    for (u32 i = 0; i < at_dst; ++i)
-        if (n == 0 || h.src[out[n - 1u]] != h.src[out[i]] || h.dst[out[n - 1u]] != h.dst[out[i]])
-            out[n++] = out[i];
-    return n;
+MYMYR_HD HorizonParents horizon_parents(const HorizonGraph& h)
+{
+    const u32* dst = h.order + 2u + h.edges;
+    return {dst, dst + h.edges, dst + h.edges + (h.count + 1u)};
 }
 
-/// The action edges (`order[2, 2 + order[0])`) and the parent edges (the `order[1]` entries after the `edges` of the
-/// first list) of the graph, canonical: strictly ascending in the edges' action tuples / parent tuples. The edges' ends,
-/// schemas and bindings must be valid.
+/// The parent pairs of the graph, written into its order scratch (horizon_parents); returns their number. Under `exclude`
+/// the edges that touch the root are left out. The edges are taken in the order of their destinations, so that the
+/// destinations of one source come out ascending and a repeated pair is the last one of its source: an edge list that is
+/// ordered by destination (as the horizon builder writes it) is read as it is, any other is first ordered by destination
+/// by a stable counting pass over `counts[nodes]` and `tmp[edges]`. The cost is linear in the edges and nodes.
+MYMYR_HD u32 horizon_canonical_parents(const HorizonGraph& h, u32* counts, u32* tmp)
+{
+    const u32 nodes = h.count;
+    u32* dst_of = h.order + 2u + h.edges;
+    u32* begin = dst_of + h.edges;
+    u32* fill = begin + (nodes + 1u);
+    const auto kept = [&](u32 e) { return !(h.exclude && (h.src[e] == 0 || h.dst[e] == 0)); };
+    for (u32 k = 0; k < nodes; ++k)
+        fill[k] = 0;
+    bool by_destination = true;
+    i32 last = 0;
+    for (u32 e = 0; e < h.edges; ++e)
+        if (kept(e))
+        {
+            by_destination = by_destination && h.dst[e] >= last;
+            last = h.dst[e];
+            ++fill[h.src[e]];
+        }
+    u32 count = 0;
+    const u32* order = nullptr;  // the kept edges by destination (null: the edges themselves)
+    u32 listed = 0;
+    if (!by_destination)
+    {
+        for (u32 k = 0; k < nodes; ++k)
+            counts[k] = 0;
+        for (u32 e = 0; e < h.edges; ++e)
+            if (kept(e))
+                ++counts[h.dst[e]];
+        u32 at = 0;
+        for (u32 k = 0; k < nodes; ++k)
+        {
+            const u32 c = counts[k];
+            counts[k] = at;
+            at += c;
+        }
+        for (u32 e = 0; e < h.edges; ++e)
+            if (kept(e))
+                tmp[counts[h.dst[e]]++] = e;
+        order = tmp;
+        listed = at;
+    }
+    u32 at = 0;
+    for (u32 k = 0; k < nodes; ++k)
+    {
+        begin[k] = at;
+        at += fill[k];
+        fill[k] = 0;
+    }
+    begin[nodes] = at;
+    // a repeated pair is written over the slot after its source's last one and not counted (without a branch: whether an
+    // edge repeats its predecessor is data dependent)
+    const auto add = [&](u32 e)
+    {
+        const u32 src = static_cast<u32>(h.src[e]), dst = static_cast<u32>(h.dst[e]);
+        const u32 f = fill[src];
+        u32* slot = dst_of + begin[src] + f;
+        const u32 again = static_cast<u32>(f != 0 && slot[-1] == dst);
+        *slot = dst;
+        fill[src] = f + 1u - again;
+        count += 1u - again;
+    };
+    if (order)
+        for (u32 i = 0; i < listed; ++i)
+            add(order[i]);
+    else
+        for (u32 e = 0; e < h.edges; ++e)
+            if (kept(e))
+                add(e);
+    return count;
+}
+
+/// The action edges of the graph in the canonical order of each action relation (ascending destination, then objects,
+/// without repeats), written to `out`; returns their number. Edges that come ordered by (destination, schema, objects)
+/// are taken in one pass, repeated tuples dropped: with one schema per action relation the edges of each relation are
+/// then in the canonical order. Any other order is sorted by horizon_canonical_list.
+MYMYR_HD u32 horizon_canonical_actions(const HorizonGraph& h, u32* out, u32* counts)
+{
+    if (h.one_schema_per_relation)
+    {
+        u32 n = 0;
+        u32 last = 0;
+        bool ordered = true;
+        for (u32 e = 0; e < h.edges && ordered; ++e)
+        {
+            const i32 dst = h.dst[e];
+            if (h.exclude && dst == 0)
+                continue;
+            if (n != 0)
+            {
+                const i32 last_dst = h.dst[last];
+                if (dst != last_dst)
+                    ordered = dst > last_dst;
+                else
+                {
+                    const i32 schema = h.schema[e], last_schema = h.schema[last];
+                    if (schema != last_schema)
+                        ordered = schema > last_schema;
+                    else
+                    {
+                        const i32* a = h.binding + u64{last} * h.label_width;
+                        const i32* b = h.binding + u64{e} * h.label_width;
+                        const u32 arity = h.v->schema_arity[schema];
+                        if (!tuple_before(a, b, arity))
+                        {
+                            ordered = !tuple_before(b, a, arity);  // equal: the same tuple again
+                            continue;
+                        }
+                    }
+                }
+            }
+            out[n++] = e;
+            last = e;
+        }
+        if (ordered)
+            return n;
+    }
+    return horizon_canonical_list(out, h.edges, h.count, counts, HorizonActionEdges{&h}, HorizonActionBefore{&h});
+}
+
+/// The action edges (`order[2, 2 + order[0])`) and the parent pairs (horizon_parents, `order[1]` of them) of the graph,
+/// canonical: the action edges of each relation strictly ascending in their action tuples, the pairs strictly ascending.
+/// The edges' ends, schemas and bindings must be valid.
 MYMYR_HD void canonical_horizon_edges(const HorizonGraph& h)
 {
     if (!h.order)
         return;
     h.order[0] = h.order[1] = 0;
     u32* actions = h.order + 2;
-    u32* parents = actions + h.edges;
-    u32* counts = parents + h.edges;
+    u32* counts = actions + 2u * u64{h.edges} + (2u * u64{h.count} + 1u);
     if (h.use_actions)
-    {
-        const HorizonActionEdges edges{&h};
-        h.order[0] = horizon_canonical_list(actions, h.edges, h.count, counts, edges, HorizonActionBefore{&h});
-    }
+        h.order[0] = horizon_canonical_actions(h, actions, counts);
     if (h.use_parents)
-        h.order[1] = horizon_canonical_parents(h, parents, counts, counts + 2u * u64{h.count});
+        h.order[1] = horizon_canonical_parents(h, counts, counts + h.count);
 }
 
 /// The tuples of the action cell of `relation` in the graph.
@@ -515,17 +569,18 @@ MYMYR_HD u64 horizon_kin_prepare(const HorizonGraph& h)
     const u32 n = k.nodes;
     for (u32 i = 0; i <= n; ++i)
         k.child_offsets[i] = k.parent_offsets[i] = k.far_offsets[i] = 0;
-    const u32* edges = h.order + 2u + h.edges;
+    const HorizonParents pairs = horizon_parents(h);
     u32 total = 0;
-    for (u32 i = 0; i < h.order[1]; ++i)
-    {
-        const u32 e = edges[i];
-        if (h.src[e] == h.dst[e])
-            continue;
-        k.children[total++] = static_cast<u32>(h.dst[e]);
-        ++k.child_offsets[static_cast<u32>(h.src[e]) + 1u];
-        ++k.parent_offsets[static_cast<u32>(h.dst[e]) + 1u];
-    }
+    for (u32 src = 0; src < n; ++src)
+        for (u32 i = 0; i < pairs.fill[src]; ++i)
+        {
+            const u32 dst = pairs.dst[pairs.begin[src] + i];
+            if (src == dst)
+                continue;
+            k.children[total++] = dst;
+            ++k.child_offsets[src + 1u];
+            ++k.parent_offsets[dst + 1u];
+        }
     for (u32 i = 0; i < n; ++i)
     {
         k.child_offsets[i + 1u] += k.child_offsets[i];
@@ -883,9 +938,10 @@ MYMYR_HD void horizon_emit_cell(const Cell& c, const HorizonGraph& h, Out& out)
     {
         if (h.order)
         {
-            const u32* parents = h.order + 2 + h.edges;
-            for (u32 i = 0; i < h.order[1]; ++i)
-                out.put_pair(static_cast<u32>(h.src[parents[i]]), static_cast<u32>(h.dst[parents[i]]));
+            const HorizonParents pairs = horizon_parents(h);
+            for (u32 src = 0; src < h.count; ++src)
+                for (u32 i = 0; i < pairs.fill[src]; ++i)
+                    out.put_pair(src, pairs.dst[pairs.begin[src] + i]);
         }
         return;
     }

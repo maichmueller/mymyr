@@ -400,8 +400,10 @@ truncate=False, merge=True)` does the same over a `datasets.StateSpace` generate
 - **Order.** A graph is built breadth first. The root is node 0; then, level by level, the successors of the nodes of the
   level before, in node order, each node's successors in the canonical order of `rl.expand` (by action schema, then by
   objects). The nodes of the last level (`depth`) are not expanded; `depth=0` gives root-only graphs. Edge `e` of a
-  graph goes from a node to one of its successors: the edges are ordered by source node, then canonically, one per
-  (node, successor row), so two actions that lead to the same state are two edges.
+  graph goes from a node to one of its successors: one edge per (node, successor row), so two actions that lead to the
+  same state are two edges. The edges are ordered by destination node, then by action schema, then by objects; edges
+  that agree keep the order of their source nodes and of `rl.expand`. In a tree (`merge=False`) that is the order the
+  nodes are numbered in.
 - **Dedupe.** With `merge=True` a state is one node per graph: the first time it is reached it gets the next node
   number, and every later successor row with the same state words is an edge to that node. A state with several
   predecessors is one node with several incoming edges, a cycle is an edge to an earlier node, and a successor equal to
