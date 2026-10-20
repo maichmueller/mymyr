@@ -697,7 +697,8 @@ TEST(EncoderNumeric, TheLaneGroupFormsWriteTheSameValues)
                 };
                 u64 numeric_total = 0;
                 for (u64 g = 0; g < G; ++g)
-                    numeric_total += ed::instance_view(encoder->context().view(), static_cast<u32>(rows.task_ids[g])).numeric_tuples;
+                    numeric_total += ed::numeric_slot_count(
+                        ed::instance_view(encoder->context().view(), static_cast<u32>(rows.task_ids[g])));
                 const auto offsets = reinterpret_cast<const i32*>(expected_arrays["relation_offsets"].data());
                 const auto arg_offsets = reinterpret_cast<const i32*>(expected_arrays["relation_arg_offsets"].data());
                 struct Positions
@@ -739,7 +740,7 @@ TEST(EncoderNumeric, TheLaneGroupFormsWriteTheSameValues)
                         ed::fill_graph_positioned_group<i32>(ed::SoloGroup{}, v, row, g, entity, tb, grouped_out, positions, 0,
                                                              vb.data(), b.data());
                     }
-                    numeric_base += v.numeric_tuples;
+                    numeric_base += ed::numeric_slot_count(v);
                 }
                 EXPECT_EQ(plain, expected_arrays);
                 EXPECT_EQ(grouped, expected_arrays);

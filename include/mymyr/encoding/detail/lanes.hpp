@@ -282,10 +282,20 @@ struct InstanceView
     const u32* relation_virtual;
     const u32* virtual_relation;
     u32 num_virtual;
-    const i32* numeric_args;  // the objects of the instance's numeric slots, rows of max_arity entries
+    const i32* numeric_args;  // the context's numeric slot rows, max_arity entries each; the instance's start at
+                              // numeric_arg_row(*this)
     u32 numeric_storage;
-    u32 numeric_tuples;       // the numeric slots of the instance
 };
+
+/// The first row of the instance's numeric slots in InstanceView::numeric_args. Read from the instance's columns when
+/// needed: the graphs of an instance without numeric cells never use it.
+MYMYR_HD u64 numeric_arg_row(const InstanceView& v) { return v.ext_lists[k_numeric_args_offset - k_ext_lists]; }
+
+/// The numeric slots of the instance: the tuples of its numeric cells.
+MYMYR_HD u32 numeric_slot_count(const InstanceView& v)
+{
+    return static_cast<u32>(v.ext_lists[k_numeric_tuples - k_ext_lists]);
+}
 
 MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
 {
@@ -325,9 +335,8 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.relation_virtual = c.relation_virtual;
     v.virtual_relation = c.virtual_relation;
     v.num_virtual = c.num_virtual;
-    v.numeric_args = c.numeric_args ? c.numeric_args + row[k_numeric_args_offset] * c.max_arity : nullptr;
+    v.numeric_args = c.numeric_args;
     v.numeric_storage = c.numeric_storage;
-    v.numeric_tuples = static_cast<u32>(row[k_numeric_tuples]);
     return v;
 }
 
@@ -1283,7 +1292,7 @@ MYMYR_HD bool has_virtual_nodes(const InstanceView& v) { return v.relation_virtu
 /// of the graph are checked (check_actions, which writes the rows' `starts`): a violation sets k_graph_bad_action_order
 /// or k_graph_bad_action_label, and the counts of the action cells are then meaningless.
 template<bool Layered = true>
-MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32* cell_counts,
+MYMYR_HD_HOT GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32* cell_counts,
                                  u32* virtual_scratch = nullptr)
 {
     GraphTotals t = empty_totals();
@@ -1817,8 +1826,9 @@ MYMYR_HD u32 fill_numeric_cell(const InstanceView& v, const Cell& c, const RowIn
 {
     const u32 n = c.b - c.a;
     const u64 A = v.max_arity;
+    const i32* const slot_args = v.numeric_args + numeric_arg_row(v) * A;
     for (u32 k = 0; k < n; ++k)
-        dst = emit_state_tuple<I>(dst, v.numeric_args + static_cast<u64>(c.a + k) * A, c.logical_arity, entity_base,
+        dst = emit_state_tuple<I>(dst, slot_args + static_cast<u64>(c.a + k) * A, c.logical_arity, entity_base,
                                   auxiliary, k_no_entity);
     if (out.numeric_f64)
         for (u32 k = 0; k < n; ++k)

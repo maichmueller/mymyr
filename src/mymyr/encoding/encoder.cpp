@@ -109,6 +109,9 @@ struct Pass
     bool layered = in.subgoals.layers != 0 || in.history.masks.layers != 0 || in.history.count != nullptr;
     // the batch stores the Simple graph, which follows the fill of each graph with its cells' counts
     bool simple = context.schema().emits_simple();
+    // some lane beyond the relation arrays is present: the Simple graph or numeric rows. The passes are instantiated
+    // without these lanes for the batches without them, which are the hot ones.
+    bool lanes = simple || in.states.numeric_words != 0;
     // the dtype of the batch's numeric values
     NumericDtype numeric_dtype = context.schema().options().numeric_dtype;
     detail::SimpleParams simple_params{R, context.schema().simple_max_arity(), context.schema().simple_constants()};
@@ -207,14 +210,15 @@ struct Pass
     }
 
     /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff
-    /// it has any).
-    template<bool Layered>
+    /// it has any). `Lanes`: the batch has numeric rows.
+    template<bool Layered, bool Lanes>
     [[nodiscard]] detail::RowInput row_input(u64 g, const detail::InstanceView& v, u32* starts, u32* cursors,
                                              detail::RowLayers& layers) const noexcept
     {
         detail::RowInput row{in.states.row(g), derived_of(g, v)};
-        if (in.states.numeric_words != 0)
-            row.numeric = row.atoms + in.states.words;
+        if constexpr (Lanes)
+            if (in.states.numeric_words != 0)
+                row.numeric = row.atoms + in.states.words;
         if (in.goal_pos)
         {
             row.goal_pos = in.goal_pos + g * in.goal_stride;
@@ -279,7 +283,7 @@ struct Pass
 
 /// Pass one of a member: validates its graphs, evaluates their derived words, counts them, and (relation-major) tallies
 /// the tuples per relation. An invalid graph is recorded by kind and counts as empty.
-template<bool Layered>
+template<bool Layered, bool Lanes>
 void count_range(const Pass& p, u32 t)
 {
     const auto [lo, hi] = ThreadPool::slice(p.graphs, t, p.members);
@@ -326,7 +330,7 @@ void count_range(const Pass& p, u32 t)
         if (Layered && refuse_layers(p, m, v, g))
             continue;
         detail::RowLayers layers;
-        const detail::RowInput input = p.row_input<Layered>(
+        const detail::RowInput input = p.row_input<Layered, Lanes>(
             g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
             m.action_cursors.data(), layers);
         const u64* row = input.atoms;
@@ -381,7 +385,8 @@ void count_range(const Pass& p, u32 t)
         m.args += totals.args;
         m.targets += totals.targets;
         m.history += totals.history_steps;
-        m.numeric += v.numeric_tuples;
+        if constexpr (Lanes)
+            m.numeric += detail::numeric_slot_count(v);
         if (p.relation_major)
             for (u32 i = 0; i < cells.count; ++i)
                 m.tally[cells.cells[i].relation] += cell_counts[i];
@@ -389,7 +394,7 @@ void count_range(const Pass& p, u32 t)
 }
 
 /// Pass two of a member: the positions (relation-major) and the contents of its graphs.
-template<class I, bool Layered>
+template<class I, bool Layered, bool Lanes>
 void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
 {
     const auto [lo, hi] = ThreadPool::slice(p.graphs, t, p.members);
@@ -427,7 +432,7 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         const detail::InstanceView v = detail::instance_view(p.view, instance);
         const detail::GraphTotals& totals = m.totals[g - lo];
         detail::RowLayers layers;
-        const detail::RowInput row = p.row_input<Layered>(
+        const detail::RowInput row = p.row_input<Layered, Lanes>(
             g, v, p.starts_stride ? m.action_starts.data() + (g - lo) * p.starts_stride : nullptr,
             m.action_cursors.data(), layers);
         if (Layered && row.layers)
@@ -440,16 +445,18 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
         else
             detail::fill_graph<I, Layered>(v, row, g, tuple, arg, entity, totals, out, target, virtual_scratch,
                                            graph_counts, history, numeric);
-        if (p.simple)
-            detail::simple_fill_graph<I>(p.simple_params, simple, out, p.cells_of<Layered>(v, g), graph_counts,
-                                         p.relation_major, g,
-                                         {entity, totals.entities, tuple, totals.tuples, arg, totals.args, row.numeric,
-                                          v.numeric_storage});
+        if constexpr (Lanes)
+            if (p.simple)
+                detail::simple_fill_graph<I>(p.simple_params, simple, out, p.cells_of<Layered>(v, g), graph_counts,
+                                             p.relation_major, g,
+                                             {entity, totals.entities, tuple, totals.tuples, arg, totals.args,
+                                              row.numeric, v.numeric_storage});
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
         target += totals.targets;
-        numeric += v.numeric_tuples;
+        if constexpr (Lanes)
+            numeric += detail::numeric_slot_count(v);
         if constexpr (Layered)
             history += totals.history_steps;
     };
@@ -586,10 +593,17 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
     run(pool, members,
         [&pass](u32 t)
         {
-            if (pass.layered)
-                count_range<true>(pass, t);
+            if (pass.lanes)
+            {
+                if (pass.layered)
+                    count_range<true, true>(pass, t);
+                else
+                    count_range<false, true>(pass, t);
+            }
+            else if (pass.layered)
+                count_range<true, false>(pass, t);
             else
-                count_range<false>(pass, t);
+                count_range<false, false>(pass, t);
         });
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none, narrow_goal = k_none, bad_goal_bits = k_none;
     u64 bad_slice = k_none, bad_action_order = k_none, bad_action_label = k_none;
@@ -773,10 +787,18 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
         run(pool, members,
             [&pass, &work, wide = options.index == IndexType::I64](u32 t)
             {
-                if (pass.layered)
-                    wide ? fill_range<i64, true>(pass, work, t) : fill_range<i32, true>(pass, work, t);
+                if (pass.lanes)
+                {
+                    if (pass.layered)
+                        wide ? fill_range<i64, true, true>(pass, work, t) : fill_range<i32, true, true>(pass, work, t);
+                    else
+                        wide ? fill_range<i64, false, true>(pass, work, t)
+                             : fill_range<i32, false, true>(pass, work, t);
+                }
+                else if (pass.layered)
+                    wide ? fill_range<i64, true, false>(pass, work, t) : fill_range<i32, true, false>(pass, work, t);
                 else
-                    wide ? fill_range<i64, false>(pass, work, t) : fill_range<i32, false>(pass, work, t);
+                    wide ? fill_range<i64, false, false>(pass, work, t) : fill_range<i32, false, false>(pass, work, t);
             });
     }
     auto close = [&]<class I>(I)
