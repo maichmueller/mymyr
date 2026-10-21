@@ -756,7 +756,7 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   wait while another thread captures a CUDA graph, which invalidates that capture) the encoder's device memory is kept
   rather than freed under work that may still read it.
 - **On CUDA** the first call of a compiled function on a device uploads the encoder's context there (before XLA runs
-  or traces the call); every call then enqueues memsets of its outputs and the encoding kernels on XLA's stream, with
+  or traces the call); every call then enqueues the encoding kernels on XLA's stream (they zero what the batch leaves unused), with
   the device scratch as one more result of the call that XLA allocates, and nothing else: no allocation,
   synchronization or event. The target is registered command-buffer compatible, as the environment targets of
   `mymyr.rl.jax`, so XLA may trace it into its CUDA graphs (`--xla_gpu_enable_command_buffer` with `CUSTOM_CALL`).

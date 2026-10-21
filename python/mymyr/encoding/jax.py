@@ -439,7 +439,8 @@ def encode(
     states: uint32 [N, 2 W] (the u64 words of each row as halves, low first), or uint64 / int64 [N, W] words, or one row.
     task_ids: int32 [N], the instance of each row (None: instance 0; required for a table of several instances).
     derived: the derived words of the rows, [N, 2 D] halves or [N, D] words, D at least the table's derived words;
-    required when a graph reads derived atoms. goals: ``(goal_pos, goal_neg)`` or ``(goal_pos, goal_neg,
+    required where a graph reads derived atoms whose axioms the device cannot evaluate (otherwise the target evaluates
+    them). goals: ``(goal_pos, goal_neg)`` or ``(goal_pos, goal_neg,
     goal_derived_pos, goal_derived_neg)``, each with N rows or one row for all (halves or words), replacing the
     instances' goals as in ``FlatRelationEncoder.encode``.
 
