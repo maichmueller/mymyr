@@ -1057,7 +1057,8 @@ bool is_device_array(nb::handle value)
            PyObject_HasAttrString(value.ptr(), "__cuda_array_interface__");
 }
 
-/// Whether an argument of `encode` is a CUDA device array; with `masks`, a tuple of the goal masks of which one is.
+/// Whether an argument of `encode` is a CUDA device array; with `masks`, a tuple of masks (the goals, the subgoal layers
+/// or the history) of which one is.
 bool on_device(nb::handle value, bool masks = false)
 {
     if (!masks)
@@ -1076,14 +1077,14 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
                                PoolArg pool_in, CapacitiesArg capacities_in)
 {
     const u32 threads = threads_arg(threads_in);
-    if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg, true))
+    if (on_device(state_arg) || on_device(task_ids) || on_device(derived_arg) || on_device(goals_arg, true) ||
+        on_device(subgoals_arg, true) || on_device(history_arg, true))
     {
-        if (!subgoals_arg.is_none() || !history_arg.is_none())
-            throw nb::value_error("mymyr: encoding: subgoals and history are not encoded on the device");
         return Arg<ann::EncodingBatch>(
             nb::module_::import_("mymyr.encoding._device")
-                .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg, framework,
-                                threads_in, pool_in, capacities_in ? nb::object(*capacities_in) : nb::none()));
+                .attr("encode")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg,
+                                subgoals_arg, history_arg, framework, threads_in, pool_in,
+                                capacities_in ? nb::object(*capacities_in) : nb::none()));
     }
     const std::optional<encoding::BatchShape> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
@@ -1777,9 +1778,9 @@ void bind_encoding(nb::module_& parent)
              "sizes['targets'] / sizes['history'] entries hold the encoding, the rest is "
              "zero) and `sizes` reports the true sizes. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
-             "set; nothing raises. Rows (and task_ids, derived, goals) in CUDA memory are encoded on the device into "
-             "torch tensors: a DeviceFlatBatch is returned, actions, subgoals and history are refused, threads has no effect and pool is "
-             "refused.")
+             "set; nothing raises. Rows (and task_ids, derived, goals, subgoals, history) in CUDA memory are encoded on "
+             "the device into torch tensors: a DeviceFlatBatch is returned, actions are refused, threads has no effect "
+             "and pool is refused.")
         .def(
             "reserve_device",
             [](nb::handle self, IntArg graphs, Arg<ann::Any> device, StreamArg stream)

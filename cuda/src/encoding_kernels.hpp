@@ -3,11 +3,12 @@
 // active width classes count and fill around one shared scan, with no allocation or synchronization, so a CUDA graph
 // can capture the launches:
 //   count  one group of 4, 8 or 32 lanes per graph counts its cells (encoding::detail::count_graph_group), writes the
-//          graph's totals and cell counts into the scratch, and flags invalid rows;
+//          graph's totals and cell counts into the scratch, and flags invalid rows. The levels of a row's subgoal
+//          layers are computed by the group first, into the scratch;
 //   scan   one inclusive scan over the scratch's totals, two kernels (cub::DeviceScan): the entities, the targets and,
 //          graph-major, the tuples and arguments of every graph, relation-major the tuples of every (relation, graph)
-//          cell, in this order, each row opened by a zero so that its entries are the exclusive prefix sums plus the
-//          sums of the rows before it;
+//          cell, and with history the history steps of every graph, in this order, each row opened by a zero so that
+//          its entries are the exclusive prefix sums plus the sums of the rows before it;
 //   fill   a thread per graph (narrow rows) or a warp per graph checks the sizes against the capacities and the index
 //          type, and then writes the graph from the positions of the scan (encoding::detail::fill_graph and its group
 //          and relation-major forms).
@@ -42,6 +43,11 @@ struct EncodeParams
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    // the subgoal layers and history of the rows, and the scratch their levels are computed into
+    encoding::detail::LayerSource layers;
+    u64* level_storage = nullptr;  // [graphs, level_stride] words
+    u64 level_stride = 0;
+    bool layered = false;          // some row may have subgoal layers or history steps (LayerSource::layered)
     bool classify = false, warp_class = false, first_class = true;
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
     // the batch
@@ -56,6 +62,7 @@ struct EncodeParams
     void* totals = nullptr;  // the scanned array: u32, u64 when wide
     bool wide = false;
     u64 segments = 0;        // relation-major: the index of the first entry of the cell row in `totals`
+    u64 history_at = 0;      // the index of the first entry of the history row in `totals` (0: the schema has no history)
     u32* flags = nullptr;    // flags[0]: a row is invalid
     u32* cell_counts = nullptr;  // graph-major: [graphs, cell_stride] the counts of each graph's cells
     u64 cell_stride = 0;

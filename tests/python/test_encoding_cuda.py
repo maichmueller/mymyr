@@ -34,6 +34,19 @@ OPTION_SETS = {
     "plain_goal_no_static": {"goal_derivations": ("plain",), "include_static": False, "nullary": False},
     "no_actions": {"include_actions": False, "entity_arrays": "auto", "goal_derivations": ()},
 }
+ALL_GOALS = ("plain", "satisfied", "unsatisfied")
+LAYERED_OPTION_SETS = {
+    "levels_targets": {"max_goal_level": 3, "goal_derivations": ALL_GOALS, "target_sources": ("goal", "subgoal")},
+    "history": {"history": True},
+    "history_newest_targets": {"history": True, "history_max_steps": 2, "target_sources": ("history",)},
+    "levels_history_virtual": {
+        "max_goal_level": 2,
+        "history": True,
+        "target_sources": ("goal", "subgoal", "history"),
+        "predicate_virtual_nodes": True,
+        "goal_derivations": ("plain", "satisfied"),
+    },
+}
 
 
 def gpu():
@@ -116,6 +129,9 @@ def device_encode(encoder, case, dev, goals=None, **kwargs):
     derived = None if case.derived is None else to_device(case.derived, dev)
     if goals is not None:
         goals = tuple(to_device(g, dev) for g in goals)
+    for key in ("subgoals", "history"):
+        if kwargs.get(key) is not None:
+            kwargs[key] = tuple(None if x is None else to_device(x, dev) for x in kwargs[key])
     return encoder.encode(to_device(case.rows, dev), ids, derived=derived, goals=goals, **kwargs)
 
 
@@ -140,7 +156,55 @@ def exact_capacities(batch, factor=1):
     }
     if hasattr(batch, "target_offsets"):
         sizes["targets"] = int(batch.target_offsets[-1])
+    if hasattr(batch, "history_offsets"):
+        sizes["history"] = int(batch.history_offsets[-1])
     return {k: v * factor for k, v in sizes.items()}
+
+
+def layered_rows(case, layers=3, steps=4, seed=11):
+    """Random subgoal layers and history steps for the rows of ``case`` as the masks of ``encode``: (subgoals,
+    history). A row uses a random number of its layers (the others are empty) and has a random number of valid steps;
+    the literals are random over its slots (over its derived atoms for the derived masks)."""
+    rng = np.random.default_rng(seed)
+    table = rl.as_table(case.source) if isinstance(case.source, mymyr.Task) else case.source
+    offsets = np.asarray(table.atom_metadata()["atom_offsets"])
+    ids = np.zeros(case.n, np.int64) if case.ids is None else case.ids
+    n, words = case.rows.shape
+    dwords = None if case.derived is None else case.derived.shape[1]
+
+    def masks(count):
+        pos, neg = (np.zeros((n, count, words), np.uint64) for _ in range(2))
+        dpos = dneg = None
+        if dwords is not None:
+            dpos, dneg = (np.zeros((n, count, dwords), np.uint64) for _ in range(2))
+        return pos, neg, dpos, dneg
+
+    def draw(pos, neg, dpos, dneg, row, k):
+        slots = int(offsets[ids[row] + 1] - offsets[ids[row]])
+        for slot in range(slots):
+            r = rng.random()
+            target = pos if r < 0.08 else neg if r < 0.16 else None
+            if target is not None:
+                target[row, k, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+        if dwords is not None:
+            held = [w * 64 + b for w in range(dwords) for b in range(64) if (int(case.derived[row, w]) >> b) & 1]
+            for slot in held:
+                r = rng.random()
+                target = dpos if r < 0.4 else dneg if r < 0.6 else None
+                if target is not None:
+                    target[row, k, slot // 64] |= np.uint64(1) << np.uint64(slot % 64)
+
+    used = rng.integers(0, layers + 1, n)
+    valid = rng.integers(0, steps + 1, n).astype(np.int32)
+    layer_masks, step_masks = masks(layers), masks(steps)
+    for row in range(n):
+        for k in range(int(used[row])):
+            draw(*layer_masks, row, k)
+        for k in range(steps):
+            draw(*step_masks, row, k)
+    dt = rng.integers(-20, 40, (n, steps)).astype(np.int32)
+    keep = lambda m: tuple(x for x in m if x is not None)  # noqa: E731
+    return keep(layer_masks), (*keep(step_masks)[:2], dt, valid, *keep(step_masks)[2:])
 
 
 def fluent_goals(case, seed=3):
@@ -313,15 +377,181 @@ def test_rows_of_other_producers_and_layouts_equal_host(cases):
     assert isinstance(batch.relation_args, torch.Tensor) and batch.relation_args.device == dev
 
 
-def test_an_encoder_with_subgoal_levels_or_history_is_refused_for_device_rows(cases):
+def sliced(case, n):
+    case = copy.copy(case)
+    case.rows = case.rows[:n]
+    case.ids = None if case.ids is None else case.ids[:n]
+    case.derived = None if case.derived is None else case.derived[:n]
+    return case
+
+
+def layered_kwargs(case, options, **kwargs):
+    """The ``subgoals`` and ``history`` arguments (host arrays) an encoder with these options takes for the rows."""
+    subgoals, history = layered_rows(case, **kwargs)
+    out = {}
+    if options.get("max_goal_level"):
+        # the layers an encoder takes: at most as many as its levels
+        out["subgoals"] = tuple(np.ascontiguousarray(x[:, : options["max_goal_level"]]) for x in subgoals)
+    if options.get("history"):
+        out["history"] = history
+    return out
+
+
+@pytest.mark.parametrize("options", LAYERED_OPTION_SETS.values(), ids=LAYERED_OPTION_SETS.keys())
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
+def test_subgoal_layers_and_history_equal_host_bit_for_bit(cases, layout, index, options, n):
+    dev = gpu()
+    for case in cases.values():
+        if n is not None:
+            case = sliced(case, n)
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, **options)
+        kwargs = layered_kwargs(case, options)
+        host = host_encode(encoder, case, **kwargs)
+        batch = device_encode(encoder, case, dev, **kwargs)
+        assert isinstance(batch, encoding.DeviceFlatBatch)
+        if options.get("history"):
+            assert batch.history_dt.dtype == torch.int32 and batch.history_offsets.shape == (case.n + 1,)
+        same_batch(host, batch)
+        # fewer layers and steps than the arrays hold, and a history without counts: every step is valid
+        if n is None and "history" in kwargs:
+            pos, neg, dt, _count, *derived = kwargs["history"]
+            every = {**kwargs, "history": (pos, neg, dt, None, *derived)}
+            same_batch(host_encode(encoder, case, **every), device_encode(encoder, case, dev, **every))
+        if n is None and "subgoals" in kwargs:
+            one = {**kwargs, "subgoals": tuple(np.ascontiguousarray(x[:, :1]) for x in kwargs["subgoals"])}
+            same_batch(host_encode(encoder, case, **one), device_encode(encoder, case, dev, **one))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_layers_and_history_with_row_goals_equal_host(cases, layout):
+    dev = gpu()
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    for name in ("gripper", "blocks_table", "philosophers_table"):
+        if name not in cases:
+            continue
+        case = cases[name]
+        encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+        goals = fluent_goals(case)
+        kwargs = layered_kwargs(case, options)
+        same_batch(host_encode(encoder, case, goals, **kwargs), device_encode(encoder, case, dev, goals, **kwargs))
+        if case.ids is None:  # layers that every row shares
+            shared = {**kwargs, "subgoals": tuple(np.ascontiguousarray(x[:1]) for x in kwargs["subgoals"])}
+            same_batch(host_encode(encoder, case, goals, **shared), device_encode(encoder, case, dev, goals, **shared))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("name", ["gripper", "blocks_table", "philosophers_table"])
+@pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
+def test_the_capacity_form_with_history_equals_host(cases, layout, name, n):
+    dev = gpu()
+    if name not in cases:
+        pytest.skip("built without the loki front end")
+    case = cases[name] if n is None else sliced(cases[name], n)
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+    kwargs = layered_kwargs(case, options)
+    exact = exact_capacities(host_encode(encoder, case, **kwargs))
+    assert set(exact) == {"graphs", "entities", "args", "targets", "history"}
+    roomy = exact_capacities(host_encode(encoder, case, **kwargs), 2) if case.n else dict.fromkeys(exact, 10)
+    short_history = dict(exact, history=max(0, exact["history"] - 1))
+    zero = {"entities": 0, "graphs": case.rows.shape[0], "args": 0, "targets": 0, "history": 0}
+    for caps in (exact, roomy, short_history, dict(exact, targets=max(0, exact["targets"] - 1)), zero):
+        host = host_encode(encoder, case, capacities=caps, **kwargs)
+        batch = device_encode(encoder, case, dev, capacities=caps, **kwargs)
+        same_batch(host, batch)
+        assert batch.sizes == host.sizes and batch.sizes["invalid_input"] is False
+        assert batch.device_sizes.dtype == torch.int64 and batch.device_sizes.shape == (6,)
+        assert batch.history_entity.shape[0] == caps["history"]
+    assert host_encode(encoder, case, capacities=short_history, **kwargs).sizes["overflow"] == (exact["history"] > 0)
+
+
+def test_the_capacities_of_a_schema_with_history_name_the_history(cases):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, history=True)
+    caps = {"entities": 1, "graphs": case.n, "args": 1}
+    with pytest.raises(ValueError, match="the schema has history: capacities needs the key 'history'"):
+        device_encode(encoder, case, dev, capacities=caps, history=layered_rows(case)[1])
+    plain = encoding.FlatRelationEncoder(case.source)
+    batch = device_encode(plain, case, dev, capacities={**caps, "history": 0})
+    assert "history" not in batch.sizes and batch.device_sizes.shape == (6,)
+
+
+def test_layers_and_history_the_schema_does_not_have_are_refused(cases):
+    dev = gpu()
+    case = cases["gripper"]
+    subgoals, history = layered_rows(case)
+    plain = encoding.FlatRelationEncoder(case.source)
+    with pytest.raises(ValueError, match="^mymyr: encoding: subgoal layers are given, but the schema has no subgoal"):
+        device_encode(plain, case, dev, subgoals=subgoals)
+    with pytest.raises(ValueError, match="^mymyr: encoding: history steps are given, but the schema has no history"):
+        device_encode(plain, case, dev, history=history)
+    levels = encoding.FlatRelationEncoder(case.source, max_goal_level=2)
+    with pytest.raises(ValueError, match="3 subgoal layers are given, the schema has 2 levels"):
+        device_encode(levels, case, dev, subgoals=subgoals)
+    # an encoder with layers or history encodes the rows without them
+    for options in ({"max_goal_level": 2}, {"history": True}):
+        encoder = encoding.FlatRelationEncoder(case.source, **options)
+        same_batch(host_encode(encoder, case), device_encode(encoder, case, dev))
+
+
+def test_mask_pairs_with_different_row_strides_are_refused_before_any_launch():
+    # the device reads both masks of a pair with one row stride: a negative mask with a shorter stride than the
+    # positive one would be read past its end (only the checks run here, no kernel)
+    gpu()
+    from mymyr.encoding import _device
+    n, layers, words = 8, 2, 1
+    states = torch.zeros((n, words), dtype=torch.int64, device="cuda")
+    pos = torch.zeros((2 * n, layers, words), dtype=torch.int64, device="cuda")[::2]
+    neg = torch.zeros((n, layers, words), dtype=torch.int64, device="cuda")
+    assert pos.stride(0) != neg.stride(0) and pos.shape == neg.shape
+    dt = torch.zeros((n, layers), dtype=torch.int32, device="cuda")
+    for subgoals, history in (((pos, neg), None), ((neg, pos), None), ((neg, neg, pos, neg), None),
+                              (None, (pos, neg, dt)), (None, (neg, neg, dt, None, pos, neg))):
+        with pytest.raises(ValueError, match="row stride of .* the two masks need the same one"):
+            _device._Rows(torch, states, None, None, None, subgoals, history)
+    goal_pos = torch.zeros((2 * n, words), dtype=torch.int64, device="cuda")[::2]
+    goal_neg = torch.zeros((n, words), dtype=torch.int64, device="cuda")
+    for goals in ((goal_pos, goal_neg), (goal_neg, goal_neg, goal_pos, goal_neg)):
+        with pytest.raises(ValueError, match="row stride of .* the two masks need the same one"):
+            _device._Rows(torch, states, None, None, goals)
+    # equal strides are accepted, strided or not
+    _device._Rows(torch, states, None, None, (goal_pos, goal_pos), (pos, pos), (pos, pos, dt))
+    _device._Rows(torch, states, None, None, (goal_neg, goal_neg), (neg, neg), (neg, neg, dt))
+
+
+def test_invalid_layers_and_history_are_flagged_or_raise(cases):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
-    rows = to_device(case.rows, dev)
-    ids = None if case.ids is None else to_device(case.ids, dev)
-    for options, what in (({"max_goal_level": 1}, "subgoal levels"), ({"history": True}, "history steps")):
-        encoder = encoding.FlatRelationEncoder(case.source, **options)
-        with pytest.raises(ValueError, match=f"^mymyr: encoding: the device does not encode {what}"):
-            encoder.encode(rows, ids)
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, **options)
+    kwargs = layered_kwargs(case, options)
+    caps = exact_capacities(host_encode(encoder, case, **kwargs))
+    steps = kwargs["history"][2].shape[1]
+    for count in (steps + 1, -1):
+        bad_count = kwargs["history"][3].copy()
+        bad_count[3] = count
+        bad = {**kwargs, "history": (*kwargs["history"][:3], bad_count, *kwargs["history"][4:])}
+        with pytest.raises(ValueError, match="^mymyr: encoding: a row is invalid"):
+            device_encode(encoder, case, dev, **bad)
+        sizes = device_encode(encoder, case, dev, capacities=caps, **bad).sizes
+        assert sizes["overflow"] and sizes["invalid_input"] and not sizes["capacity_overflow"]
+    # a subgoal bit past the slots of the instance
+    pos = kwargs["subgoals"][0].copy()
+    table = rl.as_table(case.source) if isinstance(case.source, mymyr.Task) else case.source
+    offsets = np.asarray(table.atom_metadata()["atom_offsets"])
+    ids = np.zeros(case.n, np.int64) if case.ids is None else case.ids
+    row = next(r for r in range(case.n) if int(offsets[ids[r] + 1] - offsets[ids[r]]) < 64 * case.rows.shape[1])
+    slots = int(offsets[ids[row] + 1] - offsets[ids[row]])
+    pos[row, 0, slots // 64] |= np.uint64(1) << np.uint64(slots % 64)
+    bad = {**kwargs, "subgoals": (pos, *kwargs["subgoals"][1:])}
+    with pytest.raises(ValueError, match="set an atom bit its instance does not have"):
+        host_encode(encoder, case, **bad)
+    sizes = device_encode(encoder, case, dev, capacities=caps, **bad).sizes
+    assert sizes["invalid_input"]
+    assert device_encode(encoder, case, dev, capacities=caps, **kwargs).sizes["overflow"] is False
 
 
 def test_the_arguments_are_checked_before_any_launch(cases):
@@ -333,10 +563,10 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     prefix = "^mymyr: encoding: "
     with pytest.raises(ValueError, match=prefix + "actions are not encoded on the device"):
         encoder.encode(rows, ids, actions=rl.expand(rl.as_table(case.tasks[0]), case.rows[:1]))
-    with pytest.raises(ValueError, match=prefix + "subgoals and history are not encoded on the device"):
+    with pytest.raises(ValueError, match=prefix + r"'subgoals\[0\] \(pos\)' must be"):
         encoder.encode(rows, ids, subgoals=(rows, rows))
-    with pytest.raises(ValueError, match=prefix + "subgoals and history are not encoded on the device"):
-        encoder.encode(rows, ids, history=(rows, rows, rows))
+    with pytest.raises(ValueError, match=prefix + r"history must be \(pos, neg, dt\)"):
+        encoder.encode(rows, ids, history=(rows, rows))
     with pytest.raises(ValueError, match=prefix + "pool is a pool of host threads"):
         encoder.encode(rows, ids, pool=rl.ThreadPool(2))
     for framework in ("numpy", "jax", "dlpack"):
@@ -427,7 +657,7 @@ def test_count_index_overflow_raises_before_exact_allocation(cases, monkeypatch)
     native = encoding._device._device_encoder(encoder, 0)
 
     def count(self, stream, rows, allocate):
-        return allocate(1 << 31, 0, 0, 0, 2)
+        return allocate(1 << 31, 0, 0, 0, 0, 2)
 
     monkeypatch.setattr(type(native), "encode_exact", count)
     with pytest.raises(OverflowError, match="use index_dtype='int64'"):
@@ -675,10 +905,20 @@ def op_inputs(case, dev, goals=None):
     return to_device(case.rows, dev), ids, derived, g
 
 
-def call_op(handle, rows, ids, derived, g, caps):
+def call_op(handle, rows, ids, derived, g, caps, subgoals=None, history=None):
+    sg = [None] * 4 if subgoals is None else [*subgoals, *([None] * (4 - len(subgoals)))]
+    hs = [None] * 6 if history is None else [*history, *([None] * (6 - len(history)))]
     return torch.ops.mymyr.encode_flat(
-        handle, rows, ids, derived, g[0], g[1], g[2], g[3], caps["graphs"], caps["entities"], caps["args"], caps["targets"]
+        handle, rows, ids, derived, g[0], g[1], g[2], g[3], *sg, *hs,
+        caps["graphs"], caps["entities"], caps["args"], caps["targets"], caps.get("history", 0),
     )
+
+
+def layered_operands(case, dev, options):
+    """The subgoal and history operands of the op (device tensors, or None) for an encoder with these options."""
+    kwargs = layered_kwargs(case, options)
+    return tuple(None if key not in kwargs else tuple(to_device(x, dev) for x in kwargs[key])
+                 for key in ("subgoals", "history"))
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
@@ -720,7 +960,7 @@ def test_the_op_takes_row_goals_and_derived_words(cases):
     same_batch(host_encode(encoder, case, goals, capacities=caps), encoding.DeviceFlatBatch.from_arrays(encoder, out))
     with pytest.raises(ValueError, match="goals are"):
         torch.ops.mymyr.encode_flat(handle, to_device(case.rows, dev), None, None, to_device(goals[0], dev), None, None,
-                                    None, 1, 1, 1, 1)
+                                    None, *([None] * 10), 1, 1, 1, 1, 0)
     rt.unregister(handle)
 
 
@@ -752,9 +992,7 @@ def test_the_op_compiles_without_graph_breaks(cases):
     rows, ids, derived, g = op_inputs(case, dev)
 
     def fn(rows, ids):
-        out = torch.ops.mymyr.encode_flat(
-            handle, rows, ids, None, None, None, None, None, caps["graphs"], caps["entities"], caps["args"], caps["targets"]
-        )
+        out = call_op(handle, rows, ids, None, [None] * 4, caps)
         return out[8] + 1, out[-1]
 
     torch._dynamo.reset()
@@ -869,8 +1107,8 @@ def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
     layout = encoding._device.layout_of(encoder)
     real = type(layout).specs
 
-    def short(self, torch_, graphs, entities, args, targets):
-        return real(self, torch_, graphs - 1, entities, args, targets)
+    def short(self, torch_, graphs, entities, args, targets, history=0):
+        return real(self, torch_, graphs - 1, entities, args, targets, history)
 
     monkeypatch.setattr(type(layout), "specs", short)
     with pytest.raises(ValueError, match="^mymyr: encoding: the batch has more graphs than the output capacity"):
@@ -1047,6 +1285,94 @@ def test_capacity_fill_overwrites_dirty_outputs_and_tails(cases, monkeypatch, la
     exact = host_encode(encoder, case)
     for caps in (exact_capacities(exact, 2), dict(exact_capacities(exact), args=0)):
         same_batch(host_encode(encoder, case, capacities=caps), device_encode(encoder, case, dev, capacities=caps))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("name", ["gripper", "blocks_table", "philosophers_table"])
+def test_the_op_takes_subgoal_layers_and_history(cases, layout, name):
+    dev = gpu()
+    if name not in cases:
+        pytest.skip("built without the loki front end")
+    case = cases[name]
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+    handle = rt.register(encoder)
+    kwargs = layered_kwargs(case, options)
+    caps = exact_capacities(host_encode(encoder, case, **kwargs), 2)
+    rows, ids, derived, g = op_inputs(case, dev)
+    subgoals, history = layered_operands(case, dev, options)
+    out = call_op(handle, rows, ids, derived, g, caps, subgoals, history)
+    assert len(out) == len(encoding.DeviceFlatBatch.array_names)
+    batch = encoding.DeviceFlatBatch.from_arrays(encoder, out)
+    same_batch(host_encode(encoder, case, capacities=caps, **kwargs), batch)
+    assert batch.sizes["overflow"] is False and batch.sizes["history"] > 0 and batch.device_sizes.shape == (6,)
+    for bad, text in (((subgoals[0], None), "come in pairs"), ):
+        with pytest.raises(ValueError, match=text):
+            call_op(handle, rows, ids, derived, g, caps, bad, history)
+    with pytest.raises(ValueError, match="history need their masks"):
+        call_op(handle, rows, ids, derived, g, caps, subgoals, (None, None, history[2], history[3]))
+    rt.unregister(handle)
+
+
+def test_the_fake_implementation_gives_the_history_arrays(cases):
+    dev = gpu()
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    case = cases["gripper"]
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, **options)
+    handle = rt.register(encoder)
+    caps = {"graphs": case.n, "entities": 400, "args": 3000, "targets": 60, "history": 25}
+    rows, ids, derived, g = op_inputs(case, dev)
+    subgoals, history = layered_operands(case, dev, options)
+    real = call_op(handle, rows, ids, derived, g, caps, subgoals, history)
+    with FakeTensorMode() as mode:
+        fake = call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
+    assert len(fake) == len(real)
+    for f, r in zip(fake, real, strict=True):
+        assert f.shape == r.shape and f.dtype == r.dtype and f.device == r.device
+    names = encoding.DeviceFlatBatch.array_names
+    assert fake[names.index("history_entity")].shape == (25,) and fake[names.index("history_dt")].dtype == torch.int32
+    rt.unregister(handle)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.needs_gil
+@pytest.mark.filterwarnings("ignore:The CUDA Graph is empty")
+def test_the_op_with_layers_compiles_and_replays_in_a_cuda_graph(cases, layout):
+    dev = gpu()
+    case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
+    options = LAYERED_OPTION_SETS["levels_history_virtual"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **options)
+    handle = rt.register(encoder)
+    kwargs = layered_kwargs(case, options)
+    caps = exact_capacities(host_encode(encoder, case, **kwargs), 2)
+    rows, ids, derived, g = op_inputs(case, dev)
+    subgoals, history = layered_operands(case, dev, options)
+
+    def fn(rows, ids, subgoals, history):
+        return call_op(handle, rows, ids, None, [None] * 4, caps, subgoals, history)
+
+    eager = fn(rows, ids, subgoals, history)
+    same_batch(host_encode(encoder, case, capacities=caps, **kwargs), encoding.DeviceFlatBatch.from_arrays(encoder, eager))
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, backend="aot_eager")
+    for _ in range(2):
+        for a, b in zip(compiled(rows, ids, subgoals, history), eager, strict=True):
+            assert torch.equal(a, b)
+    stream = torch.cuda.Stream(dev)
+    with torch.cuda.stream(stream):
+        fn(rows, ids, subgoals, history)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = fn(rows, ids, subgoals, history)
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        for a, b in zip(captured, eager, strict=True):
+            assert torch.equal(a, b)
+    rt.unregister(handle)
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])

@@ -1,6 +1,7 @@
 #pragma once
 // Pointer-and-size views shared by the host API and device kernels.
 #include "mymyr/encoding/buffers.hpp"
+#include "mymyr/encoding/layers.hpp"
 #include "mymyr/encoding/options.hpp"
 
 namespace mymyr::cuda
@@ -13,6 +14,7 @@ struct OutputArrays
     bool counts = true;
     bool goal_complete = false;
     bool targets = false;
+    bool history = false;  // history_offsets, history_entity and history_dt
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 /// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities
@@ -50,10 +52,16 @@ struct DeviceEncodeInput
     const u64* goal_derived_neg = nullptr;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    // The subgoal layers and the history steps of each row, with the layouts and rules of encoding::EncodeInput (device
+    // pointers). The schema needs subgoal levels (at least as many as layers) or history; `history.dt` [graphs, layers]
+    // is required with the masks. A row whose history count lies outside [0, layers], or whose layers or steps are
+    // narrower than its instance or set a bit it does not have, is invalid.
+    encoding::LayerInput subgoals{};
+    encoding::HistoryInput history{};
     /// Optional device count, bounded by `graphs`. A circular row view starts at *row_start modulo row_capacity.
     /// Counts and starts are read on the encoder's stream; derived inputs and goal masks use the same row order.
     /// An encode with any of them (or with DeviceOutput::graphs) is sized for `graphs` rows but costs what the live rows
-    /// cost; it takes no launch order.
+    /// cost; it takes no launch order, and its rows carry no subgoal layers and its schema no history steps.
     const u64* graphs_device = nullptr;
     const u64* row_start = nullptr;
     u64 row_capacity = 0;

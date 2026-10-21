@@ -705,13 +705,20 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         expected.args = std::max(expected.args, args);
         expected.cells = std::max<u64>(expected.cells, inst.num_plain_cells);
         expected.words = std::max<u64>(expected.words, inst.words);
+        expected.state_words = std::max<u64>(expected.state_words, inst.words);
+        expected.derived_words = std::max<u64>(expected.derived_words, inst.derived_words);
     }
     EXPECT_EQ(b.entities, expected.entities);
     EXPECT_EQ(b.tuples, expected.tuples);
     EXPECT_EQ(b.args, expected.args);
     EXPECT_EQ(b.cells, expected.cells);
     EXPECT_EQ(b.words, expected.words);
+    EXPECT_EQ(b.state_words, expected.state_words);
+    EXPECT_EQ(b.derived_words, expected.derived_words);
     EXPECT_EQ(b.targets, 0u);
+    EXPECT_EQ(b.levels, 0u);
+    EXPECT_FALSE(b.history);
+    EXPECT_EQ(b.step_entities + b.step_tuples + b.step_args + b.step_targets, 0u);
 
     const u64 G = 1000, R = encoder->schema().num_relations();
     const cuda::BatchShape worst = device.worst_case(G);
@@ -1166,25 +1173,24 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
                 << c.what << ": " << e.what();
         }
     }
-    // subgoal and history relations
+    // subgoal and history relations are encoded
     {
         encoding::FlatOptions with_subgoals;
         with_subgoals.max_goal_level = 1;
         encoding::FlatOptions with_history;
         with_history.history = true;
-        for (const auto& [refused_options, what] :
-             {std::pair{with_subgoals, "subgoal levels"}, std::pair{with_history, "history steps"}})
-            try
-            {
-                cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, refused_options));
-                ADD_FAILURE() << what << " were accepted";
-            }
-            catch (const std::invalid_argument& e)
-            {
-                EXPECT_NE(std::string(e.what()).find(std::string("the device does not encode ") + what),
-                          std::string::npos)
-                    << e.what();
-            }
+        encoding::FlatOptions with_both;
+        with_both.max_goal_level = 3;
+        with_both.history = true;
+        with_both.history_max_steps = 2;
+        with_both.targets = {encoding::TargetSource::Goal, encoding::TargetSource::Subgoal,
+                             encoding::TargetSource::History};
+        for (const auto& accepted_options : {with_subgoals, with_history, with_both})
+        {
+            const cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, accepted_options));
+            EXPECT_EQ(device.bounds().levels, accepted_options.max_goal_level);
+            EXPECT_EQ(device.bounds().history, accepted_options.history);
+        }
     }
     // everything else is encoded: goal relations, goal targets, virtual nodes, derived relations, both layouts
     const auto derived_table = rl::TaskTable::single(test::pddl_task("features", "p01"));
@@ -1218,39 +1224,17 @@ void expect_schema_refusal(encoding::FlatOptions options, const char* message)
         EXPECT_EQ(std::string(e.what()), std::string("mymyr: encoding: the device does not encode ") + message);
     }
 }
-TEST(DeviceEncoderSchema, RefusesSubgoalLevels)
+TEST(DeviceEncoderSchema, AcceptsSubgoalLevelsHistoryAndTheirTargets)
 {
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
     encoding::FlatOptions o;
-    o.max_goal_level = 1;
-    expect_schema_refusal(o, "subgoal levels");
-}
-TEST(DeviceEncoderSchema, RefusesHistorySteps)
-{
-    encoding::FlatOptions o;
+    o.max_goal_level = 3;
     o.history = true;
-    expect_schema_refusal(o, "history steps");
-}
-TEST(DeviceEncoderSchema, RefusesHistoryStepsWithAMaximum)
-{
-    encoding::FlatOptions o;
-    o.history = true;
+    o.targets = {encoding::TargetSource::Goal, encoding::TargetSource::Subgoal, encoding::TargetSource::History};
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
     o.history_max_steps = 3;
-    o.targets = {encoding::TargetSource::Goal};
-    expect_schema_refusal(o, "history steps");
-}
-TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
-{
-    encoding::FlatOptions o;
-    o.max_goal_level = 1;
-    o.targets = {encoding::TargetSource::Subgoal};
-    expect_schema_refusal(o, "subgoal targets");
-}
-TEST(DeviceEncoderSchema, RefusesHistoryTargets)
-{
-    encoding::FlatOptions o;
-    o.history = true;
     o.targets = {encoding::TargetSource::History};
-    expect_schema_refusal(o, "history targets");
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
 TEST(DeviceEncoderSchema, RefusesActionTargets)
 {

@@ -10,6 +10,9 @@ namespace mymyr::cuda
 void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream)
 {
     if (!in.graphs) return;
+    if (in.subgoals.layers || in.history.masks.layers || in.history.count || ring.subgoals.layers ||
+        ring.history.masks.layers || ring.history.count)
+        throw std::invalid_argument("mymyr: encoding: a device ring carries no subgoal layers or history steps");
     auto invalid = [] { throw std::invalid_argument("mymyr: encoding: appended rows must match the device ring's columns and widths"); };
     if (!status || !ring.graphs || !ring.states || !ring.task_ids || in.graphs_device || in.row_start || in.dropped ||
         !in.states || in.state_words != ring.state_words || in.state_stride < in.state_words ||

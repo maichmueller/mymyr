@@ -16,10 +16,11 @@ private pool owns it through the last replay. Warm the encoder on the capture st
 no scratch reservation is needed. Exact calls reuse a workspace per stream; ``reserve_device`` can size it in advance
 and ``release_device`` frees it.
 
-What the device does not encode: the action relations (``actions=``) and subgoal levels and history steps (an
-encoder with ``max_goal_level`` above 0 or with ``history`` is refused, and so are ``subgoals=`` and ``history=``). The
-device evaluates axioms into scratch when a graph needs derived atoms and ``derived=`` is absent; supplied derived
-words take precedence.
+The subgoal layers and history steps of the rows (``subgoals=``, ``history=``) are CUDA tensors of the same forms as on
+the host: masks [N, L, W] (or [1, L, W] for layers that every row shares) of 64-bit words, ``dt`` int32 [N, H] and the
+valid step ``count`` int32 [N]; device streams and device collation carry neither. What the device does not encode: the
+action relations (``actions=``), action targets and horizons. The device evaluates axioms into scratch when a graph
+needs derived atoms and ``derived=`` is absent; supplied derived words take precedence.
 """
 
 from __future__ import annotations
@@ -47,6 +48,9 @@ _ARRAYS = (
     "target_offsets",
     "target_entity",
     "target_group",
+    "history_offsets",
+    "history_entity",
+    "history_dt",
 )
 _OUTPUTS = (*_ARRAYS, "sizes")
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
@@ -80,7 +84,7 @@ def _native() -> Any:
 class _Layout:
     """Which arrays a batch of an encoder stores, and their dtypes."""
 
-    __slots__ = ("counts", "entity_arrays", "goal_complete", "index", "relations", "targets")
+    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets")
 
     def __init__(self, encoder: Any):
         options = encoder.options
@@ -89,6 +93,7 @@ class _Layout:
         self.entity_arrays = not encoder.implicit_entities
         self.counts = bool(options["emit_counts"])
         self.targets = bool(options["target_sources"])
+        self.history = bool(options["history"])
         self.goal_complete = any(lane in _GOAL_LANES for lane in encoder.relation_lanes)
 
     def present(self, name: str) -> bool:
@@ -100,9 +105,13 @@ class _Layout:
             return self.goal_complete
         if name.startswith("target_"):
             return self.targets
+        if name.startswith("history_"):
+            return self.history
         return True
 
-    def specs(self, torch: Any, graphs: int, entities: int, args: int, targets: int) -> dict[str, tuple[tuple[int, ...], Any]]:
+    def specs(
+        self, torch: Any, graphs: int, entities: int, args: int, targets: int, history: int = 0
+    ) -> dict[str, tuple[tuple[int, ...], Any]]:
         """The shape and dtype of every output, absent arrays included (as empty arrays)."""
         index = torch.int32 if self.index == "int32" else torch.int64
         g, r = graphs, self.relations
@@ -120,6 +129,9 @@ class _Layout:
             "target_offsets": ((g + 1,), index),
             "target_entity": ((targets,), index),
             "target_group": ((targets,), torch.uint8),
+            "history_offsets": ((g + 1,), index),
+            "history_entity": ((history,), index),
+            "history_dt": ((history,), torch.int32),
         }
         specs = {name: (shape if self.present(name) else (0,), dtype) for name, (shape, dtype) in shapes.items()}
         specs["sizes"] = ((len(_SIZE_FIELDS),), torch.int64)
@@ -186,6 +198,15 @@ def _cuda_tensor(torch: Any, x: Any, name: str, keep: list) -> Any:
     return t
 
 
+def _cuda_tuple(torch: Any, items: Any, name: str, keep: list) -> Optional[tuple]:
+    """The arrays of ``items`` (a tuple of masks, with None for an absent entry) as CUDA tensors."""
+    if items is None:
+        return None
+    if isinstance(items, str) or not hasattr(items, "__len__"):
+        raise _error(f"{name} must be a tuple of arrays")
+    return tuple(None if x is None else _cuda_tensor(torch, x, f"{name}[{k}]", keep) for k, x in enumerate(items))
+
+
 def _words(torch: Any, t: Any, name: str) -> Any:
     """``t`` as 64-bit words [rows, width] (a 1-d array is one row): 64-bit integers, or 32-bit halves that are
     reinterpreted as the little-endian halves of words."""
@@ -219,12 +240,50 @@ def _stride(w: Any) -> int:
     return w.stride(0) if w.shape[0] > 1 else w.shape[1]
 
 
+def _same_strides(pos: Any, neg: Any, pos_name: str, neg_name: str) -> None:
+    """The two masks of a pair (of the same shape) are read with one row stride: they need the same one."""
+    if pos.shape[0] > 1 and pos.numel() and pos.stride(0) != neg.stride(0):
+        raise _error(f"'{neg_name}' has a row stride of {neg.stride(0)} words, '{pos_name}' of {pos.stride(0)}: the two "
+                     f"masks need the same one (make both contiguous)")
+
+
+def _layer_words(torch: Any, t: Any, name: str, graphs: int, may_share: bool) -> Any:
+    """``t`` as 64-bit masks [rows, layers, width]: 64-bit integers, or 32-bit halves reinterpreted as little-endian
+    halves of words. A row's layers are contiguous; one row per state, or a single row that all share if ``may_share``."""
+    if t.ndim != 3:
+        raise _error(f"'{name}' must be an array of masks [N, layers, words], not {t.ndim}-dimensional")
+    if t.dtype == torch.int64:
+        w = t
+    elif t.dtype == torch.uint64:
+        w = t.view(torch.int64)
+    elif t.dtype in (torch.int32, torch.uint32):
+        if t.shape[-1] % 2 or (t.numel() and t.stride(-1) != 1):
+            raise _error(f"'{name}' holds 32-bit halves: it needs an even number of contiguous columns")
+        try:
+            w = t.view(torch.int64)
+        except RuntimeError as error:
+            raise _error(f"'{name}' holds 32-bit halves that cannot be read as 64-bit words ({error})") from None
+    else:
+        raise _error(f"'{name}' must hold 64-bit mask words (or 32-bit halves), not {t.dtype}")
+    rows, layers, width = w.shape
+    if rows != graphs and not (may_share and rows == 1):
+        raise _error(f"'{name}' has {rows} rows: one per state ({graphs})" + (" or a single shared row" if may_share else ""))
+    if w.numel() and (width > 1 and w.stride(2) != 1 or layers > 1 and w.stride(1) != width):
+        raise _error(f"'{name}' must have contiguous layers")
+    if w.numel() and w.data_ptr() % 8:
+        raise _error(f"'{name}' must be 8-byte aligned")
+    if w.numel() and rows > 1 and w.stride(0) < layers * width:
+        raise _error(f"'{name}' has rows that overlap")
+    return w
+
+
 class _Rows:
     """The checked rows of a call: the device pointers and strides the native side takes."""
 
-    __slots__ = ("device", "fields", "graphs", "tensors")
+    __slots__ = ("device", "fields", "graphs", "history_layers", "tensors")
 
-    def __init__(self, torch: Any, states: Any, task_ids: Any, derived: Any, goals: Any):
+    def __init__(self, torch: Any, states: Any, task_ids: Any, derived: Any, goals: Any, subgoals: Any = None,
+                 history: Any = None):
         if states.device.type != "cuda":
             raise _error(f"'states' is on {states.device}: the rows must be CUDA tensors")
         w = _words(torch, states, "states")
@@ -269,35 +328,110 @@ class _Rows:
                 tensors.append(m)
             for pair in range(len(masks) // 2):
                 pos, neg = masks[2 * pair], masks[2 * pair + 1]
+                _same_strides(pos, neg, names[2 * pair], names[2 * pair + 1])
                 shared = pos.shape[0] == 1 and graphs != 1
                 at = 4 * pair
                 goal[at:at + 4] = [pos.data_ptr(), neg.data_ptr(), 0 if shared else _stride(pos), pos.shape[1]]
+        sub = self._subgoals(torch, subgoals, graphs, tensors)
+        hist, self.history_layers = self._history(torch, history, graphs, tensors)
         self.tensors = tensors
         self.fields = [graphs, w.data_ptr() if w.numel() else 0, _stride(w), w.shape[1], ids_ptr, derived_ptr,
-                       derived_stride, *goal[:4], *goal[4:]]
-        if len(self.fields) != 15:
+                       derived_stride, *goal[:4], *goal[4:], *sub, *hist]
+        if len(self.fields) != 35:
             raise AssertionError("the row fields have a fixed length")
 
     def _same_device(self, t: Any, name: str) -> None:
         if t.device != self.device:
             raise _error(f"'{name}' is on {t.device}, the states on {self.device}")
 
+    def _pair(self, torch: Any, items: Any, at: int, names: tuple, graphs: int, may_share: bool, tensors: list) -> tuple:
+        """The masks ``items[at]`` and ``items[at + 1]`` as (pos, neg, row stride) (stride 0: shared by all rows)."""
+        pair = []
+        for k in (at, at + 1):
+            if items[k] is None:
+                raise _error(f"'{names[k]}' must be an array, not None")
+            m = _layer_words(torch, items[k], names[k], graphs, may_share)
+            self._same_device(m, names[k])
+            tensors.append(m)
+            pair.append(m)
+        pos, neg = pair
+        if pos.shape != neg.shape:
+            raise _error(f"'{names[at + 1]}' has another shape than '{names[at]}'")
+        _same_strides(pos, neg, names[at], names[at + 1])
+        shared = pos.shape[0] == 1 and graphs != 1
+        stride = 0 if shared else (pos.stride(0) if pos.shape[0] > 1 else pos.shape[1] * pos.shape[2])
+        return pos, neg, stride
 
-def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int]:
-    """The (graphs, entities, args, targets) capacities of a ``capacities`` dict."""
+    def _layers(self, torch: Any, items: Any, names: tuple, derived_at: int, graphs: int, may_share: bool,
+                tensors: list) -> list[int]:
+        """The fields of a set of layers: pos, neg, stride, layers, words, then the derived pointers, stride and
+        words (0 without derived masks)."""
+        pos, neg, stride = self._pair(torch, items, 0, names, graphs, may_share, tensors)
+        fields = [pos.data_ptr() if pos.numel() else 0, neg.data_ptr() if neg.numel() else 0, stride, pos.shape[1],
+                  pos.shape[2], 0, 0, 0, 0]
+        if len(items) > derived_at:
+            dpos, dneg, dstride = self._pair(torch, items, derived_at, names, graphs, may_share, tensors)
+            if dpos.shape[1] != pos.shape[1]:
+                raise _error(f"'{names[derived_at]}' has {dpos.shape[1]} layers, '{names[0]}' has {pos.shape[1]}")
+            fields[5:] = [dpos.data_ptr() if dpos.numel() else 0, dneg.data_ptr() if dneg.numel() else 0, dstride,
+                          dpos.shape[2]]
+        return fields
+
+    def _subgoals(self, torch: Any, subgoals: Any, graphs: int, tensors: list) -> list[int]:
+        if subgoals is None:
+            return [0] * 9
+        names = ("subgoals[0] (pos)", "subgoals[1] (neg)", "subgoals[2] (derived_pos)", "subgoals[3] (derived_neg)")
+        if isinstance(subgoals, str) or not hasattr(subgoals, "__len__") or len(subgoals) not in (2, 4):
+            raise _error("subgoals must be (pos, neg) or (pos, neg, derived_pos, derived_neg)")
+        return self._layers(torch, subgoals, names, 2, graphs, True, tensors)
+
+    def _history(self, torch: Any, history: Any, graphs: int, tensors: list) -> tuple[list[int], int]:
+        """The fields of the history (its masks, the pointers of dt and count) and the steps of its longest row."""
+        if history is None:
+            return [0] * 11, 0
+        names = ("history[0] (pos)", "history[1] (neg)", "history[2] (dt)", "history[3] (count)",
+                 "history[4] (derived_pos)", "history[5] (derived_neg)")
+        if isinstance(history, str) or not hasattr(history, "__len__") or len(history) not in (3, 4, 6):
+            raise _error("history must be (pos, neg, dt), (pos, neg, dt, count) or (pos, neg, dt, count, derived_pos, "
+                         "derived_neg)")
+        masks = self._layers(torch, (history[0], history[1], *history[4:]), (names[0], names[1], *names[4:]), 2, graphs,
+                             False, tensors)
+        steps = masks[3]
+        ptrs = []
+        for k, shape in ((2, (graphs, steps)), (3, (graphs,))):
+            x = history[k] if k < len(history) else None
+            if x is None:
+                if k == 2 and graphs * steps != 0:
+                    raise _error(f"'{names[2]}' must be an array, not None")
+                ptrs.append(0)
+                continue
+            t = x
+            if t.dtype != torch.int32 or tuple(t.shape) != shape or not t.is_contiguous():
+                raise _error(f"'{names[k]}' must be a contiguous int32 tensor of shape {list(shape)}, not a {t.dtype} "
+                             f"tensor of shape {list(t.shape)} (convert with .to(torch.int32))")
+            self._same_device(t, names[k])
+            tensors.append(t)
+            ptrs.append(t.data_ptr() if t.numel() else 0)
+        return [*masks, *ptrs], steps
+
+
+def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int, int]:
+    """The (graphs, entities, args, targets, history) capacities of a ``capacities`` dict."""
     if not isinstance(value, dict):
         raise _error(f"capacities must be a dict, not {type(value).__name__}")
-    keys = {"entities", "graphs", "args", "targets"}
+    keys = {"entities", "graphs", "args", "targets", "history"}
     unknown = set(value) - keys
     if unknown:
         raise _error(f"capacities has the unknown key '{sorted(unknown, key=str)[0]}'; the keys are 'entities', "
-                     f"'graphs', 'args' and 'targets'")
+                     f"'graphs', 'args', 'targets' and 'history'")
     if not {"entities", "graphs", "args"} <= set(value):
         raise _error("capacities needs the keys 'entities', 'graphs' and 'args'")
     if "targets" not in value and layout.targets:
         raise _error("the schema has targets: capacities needs the key 'targets' as well")
+    if "history" not in value and layout.history:
+        raise _error("the schema has history: capacities needs the key 'history' as well")
     out = []
-    for key in ("graphs", "entities", "args", "targets"):
+    for key in ("graphs", "entities", "args", "targets", "history"):
         n = value.get(key, 0)
         if isinstance(n, bool) or not isinstance(n, int):
             if hasattr(n, "__index__") and not isinstance(n, bool):
@@ -307,7 +441,7 @@ def _capacities(value: Any, layout: _Layout) -> tuple[int, int, int, int]:
         if n < 0:
             raise _error(f"capacities['{key}'] must be at least 0, got {n}")
         out.append(n)
-    return out[0], out[1], out[2], out[3]
+    return out[0], out[1], out[2], out[3], out[4]
 
 
 # ------------------------------------------------------------------------------------------------ pending inputs
@@ -357,14 +491,16 @@ def encode_arrays(
     task_ids: Any,
     derived: Any,
     goals: Any,
-    capacities: Optional[tuple[int, int, int, int]],
+    capacities: Optional[tuple[int, int, int, int, int]],
     keep: Optional[list] = None,
+    subgoals: Any = None,
+    history: Any = None,
 ) -> dict[str, Any]:
     """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [6] int64 (entities,
     tuples, args, targets, history, overflow flags; None without capacities)."""
     torch = _torch()
     layout = layout_of(encoder)
-    rows = _Rows(torch, states, task_ids, derived, goals)
+    rows = _Rows(torch, states, task_ids, derived, goals, subgoals, history)
     device = rows.device
     native = _device_encoder(encoder, device.index)
     from mymyr.rl.torch._ops import _stream
@@ -372,25 +508,26 @@ def encode_arrays(
     stream = _stream(states)
     out: dict[str, Any] = {}
     if capacities is not None:
-        graphs, entities, args, targets = capacities
+        graphs, entities, args, targets, steps = capacities
         if rows.graphs > graphs:
             raise _error("the batch has more graphs than the output capacity")
-        specs = layout.specs(torch, rows.graphs, entities, args, targets)
+        specs = layout.specs(torch, rows.graphs, entities, args, targets, steps)
         out = _outputs(torch, specs, device)
         scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
         native.encode(stream, rows.fields, _pointers(out),
-                      [out["task_ids"].shape[0], entities, args, targets], scratch.data_ptr(), scratch.numel())
+                      [out["task_ids"].shape[0], entities, args, targets, steps], scratch.data_ptr(), scratch.numel())
     else:
 
-        def allocate(entities: int, tuples: int, args: int, targets: int, flags: int) -> list[int]:
+        def allocate(entities: int, tuples: int, args: int, targets: int, steps: int, flags: int) -> list[int]:
             if flags & _OVERFLOW_INPUT:
-                raise _error("a row is invalid: a task id outside the table, a state row or goal mask narrower than "
-                             "its instance, or a bit that its instance has no atom for")
+                raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or "
+                             "history step narrower than its instance, a history count outside [0, steps], or a bit "
+                             "that its instance has no atom for")
             if flags & _OVERFLOW_INDEX:
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
-                                    f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}): "
-                                    "use index_dtype='int64'")
-            specs = layout.specs(torch, rows.graphs, entities, args, targets)
+                                    f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}, "
+                                    f"history {steps}): use index_dtype='int64'")
+            specs = layout.specs(torch, rows.graphs, entities, args, targets, steps)
             for name, (shape, dtype) in specs.items():
                 if name != "sizes":
                     out[name] = torch.empty(shape, dtype=dtype, device=device)
@@ -410,6 +547,8 @@ def encode(
     derived: Any,
     goals: Any,
     actions: Any,
+    subgoals: Any,
+    history: Any,
     framework: Any,
     threads: Any,
     pool: Any,
@@ -437,7 +576,9 @@ def encode(
         if isinstance(goals, str) or not hasattr(goals, "__len__"):
             raise _error("goals must be (goal_pos, goal_neg) or (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)")
         g = tuple(_cuda_tensor(torch, mask, f"goals[{k}]", keep) for k, mask in enumerate(goals))
-    arrays = encode_arrays(encoder, s, ids, d, g, caps, keep)
+    sub = _cuda_tuple(torch, subgoals, "subgoals", keep)
+    hist = _cuda_tuple(torch, history, "history", keep)
+    arrays = encode_arrays(encoder, s, ids, d, g, caps, keep, sub, hist)
     return DeviceFlatBatch(encoder, arrays, exact=caps is None)
 
 
@@ -532,6 +673,11 @@ class _Host:
             lengths = np.diff(offsets)
         self.relation_arg_offsets = np.concatenate(([0], np.cumsum(lengths, dtype=np.int64)))
         self.relation_args = args.cpu().numpy() - begin
+        if batch._layout.history:
+            first, last = batch.history_offsets[graph:graph + 2].tolist()
+            self.history_offsets = np.array([0, last - first], dtype=np.int64)
+            self.history_entity = batch.history_entity[first:last].cpu().numpy() - begin
+            self.history_dt = batch.history_dt[first:last].cpu().numpy()
 
 
 def _signed(fingerprint: int) -> int:
@@ -554,6 +700,7 @@ class DeviceFlatBatch:
         self._table_fingerprint = encoder.table_fingerprint
         self._options = encoder.options
         layout = layout_of(encoder)
+        self._layout = layout
         self._arrays = {name: arrays[name] for name in _ARRAYS if layout.present(name)}
         self._sizes = None if exact else arrays["sizes"]
         self._graphs = self._arrays["task_ids"].shape[0]
@@ -591,13 +738,14 @@ class DeviceFlatBatch:
     @property
     def device_sizes(self) -> Optional[Any]:
         """After an encoding with capacities: a device tensor int64 [6] with the true entities, tuples, args, targets and
-        history steps (always 0) of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no host wait;
-        None otherwise."""
+        history steps of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no
+        host wait; None otherwise."""
         return self._sizes
 
     @property
     def sizes(self) -> Optional[dict[str, Any]]:
-        """After an encoding with capacities: the true entities, tuples, args and targets of the batch, and whether it overflowed
+        """After an encoding with capacities: the true entities, tuples, args and targets of the batch (and history steps, for
+        a schema with history), and whether it overflowed
         (``overflow``: the batch is all zero) because of the capacities (``capacity_overflow``), the index type
         (``index_overflow``) or an invalid row (``invalid_input``: a task id outside the table, a row or goal mask
         narrower than its instance, an atom bit its instance has no slot for); None otherwise. It reads
@@ -605,7 +753,8 @@ class DeviceFlatBatch:
         if self._sizes is None:
             return None
         values = dict(zip(_SIZE_FIELDS, self._sizes.tolist(), strict=True))
-        del values["history"]  # the device encodes no history steps: the dict has the keys of a batch without them
+        if not self._layout.history:
+            del values["history"]  # a schema without history has the keys of a batch without it
         flags = values["overflow"]
         values["overflow"] = flags != 0
         values["capacity_overflow"] = bool(flags & _OVERFLOW_CAPACITY)
@@ -654,7 +803,7 @@ class DeviceFlatBatch:
 
     @classmethod
     def from_arrays(cls, encoder: Any, arrays: Any, exact: bool = False) -> "DeviceFlatBatch":
-        """The batch of the outputs of ``torch.ops.mymyr.encode_flat``: a tuple of its 14 tensors (the arrays in the
+        """The batch of the outputs of ``torch.ops.mymyr.encode_flat``: a tuple of its 17 tensors (the arrays in the
         order of ``mymyr.encoding.DeviceFlatBatch.array_names``, sizes last), for ``encoder``."""
         if len(arrays) != len(_OUTPUTS):
             raise _error(f"expected the {len(_OUTPUTS)} outputs of encode_flat, got {len(arrays)}")
@@ -773,11 +922,12 @@ class DeviceFlatStream:
         caps = _capacities(capacities, layout)
         if caps[0] < self.capacity:
             raise _error("flush graph capacity must cover the entire device ring")
-        out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:]), self.device)
+        # a ring's schema has no history steps: the history capacity plays no part
+        out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:4]), self.device)
         graphs = torch.empty(1, dtype=torch.int64, device=self.device)
         scratch = _scratch(torch, self._native, self._stream_ptr, self.capacity, self.device, self._derived is not None)
         self._native.flush(self._stream_ptr, self._rows.fields, self.device_status.data_ptr(), _pointers(out),
-                           [self.capacity, *caps[1:]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
+                           [self.capacity, *caps[1:4]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
         result = DeviceFlatBatch(self.encoder, out, exact=False)
         result._device_graphs = graphs
         result._keepalive = (self, scratch)
@@ -850,8 +1000,9 @@ class DeviceCollator:
         else:
             if caps[0] < graphs:
                 raise _error("collated graphs exceed the output capacity")
-            out = _outputs(torch, layout.specs(torch, graphs, *caps[1:]), first.device)
-            native.encode(_pointers(out), [graphs, *caps[1:]], scratch.data_ptr(), scratch.numel())
+            # collated batches have no history steps: the history capacity plays no part
+            out = _outputs(torch, layout.specs(torch, graphs, *caps[1:4]), first.device)
+            native.encode(_pointers(out), [graphs, *caps[1:4]], scratch.data_ptr(), scratch.numel())
         result = DeviceFlatBatch(encoder, out, exact=caps is None)
         result._keepalive = (native, scratch, batches, arrays)
         return result

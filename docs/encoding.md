@@ -632,26 +632,38 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   goal masks `(goal_pos, goal_neg)` or `(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)` with `N` rows or a
   single shared row. All of them are on one device or all on the host; a call mixing the two raises `ValueError`.
   Supplied derived words take precedence. When they are absent and a graph reads derived atoms, the device axiom
-  evaluator runs on the encoder stream into its scratch, one launch per object-bitset width over all rows of the
-  batch. Tasks with no required derived atoms keep the ordinary encoder launches and scratch size. An instance whose
-  axioms exceed the device limits (a body beyond the matcher limits, an object bitset wider than the device
-  evaluates) needs supplied words for its own rows only: a batch with such rows and no derived words sets
-  `invalid_input`, and a batch without `task_ids` (all rows of instance 0) whose instance 0 exceeds the limits raises
-  `ValueError`. Rows of the other instances encode as usual.
-- **Refused.** `actions=` (the action relations are not encoded on the device), `subgoals=` and `history=` (an encoder
-  with `max_goal_level` above 0 or with `history` is refused for device rows), `pool=` (a pool of host threads
+  evaluator runs on the encoder stream into its scratch, one launch per object-bitset width over all rows of the batch.
+  Subgoal layers with derived masks read the derived atoms of the instances whose layers can name them, under every goal
+  mode. Tasks with no required derived atoms keep the ordinary encoder launches and scratch size. An instance whose
+  axioms exceed the device limits (a body beyond the matcher limits, an object bitset wider than the device evaluates)
+  needs supplied words for its own rows only: a batch with such rows and no derived words sets `invalid_input`, and a
+  batch without `task_ids` (all rows of instance 0) whose instance 0 exceeds the limits raises `ValueError`. Rows of the
+  other instances encode as usual.
+- **Subgoal layers and history.** `subgoals=` and `history=` take CUDA tensors of the forms of the host call (the
+  masks `[N, L, W]` of 64-bit words, `[1, L, W]` for subgoal layers that every row shares, `dt` `int32` `[N, H]` and the
+  valid step `count` `int32` `[N]`, with the derived masks last), and the device encodes the subgoal levels, the history
+  steps and their targets exactly as the host does: the levels as layers minus the goal and the lower layers, the newest
+  `history_max_steps` of each row's valid steps (all of them when it is not set), history targets numbered relation,
+  then step, then slot. A row may use fewer layers than the call has (an empty layer adds nothing) and have fewer valid
+  steps than `H`, down to none. The subgoal levels of a graph are computed once into the workspace's scratch, so a
+  schema with levels needs scratch of one mask per level and sign over the instance's words for every graph of a
+  batch, on top of the scratch of a schema without them.
+- **Refused.** `actions=` (the action relations are not encoded on the device), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
-  prefix; `threads` has no effect. A row that is invalid (a task id outside the table, a row or goal mask narrower
-  than its instance, a goal bit its instance has no atom for) raises `ValueError` without capacities and sets
-  `invalid_input` in `sizes` with them.
+  prefix, as do an encoder with action targets or a horizon mode and layers or history given to an encoder whose
+  schema has no subgoal or history relations; `threads` has no effect. A row that is invalid (a task id outside the
+  table, a row, goal mask, subgoal layer or history step narrower than its instance, a goal, layer or step bit its
+  instance has no atom for, a history count outside `[0, H]`) raises `ValueError` without capacities and sets
+  `invalid_input` in `sizes` with them. The steps of a history that the row does not use (beyond its count, or older
+  than `history_max_steps` newest) are not read.
 - **One wait without capacities.** An encoding without `capacities` must size its arrays by the batch: it counts the
-  batch on the stream, copies the five sizes to the host and waits for them (the only host wait of the call), allocates
+  batch on the stream, copies the sizes to the host and waits for them (the only host wait of the call), allocates
   exact arrays and fills them. A batch that needs more indices than `int32` holds raises `OverflowError`; use
   `index_dtype='int64'`.
-- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=)` (`targets` only with target
-  sources) every variable-size array is allocated at its capacity, zero-filled, and the kernels write the true sizes into
-  `batch.device_sizes` (an `int64` `[6]` tensor: entities, tuples, args, targets, history steps (always 0) and the
-  overflow flags, 1 for a capacity, 2 for the index type, 4 for an invalid row). The call never waits and can be captured in a CUDA graph. A batch
+- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=, history=)` (`targets` only with
+  target sources, `history` only with a history) every variable-size array is allocated at its capacity, zero-filled,
+  and the kernels write the true sizes into `batch.device_sizes` (an `int64` `[6]` tensor: entities, tuples, args,
+  targets, history steps and the overflow flags, 1 for a capacity, 2 for the index type, 4 for an invalid row). The call never waits and can be captured in a CUDA graph. A batch
   that does not fit its capacities stays all zero with the flag set. `batch.sizes` reads `device_sizes` into a dict (and
   waits).
 - **`DeviceFlatBatch`** has the accessors of `FlatBatch`: the arrays (an array the schema does not store raises
@@ -669,11 +681,12 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 ### The torch op
 
 `torch.ops.mymyr.encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
-graphs, entities, args, targets)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs
-(`import mymyr.rl.torch` registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors
-are as above (`None` for an input that is absent) and the four ints are the capacities (`targets` 0 without target
-sources). It returns the list of 14 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the
-batch table and `sizes` last; an array the schema does not store is an empty tensor, and
+subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
+history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)` is the capacity form as a torch
+custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch` registers it). `encoder` is the handle
+`mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that is absent) and the five
+ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It returns the list of 17
+tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema does not store is an empty tensor, and
 `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch. The op waits for nothing, allocates only
 its outputs and scratch and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
 traces it without a graph break. The registry keeps the encoder alive until `unregister(handle)`. A compiled function

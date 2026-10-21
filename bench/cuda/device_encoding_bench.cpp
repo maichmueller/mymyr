@@ -5,6 +5,8 @@
 //                               [--replays 10] [--device 0] [--secondary-problem P.pddl]
 //                               [--lanes 4|8|32] [--fill auto|thread|warp] [--streams] [--collate-slices K]
 //                               [--ring-rows L] [--instances K]
+//                               [--levels L] [--history H] [--max-steps M] [--literals K] [--targets]
+//                               [--cpu-threads T]
 //
 // FILE holds the state rows, little-endian u64 [rows, W]; they are tiled to --n graphs. For each of the graph-major and
 // the relation-major layout the encode of the batch is captured into a CUDA graph on a stream and replayed --replays
@@ -12,6 +14,11 @@
 // followed by a synchronize on the host clock. The rounds of the three timings alternate, the first rotating. The object
 // also reports, for each layout, the nodes of the captured graph (kernels, memsets, anything else), the scratch of the
 // reserved workspace, and whether the device's sizes equal the host encoder's.
+//
+// --levels L gives every row L subgoal layers and --history H a history of H valid steps (M: the newest steps encoded),
+// each layer and step K random literals of the row's task (the plain and satisfied goal relations are on with levels;
+// --targets makes the goal, subgoal and history entities targets). The host encoder's time on the same rows with T
+// threads is reported as cpu_graph_major_us (one entry per round, the whole batch).
 
 // With --streams, also times captured append, flush, append plus flush and four-slice collation (--collate-slices K:
 // K slices of equal size). Append and flush arrays hold one replay per sample; combined and collation arrays hold
@@ -34,6 +41,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -45,7 +53,8 @@ namespace
 {
     std::fprintf(stderr,
                  "error: %s\nusage: mymyr_device_encoding_bench --domain D.pddl --problem P.pddl --rows FILE --words W "
-                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|warp] [--streams]\n",
+                 "[--n N] [--rounds R] [--replays K] [--device I] [--lanes L] [--fill auto|thread|warp] [--streams] "
+                 "[--levels L] [--history H] [--max-steps M] [--literals K] [--targets] [--cpu-threads T]\n",
                  message);
     std::exit(2);
 }
@@ -58,6 +67,8 @@ struct Args
     u32 rounds = 20, replays = 10;
     int device = 0;
     cuda::LaunchConfig launch;
+    u32 levels = 0, history = 0, max_steps = 0, literals = 6, cpu_threads = 1;
+    bool targets = false;
     bool streams = false;
     u64 collate_slices = 0, ring_rows = 0;
     u32 instances = 1;
@@ -103,6 +114,18 @@ Args parse(int argc, char** argv)
             a.device = std::stoi(value());
         else if (flag == "--lanes")
             a.launch.count_lanes = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--levels")
+            a.levels = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--history")
+            a.history = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--max-steps")
+            a.max_steps = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--literals")
+            a.literals = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--cpu-threads")
+            a.cpu_threads = static_cast<u32>(std::stoul(value()));
+        else if (flag == "--targets")
+            a.targets = true;
         else if (flag == "--fill")
         {
             const std::string mode = value();
@@ -146,6 +169,66 @@ std::vector<u64> read_rows(const std::string& path, u32 words, u64 n)
     return tiled;
 }
 
+/// The subgoal layers and history of the rows: K random literals per layer and step, over the slots of the first task
+/// (a literal is positive if the row's state has the atom, negative otherwise, one in two).
+struct LayerRows
+{
+    u32 levels = 0, steps = 0, words = 0;
+    std::vector<u64> layer_pos, layer_neg, step_pos, step_neg;
+    std::vector<i32> dt;
+
+    LayerRows(const Args& a, const std::vector<u64>& rows, u32 row_words, u32 slots) : levels(a.levels), steps(a.history), words(row_words)
+    {
+        const u64 n = rows.size() / row_words;
+        layer_pos.assign(n * levels * words, 0);
+        layer_neg = layer_pos;
+        step_pos.assign(n * steps * words, 0);
+        step_neg = step_pos;
+        dt.assign(n * steps, 0);
+        if (slots == 0)
+            return;
+        for (u64 g = 0; g < n; ++g)
+        {
+            std::mt19937_64 rng(g + 1);
+            const u64* state = rows.data() + g * words;
+            auto draw = [&](u64* pos, u64* neg)
+            {
+                for (u32 k = 0; k < a.literals; ++k)
+                {
+                    const u32 slot = static_cast<u32>(rng() % slots);
+                    const bool held = (state[slot >> 6] >> (slot & 63)) & 1u;
+                    (held == (rng() % 2 == 0) ? pos : neg)[slot >> 6] |= u64{1} << (slot & 63);
+                }
+            };
+            for (u32 l = 0; l < levels; ++l)
+                draw(layer_pos.data() + (g * levels + l) * words, layer_neg.data() + (g * levels + l) * words);
+            for (u32 j = 0; j < steps; ++j)
+            {
+                draw(step_pos.data() + (g * steps + j) * words, step_neg.data() + (g * steps + j) * words);
+                dt[g * steps + j] = static_cast<i32>(j + 1);
+            }
+        }
+    }
+
+    [[nodiscard]] encoding::LayerInput subgoals(const u64* pos, const u64* neg) const
+    {
+        encoding::LayerInput in;
+        if (levels)
+            in = {pos, neg, u64{levels} * words, levels, words};
+        return in;
+    }
+    [[nodiscard]] encoding::HistoryInput history_of(const u64* pos, const u64* neg, const i32* step_dt) const
+    {
+        encoding::HistoryInput in;
+        if (steps)
+        {
+            in.masks = {pos, neg, u64{steps} * words, steps, words};
+            in.dt = step_dt;
+        }
+        return in;
+    }
+};
+
 struct NodeCounts
 {
     u32 kernels = 0, memsets = 0, others = 0, thread_fills = 0, warp_fills = 0;
@@ -186,6 +269,7 @@ struct Session
     std::unique_ptr<cuda::DeviceEncoder> device;
     cuda::DeviceBuffer states, derived, block, task_ids;
     std::vector<i32> ids;
+    std::vector<u64> derived_rows;  // supplied derived words on the host, which host_input reads
     cuda::DeviceEncodeInput input;
     cuda::DeviceOutput output;
     cuda::OutputLayout layout_of;
@@ -199,25 +283,45 @@ struct Session
     bool sizes_match = false;
 
     cuda::LaunchConfig launch;
+    cuda::DeviceBuffer layer_pos, layer_neg, step_pos, step_neg, step_dt;
+    encoding::EncodeInput host_input;
+    std::vector<double> cpu_times;
 
     Session(const cuda::ContextPtr& ctx, cudaStream_t stream, rl::TaskTablePtr table, encoding::Layout l, const std::vector<u64>& rows,
-            u32 words, u64 n, const cuda::LaunchConfig& config, bool supplied_derived = false)
+            u32 words, u64 n, const cuda::LaunchConfig& config, const Args& args, const LayerRows& layers,
+            bool supplied_derived = false)
         : layout(l), launch(config)
     {
         encoding::FlatOptions options;
         options.goal_derivations = {};
         options.layout = l;
+        if (args.levels)
+        {
+            options.max_goal_level = args.levels;
+            options.goal_derivations = {encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied};
+            if (args.targets)
+                options.targets.insert(encoding::TargetSource::Goal), options.targets.insert(encoding::TargetSource::Subgoal);
+        }
+        if (args.history)
+        {
+            options.history = true;
+            if (args.max_steps)
+                options.history_max_steps = args.max_steps;
+            if (args.targets)
+                options.targets.insert(encoding::TargetSource::History);
+        }
         host = encoding::FlatEncoder::create(std::move(table), options);
         // the host's sizes size the output
         encoding::EncodeInput in;
         in.states = {rows.data(), n, words, 0, 0};
+        in.subgoals = layers.subgoals(layers.layer_pos.data(), layers.layer_neg.data());
+        in.history = layers.history_of(layers.step_pos.data(), layers.step_neg.data(), layers.dt.data());
         if (host->table().size() > 1)
         {
             for (u64 g = 0; g < n; ++g)
                 ids.push_back(static_cast<i32>(g % host->table().size()));
             in.task_ids = ids.data();
         }
-        std::vector<u64> derived_rows;
         const u32 dw = host->table().derived_words();
         if (supplied_derived && dw)
         {
@@ -235,10 +339,11 @@ struct Session
             in.derived = derived_rows.data();
             in.derived_stride = dw;
         }
+        host_input = in;
         ThreadPool pool(1);
         encoding::EncodeScratch scratch_of_host;
         host_sizes = host->count(in, pool, scratch_of_host);
-        const cuda::BatchShape shape{n, host_sizes.entities, host_sizes.args, host_sizes.targets};
+        const cuda::BatchShape shape{n, host_sizes.entities, host_sizes.args, host_sizes.targets, host_sizes.history};
         device = std::make_unique<cuda::DeviceEncoder>(ctx, host);
         device->reserve(shape, stream);
         states = cuda::DeviceBuffer(ctx, rows.size() * 8, stream);
@@ -250,6 +355,21 @@ struct Session
         input.states = static_cast<const u64*>(states.data());
         input.state_stride = words;
         input.state_words = words;
+        auto upload = [&](cuda::DeviceBuffer& buffer, const auto& v)
+        {
+            buffer = cuda::DeviceBuffer(ctx, std::max<u64>(v.size() * sizeof(v[0]), 8), stream);
+            if (!v.empty())
+                cuda::check(cudaMemcpyAsync(buffer.data(), v.data(), v.size() * sizeof(v[0]), cudaMemcpyHostToDevice, stream),
+                            "upload layers");
+        };
+        upload(layer_pos, layers.layer_pos);
+        upload(layer_neg, layers.layer_neg);
+        upload(step_pos, layers.step_pos);
+        upload(step_neg, layers.step_neg);
+        upload(step_dt, layers.dt);
+        input.subgoals = layers.subgoals(static_cast<const u64*>(layer_pos.data()), static_cast<const u64*>(layer_neg.data()));
+        input.history = layers.history_of(static_cast<const u64*>(step_pos.data()), static_cast<const u64*>(step_neg.data()),
+                                          static_cast<const i32*>(step_dt.data()));
         if (!ids.empty())
         {
             task_ids = cuda::DeviceBuffer(ctx, ids.size() * sizeof(i32), stream);
@@ -270,7 +390,7 @@ struct Session
         cuda::check(cudaStreamSynchronize(stream), "sizes");
         sizes_match = device_sizes.entities == host_sizes.entities && device_sizes.tuples == host_sizes.tuples &&
                       device_sizes.args == host_sizes.args && device_sizes.targets == host_sizes.targets &&
-                      device_sizes.overflow == 0 && host_sizes.overflow == 0;
+                      device_sizes.history == host_sizes.history && device_sizes.overflow == 0 && host_sizes.overflow == 0;
         scratch = cuda::detail::scratch_layout(shape, device->bounds(), l, host->schema().num_relations());
         scratch.bytes = device->scratch_bytes(shape);
         cells = device->bounds().cells;
@@ -288,6 +408,20 @@ struct Session
         for (int i = 0; i < 3; ++i)
             cuda::check(cudaGraphLaunch(exec, stream), "warm up");
         cuda::check(cudaStreamSynchronize(stream), "warm up");
+    }
+
+    /// The host encoder on the same rows with `threads` threads: the time of the whole batch in microseconds per round.
+    void time_host(u32 threads, u32 rounds)
+    {
+        ThreadPool pool(threads);
+        encoding::EncodeScratch scratch_of_host;
+        (void)host->encode(host_input, pool, scratch_of_host);
+        for (u32 r = 0; r < rounds; ++r)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            (void)host->encode(host_input, pool, scratch_of_host);
+            cpu_times.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+        }
     }
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
@@ -468,14 +602,14 @@ void print_layout(const char* name, const Session& s)
 {
     std::printf("\"%s\":{\"kernels\":%u,\"memsets\":%u,\"other_nodes\":%u,\"scratch_bytes\":%llu,\"cub_bytes\":%llu,"
                 "\"thread_fills\":%u,\"warp_fills\":%u,\"cells\":%llu,\"relations\":%llu,\"wide\":%s,\"output_bytes\":%llu,\"sizes_match\":%s,"
-                "\"entities\":%llu,\"tuples\":%llu,\"args\":%llu,\"targets\":%llu}",
+                "\"entities\":%llu,\"tuples\":%llu,\"args\":%llu,\"targets\":%llu,\"history\":%llu}",
                 name, s.nodes.kernels, s.nodes.memsets, s.nodes.others,
                 static_cast<unsigned long long>(s.scratch.bytes), static_cast<unsigned long long>(s.scratch.scan_temp_bytes),
                 s.nodes.thread_fills, s.nodes.warp_fills, static_cast<unsigned long long>(s.cells), static_cast<unsigned long long>(s.scratch.relations),
                 s.scratch.wide ? "true" : "false", static_cast<unsigned long long>(s.layout_of.sizes),
                 s.sizes_match ? "true" : "false", static_cast<unsigned long long>(s.host_sizes.entities),
                 static_cast<unsigned long long>(s.host_sizes.tuples), static_cast<unsigned long long>(s.host_sizes.args),
-                static_cast<unsigned long long>(s.host_sizes.targets));
+                static_cast<unsigned long long>(s.host_sizes.targets), static_cast<unsigned long long>(s.host_sizes.history));
 }
 }  // namespace
 
@@ -500,13 +634,17 @@ int main(int argc, char** argv)
         options.max_bytes = u64{3} << 30;
         const cuda::ContextPtr ctx = cuda::DeviceContext::create(a.device, options);
         cuda::Stream stream;
-        Session graph_major(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch);
-        Session relation_major(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch);
+        const LayerRows layers(a, rows, words, table->task(0)->atoms().fluent_slots());
+        Session graph_major(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch, a, layers);
+        Session relation_major(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch, a, layers);
+        graph_major.time_host(a.cpu_threads, a.rounds);
         std::unique_ptr<Session> graph_given, relation_given;
         if (graph_major.host->context().max_derived_words())
         {
-            graph_given = std::make_unique<Session>(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch, true);
-            relation_given = std::make_unique<Session>(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n, a.launch, true);
+            graph_given = std::make_unique<Session>(ctx, stream, table, encoding::Layout::Graph, rows, words, a.n, a.launch,
+                                                    a, layers, true);
+            relation_given = std::make_unique<Session>(ctx, stream, table, encoding::Layout::Relation, rows, words, a.n,
+                                                       a.launch, a, layers, true);
         }
         std::unique_ptr<StreamSession> stream_graph, stream_relation;
         if (a.streams)
@@ -541,6 +679,8 @@ int main(int argc, char** argv)
         print_times("relation", relation_times);
         std::printf(",");
         print_times("eager", eager_times);
+        std::printf(",");
+        print_times("cpu_graph_major_us", graph_major.cpu_times);
         if (graph_given)
         {
             std::printf(","); print_times("graph_given", graph_given_times);

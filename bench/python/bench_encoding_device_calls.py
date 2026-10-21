@@ -73,8 +73,8 @@ def bench_task(key, n, rounds, data):
     handle = rt.register(encoder)
 
     def op(states):
-        return torch.ops.mymyr.encode_flat(handle, states, None, None, None, None, None, None, caps["graphs"],
-                                           caps["entities"], caps["args"], 0)
+        return torch.ops.mymyr.encode_flat(handle, states, None, None, None, None, None, None, *([None] * 10),
+                                           caps["graphs"], caps["entities"], caps["args"], 0, 0)
 
     torch._dynamo.reset()
     compiled = torch.compile(lambda states: op(states), fullgraph=True, backend="eager")

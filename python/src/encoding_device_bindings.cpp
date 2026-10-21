@@ -27,6 +27,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <map>
@@ -62,8 +63,12 @@ struct Rows
     std::uintptr_t goal_derived_pos = 0, goal_derived_neg = 0;
     u64 goal_derived_stride = 0;
     u32 goal_derived_words = 0;
+    // the subgoal layers, then the masks of the history: pos, neg, stride, layers, words, derived pos, derived neg,
+    // derived stride, derived words; then the history's dt and count
+    std::array<std::uintptr_t, 9> subgoals{}, history{};
+    std::uintptr_t history_dt = 0, history_count = 0;
 };
-constexpr usize k_row_fields = 15;
+constexpr usize k_row_fields = 35;
 
 Rows rows_of(const std::vector<std::uintptr_t>& v)
 {
@@ -86,6 +91,11 @@ Rows rows_of(const std::vector<std::uintptr_t>& v)
     r.goal_derived_neg = v[i++];
     r.goal_derived_stride = v[i++];
     r.goal_derived_words = static_cast<u32>(v[i++]);
+    for (auto* layers : {&r.subgoals, &r.history})
+        for (std::uintptr_t& field : *layers)
+            field = v[i++];
+    r.history_dt = v[i++];
+    r.history_count = v[i++];
     return r;
 }
 
@@ -93,6 +103,21 @@ template<class T>
 T* ptr(std::uintptr_t p)
 {
     return reinterpret_cast<T*>(p);
+}
+
+encoding::LayerInput layers_of(const std::array<std::uintptr_t, 9>& f)
+{
+    encoding::LayerInput l;
+    l.pos = ptr<const u64>(f[0]);
+    l.neg = ptr<const u64>(f[1]);
+    l.stride = f[2];
+    l.layers = static_cast<u32>(f[3]);
+    l.words = static_cast<u32>(f[4]);
+    l.derived_pos = ptr<const u64>(f[5]);
+    l.derived_neg = ptr<const u64>(f[6]);
+    l.derived_stride = f[7];
+    l.derived_words = static_cast<u32>(f[8]);
+    return l;
 }
 
 cuda::DeviceEncodeInput input_of(const Rows& r)
@@ -113,13 +138,18 @@ cuda::DeviceEncodeInput input_of(const Rows& r)
     in.goal_derived_neg = ptr<const u64>(r.goal_derived_neg);
     in.goal_derived_stride = r.goal_derived_stride;
     in.goal_derived_words = r.goal_derived_words;
+    in.subgoals = layers_of(r.subgoals);
+    in.history.masks = layers_of(r.history);
+    in.history.dt = ptr<const i32>(r.history_dt);
+    in.history.count = ptr<const i32>(r.history_count);
     return in;
 }
 
 /// The destination arrays, in the order of encoding._device: task_ids, num_objects, entity_offsets, entity_role,
 /// entity_ref, relation_counts, relation_offsets, relation_arg_offsets, relation_args, goal_complete, target_offsets,
-/// target_entity, target_group, sizes (0: the array is absent or has no entries).
-constexpr usize k_output_fields = 14;
+/// target_entity, target_group, history_offsets, history_entity, history_dt, sizes (0: the array is absent or has no
+/// entries).
+constexpr usize k_output_fields = 17;
 
 cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities)
 {
@@ -140,7 +170,10 @@ cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encodin
     a.target_offsets = ptr<void>(v[10]);
     a.target_entity = ptr<void>(v[11]);
     a.target_group = ptr<u8>(v[12]);
-    out.sizes = ptr<encoding::FlatSizes>(v[13]);
+    a.history_offsets = ptr<void>(v[13]);
+    a.history_entity = ptr<void>(v[14]);
+    a.history_dt = ptr<i32>(v[15]);
+    out.sizes = ptr<encoding::FlatSizes>(v[16]);
     out.capacities = capacities;
     return out;
 }
@@ -291,7 +324,7 @@ public:
         const auto slot = slot_of(stream);
         std::lock_guard lock(slot->mutex);
         ensure_context(*slot, cuda_stream(stream));
-        return m_device_encoder->scratch_bytes(*slot->context, cuda::BatchShape{graphs, 0, 0, 0},
+        return m_device_encoder->scratch_bytes(*slot->context, cuda::BatchShape{graphs, 0, 0, 0, 0},
                                                derived ? cuda::DerivedWords::Supplied : cuda::DerivedWords::Evaluated);
     }
 
@@ -300,10 +333,10 @@ public:
                 const std::vector<std::uintptr_t>& outputs, const std::vector<u64>& capacities,
                 std::uintptr_t scratch, u64 bytes)
     {
-        if (capacities.size() != 4)
-            throw nb::value_error("mymyr: expected four capacities");
+        if (capacities.size() != 5)
+            throw nb::value_error("mymyr: expected five capacities");
         const Rows rows = rows_of(row_fields);
-        const encoding::BatchShape caps{capacities[0], capacities[1], capacities[2], capacities[3]};
+        const encoding::BatchShape caps{capacities[0], capacities[1], capacities[2], capacities[3], capacities[4]};
         cuda::DeviceOutput out = output_of(outputs, caps);
         out.zero_unused = true;
         nb::gil_scoped_release release;
@@ -311,14 +344,14 @@ public:
         std::lock_guard lock(slot->mutex);
         ensure_context(*slot, cuda_stream(stream));
         check_rows(rows);
-        m_device_encoder->encode(*slot->context, ptr<void>(scratch), bytes, cuda::BatchShape{rows.graphs, 0, 0, 0},
+        m_device_encoder->encode(*slot->context, ptr<void>(scratch), bytes, cuda::BatchShape{rows.graphs, 0, 0, 0, 0},
                                  input_of(rows), out);
     }
 
-    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, flags)` to check the flags
+    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, history, flags)` to check the flags
     /// and return the graph extent and output pointers (the sizes pointer ignored), then fills them.
     void encode_exact(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
-                      const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u32)>& allocate)
+                      const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u32)>& allocate)
     {
         const Rows rows = rows_of(row_fields);
         std::vector<std::uintptr_t> outputs;
@@ -350,10 +383,10 @@ public:
             cuda::check(cudaStreamSynchronize(s), "cudaStreamSynchronize (sizes)");
             ++slot->syncs;
             const encoding::FlatSizes sizes = *static_cast<const encoding::FlatSizes*>(slot->staging.data(0));
-            outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.overflow);
+            outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.history, sizes.overflow);
             if (outputs.size() != k_output_fields + 1)
-                refuse("expected the output graph extent and fourteen pointers");
-            const encoding::BatchShape caps{outputs.front(), sizes.entities, sizes.args, sizes.targets};
+                refuse("expected the output graph extent and seventeen pointers");
+            const encoding::BatchShape caps{outputs.front(), sizes.entities, sizes.args, sizes.targets, sizes.history};
             outputs.erase(outputs.begin());
             cuda::DeviceOutput out = output_of(outputs, caps);
             out.sizes = device_sizes;
@@ -391,7 +424,7 @@ private:
         // sized to a power of two so that batches that grow a little reserve again rarely
         const u64 want = std::bit_ceil(std::max<u64>(graphs, 1024));
         cuda::DeviceGuard guard(m_device);
-        m_device_encoder->reserve(cuda::BatchShape{want, 0, 0, 0}, stream);
+        m_device_encoder->reserve(cuda::BatchShape{want, 0, 0, 0, 0}, stream);
         slot.held.reset();
         slot.held.emplace(m_device_encoder->acquire(stream));
         ++slot.reservations;
@@ -513,11 +546,12 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (15 integers: the graphs, then the pointers and strides of the arrays) into the 14 output "
-             "pointers, with the capacities (graphs, entities, args, targets), on `stream`. No host wait.")
+             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 17 output "
+             "pointers, with the capacities (graphs, entities, args, targets, history), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
-             "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, flags) "
-             "to check the flags and return the graph extent and fourteen pointers, then fills them on `stream`.");
+             "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, "
+             "flags) to check the flags and return the graph extent and seventeen pointers, then fills them on "
+             "`stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")
         .def("__init__", [](DeviceCollatorHandle* self, const std::vector<nb::handle>& encoders, int device, std::intptr_t stream,

@@ -233,8 +233,8 @@ struct EncodingAxiomInstance
 {
     rl::dev::TaskView view;      // the instance's uploaded task (device pointers)
     const u64* reads = nullptr;  // Derived::reads of its axioms (device; null: every axiom in every round)
-    u32 modes = 0;   // bit m: its graphs read derived atoms under goal mode m (0: the instance's goal, 1: row goals,
-                     // 2: row goals with derived literals)
+    u32 modes = 0;   // bit m: its graphs read derived atoms under mode m (0: the instance's goal, 1: row goals,
+                     // 2: row goals with derived literals; 3 to 5: the same with subgoal layers over derived slots)
     u32 refused = 0;  // nonzero: its axioms are beyond the device's matchers (a row of it that reads them is invalid)
 };
 /// The derived words of a batch of table rows, into the encoder's scratch: row i's closure at derived + i * derived_words

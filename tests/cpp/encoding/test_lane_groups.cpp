@@ -35,13 +35,15 @@ struct Destination
     {
         return {graphs, at<I>("num_objects"), at<I>("relation_counts"), at<I>("relation_offsets"),
                 at<I>("relation_arg_offsets"), at<I>("relation_args"), at<u8>("entity_role"), at<I>("entity_ref"),
-                at<u8>("goal_complete"), at<I>("target_offsets"), at<I>("target_entity"), at<u8>("target_group")};
+                at<u8>("goal_complete"), at<I>("target_offsets"), at<I>("target_entity"), at<u8>("target_group"),
+                at<I>("history_offsets"), at<I>("history_entity"), at<i32>("history_dt")};
     }
 };
 
 auto totals(const ed::GraphTotals& t)
 {
-    return std::tuple{t.entities, t.tuples, t.args, t.targets, t.goal_entities, t.actions, t.virtuals, t.flags};
+    return std::tuple{t.entities, t.tuples, t.args,  t.targets,        t.goal_entities, t.actions,
+                      t.virtuals, t.flags,  t.subgoal_entities, t.history_steps, t.history_targets};
 }
 
 template<class I>
@@ -55,7 +57,7 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
     Destination expected(*reference), plain(*reference), grouped(*reference);
     for (Destination* dst : {&plain, &grouped})
         for (const char* name : {"num_objects", "relation_counts", "relation_args", "entity_role", "entity_ref",
-                                 "goal_complete", "target_entity", "target_group"})
+                                 "goal_complete", "target_entity", "target_group", "history_entity", "history_dt"})
             dst->dirty(name);
     for (Destination* dst : {&plain, &grouped})
     {
@@ -65,11 +67,12 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
                 dst->dirty(name);
                 dst->at<I>(name)[G * R] = expected.at<I>(name)[G * R];
             }
-        if (dst->at<I>("target_offsets"))
-        {
-            dst->dirty("target_offsets");
-            dst->at<I>("target_offsets")[G] = expected.at<I>("target_offsets")[G];
-        }
+        for (const char* name : {"target_offsets", "history_offsets"})
+            if (dst->at<I>(name))
+            {
+                dst->dirty(name);
+                dst->at<I>(name)[G] = expected.at<I>(name)[G];
+            }
     }
     struct Positions
     {
@@ -93,10 +96,25 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
                 row.goal_derived_neg = batch.goal_derived_neg.data() + g * batch.derived_words;
             }
         }
-        const u32 cells = ed::cell_list(v, row).count;
+        // the rows' subgoal layers and history steps, and the levels of the layers
+        const ed::LayerSource source{in.subgoals, in.history, encoder->schema().options().history_max_steps.value_or(0)};
+        ed::RowLayers layers;
+        std::vector<u64> storage;
+        if (source.layered())
+        {
+            ASSERT_EQ(ed::layer_validity(v, source, g), ed::LayerValidity::Valid);
+            if (ed::bind_layers(source, g, layers))
+            {
+                row.layers = &layers;
+                storage.assign(ed::effective_layer_words(v, layers.subgoals), 0);
+                ed::bind_levels(ed::SoloGroup{}, v, row, layers, storage.data());
+            }
+        }
+        const u64 history = expected.at<I>("history_offsets") ? static_cast<u64>(expected.at<I>("history_offsets")[g]) : 0;
+        const u32 cells = ed::cell_list<true>(v, row).count;
         std::vector<u32> a(cells), b(cells), va(v.num_virtual), vb(v.num_virtual);
-        const auto ta = ed::count_graph(v, row, a.data(), va.data());
-        const auto tb = ed::count_graph_group(ed::SoloGroup{}, v, row, b.data(), vb.data());
+        const auto ta = ed::count_graph<true>(v, row, a.data(), va.data());
+        const auto tb = ed::count_graph_group<true>(ed::SoloGroup{}, v, row, b.data(), vb.data());
         ASSERT_EQ(totals(ta), totals(tb));
         ASSERT_EQ(a, b);
         const u64 entity = static_cast<u64>(expected.at<I>("entity_offsets")[g]);
@@ -105,15 +123,18 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
         {
             const u64 tuple = static_cast<u64>(expected.at<I>("relation_offsets")[g * R]);
             const u64 arg = static_cast<u64>(expected.at<I>("relation_arg_offsets")[g * R]);
-            ed::fill_graph<I>(v, row, g, tuple, arg, entity, ta, plain.out<I>(G), target, va.data(), a.data());
-            ed::fill_graph_group<I>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb, grouped.out<I>(G), target,
-                                    vb.data(), b.data());
+            ed::fill_graph<I, true>(v, row, g, tuple, arg, entity, ta, plain.out<I>(G), target, va.data(), a.data(),
+                                    history);
+            ed::fill_graph_group<I, true>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb, grouped.out<I>(G),
+                                          target, vb.data(), b.data(), history);
         }
         else
         {
-            ed::fill_graph_positioned<I>(v, row, g, entity, ta, plain.out<I>(G), positions, target, va.data(), a.data());
-            ed::fill_graph_positioned_group<I>(ed::SoloGroup{}, v, row, g, entity, tb, grouped.out<I>(G), positions,
-                                               target, vb.data(), b.data());
+            ed::fill_graph_positioned<I, decltype(positions), true>(v, row, g, entity, ta, plain.out<I>(G), positions,
+                                                                    target, va.data(), a.data(), history);
+            ed::fill_graph_positioned_group<I, decltype(positions), true>(ed::SoloGroup{}, v, row, g, entity, tb,
+                                                                          grouped.out<I>(G), positions, target,
+                                                                          vb.data(), b.data(), history);
         }
     }
     EXPECT_EQ(plain.arrays, expected.arrays);
@@ -166,10 +187,111 @@ TEST_P(EncodingLaneCorpus, EverySupportedOptionEqualsThePlainForms)
             }
 }
 INSTANTIATE_TEST_SUITE_P(Corpus, EncodingLaneCorpus, ::testing::Range(u32{0}, u32{11}));
+
+TEST(EncodingLaneGroups, SubgoalLevelsAndHistoryEqualThePlainForms)
+{
+    for (const auto& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        auto batch = make_batch(c.table, 33, c.walk, 13);
+        add_layered_rows(batch, 3, 4, 14);
+        for (const Config& config : layered_configs())
+        {
+            SCOPED_TRACE(config.name);
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            {
+                compare<i32>(batch, config, layout);
+                compare<i64>(batch, config, layout);
+            }
+            if (HasFatalFailure())
+                return;
+        }
+    }
+}
 }
 
 namespace
 {
+TEST(EncodingLaneGroups, ARowWithoutLayersLeavesTheLayerStorageUntouched)
+{
+    const auto table = table_of("philosophers", {"p03-phil4"});
+    const auto encoder = encoding::FlatEncoder::create(table, configs().back().options);
+    const auto v = ed::instance_view(encoder->context().view(), 0);
+    const std::vector<u64> state(std::max<u32>(v.words, 1), 0);
+    const ed::RowInput row{state.data(), nullptr};
+    ASSERT_EQ(row.layers, nullptr);
+    // the layer storage of a row that has neither subgoal layers nor history steps is never set: whatever it holds
+    // (a kernel's local memory is not cleared) must not be read as layers
+    alignas(ed::RowLayers) unsigned char bytes[sizeof(ed::RowLayers)];
+    std::fill(std::begin(bytes), std::end(bytes), static_cast<unsigned char>(0xa5));
+    auto& layers = *reinterpret_cast<ed::RowLayers*>(bytes);
+    ed::bind_levels(ed::SoloGroup{}, v, row, layers, nullptr);
+    for (const unsigned char byte : bytes)
+        ASSERT_EQ(byte, 0xa5);
+}
+
+TEST(EncodingLaneGroups, TheLevelsOfARowAreAPointerAndAPresenceMask)
+{
+    // a device thread holds the layers of its row in local memory: the levels name their masks by one storage
+    // pointer, the presence of each goal cell kind and the offsets of level_plane_offset, not by a pointer per kind
+    EXPECT_LE(sizeof(ed::LevelPlanes), 32u);
+    EXPECT_LE(sizeof(ed::RowLayers), 160u);
+    const auto table = table_of("philosophers", {"p03-phil4"});
+    const auto encoder = encoding::FlatEncoder::create(table, configs().back().options);
+    const auto v = ed::instance_view(encoder->context().view(), 0);
+    const std::vector<u64> state(v.words, 0), goal(v.words, 0);
+    std::vector<u64> pos(2 * u64{v.words}, 0), neg(2 * u64{v.words}, 0);
+    pos[0] = 1;        // level 1: a positive literal the state does not satisfy
+    neg[v.words] = 2;  // level 2: a negative literal it satisfies
+    const ed::MaskLayers raw{pos.data(), neg.data(), nullptr, nullptr, 2, v.words, 0};
+    std::vector<u64> storage(ed::effective_layer_words(v, raw), 0);
+    const ed::RowInput row{state.data(), nullptr, goal.data(), goal.data()};  // a row goal without literals
+    const ed::LevelPlanes levels =
+        ed::effective_layers(v, ed::goal_words(v, row), raw, state.data(), nullptr, storage.data());
+    const auto kind = [](u32 level, bool negative, ed::GoalMode mode)
+    { return (level << 4) | (negative ? 4u : 0u) | static_cast<u32>(mode); };
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Plain)),
+              storage.data() + ed::level_plane_offset(v, raw, false, 0, 0));
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::PlainTarget)), levels.plane(kind(1, false, ed::GoalMode::Plain)));
+    EXPECT_NE(levels.plane(kind(1, false, ed::GoalMode::Unsatisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Satisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(1, true, ed::GoalMode::Plain)), nullptr);
+    EXPECT_NE(levels.plane(kind(2, true, ed::GoalMode::Satisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(2, true, ed::GoalMode::Unsatisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(2, false, ed::GoalMode::Plain)), nullptr);
+    EXPECT_EQ(levels.plane(kind(3, false, ed::GoalMode::Plain)), nullptr);
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Plain) | 8u), nullptr);  // no derived masks
+    // only the plain masks are stored: a satisfied or unsatisfied cell cuts its plain mask down by the state
+    EXPECT_EQ(ed::effective_layer_words(v, raw), 2u * 2u * v.words);
+    EXPECT_EQ(levels.plane(kind(2, true, ed::GoalMode::Satisfied)), levels.plane(kind(2, true, ed::GoalMode::Plain)));
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Unsatisfied)), levels.plane(kind(1, false, ed::GoalMode::Plain)));
+}
+
+TEST(EncodingLaneGroups, ALayerCountBeyondTheLevelsComputesNoMoreThanTheLevels)
+{
+    const auto table = table_of("philosophers", {"p03-phil4"});
+    const auto encoder = encoding::FlatEncoder::create(table, configs().back().options);
+    const auto v = ed::instance_view(encoder->context().view(), 0);
+    ASSERT_GT(v.words, 0u);
+    const std::vector<u64> state(v.words, 0);
+    const ed::RowInput row{state.data(), nullptr};
+    // a count no call gives (as an unbound layer view would hold): masks of that many layers, so that nothing is read
+    // past them, and storage for that many, of which only the levels a goal cell kind can name are written
+    constexpr u32 garbage = 1000;
+    const std::vector<u64> pos(u64{garbage} * v.words, 0x5555555555555555ull), neg(u64{garbage} * v.words, 0);
+    const ed::MaskLayers raw{pos.data(), neg.data(), nullptr, nullptr, garbage, v.words, 0};
+    ed::MaskLayers levels = raw;
+    levels.layers = ed::k_max_subgoal_levels;
+    EXPECT_EQ(ed::level_count(raw), ed::k_max_subgoal_levels);
+    EXPECT_EQ(ed::effective_layer_words(v, raw), ed::effective_layer_words(v, levels));
+    constexpr u64 untouched = 0xa5a5a5a5a5a5a5a5ull;
+    std::vector<u64> storage(u64{garbage} * 6 * v.words, untouched);
+    (void)ed::effective_layers(v, ed::goal_words(v, row), raw, state.data(), nullptr, storage.data());
+    const u64 used = ed::effective_layer_words(v, levels);
+    for (u64 i = used; i < storage.size(); ++i)
+        ASSERT_EQ(storage[i], untouched) << "word " << i << " of the storage past the levels";
+}
+
 TEST(EncodingLaneGroups, GoalStridesRejectOverlapAndAllowBroadcast)
 {
     const auto table = table_of("philosophers", {"p03-phil4"});
