@@ -607,6 +607,13 @@ def test_the_size_words_follow_the_native_size_fields():
     static = (("task_ids",), 1, 0, 0, 0, True, None, 0)
     batch = ej.JaxFlatBatch({"task_ids": jnp.zeros((2,), jnp.int32)}, jnp.asarray(words), static)
     assert int(batch.overflow) == _device._OVERFLOW_CAPACITY | _device._OVERFLOW_INPUT
+
+
+def test_the_device_ordinal_is_the_local_hardware_id_even_when_it_is_zero():
+    assert ej._ordinal(types.SimpleNamespace(local_hardware_id=0, id=5)) == 0
+    assert ej._ordinal(types.SimpleNamespace(local_hardware_id=3, id=5)) == 3
+    assert ej._ordinal(types.SimpleNamespace(id=5)) == 5
+    assert ej._ordinal(types.SimpleNamespace(local_hardware_id=None, id=2)) == 2
 def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     """Destroying the last reference of an encoder waits for the device. CUDA refuses that wait while another thread
     captures a CUDA graph; the generation is then kept (not freed under work that may still read it) and counted."""

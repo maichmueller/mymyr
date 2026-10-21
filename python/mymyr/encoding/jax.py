@@ -351,6 +351,12 @@ def _cuda_device() -> Optional[Any]:
     return devices[0] if devices else None
 
 
+def _ordinal(device: Any) -> int:
+    """The CUDA ordinal of a JAX device: its local hardware id (0 is a valid one), else its id."""
+    local = getattr(device, "local_hardware_id", None)
+    return int(device.id if local is None else local)
+
+
 def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Optional[int]:
     """The bytes of the call's scratch result: the device encoder's scratch for `graphs` rows (with `derived`: the rows
     come with their derived words, otherwise the device evaluates them) plus 255 bytes of alignment slack, or None
@@ -360,7 +366,7 @@ def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Opt
     device = _cuda_device()
     if device is None:
         return None
-    ordinal = int(getattr(device, "local_hardware_id", None) or device.id)
+    ordinal = _ordinal(device)
     key = (graphs, ordinal, derived)
     n = reg.scratch.get(key)
     if n is None:
