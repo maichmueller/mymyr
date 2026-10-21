@@ -904,6 +904,8 @@ def test_shared_statics_are_refused_by_the_device_before_any_launch():
         encoder.encode(rows)
     with pytest.raises(ValueError, match=message):
         encoder.reserve_device(8)
+    with pytest.raises(ValueError, match=message):
+        encoder.device_stream(8)
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     handle = rt.register(encoder)
