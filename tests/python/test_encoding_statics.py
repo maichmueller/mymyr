@@ -10,7 +10,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from conftest import BLOCKS, text_task, walk
+from conftest import BLOCKS, ROOT, text_task, walk
 
 TASKS = ["gripper__prob05", "blocks__probBLOCKS-8-0", "logistics00__probLOGISTICS-6-1", "philosophers__p03-phil4"]
 STATIC_ARRAYS = ("static_task_ids", "static_offsets", "static_arg_offsets", "static_args", "static_relations")
@@ -32,8 +32,15 @@ OPTION_SETS = {
 
 
 def arrays(batch):
-    """The arrays of a batch as int64 NumPy arrays by name."""
-    return {k: np.asarray(v).astype(np.int64) for k, v in batch.as_dict().items() if np.ndim(v) > 0}
+    """The arrays of a batch as int64 NumPy arrays by name; a float array (numeric values) by its bits."""
+    out = {}
+    for key, value in batch.as_dict().items():
+        if np.ndim(value) > 0:
+            value = np.asarray(value)
+            if value.dtype.kind == "f":
+                value = value.view(np.int32 if value.itemsize == 4 else np.int64)
+            out[key] = value.astype(np.int64)
+    return out
 
 
 def repeated_form(batch):
@@ -135,6 +142,21 @@ def test_the_blocks_and_the_graphs_rebuild_the_repeated_batch(name, layout, inde
     if counts is not None:
         assert not counts[:, sorted(static)].any() if static else True
     assert d["static_task_ids"].tolist() == [0]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("name", ["cs-drone", "m-refuel", "cs-expedition"])
+def test_the_numeric_lane_rebuilds_the_repeated_batch(name, layout, dtype):
+    # the numeric relations are fluent: they stay in the graphs, with the values of the repeated batch
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks" / f"{name}.txt"))
+    states = walk(task, steps=12, walks=3)
+    common = dict(layout=layout, numeric_dtype=dtype)
+    shared = encoding.FlatRelationEncoder(task, statics="shared", **common)
+    batch = assert_rebuilds(shared, encoding.FlatRelationEncoder(task, **common), states)
+    static = [int(r) for r in batch.as_dict()["static_relations"]]
+    assert static and all(shared.relation_lanes[r] != "numeric" for r in static)
+    assert len(batch.numeric_values) > 0
 
 
 def test_a_table_of_instances_keeps_one_block_each_in_instance_order():

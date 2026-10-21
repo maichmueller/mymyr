@@ -37,6 +37,9 @@ std::vector<i64> values_of(const rl::ArrayBundle& bundle, const rl::ArrayInfo& i
             case rl::DType::U8: out.push_back(std::to_integer<u8>(*at)); break;
             case rl::DType::I32: { i32 v; std::memcpy(&v, at, 4); out.push_back(v); break; }
             case rl::DType::I64: { i64 v; std::memcpy(&v, at, 8); out.push_back(v); break; }
+            // numeric values compare by their bits
+            case rl::DType::F32: { i32 v; std::memcpy(&v, at, 4); out.push_back(v); break; }
+            case rl::DType::F64: { i64 v; std::memcpy(&v, at, 8); out.push_back(v); break; }
             default: ADD_FAILURE() << "unexpected dtype of " << info.name;
         }
     }
@@ -236,6 +239,32 @@ TEST(SharedStatics, RebuildTheRepeatedFormOverTheCorpus)
                                         std::string(corpus.name) + "/" + config.name + "/" + shape.text());
             }
     }
+}
+
+TEST(SharedStatics, RebuildTheRepeatedFormWithTheNumericLane)
+{
+    // the numeric relations are fluent: they stay in the graphs, and numeric_values is that of the repeated form
+    u64 static_tables = 0;
+    for (const em::Corpus& corpus : em::numeric_corpus())
+    {
+        const test::Rows rows = em::walk_rows(*corpus.table, 20, 13);
+        const EncodeInput in = em::input_of(rows);
+        for (const Shape& shape : k_shapes)
+            for (const NumericDtype dtype : {NumericDtype::F32, NumericDtype::F64})
+            {
+                FlatOptions options = em::with(test::encoder_options(), shape.layout, shape.index);
+                options.numeric_dtype = dtype;
+                const auto schema = FlatEncoder::create(corpus.table, shared_of(options))->schema_ptr();
+                ASSERT_TRUE(schema->stores_numeric_values());
+                for (const u32 r : schema->static_relations())
+                    EXPECT_LT(r, schema->first_numeric_relation()) << corpus.name;
+                static_tables += !schema->static_relations().empty();
+                expect_same_as_repeated(corpus.table, options, in,
+                                        std::string(corpus.name) + "/" + shape.text() + "/" +
+                                            std::string(to_string(dtype)));
+            }
+    }
+    EXPECT_GT(static_tables, 0u);
 }
 
 TEST(SharedStatics, ASingleRowAndAnEmptyBatchHaveTheirBlocks)
