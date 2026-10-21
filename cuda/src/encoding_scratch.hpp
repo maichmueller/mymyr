@@ -12,8 +12,8 @@ namespace mymyr::cuda::detail
 /// relation-major layout the entity and target rows and a row of G * R + 1 entries, the tuples of the cells in segment
 /// order; with history, a last row of G + 1 entries holds the history steps of the graphs. The entries are u32 when the
 /// conservative sum of the bounds fits u32, u64 otherwise (always with history, whose steps per row the bounds do not
-/// limit). Cell counts are [G, cells] u32 (graph-major only). The subgoal levels of a graph (the plain, satisfied and
-/// unsatisfied masks of every level, sign and slot kind) take `level_stride` u64 words each. The scan is two kernels.
+/// limit). Cell counts are [G, cells] u32 (graph-major only). The subgoal levels of a graph (the plain mask of every level,
+/// sign and slot kind) take `level_stride` u64 words each. The scan is two kernels.
 /// Offsets are bytes into the scratch. Scratch bytes: 16 per graph and 4 per cell (graph-major, narrow), plus the
 /// levels and the scan's storage.
 struct ScratchLayout

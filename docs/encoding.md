@@ -646,7 +646,7 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   `history_max_steps` of each row's valid steps (all of them when it is not set), history targets numbered relation,
   then step, then slot. A row may use fewer layers than the call has (an empty layer adds nothing) and have fewer valid
   steps than `H`, down to none. The subgoal levels of a graph are computed once into the workspace's scratch, so a
-  schema with levels needs scratch of three planes per level and sign over the instance's words for every graph of a
+  schema with levels needs scratch of one mask per level and sign over the instance's words for every graph of a
   batch, on top of the scratch of a schema without them.
 - **Refused.** `actions=` (the action relations are not encoded on the device), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
