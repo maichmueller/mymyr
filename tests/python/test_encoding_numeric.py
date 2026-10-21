@@ -198,6 +198,45 @@ def test_an_undefined_value_is_nan(cases):
         assert int(np.asarray(batch.entity_role)[int(np.asarray(batch.relation_args)[first])]) == 8
 
 
+MIX_DOMAIN = (
+    "(define (domain mix) (:requirements :strips :typing :numeric-fluents) (:types a b)"
+    " (:predicates (p ?x - a) (q)) (:functions (f ?x - a) (g ?y - b) (h))"
+    " (:action inc-f :parameters (?x - a) :precondition (p ?x) :effect (and (q) (increase (f ?x) 1)))"
+    " (:action inc-g :parameters (?y - b) :precondition (q) :effect (and (not (q)) (increase (g ?y) 2)))"
+    " (:action inc-h :parameters () :precondition (q) :effect (and (not (q)) (increase (h) 0.5))))"
+)
+MIX_PROBLEMS = (
+    "(define (problem both) (:domain mix) (:objects a2 a1 - a b1 b2 - b)"
+    " (:init (p a1) (p a2) (= (f a1) 1) (= (f a2) 3) (= (g b1) 0) (= (g b2) 7) (= (h) 0)) (:goal (and (q))))",
+    # no object of type b: no slot of g
+    "(define (problem without-g) (:domain mix) (:objects a1 - a) (:init (p a1) (= (f a1) 0) (= (h) 1)) (:goal (and (q))))",
+)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("index", INDICES)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_an_instance_without_slots_of_a_function_has_no_tuples_of_its_relation(layout, index, dtype):
+    needs_front_end()
+    domain = mymyr.Domain.from_string(MIX_DOMAIN)
+    case = Case("mix", rl.TaskTable([mymyr.Task(domain.instantiate_string(p)) for p in MIX_PROBLEMS]))
+    assert [len(t.numeric_names) for t in case.table.tasks] == [5, 2]
+    encoder = encoding.FlatRelationEncoder(case.table, layout=layout, index_dtype=index, numeric_dtype=dtype,
+                                           goal_derivations=())
+    assert [n for n in encoder.relation_names if n.startswith("[num]")] == ["[num]f", "[num]g", "[num]h"]
+    batch = encoder.encode(case.states, case.ids)
+    same_values(decode(batch, encoder), expected(case, encoder, batch))
+    counts = np.asarray(batch.relation_counts)
+    f, g, h = (encoder.relation_id(n) for n in ("[num]f", "[num]g", "[num]h"))
+    second = case.ids == 1
+    assert second.any() and (~second).any()
+    assert (counts[second, f] == 1).all() and (counts[second, g] == 0).all() and (counts[:, h] == 1).all()
+    assert (counts[~second, f] == 2).all() and (counts[~second, g] == 2).all()
+    at = int(np.flatnonzero(second)[0])
+    single = encoder.encode([case.states[at]], case.ids[at : at + 1])
+    same_values(decode(single, encoder), [decode(batch, encoder)[at]])
+
+
 @pytest.mark.parametrize("name", ["counters_i32", "cs-drone"])
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_the_forms_of_the_encoder_agree(cases, name, layout):

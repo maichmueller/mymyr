@@ -443,6 +443,55 @@ TEST(EncoderNumeric, TuplesAndValuesWithSubgoalLayersAndHistory)
     EXPECT_GT(with_subgoals, 0u);
 }
 
+TEST(EncoderNumeric, AnInstanceWithoutSlotsOfAFunctionHasNoTuplesOfItsRelation)
+{
+    // f over a, g over b, h nullary: the second instance has no object of type b, so no slot of g
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain mix) (:requirements :strips :typing :numeric-fluents) (:types a b)"
+        " (:predicates (p ?x - a) (q)) (:functions (f ?x - a) (g ?y - b) (h))"
+        " (:action inc-f :parameters (?x - a) :precondition (p ?x) :effect (and (q) (increase (f ?x) 1)))"
+        " (:action inc-g :parameters (?y - b) :precondition (q) :effect (and (not (q)) (increase (g ?y) 2)))"
+        " (:action inc-h :parameters () :precondition (q) :effect (and (not (q)) (increase (h) 0.5))))");
+    const auto both = Task::create(*domain->instantiate_string(
+        "(define (problem both) (:domain mix) (:objects a2 a1 - a b1 b2 - b)"
+        " (:init (p a1) (p a2) (= (f a1) 1) (= (f a2) 3) (= (g b1) 0) (= (g b2) 7) (= (h) 0)) (:goal (and (q))))"));
+    const auto without_g = Task::create(*domain->instantiate_string(
+        "(define (problem without-g) (:domain mix) (:objects a1 - a)"
+        " (:init (p a1) (= (f a1) 0) (= (h) 1)) (:goal (and (q))))"));
+    const auto table = rl::TaskTable::create({both, without_g});
+    ASSERT_EQ(table->task(0)->numeric().slots, 5u);
+    ASSERT_EQ(table->task(1)->numeric().slots, 2u);
+    const test::Rows rows = mixed_rows(*table, 10, 6);
+    for (const Layout layout : k_layouts)
+        for (const IndexType index : k_indices)
+            for (const NumericDtype dtype : k_dtypes)
+            {
+                SCOPED_TRACE("layout=" + std::string(to_string(layout)) + (index == IndexType::I64 ? " int64 " : " int32 ") +
+                             std::string(to_string(dtype)));
+                const auto encoder = FlatEncoder::create(table, options_with(layout, index, dtype));
+                const EncodingSchema& schema = encoder->schema();
+                ASSERT_EQ(schema.num_relations() - schema.first_numeric_relation(), 3u);
+                const auto batch = encoder->encode(input_of(rows));
+                EXPECT_NO_THROW(validate(*batch, schema));
+                expect_equal(decode(*batch, schema), expected(*table, schema, rows, *batch));
+                const auto counts = ints(*batch, "relation_counts");
+                const u64 R = schema.num_relations();
+                for (u64 g = 0; g < rows.size(); ++g)
+                {
+                    const bool second = rows.task_ids[g] == 1;
+                    EXPECT_EQ(counts[g * R + *schema.find("[num]f")], second ? 1 : 2) << "graph " << g;
+                    EXPECT_EQ(counts[g * R + *schema.find("[num]g")], second ? 0 : 2) << "graph " << g;
+                    EXPECT_EQ(counts[g * R + *schema.find("[num]h")], 1) << "graph " << g;
+                }
+                // a single row of the second instance alone
+                const test::Rows one = row_of(rows, 1, table->row_words());
+                ASSERT_EQ(one.task_ids[0], 1);
+                const auto single = encoder->encode(input_of(one));
+                EXPECT_NO_THROW(validate(*single, schema));
+                expect_equal(decode(*single, schema), expected(*table, schema, one, *single));
+            }
+}
+
 TEST(EncoderNumeric, ValuesFollowTheStateAlongAWalk)
 {
     // the values change from row to row and instances differ in their slots: not every row has the same values
