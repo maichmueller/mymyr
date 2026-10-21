@@ -463,6 +463,16 @@ def test_constants_have_labels_of_their_own_when_asked():
     assert pickle.loads(pickle.dumps(labelled)).options["constant_labels"] is True
 
 
+def test_constant_labels_refuse_a_task_without_recorded_constants():
+    # the text format does not record which objects are constants of the domain
+    task = text_task("gripper__prob05")
+    assert encoding.SimpleEncoder(task).schema.simple_constants == 0
+    with pytest.raises(ValueError, match="^mymyr: encoding: constant_labels needs the constants of the domain"):
+        encoding.SimpleEncoder(task, constant_labels=True)
+    with pytest.raises(ValueError, match="constant_labels needs the constants of the domain"):
+        encoding.FlatRelationEncoder(rl.TaskTable([task]), outputs=("relations", "simple"), constant_labels=True)
+
+
 # ------------------------------------------------------------------------------------------------ pickling and refusals
 def test_encoders_pickle_with_their_outputs():
     task = text_task("blocks__probBLOCKS-8-0")

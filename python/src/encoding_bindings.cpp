@@ -430,8 +430,9 @@ constexpr const char* k_option_doc =
     "relation_* arrays) and 'simple' (the Simple graph: node_offsets, node_label, edge_offsets, edge_index and "
     "edge_label; it needs entity_arrays='always' and no predicate_virtual_nodes, and without 'relations' the layout "
     "and emit_counts keep their defaults). constant_labels: with 'simple', each constant of the domain has a node label "
-    "of its own (otherwise an object has the label of its role). Raises ValueError for invalid combinations and for "
-    "horizon encodings of a domain with numeric functions.";
+    "of its own (otherwise an object has the label of its role); a task read from the text format does not record "
+    "the constants and is refused. Raises ValueError for invalid combinations and for horizon encodings of a domain "
+    "with numeric functions.";
 
 constexpr const char* k_horizon_option_doc =
     " horizon_mode, root_policy, parent_relation, sibling_relation, cousin_relation: the horizon variants "

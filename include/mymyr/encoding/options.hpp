@@ -190,7 +190,8 @@ struct FlatOptions
     /// emit_counts have no meaning, so they stay at their defaults).
     Outputs outputs{Output::Relations};
     /// Simple: an object that is a constant of the domain gets a node label of its own (otherwise every object has the
-    /// label of its role). Needs the Simple output.
+    /// label of its role). Needs the Simple output and the domain's constants (DomainSignature::constants_recorded):
+    /// a task read from the text format does not record them and is refused.
     bool constant_labels = false;
     Layout layout = Layout::Graph;
     IndexType index = IndexType::I32;

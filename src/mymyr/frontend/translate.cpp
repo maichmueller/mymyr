@@ -1773,6 +1773,7 @@ std::unique_ptr<DomainState> translate_domain(const loki::Domain& dl, const Pred
         }
 
     // constants
+    t.constants_recorded = true;
     for (const auto& o : dl->get_constants())
     {
         Object out;

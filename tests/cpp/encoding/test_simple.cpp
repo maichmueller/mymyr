@@ -766,6 +766,34 @@ TEST(Simple, ConstantsGetLabelsOfTheirOwnWhenAsked)
     EXPECT_EQ(b[static_cast<u64>(offsets[0])], b[static_cast<u64>(offsets[rows.size() - 1])]);
 }
 
+TEST(Simple, ConstantLabelsRefuseATaskWithoutRecordedConstants)
+{
+    // the text format does not record which objects are constants of the domain; a PDDL domain without constants is
+    // a domain with none
+    const auto text = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/gripper__prob05.txt");
+    FlatOptions options = test::encoder_options();
+    options.outputs = k_both;
+    EXPECT_NO_THROW((void)FlatEncoder::create(rl::TaskTable::single(text), options));
+    options.constant_labels = true;
+    for (const auto& table : {rl::TaskTable::single(text),
+                              rl::TaskTable::create({test::pddl_task("gripper", "p01"), text})})
+    {
+        try
+        {
+            (void)FlatEncoder::create(table, options);
+            ADD_FAILURE() << "constant_labels accepted a task without recorded constants";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            EXPECT_NE(std::string(error.what()).find("mymyr: encoding: constant_labels needs the constants of the domain"),
+                      std::string::npos)
+                << error.what();
+        }
+    }
+    const auto blocks = FlatEncoder::create(rl::TaskTable::single(test::pddl_task("blocks", "smedium")), options);
+    EXPECT_EQ(blocks->schema().simple_constants(), 0u);
+}
+
 TEST(Simple, RefusesWhatItCannotRepresent)
 {
     const Tables tables("blocks", {"smedium"});

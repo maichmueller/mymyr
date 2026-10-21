@@ -404,6 +404,8 @@ DomainSignature DomainSignature::of(const rl::TaskTable& table)
     }
     for (u32 s = 0; s < table.num_schemas(); ++s)
         domain.schemas.push_back({table.schema_names()[s], table.schema_arities()[s]});
+    for (u32 i = 0; i < table.size(); ++i)
+        domain.constants_recorded = domain.constants_recorded && table.instance(i).task->data().constants_recorded;
     if (table.size() != 0)
     {
         const formalism::TaskData& data = table.instance(0).task->data();
@@ -531,6 +533,9 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         schema->m_simple_max_arity = std::max(schema->m_simple_max_arity, relation.arity);
     if (o.constant_labels)
     {
+        if (!domain.constants_recorded)
+            invalid("constant_labels needs the constants of the domain, which a task read from mymyr's text format "
+                    "does not record: load the task from PDDL");
         schema->m_constants = domain.constants;
         schema->m_simple_constants = static_cast<u32>(domain.constants.size());
     }

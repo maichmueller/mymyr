@@ -72,6 +72,9 @@ struct DomainSignature
     /// The constants of the domain, in declaration order: they are the first objects of every instance, so the
     /// constant with index c is the object with id c.
     std::vector<std::string> constants;
+    /// Whether `constants` lists the domain's constants: false when an instance was read from mymyr's text format,
+    /// which does not record them (FlatOptions::constant_labels then refuses the domain).
+    bool constants_recorded = true;
 
     /// The domain of a task table: its domain predicates (the front end's helper predicates for quantified conditions
     /// among them; the predicates only a problem's axioms define are not part of it), its numeric functions and its

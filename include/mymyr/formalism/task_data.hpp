@@ -226,6 +226,9 @@ struct TaskData
     // entities
     std::vector<Type> types;
     std::vector<Object> objects;
+    // Whether `Object::constant` marks the domain's constants. The front end records them; mymyr's text format does
+    // not, so every object of a task read from it is unmarked whether or not its domain has constants.
+    bool constants_recorded = false;
     std::vector<Predicate> predicates;
     std::vector<Function> functions;
     std::vector<Schema> schemas;
