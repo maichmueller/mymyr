@@ -599,13 +599,13 @@ def test_the_size_words_follow_the_native_size_fields():
     fields = _device._SIZE_FIELDS
     words = np.zeros((len(fields), 2), np.uint32)
     for k, name in enumerate(fields):
-        words[k] = (k + 1, 0 if name != "targets" else 3)  # targets above 32 bits
+        words[k] = (100 + k, 0 if name != "targets" else 3)  # no size equals the flags; targets above 32 bits
     flags = fields.index("overflow")
     words[flags] = (_device._OVERFLOW_CAPACITY | _device._OVERFLOW_INPUT, 0)
     sizes = ej._host_sizes(words)
     for k, name in enumerate(fields):
         if name not in ("overflow", "history"):
-            assert sizes[name] == (k + 1) + ((3 << 32) if name == "targets" else 0), name
+            assert sizes[name] == (100 + k) + ((3 << 32) if name == "targets" else 0), name
     assert sizes["overflow"] and sizes["capacity_overflow"] and sizes["invalid_input"] and not sizes["index_overflow"]
     static = (("task_ids",), 1, 0, 0, 0, True, None, 0)
     batch = ej.JaxFlatBatch({"task_ids": jnp.zeros((2,), jnp.int32)}, jnp.asarray(words), static)
