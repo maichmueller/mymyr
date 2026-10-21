@@ -367,6 +367,14 @@ def test_lax_scan_encodes_every_step(cases):
                 if name in ej.JaxFlatBatch.array_names:
                     assert np.array_equal(np.asarray(getattr(stacked, name)[k]), np.asarray(getattr(host, name))), name
             assert ej._host_sizes(np.asarray(stacked.device_sizes[k]))["args"] == host.sizes["args"]
+        sizes = stacked.sizes  # NumPy arrays over the stacked axis
+        assert sizes["args"].shape == (steps,) and sizes["overflow"].shape == (steps,) and not sizes["overflow"].any()
+        for k in range(steps):
+            step = case.resized(per_step)
+            step.rows = case.rows[k * per_step:(k + 1) * per_step]
+            want = host_encode(encoder, step, capacities=caps).sizes
+            for key in ("entities", "tuples", "args", "targets"):
+                assert int(sizes[key][k]) == want[key], key
 
 
 def test_vmap_encodes_each_batch_on_its_own(cases):
@@ -378,6 +386,10 @@ def test_vmap_encodes_each_batch_on_its_own(cases):
     for platform in PLATFORMS:
         batched = jax.jit(jax.vmap(lambda r: ej.encode(encoder, r, capacities=caps)))(put(rows, platform))
         assert batched.relation_args.shape == (3, caps["args"])
+        sizes = batched.sizes
+        assert sizes["args"].shape == (3,) and not sizes["capacity_overflow"].any() and not sizes["overflow"].any()
+        for b in range(3):
+            assert int(sizes["args"][b]) == ej.encode(encoder, put(rows[b], platform), capacities=caps).sizes["args"]
         for b in range(3):
             single = ej.encode(encoder, put(rows[b], platform), capacities=caps)
             for x, y in zip(jax.tree_util.tree_leaves(single), jax.tree_util.tree_leaves(batched), strict=True):

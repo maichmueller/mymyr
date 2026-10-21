@@ -197,7 +197,8 @@ class JaxFlatBatch:
         """After an encoding with capacities: the true entities, tuples, args and targets of the batch, and whether it
         overflowed (``overflow``: the batch is all zero) because of the capacities (``capacity_overflow``), the index
         type (``index_overflow``) or an invalid row (``invalid_input``); None for an exact batch. It reads
-        ``device_sizes`` on the host, which waits for the computation (not under ``jax.jit``)."""
+        ``device_sizes`` on the host, which waits for the computation (not under ``jax.jit``). Of a batch stacked by
+        ``lax.scan`` or ``jax.vmap`` every value is a NumPy array over the stacked axes."""
         if self._sizes is None:
             return None
         return _host_sizes(np.asarray(self._sizes))
@@ -251,15 +252,19 @@ del _name
 
 
 def _host_sizes(words: np.ndarray) -> dict[str, Any]:
-    halves = np.ascontiguousarray(words, dtype=np.uint32).reshape(len(_SIZE_FIELDS), 2).astype(np.uint64)
+    """The sizes of ``device_sizes`` words (uint32 [..., S, 2]): Python values for one batch, NumPy arrays over the
+    leading axes of a stacked batch."""
+    halves = np.ascontiguousarray(words, dtype=np.uint32).astype(np.uint64)
+    packed = halves[..., 0] | (halves[..., 1] << np.uint64(32))  # [..., S]
     # a batch of this target has no history steps (the device refuses such schemas), as a host batch without history
-    values = {name: int(lo) | (int(hi) << 32) for name, (lo, hi) in zip(_SIZE_FIELDS, halves, strict=True)
-              if name != "history"}
+    values = {name: packed[..., k] for k, name in enumerate(_SIZE_FIELDS) if name != "history"}
     flags = values["overflow"]
     values["overflow"] = flags != 0
-    values["capacity_overflow"] = bool(flags & _device._OVERFLOW_CAPACITY)
-    values["index_overflow"] = bool(flags & _device._OVERFLOW_INDEX)
-    values["invalid_input"] = bool(flags & _device._OVERFLOW_INPUT)
+    values["capacity_overflow"] = (flags & _device._OVERFLOW_CAPACITY) != 0
+    values["index_overflow"] = (flags & _device._OVERFLOW_INDEX) != 0
+    values["invalid_input"] = (flags & _device._OVERFLOW_INPUT) != 0
+    if packed.ndim == 1:
+        return {name: (bool(v) if v.dtype == np.bool_ else int(v)) for name, v in values.items()}
     return values
 
 
