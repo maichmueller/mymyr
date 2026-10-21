@@ -651,13 +651,8 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
+    // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
-    constexpr encoding::TargetSources targets{encoding::TargetSource::Goal, encoding::TargetSource::Subgoal,
-                                              encoding::TargetSource::History};
-    constexpr encoding::GoalDerivations goals{encoding::GoalDerivation::Plain, encoding::GoalDerivation::Satisfied,
-                                             encoding::GoalDerivation::Unsatisfied};
-    if (o.targets.bits() & ~targets.bits()) refuse("these target sources");
-    if (o.goal_derivations.bits() & ~goals.bits()) refuse("these goal derivations");
 }
 
 DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder)

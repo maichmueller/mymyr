@@ -218,7 +218,8 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode (action targets, horizons, ...).
+    /// Throws std::invalid_argument for a schema the device does not encode: action targets and horizons (with the
+    /// goal derivations that only a delta horizon has).
     static void check_schema(const encoding::EncodingSchema& schema);
 
     /// Each stream has its own scratch.
