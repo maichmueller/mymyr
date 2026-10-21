@@ -830,7 +830,7 @@ relations. An encoder has the same properties.
   a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, history and `history_max_steps`, horizon
-  mode and root policy), `statics='shared'` (the repeated form adds nothing, so existing fingerprints are unchanged),
+  mode and root policy), `statics='shared'` (the repeated form adds nothing to the hash),
   and which arrays are omitted: `relation_counts` (`emit_counts=False`) and `entity_role` / `entity_ref` (implicit
   entity arrays); an encoding that stores every array has one fingerprint however it was asked for. It does not depend
   on declaration order, on predicate ids, on the process or on the build.
@@ -862,8 +862,8 @@ With `FlatOptions::statics = Statics::Shared` (`schema.shared_statics()`) the ca
 scratch, &static_sizes)`, `encode_capacity(..., sizes, &static_shape, &static_sizes)`, `encode_into(..., scratch,
 &static_shape, &static_sizes)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
 (`static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations`), null iff the statics are
-repeated. `require_repeated_statics(options, family)` is the refusal that an encoding without shared statics (the
-device encoder) makes.
+repeated. `require_repeated_statics(options, family)` is the refusal for an encoding family whose graphs need the static
+tuples among their own tuples; the device encoder refuses shared statics when it is made.
 
 `mymyr/cuda/encoding.hpp`, linked with `mymyr::cuda`, has the [device encoder](#encoding-on-the-device):
 `cuda::DeviceEncoder(context, encoder)` uploads the encoder's context, `reserve` and `acquire` give an
