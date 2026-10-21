@@ -209,7 +209,8 @@ MIX_PROBLEMS = (
     "(define (problem both) (:domain mix) (:objects a2 a1 - a b1 b2 - b)"
     " (:init (p a1) (p a2) (= (f a1) 1) (= (f a2) 3) (= (g b1) 0) (= (g b2) 7) (= (h) 0)) (:goal (and (q))))",
     # no object of type b: no slot of g
-    "(define (problem without-g) (:domain mix) (:objects a1 - a) (:init (p a1) (= (f a1) 0) (= (h) 1)) (:goal (and (q))))",
+    "(define (problem without-g) (:domain mix) (:objects a1 - a)"
+    " (:init (p a1) (= (f a1) 0) (= (h) 1)) (:goal (and (q))))",
 )
 
 

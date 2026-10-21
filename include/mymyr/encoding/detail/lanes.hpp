@@ -264,8 +264,8 @@ struct InstanceView
     u32 num_cells, num_row_cells, num_plain_cells, num_plain_row_cells;
     const Cell *cells, *row_cells, *plain_cells, *plain_row_cells;
     const Cell* cell_base;   // the context's cells: the rows of the extended lists are relative to it
-    const u64* columns;      // the instance's k_instance_columns columns: the ones not resolved here (the extended lists,
-                             // the numeric slots) are read from it where needed
+    const u64* columns;      // the instance's k_instance_columns columns: the ones not resolved here (the extended
+                             // lists, the numeric slots) are read from it where needed
     const i32* slot_args;
     const i32* derived_args;
     const i32* static_args;

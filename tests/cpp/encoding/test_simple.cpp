@@ -785,9 +785,9 @@ TEST(Simple, ConstantLabelsRefuseATaskWithoutRecordedConstants)
         }
         catch (const std::invalid_argument& error)
         {
-            EXPECT_NE(std::string(error.what()).find("mymyr: encoding: constant_labels needs the constants of the domain"),
-                      std::string::npos)
-                << error.what();
+            const std::string what = error.what();
+            EXPECT_NE(what.find("mymyr: encoding: constant_labels needs the constants of the domain"), std::string::npos)
+                << what;
         }
     }
     const auto blocks = FlatEncoder::create(rl::TaskTable::single(test::pddl_task("blocks", "smedium")), options);

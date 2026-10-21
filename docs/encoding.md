@@ -710,13 +710,14 @@ capacities (`capacities=dict(graphs=..., entities=..., args=...)`) the Simple ar
 and `2 * args` edges; the first `sizes['entities'] + sizes['tuples']` nodes and `2 * sizes['args']` edges hold the
 graphs and the rest is zero. `edge_index` is then `[2, 2 * args]`.
 
-**Refusals.** `predicate_virtual_nodes` (a tuple's node already names its predicate) and `entity_arrays='auto'`
-(the graph keeps the entity arrays) raise `ValueError` with Simple, and so do `layout='relation'` and `emit_counts=False`
+**Refusals.** `predicate_virtual_nodes` (a tuple's node already names its predicate) and `entity_arrays='auto'` (the
+graph keeps the entity arrays) raise `ValueError` with Simple, and so do `layout='relation'` and `emit_counts=False`
 without the `'relations'` output, since the batch has no relation arrays for them to shape. `constant_labels` needs the
 `'simple'` output and the constants of the domain: a task read from mymyr's text format does not record them, so a table
-with such a task raises `ValueError` with `constant_labels=True` (a PDDL domain without constants has none to label). The device does not encode Simple: an encoder with the Simple output raises `ValueError` ("the device
-does not encode Simple") for rows in CUDA memory. `entity_names` and `describe` read the relation arrays and raise for a
-Simple-only batch, and `hgraph` views relation arrays.
+with such a task raises `ValueError` with `constant_labels=True` (a PDDL domain without constants has none to label).
+The device does not encode Simple: an encoder with the Simple output raises `ValueError` ("the device does not encode
+Simple") for rows in CUDA memory. `entity_names` and `describe` read the relation arrays and raise for a Simple-only
+batch, and `hgraph` views relation arrays.
 
 ```python needs-torch_geometric
 import torch_geometric

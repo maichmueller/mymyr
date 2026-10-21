@@ -398,7 +398,8 @@ TEST(EncoderNumeric, TuplesAndValuesWithSubgoalLayersAndHistory)
                         options.targets = {TargetSource::Goal, TargetSource::Subgoal, TargetSource::History};
                     const auto encoder = FlatEncoder::create(t.table, options);
                     EncodeInput in = input_of(rows);
-                    const LayerInput layer{.pos = pos.data(), .neg = neg.data(), .stride = words, .layers = 1, .words = words};
+                    const LayerInput layer{
+                        .pos = pos.data(), .neg = neg.data(), .stride = words, .layers = 1, .words = words};
                     // a table whose goals have no atoms (only numeric conditions) has no subgoal relations
                     if (encoder->schema().has_subgoals())
                     {
@@ -411,7 +412,8 @@ TEST(EncoderNumeric, TuplesAndValuesWithSubgoalLayersAndHistory)
                     std::shared_ptr<const rl::ArrayBundle> batch;
                     ASSERT_NO_THROW(batch = encoder->encode(in));
                     EXPECT_NO_THROW(validate(*batch, encoder->schema()));
-                    expect_equal(decode(*batch, encoder->schema()), expected(*t.table, encoder->schema(), rows, *batch));
+                    expect_equal(decode(*batch, encoder->schema()),
+                                 expected(*t.table, encoder->schema(), rows, *batch));
                     EXPECT_EQ(batch->find("target_offsets") != nullptr, targets);
                     // the numeric tuples add no goal, subgoal, history or target entity: per graph, the entities of
                     // every role but the auxiliary one, the history steps and the targets of every group are those of
@@ -466,8 +468,8 @@ TEST(EncoderNumeric, AnInstanceWithoutSlotsOfAFunctionHasNoTuplesOfItsRelation)
         for (const IndexType index : k_indices)
             for (const NumericDtype dtype : k_dtypes)
             {
-                SCOPED_TRACE("layout=" + std::string(to_string(layout)) + (index == IndexType::I64 ? " int64 " : " int32 ") +
-                             std::string(to_string(dtype)));
+                SCOPED_TRACE("layout=" + std::string(to_string(layout)) +
+                             (index == IndexType::I64 ? " int64 " : " int32 ") + std::string(to_string(dtype)));
                 const auto encoder = FlatEncoder::create(table, options_with(layout, index, dtype));
                 const EncodingSchema& schema = encoder->schema();
                 ASSERT_EQ(schema.num_relations() - schema.first_numeric_relation(), 3u);
