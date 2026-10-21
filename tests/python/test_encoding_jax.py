@@ -125,8 +125,12 @@ class Case:
             if derived:
                 x = rl.expand(self.table, padded, np.full(len(states), index, np.int32) if len(tasks) > 1 else None,
                               derived=True)
-                padded = np.ascontiguousarray(np.asarray(x.succ))
-                dwords.append(np.asarray(x.derived))
+                succ, derived_rows = np.asarray(x.succ), np.asarray(x.derived)
+                padded = np.zeros((len(succ), self.table.words), np.uint64)  # as wide as the table's widest instance
+                padded[:, : succ.shape[1]] = succ
+                wide = np.zeros((len(succ), self.table.derived_words), np.uint64)
+                wide[:, : derived_rows.shape[1]] = derived_rows
+                dwords.append(wide)
             ids += [index] * len(padded)
             rows.append(padded)
         self.rows = np.ascontiguousarray(np.concatenate(rows))
@@ -614,3 +618,41 @@ def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
         release.set()
         thread.join()
     assert _encoding_jax.leaked_devices() == before + 1
+
+
+GATED = (
+    "(define (domain gated) (:requirements :strips :derived-predicates) (:predicates (p ?x) (q ?x))"
+    " (:derived (q ?x) (p ?x)) (:action set :parameters (?x) :precondition (and) :effect (p ?x)))"
+)
+
+
+def gated_task(objects):
+    names = " ".join(f"o{k}" for k in range(objects))
+    return mymyr.Task(mymyr.Domain.from_string(GATED).instantiate_string(
+        f"(define (problem g{objects}) (:domain gated) (:objects {names}) (:init (p o0)) (:goal (and (q o1))))"))
+
+
+def test_derived_words_are_required_only_where_the_device_cannot_evaluate_the_axioms():
+    need_gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    # the device evaluates the axioms of small instances: the rows come without their derived words
+    small = [gated_task(3), gated_task(5)]
+    case = Case(rl.TaskTable(small), small, derived=True)
+    encoder = encoding.FlatRelationEncoder(case.source)
+    plain = Case.__new__(Case)
+    plain.__dict__.update(case.__dict__, derived=None)
+    caps = exact_capacities(host_encode(encoder, plain), 2)
+    want = host_encode(encoder, plain, capacities=caps)
+    same_batch(want, jax_encode(encoder, plain, "cuda", capacities=caps))
+    # 2100 objects need 33 object words, which it does not evaluate: those rows need their derived words
+    large = [gated_task(3), gated_task(2100)]
+    case = Case(rl.TaskTable(large), large, derived=True, steps=2)
+    encoder = encoding.FlatRelationEncoder(case.source)
+    caps = exact_capacities(host_encode(encoder, case), 2)
+    want = host_encode(encoder, case, capacities=caps)
+    same_batch(want, jax_encode(encoder, case, "cuda", capacities=caps))
+    plain = Case.__new__(Case)
+    plain.__dict__.update(case.__dict__, derived=None)
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: the rows' derived words are required"):
+        jax_encode(encoder, plain, "cuda", capacities=caps)
