@@ -621,7 +621,7 @@ f64 real_at(const void* data, bool wide, u64 i)
 
 bool same_real(f64 a, f64 b) { return (a != a && b != b) || a == b; }
 
-/// Whether the `size` bytes from `from` are zero.
+/// Whether the entries [from, to) of `width` bytes each are zero.
 bool zero_past(const void* data, u64 from, u64 to, usize width)
 {
     const auto* bytes = static_cast<const std::byte*>(data);

@@ -472,7 +472,7 @@ TEST(EncoderNumeric, SingleBatchPoolAndStreamsAgree)
                     stream.append(input_of(part));
                 }
                 expect_same_bytes(*batch, *stream.flush(pool));
-                // the mutable stream, stored under indices in reverse and flushed in index order
+                // the mutable stream, stored under the row indices and flushed in index order
                 FlatMutableStream mutable_stream(encoder);
                 std::vector<i64> indices(rows.size());
                 for (u64 g = 0; g < rows.size(); ++g)

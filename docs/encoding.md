@@ -243,8 +243,9 @@ auxiliary entity. Actions are not virtual-node predicates.
 A numeric task is encoded like any other: its `State`s are packed, and its rows `[N, W + NN]` (`table.initial_states()`,
 `rl.expand`, `rl.CpuEnvPool`) are read as they are. For every **fluent** numeric function `f` of the domain (a function
 that effects change and that states give values to; `total-cost` is no part of a state, and a static function never
-changes) the schema has a relation `[num]f` (lane `numeric`, sorted among the relation names like any other, so that the
-numeric relations are the last ones of the catalog). It has one tuple for each numeric slot of `f` in the instance, over
+changes) the schema has a relation `[num]f` (lane `numeric`). The numeric relations follow all other relations of the
+catalog, sorted by name among themselves, so a schema without numeric functions has the relation ids it would have
+without the lane. It has one tuple for each numeric slot of `f` in the instance, over
 the objects of the ground term `(f o1 ... ok)`, or over the auxiliary entity for a nullary function, in the
 lexicographic order of the objects. The tuples are the same in every graph of an instance: a state changes their values,
 not their number. `numeric_values` holds the value of every numeric tuple of the batch, in the order in which the

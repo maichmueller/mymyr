@@ -277,7 +277,6 @@ def test_options_properties_and_the_catalog(cases):
     assert names == sorted(names) and all(n.startswith("[num]") for n in names) and names
     first = encoder.relation_lanes.index("numeric")
     assert all(lane == "numeric" for lane in encoder.relation_lanes[first:])
-    task = case.table.tasks[0]
     for name in names:
         r = encoder.relation_id(name)
         assert encoder.relation_arities[r] == max(1, encoder.relation_logical_arities[r])
@@ -294,7 +293,6 @@ def test_options_properties_and_the_catalog(cases):
     assert (encoding.EncodingSchema(classical, numeric_dtype="float64").schema_fingerprint
             == encoding.EncodingSchema(classical).schema_fingerprint)
     assert "numeric" not in encoding.EncodingSchema(classical).relation_lanes
-    del task
 
 
 def test_invalid_numeric_options_and_rows(cases):
