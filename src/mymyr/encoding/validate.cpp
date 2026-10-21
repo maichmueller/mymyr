@@ -113,7 +113,7 @@ struct StaticBlocks
     std::vector<i32> ids;                 // the instance of each block, ascending
     std::vector<i64> objects;             // the objects of each block's instance
     std::vector<bool> auxiliary;          // some tuple of the block uses the auxiliary entity
-    std::vector<std::vector<i64>> keys;   // the predicate keys the tuples of the block use
+    std::vector<std::vector<i64>> keys;   // the predicate keys the tuples of the block use, ascending, each once
     [[nodiscard]] usize find(i32 id) const
     {
         return static_cast<usize>(std::ranges::lower_bound(ids, id) - ids.begin());
@@ -212,6 +212,12 @@ StaticBlocks check_static_blocks(const rl::ArrayBundle& batch, const EncodingSch
                 }
             }
         }
+    // each key once, so that a graph looks up its virtual nodes once per predicate and not once per tuple
+    for (std::vector<i64>& keys : blocks.keys)
+    {
+        std::ranges::sort(keys);
+        keys.erase(std::ranges::unique(keys).begin(), keys.end());
+    }
     return blocks;
 }
 }  // namespace
