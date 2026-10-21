@@ -584,9 +584,9 @@ ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds,
     out.cell_counts = round_up(add(k_flag_bytes, mul(out.wide ? 8 : 4, out.scan_length)));
     out.cell_stride = bounds.cells;
     out.cell_entries = out.relation_major ? 0 : mul(G, bounds.cells);
-    // the levels of the subgoal layers of a graph: three planes (plain, satisfied, unsatisfied) per level, sign and slot
-    // kind, over the instance's words (and its derived words)
-    out.level_stride = mul(mul(bounds.levels, 6), add(bounds.state_words, bounds.derived_words));
+    // the levels of the subgoal layers of a graph: the plain mask of each level, sign and slot kind, over the instance's
+    // words (and its derived words)
+    out.level_stride = mul(mul(bounds.levels, 2), add(bounds.state_words, bounds.derived_words));
     out.level_storage = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
     out.scan_temp = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
     out.scan_temp_bytes = totals_scan_temp_bytes(out.scan_length, out.wide);

@@ -421,11 +421,11 @@ struct HistoryRows
 /// The most subgoal levels of a row (FlatOptions::max_goal_level): the kind of a goal cell of a level holds it in two bits.
 inline constexpr u32 k_max_subgoal_levels = 3;
 
-/// The masks of the subgoal levels of a row (effective_layers), in `storage` as level_plane_offset lays them out from
-/// `fluent` (the words of the planes over the fluent slots), `words` and `derived_words`. Bit k of `present` is set iff
-/// the cell of goal cell kind k (op - k_goal_op_base, a cell of a subgoal level) takes a literal: one of the plain mask
-/// of the positive or negative literals over the fluent or derived slots of the level, or of the part of it that the
-/// state satisfies or does not.
+/// The masks of the subgoal levels of a row (effective_layers): the plain mask of the positive or negative literals over
+/// the fluent or derived slots of each level, in `storage` as level_plane_offset lays them out from `fluent` (the words of
+/// the masks over the fluent slots), `words` and `derived_words`. A satisfied or unsatisfied cell of a level takes the
+/// part of the plain mask that the state satisfies or does not (goal_cell_words). Bit k of `present` is set iff the cell
+/// of goal cell kind k (op - k_goal_op_base, a cell of a subgoal level) takes a literal.
 struct LevelPlanes
 {
     const u64* storage = nullptr;
@@ -433,18 +433,16 @@ struct LevelPlanes
     u64 fluent = 0;
     u32 words = 0, derived_words = 0;
 
-    /// The mask the cell of goal cell kind `kind` (16 to 63) takes its literals from, null if it takes none.
+    /// The plain mask of the level, sign and slot kind of goal cell kind `kind` (16 to 63), null if the cell takes no
+    /// literal.
     [[nodiscard]] MYMYR_HD const u64* plane(u32 kind) const
     {
         if (((present >> kind) & 1u) == 0)
             return nullptr;
         const bool derived_slots = (kind & 8u) != 0;
         const u64 level_sign = u64{(kind >> 4) - 1u} * 2u + ((kind >> 2) & 1u);
-        const u64 mode = static_cast<u64>(plane_of_mode(kind & 3u));
-        return storage + (derived_slots ? fluent : 0u) + (level_sign * 3u + mode) * (derived_slots ? derived_words : words);
+        return storage + (derived_slots ? fluent : 0u) + level_sign * (derived_slots ? derived_words : words);
     }
-    /// The plane of a goal mode: plain (Plain and PlainTarget), satisfied and unsatisfied.
-    [[nodiscard]] static MYMYR_HD u32 plane_of_mode(u32 mode) { return mode <= 1u ? 0u : mode - 1u; }
 };
 
 /// The subgoal layers and history steps of a row; a row without either has no RowLayers. `levels` are the subgoal
@@ -1063,29 +1061,25 @@ MYMYR_HD u32 level_count(const MaskLayers& raw)
 /// The 64-bit words `effective_layers` needs for the subgoal layers `raw` of an instance.
 MYMYR_HD u64 effective_layer_words(const InstanceView& v, const MaskLayers& raw)
 {
-    return u64{level_count(raw)} * 3u * (2u * v.words + (raw.derived_pos ? 2u * v.derived_words : 0u));
+    return u64{level_count(raw)} * (2u * v.words + (raw.derived_pos ? 2u * v.derived_words : 0u));
 }
 
-/// Where the planes of level l (0-based: layer l) and one sign over the fluent or the derived slots begin in the storage
-/// of effective_layer_words: three planes of the slots' words, one after the other (plain, satisfied, unsatisfied), the
-/// fluent planes of all levels and signs first.
+/// Where the plain mask of level l (0-based: layer l) and one sign over the fluent or the derived slots begins in the
+/// storage of effective_layer_words: the slots' words, the masks over the fluent slots of all levels and signs first.
 MYMYR_HD u64 level_plane_offset(const InstanceView& v, const MaskLayers& raw, bool derived_slots, u32 l, u32 negative)
 {
-    const u64 fluent = raw.pos && raw.neg ? u64{level_count(raw)} * 6u * v.words : 0u;
-    return (derived_slots ? fluent : 0u) + (u64{l} * 2u + negative) * 3u * (derived_slots ? v.derived_words : v.words);
+    const u64 fluent = raw.pos && raw.neg ? u64{level_count(raw)} * 2u * v.words : 0u;
+    return (derived_slots ? fluent : 0u) + (u64{l} * 2u + negative) * (derived_slots ? v.derived_words : v.words);
 }
 
-/// The words first, first + step, ... of the three planes at `storage` of level l (0-based) and one sign: the words of
-/// `layer` (layer l of `layers` words each, masks of one sign) without the literals of `lowest` (the goal's, null: none) and
-/// of the layers below l; the plain plane is that mask, and the satisfied and unsatisfied planes the part whose literals
-/// the state `state` (null: all clear) satisfies or does not (a positive literal holds iff its bit is set, a negative
-/// one iff it is clear). Returns the bits 1, 2 and 4 of the planes that have a literal among these words.
+/// The words first, first + step, ... of the plain mask at `plain` of level l (0-based) and one sign: the words of `layer`
+/// (layer l of `layers` words each, masks of one sign) without the literals of `lowest` (the goal's, null: none) and of
+/// the layers below l. Returns the bits 1, 2 and 4: the mask has a literal among these words, one that the state `state`
+/// (null: all clear) satisfies, one that it does not (a positive literal holds iff its bit is set, a negative one iff it
+/// is clear).
 MYMYR_HD u32 level_plane_words(const u64* layer, u32 layer_words, u32 l, const u64* lowest, const u64* state,
-                               bool negative, u32 words, u64* storage, u32 first, u32 step)
+                               bool negative, u32 words, u64* plain, u32 first, u32 step)
 {
-    u64* plain = storage;
-    u64* satisfied = storage + words;
-    u64* unsatisfied = storage + 2u * u64{words};
     u64 any = 0, any_satisfied = 0, any_unsatisfied = 0;
     for (u32 w = first; w < words; w += step)
     {
@@ -1095,20 +1089,18 @@ MYMYR_HD u32 level_plane_words(const u64* layer, u32 layer_words, u32 l, const u
         const u64 m = layer[u64{l} * layer_words + w] & ~lower;
         const u64 x = state ? state[w] : u64{0};
         plain[w] = m;
-        satisfied[w] = m & (negative ? ~x : x);
-        unsatisfied[w] = m & (negative ? x : ~x);
         any |= m;
-        any_satisfied |= satisfied[w];
-        any_unsatisfied |= unsatisfied[w];
+        any_satisfied |= m & (negative ? ~x : x);
+        any_unsatisfied |= m & (negative ? x : ~x);
     }
     return (any ? 1u : 0u) | (any_satisfied ? 2u : 0u) | (any_unsatisfied ? 4u : 0u);
 }
 
 /// The levels of a row's subgoal layers: level l (layer l - 1) holds the literals of that layer that neither the goal
 /// nor a layer below it has with the same sign, over the instance's words (derived words). The goal is the row's own or
-/// the instance's (goal_words). For each level and sign, the plain mask, the part of it whose literals the state
-/// (`atoms`, `derived`: null is all clear) satisfies and the part it does not, written to `storage`
-/// (effective_layer_words, laid out by level_plane_offset). A mask without a literal, and one the layers lack, is null.
+/// the instance's (goal_words). For each level and sign the plain mask is written to `storage` (effective_layer_words,
+/// laid out by level_plane_offset); whether it, the part of it whose literals the state (`atoms`, `derived`: null is all
+/// clear) satisfies and the part it does not have a literal goes to LevelPlanes::present.
 /// The lanes of the group split the words of every plane and all call this together; `storage` is shared by them and is
 /// complete for every lane when the call returns.
 template<class Group>
@@ -1210,8 +1202,7 @@ template<bool Layered>
 MYMYR_HD_HOT GoalCellWords goal_cell_words(const Cell& c, const GoalWords& g, const RowInput& in)
 {
     const u32 kind = c.op - k_goal_op_base;
-    // the masks of a subgoal level are cut down by the state already
-    const bool plain = (kind & 3u) < 2u || (Layered && kind >= 16u);
+    const bool plain = (kind & 3u) < 2u;
     const bool wants_set = ((kind & 3u) == static_cast<u32>(GoalMode::Satisfied)) != ((kind & 4u) != 0);
     GoalCellWords out{c.a < c.b ? goal_cell_mask<Layered>(c, g, in) : nullptr,
                       (kind & 8u) ? in.derived : in.atoms,
@@ -1228,21 +1219,8 @@ MYMYR_HD_HOT GoalCellWords goal_cell_words(const Cell& c, const GoalWords& g, co
 template<bool Layered>
 MYMYR_HD u32 goal_cell_count(const Cell& c, const GoalWords& g, const RowInput& in)
 {
-    if (Layered && c.op >= k_goal_op_base + 16u)  // a subgoal level has no constant part
-    {
-        const u64* mask = in.layers ? in.layers->levels.plane((c.op - k_goal_op_base) & 63u) : nullptr;
-        if (!mask || c.a >= c.b)
-            return 0;
-        const u32 last = (c.b - 1u) >> 6;
-        const u64 head = ~u64{0} << (c.a & 63u), tail = ~u64{0} >> (63u - ((c.b - 1u) & 63u));
-        if ((c.a >> 6) == last)
-            return popcount64(mask[last] & head & tail);
-        u32 n = popcount64(mask[c.a >> 6] & head) + popcount64(mask[last] & tail);
-        for (u32 w = (c.a >> 6) + 1u; w < last; ++w)
-            n += popcount64(mask[w]);
-        return n;
-    }
-    u32 n = g.constants ? c.d - c.c : 0u;
+    // a subgoal level has no constant part
+    u32 n = g.constants && !(Layered && c.op >= k_goal_op_base + 16u) ? c.d - c.c : 0u;
     const GoalCellWords words = goal_cell_words<Layered>(c, g, in);
     if (words.mask)
         for (u32 w = c.a >> 6, last = (c.b - 1u) >> 6; w <= last; ++w)

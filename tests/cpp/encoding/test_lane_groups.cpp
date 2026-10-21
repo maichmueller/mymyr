@@ -261,6 +261,10 @@ TEST(EncodingLaneGroups, TheLevelsOfARowAreAPointerAndAPresenceMask)
     EXPECT_EQ(levels.plane(kind(2, false, ed::GoalMode::Plain)), nullptr);
     EXPECT_EQ(levels.plane(kind(3, false, ed::GoalMode::Plain)), nullptr);
     EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Plain) | 8u), nullptr);  // no derived masks
+    // only the plain masks are stored: a satisfied or unsatisfied cell cuts its plain mask down by the state
+    EXPECT_EQ(ed::effective_layer_words(v, raw), 2u * 2u * v.words);
+    EXPECT_EQ(levels.plane(kind(2, true, ed::GoalMode::Satisfied)), levels.plane(kind(2, true, ed::GoalMode::Plain)));
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Unsatisfied)), levels.plane(kind(1, false, ed::GoalMode::Plain)));
 }
 
 TEST(EncodingLaneGroups, ALayerCountBeyondTheLevelsComputesNoMoreThanTheLevels)
