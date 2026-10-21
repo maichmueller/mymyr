@@ -1,5 +1,5 @@
-"""The XLA FFI targets of mymyr.rl.jax: registration and the typed ``jax.ffi.ffi_call``
-wrappers.
+"""The XLA FFI targets of mymyr.rl.jax (and mymyr.encoding.jax's ``mymyr_encode_flat``): registration and the typed
+``jax.ffi.ffi_call`` wrappers.
 
 Every call carries the environment's registry handle as the int64 attribute ``handle`` (FFI attributes are scalars; the
 table and the configuration stay native), and the rows' instances as an int32 operand ``task_ids``. The environment state is updated in place: its arrays are both operands and
@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from mymyr._core import _rl_jax
+from mymyr._core import _encoding_jax, _rl_jax
 
 __all__ = ["register", "registered", "TARGETS"]
 
@@ -35,6 +35,7 @@ TARGETS = (
     "mymyr_env_step_sync",
     "mymyr_expand",
     "mymyr_expand_flat",
+    "mymyr_encode_flat",
 )
 
 _lock = threading.Lock()
@@ -47,15 +48,19 @@ def register() -> None:
     with _lock:
         if _done:
             return
-        targets = _rl_jax.ffi_targets()
+        targets = [*_rl_jax.ffi_targets(), *_encoding_jax.ffi_targets()]
         if not targets:
             raise RuntimeError(
                 "mymyr: this mymyr was built without the XLA FFI headers (jaxlib was not found when it was built); "
                 "rebuild it in an environment with jaxlib to use mymyr.rl.jax"
             )
         platforms = {p.lower() for p in (d.platform for d in jax.devices())} | {"cpu"}
+        cuda = bool({"gpu", "cuda"} & platforms)
+        for name, platform, registration in _encoding_jax.ffi_types():  # the state types of stateful targets
+            if platform.lower() != "cuda" or cuda:
+                jax.ffi.register_ffi_type(name, registration, platform=platform)
         for name, platform, stages, cmd_buffer in targets:
-            if platform.lower() == "cuda" and not ({"gpu", "cuda"} & platforms):
+            if platform.lower() == "cuda" and not cuda:
                 continue  # JAX without a CUDA backend: the CPU targets only
             jax.ffi.register_ffi_target(name, stages, platform=platform, **_traits(cmd_buffer))
         _done = True

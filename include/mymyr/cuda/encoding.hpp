@@ -221,6 +221,10 @@ public:
     /// Throws std::invalid_argument for a schema the device does not encode: action targets and horizons (with the
     /// goal derivations that only a delta horizon has).
     static void check_schema(const encoding::EncodingSchema& schema);
+    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose
+    /// predicate virtual nodes or relations need more shared memory than a block has for the default launch. Computed
+    /// on the host, without uploading a context (without a CUDA device only the schema is checked).
+    static void check_encoder(const encoding::FlatEncoder& encoder);
 
     /// Each stream has its own scratch.
     DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder);
@@ -253,6 +257,13 @@ public:
     /// The exact byte count for a held generation, including one held across refresh().
     [[nodiscard]] u64 scratch_bytes(const EncodingAcquisition& context, const BatchShape& shape,
                                     DerivedWords derived = DerivedWords::Evaluated) const;
+    /// Whether the rows of some instance of `encoder` need their derived words supplied (DeviceEncodeInput::derived): their
+    /// graphs read derived atoms (for rows without goal masks, with goal masks over the fluent slots, or with derived
+    /// goal masks too) and the device cannot evaluate the axioms (they exceed the matcher limits or the object-bitset
+    /// widths), so that such rows without supplied words are flagged invalid (a batch without task ids is refused).
+    /// Computed on the host, without uploading a context.
+    [[nodiscard]] static bool needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks,
+                                            bool derived_goal_masks);
 
     /// Allocates only this stream's scratch, on the compute stream, and makes the stream wait for allocation.
     /// Smaller reservations retain the allocation. Refresh resizes existing workspaces when their cell bounds grow.
@@ -311,6 +322,11 @@ public:
     /// count() and fill() use the same acquisition, scratch address, shape, rows and launch configuration on one stream,
     /// with no other use of that scratch between them. Refresh preserves the held generation's scratch requirements.
     void encode(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
+                const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
+    /// encode() on `stream` instead of the acquisition's stream, for a caller that holds one acquisition for every
+    /// stream it encodes on (an XLA custom call, which cannot acquire under capture). The caller orders the upload that
+    /// preceded the acquisition before the first launch on `stream` and every launch before the acquisition's release.
+    void encode(const EncodingAcquisition& context, cudaStream_t stream, void* scratch, u64 bytes, const BatchShape& shape,
                 const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
     void count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch = {}) const;
