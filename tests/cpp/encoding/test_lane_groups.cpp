@@ -111,10 +111,10 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
             }
         }
         const u64 history = expected.at<I>("history_offsets") ? static_cast<u64>(expected.at<I>("history_offsets")[g]) : 0;
-        const u32 cells = ed::cell_list(v, row).count;
+        const u32 cells = ed::cell_list<true>(v, row).count;
         std::vector<u32> a(cells), b(cells), va(v.num_virtual), vb(v.num_virtual);
-        const auto ta = ed::count_graph(v, row, a.data(), va.data());
-        const auto tb = ed::count_graph_group(ed::SoloGroup{}, v, row, b.data(), vb.data());
+        const auto ta = ed::count_graph<true>(v, row, a.data(), va.data());
+        const auto tb = ed::count_graph_group<true>(ed::SoloGroup{}, v, row, b.data(), vb.data());
         ASSERT_EQ(totals(ta), totals(tb));
         ASSERT_EQ(a, b);
         const u64 entity = static_cast<u64>(expected.at<I>("entity_offsets")[g]);
@@ -123,16 +123,18 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
         {
             const u64 tuple = static_cast<u64>(expected.at<I>("relation_offsets")[g * R]);
             const u64 arg = static_cast<u64>(expected.at<I>("relation_arg_offsets")[g * R]);
-            ed::fill_graph<I>(v, row, g, tuple, arg, entity, ta, plain.out<I>(G), target, va.data(), a.data(), history);
-            ed::fill_graph_group<I>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb, grouped.out<I>(G), target,
-                                    vb.data(), b.data(), history);
+            ed::fill_graph<I, true>(v, row, g, tuple, arg, entity, ta, plain.out<I>(G), target, va.data(), a.data(),
+                                    history);
+            ed::fill_graph_group<I, true>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb, grouped.out<I>(G),
+                                          target, vb.data(), b.data(), history);
         }
         else
         {
-            ed::fill_graph_positioned<I>(v, row, g, entity, ta, plain.out<I>(G), positions, target, va.data(), a.data(),
-                                         history);
-            ed::fill_graph_positioned_group<I>(ed::SoloGroup{}, v, row, g, entity, tb, grouped.out<I>(G), positions,
-                                               target, vb.data(), b.data(), history);
+            ed::fill_graph_positioned<I, decltype(positions), true>(v, row, g, entity, ta, plain.out<I>(G), positions,
+                                                                    target, va.data(), a.data(), history);
+            ed::fill_graph_positioned_group<I, decltype(positions), true>(ed::SoloGroup{}, v, row, g, entity, tb,
+                                                                          grouped.out<I>(G), positions, target,
+                                                                          vb.data(), b.data(), history);
         }
     }
     EXPECT_EQ(plain.arrays, expected.arrays);

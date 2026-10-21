@@ -178,8 +178,8 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
         const InstanceView v = instance_view(view, rows[g].first);
         const RowInput in{rows[g].second.data(), nullptr};
         cell_counts[g].resize(v.num_cells);
-        totals.push_back(group ? count_graph_group(SoloGroup{}, v, in, cell_counts[g].data())
-                               : count_graph(v, in, cell_counts[g].data()));
+        totals.push_back(group ? count_graph_group<false>(SoloGroup{}, v, in, cell_counts[g].data())
+                               : count_graph<false>(v, in, cell_counts[g].data()));
         entity_base[g] = entities;
         tuple_base[g] = tuples;
         arg_base[g] = args;
@@ -231,10 +231,11 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
             const InstanceView v = instance_view(view, rows[g].first);
             const RowInput in{rows[g].second.data(), nullptr};
             if (group)
-                fill_graph_positioned_group<I>(SoloGroup{}, v, in, g, entity_base[g], totals[g], out,
-                                               SegmentPositions<I>{out}, 0, nullptr, nullptr);
+                fill_graph_positioned_group<I, SegmentPositions<I>, false>(SoloGroup{}, v, in, g, entity_base[g],
+                                                                           totals[g], out, SegmentPositions<I>{out}, 0,
+                                                                           nullptr, nullptr);
             else
-                fill_graph_relation_major<I>(v, in, g, entity_base[g], totals[g], out);
+                fill_graph_relation_major<I, false>(v, in, g, entity_base[g], totals[g], out);
         }
     }
     else
@@ -243,10 +244,10 @@ Arrays run(const Fixture& fixture, const std::vector<std::pair<u32, std::vector<
             const InstanceView v = instance_view(view, rows[g].first);
             const RowInput in{rows[g].second.data(), nullptr};
             if (group)
-                fill_graph_group<I>(SoloGroup{}, v, in, g, tuple_base[g], arg_base[g], entity_base[g], totals[g], out,
-                                    0, nullptr, cell_counts[g].data());
+                fill_graph_group<I, false>(SoloGroup{}, v, in, g, tuple_base[g], arg_base[g], entity_base[g], totals[g],
+                                           out, 0, nullptr, cell_counts[g].data());
             else
-                fill_graph<I>(v, in, g, tuple_base[g], arg_base[g], entity_base[g], totals[g], out);
+                fill_graph<I, false>(v, in, g, tuple_base[g], arg_base[g], entity_base[g], totals[g], out);
         }
     offsets[G * Fixture::R] = static_cast<I>(tuples);
     arg_offsets[G * Fixture::R] = static_cast<I>(args);
@@ -480,8 +481,8 @@ TEST(EncodingLanes, OmittedCountsAndEntityArraysAreNotWritten)
     for (u64 g = 0; g < G; ++g)
     {
         const InstanceView v = instance_view(view, rows[g].first);
-        const GraphTotals totals = count_graph(v, {rows[g].second.data(), nullptr}, nullptr);
-        fill_graph<i32>(v, {rows[g].second.data(), nullptr}, g, tuple, arg, entity, totals, out);
+        const GraphTotals totals = count_graph<false>(v, {rows[g].second.data(), nullptr}, nullptr);
+        fill_graph<i32, false>(v, {rows[g].second.data(), nullptr}, g, tuple, arg, entity, totals, out);
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
@@ -502,7 +503,7 @@ TEST(EncodingLanes, AStaticTupleOfANullaryPredicateIsTheAuxiliaryTuple)
     const ContextView view = fixture.view();
     const InstanceView v = instance_view(view, 1);
     const std::vector<u64> atoms = {0, 0};
-    const GraphTotals totals = count_graph(v, {atoms.data(), nullptr}, nullptr);
+    const GraphTotals totals = count_graph<false>(v, {atoms.data(), nullptr}, nullptr);
     EXPECT_EQ(totals.tuples, 1u);
     EXPECT_EQ(totals.args, 1u);
     EXPECT_EQ(totals.flags, k_graph_auxiliary);
@@ -515,7 +516,7 @@ TEST(EncodingLanes, CellCountsAreReportedInCellOrder)
     const InstanceView v = instance_view(fixture.view(), 0);
     const std::vector<u64> atoms = {0b101, u64{1} << 2};  // slots 0, 2 and 66
     u32 counts[3] = {};
-    const GraphTotals totals = count_graph(v, {atoms.data(), nullptr}, counts);
+    const GraphTotals totals = count_graph<false>(v, {atoms.data(), nullptr}, counts);
     EXPECT_EQ(counts[0], 2u);
     EXPECT_EQ(counts[1], 2u);
     EXPECT_EQ(counts[2], 1u);
@@ -528,14 +529,14 @@ TEST(EncodingLanes, BitsPastTheFluentSlotsAreFlaggedAndPaddingWordsAreIgnored)
     const ContextView view = fixture.view();
     // instance 0: 67 slots in 2 words; bit 67 is past them
     std::vector<u64> atoms = {0, u64{1} << 3};
-    EXPECT_TRUE(count_graph(instance_view(view, 0), {atoms.data(), nullptr}, nullptr).flags & k_graph_bad_row);
+    EXPECT_TRUE(count_graph<false>(instance_view(view, 0), {atoms.data(), nullptr}, nullptr).flags & k_graph_bad_row);
     atoms = {0, u64{1} << 2};
-    EXPECT_FALSE(count_graph(instance_view(view, 0), {atoms.data(), nullptr}, nullptr).flags & k_graph_bad_row);
+    EXPECT_FALSE(count_graph<false>(instance_view(view, 0), {atoms.data(), nullptr}, nullptr).flags & k_graph_bad_row);
     // instance 1: 5 slots in 1 word; bit 5 is past them, and a second word is padding
     atoms = {u64{1} << 5, 0};
-    EXPECT_TRUE(count_graph(instance_view(view, 1), {atoms.data(), nullptr}, nullptr).flags & k_graph_bad_row);
+    EXPECT_TRUE(count_graph<false>(instance_view(view, 1), {atoms.data(), nullptr}, nullptr).flags & k_graph_bad_row);
     atoms = {u64{1} << 4, ~u64{0}};
-    const GraphTotals totals = count_graph(instance_view(view, 1), {atoms.data(), nullptr}, nullptr);
+    const GraphTotals totals = count_graph<false>(instance_view(view, 1), {atoms.data(), nullptr}, nullptr);
     EXPECT_FALSE(totals.flags & k_graph_bad_row);
     EXPECT_EQ(totals.tuples, 1u);
 }
@@ -552,11 +553,11 @@ TEST(EncodingLanes, DerivedBitsPastTheDerivedSlotsAreFlagged)
     const ContextView view = fixture.view();
     const std::vector<u64> atoms = {0, 0};
     std::vector<u64> derived = {0b101};
-    GraphTotals totals = count_graph(instance_view(view, 0), {atoms.data(), derived.data()}, nullptr);
+    GraphTotals totals = count_graph<false>(instance_view(view, 0), {atoms.data(), derived.data()}, nullptr);
     EXPECT_EQ(totals.tuples, 2u + 2u);  // two derived atoms and two static tuples
     EXPECT_FALSE(totals.flags & k_graph_bad_row);
     derived = {0b1000};
-    totals = count_graph(instance_view(view, 0), {atoms.data(), derived.data()}, nullptr);
+    totals = count_graph<false>(instance_view(view, 0), {atoms.data(), derived.data()}, nullptr);
     EXPECT_TRUE(totals.flags & k_graph_bad_row);
 }
 }  // namespace

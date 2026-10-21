@@ -570,7 +570,7 @@ MYMYR_HD CellList cell_list(const InstanceView& v, bool row_goals, bool actions,
     return CellList{v.cell_base + entry[1], static_cast<u32>(entry[0])};
 }
 
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD CellList cell_list(const InstanceView& v, const RowInput& in)
 {
     if (Layered && in.layers)
@@ -1146,7 +1146,7 @@ MYMYR_HD void bind_levels(const Group& grp, const InstanceView& v, const RowInpu
 /// The mask a goal cell takes its literals from: the positive or negative literals over the fluent or derived slots of
 /// the goal, or, for a cell of a subgoal level (1 to 3), of that level of the row's subgoal layers (effective_layers);
 /// null if there is none (no tuples).
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD_HOT const u64* goal_cell_mask(const Cell& c, const GoalWords& g, const RowInput& in)
 {
     const u32 kind = c.op - k_goal_op_base;
@@ -1182,7 +1182,7 @@ struct GoalCellWords
     }
 };
 
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD_HOT GoalCellWords goal_cell_words(const Cell& c, const GoalWords& g, const RowInput& in)
 {
     const u32 kind = c.op - k_goal_op_base;
@@ -1201,7 +1201,7 @@ MYMYR_HD_HOT GoalCellWords goal_cell_words(const Cell& c, const GoalWords& g, co
 }
 
 /// The tuples of a goal cell in this graph: those its masks give plus the cell's constant part (the instance's goal only).
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD u32 goal_cell_count(const Cell& c, const GoalWords& g, const RowInput& in)
 {
     if (Layered && c.op >= k_goal_op_base + 16u)  // a subgoal level has no constant part
@@ -1303,7 +1303,7 @@ MYMYR_HD_COLD u32 special_cell_count(const InstanceView& v, const Cell& c, const
 }
 
 /// The tuples of one cell in this graph. `Layered` false: the row has no subgoal layers or history steps.
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD_HOT u32 cell_count(const InstanceView& v, const Cell& c, const RowInput& in)
 {
     if (c.op == static_cast<u32>(CellOp::Fluent))
@@ -1321,7 +1321,7 @@ MYMYR_HD_HOT u32 cell_count(const InstanceView& v, const Cell& c, const RowInput
 /// the auxiliary flag (a nullary cell with a tuple, goal cells included; an action relation has no auxiliary slot, its
 /// action entity is its only entity). The entity count, the used predicates and the bad-row flags are set by
 /// count_graph and finish_totals.
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
 {
     t.tuples += n;
@@ -1379,7 +1379,7 @@ MYMYR_HD GraphTotals empty_totals()
 
 /// The entities of a graph: the objects, the auxiliary entity if there is one, the goal, subgoal, action, history
 /// step, history target and virtual entities. `Layered` false: the graph has no subgoal layers or history steps.
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD u32 entity_count(const GraphTotals& t, const InstanceView& v)
 {
     u32 n = v.num_objects + ((t.flags & k_graph_auxiliary) ? 1u : 0u) + t.goal_entities + t.actions + t.virtuals;
@@ -1389,7 +1389,7 @@ MYMYR_HD u32 entity_count(const GraphTotals& t, const InstanceView& v)
 }
 
 /// Completes the totals once every cell of the graph is accumulated: the entities and the bad-row flags.
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD void finish_totals(GraphTotals& t, const InstanceView& v, const RowInput& in)
 {
     t.entities = entity_count<Layered>(t, v);
@@ -1416,7 +1416,7 @@ MYMYR_HD bool has_virtual_nodes(const InstanceView& v) { return v.relation_virtu
 /// v.num_virtual words (it is overwritten); the totals then count the predicates that have a tuple. The expansion rows
 /// of the graph are checked (check_actions, which writes the rows' `starts`): a violation sets k_graph_bad_action_order
 /// or k_graph_bad_action_label, and the counts of the action cells are then meaningless.
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32* cell_counts,
                                  u32* virtual_scratch = nullptr)
 {
@@ -1458,7 +1458,7 @@ MYMYR_HD GraphTotals count_graph(const InstanceView& v, const RowInput& in, u32*
 /// rows is counted by count_graph). With predicate virtual nodes `virtual_scratch` (v.num_virtual words, shared by the
 /// lanes) is overwritten. The group may be a part of a warp; all of its lanes call this function together. The levels
 /// of a row with subgoal layers are bound (bind_levels, by the same group) before the call.
-template<bool Layered = true, class Group, class Sink>
+template<bool Layered, class Group, class Sink>
 MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView& v, const RowInput& in,
                                             const Sink& sink, u32* virtual_scratch)
 {
@@ -1538,7 +1538,7 @@ MYMYR_HD GraphTotals count_graph_group_into(const Group& grp, const InstanceView
 }
 
 /// count_graph_group writing the count of cell i to cell_counts[i] (not null).
-template<bool Layered = true, class Group>
+template<bool Layered, class Group>
 MYMYR_HD GraphTotals count_graph_group(const Group& grp, const InstanceView& v, const RowInput& in, u32* cell_counts,
                                        u32* virtual_scratch = nullptr)
 {
@@ -1549,7 +1549,7 @@ MYMYR_HD GraphTotals count_graph_group(const Group& grp, const InstanceView& v, 
 /// The totals of a graph from the counts of its cells, `count(i, cell)` for the cell i of cell_list(v, in), without
 /// counting the cells again. The goal, subgoal, action and history targets and entities, the history steps and the
 /// auxiliary flag are set; `entities` and `virtuals` are not (a fill needs neither).
-template<bool Layered = true, class CountOf>
+template<bool Layered, class CountOf>
 MYMYR_HD GraphTotals totals_from_counts(const InstanceView& v, const RowInput& in, const CountOf& count)
 {
     GraphTotals t = empty_totals();
@@ -1564,7 +1564,7 @@ MYMYR_HD GraphTotals totals_from_counts(const InstanceView& v, const RowInput& i
 /// The virtual rank of every predicate in this graph: `rank[p]` for virtual index p is the number of used predicates
 /// below it if p has a tuple in the graph, else k_no_virtual. `cell_counts` are the counts of count_graph (null: they are
 /// recounted). Returns the number of used predicates. `rank` holds v.num_virtual words.
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD u32 virtual_ranks(const InstanceView& v, const RowInput& in, const u32* cell_counts, u32* rank)
 {
     const u32 P = v.num_virtual;
@@ -1637,7 +1637,7 @@ struct EntityBlocks
     u64 virtual_nodes;
 };
 
-template<bool Layered = true>
+template<bool Layered>
 MYMYR_HD EntityBlocks entity_blocks(const InstanceView& v, const GraphTotals& totals, u64 entity_base)
 {
     EntityBlocks blocks;
@@ -1928,7 +1928,7 @@ MYMYR_HD u32 fill_cell(const InstanceView& v, const Cell& c, const RowInput& in,
 /// order of their objects. With goal targets each tuple starts with its goal entity, the ids `first_target`,
 /// `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it; the tuple of a
 /// nullary predicate is the entity `auxiliary`. Writes count * c.arity entries.
-template<class I, u32 K, bool Target, bool Layered = true>
+template<class I, u32 K, bool Target, bool Layered>
 MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
                                u64 auxiliary, u64 first_target, u64 pred, I* dst)
 {
@@ -1986,7 +1986,7 @@ MYMYR_HD u32 fill_goal_cell_of(const InstanceView& v, const Cell& c, const RowIn
     return n;
 }
 
-template<class I, bool Target, bool Layered = true>
+template<class I, bool Target, bool Layered>
 MYMYR_HD u32 fill_goal_cell_dispatch(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base,
                                      u64 auxiliary, u64 first_target, u64 pred, I* dst)
 {
@@ -2008,7 +2008,7 @@ MYMYR_HD u32 fill_goal_cell_dispatch(const InstanceView& v, const Cell& c, const
 /// instance's goal only). With goal targets (GoalMode::PlainTarget) each tuple starts with its goal entity, the ids
 /// `first_target`, `first_target + 1`, ... in tuple order. A predicate entity `pred` (unless k_no_entity) follows it.
 /// Writes count * c.arity entries.
-template<class I, bool Layered = true>
+template<class I, bool Layered>
 MYMYR_HD u32 fill_goal_cell(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                             u64 first_target, u64 pred, I* dst)
 {
@@ -2296,7 +2296,7 @@ MYMYR_HD_COLD u32 fill_goal_cell_at(const InstanceView& v, const Cell& c, const 
 /// `graph_tuple` is the index of the cell's first tuple among the graph's tuples in graph-major order, the sum of the
 /// counts of the graph's cells before it (the `entity_ref` of its first target entity), whatever the layout. Returns
 /// the number of tuples.
-template<class I, bool Layered = true>
+template<class I, bool Layered>
 MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& in, u64 entity_base, u64 auxiliary,
                           u64 graph_tuple, FillCursor& cursor, const GraphOut<I>& out, I* dst)
 {
@@ -2313,7 +2313,7 @@ MYMYR_HD u32 fill_cell_at(const InstanceView& v, const Cell& c, const RowInput& 
 /// The start of a graph's fill: its entities (the objects, the auxiliary entity, and the virtual entities, which need the
 /// ranks of the predicates, computed into `scratch` from `cell_counts` (null: recounted)) and the cursor of its goal and
 /// action entities. `scratch` must hold v.num_virtual words with predicate virtual nodes and may be null otherwise.
-template<class I, bool Layered = true>
+template<class I, bool Layered>
 MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g, u64 entity_base,
                                 const GraphTotals& totals, const GraphOut<I>& out, u64 target_base,
                                 const u32* cell_counts, u32* scratch, u64 history_base = 0)
@@ -2345,7 +2345,7 @@ MYMYR_HD FillCursor begin_graph(const InstanceView& v, const RowInput& in, u64 g
 /// graph; `target_base` is where the graph's targets start in the target arrays; `virtual_scratch` is as in count_graph.
 /// The end entries of the offset arrays are the caller's. A loop over begin_graph and fill_cell_at: the cells of an
 /// instance are sorted by relation, and the relations between them are empty.
-template<class I, bool Layered = true>
+template<class I, bool Layered>
 MYMYR_HD void fill_graph(const InstanceView& v, const RowInput& given, u64 g, u64 tuple_base, u64 arg_base,
                          u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
                          u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr, u64 history_base = 0)
@@ -2413,7 +2413,7 @@ struct ArrayArgPositions
 /// ArrayArgPositions). The `entity_ref` of a goal entity is the same as in fill_graph. The counts, if stored, are [G, R]
 /// indexed (g, r). `cell_counts` are the graph's cell counts from count_graph (null: they are recounted when virtual
 /// nodes need them).
-template<class I, class Positions, bool Layered = true>
+template<class I, class Positions, bool Layered>
 MYMYR_HD void fill_graph_positioned(const InstanceView& v, const RowInput& in, u64 g, u64 entity_base,
                                     const GraphTotals& totals, const GraphOut<I>& out, const Positions& positions,
                                     u64 target_base, u32* virtual_scratch, const u32* cell_counts,
@@ -2456,7 +2456,7 @@ MYMYR_HD void fill_graph_positioned(const InstanceView& v, const RowInput& in, u
 
 /// Writes graph `g` of a relation-major batch with the cells' positions read from the scanned segment arrays
 /// (out.relation_offsets and out.relation_arg_offsets at the cell's segment, scanned beforehand).
-template<class I, bool Layered = true>
+template<class I, bool Layered>
 MYMYR_HD void fill_graph_relation_major(const InstanceView& v, const RowInput& given, u64 g, u64 entity_base,
                                         const GraphTotals& totals, const GraphOut<I>& out, u64 target_base = 0,
                                         u32* virtual_scratch = nullptr, const u32* cell_counts = nullptr,
@@ -2487,7 +2487,7 @@ MYMYR_HD void advance_cursor(FillCursor& cursor, const Cell& c, u32 n)
 /// begin_graph for the lanes of a group: the lanes share the header, the objects and the virtual entities, and the
 /// ranks of the virtual predicates (virtual_ranks into `scratch`, which the lanes share) are computed by lane 0, and
 /// the history steps are split over the lanes (`history_base` is the position of the graph's first step).
-template<class I, bool Layered = true, class Group>
+template<class I, bool Layered, class Group>
 MYMYR_HD FillCursor begin_graph_group(const Group& grp, const InstanceView& v, const RowInput& in, u64 g,
                                       u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out,
                                       u64 target_base, const u32* cell_counts, u32* scratch, u64 history_base = 0)
@@ -2574,7 +2574,7 @@ MYMYR_HD void fill_state_cell_group_dispatch(const Group& grp, const InstanceVie
 /// fill_cell_at for the lanes of a group, for a cell of `n` tuples (its count): a fluent, derived or static cell is shared
 /// among the lanes; any other cell (goal and action cells, whose tuples depend on one another) is written by lane 0
 /// alone. Every lane's cursor advances past the cell.
-template<class I, bool Layered = true, class Group>
+template<class I, bool Layered, class Group>
 MYMYR_HD void fill_cell_group(const Group& grp, const InstanceView& v, const Cell& c, const RowInput& in,
                               u64 entity_base, u64 auxiliary, u64 graph_tuple, FillCursor& cursor,
                               const GraphOut<I>& out, I* dst, u32 n)
@@ -2618,7 +2618,7 @@ MYMYR_HD void fill_empty_relations(const Group& grp, I* offsets, I* arg_offsets,
 /// count_graph or count_graph_group wrote them, and are required: the cells are written one after the other, each by
 /// the whole group, from the positions the counts give. `virtual_scratch` is shared by the lanes (v.num_virtual
 /// words, or null without predicate virtual nodes). A graph with expansion rows is filled by fill_graph.
-template<class I, bool Layered = true, class Group>
+template<class I, bool Layered, class Group>
 MYMYR_HD void fill_graph_group(const Group& grp, const InstanceView& v, const RowInput& in, u64 g, u64 tuple_base,
                                u64 arg_base, u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out,
                                u64 target_base, u32* virtual_scratch, const u32* cell_counts, u64 history_base = 0)
@@ -2657,7 +2657,7 @@ MYMYR_HD void fill_graph_group(const Group& grp, const InstanceView& v, const Ro
 
 /// fill_graph_positioned for the lanes of a group, with the counts of the graph's cells from `positions.count(segment)`
 /// (a cell with its tuples is written by the whole group, one cell after the other).
-template<class I, class Positions, bool Layered = true, class Group>
+template<class I, class Positions, bool Layered, class Group>
 MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& v, const RowInput& in, u64 g,
                                           u64 entity_base, const GraphTotals& totals, const GraphOut<I>& out,
                                           const Positions& positions, u64 target_base, u32* virtual_scratch,
