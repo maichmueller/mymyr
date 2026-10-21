@@ -101,6 +101,21 @@ struct EncoderEntry : FfiEntry
     }
 
 #if defined(MYMYR_HAS_CUDA)
+    /// Detaches the calling thread from the interpreter while it waits for a device (a thread of XLA has no thread
+    /// state to detach).
+    struct Detached
+    {
+        PyThreadState* state = PyGILState_Check() ? PyEval_SaveThread() : nullptr;
+        Detached() = default;
+        Detached(const Detached&) = delete;
+        Detached& operator=(const Detached&) = delete;
+        ~Detached()
+        {
+            if (state)
+                PyEval_RestoreThread(state);
+        }
+    };
+
     /// The encoder on one device: its own device context, the uploaded encoding context and an acquisition of it that
     /// every call of the device uses.
     struct Device
@@ -116,19 +131,45 @@ struct EncoderEntry : FfiEntry
         ~Device()
         {
             // The calls ran on XLA's streams, which the acquisition's release does not wait for: the device's work
-            // completes before the context generation can be freed.
+            // completes before the context generation can be freed. A device that cannot synchronize (CUDA refuses
+            // the call while another thread captures a CUDA graph, and a failed device may still run the work) keeps
+            // its generation: it is leaked rather than freed under the work that may read it.
+            const Detached detached;  // the last reference may be dropped by a Python thread
+            bool synchronized = false;
             try
             {
                 cuda::DeviceGuard guard(ordinal);
-                (void)cudaDeviceSynchronize();
-                held.reset();
-                encoder.reset();
+                synchronized = cudaDeviceSynchronize() == cudaSuccess;
+                if (!synchronized)
+                    (void)cudaGetLastError();
             }
             catch (...)
             {
             }
+            if (synchronized)
+            {
+                try
+                {
+                    cuda::DeviceGuard guard(ordinal);
+                    held.reset();
+                    encoder.reset();
+                }
+                catch (...)
+                {
+                }
+                return;
+            }
+            struct Leaked
+            {
+                cuda::ContextPtr ctx;
+                std::unique_ptr<cuda::DeviceEncoder> encoder;
+                std::optional<cuda::EncodingAcquisition> held;
+            };
+            new Leaked{std::move(ctx), std::move(encoder), std::move(held)};
+            ++leaked_devices;
         }
     };
+    static inline std::atomic<u64> leaked_devices{0};
     std::mutex devices_mutex;
     std::map<int, std::shared_ptr<Device>> devices;
 
@@ -666,7 +707,12 @@ void bind_encoding_jax(nb::module_& parent)
         "Enters a FlatRelationEncoder into the FFI handle registry and returns its handle (a new one per call). The "
         "registry keeps the encoder until unregister(handle).");
     m.def(
-        "unregister", [](i64 handle) { ffi_registry().remove(handle); }, "handle"_a,
+        "unregister",
+        [](i64 handle) {
+            nb::gil_scoped_release release;  // the last reference destroys the entry, which waits for its devices
+            ffi_registry().remove(handle);
+        },
+        "handle"_a,
         "Drops the registry's reference: calls traced afterwards fail; executables already compiled keep the encoder.");
     m.def(
         "info",
@@ -723,6 +769,31 @@ void bind_encoding_jax(nb::module_& parent)
         "handle"_a, "graphs"_a, "device"_a, "derived"_a,
         "The device scratch of a batch of `graphs` rows on CUDA device `device`, for a call that passes its derived words "
         "(`derived`) or lets the device evaluate them (the result 'scratch' adds 255 bytes of alignment slack).");
+    m.def(
+        "prepare",
+        [](i64 handle, int device) {
+#if defined(MYMYR_HAS_CUDA)
+            const EntryPtr e = entry_of(handle);
+            nb::gil_scoped_release release;
+            (void)e->device(device, true);
+#else
+            (void)handle;
+            (void)device;
+            throw nb::value_error("mymyr: encoding: this mymyr was built without the CUDA backend");
+#endif
+        },
+        "handle"_a, "device"_a,
+        "Uploads the encoder's context to CUDA device `device` now, as the first call of a compiled function on it "
+        "does, and holds it for the encoder's lifetime.");
+    m.def(
+        "leaked_devices",
+#if defined(MYMYR_HAS_CUDA)
+        [] { return EncoderEntry::leaked_devices.load(); },
+#else
+        [] { return u64{0}; },
+#endif
+        "How many encoder slots on a device were leaked instead of freed because the device could not synchronize when "
+        "the slot was destroyed (CUDA refuses the synchronization while another thread captures a CUDA graph).");
     m.def(
         "calls",
         [](i64 handle) {

@@ -16,6 +16,9 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
+import time
+import types
 
 import numpy as np
 import pytest
@@ -568,3 +571,46 @@ def test_command_buffers_give_the_eager_arrays(cases):
                          check=False)
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-4000:]
     assert run.stdout.strip().endswith("ok")
+
+
+# ------------------------------------------------------------------------------------------------ sizes, devices, pools
+
+
+def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
+    """Destroying the last reference of an encoder waits for the device. CUDA refuses that wait while another thread
+    captures a CUDA graph; the generation is then kept (not freed under work that may still read it) and counted."""
+    need_gpu()
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("torch has no CUDA device")
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source)
+    handle = ej.register(encoder)
+    _encoding_jax.prepare(handle, 0)  # the device slot exists, no compiled function holds the encoder
+    x = torch.zeros(8, device="cuda")
+    torch.cuda.synchronize()
+    capturing, release = threading.Event(), threading.Event()
+
+    def capture():
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph, capture_error_mode="global"):
+                (x + 1).sum()
+                capturing.set()
+                release.wait(60)
+        except Exception:  # the capture was invalidated by the refused synchronization
+            pass
+        finally:
+            capturing.set()
+
+    before = _encoding_jax.leaked_devices()
+    thread = threading.Thread(target=capture)
+    thread.start()
+    try:
+        assert capturing.wait(60)
+        time.sleep(0.2)
+        ej.unregister(handle)  # the registry held the last reference
+    finally:
+        release.set()
+        thread.join()
+    assert _encoding_jax.leaked_devices() == before + 1

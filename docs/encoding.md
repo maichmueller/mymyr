@@ -746,7 +746,12 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   contexts until `ej.unregister(encoder or handle)`. Every compiled function that calls the encoder holds it as well,
   so it keeps working after the encoder is unregistered and every Python reference to it is gone; the encoder is freed
   when the last of these executables is (`jax.clear_caches()` and dropping the jitted functions). A function traced
-  after `unregister` registers the encoder again, or fails if it holds only the handle.
+  after `unregister` registers the encoder again, or fails if it holds only the handle; one that is being traced or
+  compiled while its encoder is unregistered fails with `no encoder is registered` (an executable looks its encoder up
+  when it is created), so unregister an encoder only after the functions that use it are compiled. Destroying the last
+  reference of an encoder on a CUDA device waits for the device; where the device cannot synchronize (CUDA refuses the
+  wait while another thread captures a CUDA graph, which invalidates that capture) the encoder's device memory is kept
+  rather than freed under work that may still read it.
 - **On CUDA** the first call of a compiled function on a device uploads the encoder's context there (before XLA runs
   or traces the call); every call then enqueues memsets of its outputs and the encoding kernels on XLA's stream, with
   the device scratch as one more result of the call that XLA allocates, and nothing else: no allocation,
