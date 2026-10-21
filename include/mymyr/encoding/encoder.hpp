@@ -229,9 +229,6 @@ public:
     /// (it is warm once the thread has encoded). It serves one call at a time, like any scratch.
     [[nodiscard]] static EncodeScratch& of_this_thread();
 
-    /// The numeric tuples of the batch the last count() counted (the length of its numeric_values).
-    [[nodiscard]] u64 numeric_tuples() const noexcept;
-
     struct Impl;
     [[nodiscard]] Impl& impl() noexcept { return *m_impl; }
 
@@ -272,15 +269,16 @@ public:
     /// The capacity form into a new bundle whose variable-size arrays (the entity arrays, relation_args, the target
     /// entity and group arrays and the history entity and dt arrays) have the capacities' sizes. The arrays hold the
     /// batch in their first `sizes.entities` / `sizes.args` / ... entries and are zero beyond; if `sizes.overflow` is
-    /// set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
+    /// set, every array is zero (no valid encoding). `sizes` is set to the true sizes, and `extra` (if not null) to the
+    /// true numeric count and static block sizes; a numeric count past capacities.numeric sets k_overflow_capacity.
     /// With shared statics the static blocks have capacities too (`static_capacities`: the arrays static_task_ids and
     /// static_args, and static_offsets and static_arg_offsets for that many blocks, have these sizes; the entries past
-    /// the batch's blocks are zero, the offsets past them repeat their last entry) and `static_sizes` receives the true
-    /// sizes; a static size past its capacity sets k_overflow_capacity. Both are required with shared statics and must
-    /// be null otherwise.
+    /// the batch's blocks are zero, the offsets past them repeat their last entry), and a static size past its capacity
+    /// sets k_overflow_capacity. `static_capacities` and `extra` are required with shared statics, and
+    /// `static_capacities` must be null otherwise.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(
         const EncodeInput& in, const BatchShape& capacities, ThreadPool& pool, EncodeScratch& scratch,
-        FlatSizes& sizes, const StaticShape* static_capacities = nullptr, StaticSizes* static_sizes = nullptr) const;
+        FlatSizes& sizes, const StaticShape* static_capacities = nullptr, ExtraSizes* extra = nullptr) const;
 
     /// Throws std::invalid_argument for the subgoal layers and history steps of `in` that the input alone shows
     /// invalid: given for a schema without subgoal or history relations, more layers than levels, a missing pair of
@@ -289,10 +287,10 @@ public:
 
     /// The capacity form, step one: checks the input (the exceptions of encode, except std::overflow_error), counts and
     /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not
-    /// fit the index type. `scratch` keeps the counts for fill(). With shared statics `static_sizes` (if not null)
-    /// receives the sizes of the static blocks, which also count for the index type.
+    /// fit the index type. `scratch` keeps the counts for fill(). `extra` (if not null) receives the numeric count and,
+    /// with shared statics, the sizes of the static blocks, which also count for the index type.
     [[nodiscard]] FlatSizes count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch,
-                                  StaticSizes* static_sizes = nullptr) const;
+                                  ExtraSizes* extra = nullptr) const;
     /// Step two: writes the batch counted by the last count() of `scratch` (`in` and `sizes` must be that call's) into
     /// `out`, the static blocks included. Requires sizes.overflow == 0 and the buffers as described at FlatBuffers;
     /// throws std::invalid_argument otherwise, and when `scratch` does not hold the count of `in`.
@@ -300,11 +298,10 @@ public:
               EncodeScratch& scratch) const;
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
     /// returned sizes are true; if they overflow, no array of `out` is written. Entries of `out` past the sizes are
-    /// left as they were. Reuses the buffers of `scratch`. `static_capacities` and `static_sizes` are as at
-    /// encode_capacity.
+    /// left as they were. Reuses the buffers of `scratch`. `static_capacities` and `extra` are as at encode_capacity.
     FlatSizes encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
                           ThreadPool& pool, EncodeScratch& scratch, const StaticShape* static_capacities = nullptr,
-                          StaticSizes* static_sizes = nullptr) const;
+                          ExtraSizes* extra = nullptr) const;
 
 private:
     FlatEncoder() = default;

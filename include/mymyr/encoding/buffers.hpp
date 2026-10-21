@@ -42,6 +42,14 @@ struct StaticSizes
     u64 args = 0;
 };
 
+/// The true sizes of a batch that its FlatSizes do not hold (the FlatSizes keep the six words of the device's sizes):
+/// its numeric values and its static blocks.
+struct ExtraSizes
+{
+    u64 numeric = 0;        // the numeric tuples, the length of numeric_values (0 if the schema stores none)
+    StaticSizes statics{};  // the static blocks (all 0 unless the schema shares its statics)
+};
+
 /// Flags of FlatSizes::overflow.
 inline constexpr u32 k_overflow_capacity = 1;  // some size exceeds its capacity
 inline constexpr u32 k_overflow_index = 2;     // some size or count does not fit the index type
@@ -99,7 +107,7 @@ struct FlatBuffers
     // The static blocks, present iff the schema shares its statics (EncodingSchema::shared_statics): the arrays
     // static_task_ids [I_b], static_offsets and static_arg_offsets [I_b * R_s + 1], static_args [A_s] and
     // static_relations [R_s]. static_offsets and static_arg_offsets must hold I_b * R_s + 1 entries (the entries of the
-    // blocks), static_task_ids I_b and static_args the arguments of the blocks (StaticSizes); static_relations is always
+    // blocks), static_task_ids I_b and static_args the arguments of the blocks (ExtraSizes::statics); static_relations is always
     // R_s entries. The destination arrays of a capacity form may be longer; the encoder writes only the blocks' entries.
     i32* static_task_ids = nullptr;
     void* static_offsets = nullptr;

@@ -569,7 +569,9 @@ TEST(EncoderNumeric, SingleBatchPoolAndStreamsAgree)
                 ThreadPool pool(3);
                 EncodeScratch scratch;
                 expect_same_bytes(*batch, *encoder->encode(input_of(rows), pool, scratch));
-                EXPECT_EQ(scratch.numeric_tuples(), [&] {
+                ExtraSizes extra;
+                (void)encoder->count(input_of(rows), pool, scratch, &extra);
+                EXPECT_EQ(extra.numeric, [&] {
                     u64 n = 0;
                     for (const auto& g : reference)
                         n += g.size();
@@ -627,13 +629,17 @@ TEST(EncoderNumeric, CapacitiesPadWithZerosAndOverflowOnTheNumericCount)
             ThreadPool pool(1);
             EncodeScratch scratch;
             const auto exact = encoder->encode(input_of(rows), pool, scratch);
-            const u64 numeric = scratch.numeric_tuples();
+            const u64 numeric = reals(*exact, "numeric_values", value_dtype(encoder->schema().options())).size();
             ASSERT_GT(numeric, 0u);
             FlatSizes sizes;
             const BatchShape roomy{rows.size(), static_cast<u64>(ints(*exact, "entity_offsets").back()) + 5,
                                    ints(*exact, "relation_args").size() + 5, 0, 0, numeric + 7};
-            const auto padded = encoder->encode_capacity(input_of(rows), roomy, pool, scratch, sizes);
+            // every capacity form reports the true numeric count, a repeated schema without static capacities
+            ExtraSizes extra;
+            const auto padded = encoder->encode_capacity(input_of(rows), roomy, pool, scratch, sizes, nullptr, &extra);
             ASSERT_FALSE(sizes.overflowed());
+            EXPECT_EQ(extra.numeric, numeric);
+            EXPECT_EQ(extra.statics.instances, 0u);
             EXPECT_NO_THROW(validate(*padded, encoder->schema()));
             const auto values = reals(*padded, "numeric_values", value_dtype(encoder->schema().options()));
             const auto want = reals(*exact, "numeric_values", value_dtype(encoder->schema().options()));
@@ -645,22 +651,66 @@ TEST(EncoderNumeric, CapacitiesPadWithZerosAndOverflowOnTheNumericCount)
             // one numeric value too few: nothing is written
             BatchShape tight = roomy;
             tight.numeric = numeric - 1;
-            const auto overflowed = encoder->encode_capacity(input_of(rows), tight, pool, scratch, sizes);
+            extra = {};
+            const auto overflowed = encoder->encode_capacity(input_of(rows), tight, pool, scratch, sizes, nullptr, &extra);
             EXPECT_TRUE(sizes.overflow & k_overflow_capacity);
+            EXPECT_EQ(extra.numeric, numeric);
             for (const rl::ArrayInfo& info : overflowed->arrays())
             {
                 const auto* data = static_cast<const u8*>(overflowed->data(info));
                 for (u64 i = 0; i < info.elements() * rl::dtype_bytes(info.dtype); ++i)
                     ASSERT_EQ(data[i], 0) << info.name.str();
             }
+            // encode_into, into the padded batch's arrays
+            {
+                std::map<std::string, std::vector<std::byte>> arrays;
+                for (const rl::ArrayInfo& info : padded->arrays())
+                    arrays[info.name.str()].resize(info.elements() * rl::dtype_bytes(info.dtype));
+                auto at = [&](const char* name) -> void*
+                {
+                    const auto it = arrays.find(name);
+                    return it == arrays.end() ? nullptr : it->second.data();
+                };
+                FlatBuffers out;
+                out.task_ids = static_cast<i32*>(at("task_ids"));
+                out.num_objects = at("num_objects");
+                out.entity_offsets = at("entity_offsets");
+                out.entity_role = static_cast<u8*>(at("entity_role"));
+                out.entity_ref = at("entity_ref");
+                out.relation_counts = at("relation_counts");
+                out.relation_offsets = at("relation_offsets");
+                out.relation_arg_offsets = at("relation_arg_offsets");
+                out.relation_args = at("relation_args");
+                out.numeric_values = at("numeric_values");
+                extra = {};
+                const FlatSizes into = encoder->encode_into(input_of(rows), roomy, out, pool, scratch, nullptr, &extra);
+                EXPECT_FALSE(into.overflowed());
+                EXPECT_EQ(extra.numeric, numeric);
+                extra = {};
+                (void)encoder->encode_into(input_of(rows), tight, out, pool, scratch, nullptr, &extra);
+                EXPECT_EQ(extra.numeric, numeric);
+            }
             // the stream's capacity form
             FlatStream stream(encoder);
             stream.append(input_of(rows));
-            (void)stream.flush(pool, tight, sizes);
+            extra = {};
+            (void)stream.flush(pool, tight, sizes, nullptr, &extra);
             EXPECT_TRUE(sizes.overflow & k_overflow_capacity);
+            EXPECT_EQ(extra.numeric, numeric);
             EXPECT_EQ(stream.size(), rows.size());
-            (void)stream.flush(pool, roomy, sizes);
+            extra = {};
+            (void)stream.flush(pool, roomy, sizes, nullptr, &extra);
+            EXPECT_EQ(extra.numeric, numeric);
             EXPECT_EQ(stream.size(), 0u);
+            FlatMutableStream mutable_stream(encoder);
+            std::vector<i64> indices(rows.size());
+            for (u64 g = 0; g < rows.size(); ++g)
+                indices[g] = static_cast<i64>(g);
+            mutable_stream.append(indices, input_of(rows));
+            extra = {};
+            (void)mutable_stream.flush(pool, roomy, sizes, nullptr, &extra);
+            EXPECT_FALSE(sizes.overflowed());
+            EXPECT_EQ(extra.numeric, numeric);
         }
 }
 

@@ -631,7 +631,7 @@ int main(int argc, char** argv)
         const bool shared = options.statics == encoding::Statics::Shared;
         std::vector<i32> static_task_ids, static_offsets, static_arg_offsets, static_args, static_relations;
         encoding::StaticShape static_capacities;
-        encoding::StaticSizes static_sizes;
+        encoding::ExtraSizes extra;
         if (shared)
         {
             static_task_ids.resize(bundle->find("static_task_ids")->elements());
@@ -652,7 +652,7 @@ int main(int argc, char** argv)
         {
             const double t0 = now_s();
             const encoding::FlatSizes sizes = encoder->encode_into(in, capacities, buffers, pool, scratch, static_caps,
-                                                                   shared ? &static_sizes : nullptr);
+                                                                   &extra);
             if (sizes.overflowed())
                 throw std::runtime_error("the buffers are too small");
             if (rep > 0)
@@ -662,7 +662,7 @@ int main(int argc, char** argv)
         for (int rep = 0; rep < 6; ++rep)
         {
             const double t0 = now_s();
-            const encoding::FlatSizes sizes = encoder->count(in, pool, scratch, shared ? &static_sizes : nullptr);
+            const encoding::FlatSizes sizes = encoder->count(in, pool, scratch, &extra);
             const double t1 = now_s();
             encoder->fill(in, sizes, buffers, pool, scratch);
             if (rep > 0)

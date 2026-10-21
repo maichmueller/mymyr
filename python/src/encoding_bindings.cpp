@@ -286,8 +286,7 @@ struct PyFlatBatch
     std::shared_ptr<const encoding::EncodingSchema> schema;
     Framework framework = Framework::Numpy;
     std::optional<encoding::FlatSizes> sizes;  // set by an encoding with capacities
-    u64 numeric_tuples = 0;                    // with sizes: the numeric tuples of the batch (its numeric_values)
-    std::optional<encoding::StaticSizes> static_sizes;  // the same for the static blocks of shared statics
+    encoding::ExtraSizes extra;                // with sizes: the numeric count and the static block sizes
 };
 
 // ------------------------------------------------------------------------------------------------ options
@@ -1152,16 +1151,11 @@ PyFlatBatch run_encoding(PyFlatEncoder& self, ImportedRows& rows, Framework fram
                     if (capacities)
                     {
                         encoding::FlatSizes sizes;
-                        encoding::StaticSizes static_sizes;
                         const encoding::StaticShape* static_caps =
                             capacities->statics ? &*capacities->statics : nullptr;
                         output.arrays = self.encoder->encode_capacity(rows.input, capacities->batch, pool, scratch,
-                                                                      sizes, static_caps,
-                                                                      static_caps ? &static_sizes : nullptr);
+                                                                      sizes, static_caps, &output.extra);
                         output.sizes = sizes;
-                        output.numeric_tuples = scratch.numeric_tuples();
-                        if (static_caps)
-                            output.static_sizes = static_sizes;
                     }
                     else
                         output.arrays = self.encoder->encode(rows.input, pool, scratch);
@@ -1693,15 +1687,10 @@ PyFlatBatch flush_stream(Py& self, Arg<ann::Framework> framework, IntArg threads
                     if (capacities)
                     {
                         encoding::FlatSizes sizes;
-                        encoding::StaticSizes static_sizes;
                         const encoding::StaticShape* static_caps =
                             capacities->statics ? &*capacities->statics : nullptr;
-                        output.arrays = self.stream->flush(pool, capacities->batch, sizes, static_caps,
-                                                           static_caps ? &static_sizes : nullptr);
+                        output.arrays = self.stream->flush(pool, capacities->batch, sizes, static_caps, &output.extra);
                         output.sizes = sizes;
-                        output.numeric_tuples = encoding::EncodeScratch::of_this_thread().numeric_tuples();
-                        if (static_caps)
-                            output.static_sizes = static_sizes;
                     }
                     else
                         output.arrays = self.stream->flush(pool);
@@ -2155,12 +2144,12 @@ void bind_encoding(nb::module_& parent)
                 if (self.schema->has_history())
                     out["history"] = self.sizes->history;
                 if (self.schema->stores_numeric_values())
-                    out["numeric"] = self.numeric_tuples;
-                if (self.static_sizes)
+                    out["numeric"] = self.extra.numeric;
+                if (self.schema->shared_statics())
                 {
-                    out["static_instances"] = self.static_sizes->instances;
-                    out["static_tuples"] = self.static_sizes->tuples;
-                    out["static_args"] = self.static_sizes->args;
+                    out["static_instances"] = self.extra.statics.instances;
+                    out["static_tuples"] = self.extra.statics.tuples;
+                    out["static_args"] = self.extra.statics.args;
                 }
                 out["overflow"] = self.sizes->overflowed();
                 out["capacity_overflow"] = (self.sizes->overflow & encoding::k_overflow_capacity) != 0;

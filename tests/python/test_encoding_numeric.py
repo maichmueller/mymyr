@@ -283,6 +283,8 @@ def test_the_forms_of_the_encoder_agree(cases, name, layout):
     flushed.append(case.states, case.ids)
     again = flushed.flush(capacities={**capacities, "numeric": n - 1})
     assert again.sizes["overflow"] and again.sizes["numeric"] == n
+    kept = mutable.flush(capacities=capacities)
+    assert kept.sizes["numeric"] == n and not kept.sizes["overflow"]
     # the pickled encoder encodes the same bytes
     clone = pickle.loads(pickle.dumps(encoder))
     assert clone.options == encoder.options

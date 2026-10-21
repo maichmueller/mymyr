@@ -1186,8 +1186,9 @@ instance, written like the tuples of a static cell, and its values come from the
 (`RowInput::numeric`, `numeric_slot_value`, `fill_numeric_cell` in `mymyr/encoding/detail/lanes.hpp`). `GraphOut` holds
 the destination of the values (`numeric_f32` or `numeric_f64`, `numeric_block`) and `SimpleOut::node_value` that of the
 node values; `FillCursor::numeric_at` is the index of the next value. `FlatBuffers::numeric_values` and `node_value` are
-the arrays, `BatchShape::numeric` the capacity, and `EncodeScratch::numeric_tuples()` the true count of the batch last
-counted (the `FlatSizes` of a batch do not carry it, so that the device ABI keeps its six words).
+the arrays, `BatchShape::numeric` the capacity, and `ExtraSizes::numeric` the true count: `count`, `encode_capacity`,
+`encode_into` and the stream `flush` overloads take an `ExtraSizes*` last (the `FlatSizes` of a batch do not carry it,
+so that the device ABI keeps its six words).
 
 `mymyr/encoding/hgraph.hpp` has the [HGraph view](#the-hgraph-view): `HGraphView::of(batch, schema)` (a relation-major
 `rl::ArrayBundle` and the `EncodingSchema` it was encoded for; `std::invalid_argument` for what the view refuses) holds
@@ -1210,9 +1211,9 @@ variable arrays have the capacity sizes, zero after the batch; `validate` accept
 runs on the CPU.
 
 With `FlatOptions::statics = Statics::Shared` (`schema.shared_statics()`) the calls take the capacity
-`StaticShape{instances, args}` and report `StaticSizes{instances, tuples, args}` after the batch's: `count(in, pool,
-scratch, &static_sizes)`, `encode_capacity(..., sizes, &static_shape, &static_sizes)`, `encode_into(..., scratch,
-&static_shape, &static_sizes)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
+`StaticShape{instances, args}` and report `ExtraSizes::statics` (`StaticSizes{instances, tuples, args}`) after the
+batch's: `count(in, pool, scratch, &extra)`, `encode_capacity(..., sizes, &static_shape, &extra)`, `encode_into(...,
+scratch, &static_shape, &extra)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
 (`static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations`), null iff the statics are
 repeated. `require_repeated_statics(options, family)` is the refusal for an encoding family whose graphs need the static
 tuples among their own tuples; the device encoder refuses shared statics when it is made.

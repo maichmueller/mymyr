@@ -142,7 +142,9 @@ int main(int argc, char** argv)
         ThreadPool pool(threads);
         encoding::EncodeScratch scratch;
         const double t_with = best_time(*with, in, pool, scratch, 7);
-        const double numeric_tuples = static_cast<double>(scratch.numeric_tuples()) / static_cast<double>(n);
+        encoding::ExtraSizes extra;
+        (void)with->count(in, pool, scratch, &extra);
+        const double numeric_tuples = static_cast<double>(extra.numeric) / static_cast<double>(n);
         const double t_without = best_time(*without, in, pool, scratch, 7);
         const auto batch = with->encode(in, pool, scratch);
         std::printf("{\"states\":%llu,\"layout\":\"%s\",\"threads\":%u,\"dtype\":\"%s\",\"outputs\":\"%s\","

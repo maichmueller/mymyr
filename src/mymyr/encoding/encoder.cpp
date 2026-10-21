@@ -53,7 +53,6 @@ rl::ArrayShape shape2(u64 n, u64 m) { return {static_cast<i64>(n), static_cast<i
 EncodeScratch::EncodeScratch() : m_impl(std::make_unique<Impl>()) {}
 EncodeScratch::~EncodeScratch() = default;
 
-u64 EncodeScratch::numeric_tuples() const noexcept { return m_impl->numeric_total; }
 
 EncodeScratch& EncodeScratch::of_this_thread()
 {
@@ -414,22 +413,23 @@ void fill_range(const Pass& p, const FlatBuffers& b, u32 t)
 }
 
 /// Throws unless the static capacities and sizes are given exactly when the schema shares its statics.
-void check_static_arguments(const EncodingSchema& schema, const StaticShape* capacities, const StaticSizes* sizes)
+void check_static_arguments(const EncodingSchema& schema, const StaticShape* capacities, const ExtraSizes* extra)
 {
-    if (schema.shared_statics() && (!capacities || !sizes))
+    if (schema.shared_statics() && (!capacities || !extra))
         invalid("the schema shares its statics: the capacity form needs the capacities and the sizes of the static blocks");
-    if (!schema.shared_statics() && (capacities || sizes))
-        invalid("the schema repeats its statics: the capacity form takes no capacities or sizes of static blocks");
+    if (!schema.shared_statics() && capacities)
+        invalid("the schema repeats its statics: the capacity form takes no capacities of static blocks");
 }
 
-/// Whether the batch of `sizes` and `statics` exceeds the capacities.
-bool exceeds_capacity(const FlatSizes& sizes, const StaticSizes& statics, const BatchShape& capacities,
-                      const StaticShape* static_capacities)
+/// Whether the batch of `sizes` and `extra` exceeds the capacities.
+bool exceeds_capacity(const EncodingSchema& schema, const FlatSizes& sizes, const ExtraSizes& extra,
+                      const BatchShape& capacities, const StaticShape* static_capacities)
 {
     return sizes.entities > capacities.entities || sizes.args > capacities.args || sizes.targets > capacities.targets ||
            sizes.history > capacities.history ||
-           (static_capacities &&
-            (statics.instances > static_capacities->instances || statics.args > static_capacities->args));
+           (schema.stores_numeric_values() && extra.numeric > capacities.numeric) ||
+           (static_capacities && (extra.statics.instances > static_capacities->instances ||
+                                  extra.statics.args > static_capacities->args));
 }
 
 /// The distinct instances of the rows of a call, ascending, into s.present.
@@ -550,12 +550,13 @@ u64 FlatEncoder::graphs_of(const EncodeInput& in) const noexcept
     return m_schema->has_horizon() ? in.horizon.graphs : in.states.rows;
 }
 
-FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch,
-                             StaticSizes* static_sizes) const
+FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch, ExtraSizes* extra) const
 {
     const EncodingContext& context = *m_context;
     Scratch& s = scratch.impl();
     s.counted = false;
+    if (extra)
+        *extra = {};
     if (m_schema->has_horizon())
         return count_horizon(in, pool, scratch);
     if (in.horizon.graphs != 0 || in.horizon.node_offsets || in.horizon.nodes.rows != 0)
@@ -724,8 +725,8 @@ FlatSizes FlatEncoder::count(const EncodeInput& in, ThreadPool& pool, EncodeScra
             sizes.overflow |= k_overflow_index;
     }
     s.static_sizes = statics;
-    if (static_sizes)
-        *static_sizes = statics;
+    if (extra)
+        *extra = {s.numeric_total, statics};
 
     s.sizes = sizes;
     s.counted = true;
@@ -891,17 +892,16 @@ void FlatEncoder::fill(const EncodeInput& in, const FlatSizes& sizes, const Flat
 
 FlatSizes FlatEncoder::encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
                                    ThreadPool& pool, EncodeScratch& scratch, const StaticShape* static_capacities,
-                                   StaticSizes* static_sizes) const
+                                   ExtraSizes* extra) const
 {
-    check_static_arguments(*m_schema, static_capacities, static_sizes);
+    check_static_arguments(*m_schema, static_capacities, extra);
     if (graphs_of(in) > capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
-    StaticSizes statics;
-    FlatSizes sizes = count(in, pool, scratch, &statics);
-    if (static_sizes)
-        *static_sizes = statics;
-    if (exceeds_capacity(sizes, statics, capacities, static_capacities) ||
-        (m_schema->stores_numeric_values() && scratch.numeric_tuples() > capacities.numeric))
+    ExtraSizes true_extra;
+    FlatSizes sizes = count(in, pool, scratch, &true_extra);
+    if (extra)
+        *extra = true_extra;
+    if (exceeds_capacity(*m_schema, sizes, true_extra, capacities, static_capacities))
         sizes.overflow |= k_overflow_capacity;
     if (!sizes.overflowed())
         fill(in, sizes, out, pool, scratch);
@@ -1046,8 +1046,9 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in, ThreadPool& pool,
                                                            EncodeScratch& scratch) const
 {
-    StaticSizes statics;
-    const FlatSizes sizes = count(in, pool, scratch, &statics);
+    ExtraSizes extra;
+    const FlatSizes sizes = count(in, pool, scratch, &extra);
+    const StaticSizes& statics = extra.statics;
     if (sizes.overflow & k_overflow_index)
     {
         const IndexType index = m_schema->options().index;
@@ -1071,7 +1072,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
                                   "static block cells");
     }
     Allocation allocation = allocate(graphs_of(in), sizes.entities, sizes.args, sizes.targets, sizes.history,
-                                     scratch.numeric_tuples(), sizes.entities + sizes.tuples, 2 * sizes.args,
+                                     extra.numeric, sizes.entities + sizes.tuples, 2 * sizes.args,
                                      {statics.instances, statics.args});
     fill(in, sizes, allocation.buffers, pool, scratch);
     return std::move(allocation.bundle);
@@ -1081,17 +1082,17 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
                                                                     const BatchShape& capacities, ThreadPool& pool,
                                                                     EncodeScratch& scratch, FlatSizes& sizes,
                                                                     const StaticShape* static_capacities,
-                                                                    StaticSizes* static_sizes) const
+                                                                    ExtraSizes* extra) const
 {
-    check_static_arguments(*m_schema, static_capacities, static_sizes);
+    check_static_arguments(*m_schema, static_capacities, extra);
     if (graphs_of(in) > capacities.graphs)
         invalid("the batch has more graphs than the output capacity");
-    StaticSizes statics;
-    sizes = count(in, pool, scratch, &statics);
-    if (static_sizes)
-        *static_sizes = statics;
-    if (exceeds_capacity(sizes, statics, capacities, static_capacities) ||
-        (m_schema->stores_numeric_values() && scratch.numeric_tuples() > capacities.numeric))
+    ExtraSizes true_extra;
+    sizes = count(in, pool, scratch, &true_extra);
+    if (extra)
+        *extra = true_extra;
+    const StaticSizes& statics = true_extra.statics;
+    if (exceeds_capacity(*m_schema, sizes, true_extra, capacities, static_capacities))
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
     const bool fits = !sizes.overflowed();
@@ -1111,7 +1112,7 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
         if (out.relation_args)
             zero(out.relation_args, sizes.args, capacities.args, index_bytes);
         if (out.numeric_values)
-            zero(out.numeric_values, scratch.numeric_tuples(), capacities.numeric,
+            zero(out.numeric_values, true_extra.numeric, capacities.numeric,
                  m_schema->options().numeric_dtype == NumericDtype::F64 ? 8 : 4);
         if (out.node_value)
             zero(out.node_value, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);

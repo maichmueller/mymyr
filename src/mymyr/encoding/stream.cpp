@@ -781,10 +781,10 @@ private:
 std::shared_ptr<const rl::ArrayBundle> encode_rows(const FlatEncoder& encoder, const EncodeInput& in, ThreadPool& pool,
                                                    const BatchShape* capacities, FlatSizes* sizes,
                                                    const StaticShape* static_capacities = nullptr,
-                                                   StaticSizes* static_sizes = nullptr)
+                                                   ExtraSizes* extra = nullptr)
 {
     EncodeScratch& scratch = EncodeScratch::of_this_thread();
-    return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes, static_capacities, static_sizes)
+    return capacities ? encoder.encode_capacity(in, *capacities, pool, scratch, *sizes, static_capacities, extra)
                       : encoder.encode(in, pool, scratch);
 }
 }  // namespace
@@ -845,13 +845,12 @@ std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool)
 }
 
 std::shared_ptr<const rl::ArrayBundle> FlatStream::flush(ThreadPool& pool, const BatchShape& capacities, FlatSizes& sizes,
-                                                         const StaticShape* static_capacities,
-                                                         StaticSizes* static_sizes)
+                                                         const StaticShape* static_capacities, ExtraSizes* extra)
 {
     std::lock_guard lock(m_impl->mutex);
     RowStore& store = m_impl->store;
     const EncodeInput in = store.assemble(nullptr, store.live());
-    auto out = encode_rows(*m_impl->encoder, in, pool, &capacities, &sizes, static_capacities, static_sizes);
+    auto out = encode_rows(*m_impl->encoder, in, pool, &capacities, &sizes, static_capacities, extra);
     if (!sizes.overflowed())
         store.reset();
     return out;
@@ -1213,12 +1212,12 @@ std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool
 
 std::shared_ptr<const rl::ArrayBundle> FlatMutableStream::flush(ThreadPool& pool, const BatchShape& capacities,
                                                                 FlatSizes& sizes, const StaticShape* static_capacities,
-                                                                StaticSizes* static_sizes)
+                                                                ExtraSizes* extra)
 {
     std::lock_guard lock(m_impl->mutex);
     Impl& s = *m_impl;
     s.order();
     const EncodeInput in = s.store.assemble(s.direct() ? nullptr : s.slots.data(), s.slots.size());
-    return encode_rows(*s.encoder, in, pool, &capacities, &sizes, static_capacities, static_sizes);
+    return encode_rows(*s.encoder, in, pool, &capacities, &sizes, static_capacities, extra);
 }
 }  // namespace mymyr::encoding

@@ -116,12 +116,12 @@ TEST(EncodingCollate, SharedStaticsIgnoreTheCapacityTailsOfTheBlocks)
     std::vector<std::shared_ptr<const rl::ArrayBundle>> batches;
     for (const auto& part : parts(input, rows.words, {5u, 0u, 19u}))
     {
-        encoding::StaticSizes statics;
-        const encoding::FlatSizes exact = encoder->count(part, pool, scratch, &statics);
+        encoding::ExtraSizes extra;
+        const encoding::FlatSizes exact = encoder->count(part, pool, scratch, &extra);
         const encoding::BatchShape caps{part.states.rows, exact.entities + 9, exact.args + 7, 0};
-        const encoding::StaticShape static_caps{statics.instances + 2, statics.args + 11};
+        const encoding::StaticShape static_caps{extra.statics.instances + 2, extra.statics.args + 11};
         encoding::FlatSizes sizes;
-        batches.push_back(encoder->encode_capacity(part, caps, pool, scratch, sizes, &static_caps, &statics));
+        batches.push_back(encoder->encode_capacity(part, caps, pool, scratch, sizes, &static_caps, &extra));
         ASSERT_FALSE(sizes.overflowed());
     }
     same(*encoder->encode(input), *encoding::collate(batches));
@@ -304,9 +304,10 @@ TEST(EncodingCollate, NumericValuesAndSimpleGraphsIgnoreCapacityTails)
             std::vector<std::shared_ptr<const rl::ArrayBundle>> batches;
             for (const auto& part : parts(input, c.table->row_words(), {5u, 0u, input.states.rows - 5}))
             {
-                const encoding::FlatSizes exact = encoder->count(part, pool, scratch);
+                encoding::ExtraSizes extra;
+                const encoding::FlatSizes exact = encoder->count(part, pool, scratch, &extra);
                 encoding::BatchShape caps{part.states.rows, exact.entities + 9, exact.args + 7, 0};
-                caps.numeric = scratch.numeric_tuples() + 5;
+                caps.numeric = extra.numeric + 5;
                 encoding::FlatSizes sizes;
                 batches.push_back(encoder->encode_capacity(part, caps, pool, scratch, sizes));
                 ASSERT_FALSE(sizes.overflowed());
