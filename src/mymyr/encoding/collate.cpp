@@ -64,6 +64,45 @@ struct Slice
     u64 graph, graphs, entity, entities, args, targets, history;
 };
 
+/// The static block of an instance in a batch with shared statics: block `block` of `batch`.
+struct StaticSource
+{
+    i32 id;
+    const rl::ArrayBundle* batch;
+    u64 block;
+};
+
+/// The static blocks of the collated batch: one per instance of its graphs, in ascending instance order, each taken
+/// from the first slice that has it (the blocks of one instance are equal in batches of one schema and table). Checks
+/// that every slice holds exactly the blocks of its graphs' instances and that its static arrays are long enough.
+template<class I> std::vector<StaticSource> static_sources(const std::vector<Slice>& slices, u64 relations)
+{
+    std::vector<StaticSource> out;
+    for (const auto& s : slices)
+    {
+        const i32* task_ids = data<i32>(*s.batch, "task_ids");
+        std::vector<i32> ids(task_ids, task_ids + s.graphs);
+        std::ranges::sort(ids);
+        ids.erase(std::ranges::unique(ids).begin(), ids.end());
+        const u64 blocks = ids.size(), segments = mul(blocks, relations);
+        need(*s.batch, "static_relations", relations);
+        need(*s.batch, "static_task_ids", blocks);
+        need(*s.batch, "static_offsets", add(segments, 1));
+        need(*s.batch, "static_arg_offsets", add(segments, 1));
+        need(*s.batch, "static_args", closing<I>(*s.batch, "static_arg_offsets", segments));
+        const i32* stored = data<i32>(*s.batch, "static_task_ids");
+        for (u64 b = 0; b < blocks; ++b)
+        {
+            if (stored[b] != ids[b])
+                invalid("the static blocks of a collated batch are not those of its graphs' instances");
+            out.push_back({ids[b], s.batch, b});
+        }
+    }
+    std::ranges::stable_sort(out, {}, &StaticSource::id);
+    out.erase(std::ranges::unique(out, {}, &StaticSource::id).begin(), out.end());
+    return out;
+}
+
 template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
     std::span<const std::shared_ptr<const rl::ArrayBundle>> batches)
 {
@@ -107,6 +146,28 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
     for (const u64 value : {add(G, 1), add(cells, 1), E, A, T, H})
         detail::check_index_range(value, index, "collated total");
 
+    // With shared statics: the blocks, their segments (block b, static relation k: b * static_relations + k) and sizes.
+    const bool shared = first.scalar("statics") == 1;
+    const u64 static_relations = shared ? array(first, "static_relations").elements() : 0;
+    const std::vector<StaticSource> blocks = shared ? static_sources<I>(slices, static_relations) : std::vector<StaticSource>{};
+    const u64 static_segments = mul(blocks.size(), static_relations);
+    u64 static_tuples = 0, static_args = 0;
+    for (const auto& b : blocks)
+    {
+        const I* so = data<I>(*b.batch, "static_offsets");
+        const I* sa = data<I>(*b.batch, "static_arg_offsets");
+        for (u64 k = 0; k < static_relations; ++k)
+        {
+            const u64 src = b.block * static_relations + k;
+            if (so[src] < 0 || so[src + 1] < so[src] || sa[src] < 0 || sa[src + 1] < sa[src])
+                invalid("collated static offsets must be nonnegative and monotone");
+            static_tuples = add(static_tuples, static_cast<u64>(so[src + 1] - so[src]));
+            static_args = add(static_args, static_cast<u64>(sa[src + 1] - sa[src]));
+        }
+    }
+    for (const u64 value : {add(static_segments, 1), static_tuples, static_args})
+        detail::check_index_range(value, index, "collated static total");
+
     // Count cells in destination order. All sums are wide until every total has passed the index check.
     std::vector<u64> tuples(add(cells, 1)), arguments(add(cells, 1));
     for (const auto& s : slices)
@@ -147,6 +208,10 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
         else if (name == "target_entity" || name == "target_group") n = T;
         else if (name == "history_entity" || name == "history_dt") n = H;
         else if (name == "relation_counts") n = cells;
+        else if (name == "static_task_ids") n = blocks.size();
+        else if (name == "static_offsets" || name == "static_arg_offsets") n = static_segments + 1;
+        else if (name == "static_args") n = static_args;
+        else if (name == "static_relations") n = static_relations;
         else if (name != "task_ids" && name != "num_objects" && name != "goal_complete")
             invalid("collation does not support array " + a.name.str());
         const rl::ArrayShape shape = name == "relation_counts" ? rl::ArrayShape{static_cast<i64>(G), static_cast<i64>(relations)}
@@ -204,6 +269,39 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
             }
         target_base += s.targets; history_base += s.history;
     }
+    if (shared)
+    {
+        // the ids of a static tuple are graph-local: the blocks are copied as they are
+        if (static_relations)
+            std::memcpy(data<I>(*result, "static_relations"), data<I>(first, "static_relations"),
+                        static_relations * sizeof(I));
+        i32* ids = data<i32>(*result, "static_task_ids");
+        I* offsets = data<I>(*result, "static_offsets");
+        I* arg_offsets = data<I>(*result, "static_arg_offsets");
+        I* args = data<I>(*result, "static_args");
+        u64 tuples_at = 0, args_at = 0;
+        for (u64 i = 0; i < blocks.size(); ++i)
+        {
+            const auto& b = blocks[i];
+            ids[i] = b.id;
+            const I* so = data<I>(*b.batch, "static_offsets");
+            const I* sa = data<I>(*b.batch, "static_arg_offsets");
+            const I* source = data<I>(*b.batch, "static_args");
+            for (u64 k = 0; k < static_relations; ++k)
+            {
+                const u64 src = b.block * static_relations + k, dst = i * static_relations + k;
+                offsets[dst] = static_cast<I>(tuples_at);
+                arg_offsets[dst] = static_cast<I>(args_at);
+                const u64 n = static_cast<u64>(sa[src + 1] - sa[src]);
+                if (n)
+                    std::memcpy(args + args_at, source + sa[src], n * sizeof(I));
+                tuples_at += static_cast<u64>(so[src + 1] - so[src]);
+                args_at += n;
+            }
+        }
+        offsets[static_segments] = static_cast<I>(tuples_at);
+        arg_offsets[static_segments] = static_cast<I>(args_at);
+    }
     return result;
 }
 }
@@ -226,7 +324,7 @@ std::shared_ptr<const rl::ArrayBundle> collate(std::span<const std::shared_ptr<c
             if (!b->find(a.name.view()) || b->find(a.name.view())->dtype != a.dtype)
                 invalid("collate received different stored arrays or dtypes");
     }
-    if (first.scalar("statics") != 0) invalid("collate requires repeated statics");
+    if (first.scalar("statics") != 0 && first.scalar("statics") != 1) invalid("collate received an invalid statics form");
     if (first.scalar("num_relations") < 0) invalid("collate received no relation count");
     if (first.scalar("index_dtype") == 0) return concatenate<i32>(batches);
     if (first.scalar("index_dtype") == 1) return concatenate<i64>(batches);

@@ -551,6 +551,8 @@ The rest of the batch follows the same rules as a repeated one:
   true sizes, `static_offsets` and `static_arg_offsets` repeat their last value, and `sizes` gains `static_instances`,
   `static_tuples` and `static_args`. A batch that does not fit overflows like any capacity.
 - **Streams** flush the same batch as `encode` over the rows, with `capacities` as above.
+- **Collation.** `encoding.collate` of host batches gives the batch of one encode of all their rows, blocks included;
+  the device encodes no shared form, so device batches and `DeviceCollator` have none.
 - **Names.** `entity_names` and `describe` give the same names and tuples as for the repeated batch; the static tuples
   of a graph are listed in their relations, in the order of the repeated form.
 - **Validation.** The C++ `validate` also checks the blocks: the instances, the offsets, the
@@ -954,7 +956,9 @@ list must contain at least one batch. The result equals one encode of all rows i
 stay local to their graph; entity ids and offsets receive the appropriate prefixes. Relation-major cells are
 interleaved by relation across the slices. Mixed schemas, tables (`table_fingerprint`), layouts, index types,
 static representations or devices raise `ValueError`; so does a device batch of an encoder with subgoal layers or
-history steps. Overflowed inputs are refused. Host collation allocates exact arrays; device collation accepts
+history steps. Host collation also takes batches with [shared statics](#shared-statics): the result holds one static
+block per instance of its graphs, in ascending instance order, as one encode of all rows does. Overflowed inputs are
+refused. Host collation allocates exact arrays; device collation accepts
 `capacities=` and reports overflow through `device_sizes`. All accumulated totals use uint64 before index checks.
 
 For repeated or captured device collation, prepare `encoding.DeviceCollator(batches)` outside capture and call
