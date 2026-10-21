@@ -506,6 +506,11 @@ def test_refusals():
         encoding.FlatRelationEncoder(task, constant_labels=True)
     with pytest.raises(ValueError, match="at least one"):
         encoding.FlatRelationEncoder(task, outputs=())
+    message = "^mymyr: encoding: statics='shared' is not supported by the Simple encoding"
+    with pytest.raises(ValueError, match=message):
+        encoding.SimpleEncoder(task, statics="shared")
+    with pytest.raises(ValueError, match=message):
+        encoding.FlatRelationEncoder(task, outputs=BOTH, statics="shared")
     with pytest.raises(ValueError, match=r"outputs must be one of 'relations', 'simple', got 'color'"):
         encoding.FlatRelationEncoder(task, outputs=("color",))
     with pytest.raises(TypeError, match="outputs"):

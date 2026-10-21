@@ -814,6 +814,9 @@ TEST(Simple, RefusesWhatItCannotRepresent)
     refused([](FlatOptions& o) { o.outputs = k_both, o.predicate_virtual_nodes = true; }, "predicate_virtual_nodes");
     refused([](FlatOptions& o) { o.outputs = {}; }, "at least one");
     refused([](FlatOptions& o) { o.constant_labels = true; }, "constant_labels");
+    refused([](FlatOptions& o) { o.outputs = k_both, o.statics = Statics::Shared; },
+            "statics='shared' is not supported by the Simple encoding");
+    refused([](FlatOptions& o) { o.outputs = k_simple, o.statics = Statics::Shared; }, "Simple encoding");
     refused([](FlatOptions& o) { o.outputs = k_both, o.entity_arrays = EntityArrays::Auto; }, "entity_arrays");
     refused([](FlatOptions& o) { o.outputs = k_simple, o.layout = Layout::Relation; }, "layout");
     refused([](FlatOptions& o) { o.outputs = k_simple, o.emit_counts = false; }, "emit_counts");

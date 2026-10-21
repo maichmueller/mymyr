@@ -348,6 +348,9 @@ def test_the_view_refuses_what_it_cannot_view():
     virtual = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False, predicate_virtual_nodes=True)
     with pytest.raises(ValueError, match="^mymyr: encoding: the HGraph view does not support predicate virtual nodes"):
         encoding.hgraph(virtual.encode(states))
+    shared = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False, statics="shared")
+    with pytest.raises(ValueError, match="^mymyr: encoding: statics='shared' is not supported by the HGraph encoding"):
+        encoding.hgraph(shared.encode(states))
     batch = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False).encode(states)
     with pytest.raises(TypeError):
         encoding.hgraph(None)

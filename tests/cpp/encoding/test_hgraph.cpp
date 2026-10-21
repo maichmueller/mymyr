@@ -727,7 +727,15 @@ TEST(HGraphView, RefusesWhatItCannotView)
     const auto encoder = FlatEncoder::create(table, options);
     const auto batch = encoder->encode(in);
     EXPECT_NO_THROW((void)HGraphView::of(batch, encoder->schema_ptr()));
-    // shared static storage
+    // shared static storage: the schema's statics, and a batch that claims them
+    {
+        FlatOptions shared = options;
+        shared.statics = Statics::Shared;
+        const auto shared_encoder = FlatEncoder::create(table, shared);
+        const auto shared_batch = shared_encoder->encode(in);
+        expect_refusal([&] { (void)HGraphView::of(shared_batch, shared_encoder->schema_ptr()); },
+                       "statics='shared' is not supported by the HGraph encoding");
+    }
     expect_refusal([&] { (void)HGraphView::of(with_scalar(*batch, "statics", 1), encoder->schema_ptr()); },
                    "shared static");
     // a batch of another schema
