@@ -230,6 +230,39 @@ TEST(EncodingLaneGroups, ARowWithoutLayersLeavesTheLayerStorageUntouched)
         ASSERT_EQ(byte, 0xa5);
 }
 
+TEST(EncodingLaneGroups, TheLevelsOfARowAreAPointerAndAPresenceMask)
+{
+    // a device thread holds the layers of its row in local memory: the levels name their masks by one storage
+    // pointer, the presence of each goal cell kind and the offsets of level_plane_offset, not by a pointer per kind
+    EXPECT_LE(sizeof(ed::LevelPlanes), 32u);
+    EXPECT_LE(sizeof(ed::RowLayers), 160u);
+    const auto table = table_of("philosophers", {"p03-phil4"});
+    const auto encoder = encoding::FlatEncoder::create(table, configs().back().options);
+    const auto v = ed::instance_view(encoder->context().view(), 0);
+    const std::vector<u64> state(v.words, 0), goal(v.words, 0);
+    std::vector<u64> pos(2 * u64{v.words}, 0), neg(2 * u64{v.words}, 0);
+    pos[0] = 1;        // level 1: a positive literal the state does not satisfy
+    neg[v.words] = 2;  // level 2: a negative literal it satisfies
+    const ed::MaskLayers raw{pos.data(), neg.data(), nullptr, nullptr, 2, v.words, 0};
+    std::vector<u64> storage(ed::effective_layer_words(v, raw), 0);
+    const ed::RowInput row{state.data(), nullptr, goal.data(), goal.data()};  // a row goal without literals
+    const ed::LevelPlanes levels =
+        ed::effective_layers(v, ed::goal_words(v, row), raw, state.data(), nullptr, storage.data());
+    const auto kind = [](u32 level, bool negative, ed::GoalMode mode)
+    { return (level << 4) | (negative ? 4u : 0u) | static_cast<u32>(mode); };
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Plain)),
+              storage.data() + ed::level_plane_offset(v, raw, false, 0, 0));
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::PlainTarget)), levels.plane(kind(1, false, ed::GoalMode::Plain)));
+    EXPECT_NE(levels.plane(kind(1, false, ed::GoalMode::Unsatisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Satisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(1, true, ed::GoalMode::Plain)), nullptr);
+    EXPECT_NE(levels.plane(kind(2, true, ed::GoalMode::Satisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(2, true, ed::GoalMode::Unsatisfied)), nullptr);
+    EXPECT_EQ(levels.plane(kind(2, false, ed::GoalMode::Plain)), nullptr);
+    EXPECT_EQ(levels.plane(kind(3, false, ed::GoalMode::Plain)), nullptr);
+    EXPECT_EQ(levels.plane(kind(1, false, ed::GoalMode::Plain) | 8u), nullptr);  // no derived masks
+}
+
 TEST(EncodingLaneGroups, ALayerCountBeyondTheLevelsComputesNoMoreThanTheLevels)
 {
     const auto table = table_of("philosophers", {"p03-phil4"});
