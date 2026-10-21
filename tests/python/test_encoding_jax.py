@@ -658,6 +658,18 @@ def test_the_flags_of_a_call_at_held_capacities_are_checked(cases):
         ej.encode(handle, rows, put(ids, "cpu"))
 
 
+def test_the_cpu_pools_of_alternating_thread_counts_are_kept(cases):
+    case = cases["gripper"].resized(64)
+    encoder = encoding.FlatRelationEncoder(case.source)
+    handle = ej.register(encoder)
+    caps = exact_capacities(host_encode(encoder, case))
+    rows = put(halves(case.rows), "cpu")
+    want = host_encode(encoder, case, capacities=caps)
+    for k in range(6):
+        same_batch(want, ej.encode(handle, rows, capacities=caps, threads=1 + k % 2))
+    assert _encoding_jax.calls(handle)["pools"] == 2
+
+
 def test_a_batch_keeps_its_schema_after_the_encoder_is_unregistered(cases):
     case = cases["gripper"]
     encoder = encoding.FlatRelationEncoder(case.source)

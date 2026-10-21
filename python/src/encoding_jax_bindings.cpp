@@ -80,24 +80,29 @@ struct EncoderEntry : FfiEntry
 {
     std::shared_ptr<const encoding::FlatEncoder> encoder;
 
-    // The CPU target: one call at a time (the scratch), on a pool rebuilt when the thread count changes.
+    // The CPU target: one call at a time (the scratch), on the pool of the call's thread count. The pools stay, so
+    // that calls alternating between thread counts build none after the first of each.
     std::mutex host_mutex;
     encoding::EncodeScratch scratch;
-    std::shared_ptr<ThreadPool> pool;
-    u32 pool_threads = 0;
+    std::map<u32, std::shared_ptr<ThreadPool>> pools;
+    static constexpr usize k_max_pools = 4;
 
-    std::atomic<u64> cpu_calls{0}, cuda_calls{0}, captured_calls{0};
+    std::atomic<u64> cpu_calls{0}, cuda_calls{0}, captured_calls{0}, pools_built{0};
 
     explicit EncoderEntry(std::shared_ptr<const encoding::FlatEncoder> e) : encoder(std::move(e)) {}
 
+    /// The pool of `threads` workers (the caller holds host_mutex).
     ThreadPool& pool_of(u32 threads)
     {
-        if (!pool || pool_threads != threads)
+        auto it = pools.find(threads);
+        if (it == pools.end())
         {
-            pool = std::make_shared<ThreadPool>(threads);
-            pool_threads = threads;
+            if (pools.size() >= k_max_pools)
+                pools.clear();
+            it = pools.emplace(threads, std::make_shared<ThreadPool>(threads)).first;
+            ++pools_built;
         }
-        return *pool;
+        return *it->second;
     }
 
 #if defined(MYMYR_HAS_CUDA)
@@ -802,11 +807,13 @@ void bind_encoding_jax(nb::module_& parent)
             d["cpu"] = e->cpu_calls.load();
             d["cuda"] = e->cuda_calls.load();
             d["captured"] = e->captured_calls.load();
+            d["pools"] = e->pools_built.load();
             return d;
         },
         "handle"_a,
         "How often the targets ran for this encoder: 'cpu', 'cuda' and 'captured' (CUDA calls traced into a command "
-        "buffer, which XLA then replays without calling the target).");
+        "buffer, which XLA then replays without calling the target), and the worker pools the CPU target built "
+        "('pools': one per thread count it ran with).");
     m.def(
         "has_cuda",
         [] {
