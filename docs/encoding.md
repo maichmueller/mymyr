@@ -719,15 +719,17 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   `jax_enable_x64` or as NumPy arrays) and `int32` halves are accepted too. `task_ids` is `int32` `[N]` (required for a
   table of several instances), `derived` the rows' derived words, and `goals` the masks `(goal_pos, goal_neg)` or all
   four, with `N` rows or one row for all, as in `encoder.encode`.
-- **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=, args=,
-  targets=)` (`targets` only with target sources; `graphs` at least `N`): the per-graph arrays have `N` entries, the
-  variable-size arrays the capacities' sizes, zero past the batch. `batch.device_sizes` is `uint32` `[S, 2]`, the `S`
-  64-bit words of `DeviceFlatBatch.sizes` (entities, tuples, args, targets, history and the overflow flags: 1 a capacity,
-  2 the index type, 4 an invalid row) as halves, low half first; `batch.overflow` is the flags as a `uint32` scalar
-  for use inside the function, and `batch.sizes` reads them on the host. A batch that does not fit, or has an invalid row, is all zero with its flag set. An eager call
-  without capacities waits once for the batch's sizes (the first call for a number of rows also counts the batch; later
-  ones reuse the capacities held for it, which only grow) and returns exact arrays (`ValueError` for an invalid row,
-  `OverflowError` when `int32` indices do not suffice); a traced call without them raises `ValueError`.
+- **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
+  args=, targets=)` (`targets` only with target sources; `graphs` at least `N`): the per-graph arrays have `N`
+  entries, the variable-size arrays the capacities' sizes, zero past the batch. `batch.device_sizes` is `uint32` `[S,
+  2]`, the `S` 64-bit words of `DeviceFlatBatch.sizes` (entities, tuples, args, targets, history and the overflow
+  flags: 1 a capacity, 2 the index type, 4 an invalid row) as halves, low half first; `batch.overflow` is the flags as
+  a `uint32` scalar for use inside the function, and `batch.sizes` reads them on the host (NumPy arrays over the
+  stacked axes for a batch stacked by `lax.scan` or `jax.vmap`). A batch that does not fit, or has an invalid row, is
+  all zero with its flag set. An eager call without capacities waits once for the batch's sizes (the first call for a
+  number of rows also counts the batch; later ones reuse the capacities held for it, which only grow) and returns
+  exact arrays (`ValueError` for an invalid row, `OverflowError` when `int32` indices do not suffice); a traced call
+  without them raises `ValueError`.
 - **`JaxFlatBatch`** is a pytree with the arrays of `FlatBatch` under the same names, dtypes and shapes (an array the
   schema does not store raises `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities` and
   `as_dict(framework=None)` (`'jax'`, `'dlpack'` or `'numpy'`, with the scalars of `FlatBatch.as_dict`, the table's
@@ -735,12 +737,12 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
 - **What it encodes.** What the device encodes, on both platforms: a schema the device refuses (action, subgoal or
-  history targets, subgoal levels, horizons) and rows without their derived words where the device cannot
-  evaluate the axioms that a graph reads (a body or object set beyond the device's matcher limits) raise `ValueError`
-  (`mymyr: encoding: ...`) when the function is traced. Otherwise the device evaluates missing derived words, as the
-  CPU encoder does. Action relations need an expansion, which
-  JAX cannot pass, so their tuples are never encoded here. In a mymyr built without the CUDA backend, only the
-  CPU target exists, and no device refusal applies.
+  history targets, subgoal levels, horizons) or whose kernels need more shared memory than a block has (very many
+  predicate virtual nodes or relations) and rows without their derived words where the device cannot evaluate the
+  axioms that a graph reads (a body or object set beyond the device's matcher limits) raise `ValueError` (`mymyr:
+  encoding: ...`) when the function is traced. Otherwise the device evaluates missing derived words, as the CPU
+  encoder does. Action relations need an expansion, which JAX cannot pass, so their tuples are never encoded here. In
+  a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies.
 - **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
   `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place
   of the encoder, so a function can hold the integer only); the registry keeps the encoder, its table and its device
