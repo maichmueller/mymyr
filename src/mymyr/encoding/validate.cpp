@@ -842,6 +842,8 @@ void validate_numeric(const rl::ArrayBundle& batch, const EncodingSchema& schema
             fail("numeric_values is not zero past the batch");
         if (batch.scalar("numeric_dtype") != (wide_values ? 1 : 0))
             fail("numeric_dtype does not match the schema's numeric dtype");
+        if (batch.scalar("numeric_relations") != static_cast<i64>(R - schema.first_numeric_relation()))
+            fail("numeric_relations does not match the schema's numeric relations");
     }
     if (!node_values)
         return;

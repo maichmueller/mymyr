@@ -62,6 +62,8 @@ struct Slice
 {
     const rl::ArrayBundle* batch;
     u64 graph, graphs, entity, entities, args, targets, history;
+    u64 numeric, nodes, edges;  // its numeric values and, with the Simple graph, its nodes and edges
+    u64 edge_stride;            // the distance of the rows of its edge_index (its capacity of edges)
 };
 
 /// The static block of an instance in a batch with shared statics: block `block` of `batch`.
@@ -110,8 +112,17 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
     const u64 relations = static_cast<u64>(first.scalar("num_relations"));
     const bool relation_major = first.scalar("layout") == 1;
     const bool targets = first.find("target_offsets"), history = first.find("history_offsets");
+    // A batch of the Simple graph alone has no relation arrays. The numeric values are those of the tuples of the last
+    // numeric_relations relations, in segment order.
+    const bool relation_arrays = first.find("relation_offsets"), simple = first.find("node_offsets");
+    const bool numeric = first.find("numeric_values");
+    const i64 numeric_scalar = first.scalar("numeric_relations");
+    if (numeric && (!relation_arrays || numeric_scalar < 0 || static_cast<u64>(numeric_scalar) > relations))
+        invalid("a collated batch with numeric values has no valid numeric_relations");
+    const u64 numeric_relations = numeric ? static_cast<u64>(numeric_scalar) : 0;
+    const u64 first_numeric = relations - numeric_relations;
     const IndexType index = sizeof(I) == 8 ? IndexType::I64 : IndexType::I32;
-    u64 G = 0, E = 0, A = 0, T = 0, H = 0;
+    u64 G = 0, E = 0, A = 0, T = 0, H = 0, N = 0, V = 0, D = 0;
     std::vector<Slice> slices;
     slices.reserve(batches.size());
     for (const auto& b : batches)
@@ -128,8 +139,10 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
         need(*b, "relation_offsets", add(slice_cells, 1));
         need(*b, "relation_arg_offsets", add(slice_cells, 1));
         need(*b, "relation_counts", slice_cells);
+        need(*b, "node_offsets", add(n, 1));
+        need(*b, "edge_offsets", add(n, 1));
         const u64 entities = closing<I>(*b, "entity_offsets", n);
-        const u64 args = closing<I>(*b, "relation_arg_offsets", slice_cells);
+        const u64 args = relation_arrays ? closing<I>(*b, "relation_arg_offsets", slice_cells) : 0;
         const u64 t = targets ? closing<I>(*b, "target_offsets", n) : 0;
         const u64 h = history ? closing<I>(*b, "history_offsets", n) : 0;
         need(*b, "entity_role", entities);
@@ -139,11 +152,34 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
         need(*b, "target_group", t);
         need(*b, "history_entity", h);
         need(*b, "history_dt", h);
-        slices.push_back({b.get(), G, static_cast<u64>(graphs), E, entities, args, t, h});
+        u64 values = 0;
+        if (numeric)
+        {
+            const I* ro = data<I>(*b, "relation_offsets");
+            for (u64 g = 0; g < n; ++g)
+                for (u64 r = first_numeric; r < relations; ++r)
+                {
+                    const u64 src = relation_major ? r * n + g : g * relations + r;
+                    if (ro[src] < 0 || ro[src + 1] < ro[src])
+                        invalid("collated offsets must be nonnegative and monotone");
+                    values = add(values, static_cast<u64>(ro[src + 1] - ro[src]));
+                }
+            need(*b, "numeric_values", values);
+        }
+        const u64 nodes = simple ? closing<I>(*b, "node_offsets", n) : 0;
+        const u64 edges = simple ? closing<I>(*b, "edge_offsets", n) : 0;
+        const u64 stride = simple ? static_cast<u64>(array(*b, "edge_index").elements()) / 2 : 0;
+        need(*b, "node_label", nodes);
+        need(*b, "node_value", nodes);
+        need(*b, "edge_label", edges);
+        if (stride < edges)
+            invalid("a collated array is too short: edge_index");
+        slices.push_back({b.get(), G, static_cast<u64>(graphs), E, entities, args, t, h, values, nodes, edges, stride});
         G = add(G, static_cast<u64>(graphs)); E = add(E, entities); A = add(A, args); T = add(T, t); H = add(H, h);
+        N = add(N, values); V = add(V, nodes); D = add(D, edges);
     }
-    const u64 cells = mul(G, relations);
-    for (const u64 value : {add(G, 1), add(cells, 1), E, A, T, H})
+    const u64 cells = relation_arrays ? mul(G, relations) : 0;
+    for (const u64 value : {add(G, 1), add(cells, 1), E, A, T, H, V, D})
         detail::check_index_range(value, index, "collated total");
 
     // With shared statics: the blocks, their segments (block b, static relation k: b * static_relations + k) and sizes.
@@ -172,6 +208,8 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
     std::vector<u64> tuples(add(cells, 1)), arguments(add(cells, 1));
     for (const auto& s : slices)
     {
+        if (!relation_arrays)
+            break;
         const I* ro = data<I>(*s.batch, "relation_offsets");
         const I* ao = data<I>(*s.batch, "relation_arg_offsets");
         for (u64 g = 0; g < s.graphs; ++g)
@@ -193,6 +231,22 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
     detail::check_index_range(tuples.back(), index, "collated tuples");
     if (arguments.back() != A)
         invalid("collated argument offsets have inconsistent totals");
+    // where the values of each numeric segment start, in the destination's segment order
+    std::vector<u64> value_at(numeric ? cells : 0);
+    if (numeric)
+    {
+        u64 at = 0;
+        for (u64 i = 0; i < G * numeric_relations; ++i)
+        {
+            const u64 g = relation_major ? i % G : i / numeric_relations;
+            const u64 r = first_numeric + (relation_major ? i / G : i % numeric_relations);
+            const u64 dst = relation_major ? r * G + g : g * relations + r;
+            value_at[dst] = at;
+            at += tuples[dst + 1] - tuples[dst];
+        }
+        if (at != N)
+            invalid("collated numeric values have inconsistent totals");
+    }
 
     rl::ArrayBundle::Builder builder;
     for (const auto& [key, value] : first.scalars())
@@ -212,19 +266,24 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
         else if (name == "static_offsets" || name == "static_arg_offsets") n = static_segments + 1;
         else if (name == "static_args") n = static_args;
         else if (name == "static_relations") n = static_relations;
+        else if (name == "numeric_values") n = N;
+        else if (name == "node_offsets" || name == "edge_offsets") n = G + 1;
+        else if (name == "node_label" || name == "node_value") n = V;
+        else if (name == "edge_label" || name == "edge_index") n = D;
         else if (name != "task_ids" && name != "num_objects" && name != "goal_complete")
             invalid("collation does not support array " + a.name.str());
         const rl::ArrayShape shape = name == "relation_counts" ? rl::ArrayShape{static_cast<i64>(G), static_cast<i64>(relations)}
+                                     : name == "edge_index"    ? rl::ArrayShape{2, static_cast<i64>(D)}
                                                                : rl::ArrayShape{static_cast<i64>(n)};
         builder.add_uninitialized(a.name, a.dtype, shape);
     }
     auto result = std::make_shared<rl::ArrayBundle>(builder.build());
-    for (u64 c = 0; c <= cells; ++c)
+    for (u64 c = 0; c <= cells && relation_arrays; ++c)
     {
         data<I>(*result, "relation_offsets")[c] = static_cast<I>(tuples[c]);
         data<I>(*result, "relation_arg_offsets")[c] = static_cast<I>(arguments[c]);
     }
-    u64 target_base = 0, history_base = 0;
+    u64 target_base = 0, history_base = 0, node_base = 0, edge_base = 0;
     for (const auto& s : slices)
     {
         for (const auto& a : first.arrays())
@@ -236,6 +295,8 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
             else if (name == "target_group") { start = target_base; count = s.targets; }
             else if (name == "history_dt") { start = history_base; count = s.history; }
             else if (name == "relation_counts") { start = mul(s.graph, relations); count = mul(s.graphs, relations); }
+            else if (name == "node_label" || name == "node_value") { start = node_base; count = s.nodes; }
+            else if (name == "edge_label") { start = edge_base; count = s.edges; }
             else if (name != "task_ids" && name != "num_objects" && name != "goal_complete") continue;
             const u64 bytes = mul(count, rl::dtype_bytes(a.dtype));
             if (bytes)
@@ -256,18 +317,60 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
                 for (u64 j = 0; j < count; ++j)
                     data<I>(*result, entity_name)[base + j] = static_cast<I>(s.entity + data<I>(*s.batch, entity_name)[j]);
         }
-        const I* source_args = data<I>(*s.batch, "relation_args");
-        const I* source_offsets = data<I>(*s.batch, "relation_arg_offsets");
-        I* dest_args = data<I>(*result, "relation_args");
-        for (u64 g = 0; g < s.graphs; ++g)
-            for (u64 r = 0; r < relations; ++r)
+        if (relation_arrays)
+        {
+            const I* source_args = data<I>(*s.batch, "relation_args");
+            const I* source_offsets = data<I>(*s.batch, "relation_arg_offsets");
+            I* dest_args = data<I>(*result, "relation_args");
+            for (u64 g = 0; g < s.graphs; ++g)
+                for (u64 r = 0; r < relations; ++r)
+                {
+                    const u64 src = relation_major ? r * s.graphs + g : g * relations + r;
+                    const u64 dst = relation_major ? r * G + s.graph + g : (s.graph + g) * relations + r;
+                    for (u64 j = 0; j < arguments[dst + 1] - arguments[dst]; ++j)
+                        dest_args[arguments[dst] + j] = static_cast<I>(s.entity + source_args[source_offsets[src] + j]);
+                }
+        }
+        if (numeric)
+        {
+            // the values of each numeric segment, from the slice's segment order into the destination's
+            const u64 width = rl::dtype_bytes(array(first, "numeric_values").dtype);
+            const auto* source = static_cast<const std::byte*>(s.batch->data(array(*s.batch, "numeric_values")));
+            auto* dest = static_cast<std::byte*>(result->mutable_data("numeric_values"));
+            const I* ro = data<I>(*s.batch, "relation_offsets");
+            u64 from = 0;
+            for (u64 i = 0; i < s.graphs * numeric_relations; ++i)
             {
+                const u64 g = relation_major ? i % s.graphs : i / numeric_relations;
+                const u64 r = first_numeric + (relation_major ? i / s.graphs : i % numeric_relations);
                 const u64 src = relation_major ? r * s.graphs + g : g * relations + r;
                 const u64 dst = relation_major ? r * G + s.graph + g : (s.graph + g) * relations + r;
-                for (u64 j = 0; j < arguments[dst + 1] - arguments[dst]; ++j)
-                    dest_args[arguments[dst] + j] = static_cast<I>(s.entity + source_args[source_offsets[src] + j]);
+                const u64 n = static_cast<u64>(ro[src + 1] - ro[src]);
+                if (n)
+                    std::memcpy(dest + value_at[dst] * width, source + from * width, n * width);
+                from += n;
             }
-        target_base += s.targets; history_base += s.history;
+        }
+        if (simple)
+        {
+            // node ids are batch-global: a slice's nodes follow the nodes, and its edges the edges, of the slices before it
+            const I* node_offsets = data<I>(*s.batch, "node_offsets");
+            const I* edge_offsets = data<I>(*s.batch, "edge_offsets");
+            I* dest_nodes = data<I>(*result, "node_offsets");
+            I* dest_edges = data<I>(*result, "edge_offsets");
+            for (u64 g = 0; g <= s.graphs; ++g)
+            {
+                dest_nodes[s.graph + g] = static_cast<I>(node_base + static_cast<u64>(node_offsets[g]));
+                dest_edges[s.graph + g] = static_cast<I>(edge_base + static_cast<u64>(edge_offsets[g]));
+            }
+            const I* source = data<I>(*s.batch, "edge_index");
+            I* dest = data<I>(*result, "edge_index");
+            for (u64 row = 0; row < 2; ++row)
+                for (u64 j = 0; j < s.edges; ++j)
+                    dest[row * D + edge_base + j] =
+                        static_cast<I>(node_base + static_cast<u64>(source[row * s.edge_stride + j]));
+        }
+        target_base += s.targets; history_base += s.history; node_base += s.nodes; edge_base += s.edges;
     }
     if (shared)
     {

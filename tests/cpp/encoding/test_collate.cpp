@@ -204,3 +204,184 @@ TEST(EncodingCollate, ChecksCombinedWideTotalsBeforeAllocatingIndexArrays)
     const std::vector<std::shared_ptr<const rl::ArrayBundle>> batches{batch, batch};
     EXPECT_THROW((void)encoding::collate(batches), std::overflow_error);
 }
+
+namespace
+{
+/// Tables with numeric functions: two instances of different sizes with i32 storage, three with f64 storage, and one
+/// instance whose functions have several arities.
+std::vector<Corpus> numeric_corpus()
+{
+    using Mode = TaskOptions::NumericStorageMode;
+    auto counters = [](const char* problem, Mode mode)
+    {
+        const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
+        TaskOptions options;
+        options.numeric_storage = mode;
+        return Task::create(*frontend::load_task(dir + "domain.pddl", dir + problem + ".pddl"), options);
+    };
+    const std::string drone = std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-drone.txt";
+    std::vector<Corpus> out;
+    out.push_back({"counters_i32", rl::TaskTable::create({counters("p01", Mode::Auto), counters("p02", Mode::Auto)}), true});
+    out.push_back({"counters_f64",
+                   rl::TaskTable::create({counters("p01", Mode::F64), counters("p03-half", Mode::F64),
+                                          counters("p02", Mode::F64)}),
+                   true});
+    out.push_back({"drone", rl::TaskTable::single(Task::from_text_file(drone)), true});
+    return out;
+}
+
+/// `per_instance` walk rows of each instance, interleaved, with their numeric words.
+test::Rows walk_rows(const rl::TaskTable& table, u64 per_instance, u64 seed)
+{
+    std::vector<test::Rows> sources;
+    for (u32 i = 0; i < table.size(); ++i)
+        sources.push_back(test::random_walk(table, i, per_instance, seed + i));
+    test::Rows out;
+    out.words = table.words();
+    out.numeric_words = table.numeric_words();
+    const u32 width = table.row_words();
+    for (u64 k = 0; k < per_instance; ++k)
+        for (const auto& source : sources)
+        {
+            out.data.insert(out.data.end(), source.data.begin() + static_cast<std::ptrdiff_t>(k * width),
+                            source.data.begin() + static_cast<std::ptrdiff_t>((k + 1) * width));
+            out.task_ids.push_back(source.task_ids[k]);
+        }
+    return out;
+}
+
+encoding::EncodeInput input_of(const test::Rows& rows)
+{
+    encoding::EncodeInput in;
+    in.states = rows.view();
+    in.task_ids = rows.task_ids.data();
+    return in;
+}
+
+/// The encodes of the row slices {3, 0, 11, the rest} of `input`, whose rows are `width` words wide.
+std::vector<std::shared_ptr<const rl::ArrayBundle>> encoded_parts(const encoding::FlatEncoder& encoder,
+                                                                  const encoding::EncodeInput& input, u32 width)
+{
+    std::vector<std::shared_ptr<const rl::ArrayBundle>> out;
+    for (const auto& part : parts(input, width, {3u, 0u, 11u, input.states.rows - 14}))
+        out.push_back(encoder.encode(part));
+    return out;
+}
+
+const encoding::Outputs k_relations{encoding::Output::Relations};
+const encoding::Outputs k_both{encoding::Output::Relations, encoding::Output::Simple};
+const encoding::Outputs k_simple{encoding::Output::Simple};
+}
+
+TEST(EncodingCollate, NumericValuesFollowTheirTuplesInBothLayoutsIndexTypesAndDtypes)
+{
+    for (const auto& c : numeric_corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const test::Rows rows = walk_rows(*c.table, 20, 167);
+        const auto input = input_of(rows);
+        for (const auto& outputs : {k_relations, k_both})
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                    for (const auto dtype : {encoding::NumericDtype::F32, encoding::NumericDtype::F64})
+                    {
+                        if (outputs.contains(encoding::Output::Simple) && layout == encoding::Layout::Relation)
+                            continue;
+                        auto options = with(test::encoder_options(), layout, index);
+                        options.numeric_dtype = dtype;
+                        options.outputs = outputs;
+                        const auto encoder = encoding::FlatEncoder::create(c.table, options);
+                        ASSERT_TRUE(encoder->schema().stores_numeric_values());
+                        const auto expected = encoder->encode(input);
+                        EXPECT_EQ(expected->scalar("numeric_relations"),
+                                  encoder->schema().num_relations() - encoder->schema().first_numeric_relation());
+                        same(*expected, *encoding::collate(encoded_parts(*encoder, input, c.table->row_words())));
+                    }
+    }
+}
+
+TEST(EncodingCollate, SimpleGraphsShiftTheirNodeIds)
+{
+    for (const auto& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const auto rows = make_batch(c.table, 33, c.walk, 173);
+        for (auto config : configs())
+        {
+            if (config.options.predicate_virtual_nodes || config.options.entity_arrays != encoding::EntityArrays::Always)
+                continue;
+            SCOPED_TRACE(config.name);
+            for (const auto& outputs : {k_both, k_simple})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                {
+                    config.options.index = index;
+                    config.options.outputs = outputs;
+                    const auto encoder = encoding::FlatEncoder::create(c.table, config.options);
+                    const auto input = host_input(rows, 33, config.inputs);
+                    same(*encoder->encode(input), *encoding::collate(encoded_parts(*encoder, input, rows.words)));
+                }
+        }
+    }
+    // a numeric table adds node_value; the Simple graph alone has no numeric_values
+    for (const auto& c : numeric_corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const test::Rows rows = walk_rows(*c.table, 20, 179);
+        const auto input = input_of(rows);
+        auto options = test::encoder_options();
+        options.outputs = k_simple;
+        const auto encoder = encoding::FlatEncoder::create(c.table, options);
+        ASSERT_TRUE(encoder->schema().stores_node_value());
+        const auto expected = encoder->encode(input);
+        EXPECT_EQ(expected->find("numeric_values"), nullptr);
+        same(*expected, *encoding::collate(encoded_parts(*encoder, input, c.table->row_words())));
+    }
+}
+
+TEST(EncodingCollate, NumericValuesAndSimpleGraphsIgnoreCapacityTails)
+{
+    for (const auto& c : numeric_corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const test::Rows rows = walk_rows(*c.table, 8, 181);
+        const auto input = input_of(rows);
+        for (const auto& outputs : {k_relations, k_both, k_simple})
+        {
+            auto options = test::encoder_options();
+            options.outputs = outputs;
+            const auto encoder = encoding::FlatEncoder::create(c.table, options);
+            ThreadPool pool(1);
+            encoding::EncodeScratch scratch;
+            std::vector<std::shared_ptr<const rl::ArrayBundle>> batches;
+            for (const auto& part : parts(input, c.table->row_words(), {5u, 0u, input.states.rows - 5}))
+            {
+                const encoding::FlatSizes exact = encoder->count(part, pool, scratch);
+                encoding::BatchShape caps{part.states.rows, exact.entities + 9, exact.args + 7, 0};
+                caps.numeric = scratch.numeric_tuples() + 5;
+                encoding::FlatSizes sizes;
+                batches.push_back(encoder->encode_capacity(part, caps, pool, scratch, sizes));
+                ASSERT_FALSE(sizes.overflowed());
+            }
+            same(*encoder->encode(input), *encoding::collate(batches));
+        }
+    }
+}
+
+TEST(EncodingCollate, RefusesNumericValuesWithoutTheirRelationCount)
+{
+    const auto c = numeric_corpus().front();
+    const test::Rows rows = walk_rows(*c.table, 2, 191);
+    const auto batch = encoding::FlatEncoder::create(c.table, test::encoder_options())->encode(input_of(rows));
+    rl::ArrayBundle::Builder builder;
+    for (const auto& [key, value] : batch->scalars())
+        if (key.view() != "numeric_relations")
+            builder.scalar(key, value);
+    for (const auto& info : batch->arrays())
+        builder.add_uninitialized(info.name, info.dtype, info.shape);
+    auto stripped = std::make_shared<rl::ArrayBundle>(builder.build());
+    for (const auto& info : batch->arrays())
+        std::memcpy(stripped->mutable_data(info.name.view()), batch->data(info),
+                    info.elements() * rl::dtype_bytes(info.dtype));
+    const std::vector<std::shared_ptr<const rl::ArrayBundle>> batches{stripped};
+    EXPECT_THROW((void)encoding::collate(batches), std::invalid_argument);
+}

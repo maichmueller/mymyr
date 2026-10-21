@@ -2182,7 +2182,8 @@ void bind_encoding(nb::module_& parent)
             },
             "framework"_a = nb::none(),
             "The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, "
-            "table_fingerprint, statics and, with numeric values, numeric_dtype) and the arrays of the batch, zero-copy, "
+            "table_fingerprint, statics and, with numeric values, numeric_dtype and numeric_relations) and the arrays "
+            "of the batch, zero-copy, "
             "in the framework (default: the batch's).");
     for (const auto& [name, doc] : k_batch_arrays)
         batch.def_prop_ro(name, [name = name](const PyFlatBatch& self) { return ArrayOut(batch_array(self, name)); }, doc);

@@ -42,7 +42,8 @@
 // int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern), table_fingerprint (the
 // table's, rl::TaskTable::fingerprint, as an i64 bit pattern: the task ids of batches with equal ones name the same
 // instances), statics (0: the static tuples are repeated in every graph; 1: they are shared, see below) and, with
-// numeric values, numeric_dtype (0: float32, 1: float64).
+// numeric values, numeric_dtype (0: float32, 1: float64) and numeric_relations (the number of numeric relations: the
+// last ones of the catalog).
 //
 // The Simple graph. With FlatOptions::outputs holding Simple, a batch also has the atom-object incidence graph of its
 // tuples (it needs the entity arrays), and without Relations in the outputs it has no relation arrays (relation_*) and

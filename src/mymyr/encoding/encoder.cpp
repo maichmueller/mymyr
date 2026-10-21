@@ -998,7 +998,10 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     builder.scalar("table_fingerprint", std::bit_cast<i64>(m_table_fingerprint));
     builder.scalar("statics", m_schema->shared_statics() ? 1 : 0);
     if (m_schema->stores_numeric_values())
+    {
         builder.scalar("numeric_dtype", wide_values ? 1 : 0);
+        builder.scalar("numeric_relations", static_cast<i64>(R - m_schema->first_numeric_relation()));
+    }
     if (simple)
     {
         builder.scalar("simple_node_labels", m_schema->simple_node_labels());

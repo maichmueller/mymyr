@@ -533,7 +533,8 @@ The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: rel
 `schema_fingerprint` (the schema's fingerprint as a signed 64-bit value), `table_fingerprint` (the table's
 `TaskTable.fingerprint`, likewise: the task ids of two batches name the same instances iff the values agree),
 `statics` (0: the static tuples are repeated in every graph, 1: [shared](#shared-statics)) and, with `numeric_values`,
-`numeric_dtype` (0: float32, 1: float64) come with `batch.as_dict()`.
+`numeric_dtype` (0: float32, 1: float64) and `numeric_relations` (the number of numeric relations, the last ones of the
+catalog) come with `batch.as_dict()`.
 
 The tuples of a cell are the atoms of its predicate in the lexicographic order of their objects, so the atom slot
 layout of a task (`atoms='auto'`, `'reachable'`, `'dense'`) never reaches a model. A static tuple appears once per
@@ -1287,8 +1288,10 @@ stay local to their graph; entity ids and offsets receive the appropriate prefix
 interleaved by relation across the slices. Mixed schemas, tables (`table_fingerprint`), layouts, index types,
 static representations or devices raise `ValueError`; so does a device batch of an encoder with subgoal layers or
 history steps. Host collation also takes batches with [shared statics](#shared-statics): the result holds one static
-block per instance of its graphs, in ascending instance order, as one encode of all rows does. Overflowed inputs are
-refused. Host collation allocates exact arrays; device collation accepts
+block per instance of its graphs, in ascending instance order, as one encode of all rows does. It takes
+`numeric_values` (each value follows its tuple into the result's segment order) and the
+[Simple graph](#the-simple-graph) (the node ids in `edge_index` are shifted by the nodes of the batches before).
+Overflowed inputs are refused. Host collation allocates exact arrays; device collation accepts
 `capacities=` and reports overflow through `device_sizes`. All accumulated totals use uint64 before index checks.
 
 For repeated or captured device collation, prepare `encoding.DeviceCollator(batches)` outside capture and call
