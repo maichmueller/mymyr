@@ -240,6 +240,13 @@ def _stride(w: Any) -> int:
     return w.stride(0) if w.shape[0] > 1 else w.shape[1]
 
 
+def _same_strides(pos: Any, neg: Any, pos_name: str, neg_name: str) -> None:
+    """The two masks of a pair (of the same shape) are read with one row stride: they need the same one."""
+    if pos.shape[0] > 1 and pos.numel() and pos.stride(0) != neg.stride(0):
+        raise _error(f"'{neg_name}' has a row stride of {neg.stride(0)} words, '{pos_name}' of {pos.stride(0)}: the two "
+                     f"masks need the same one (make both contiguous)")
+
+
 def _layer_words(torch: Any, t: Any, name: str, graphs: int, may_share: bool) -> Any:
     """``t`` as 64-bit masks [rows, layers, width]: 64-bit integers, or 32-bit halves reinterpreted as little-endian
     halves of words. A row's layers are contiguous; one row per state, or a single row that all share if ``may_share``."""
@@ -321,6 +328,7 @@ class _Rows:
                 tensors.append(m)
             for pair in range(len(masks) // 2):
                 pos, neg = masks[2 * pair], masks[2 * pair + 1]
+                _same_strides(pos, neg, names[2 * pair], names[2 * pair + 1])
                 shared = pos.shape[0] == 1 and graphs != 1
                 at = 4 * pair
                 goal[at:at + 4] = [pos.data_ptr(), neg.data_ptr(), 0 if shared else _stride(pos), pos.shape[1]]
@@ -349,6 +357,7 @@ class _Rows:
         pos, neg = pair
         if pos.shape != neg.shape:
             raise _error(f"'{names[at + 1]}' has another shape than '{names[at]}'")
+        _same_strides(pos, neg, names[at], names[at + 1])
         shared = pos.shape[0] == 1 and graphs != 1
         stride = 0 if shared else (pos.stride(0) if pos.shape[0] > 1 else pos.shape[1] * pos.shape[2])
         return pos, neg, stride

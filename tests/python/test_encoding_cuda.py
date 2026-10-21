@@ -497,6 +497,31 @@ def test_layers_and_history_the_schema_does_not_have_are_refused(cases):
         same_batch(host_encode(encoder, case), device_encode(encoder, case, dev))
 
 
+def test_mask_pairs_with_different_row_strides_are_refused_before_any_launch():
+    # the device reads both masks of a pair with one row stride: a negative mask with a shorter stride than the
+    # positive one would be read past its end (only the checks run here, no kernel)
+    gpu()
+    from mymyr.encoding import _device
+    n, layers, words = 8, 2, 1
+    states = torch.zeros((n, words), dtype=torch.int64, device="cuda")
+    pos = torch.zeros((2 * n, layers, words), dtype=torch.int64, device="cuda")[::2]
+    neg = torch.zeros((n, layers, words), dtype=torch.int64, device="cuda")
+    assert pos.stride(0) != neg.stride(0) and pos.shape == neg.shape
+    dt = torch.zeros((n, layers), dtype=torch.int32, device="cuda")
+    for subgoals, history in (((pos, neg), None), ((neg, pos), None), ((neg, neg, pos, neg), None),
+                              (None, (pos, neg, dt)), (None, (neg, neg, dt, None, pos, neg))):
+        with pytest.raises(ValueError, match="row stride of .* the two masks need the same one"):
+            _device._Rows(torch, states, None, None, None, subgoals, history)
+    goal_pos = torch.zeros((2 * n, words), dtype=torch.int64, device="cuda")[::2]
+    goal_neg = torch.zeros((n, words), dtype=torch.int64, device="cuda")
+    for goals in ((goal_pos, goal_neg), (goal_neg, goal_neg, goal_pos, goal_neg)):
+        with pytest.raises(ValueError, match="row stride of .* the two masks need the same one"):
+            _device._Rows(torch, states, None, None, goals)
+    # equal strides are accepted, strided or not
+    _device._Rows(torch, states, None, None, (goal_pos, goal_pos), (pos, pos), (pos, pos, dt))
+    _device._Rows(torch, states, None, None, (goal_neg, goal_neg), (neg, neg), (neg, neg, dt))
+
+
 def test_invalid_layers_and_history_are_flagged_or_raise(cases):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
