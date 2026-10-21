@@ -686,6 +686,29 @@ def test_a_batch_keeps_its_schema_after_the_encoder_is_unregistered(cases):
     gc.collect()
     probe = object()
     assert sys.getrefcount(schema) == sys.getrefcount(probe)  # and by nothing else
+
+
+def test_rows_made_on_xlas_stream_right_before_the_encode_are_complete(cases):
+    need_gpu()
+    case = cases["gripper"].resized(4097)
+    encoder = encoding.FlatRelationEncoder(case.source)
+    handle = ej.register(encoder)
+    caps = exact_capacities(host_encode(encoder, case))
+    want = host_encode(encoder, case, capacities=caps)
+    base = put(halves(case.rows), "cuda")
+    heavy = put(np.ones((1536, 1536), np.float32), "cuda")
+
+    @jax.jit
+    def f(rows, a):
+        for _ in range(12):  # a long kernel chain: the rows depend on its (zero) result
+            a = jnp.tanh(a @ a * 1e-3)
+        lag = (jnp.sum(a) * 0.0).astype(jnp.uint32)
+        return ej.encode(handle, rows + lag, capacities=caps)
+
+    for _ in range(5):
+        same_batch(want, f(base, heavy))
+
+
 def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     """Destroying the last reference of an encoder waits for the device. CUDA refuses that wait while another thread
     captures a CUDA graph; the generation is then kept (not freed under work that may still read it) and counted."""
