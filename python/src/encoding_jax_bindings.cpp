@@ -730,7 +730,7 @@ void bind_encoding_jax(nb::module_& parent)
 #if defined(MYMYR_HAS_CUDA)
             try
             {
-                cuda::DeviceEncoder::check_schema(enc.schema());
+                cuda::DeviceEncoder::check_encoder(enc);
                 d["device_refusal"] = nb::none();
             }
             catch (const std::invalid_argument& x)

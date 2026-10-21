@@ -749,6 +749,27 @@ def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     assert _encoding_jax.leaked_devices() == before + 1
 
 
+def test_a_schema_whose_kernels_need_more_shared_memory_than_a_block_has_is_refused_when_traced():
+    need_gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    names = [f"p{k}" for k in range(4000)]
+    domain = mymyr.Domain.from_string(
+        "(define (domain many) (:requirements :strips) (:predicates " + " ".join(f"({n})" for n in names) + ")"
+        " (:action clear :parameters () :precondition (and) :effect (and " + " ".join(f"(not ({n}))" for n in names)
+        + ")))"
+    )
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem p) (:domain many) (:init " + " ".join(f"({n})" for n in names) + ") (:goal (and)))"))
+    encoder = encoding.FlatRelationEncoder(task, predicate_virtual_nodes=True)
+    rows = put(halves(np.asarray(task.encode([task.initial_state]))), "cuda")
+    caps = dict(graphs=1, entities=4096, args=4096, targets=0)
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: the schema has too many predicate virtual nodes"):
+        jax.jit(lambda r: ej.encode(encoder, r, capacities=caps))(rows)
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: the schema has too many predicate virtual nodes"):
+        ej.encode(encoder, rows, capacities=caps)
+
+
 GATED = (
     "(define (domain gated) (:requirements :strips :derived-predicates) (:predicates (p ?x) (q ?x))"
     " (:derived (q ?x) (p ?x)) (:action set :parameters (?x) :precondition (and) :effect (p ?x)))"

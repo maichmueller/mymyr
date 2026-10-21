@@ -1323,6 +1323,50 @@ TEST(DeviceEncoder, AutomaticCountLanesTryTheNextSharedMemoryConfiguration)
     cuda::check(cudaStreamSynchronize(stream), "sizes");
     EXPECT_EQ(sizes.overflow, 0u);
 }
+TEST(DeviceEncoder, AnEncoderWhoseLaunchesNeedMoreSharedMemoryThanABlockHasIsRefusedWithoutAContext)
+{
+    SKIP_WITHOUT_GPU();
+    auto many = [](u32 predicates)
+    {
+        std::string names, effects, init;
+        for (u32 p = 0; p < predicates; ++p)
+        {
+            const auto name = "p" + std::to_string(p);
+            names += " (" + name + ")";
+            effects += " (not (" + name + "))";
+            init += " (" + name + ")";
+        }
+        const auto domain = frontend::Domain::from_string("(define (domain many) (:requirements :strips) (:predicates" +
+            names + ") (:action clear :parameters () :precondition (and) :effect (and" + effects + ")))");
+        auto options = test::encoder_options();
+        options.predicate_virtual_nodes = true;
+        return encoding::FlatEncoder::create(
+            Task::create(*domain->instantiate_string("(define (problem p) (:domain many) (:init" + init + ") (:goal (and)))")),
+            options);
+    };
+    // 400 virtual nodes fit with one of the count kernel configurations, 4000 with none
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_encoder(*many(400)));
+    try
+    {
+        cuda::DeviceEncoder::check_encoder(*many(4000));
+        ADD_FAILURE() << "accepted an encoder whose count kernel needs more shared memory than a block has";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("too many predicate virtual nodes"), std::string::npos) << e.what();
+    }
+    // an ordinary encoder passes, and a schema the device does not encode is refused as well
+    const auto blocks = load_tasks("pddl/blocks", {"smedium"});
+    if (!blocks.empty())
+    {
+        EXPECT_NO_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), test::encoder_options())));
+        auto refused = test::encoder_options();
+        refused.targets = {encoding::TargetSource::Action};
+        EXPECT_THROW(cuda::DeviceEncoder::check_encoder(*encoding::FlatEncoder::create(blocks.front(), refused)),
+                     std::invalid_argument);
+    }
+}
+
 TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
 {
     SKIP_WITHOUT_GPU();
