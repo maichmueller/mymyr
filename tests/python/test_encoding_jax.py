@@ -526,6 +526,9 @@ def test_the_cuda_target_runs_on_xla_memory_only(cases):
     assert "mymyr_encode_flat" in text
     need = _encoding_jax.scratch_bytes(handle, case.n, 0, False)
     assert f"tensor<{need + 255}xui8>" in text
+    # a CPU lowering of the same function carries no device scratch
+    cpu_text = jax.jit(lambda r: ej.encode(handle, r, capacities=caps)).lower(put(halves(case.rows), "cpu")).as_text()
+    assert "mymyr_encode_flat" in cpu_text and f"tensor<{need + 255}xui8>" not in cpu_text
 
 
 COMMAND_BUFFER_SCRIPT = textwrap.dedent(

@@ -385,14 +385,21 @@ def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entitie
     del specs["sizes"]
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
     results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))
+
+    def call(rows: tuple, scratch: Optional[int]) -> tuple:
+        shapes = results if scratch is None else [*results, jax.ShapeDtypeStruct((scratch,), jnp.uint8)]
+        out = jax.ffi.ffi_call("mymyr_encode_flat", shapes, vmap_method="sequential")(
+            *rows, args=np.int64(args), entities=np.int64(entities), handle=np.int64(handle),
+            targets=np.int64(targets), threads=np.int64(threads),
+        )  # fmt: skip
+        return tuple(out[: len(results)])
+
     scratch = _scratch(reg, handle, graphs, operands[2].shape[0] != 0)
-    if scratch is not None:
-        results.append(jax.ShapeDtypeStruct((scratch,), jnp.uint8))
-    call = jax.ffi.ffi_call("mymyr_encode_flat", results, vmap_method="sequential")
-    out = call(
-        *operands, args=np.int64(args), entities=np.int64(entities), handle=np.int64(handle),
-        targets=np.int64(targets), threads=np.int64(threads),
-    )  # fmt: skip
+    if scratch is None:
+        out = call(operands, None)
+    else:  # only a CUDA lowering carries the device scratch
+        out = jax.lax.platform_dependent(*operands, cpu=lambda *rows: call(rows, None),
+                                         cuda=lambda *rows: call(rows, scratch))
     arrays = {name: out[k] for k, name in enumerate(specs) if reg.layout.present(name)}
     return arrays, out[len(specs)]
 
