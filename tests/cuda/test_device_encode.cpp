@@ -22,6 +22,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace mymyr;
@@ -961,20 +962,25 @@ TEST(DeviceEncode, TheScratchOfAnEncoderEqualsThatOfItsDeviceEncoderAndGrowsWith
 TEST(DeviceEncode, DerivedWordsAreNeededOnlyWhereTheDeviceCannotEvaluateTheAxioms)
 {
     SKIP_WITHOUT_GPU();
-    const auto options = test::encoder_options();
+    auto options = test::encoder_options();
+    options.max_goal_level = 2;  // so that subgoal layers can read derived atoms
+    // the evaluation modes: goal masks, derived goal masks, derived subgoal masks
+    constexpr std::array<std::tuple<bool, bool, bool>, 6> k_derived_modes{{{false, false, false}, {true, false, false},
+                                                                           {true, true, false}, {false, false, true},
+                                                                           {true, false, true}, {true, true, true}}};
     // the device evaluates the axioms of tasks whose graphs read derived atoms
     const auto evaluable = encoding::FlatEncoder::create(rl::TaskTable::create({gated_task(3), gated_task(5)}), options);
     ASSERT_TRUE(evaluable->context().needs_derived(0));
-    for (const auto& [goals, derived_goals] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {true, true}}})
-        EXPECT_FALSE(cuda::DeviceEncoder::needs_derived(*evaluable, goals, derived_goals));
+    for (const auto& [goals, derived_goals, layers] : k_derived_modes)
+        EXPECT_FALSE(cuda::DeviceEncoder::needs_derived(*evaluable, goals, derived_goals, layers));
     // 2100 objects need 33 object words, more than it evaluates: rows of that instance need their derived words
     const auto beyond = encoding::FlatEncoder::create(rl::TaskTable::create({gated_task(3), gated_task(2100)}), options);
-    for (const auto& [goals, derived_goals] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {true, true}}})
-        EXPECT_TRUE(cuda::DeviceEncoder::needs_derived(*beyond, goals, derived_goals));
+    for (const auto& [goals, derived_goals, layers] : k_derived_modes)
+        EXPECT_TRUE(cuda::DeviceEncoder::needs_derived(*beyond, goals, derived_goals, layers));
     // a table without derived atoms never does
     const auto plain = encoding::FlatEncoder::create(corpus()[0].table, options);
-    for (const auto& [goals, derived_goals] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {true, true}}})
-        EXPECT_FALSE(cuda::DeviceEncoder::needs_derived(*plain, goals, derived_goals));
+    for (const auto& [goals, derived_goals, layers] : k_derived_modes)
+        EXPECT_FALSE(cuda::DeviceEncoder::needs_derived(*plain, goals, derived_goals, layers));
     // the host answer agrees with what the device does: the refused instance's rows are flagged without derived words
     const auto ctx = device_context();
     cuda::Stream stream;

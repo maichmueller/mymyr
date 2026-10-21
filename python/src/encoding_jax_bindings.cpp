@@ -11,11 +11,16 @@
 //   operands    states uint32 [N, 2 W] (the u64 words of each row as uint32 halves, low word first); task_ids int32 [N]
 //               (or [0]: every row is instance 0); derived uint32 [N, 2 D] (or [0]: none); goal_pos and goal_neg
 //               uint32 [M, 2 GW] and goal_derived_pos and goal_derived_neg uint32 [M, 2 GD] (or [0]: none), M = N or
-//               M = 1 (one goal for every row)
-//   attributes  args, entities, targets: the capacities of relation_args, of the entity arrays and of the target
-//               arrays; handle: the registry handle; threads: the CPU target's worker threads (0: one per hardware
-//               thread; the CUDA target ignores it)
-//   results     the 13 arrays of a batch in the order of mymyr.encoding.DeviceFlatBatch.array_names (an array the
+//               M = 1 (one goal for every row); subgoal_pos and subgoal_neg uint32 [M, L, 2 SW] and subgoal_derived_pos
+//               and subgoal_derived_neg uint32 [M, L, 2 SD] (or [0]: none), the L subgoal layers of each row (M = 1:
+//               of every row); history_pos and history_neg uint32 [N, H, 2 HW], history_dt int32 [N, H],
+//               history_count int32 [N] (or [0]: every step valid) and history_derived_pos and history_derived_neg
+//               uint32 [N, H, 2 HD] (or [0]: none), the H history steps of each row, oldest first (the layouts and
+//               rules of encoding::LayerInput and encoding::HistoryInput)
+//   attributes  args, entities, targets, history: the capacities of relation_args, of the entity arrays, of the
+//               target arrays and of the history step arrays; handle: the registry handle; threads: the CPU target's
+//               worker threads (0: one per hardware thread; the CUDA target ignores it)
+//   results     the 16 arrays of a batch in the order of mymyr.encoding.DeviceFlatBatch.array_names (an array the
 //               schema does not store is [0]): the per-graph and per-cell arrays sized by N, the variable-size ones by
 //               the capacities; then sizes uint32 [S, 2] (the S 64-bit words of encoding::FlatSizes as uint32 halves,
 //               low half first, in the field order of the struct, the overflow flags among them); then, required on
@@ -66,6 +71,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace mymyr::python
@@ -259,12 +265,13 @@ ffi::Error guarded(F&& f)
     }
 }
 
-/// The number of results before the scratch: the 13 arrays and the sizes.
-constexpr usize k_arrays = 13;
+/// The number of results before the sizes and the scratch.
+constexpr usize k_arrays = 16;
 constexpr const char* k_array_names[k_arrays] = {
-    "task_ids",       "num_objects",          "entity_offsets", "entity_role",   "entity_ref",
-    "relation_counts", "relation_offsets",    "relation_arg_offsets", "relation_args", "goal_complete",
-    "target_offsets", "target_entity",        "target_group"};
+    "task_ids",        "num_objects",      "entity_offsets",       "entity_role",     "entity_ref",
+    "relation_counts", "relation_offsets", "relation_arg_offsets", "relation_args",   "goal_complete",
+    "target_offsets",  "target_entity",    "target_group",         "history_offsets", "history_entity",
+    "history_dt"};
 
 /// A pair of row inputs as u64 words: rows and words per row (uint32 [rows, 2 words], or [0]: absent).
 struct Words
@@ -292,6 +299,70 @@ Words words_of(const ffi::AnyBuffer& b, const char* name)
     return w;
 }
 
+/// A set of mask layers per row as u64 words: rows, layers and words per layer (uint32 [rows, layers, 2 words], or
+/// [0]: absent). `data` is null when the array has no entries.
+struct Layers
+{
+    const u64* data = nullptr;
+    u64 rows = 0;
+    u32 layers = 0;
+    u32 words = 0;
+    bool given = false;
+};
+
+Layers layers_of(const ffi::AnyBuffer& b, const char* name)
+{
+    if (b.element_type() != ffi::DataType::U32)
+        fail(std::string("'") + name + "' must be uint32 (the u64 words as halves)");
+    const auto dims = b.dimensions();
+    Layers l;
+    if (dims.size() == 1 && dims[0] == 0)
+        return l;
+    if (dims.size() != 3 || dims[2] % 2 != 0)
+        fail(std::string("'") + name + "' must be [rows, layers, 2 words] uint32");
+    l.given = true;
+    l.rows = static_cast<u64>(dims[0]);
+    l.layers = static_cast<u32>(dims[1]);
+    l.words = static_cast<u32>(dims[2] / 2);
+    if (b.element_count() == 0)
+        return l;
+    if (reinterpret_cast<std::uintptr_t>(b.untyped_data()) % 8 != 0)
+        fail(std::string("'") + name + "' is not 8-byte aligned");
+    l.data = static_cast<const u64*>(b.untyped_data());
+    return l;
+}
+
+/// The operands of mymyr_encode_flat, in order.
+namespace operand
+{
+enum : usize
+{
+    states,
+    task_ids,
+    derived,
+    goal_pos,
+    goal_neg,
+    goal_derived_pos,
+    goal_derived_neg,
+    subgoal_pos,
+    subgoal_neg,
+    subgoal_derived_pos,
+    subgoal_derived_neg,
+    history_pos,
+    history_neg,
+    history_dt,
+    history_count,
+    history_derived_pos,
+    history_derived_neg,
+    count
+};
+constexpr const char* names[count] = {
+    "states",          "task_ids",          "derived",           "goal_pos",           "goal_neg",
+    "goal_derived_pos", "goal_derived_neg", "subgoal_pos",       "subgoal_neg",        "subgoal_derived_pos",
+    "subgoal_derived_neg", "history_pos",   "history_neg",       "history_dt",         "history_count",
+    "history_derived_pos", "history_derived_neg"};
+}  // namespace operand
+
 /// One call's inputs and destinations, checked against the encoder (shapes and dtypes; the rows' contents are the
 /// targets' to check).
 struct Call
@@ -300,6 +371,8 @@ struct Call
     Words states;
     const i32* task_ids = nullptr;
     Words derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg;
+    encoding::LayerInput subgoals{};
+    encoding::HistoryInput history{};
     encoding::BatchShape capacities;
     std::array<void*, k_arrays> arrays{};   // null: absent or without entries
     std::array<u64, k_arrays> bytes{};
@@ -313,16 +386,49 @@ u64 index_bytes(const encoding::FlatEncoder& enc)
     return enc.schema().options().index == encoding::IndexType::I64 ? 8 : 4;
 }
 
-Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 targets, const ffi::AnyBuffer& states,
-             const ffi::AnyBuffer& task_ids, const ffi::AnyBuffer& derived, const ffi::AnyBuffer& goal_pos,
-             const ffi::AnyBuffer& goal_neg, const ffi::AnyBuffer& goal_derived_pos,
-             const ffi::AnyBuffer& goal_derived_neg, const ffi::RemainingRets& rets, bool scratch_required)
+/// The masks `p` and `n` (checked to be a pair) as the fluent or the derived masks of `l`; one row for every graph
+/// has a stride of 0.
+void set_layers(const Call& c, const Layers& p, const Layers& n, encoding::LayerInput& l, bool derived)
+{
+    const u64 stride = p.rows == 1 && c.graphs != 1 ? 0 : u64{p.layers} * p.words;
+    if (derived)
+    {
+        l.derived_pos = p.data;
+        l.derived_neg = n.data;
+        l.derived_stride = stride;
+        l.derived_words = p.words;
+    }
+    else
+    {
+        l.pos = p.data;
+        l.neg = n.data;
+        l.stride = stride;
+        l.layers = p.layers;
+        l.words = p.words;
+    }
+}
+
+Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 history, i64 targets, const ffi::RemainingArgs& ops,
+             const ffi::RemainingRets& rets, bool scratch_required)
 {
     const encoding::FlatEncoder& enc = *e.encoder;
     const encoding::EncodingSchema& schema = enc.schema();
     Call c;
-    if (args < 0 || entities < 0 || targets < 0)
+    if (args < 0 || entities < 0 || targets < 0 || history < 0)
         fail("the capacities must be at least 0");
+    if (ops.size() != operand::count)
+        fail("mymyr_encode_flat has " + std::to_string(operand::count) + " operands, not " + std::to_string(ops.size()));
+    std::array<ffi::AnyBuffer, operand::count> buffers = [&]<usize... K>(std::index_sequence<K...>) {
+        auto one = [&](usize k) {
+            auto b = ops.get<ffi::AnyBuffer>(k);
+            if (!b.has_value())
+                fail(std::string("the operand '") + operand::names[k] + "' must be a buffer");
+            return *b;
+        };
+        return std::array<ffi::AnyBuffer, operand::count>{one(K)...};
+    }(std::make_index_sequence<operand::count>{});
+    const ffi::AnyBuffer& states = buffers[operand::states];
+    const ffi::AnyBuffer& task_ids = buffers[operand::task_ids];
     if (states.element_type() != ffi::DataType::U32)
         fail("'states' must be uint32 (the u64 words as halves)");
     const auto sdims = states.dimensions();
@@ -340,15 +446,15 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 targets, const f
     if (task_ids.element_count() == 0 && c.graphs && enc.table().size() > 1)
         fail("task_ids are required for a table of several instances");
     c.task_ids = task_ids.element_count() ? static_cast<const i32*>(task_ids.untyped_data()) : nullptr;
-    c.derived = words_of(derived, "derived");
+    c.derived = words_of(buffers[operand::derived], "derived");
     if (c.derived.data && c.derived.rows != c.graphs)
         fail("'derived' must have one row per state");
     if (c.derived.data && c.derived.words < enc.context().max_derived_words())
         fail("'derived' needs " + std::to_string(enc.context().max_derived_words()) + " words per row");
-    c.goal_pos = words_of(goal_pos, "goal_pos");
-    c.goal_neg = words_of(goal_neg, "goal_neg");
-    c.goal_derived_pos = words_of(goal_derived_pos, "goal_derived_pos");
-    c.goal_derived_neg = words_of(goal_derived_neg, "goal_derived_neg");
+    c.goal_pos = words_of(buffers[operand::goal_pos], "goal_pos");
+    c.goal_neg = words_of(buffers[operand::goal_neg], "goal_neg");
+    c.goal_derived_pos = words_of(buffers[operand::goal_derived_pos], "goal_derived_pos");
+    c.goal_derived_neg = words_of(buffers[operand::goal_derived_neg], "goal_derived_neg");
     auto pair = [&](const Words& p, const Words& n, const char* what) {
         if ((p.data == nullptr) != (n.data == nullptr) || p.rows != n.rows || p.words != n.words)
             fail(std::string(what) + " are two masks of the same shape");
@@ -361,7 +467,71 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 targets, const f
         fail("the derived goal masks need the goal masks over the fluent slots");
     if (c.goal_pos.data && !schema.has_goal_complete())
         fail("goals are given, but the schema has no goal relations");
-    c.capacities = {c.graphs, static_cast<u64>(entities), static_cast<u64>(args), static_cast<u64>(targets)};
+
+    // the subgoal layers and the history steps
+    std::array<Layers, operand::count> layers{};
+    for (const usize k : {operand::subgoal_pos, operand::subgoal_neg, operand::subgoal_derived_pos,
+                          operand::subgoal_derived_neg, operand::history_pos, operand::history_neg,
+                          operand::history_derived_pos, operand::history_derived_neg})
+        layers[k] = layers_of(buffers[k], operand::names[k]);
+    auto layer_pair = [&](usize at, bool may_share) {
+        const Layers &p = layers[at], &n = layers[at + 1];
+        const std::string what = std::string(operand::names[at]) + " and " + operand::names[at + 1];
+        if (p.given != n.given || p.rows != n.rows || p.layers != n.layers || p.words != n.words)
+            fail(what + " are two arrays of masks of the same shape");
+        if (p.given && p.rows != c.graphs && !(may_share && p.rows == 1))
+            fail(what + (may_share ? " have one row per state or one row for all" : " have one row per state"));
+    };
+    layer_pair(operand::subgoal_pos, true);
+    layer_pair(operand::subgoal_derived_pos, true);
+    layer_pair(operand::history_pos, false);
+    layer_pair(operand::history_derived_pos, false);
+    const Layers& sub = layers[operand::subgoal_pos];
+    const Layers& steps = layers[operand::history_pos];
+    if (layers[operand::subgoal_derived_pos].given &&
+        (!sub.given || layers[operand::subgoal_derived_pos].layers != sub.layers))
+        fail("the derived subgoal masks need the subgoal masks over the fluent slots, with as many layers");
+    if (layers[operand::history_derived_pos].given &&
+        (!steps.given || layers[operand::history_derived_pos].layers != steps.layers))
+        fail("the derived history masks need the history masks over the fluent slots, with as many steps");
+    if (sub.layers != 0 && !schema.has_subgoals())
+        fail("subgoal layers are given, but the schema has no subgoal relations");
+    if (sub.layers > schema.options().max_goal_level)
+        fail(std::to_string(sub.layers) + " subgoal layers are given, the schema has " +
+             std::to_string(schema.options().max_goal_level) + " levels");
+    if (steps.layers != 0 && !schema.has_history())
+        fail("history steps are given, but the schema has no history relations");
+    // dt [N, H] and count [N] of the history, or [0]: absent
+    auto ints = [&](usize k, std::initializer_list<u64> shape) -> const i32* {
+        const ffi::AnyBuffer& b = buffers[k];
+        const auto dims = b.dimensions();
+        std::string want = "[";
+        for (const u64 d : shape)
+            want += (want.size() > 1 ? ", " : "") + std::to_string(d);
+        want += "]";
+        if (b.element_type() != ffi::DataType::S32)
+            fail(std::string("'") + operand::names[k] + "' must be int32 " + want);
+        if (dims.size() == 1 && dims[0] == 0)
+            return nullptr;
+        if (!steps.given)
+            fail(std::string("'") + operand::names[k] + "' is given without the history masks");
+        bool same = dims.size() == shape.size();
+        for (usize d = 0; same && d < shape.size(); ++d)
+            same = static_cast<u64>(dims[d]) == shape.begin()[d];
+        if (!same)
+            fail(std::string("'") + operand::names[k] + "' must be int32 " + want);
+        return b.element_count() ? static_cast<const i32*>(b.untyped_data()) : nullptr;
+    };
+    c.history.dt = ints(operand::history_dt, {c.graphs, steps.layers});
+    c.history.count = ints(operand::history_count, {c.graphs});
+    if (steps.layers != 0 && c.graphs != 0 && !c.history.dt)
+        fail("the history steps need their dt");
+    set_layers(c, sub, layers[operand::subgoal_neg], c.subgoals, false);
+    set_layers(c, layers[operand::subgoal_derived_pos], layers[operand::subgoal_derived_neg], c.subgoals, true);
+    set_layers(c, steps, layers[operand::history_neg], c.history.masks, false);
+    set_layers(c, layers[operand::history_derived_pos], layers[operand::history_derived_neg], c.history.masks, true);
+    c.capacities = {c.graphs, static_cast<u64>(entities), static_cast<u64>(args), static_cast<u64>(targets),
+                    static_cast<u64>(history)};
 
     const usize expected = k_arrays + 1 + (scratch_required ? 1 : 0);
     if (rets.size() != expected && !(rets.size() == k_arrays + 2 && !scratch_required))
@@ -372,6 +542,7 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 targets, const f
     const bool counts = schema.emits_counts();
     const bool goal = schema.has_goal_complete();
     const bool has_targets = schema.has_targets();
+    const bool has_history = schema.has_history();
     // the elements and element size of every array (0 elements: absent)
     const std::array<std::pair<u64, u64>, k_arrays> want = {{
         {G, 4},
@@ -387,6 +558,9 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 targets, const f
         {has_targets ? G + 1 : 0, I},
         {has_targets ? c.capacities.targets : 0, I},
         {has_targets ? c.capacities.targets : 0, 1},
+        {has_history ? G + 1 : 0, I},
+        {has_history ? c.capacities.history : 0, I},
+        {has_history ? c.capacities.history : 0, 4},
     }};
     for (usize k = 0; k < k_arrays; ++k)
     {
@@ -453,6 +627,9 @@ encoding::FlatBuffers buffers_of(const Call& c)
     b.target_offsets = c.arrays[10];
     b.target_entity = c.arrays[11];
     b.target_group = static_cast<u8*>(c.arrays[12]);
+    b.history_offsets = c.arrays[13];
+    b.history_entity = c.arrays[14];
+    b.history_dt = static_cast<i32*>(c.arrays[15]);
     return b;
 }
 
@@ -482,15 +659,12 @@ ffi::ErrorOr<std::unique_ptr<Call>> encode_instantiate(ffi::Dictionary attrs)
 
 // ---- CPU
 
-ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64 targets, i64 threads,
-                      ffi::AnyBuffer states, ffi::AnyBuffer task_ids, ffi::AnyBuffer derived, ffi::AnyBuffer goal_pos,
-                      ffi::AnyBuffer goal_neg, ffi::AnyBuffer goal_derived_pos, ffi::AnyBuffer goal_derived_neg,
-                      ffi::RemainingRets rets)
+ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64 history, i64 targets, i64 threads,
+                      ffi::RemainingArgs ops, ffi::RemainingRets rets)
 {
     return guarded([&] {
         EncoderEntry& e = *state_of(call)->entry;
-        const Call c = call_of(e, args, entities, targets, states, task_ids, derived, goal_pos, goal_neg,
-                               goal_derived_pos, goal_derived_neg, rets, false);
+        const Call c = call_of(e, args, entities, history, targets, ops, rets, false);
         ++e.cpu_calls;
         if (c.graphs == 0)  // the empty batch: zero offsets and sizes
         {
@@ -507,6 +681,8 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
         in.derived_stride = c.derived.words;
         set_goal(c, c.goal_pos, c.goal_neg, in, false);
         set_goal(c, c.goal_derived_pos, c.goal_derived_neg, in, true);
+        in.subgoals = c.subgoals;
+        in.history = c.history;
         const encoding::FlatBuffers out = buffers_of(c);
         encoding::FlatSizes sizes;
         {
@@ -518,8 +694,9 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
             }
             catch (const std::invalid_argument&)
             {
-                // the rows' contents (a task id outside the table, a row or goal mask narrower than its instance, a
-                // bit its instance has no atom for): a flag, as on the device
+                // the rows' contents (a task id outside the table, a row, goal mask, subgoal layer or history step
+                // narrower than its instance, a bit its instance has no atom for, a history count outside the row's
+                // steps): a flag, as on the device
                 sizes = encoding::FlatSizes{};
                 sizes.overflow = encoding::k_overflow_input;
             }
@@ -539,22 +716,22 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
             zero_from(8, sizes.args, I);
             zero_from(11, sizes.targets, I);
             zero_from(12, sizes.targets, 1);
+            zero_from(14, sizes.history, I);
+            zero_from(15, sizes.history, 4);
         }
         std::memcpy(c.sizes, &sizes, sizeof sizes);
     });
 }
 
 #define MYMYR_ENCODE_ATTRS                                                                                              \
-    .Attr<i64>("args").Attr<i64>("entities").Attr<i64>("handle").Attr<i64>("targets").Attr<i64>("threads")
-#define MYMYR_ENCODE_OPERANDS                                                                                           \
-    .Arg<ffi::AnyBuffer>()                                                                                              \
-        .Arg<ffi::AnyBuffer>()                                                                                          \
-        .Arg<ffi::AnyBuffer>()                                                                                          \
-        .Arg<ffi::AnyBuffer>()                                                                                          \
-        .Arg<ffi::AnyBuffer>()                                                                                          \
-        .Arg<ffi::AnyBuffer>()                                                                                          \
-        .Arg<ffi::AnyBuffer>()                                                                                          \
-        .RemainingRets()
+    .Attr<i64>("args")                                                                                                  \
+        .Attr<i64>("entities")                                                                                          \
+        .Attr<i64>("handle")                                                                                            \
+        .Attr<i64>("history")                                                                                           \
+        .Attr<i64>("targets")                                                                                           \
+        .Attr<i64>("threads")
+// the operands of `operand` (checked by call_of), then the results
+#define MYMYR_ENCODE_OPERANDS .RemainingArgs().RemainingRets()
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_encode_instantiate_cpu, encode_instantiate<CpuCall>,
                               ffi::Ffi::BindInstantiate().Attrs());
@@ -569,14 +746,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(mymyr_ffi_encode_cpu, encode_cpu,
 constexpr u64 k_scratch_align = 256;
 
 ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i64 entities, i64 /*handle*/,
-                       i64 targets, i64 /*threads*/, ffi::AnyBuffer states, ffi::AnyBuffer task_ids,
-                       ffi::AnyBuffer derived, ffi::AnyBuffer goal_pos, ffi::AnyBuffer goal_neg,
-                       ffi::AnyBuffer goal_derived_pos, ffi::AnyBuffer goal_derived_neg, ffi::RemainingRets rets)
+                       i64 history, i64 targets, i64 /*threads*/, ffi::RemainingArgs ops, ffi::RemainingRets rets)
 {
     return guarded([&] {
         EncoderEntry& e = *state_of(call)->entry;
-        const Call c = call_of(e, args, entities, targets, states, task_ids, derived, goal_pos, goal_neg,
-                               goal_derived_pos, goal_derived_neg, rets, true);
+        const Call c = call_of(e, args, entities, history, targets, ops, rets, true);
         cuda::DeviceGuard guard(ordinal);
         cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
         cuda::check(cudaStreamIsCapturing(st, &status), "cudaStreamIsCapturing");
@@ -613,6 +787,8 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         in.derived_stride = c.derived.words;
         set_goal(c, c.goal_pos, c.goal_neg, in, false);
         set_goal(c, c.goal_derived_pos, c.goal_derived_neg, in, true);
+        in.subgoals = c.subgoals;
+        in.history = c.history;
         cuda::DeviceOutput out;
         out.arrays = buffers_of(c);
         out.capacities = shape;
@@ -738,9 +914,11 @@ void bind_encoding_jax(nb::module_& parent)
             {
                 d["device_refusal"] = std::string(x.what());
             }
-            d["needs_derived"] = nb::make_tuple(cuda::DeviceEncoder::needs_derived(enc, false, false),
-                                                cuda::DeviceEncoder::needs_derived(enc, true, false),
-                                                cuda::DeviceEncoder::needs_derived(enc, true, true));
+            nb::list needs;
+            for (const bool layer_masks : {false, true})
+                for (const auto [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
+                    needs.append(cuda::DeviceEncoder::needs_derived(enc, goal_masks, derived_goal_masks, layer_masks));
+            d["needs_derived"] = nb::tuple(needs);
             d["cuda"] = true;
 #else
             d["device_refusal"] = nb::none();
@@ -752,8 +930,8 @@ void bind_encoding_jax(nb::module_& parent)
         "handle"_a,
         "What the Python side checks at trace time: instances, derived_words (the widest instance's), device_refusal "
         "(why the device does not encode the schema, or None), needs_derived (whether the device needs the rows' "
-        "derived words without goal masks, with fluent goal masks, with derived goal masks too; None without the CUDA "
-        "backend) and cuda (whether the CUDA target exists).");
+        "derived words without goal masks, with fluent goal masks, with derived goal masks too, then the same three "
+        "with derived subgoal masks; None without the CUDA backend) and cuda (whether the CUDA target exists).");
     m.def(
         "scratch_bytes",
         [](i64 handle, u64 graphs, int device, bool derived) -> u64 {
@@ -762,7 +940,7 @@ void bind_encoding_jax(nb::module_& parent)
             nb::gil_scoped_release release;
             cuda::DeviceGuard guard(device);
             return cuda::DeviceEncoder::scratch_bytes(
-                *e->encoder, encoding::BatchShape{graphs, 0, 0, 0},
+                *e->encoder, encoding::BatchShape{graphs, 0, 0, 0, 0},
                 derived ? cuda::DerivedWords::Supplied : cuda::DerivedWords::Evaluated);
 #else
             (void)handle;

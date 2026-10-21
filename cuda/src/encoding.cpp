@@ -707,10 +707,12 @@ u64 DeviceEncoder::scratch_bytes(const EncodingAcquisition& context, const Batch
         detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations()),
         derived == DerivedWords::Evaluated);
 }
-bool DeviceEncoder::needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks, bool derived_goal_masks)
+bool DeviceEncoder::needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks, bool derived_goal_masks,
+                                  bool derived_layer_masks)
 {
     const auto facts = context_facts(encoder.context());
-    const u32 mode = goal_masks ? (derived_goal_masks ? 2 : 1) : 0;
+    // the evaluation mode of an encode (as in run): the goal mode, plus 3 with derived subgoal masks
+    const u32 mode = (goal_masks ? (derived_goal_masks ? 2 : 1) : 0) + (derived_layer_masks ? 3 : 0);
     return std::ranges::any_of(facts->axioms, [&](const detail::EncodingFacts::Axioms& axioms) {
         return ((axioms.modes >> mode) & 1u) && !axioms.refusal.empty();
     });
