@@ -1,7 +1,8 @@
 // mymyr._core._encoding_jax: the native side of mymyr.encoding.jax.
 //   register(encoder) -> handle  enters a FlatRelationEncoder into the FFI handle registry (ffi_registry.hpp), where
 //                                it stays until unregister(handle)
-//   info(handle), scratch_bytes(handle, graphs, device), calls(handle)
+//   info(handle), scratch_bytes(handle, graphs, device, derived), prepare(handle, device), leaked_devices(),
+//   calls(handle)
 //   ffi_targets(), ffi_types()   the XLA FFI handlers and the state type, for jax.ffi.register_ffi_target and
 //                                jax.ffi.register_ffi_type (empty without the XLA FFI headers)
 //
@@ -110,7 +111,7 @@ struct EncoderEntry : FfiEntry
     /// state to detach).
     struct Detached
     {
-        PyThreadState* state = PyGILState_Check() ? PyEval_SaveThread() : nullptr;
+        PyThreadState* state = PyThreadState_GetUnchecked() ? PyEval_SaveThread() : nullptr;
         Detached() = default;
         Detached(const Detached&) = delete;
         Detached& operator=(const Detached&) = delete;
