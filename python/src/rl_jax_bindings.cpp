@@ -38,10 +38,11 @@
 // [N, 2 cache_view_words] take the fast path, empty ones the general path (which synchronizes on the successor count);
 // on the CPU they must be empty.
 //
-// The handle registry: FFI attributes are scalars, so an Env enters its calls as an int64 handle into a process-wide
-// table of the native environments (as mymyr.rl.torch's ops take handles). Handles are never reused; a call whose handle is
-// gone (its Env was collected) fails with an error.
+// The handle registry (ffi_registry.hpp): FFI attributes are scalars, so an Env enters its calls as an int64 handle
+// (as mymyr.rl.torch's ops take handles). An Env is registered while it lives; a call whose handle is gone (its Env was
+// collected) fails with an error.
 
+#include "ffi_registry.hpp"
 #include "py_table.hpp"
 #include "py_task.hpp"
 #include "rl_typing.hpp"
@@ -98,7 +99,7 @@ using ContextArg = Arg<ann::Any>;
 /// A registered environment: the suite (a table's: TaskSuite::of) and configuration, the host environment (CPU calls)
 /// and, per CUDA device, the device environments and the expander (CUDA calls). Each backend serves one call at a time
 /// (its scratch).
-struct Entry
+struct Entry : FfiEntry
 {
     rl::TaskSuitePtr suite;
     rl::EnvConfig cfg;
@@ -139,47 +140,6 @@ struct Entry
     [[nodiscard]] bool multi() const noexcept { return suite->size() > 1; }
 };
 using EntryPtr = std::shared_ptr<Entry>;
-
-class Registry
-{
-public:
-    i64 add(EntryPtr e)
-    {
-        std::lock_guard lock(m_mutex);
-        const i64 h = m_next++;
-        m_entries.emplace(h, std::move(e));
-        return h;
-    }
-    void remove(i64 h)
-    {
-        EntryPtr keep;  // destroyed after the lock (a device env synchronizes its stream)
-        {
-            std::lock_guard lock(m_mutex);
-            auto it = m_entries.find(h);
-            if (it == m_entries.end())
-                return;
-            keep = std::move(it->second);
-            m_entries.erase(it);
-        }
-    }
-    [[nodiscard]] EntryPtr find(i64 h)
-    {
-        std::lock_guard lock(m_mutex);
-        auto it = m_entries.find(h);
-        return it == m_entries.end() ? nullptr : it->second;
-    }
-
-private:
-    std::mutex m_mutex;
-    std::unordered_map<i64, EntryPtr> m_entries;
-    i64 m_next = 1;
-};
-
-Registry& registry()
-{
-    static Registry* r = new Registry();  // never destroyed: XLA may call a handler during interpreter shutdown
-    return *r;
-}
 
 // ------------------------------------------------------------------------------------------------ Env (Python)
 
@@ -238,9 +198,9 @@ public:
         else if (path == "fast")
             throw nb::value_error("mymyr: path='fast' is a device path (device=None runs on the CPU)");
         m_entry = e;
-        m_handle = registry().add(std::move(e));
+        m_handle = ffi_registry().add(std::move(e));
     }
-    ~PyJaxEnv() { registry().remove(m_handle); }
+    ~PyJaxEnv() { ffi_registry().remove(m_handle); }
     PyJaxEnv(const PyJaxEnv&) = delete;
     PyJaxEnv& operator=(const PyJaxEnv&) = delete;
 
@@ -412,7 +372,7 @@ void expect_rows(const View& v, u64 rows, const char* name)
 
 EntryPtr entry(i64 handle)
 {
-    EntryPtr e = registry().find(handle);
+    EntryPtr e = ffi_registry().find_as<Entry>(handle);
     if (!e)
         fail("no environment is registered under handle " + std::to_string(handle) +
              " (its mymyr.rl.jax.Env was collected; keep the Env alive while its functions run)");

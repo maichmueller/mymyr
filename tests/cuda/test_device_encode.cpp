@@ -919,6 +919,131 @@ TEST(DeviceEncode, ACapturedEncodeReplaysWithinTheWidthClassLaunchBudget)
     }
 }
 
+TEST(DeviceEncode, TheScratchOfAnEncoderEqualsThatOfItsDeviceEncoderAndGrowsWithTheBatch)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+            for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+            {
+                const auto encoder = encoding::FlatEncoder::create(c.table, with(configs()[1].options, layout, index));
+                cuda::DeviceEncoder device(ctx, encoder);
+                const auto acquisition = device.context().acquire();
+                u64 last = 0;
+                for (const u64 graphs : {u64{1}, u64{64}, u64{4097}})
+                {
+                    const cuda::BatchShape shape{graphs, 100 * graphs, 300 * graphs, 10 * graphs};
+                    for (const auto derived : {cuda::DerivedWords::Evaluated, cuda::DerivedWords::Supplied})
+                    {
+                        const u64 bytes = cuda::DeviceEncoder::scratch_bytes(*encoder, shape, derived);
+                        EXPECT_EQ(bytes, device.scratch_bytes(shape, derived));
+                        EXPECT_EQ(bytes, device.scratch_bytes(acquisition, shape, derived));
+                        EXPECT_GT(bytes, 0u);
+                    }
+                    const u64 evaluated = cuda::DeviceEncoder::scratch_bytes(*encoder, shape);
+                    EXPECT_GE(evaluated, cuda::DeviceEncoder::scratch_bytes(*encoder, shape, cuda::DerivedWords::Supplied));
+                    EXPECT_GT(evaluated, last);
+                    last = evaluated;
+                }
+            }
+    }
+    // a table whose graphs read derived atoms needs more room to evaluate them than to be given them
+    const Corpus features = corpus()[1];
+    const auto encoder = encoding::FlatEncoder::create(features.table, test::encoder_options());
+    const cuda::BatchShape shape{64, 0, 0, 0};
+    EXPECT_GT(cuda::DeviceEncoder::scratch_bytes(*encoder, shape),
+              cuda::DeviceEncoder::scratch_bytes(*encoder, shape, cuda::DerivedWords::Supplied));
+}
+
+TEST(DeviceEncode, DerivedWordsAreNeededOnlyWhereTheDeviceCannotEvaluateTheAxioms)
+{
+    SKIP_WITHOUT_GPU();
+    const auto options = test::encoder_options();
+    // the device evaluates the axioms of tasks whose graphs read derived atoms
+    const auto evaluable = encoding::FlatEncoder::create(rl::TaskTable::create({gated_task(3), gated_task(5)}), options);
+    ASSERT_TRUE(evaluable->context().needs_derived(0));
+    for (const auto& [goals, derived_goals] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {true, true}}})
+        EXPECT_FALSE(cuda::DeviceEncoder::needs_derived(*evaluable, goals, derived_goals));
+    // 2100 objects need 33 object words, more than it evaluates: rows of that instance need their derived words
+    const auto beyond = encoding::FlatEncoder::create(rl::TaskTable::create({gated_task(3), gated_task(2100)}), options);
+    for (const auto& [goals, derived_goals] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {true, true}}})
+        EXPECT_TRUE(cuda::DeviceEncoder::needs_derived(*beyond, goals, derived_goals));
+    // a table without derived atoms never does
+    const auto plain = encoding::FlatEncoder::create(corpus()[0].table, options);
+    for (const auto& [goals, derived_goals] : std::array<std::pair<bool, bool>, 3>{{{false, false}, {true, false}, {true, true}}})
+        EXPECT_FALSE(cuda::DeviceEncoder::needs_derived(*plain, goals, derived_goals));
+    // the host answer agrees with what the device does: the refused instance's rows are flagged without derived words
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    cuda::DeviceEncoder device(ctx, beyond);
+    device.reserve(cuda::BatchShape{24, 0, 0, 0}, stream);
+    const Batch batch = make_batch(beyond->context().table_ptr(), 24, false, 41);
+    const DeviceRows rows(ctx, stream, batch);
+    const auto host = host_reference(*beyond, host_input(batch, 24, Inputs{}));
+    const auto result =
+        run_device(device, ctx, stream, rows.input(batch, 24, Inputs{false, false, false}), shape_of(24, host.sizes));
+    EXPECT_NE(result.sizes.overflow & encoding::k_overflow_input, 0u);
+}
+
+TEST(DeviceEncode, TheStreamFormLaunchesOnItsStreamAndNotTheAcquiredOne)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream owner, launch;
+    const Corpus c = corpus()[2];
+    const auto config = configs()[4];
+    const Batch batch = make_batch(c.table, 33, c.walk, 79);
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+    {
+        SCOPED_TRACE(layout == encoding::Layout::Graph ? "graph-major" : "relation-major");
+        const auto encoder = encoding::FlatEncoder::create(c.table, with(config.options, layout, encoding::IndexType::I32));
+        cuda::DeviceEncoder device(ctx, encoder);
+        const Reference host = host_reference(*encoder, host_input(batch, 33, config.inputs));
+        const cuda::BatchShape shape = shape_of(33, host.sizes);
+        const cuda::OutputLayout layout_of = device.output_layout(shape);
+        // the generation is acquired on one stream, the rows, scratch and output belong to another
+        const auto acquisition = device.context().acquire(owner);
+        const DeviceRows rows(ctx, launch, batch);
+        const auto input = rows.input(batch, 33, config.inputs);
+        const u64 bytes = device.scratch_bytes(acquisition, shape);
+        cuda::DeviceBuffer scratch(ctx, bytes, launch), block(ctx, layout_of.bytes, launch);
+        const cuda::DeviceOutput out = cuda::output_of(layout_of, shape, block.data());
+
+        // capturing the launch stream finds the kernels only if the encode was enqueued on it
+        cudaGraph_t graph = nullptr;
+        cuda::check(cudaStreamBeginCapture(launch, cudaStreamCaptureModeThreadLocal), "begin capture");
+        std::exception_ptr error;
+        try { device.encode(acquisition, launch, scratch.data(), bytes, shape, input, out); }
+        catch (...) { error = std::current_exception(); }
+        cuda::check(cudaStreamEndCapture(launch, &graph), "end capture");
+        if (error)
+            std::rethrow_exception(error);
+        const NodeCounts nodes = count_nodes(graph);
+        EXPECT_GT(nodes.kernels, 0u);
+        EXPECT_EQ(nodes.others, 0u);
+        cudaGraphExec_t exec = nullptr;
+        cuda::check(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+        cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), launch), "clear the output");
+        cuda::check(cudaGraphLaunch(exec, launch), "replay");
+        expect_same_arrays(*host.bundle, download_encoding(ctx, launch, layout_of, block));
+        cuda::check(cudaGraphExecDestroy(exec), "destroy the executable graph");
+        cuda::check(cudaGraphDestroy(graph), "destroy the graph");
+
+        // eager, with the rows written on the launch stream right before the encode and nothing synchronized between
+        cuda::check(cudaMemsetAsync(block.data(), 0, block.size(), launch), "clear the output");
+        cuda::check(cudaMemcpyAsync(const_cast<u64*>(input.states), batch.states.data(), batch.states.size() * sizeof(u64),
+                                    cudaMemcpyHostToDevice, launch),
+                    "write the rows");
+        device.encode(acquisition, launch, scratch.data(), bytes, shape, input, out);
+        const DeviceResult eager = download_encoding(ctx, launch, layout_of, block);
+        expect_sizes(host.sizes, eager.sizes);
+        expect_same_arrays(*host.bundle, eager);
+    }
+}
+
 TEST(DeviceEncode, TheWorkspaceFormEqualsTheStreamForm)
 {
     SKIP_WITHOUT_GPU();

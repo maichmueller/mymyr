@@ -105,6 +105,7 @@ struct EncodingExecution
     u64 bytes;
     const BatchShape& shape;
     const ScratchLayout& layout;
+    cudaStream_t stream;
 };
 
 struct EncodingWorkspaceState

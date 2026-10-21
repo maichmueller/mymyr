@@ -708,6 +708,14 @@ u64 DeviceEncoder::scratch_bytes(const EncodingAcquisition& context, const Batch
         detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations()),
         derived == DerivedWords::Evaluated);
 }
+bool DeviceEncoder::needs_derived(const encoding::FlatEncoder& encoder, bool goal_masks, bool derived_goal_masks)
+{
+    const auto facts = context_facts(encoder.context());
+    const u32 mode = goal_masks ? (derived_goal_masks ? 2 : 1) : 0;
+    return std::ranges::any_of(facts->axioms, [&](const detail::EncodingFacts::Axioms& axioms) {
+        return ((axioms.modes >> mode) & 1u) && !axioms.refusal.empty();
+    });
+}
 u64 DeviceEncoder::bytes_needed(const BatchShape& shape) const
 {
     std::shared_lock lock(m_state_mutex);
@@ -864,12 +872,64 @@ namespace
 {
 [[noreturn]] void invalid(const std::string& why) { throw std::invalid_argument("mymyr: encoding: " + why); }
 
+/// The count kernel's lanes per graph and the fill classes (bit 0: one thread per graph, bit 1: a warp per graph) that
+/// the first `instances` instances of `widths` launch with. Throws std::invalid_argument when the shared memory of a
+/// block does not hold what a kernel needs.
+struct LaunchPlan
+{
+    u32 lanes;
+    u32 fill_mask;
+};
+LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bool index64,
+                       const std::vector<encoding::detail::GraphWidth>& widths, u64 instances, const LaunchConfig& launch)
+{
+    u32 lanes = launch.count_lanes ? launch.count_lanes : 4;
+    if (!launch.count_lanes)
+        for (const u32 candidate : {4u, 8u, 32u})
+            if (detail::count_shared_required(virtual_nodes, candidate) <= detail::k_shared_limit)
+            {
+                lanes = candidate;
+                break;
+            }
+    if (detail::count_shared_required(virtual_nodes, lanes) > detail::k_shared_limit)
+        invalid("the schema has too many predicate virtual nodes for the count kernel");
+    auto fits = [&](bool warp)
+    {
+        return detail::fill_shared_required(virtual_nodes, static_cast<u32>(relations), warp, relation_major, index64) <=
+               detail::k_shared_limit;
+    };
+    u32 fill_mask = 0;
+    for (u64 instance = 0; instance < std::min<u64>(instances, widths.size()); ++instance)
+    {
+        bool warp = launch.fill == FillMode::Warp ||
+                    (launch.fill == FillMode::Auto && detail::warp_fill_for(widths[instance], relation_major));
+        if (!fits(warp) && launch.fill == FillMode::Auto)
+            warp = true;
+        if (!fits(warp))
+            invalid("the schema has too many predicate virtual nodes or relations for the fill kernel");
+        fill_mask |= warp ? 2u : 1u;
+    }
+    return {lanes, fill_mask ? fill_mask : 1u};
+}
+
 }  // namespace
+
+void DeviceEncoder::check_encoder(const encoding::FlatEncoder& encoder)
+{
+    check_schema(encoder.schema());
+    if (device_count() == 0)  // the shared memory of the kernels is read from the device
+        return;
+    const auto facts = context_facts(encoder.context());
+    const auto& options = encoder.schema().options();
+    (void)plan_launch(encoder.context().view().num_virtual, encoder.schema().num_relations(),
+                      options.layout == encoding::Layout::Relation, options.index == encoding::IndexType::I64, facts->widths,
+                      facts->widths.size(), {});
+}
 
 void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution, const DeviceEncodeInput& in,
                         const DeviceOutput& out, const LaunchConfig& launch) const
 {
-    const auto& [context, block, bytes, scratch_shape, layout] = execution;
+    const auto& [context, block, bytes, scratch_shape, layout, stream] = execution;
     DeviceGuard guard(m_ctx->device());
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
@@ -1000,37 +1060,10 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the count kernel runs 4, 8 or 32 lanes per graph");
 
     // how it is launched
-    const u32 virtual_nodes = context.view.num_virtual;
-    u32 lanes = launch.count_lanes ? launch.count_lanes : 4;
-    if (!launch.count_lanes)
-        for (const u32 candidate : {4u, 8u, 32u})
-            if (detail::count_shared_required(virtual_nodes, candidate) <= detail::k_shared_limit)
-            {
-                lanes = candidate;
-                break;
-            }
-    if (detail::count_shared_required(virtual_nodes, lanes) > detail::k_shared_limit)
-        invalid("the schema has too many predicate virtual nodes for the count kernel");
-    const bool index64 = opts.index == encoding::IndexType::I64;
-    auto fits = [&](bool warp)
-    {
-        return detail::fill_shared_required(virtual_nodes, static_cast<u32>(R), warp, relation_major, index64) <=
-               detail::k_shared_limit;
-    };
-    u32 fill_mask = 0;
-    for (u64 instance = 0; instance < (in.task_ids ? facts.widths.size() : std::min<usize>(1, facts.widths.size())); ++instance)
-    {
-        const auto& width = facts.widths[instance];
-        bool warp = launch.fill == FillMode::Warp ||
-                    (launch.fill == FillMode::Auto && detail::warp_fill_for(width, relation_major));
-        if (!fits(warp) && launch.fill == FillMode::Auto)
-            warp = true;
-        if (!fits(warp))
-            invalid("the schema has too many predicate virtual nodes or relations for the fill kernel");
-        fill_mask |= warp ? 2u : 1u;
-    }
-    if (!fill_mask)
-        fill_mask = 1;
+    const u64 launched_instances = in.task_ids ? facts.widths.size() : std::min<usize>(1, facts.widths.size());
+    const auto [lanes, fill_mask] =
+        plan_launch(context.view.num_virtual, R, relation_major, opts.index == encoding::IndexType::I64, facts.widths,
+                    launched_instances, launch);
 
     const detail::ScratchView scratch = detail::scratch_view(layout, block);
     const encoding::IndexType index = opts.index;
@@ -1140,28 +1173,31 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     }
     switch (phase)
     {
-    case Phase::Whole: check(detail::launch_encode(p, shape, context.stream()), "encoding kernels"); break;
-    case Phase::Count: check(detail::launch_count_sizes(p, shape, context.stream()), "encoding kernels (count)"); break;
-    case Phase::Fill: check(detail::launch_fill(p, shape, context.stream()), "encoding kernels (fill)"); break;
+    case Phase::Whole: check(detail::launch_encode(p, shape, stream), "encoding kernels"); break;
+    case Phase::Count: check(detail::launch_count_sizes(p, shape, stream), "encoding kernels (count)"); break;
+    case Phase::Fill: check(detail::launch_fill(p, shape, stream), "encoding kernels (fill)"); break;
     }
 }
 void DeviceEncoder::encode(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                            const LaunchConfig& launch) const
 {
     const auto& s = *work.m_state;
-    run(Phase::Whole, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
+    run(Phase::Whole, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, s.context.stream()}, in, out,
+        launch);
 }
 void DeviceEncoder::count(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                           const LaunchConfig& launch) const
 {
     const auto& s = *work.m_state;
-    run(Phase::Count, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
+    run(Phase::Count, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, s.context.stream()}, in, out,
+        launch);
 }
 void DeviceEncoder::fill(const EncodingWorkspace& work, const DeviceEncodeInput& in, const DeviceOutput& out,
                          const LaunchConfig& launch) const
 {
     const auto& s = *work.m_state;
-    run(Phase::Fill, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout}, in, out, launch);
+    run(Phase::Fill, {s.context, s.scratch->data(), s.layout.bytes, s.shape, s.layout, s.context.stream()}, in, out,
+        launch);
 }
 
 void DeviceEncoder::encode(const DeviceEncodeInput& in, const DeviceOutput& out, cudaStream_t stream,
@@ -1177,7 +1213,17 @@ void DeviceEncoder::encode(const EncodingAcquisition& context, void* scratch, u6
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
     const auto layout = detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations());
-    run(Phase::Whole, {context, scratch, bytes, shape, layout}, in, out, launch);
+    run(Phase::Whole, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
+}
+void DeviceEncoder::encode(const EncodingAcquisition& context, cudaStream_t stream, void* scratch, u64 bytes,
+                           const BatchShape& shape, const DeviceEncodeInput& in, const DeviceOutput& out,
+                           const LaunchConfig& launch) const
+{
+    DeviceGuard guard(m_ctx->device());
+    if (context.m_owner != m_context.get() || !context.m_facts)
+        invalid("acquire the context from this device encoder");
+    const auto layout = detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations());
+    run(Phase::Whole, {context, scratch, bytes, shape, layout, stream}, in, out, launch);
 }
 void DeviceEncoder::count(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
@@ -1186,7 +1232,7 @@ void DeviceEncoder::count(const EncodingAcquisition& context, void* scratch, u64
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
     const auto layout = detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations());
-    run(Phase::Count, {context, scratch, bytes, shape, layout}, in, out, launch);
+    run(Phase::Count, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
 }
 void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 bytes, const BatchShape& shape,
                           const DeviceEncodeInput& in, const DeviceOutput& out, const LaunchConfig& launch) const
@@ -1195,6 +1241,6 @@ void DeviceEncoder::fill(const EncodingAcquisition& context, void* scratch, u64 
     if (context.m_owner != m_context.get() || !context.m_facts)
         invalid("acquire the context from this device encoder");
     const auto layout = detail::encoding_scratch_layout(shape, *context.m_facts, options().layout, schema().num_relations());
-    run(Phase::Fill, {context, scratch, bytes, shape, layout}, in, out, launch);
+    run(Phase::Fill, {context, scratch, bytes, shape, layout, context.stream()}, in, out, launch);
 }
 }  // namespace mymyr::cuda
