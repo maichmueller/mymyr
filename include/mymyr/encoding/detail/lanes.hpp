@@ -418,6 +418,9 @@ struct HistoryRows
     u32 first = 0;
 };
 
+/// The most subgoal levels of a row (FlatOptions::max_goal_level): the kind of a goal cell of a level holds it in two bits.
+inline constexpr u32 k_max_subgoal_levels = 3;
+
 /// The masks of the subgoal levels of a row (effective_layers), at op - k_goal_op_base for the op of a goal cell of the
 /// level: the literals its cell takes (the plain mask of the positive or negative literals over the fluent or derived
 /// slots of the level, or the part of it that the state satisfies or does not), null where there is none.
@@ -1032,10 +1035,17 @@ MYMYR_HD u32 action_cell_count(const InstanceView& v, const Cell& c, const Actio
     return n;
 }
 
+/// The levels effective_layers computes for the subgoal layers `raw`: their layers, at most k_max_subgoal_levels (a
+/// count beyond that, which no valid call gives, cannot make it read or write past the storage of that many).
+MYMYR_HD u32 level_count(const MaskLayers& raw)
+{
+    return raw.layers < k_max_subgoal_levels ? raw.layers : k_max_subgoal_levels;
+}
+
 /// The 64-bit words `effective_layers` needs for the subgoal layers `raw` of an instance.
 MYMYR_HD u64 effective_layer_words(const InstanceView& v, const MaskLayers& raw)
 {
-    return u64{raw.layers} * 3u * (2u * v.words + (raw.derived_pos ? 2u * v.derived_words : 0u));
+    return u64{level_count(raw)} * 3u * (2u * v.words + (raw.derived_pos ? 2u * v.derived_words : 0u));
 }
 
 /// Where the planes of level l (0-based: layer l) and one sign over the fluent or the derived slots begin in the storage
@@ -1043,7 +1053,7 @@ MYMYR_HD u64 effective_layer_words(const InstanceView& v, const MaskLayers& raw)
 /// fluent planes of all levels and signs first.
 MYMYR_HD u64 level_plane_offset(const InstanceView& v, const MaskLayers& raw, bool derived_slots, u32 l, u32 negative)
 {
-    const u64 fluent = raw.pos && raw.neg ? u64{raw.layers} * 6u * v.words : 0u;
+    const u64 fluent = raw.pos && raw.neg ? u64{level_count(raw)} * 6u * v.words : 0u;
     return (derived_slots ? fluent : 0u) + (u64{l} * 2u + negative) * 3u * (derived_slots ? v.derived_words : v.words);
 }
 
@@ -1091,7 +1101,7 @@ MYMYR_HD LevelPlanes effective_layers_group(const Group& grp, const InstanceView
     const auto fill = [&](bool derived_slots, const u64* layer_pos, const u64* layer_neg, u32 layer_words, u32 words,
                           const u64* goal_pos, const u64* goal_neg, const u64* state)
     {
-        for (u32 l = 0; l < raw.layers; ++l)
+        for (u32 l = 0, levels = level_count(raw); l < levels; ++l)
             for (u32 sign = 0; sign < 2; ++sign)
             {
                 u64* plain = storage + level_plane_offset(v, raw, derived_slots, l, sign);

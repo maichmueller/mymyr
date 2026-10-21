@@ -228,6 +228,31 @@ TEST(EncodingLaneGroups, ARowWithoutLayersLeavesTheLayerStorageUntouched)
         ASSERT_EQ(byte, 0xa5);
 }
 
+TEST(EncodingLaneGroups, ALayerCountBeyondTheLevelsComputesNoMoreThanTheLevels)
+{
+    const auto table = table_of("philosophers", {"p03-phil4"});
+    const auto encoder = encoding::FlatEncoder::create(table, configs().back().options);
+    const auto v = ed::instance_view(encoder->context().view(), 0);
+    ASSERT_GT(v.words, 0u);
+    const std::vector<u64> state(v.words, 0);
+    const ed::RowInput row{state.data(), nullptr};
+    // a count no call gives (as an unbound layer view would hold): masks of that many layers, so that nothing is read
+    // past them, and storage for that many, of which only the levels a goal cell kind can name are written
+    constexpr u32 garbage = 1000;
+    const std::vector<u64> pos(u64{garbage} * v.words, 0x5555555555555555ull), neg(u64{garbage} * v.words, 0);
+    const ed::MaskLayers raw{pos.data(), neg.data(), nullptr, nullptr, garbage, v.words, 0};
+    ed::MaskLayers levels = raw;
+    levels.layers = ed::k_max_subgoal_levels;
+    EXPECT_EQ(ed::level_count(raw), ed::k_max_subgoal_levels);
+    EXPECT_EQ(ed::effective_layer_words(v, raw), ed::effective_layer_words(v, levels));
+    constexpr u64 untouched = 0xa5a5a5a5a5a5a5a5ull;
+    std::vector<u64> storage(u64{garbage} * 6 * v.words, untouched);
+    (void)ed::effective_layers(v, ed::goal_words(v, row), raw, state.data(), nullptr, storage.data());
+    const u64 used = ed::effective_layer_words(v, levels);
+    for (u64 i = used; i < storage.size(); ++i)
+        ASSERT_EQ(storage[i], untouched) << "word " << i << " of the storage past the levels";
+}
+
 TEST(EncodingLaneGroups, GoalStridesRejectOverlapAndAllowBroadcast)
 {
     const auto table = table_of("philosophers", {"p03-phil4"});
