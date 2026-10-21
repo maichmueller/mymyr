@@ -824,7 +824,7 @@ PaddedBufs padded_results(const Entry& e, u64 N, ffi::Result<ffi::AnyBuffer> suc
 rl::PaddedExpansion make_padded(const Entry& e, const PaddedBufs& p)
 {
     rl::PaddedExpansion out;
-    out.K = p.K;
+    out.k = p.K;
     out.mask = p.mask.as<u8>();
     out.count = p.count.as<i32>();
     out.words = e.W;

@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from mymyr import State
     from mymyr.encoding import DeviceFlatBatch as DeviceFlatBatch
+    from mymyr.encoding import DeviceFlatStream as DeviceFlatStream
     from mymyr.encoding import GraphDescription as GraphDescription
     from mymyr.rl import InstanceSampler as InstanceSampler
 
-__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack"]
+__all__ = ["HeuristicObject", "SupportsCudaStream", "SupportsDLPack", "SupportsHorizonView"]
 
 
 class SupportsDLPack(Protocol):
@@ -41,3 +42,24 @@ class HeuristicObject(Protocol):
 
     def evaluate(self, state: State) -> float: ...
 
+
+class SupportsHorizonView(Protocol):
+    """The input of FlatHorizonEncoder.encode: ``mymyr.encoding.HorizonView`` or any object with these attributes (the
+    edge arrays and ``task_ids`` may be None where the schema does not read them)."""
+
+    @property
+    def nodes(self) -> Any: ...
+    @property
+    def node_offsets(self) -> Any: ...
+    @property
+    def edge_offsets(self) -> Any: ...
+    @property
+    def edge_src(self) -> Any: ...
+    @property
+    def edge_dst(self) -> Any: ...
+    @property
+    def edge_schema(self) -> Any: ...
+    @property
+    def edge_binding(self) -> Any: ...
+    @property
+    def task_ids(self) -> Any: ...

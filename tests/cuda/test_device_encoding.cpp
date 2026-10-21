@@ -1129,6 +1129,63 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
                   std::string::npos)
             << e.what();
     }
+    // horizon relations: every mode, the rooted horizon (parent, sibling and cousin relations), the transitions (the
+    // depth-one horizons: full or delta, the root excluded)
+    struct HorizonCase
+    {
+        const char* what;
+        encoding::HorizonMode mode;
+        encoding::RootPolicy root;
+        bool parent, sibling, cousin;
+    };
+    using enum encoding::HorizonMode;
+    using enum encoding::RootPolicy;
+    for (const HorizonCase& c : {HorizonCase{"full horizon", Full, Include, false, false, false},
+                                 HorizonCase{"delta horizon", Delta, Include, false, false, false},
+                                 HorizonCase{"action horizon", Action, Include, false, false, false},
+                                 HorizonCase{"rooted horizon", Full, EncodeOnly, true, true, true},
+                                 HorizonCase{"cousin relation", Action, Include, false, false, true},
+                                 HorizonCase{"transitions", Full, Exclude, false, false, false},
+                                 HorizonCase{"transition effects", Delta, Exclude, true, false, false}})
+    {
+        encoding::FlatOptions horizon = test::encoder_options();
+        horizon.horizon.mode = c.mode;
+        horizon.horizon.root = c.root;
+        horizon.horizon.parent_relation = c.parent;
+        horizon.horizon.sibling_relation = c.sibling;
+        horizon.horizon.cousin_relation = c.cousin;
+        try
+        {
+            cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, horizon));
+            ADD_FAILURE() << "the " << c.what << " was accepted";
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
+                      std::string::npos)
+                << c.what << ": " << e.what();
+        }
+    }
+    // subgoal and history relations
+    {
+        encoding::FlatOptions with_subgoals;
+        with_subgoals.max_goal_level = 1;
+        encoding::FlatOptions with_history;
+        with_history.history = true;
+        for (const auto& [refused_options, what] :
+             {std::pair{with_subgoals, "subgoal levels"}, std::pair{with_history, "history steps"}})
+            try
+            {
+                cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, refused_options));
+                ADD_FAILURE() << what << " were accepted";
+            }
+            catch (const std::invalid_argument& e)
+            {
+                EXPECT_NE(std::string(e.what()).find(std::string("the device does not encode ") + what),
+                          std::string::npos)
+                    << e.what();
+            }
+    }
     // everything else is encoded: goal relations, goal targets, virtual nodes, derived relations, both layouts
     const auto derived_table = rl::TaskTable::single(test::pddl_task("features", "p01"));
     for (const auto& t : {table, derived_table})
@@ -1167,6 +1224,20 @@ TEST(DeviceEncoderSchema, RefusesSubgoalLevels)
     o.max_goal_level = 1;
     expect_schema_refusal(o, "subgoal levels");
 }
+TEST(DeviceEncoderSchema, RefusesHistorySteps)
+{
+    encoding::FlatOptions o;
+    o.history = true;
+    expect_schema_refusal(o, "history steps");
+}
+TEST(DeviceEncoderSchema, RefusesHistoryStepsWithAMaximum)
+{
+    encoding::FlatOptions o;
+    o.history = true;
+    o.history_max_steps = 3;
+    o.targets = {encoding::TargetSource::Goal};
+    expect_schema_refusal(o, "history steps");
+}
 TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
 {
     encoding::FlatOptions o;
@@ -1177,6 +1248,7 @@ TEST(DeviceEncoderSchema, RefusesSubgoalTargets)
 TEST(DeviceEncoderSchema, RefusesHistoryTargets)
 {
     encoding::FlatOptions o;
+    o.history = true;
     o.targets = {encoding::TargetSource::History};
     expect_schema_refusal(o, "history targets");
 }
@@ -1267,4 +1339,85 @@ TEST(DeviceEncoder, SharedMemoryIncludesTheStaticScanStorage)
         }
 }
 
+}
+
+namespace
+{
+TEST(DeviceEncoder, FillZerosUnusedTailsAndOverflowOutputsWhenRequested)
+{
+    SKIP_WITHOUT_GPU();
+    const auto task = test::pddl_task("blocks", "smedium");
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+        for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+            for (const u64 graphs : {0u, 2u})
+            {
+                encoding::FlatOptions options;
+                options.layout = layout;
+                options.index = index;
+                options.targets = {encoding::TargetSource::Goal};
+                const auto host = encoding::FlatEncoder::create(task, options);
+                cuda::DeviceEncoder device(ctx, host);
+                auto shape = device.worst_case(graphs);
+                if (!graphs)
+                    shape.entities = shape.args = shape.targets = 10;
+                device.reserve(shape, stream);
+                const auto& initial = host->table().instance(0).init;
+                std::vector<u64> rows(initial.begin(), initial.end());
+                rows.insert(rows.end(), initial.begin(), initial.end());
+                cuda::DeviceBuffer states(ctx, rows.size() * sizeof(u64), stream);
+                cuda::check(cudaMemcpyAsync(states.data(), rows.data(), states.size(), cudaMemcpyHostToDevice, stream), "states");
+                cuda::DeviceEncodeInput in;
+                in.graphs = graphs;
+                in.states = static_cast<const u64*>(states.data());
+                in.state_stride = in.state_words = host->table().words();
+                for (const bool overflow : {false, true})
+                {
+                    auto capacity = shape;
+                    if (overflow)
+                    {
+                        ++capacity.graphs;
+                        capacity.entities = capacity.args = capacity.targets = 1;
+                    }
+                    const auto offsets = device.output_layout(capacity);
+                    cuda::DeviceBuffer block(ctx, offsets.bytes, stream);
+                    cuda::check(cudaMemsetAsync(block.data(), 0x5a, block.size(), stream), "dirty outputs");
+                    auto out = cuda::output_of(offsets, capacity, block.data());
+                    out.zero_unused = true;
+                    device.encode(in, out, stream);
+                    std::vector<std::byte> bytes(block.size());
+                    cuda::check(cudaMemcpyAsync(bytes.data(), block.data(), block.size(), cudaMemcpyDeviceToHost, stream), "outputs");
+                    cuda::check(cudaStreamSynchronize(stream), "outputs");
+                    encoding::FlatSizes sizes;
+                    std::memcpy(&sizes, bytes.data() + offsets.sizes, sizeof sizes);
+                    const bool failed = overflow && graphs != 0;
+                    EXPECT_EQ(sizes.overflow != 0, failed);
+                    const u64 I = index == encoding::IndexType::I32 ? 4 : 8;
+                    const auto zeros = [&](u64 at, u64 begin, u64 end, u64 width)
+                    {
+                        EXPECT_TRUE(std::all_of(bytes.begin() + static_cast<std::ptrdiff_t>(at + begin * width),
+                                                bytes.begin() + static_cast<std::ptrdiff_t>(at + end * width),
+                                                [](std::byte value) { return value == std::byte{0}; }));
+                    };
+                    zeros(offsets.entity_role, failed ? 0 : sizes.entities, capacity.entities, 1);
+                    zeros(offsets.entity_ref, failed ? 0 : sizes.entities, capacity.entities, I);
+                    zeros(offsets.relation_args, failed ? 0 : sizes.args, capacity.args, I);
+                    zeros(offsets.target_entity, failed ? 0 : sizes.targets, capacity.targets, I);
+                    zeros(offsets.target_group, failed ? 0 : sizes.targets, capacity.targets, 1);
+                    if (failed)
+                    {
+                        const u64 cells = capacity.graphs * host->schema().num_relations();
+                        zeros(offsets.task_ids, 0, capacity.graphs, 4);
+                        zeros(offsets.num_objects, 0, capacity.graphs, I);
+                        zeros(offsets.entity_offsets, 0, capacity.graphs + 1, I);
+                        zeros(offsets.relation_counts, 0, cells, I);
+                        zeros(offsets.relation_offsets, 0, cells + 1, I);
+                        zeros(offsets.relation_arg_offsets, 0, cells + 1, I);
+                        zeros(offsets.goal_complete, 0, capacity.graphs, 1);
+                        zeros(offsets.target_offsets, 0, capacity.graphs + 1, I);
+                    }
+                }
+            }
+}
 }

@@ -6,6 +6,7 @@ tested on its own (a fixture against itself, mutated copies, the narrowness of t
 native encoder is tested for what parity cannot show: a graph does not depend on the rows around it."""
 
 import itertools
+import re
 
 import numpy as np
 import pytest
@@ -14,8 +15,10 @@ import mymyr
 from mymyr import encoding, rl
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
-    HELPER, Context, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
-    lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, replay, run_case, sources_of,
+    HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
+    goal_literals, literal_text, needed_differences,
+    lanes_of, native_graph, parse_literal, random_walk_batch, random_walk_rows, read, record_context, replay, run_case,
+    sources_of, is_transition, recorded_successor,
 )
 
 IDS = [p.stem[:3] for p in FIXTURES]
@@ -52,7 +55,8 @@ def test_pending_sources_are_the_other_sources_of_the_compared_configs():
             found |= set(catalog["sources"]) - set(sources_of(config))
     assert found == set(PENDING_SOURCES)
     assert set(COMPARED_SOURCES) & set(PENDING_SOURCES) == set()
-    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation")
+    assert COMPARED_LANES == ("fluent", "static", "derived", "goal", "goal_derivation", "history", "goal_satisfaction", "parent",
+                              "sibling", "cousin")
     assert [c for c in SUPPORTED if "action" in lanes_of(c)] == [c for c in SUPPORTED if "action" in sources_of(c)]
     assert all(("action" in lanes_of(c)) == SUPPORTED[c].get("include_actions", True) for c in SUPPORTED)
 
@@ -243,20 +247,16 @@ def test_registered_differences_do_not_hide_mutations_of_the_native_graph(path):
     assert {m.kind for m in compare(expected, lost, context)} == {"catalog", "tuple"}
 
 
-def goal_case(config, state="s1"):
-    fixture, task = load(prefix_path("f03"))
+def goal_case(config, state="s1", prefix="f03"):
+    fixture, task = load(prefix_path(prefix))
     records = [r for r in fixture["encodings"] if r["config"] == config]
     states = {s["id"]: s for s in fixture["states"]}
     rows = [replay(task, states[r["state"]]["path"]) for r in records]
-    encoder, placed = encode_records(task, config, rows, records)
     index = [r["state"] for r in records].index(state)
-    batch, row = placed[index]
-    goals = records[index]["inputs"].get("goals")
-    actions = records[index]["inputs"].get("actions")
-    context = Context(fixture, task, states[state], config, None if goals is None else tuple(goals),
-                      None if actions is None else tuple(actions))
+    placed = encode_records(task, config, rows, records)[index]
+    context = record_context(fixture, task, states[state], config, records[index], placed.dropped)
     expected = fixture_graph(fixture, records[index], sources_of(config))
-    return expected, native_graph(encoder, batch, row, [task], lanes_of(config)), context
+    return expected, native_graph(placed.encoder, placed.batch, placed.row, [task], lanes_of(config)), context
 
 
 @pytest.mark.parametrize("config", ["C1", "C2", "C3"])
@@ -303,6 +303,191 @@ def test_action_tuples_action_entities_and_virtual_nodes_are_compared():
     extra = copy(actual)
     extra.entities.append(("predicate_virtual", "predicate:unused"))
     assert {m.kind for m in compare(expected, extra, context)} == {"entity"}
+
+
+def levelled(graph):
+    """The relations of a graph that hold subgoal tuples (``[sg]``, ``[ssg]``, ``[sssg]``, with their satisfaction)."""
+    return [n for n in graph.tuples if re.search(r"\[s{1,3}g\]", n)]
+
+
+def test_subgoal_tuples_and_subgoal_entities_are_compared():
+    expected, actual, context = goal_case("C4_L2", "s0", "f01")
+    assert compare(expected, actual, context) == []
+    relations = levelled(actual)
+    assert any(n.endswith("[sg]") for n in relations) and any(n.endswith("[ssg]") for n in relations)
+    assert any(n.endswith("[sat]") or n.endswith("[unsat]") for n in relations)
+    for name in relations:
+        dropped = copy(actual)
+        dropped.tuples[name] = dropped.tuples[name][1:]
+        assert {(m.kind, m.where) for m in compare(expected, dropped, context)} == {("tuple", name)}
+        extra = copy(actual)
+        extra.tuples[name] = extra.tuples[name] + extra.tuples[name][:1]
+        assert [(m.kind, m.where) for m in compare(expected, extra, context)] == [("tuple", name)]
+    subgoals = [i for i, (role, _) in enumerate(actual.entities) if role == "subgoal"]
+    assert subgoals
+    for i in subgoals:
+        role, name = actual.entities[i]
+        moved = copy(actual)
+        higher = name.endswith("[sg]")
+        moved.entities[i] = (role, name.replace("[sg]", "[ssg]") if higher else name.replace("[ssg]", "[sg]"))
+        assert {m.kind for m in compare(expected, moved, context)} == {"entity"}
+        lost = copy(actual)
+        del lost.entities[i]
+        assert {m.kind for m in compare(expected, lost, context)} == {"entity"}
+
+
+def test_the_numbering_of_subgoal_entities_is_excused_but_their_names_are_not():
+    expected, actual, context = goal_case("C4_L2", "s0", "f01")
+    first, second = [i for i, (role, _) in enumerate(actual.entities) if role == "subgoal"][:2]
+    swapped = copy(actual)
+    swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
+    assert compare(expected, swapped, context) == []
+    strict = [n for n in NAMES if n != "subgoal_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, strict)} == {"entity"}
+
+
+def test_history_tuples_history_steps_and_history_targets_are_compared():
+    expected, actual, context = goal_case("C5A", "s2", "f01")
+    assert compare(expected, actual, context) == []
+    relations = [n for n in actual.tuples if n.endswith("[hist]")]
+    assert relations and {role for role, _ in actual.entities} >= {"history", "history_target"}
+    for name in relations:
+        dropped = copy(actual)
+        dropped.tuples[name] = dropped.tuples[name][1:]
+        assert {(m.kind, m.where) for m in compare(expected, dropped, context)} == {("tuple", name)}
+    for role in ("history", "history_target"):
+        i = next(i for i, (r, _) in enumerate(actual.entities) if r == role)
+        renamed = copy(actual)
+        renamed.entities[i] = (role, actual.entities[i][1] + "_renamed")
+        assert {m.kind for m in compare(expected, renamed, context)} >= {"entity"}
+        lost = copy(actual)
+        del lost.entities[i]
+        assert {m.kind for m in compare(expected, lost, context)} >= {"entity"}
+    steps = [i for i, (role, _) in enumerate(actual.entities) if role == "history"]
+    swapped = copy(actual)
+    swapped.entities[steps[0]], swapped.entities[steps[1]] = actual.entities[steps[1]], actual.entities[steps[0]]
+    assert {m.kind for m in compare(expected, swapped, context)} == {"entity"}
+
+
+def test_the_numbering_of_history_targets_is_excused_but_their_names_are_not():
+    expected, actual, context = goal_case("C5A", "s2", "f01")
+    first, second = [i for i, (role, _) in enumerate(actual.entities) if role == "history_target"][:2]
+    swapped = copy(actual)
+    swapped.entities[first], swapped.entities[second] = actual.entities[second], actual.entities[first]
+    assert compare(expected, swapped, context) == []
+    unexcused = [n for n in NAMES if n != "history_target_entity_order"]
+    assert {m.kind for m in compare(expected, swapped, context, unexcused)} == {"entity"}
+
+
+def test_the_history_of_a_record_keeps_only_its_newest_steps():
+    fixture, task = load(prefix_path("f08"))
+    records = [r for r in fixture["encodings"] if r["config"] == "C5B"]
+    assert all(r["inputs"]["history_max_steps"] == 2 and len(r["inputs"]["history_subgoals"]) == 3 for r in records)
+    expected, actual, context = goal_case("C5B", "s0", "f08")
+    assert compare(expected, actual, context) == []
+    steps = [name for role, name in actual.entities if role == "history"]
+    assert steps == [f"history:{dt}#{i}" for i, (dt, _) in enumerate(context.history[-2:])]
+    older = copy(actual)
+    older.entities = [e for e in actual.entities if e[0] != "history"] + [("history", "history:-3#0")]
+    assert {m.kind for m in compare(expected, older, context)} >= {"entity"}
+
+
+def test_a_goal_literal_that_a_layer_lists_is_expected_once_in_the_goal():
+    expected, actual, context = goal_case("C4_L1", "s2", "f01")
+    assert "repeated_literal" in needed_differences(expected, actual, context)
+    assert compare(expected, actual, context) == []
+    layered = {parse_literal(literal) for layer in context.layers for literal in layer}
+    shared = sorted(goal_literals(context) & layered, key=repr)
+    assert shared
+    entity = literal_text(*shared[0]) + "[g]"
+    assert ("goal", entity) in actual.entities
+    lost = copy(actual)
+    lost.entities.remove(("goal", entity))
+    assert {m.kind for m in compare(expected, lost, context)} == {"entity"}
+    relation = next(n for n, ts in actual.tuples.items() if n.endswith("[g]") and any(t[0] == entity for t in ts))
+    twice = copy(actual)
+    twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+    assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+    level = copy(actual)
+    level.entities.append(("subgoal", entity.replace("[g]", "[sg]")))
+    assert {m.kind for m in compare(expected, level, context)} == {"entity"}
+
+
+def test_a_literal_in_two_layers_is_expected_once_at_the_lower_level():
+    expected, actual, context = goal_case("C4_L2", "s3", "f09")
+    assert "repeated_literal" in needed_differences(expected, actual, context)
+    assert compare(expected, actual, context) == []
+    shared = sorted({parse_literal(l) for l in context.layers[0]} & {parse_literal(l) for l in context.layers[1]},
+                    key=repr)
+    assert shared and not set(shared) & goal_literals(context)
+    name = literal_text(*shared[0])
+    assert ("subgoal", f"{name}[sg]") in actual.entities and ("subgoal", f"{name}[ssg]") not in actual.entities
+    higher = copy(actual)
+    higher.entities[higher.entities.index(("subgoal", f"{name}[sg]"))] = ("subgoal", f"{name}[ssg]")
+    assert {m.kind for m in compare(expected, higher, context)} == {"entity"}
+
+
+def test_a_literal_without_a_slot_is_left_out_of_the_native_inputs_and_only_that_literal():
+    fixture, task = load(prefix_path("f08"))
+    found = 0
+    for state in ("s0", "s1", "s2", "s3", "s4"):
+        expected, actual, context = goal_case("C5A", state, "f08")
+        assert compare(expected, actual, context) == []
+        for kind, where, text in context.dropped:
+            found += 1
+            atom = task.literal(text).atom
+            assert atom.kind == "static" or (atom.slot if atom.kind == "fluent" else atom.derived_slot) is None
+            assert kind == "history" and where.startswith("history:")
+        if context.dropped:
+            assert "literal_without_slot" in needed_differences(expected, actual, context)
+            extra = copy(actual)
+            relation = next(n for n, ts in actual.tuples.items() if ts and n.endswith("[hist]"))
+            extra.tuples[relation] = actual.tuples[relation] + actual.tuples[relation][:1]
+            assert [(m.kind, m.where) for m in compare(expected, extra, context)] == [("tuple", relation)]
+    assert found
+
+
+def test_a_goal_literal_without_a_slot_that_a_layer_lists_is_compared_in_the_native_goal():
+    for prefix, config, state in (("f08", "C4_L1", "s3"), ("f08", "C4_L2", "s1"), ("f13", "C4_L1N", "s0")):
+        expected, actual, context = goal_case(config, state, prefix)
+        assert compare(expected, actual, context) == []
+        goal = goal_literals(context)
+        slotless = [parse_literal(text) for kind, _, text in context.dropped
+                    if kind == "subgoal" and parse_literal(text) in goal]
+        assert slotless
+        for literal in slotless:
+            entity = literal_text(*literal) + "[g]"
+            relation = f"[{'+' if literal[0] else '-'}]{literal[1]}[g]"
+            assert ("goal", entity) in actual.entities and any(t[0] == entity for t in actual.tuples[relation])
+            missing = copy(actual)
+            missing.entities.remove(("goal", entity))
+            assert {m.kind for m in compare(expected, missing, context)} == {"entity"}
+            twice = copy(actual)
+            twice.tuples[relation] = actual.tuples[relation] + [t for t in actual.tuples[relation] if t[0] == entity]
+            assert [(m.kind, m.where) for m in compare(expected, twice, context)] == [("tuple", relation)]
+            fewer = copy(actual)
+            fewer.tuples[relation] = [t for t in actual.tuples[relation] if t[0] != entity]
+            assert ("tuple", relation) in {(m.kind, m.where) for m in compare(expected, fewer, context)}
+
+
+def test_a_nullary_literal_of_a_layer_is_a_tuple_over_the_auxiliary_entity():
+    exercised = 0
+    for prefix, config in (("f01", "C5BN"), ("f08", "C4_L2N"), ("f10", "C5BN"), ("f10", "C4_L1N")):
+        for state in ("s0", "s1", "s2", "s3", "s4"):
+            expected, actual, context = goal_case(config, state, prefix)
+            assert compare(expected, actual, context) == []
+            nullary = [n for n, a in actual.catalog if a == 0 and re.search(r"\[(hist|s{1,3}g)\]$", n)
+                       and actual.tuples.get(n)]
+            for name in nullary:
+                exercised += 1
+                assert all(t[-1] == AUXILIARY for t in actual.tuples[name])
+                other = copy(actual)
+                other.tuples[name] = [t[:-1] + (actual.entities[0][1],) for t in actual.tuples[name]]
+                assert {(m.kind, m.where) for m in compare(expected, other, context)} == {("tuple", name)}
+                lost = copy(actual)
+                del lost.tuples[name]
+                assert {(m.kind, m.where) for m in compare(expected, lost, context)} == {("tuple", name)}
+    assert exercised >= 4
 
 
 def test_a_record_that_lists_fewer_actions_excuses_only_the_unlisted_ones():
@@ -569,3 +754,263 @@ def test_the_fixture_states_are_distinct_graphs(path):
     assert batch.num_graphs == len(states)
     rendered = {repr(native_graph(encoder, batch, g, [task])) for g in range(batch.num_graphs)}
     assert len(rendered) >= 3
+
+
+# ------------------------------------------------------------------------------------------------ horizons
+def horizon_case(config, prefix, state):
+    expected, actual, context = goal_case(config, state=state, prefix=prefix)
+    assert compare(expected, actual, context) == []
+    return expected, actual, context
+
+
+def encoding_view(task, record):
+    table = rl.as_table(task)
+    return horizon_view(table, [horizon_dag(task, table, record["inputs"]["dag"])])
+
+
+def test_the_horizon_configs_are_compared_on_every_required_fixture():
+    required = {"f01", "f02", "f03", "f05", "f07", "f08", "f09", "f10"}
+    seen = {}
+    for path, config in fixture_cases():
+        if config.startswith("C7") and config in SUPPORTED:
+            seen.setdefault(path.stem[:3], set()).add(config)
+    assert required <= set(seen)
+    assert seen["f01"] == {"C7A", "C7AN", "C7B", "C7C", "C7D", "C7DN", "C7E", "C7EN", "C7F", "C7FN", "C7G", "C7H", "C7I",
+                           "C7J", "C7K", "C7S", "C7T"}
+    assert not {c for c in PENDING_CONFIGS if c.startswith("C7")}
+
+
+def test_the_transition_configs_are_compared_on_every_fixture_that_has_them():
+    pending = {c for c in PENDING_CONFIGS if c.startswith("C8")}
+    assert pending == {"C8S"}
+    for path, config in fixture_cases():
+        if config.startswith("C8") and config not in pending:
+            assert config in SUPPORTED and is_transition(config)
+    seen = {}
+    for path, config in fixture_cases():
+        if is_transition(config):
+            seen.setdefault(path.stem[:3], set()).add(config)
+    assert seen == {
+        "f01": {"C8A", "C8AN", "C8B", "C8BN"}, "f02": {"C8A"}, "f03": {"C8B"}, "f05": {"C8B"},
+        "f08": {"C8A", "C8AN", "C8B", "C8BN"}, "f09": {"C8A"}, "f10": {"C8AN", "C8B", "C8BN"}, "f11": {"C8A"},
+        "f12": {"C8A"}, "f13": {"C8AN"},
+    }
+
+
+def test_a_horizon_graph_has_state_entities_named_by_their_node():
+    expected, actual, _ = horizon_case("C7A", "f01", "s2")
+    states = [name for role, name in actual.entities if role == "state"]
+    assert states == [f"target:{k}" for k in range(5)]
+    assert all(("state", name) in expected.entities for name in states)
+
+
+def test_the_excluded_root_has_no_entity_and_the_excusal_is_narrow():
+    expected, actual, context = horizon_case("C7B", "f01", "s0")
+    assert ("state", "_root_state_") in expected.entities
+    assert ("state", "_root_state_") not in actual.entities and ("state", "target:0") not in actual.entities
+    # a native graph that has the entity is a mismatch, and so is an entity that a tuple of the reference mentions
+    with_entity = copy(actual)
+    with_entity.entities.insert(3, ("state", "_root_state_"))
+    assert {m.kind for m in compare(expected, with_entity, context)} == {"entity"}
+    used = copy(expected)
+    name = next(n for n, ts in used.tuples.items() if ts and n.startswith("[+]"))
+    used.tuples[name] = [("_root_state_",) + used.tuples[name][0][1:]] + used.tuples[name][1:]
+    found = compare(used, actual, context)
+    assert any(m.kind == "entity" and "_root_state_" in m.detail for m in found)
+    other = copy(actual)
+    other.entities = [e for e in actual.entities if e != ("state", "target:1")]
+    assert any(m.kind == "entity" for m in compare(expected, other, context))
+    assert [m.detail for m in compare(expected, actual, context, allowed=()) if m.kind == "entity" and "state" in m.detail] \
+        == ["missing ('state', '_root_state_')"]
+
+
+@pytest.mark.parametrize("config, prefix, state", [("C7AN", "f10", "s2"), ("C7C", "f10", "s0")])
+def test_horizon_nullary_tuples_are_checked_over_the_auxiliary_entity(config, prefix, state):
+    expected, actual, context = horizon_case(config, prefix, state)
+    nullary = [n for n, a in actual.catalog if a == 0 and actual.tuples.get(n) and not n.startswith("_")]
+    assert nullary and ("auxiliary", AUXILIARY) in actual.entities
+    for name in nullary:
+        assert all(t[-1] == AUXILIARY for t in actual.tuples[name]), name
+        lost = copy(actual)
+        lost.tuples[name] = lost.tuples[name][1:]
+        found = compare(expected, lost, context)
+        assert found and {m.kind for m in found} == {"tuple"} and {m.where for m in found} == {name}
+        extra = copy(actual)
+        extra.tuples[name] = extra.tuples[name] + [(f"target:{len(actual.entities)}", AUXILIARY)]
+        assert {m.kind for m in compare(expected, extra, context)} == {"tuple"}
+    gone = copy(actual)
+    gone.entities = [e for e in actual.entities if e[0] != "auxiliary"]
+    assert {m.kind for m in compare(expected, gone, context)} == {"entity"}
+    bare = copy(actual)
+    bare.catalog = [c for c in actual.catalog if c[1] != 0 or c[0].startswith("_")]
+    bare.tuples = {n: ts for n, ts in actual.tuples.items() if n not in nullary}
+    bare.entities = gone.entities
+    assert "catalog" in {m.kind for m in compare(expected, bare, context)}
+
+
+def test_a_horizon_encoder_without_nullary_relations_has_none_and_no_auxiliary_entity():
+    fixture, task = load(prefix_path("f10"))
+    record = next(r for r in fixture["encodings"] if r["config"] == "C7AN")
+    encoder = native_encoder(task, "C7AN", nullary=False)
+    batch = encoder.encode(encoding_view(task, record))
+    predicates = {p.name for p in task.formalism.predicates if p.arity == 0}
+    assert predicates and not predicates & {base_predicate(n) for n in encoder.relation_names}
+    assert "auxiliary" not in {role for role, _ in native_graph(encoder, batch, 0, [task], COMPARED_LANES).entities}
+
+
+def test_the_static_goal_literal_at_the_nodes_is_excused_only_for_static_atoms():
+    expected, actual, context = horizon_case("C7A", "f08", "s0")
+    assert ("target:1", "a") in actual.tuples["[+]fixed[g][sat]"]
+    assert ("target:1", "a") not in expected.tuples["[+]fixed[g][sat]"]
+    lost = copy(actual)
+    lost.tuples["[+]fixed[g][sat]"] = [t for t in actual.tuples["[+]fixed[g][sat]"] if t != ("target:0", "a")]
+    assert [m.where for m in compare(expected, lost, context)] == ["[+]fixed[g][sat]"]
+    fluent = next(n for n in actual.tuples if n.endswith("[g][sat]") and "fixed" not in n)
+    mutated = copy(actual)
+    mutated.tuples[fluent] = mutated.tuples[fluent][1:]
+    assert {m.where for m in compare(expected, mutated, context)} == {fluent}
+    assert "static_literal_at_nodes" in needed_differences(expected, actual, context)
+
+
+def test_the_delta_relations_of_static_predicates_are_excused_only_while_empty():
+    expected, actual, context = horizon_case("C7B", "f08", "s0")
+    static = [n for n, _ in expected.catalog if "fixed" in n and n not in {c[0] for c in actual.catalog}]
+    assert static
+    filled = copy(expected)
+    filled.tuples = {**expected.tuples, static[0]: [("target:1", "a")]}
+    assert {m.kind for m in compare(filled, actual, context)} >= {"catalog", "tuple"}
+    assert "delta_static_relations" in needed_differences(expected, actual, context)
+
+
+def test_the_relations_no_graph_fills_are_excused_only_while_empty_and_missing():
+    # the delta catalog: literal-level support relations
+    expected, actual, context = horizon_case("C7I", "f01", "s0")
+    own = {n for n, _ in actual.catalog}
+    support = [n for n, a in expected.catalog if a == 2 and n not in own
+               and re.search(r"^\[[+-]\]on\[(sat|unsat|sat\+|sat-)\]$", n)]
+    assert support
+    assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
+    filled = copy(expected)
+    filled.tuples = {**expected.tuples, support[0]: [("target:1", "a", "b")]}
+    assert {m.kind for m in compare(filled, actual, context)} >= {"catalog", "tuple"}
+    # the split catalog: the relation of the nodes of a static predicate
+    expected, actual, context = horizon_case("C7G", "f08", "s0")
+    own = {n for n, _ in actual.catalog}
+    anchored = [n for n, _ in expected.catalog if n == "fixed[state]"]
+    assert anchored and anchored[0] not in own
+    assert "never_filled_horizon_relations" in needed_differences(expected, actual, context)
+
+
+def test_a_literal_in_two_levels_is_expected_once_at_the_lowest_level_of_a_horizon():
+    expected, actual, context = horizon_case("C7T", "f01", "s2")
+    assert ("target:0", "c", "b") in actual.tuples["[+]on[g]"]
+    assert "[+]on[sg]" not in actual.tuples
+    assert "repeated_literal_horizon" in needed_differences(expected, actual, context)
+    lost = copy(actual)
+    lost.tuples["[+]on[g]"] = [t for t in actual.tuples["[+]on[g]"] if t != ("target:0", "c", "b")]
+    assert any(m.where == "[+]on[g]" for m in compare(expected, lost, context))
+    moved = copy(actual)
+    moved.tuples["[+]on[sg]"] = [("target:0", "c", "b")]
+    assert any(m.kind == "tuple" for m in compare(expected, moved, context))
+
+
+def test_the_edge_arrays_give_the_action_and_parent_tuples_whatever_the_order_and_multiplicity_of_the_edges():
+    fixture, task = load(prefix_path("f01"))
+    record = next(r for r in fixture["encodings"] if r["config"] == "C7C" and r["state"] == "s2")
+    view = encoding_view(task, record)
+    encoder = native_encoder(task, "C7C")
+    graph = native_graph(encoder, encoder.encode(view), 0, [task], COMPARED_LANES)
+    assert graph.tuples["_parent_"] == [("target:0", "target:1"), ("target:0", "target:2"), ("target:1", "target:3"),
+                                        ("target:2", "target:4")]
+    assert graph.unordered == ()
+
+    def with_edges(order):
+        return type(view)(
+            view.nodes, view.node_offsets, np.array([0, len(order)], np.int32), np.asarray(view.edge_src)[order],
+            np.asarray(view.edge_dst)[order], np.asarray(view.edge_schema)[order], np.asarray(view.edge_binding)[order],
+            view.task_ids)
+
+    # the edges reordered, and one of them twice, give the same graph
+    for order in (np.array([3, 1, 0, 2]), np.array([2, 0, 3, 1, 0, 3])):
+        again = native_graph(encoder, encoder.encode(with_edges(order)), 0, [task], COMPARED_LANES)
+        assert again == graph
+        assert again.unordered == ()
+
+
+@pytest.mark.parametrize("path, config", [c for c in case_params() if c.values[1].startswith("C7")])
+def test_the_candidate_nodes_are_the_targets_of_the_horizon_graph(path, config):
+    fixture, task = load(path)
+    records = [r for r in fixture["encodings"] if r["config"] == config]
+    for record, placed in zip(records, encode_records(task, config, None, records)):
+        graph = native_graph(placed.encoder, placed.batch, placed.row, [task], lanes_of(config))
+        batch, row = placed.batch, placed.row
+        first, last = (int(x) for x in batch.target_offsets[row : row + 2])
+        base = int(batch.entity_offsets[row])
+        names = [graph.entities[int(e) - base][1] for e in batch.target_entity[first:last]]
+        groups = {placed.encoder.target_group_names[int(g)] for g in batch.target_group[first:last]}
+        recorded = record["outputs"]["targets"]
+        assert names == recorded["names"], (record["state"], names)
+        assert groups <= set(recorded["groups"])
+
+
+# ------------------------------------------------------------------------------------------------ transitions and kinship
+def swapped(graph, first, second):
+    """The graph with the state entities ``target:<first>`` and ``target:<second>`` exchanged."""
+    def rename(name):
+        return {f"target:{first}": f"target:{second}", f"target:{second}": f"target:{first}"}.get(name, name)
+
+    entities = [(role, rename(name)) for role, name in graph.entities]
+    return Graph(graph.catalog, entities, {n: [tuple(rename(x) for x in t) for t in ts] for n, ts in graph.tuples.items()},
+                 graph.unordered)
+
+
+@pytest.mark.parametrize("config, prefix, state", [("C8A", "f01", "s2"), ("C8B", "f03", "s1")])
+def test_a_transition_graph_holds_every_successor_and_the_record_lists_one(config, prefix, state):
+    expected, actual, context = horizon_case(config, prefix, state)
+    successors = [name for role, name in actual.entities if role == "state"]
+    assert len(successors) > 1 and successors == [f"target:{k}" for k in range(1, len(successors) + 1)]
+    assert [name for role, name in expected.entities if role == "state"] == ["_root_state_", "target:1"]
+    assert "unrecorded_successors" in needed_differences(expected, actual, context)
+    # without the allowed difference the other successors are the mismatch, and nothing else
+    found = compare(expected, actual, context, [n for n in NAMES if n != "unrecorded_successors"])
+    assert {m.kind for m in found} == {"entity", "tuple"}
+    assert {m.detail for m in found if m.kind == "entity"} == {f"unexpected ('state', 'target:{k}')"
+                                                                for k in range(2, len(successors) + 1)}
+    # a tuple of the recorded successor that goes missing, or sits on another successor, is a mismatch
+    node = recorded_successor(context)
+    keep, other = f"target:{node}", f"target:{1 if node != 1 else 2}"
+    name, tuples = next((n, ts) for n, ts in sorted(actual.tuples.items()) if any(keep in t for t in ts))
+    lost = copy(actual)
+    lost.tuples = {**actual.tuples, name: [t for t in tuples if keep not in t]}
+    assert any(m.where == name for m in compare(expected, lost, context))
+    moved = copy(actual)
+    moved.tuples = {**actual.tuples, name: [tuple(other if x == keep else x for x in t) for t in tuples]}
+    assert compare(expected, moved, context)
+    # the recorded successor is the one whose action and state the record names: another node's facts do not do
+    swap = next(k for k in range(1, len(successors) + 1) if k != node and swapped(actual, node, k).tuples != actual.tuples)
+    assert compare(expected, swapped(actual, node, swap), context)
+
+
+def test_the_unrecorded_successors_are_cut_only_from_the_graphs_of_transition_configs():
+    from encoding_parity import _unrecorded_successors
+
+    expected, actual, context = horizon_case("C7A", "f01", "s2")
+    assert _unrecorded_successors(expected, actual, context) == (expected, actual)
+    assert REGISTRY[0].name == "unrecorded_successors"
+    assert all(is_transition(config) for _, config in REGISTRY[0].cases)
+
+
+def test_the_sibling_and_cousin_pairs_of_a_recorded_horizon_are_checked():
+    expected, actual, context = horizon_case("C7F", "f01", "s2")
+    # the dag: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 4
+    assert actual.tuples["_sibling_"] == [("target:1", "target:2"), ("target:2", "target:1")]
+    assert actual.tuples["_cousin_"] == [("target:3", "target:4"), ("target:4", "target:3")]
+    for relation in ("_sibling_", "_cousin_"):
+        lost = copy(actual)
+        lost.tuples = {**actual.tuples, relation: actual.tuples[relation][:1]}
+        assert {(m.kind, m.where) for m in compare(expected, lost, context)} == {("tuple", relation)}
+        extra = copy(actual)
+        extra.tuples = {**actual.tuples, relation: actual.tuples[relation] + [("target:0", "target:3")]}
+        assert {(m.kind, m.where) for m in compare(expected, extra, context)} >= {("tuple", relation)}
+    _, plain_actual, _ = horizon_case("C7E", "f01", "s2")
+    assert "_sibling_" not in plain_actual.tuples and "_cousin_" not in plain_actual.tuples

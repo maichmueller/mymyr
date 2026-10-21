@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <tuple>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -213,7 +214,8 @@ void Catalog::build_horizon(u32 predicate, bool state_relation, bool top)
     if (state_relation)
     {
         add_root(state_lane(source.kind), key());
-        if (split)
+        // the static atoms are the root's alone: no node has a relation of them
+        if (split && changing)
             add_candidate(state_lane(source.kind), key(0, {}, {}, {}, true));
     }
     if (top)
@@ -246,26 +248,11 @@ void Catalog::build_horizon(u32 predicate, bool state_relation, bool top)
         }
     if (!delta)
         return;
-    // A delta horizon also lists the literals themselves: the atoms a node adds (+) and deletes (-) relative to its
-    // root, and the satisfaction of those literals.
-    for (i8 sign : {i8{1}, i8{-1}})
-    {
-        if (changing)
+    // A delta horizon also lists the atoms a node adds (+) and deletes (-) relative to its root, for the predicates that
+    // change. The goal literals they satisfy are the added-satisfaction relations above.
+    if (changing)
+        for (i8 sign : {i8{1}, i8{-1}})
             add_candidate(state_lane(source.kind), key(sign));
-        for (GoalDerivation derivation : o.goal_derivations.members())
-        {
-            if (derivation == GoalDerivation::Plain)
-                continue;
-            const bool added = derivation == GoalDerivation::AddedSatisfied || derivation == GoalDerivation::AddedUnsatisfied;
-            if (added && !changing)
-                continue;
-            const Key literal = key(sign, {}, derivation);
-            if (added)
-                add_candidate(Lane::GoalSatisfaction, literal);
-            else
-                add_root(Lane::GoalSatisfaction, literal);
-        }
-    }
 }
 
 void Catalog::build()
@@ -312,6 +299,16 @@ void Catalog::build()
         parent.roles = {SlotRole::State, SlotRole::State};
         add(std::move(parent));
     }
+    for (const auto& [enabled, name, lane] : {std::tuple{o.horizon.sibling_relation, "_sibling_", Lane::Sibling},
+                                              std::tuple{o.horizon.cousin_relation, "_cousin_", Lane::Cousin}})
+        if (enabled)
+        {
+            Pending kin;
+            kin.relation.name = name;
+            kin.relation.lane = lane;
+            kin.roles = {SlotRole::State, SlotRole::State};
+            add(std::move(kin));
+        }
 }
 
 /// FNV-1a over a canonical byte stream: integers as 8 little-endian bytes, strings with their length in front.
@@ -382,6 +379,8 @@ std::string_view to_string(Lane lane) noexcept
     case Lane::History: return "history";
     case Lane::Action: return "action";
     case Lane::Parent: return "parent";
+    case Lane::Sibling: return "sibling";
+    case Lane::Cousin: return "cousin";
     }
     return "";
 }
@@ -456,9 +455,15 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     schema->m_goal_complete = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });
+    schema->m_subgoals = std::ranges::any_of(
+        schema->m_relations, [](const Relation& r)
+        {
+            return (r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction) &&
+                   r.level.value_or(0) > 0;
+        });
     const FlatOptions& o = schema->m_options;
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
-                                  !o.predicate_virtual_nodes && !o.include_actions &&
+                                  !o.predicate_virtual_nodes && !o.include_actions && !o.history &&
                                   o.horizon.mode == HorizonMode::None;
     Hasher hasher;
     hasher.text("mymyr.encoding.schema");
@@ -472,6 +477,11 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     if (schema->m_implicit_entities)
         hasher.text("omit entity_role, entity_ref");
     hasher.integer(o.targets.bits());
+    if (o.history)
+    {
+        hasher.text("history");
+        hasher.integer(o.history_max_steps.value_or(0));  // 0 (never a limit): all steps
+    }
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));
     hasher.integer(schema->m_relations.size());

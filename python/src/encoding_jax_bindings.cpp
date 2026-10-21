@@ -16,9 +16,10 @@
 //               thread; the CUDA target ignores it)
 //   results     the 13 arrays of a batch in the order of mymyr.encoding.DeviceFlatBatch.array_names (an array the
 //               schema does not store is [0]): the per-graph and per-cell arrays sized by N, the variable-size ones by
-//               the capacities; then sizes uint32 [5, 2] (the five words of encoding::FlatSizes as uint32 halves:
-//               entities, tuples, args, targets, overflow flags); then, required on CUDA and ignored on the CPU, a
-//               uint8 scratch of at least scratch_bytes(handle, N, device) + 255 bytes
+//               the capacities; then sizes uint32 [S, 2] (the S 64-bit words of encoding::FlatSizes as uint32 halves,
+//               low half first, in the field order of the struct, the overflow flags among them); then, required on
+//               CUDA and ignored on the CPU, a uint8 scratch of at least scratch_bytes(handle, N, device, derived) +
+//               255 bytes
 // Both targets give the capacity form's result: the arrays hold the batch and are zero past its sizes, or are all
 // zero when a flag is set (1: a capacity, 2: the index type, 4: an invalid row; an invalid row is a flag on both
 // targets, its sizes are those its counting reached).
@@ -355,7 +356,7 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 targets, const f
     }
     auto s = rets.get<ffi::AnyBuffer>(k_arrays);
     if (!s.has_value() || (**s).size_bytes() != sizeof(encoding::FlatSizes))
-        fail("the result 'sizes' must be uint32 [5, 2]");
+        fail("the result 'sizes' must be uint32 [" + std::to_string(sizeof(encoding::FlatSizes) / 8) + ", 2]");
     c.sizes = static_cast<encoding::FlatSizes*>((**s).untyped_data());
     if (rets.size() == k_arrays + 2)
     {
@@ -539,16 +540,17 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         ++e.cuda_calls;
         if (capturing)
             ++e.captured_calls;
-        for (usize k = 0; k < k_arrays; ++k)
-            if (c.arrays[k])
-                cuda::check(cudaMemsetAsync(c.arrays[k], 0, c.bytes[k], st), "cudaMemsetAsync");
-        if (c.graphs == 0)
+        if (c.graphs == 0)  // the empty batch: zero arrays and sizes
         {
+            for (usize k = 0; k < k_arrays; ++k)
+                if (c.arrays[k])
+                    cuda::check(cudaMemsetAsync(c.arrays[k], 0, c.bytes[k], st), "cudaMemsetAsync");
             cuda::check(cudaMemsetAsync(c.sizes, 0, sizeof(encoding::FlatSizes), st), "cudaMemsetAsync");
             return;
         }
         const encoding::BatchShape shape = c.capacities;
-        const u64 need = d->encoder->scratch_bytes(*d->held, shape);
+        const cuda::DerivedWords derived = c.derived.data ? cuda::DerivedWords::Supplied : cuda::DerivedWords::Evaluated;
+        const u64 need = d->encoder->scratch_bytes(*d->held, shape, derived);
         const auto base = reinterpret_cast<std::uintptr_t>(c.scratch);
         const u64 pad = (k_scratch_align - base % k_scratch_align) % k_scratch_align;
         if (!c.scratch || c.scratch_bytes < pad || c.scratch_bytes - pad < need)
@@ -568,6 +570,7 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         out.arrays = buffers_of(c);
         out.capacities = shape;
         out.sizes = c.sizes;
+        out.zero_unused = true;
         d->encoder->encode(*d->held, st, reinterpret_cast<void*>(base + pad), c.scratch_bytes - pad, shape, in, out);
     });
 }
@@ -701,22 +704,25 @@ void bind_encoding_jax(nb::module_& parent)
         "backend) and cuda (whether the CUDA target exists).");
     m.def(
         "scratch_bytes",
-        [](i64 handle, u64 graphs, int device) -> u64 {
+        [](i64 handle, u64 graphs, int device, bool derived) -> u64 {
 #if defined(MYMYR_HAS_CUDA)
             const EntryPtr e = entry_of(handle);
             nb::gil_scoped_release release;
             cuda::DeviceGuard guard(device);
-            return cuda::DeviceEncoder::scratch_bytes(*e->encoder, encoding::BatchShape{graphs, 0, 0, 0});
+            return cuda::DeviceEncoder::scratch_bytes(
+                *e->encoder, encoding::BatchShape{graphs, 0, 0, 0},
+                derived ? cuda::DerivedWords::Supplied : cuda::DerivedWords::Evaluated);
 #else
             (void)handle;
             (void)graphs;
             (void)device;
+            (void)derived;
             throw nb::value_error("mymyr: encoding: this mymyr was built without the CUDA backend");
 #endif
         },
-        "handle"_a, "graphs"_a, "device"_a,
-        "The device scratch of a batch of `graphs` rows on CUDA device `device` (the result 'scratch' adds 255 bytes of "
-        "alignment slack).");
+        "handle"_a, "graphs"_a, "device"_a, "derived"_a,
+        "The device scratch of a batch of `graphs` rows on CUDA device `device`, for a call that passes its derived words "
+        "(`derived`) or lets the device evaluate them (the result 'scratch' adds 255 bytes of alignment slack).");
     m.def(
         "calls",
         [](i64 handle) {

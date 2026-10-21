@@ -8,6 +8,7 @@ The tests run only when a GPU is made visible explicitly (conftest.py hides GPUs
         .venv-rl/bin/python -m pytest tests/python/test_encoding_cuda.py
 """
 
+import copy
 import gc
 import time
 import warnings
@@ -142,10 +143,6 @@ def exact_capacities(batch, factor=1):
     return {k: v * factor for k, v in sizes.items()}
 
 
-def host_sizes(sizes):
-    return {k: v for k, v in sizes.items() if k != "invalid_input"}
-
-
 def fluent_goals(case, seed=3):
     """Random goal masks over the fluent slots of every row: (goal_pos, goal_neg) [N, W]."""
     rng = np.random.default_rng(seed)
@@ -171,9 +168,15 @@ def fluent_goals(case, seed=3):
 @pytest.mark.parametrize("options", OPTION_SETS.values(), ids=OPTION_SETS.keys())
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_device_equals_host_bit_for_bit(cases, layout, index, options):
+@pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
+def test_device_equals_host_bit_for_bit(cases, layout, index, options, n):
     dev = gpu()
     for case in cases.values():
+        if n is not None:
+            case = copy.copy(case)
+            case.rows = case.rows[:n]
+            case.ids = None if case.ids is None else case.ids[:n]
+            case.derived = None if case.derived is None else case.derived[:n]
         encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, **options)
         host = host_encode(encoder, case)
         batch = device_encode(encoder, case, dev)
@@ -235,28 +238,36 @@ def test_the_instance_goals_equal_the_goal_masks_of_the_task(cases):
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("name", ["gripper", "blocks_table", "philosophers_table"])
-def test_capacity_form_equals_host_exact_short_zero_and_ample(cases, layout, name):
+@pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
+def test_capacity_form_equals_host_exact_short_zero_and_ample(cases, layout, name, n):
     dev = gpu()
     if name not in cases:
         pytest.skip("built without the loki front end")
     case = cases[name]
+    if n is not None:
+        case = copy.copy(case)
+        case.rows = case.rows[:n]
+        case.ids = None if case.ids is None else case.ids[:n]
+        case.derived = None if case.derived is None else case.derived[:n]
     encoder = encoding.FlatRelationEncoder(
         case.source, layout=layout, goal_derivations=("plain", "satisfied", "unsatisfied"), target_sources=("goal",),
         predicate_virtual_nodes=True,
     )
     exact = exact_capacities(host_encode(encoder, case))
-    short = dict(exact, args=exact["args"] - 1)
-    for caps in (exact, exact_capacities(host_encode(encoder, case), 2), short, dict(exact, entities=exact["entities"] - 1),
+    roomy = exact_capacities(host_encode(encoder, case), 2) if case.n else dict.fromkeys(exact, 10)
+    short = dict(exact, args=max(0, exact["args"] - 1))
+    for caps in (exact, roomy, short,
+                 dict(exact, entities=max(0, exact["entities"] - 1)),
                  {"entities": 0, "graphs": case.rows.shape[0], "args": 0, "targets": 0}):
         host = host_encode(encoder, case, capacities=caps)
         batch = device_encode(encoder, case, dev, capacities=caps)
         same_batch(host, batch)
         got = batch.sizes
-        assert got.pop("invalid_input") is False
+        assert got["invalid_input"] is False
         assert got == host.sizes
-        assert batch.device_sizes.dtype == torch.int64 and batch.device_sizes.shape == (5,)
+        assert batch.device_sizes.dtype == torch.int64 and batch.device_sizes.shape == (6,)
         assert batch.relation_args.shape[0] == caps["args"]
-    assert host_encode(encoder, case, capacities=short).sizes["overflow"]
+    assert host_encode(encoder, case, capacities=short).sizes["overflow"] == (exact["args"] > 0)
 
 
 # ------------------------------------------------------------------------------------------------ inputs
@@ -302,6 +313,17 @@ def test_rows_of_other_producers_and_layouts_equal_host(cases):
     assert isinstance(batch.relation_args, torch.Tensor) and batch.relation_args.device == dev
 
 
+def test_an_encoder_with_subgoal_levels_or_history_is_refused_for_device_rows(cases):
+    dev = gpu()
+    case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
+    rows = to_device(case.rows, dev)
+    ids = None if case.ids is None else to_device(case.ids, dev)
+    for options, what in (({"max_goal_level": 1}, "subgoal levels"), ({"history": True}, "history steps")):
+        encoder = encoding.FlatRelationEncoder(case.source, **options)
+        with pytest.raises(ValueError, match=f"^mymyr: encoding: the device does not encode {what}"):
+            encoder.encode(rows, ids)
+
+
 def test_the_arguments_are_checked_before_any_launch(cases):
     dev = gpu()
     case = cases["blocks_table"] if "blocks_table" in cases else cases["gripper"]
@@ -311,6 +333,10 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     prefix = "^mymyr: encoding: "
     with pytest.raises(ValueError, match=prefix + "actions are not encoded on the device"):
         encoder.encode(rows, ids, actions=rl.expand(rl.as_table(case.tasks[0]), case.rows[:1]))
+    with pytest.raises(ValueError, match=prefix + "subgoals and history are not encoded on the device"):
+        encoder.encode(rows, ids, subgoals=(rows, rows))
+    with pytest.raises(ValueError, match=prefix + "subgoals and history are not encoded on the device"):
+        encoder.encode(rows, ids, history=(rows, rows, rows))
     with pytest.raises(ValueError, match=prefix + "pool is a pool of host threads"):
         encoder.encode(rows, ids, pool=rl.ThreadPool(2))
     for framework in ("numpy", "jax", "dlpack"):
@@ -351,16 +377,17 @@ def test_the_arguments_are_checked_before_any_launch(cases):
         encoder.encode(torch.cat([rows[:1], rows[:1]]), to_device(np.full(2, 7, np.int32), dev))
 
 
-def test_derived_words_are_required_where_a_graph_reads_them(cases):
+def test_derived_words_are_evaluated_where_a_graph_reads_them(cases):
     dev = gpu()
     case = cases["philosophers"]
     encoder = encoding.FlatRelationEncoder(case.source)
     rows = to_device(case.rows, dev)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not evaluate derived atoms"):
-        encoder.encode(rows)
+    same_batch(host_encode(encoder, case), encoder.encode(rows))
     with pytest.raises(ValueError, match="^mymyr: encoding: 'derived' has"):
         encoder.encode(rows, derived=to_device(case.derived[:-1], dev))
     same_batch(host_encode(encoder, case), encoder.encode(rows, derived=to_device(case.derived, dev)))
+    supplied = np.zeros_like(case.derived)
+    same_batch(encoder.encode(case.rows, derived=supplied), encoder.encode(rows, derived=to_device(supplied, dev)))
     # a schema without derived relations or goal derived literals needs none
     plain = encoding.FlatRelationEncoder(case.source, include_derived=False, goal_derivations=())
     plain.encode(rows)
@@ -385,14 +412,45 @@ def test_invalid_rows_raise_without_capacities_and_are_flagged_with_them(cases):
     assert encoder.encode(rows, to_device(case.ids, dev), capacities=caps).sizes["overflow"] is False
 
 
-def test_the_index_overflow_flag_and_error_of_a_narrow_index_type(cases):
+def test_capacity_overflow_does_not_set_the_index_overflow_flag(cases):
     dev = gpu()
     case = cases["gripper"]
     encoder = encoding.FlatRelationEncoder(case.source, index_dtype="int32")
-    # a batch whose cells exceed the int32 index range cannot be built: the flag is reported by the capacities that no
-    # array could hold, through the capacity flag
     batch = device_encode(encoder, case, dev, capacities={"entities": 1, "graphs": case.rows.shape[0], "args": 1})
     assert batch.sizes["capacity_overflow"] and not batch.sizes["index_overflow"]
+
+
+def test_count_index_overflow_raises_before_exact_allocation(cases, monkeypatch):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, index_dtype="int32")
+    native = encoding._device._device_encoder(encoder, 0)
+
+    def count(self, stream, rows, allocate):
+        return allocate(1 << 31, 0, 0, 0, 2)
+
+    monkeypatch.setattr(type(native), "encode_exact", count)
+    with pytest.raises(OverflowError, match="use index_dtype='int64'"):
+        device_encode(encoder, case, dev)
+
+
+def test_count_index_overflow_is_reported_in_capacity_sizes(cases, monkeypatch):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, index_dtype="int32")
+    arrays = encoding._device._outputs
+
+    def outputs(torch_, specs, device):
+        out = arrays(torch_, specs, device)
+        out["sizes"].copy_(torch.tensor([1 << 31, 0, 0, 0, 0, 2], device=device))
+        return out
+
+    monkeypatch.setattr(encoding._device, "_outputs", outputs)
+    native = encoding._device._device_encoder(encoder, 0)
+    monkeypatch.setattr(type(native), "encode", lambda *a: None)
+    batch = device_encode(encoder, case, dev, capacities={"graphs": case.n, "entities": 0, "args": 0})
+    assert batch.sizes == {"entities": 1 << 31, "tuples": 0, "args": 0, "targets": 0, "overflow": True,
+                           "capacity_overflow": False, "index_overflow": True, "invalid_input": False}
 
 
 # ------------------------------------------------------------------------------------------------ waiting
@@ -478,18 +536,75 @@ def test_the_workspace_of_a_stream_is_reused_and_reserved_in_advance(cases):
         encoder.reserve_device(-1)
 
 
-def test_streams_are_ordered_with_the_inputs_and_outputs(cases):
+@pytest.mark.parametrize("mode", ["exact", "capacities", "op"])
+@pytest.mark.parametrize("wrong_stream", [False, True], ids=["current_stream", "default_stream_mutation"])
+def test_streams_are_ordered_with_the_inputs_and_outputs(cases, monkeypatch, mode, wrong_stream):
     dev = gpu()
+    if wrong_stream and torch.cuda.get_allocator_backend() != "native":
+        pytest.skip("the stream mutation requires allocations completed before use on another stream")
     case = cases["gripper"]
-    encoder = encoding.FlatRelationEncoder(case.source)
-    host = encoder.encode(case.rows)
+    encoder = encoding.FlatRelationEncoder(case.source, goal_derivations=())
+    first = case.rows[:1]
+    successors = np.asarray(rl.expand(case.source, first).succ)
+    candidates = np.concatenate((first, successors))
+    counts = encoder.encode(candidates).relation_counts
+    alternative = next((i for i in range(1, len(candidates))
+                        if np.array_equal(counts[0], counts[i]) and
+                        np.count_nonzero(candidates[0] ^ candidates[i]) == 1), None)
+    assert alternative is not None
+    # A single word changes while every cell keeps its count, so count and fill use the same extents in either order.
+    before = np.repeat(candidates[:1], case.n, axis=0)
+    after = np.repeat(candidates[alternative:alternative + 1], case.n, axis=0)
+    host = encoder.encode(after)
+    caps = exact_capacities(host)
+    handle = rt.register(encoder)
+    source = to_device(after, dev)
+    rows = to_device(before, dev)
     stream = torch.cuda.Stream(dev)
-    with torch.cuda.stream(stream):
-        rows = to_device(case.rows, dev)
-        torch.cuda._sleep(100_000_000)
-        batch = encoder.encode(rows)
-    stream.synchronize()
-    same_batch(host, batch)
+    held_scratch = []
+    allocate = encoding._device._scratch
+
+    def scratch(*args):
+        tensor = allocate(*args)
+        held_scratch.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(encoding._device, "_scratch", scratch)
+    warm = []
+
+    def warm_stream():
+        warm.append(encoder.encode(rows))
+        warm.append(encoder.encode(rows, capacities=caps))
+        if mode == "op":
+            warm.append(call_op(handle, rows, None, None, [None] * 4, caps))
+
+    try:
+        # Warm allocations and operator dispatch on both streams before delaying the write.
+        warm_stream()
+        torch.cuda.synchronize()
+        with torch.cuda.stream(stream):
+            warm_stream()
+        torch.cuda.synchronize()
+        warm.clear()
+        if wrong_stream:
+            monkeypatch.setattr(rt._ops, "_stream", lambda *a: 0)
+        with torch.cuda.stream(stream):
+            torch.cuda._sleep(200_000_000)
+            rows.copy_(source)
+            if mode == "op":
+                batch = encoding.DeviceFlatBatch.from_arrays(
+                    encoder, call_op(handle, rows, None, None, [None] * 4, caps))
+            else:
+                batch = encoder.encode(rows, capacities=None if mode == "exact" else caps)
+        torch.cuda.synchronize()
+        if wrong_stream:
+            with pytest.raises(AssertionError):
+                same_batch(host, batch)
+        else:
+            same_batch(host, batch)
+    finally:
+        torch.cuda.synchronize()
+        rt.unregister(handle)
 
 
 # ------------------------------------------------------------------------------------------------ the batch
@@ -567,16 +682,24 @@ def call_op(handle, rows, ids, derived, g, caps):
 
 
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_the_op_equals_encode_with_capacities(cases, layout):
+@pytest.mark.parametrize("n", [None, 0, 1], ids=["batch", "empty", "single"])
+def test_the_op_equals_encode_with_capacities(cases, layout, n):
     dev = gpu()
     for name, options in (("blocks_table", "goal_targets_virtual"), ("philosophers_table", "default"),
                           ("gripper", "no_actions")):
         if name not in cases:
             continue
         case = cases[name]
+        if n is not None:
+            case = copy.copy(case)
+            case.rows = case.rows[:n]
+            case.ids = None if case.ids is None else case.ids[:n]
+            case.derived = None if case.derived is None else case.derived[:n]
         encoder = encoding.FlatRelationEncoder(case.source, layout=layout, **OPTION_SETS[options])
         handle = rt.register(encoder)
         caps = exact_capacities(host_encode(encoder, case), 2)
+        if not case.n:
+            caps = dict.fromkeys(caps, 10)
         rows, ids, derived, g = op_inputs(case, dev)
         out = call_op(handle, rows, ids, derived, g, caps)
         assert len(out) == len(encoding.DeviceFlatBatch.array_names)
@@ -664,10 +787,9 @@ def test_a_captured_cuda_graph_replays_to_the_eager_result(cases, layout):
     rows, ids, derived, g = op_inputs(case, dev)
     eager = call_op(handle, rows, ids, derived, g, caps)
     stream = torch.cuda.Stream(dev)
-    with pytest.raises(ValueError, match="^mymyr: encoding: a CUDA graph capture needs the encoder's device workspace"):
-        with torch.cuda.graph(torch.cuda.CUDAGraph(), stream=stream):
-            call_op(handle, rows, ids, derived, g, caps)
-    encoder.reserve_device(case.n, stream=stream)
+    with torch.cuda.stream(stream):
+        call_op(handle, rows, ids, derived, g, caps)
+    stream.synchronize()
     reservations = encoding._device.workspace_state(encoder, stream=stream)["reservations"]
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
@@ -738,7 +860,7 @@ def test_encoders_still_pickle_and_free_their_device_state(cases):
     assert ref() is None
 
 
-def test_outputs_that_do_not_hold_the_graphs_are_refused_before_any_launch(cases, monkeypatch):
+def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
     dev = gpu()
     case = cases["gripper"]
     encoder = encoding.FlatRelationEncoder(case.source)
@@ -751,14 +873,10 @@ def test_outputs_that_do_not_hold_the_graphs_are_refused_before_any_launch(cases
         return real(self, torch_, graphs - 1, entities, args, targets)
 
     monkeypatch.setattr(type(layout), "specs", short)
-    launched = []
-    native = encoding._device._device_encoder(encoder, 0)
-    monkeypatch.setattr(type(native), "encode", lambda *a: launched.append(a), raising=False)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the output 'task_ids' has"):
+    with pytest.raises(ValueError, match="^mymyr: encoding: the batch has more graphs than the output capacity"):
         encoder.encode(rows, capacities=caps)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the output 'task_ids' has"):
+    with pytest.raises(ValueError, match="^mymyr: encoding: the batch has more graphs than the output capacity"):
         encoder.encode(rows)
-    assert not launched
 
 
 def test_graph_capacity_is_checked_before_device_encoding(cases):
@@ -779,3 +897,418 @@ def test_graph_capacity_is_checked_before_device_encoding(cases):
             call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
     finally:
         rt.unregister(handle)
+
+
+@pytest.mark.needs_gil
+def test_the_op_refuses_host_rows_with_a_value_error():
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatRelationEncoder(task)
+    handle = rt.register(encoder)
+    rows = torch.from_numpy(np.asarray(task.encode([task.initial_state])).view(np.int64))
+    try:
+        with pytest.raises(ValueError, match="^mymyr: encoding: 'states' is on cpu"):
+            call_op(handle, rows, None, None, [None] * 4, {"graphs": 1, "entities": 0, "args": 0, "targets": 0})
+    finally:
+        rt.unregister(handle)
+
+
+def test_cuda_array_interface_stream_zero_is_refused():
+    class Array:
+        __cuda_array_interface__ = {"stream": 0}
+
+    encoder = encoding.FlatRelationEncoder(text_task("gripper__prob05"))
+    with pytest.raises(ValueError, match="CUDA array interface stream 0"):
+        encoder.encode(Array())
+
+
+@pytest.mark.parametrize("framework", ["Torch", "PYTORCH"])
+def test_device_framework_names_follow_the_host_spelling(cases, framework):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source)
+    with pytest.raises(ValueError, match="framework"):
+        encoder.encode(case.rows, framework=framework)
+    with pytest.raises(ValueError, match="framework"):
+        device_encode(encoder, case, dev, framework=framework)
+
+
+@pytest.mark.parametrize("threads", [-5, 10**6, "2"])
+def test_device_threads_are_validated_as_on_the_host(cases, threads):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source)
+    with pytest.raises((TypeError, ValueError)):
+        encoder.encode(case.rows, threads=threads)
+    with pytest.raises((TypeError, ValueError)):
+        device_encode(encoder, case, dev, threads=threads)
+
+
+def test_a_compiled_function_specializes_each_encoder_handle(cases):
+    dev = gpu()
+    case = cases["gripper"]
+    encoders = [encoding.FlatRelationEncoder(case.source, emit_counts=counts) for counts in (False, True)]
+    handles = [rt.register(encoder) for encoder in encoders]
+    rows = to_device(case.rows, dev)
+    caps = exact_capacities(encoders[0].encode(case.rows))
+
+    def fn(handle, states):
+        return call_op(handle, states, None, None, [None] * 4, caps)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, backend="eager")
+    try:
+        for handle in (*handles, handles[0]):
+            eager = fn(handle, rows)
+            actual = compiled(handle, rows)
+            for a, b in zip(actual, eager, strict=True):
+                assert torch.equal(a, b)
+    finally:
+        for handle in handles:
+            rt.unregister(handle)
+
+
+@pytest.mark.parametrize("mode", ["capacities", "op"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_captured_scratch_survives_larger_calls_and_a_second_capture(cases, monkeypatch, mode, layout):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, target_sources=("goal",))
+    handle = rt.register(encoder)
+    stream = torch.cuda.Stream(dev)
+    scratch = encoding._device._scratch
+    pointers = []
+
+    def allocate(*args):
+        tensor = scratch(*args)
+        pointers.append((tensor.data_ptr(), tensor.numel()))
+        return tensor
+
+    monkeypatch.setattr(encoding._device, "_scratch", allocate)
+    batches = []
+    graphs = []
+    held = []
+    expected = []
+    inputs = []
+
+    def encode(rows, caps):
+        if mode == "op":
+            return encoding.DeviceFlatBatch.from_arrays(encoder, call_op(handle, rows, None, None, [None] * 4, caps))
+        return encoder.encode(rows, capacities=caps)
+
+    def pool_owns(graph, allocation):
+        pointer, size = allocation
+        return any(tuple(segment["segment_pool_id"]) == graph.pool() and
+                   segment["address"] <= pointer and pointer + size <= segment["address"] + segment["total_size"]
+                   for segment in torch.cuda.memory_snapshot())
+
+    try:
+        for n in (8, 4097):
+            rows = np.ascontiguousarray(np.resize(case.rows, (n, case.rows.shape[1])))
+            host = encoder.encode(rows)
+            caps = exact_capacities(host, 2)
+            expected.append(encoder.encode(rows, capacities=caps))
+            device_rows = to_device(rows, dev)
+            inputs.append(device_rows)
+            stream.wait_stream(torch.cuda.current_stream(dev))
+            with torch.cuda.stream(stream):
+                encode(device_rows, caps)
+            stream.synchronize()
+            encoder.reserve_device(2 * n, stream=stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                batches.append(encode(device_rows, caps))
+            graphs.append(graph)
+            held.append(pointers[-1])
+            assert all(pool_owns(g, p) for g, p in zip(graphs, held, strict=True))
+        assert held[0][0] != held[1][0]
+        encoder.release_device(stream=stream)
+        assert all(pool_owns(g, p) for g, p in zip(graphs, held, strict=True))
+        for graph, host, batch in zip(graphs, expected, batches, strict=True):
+            graph.replay()
+            torch.cuda.synchronize()
+            same_batch(host, batch)
+    finally:
+        torch.cuda.synchronize()
+        rt.unregister(handle)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("options", ["default", "goal_targets_virtual", "no_actions"])
+def test_capacity_fill_overwrites_dirty_outputs_and_tails(cases, monkeypatch, layout, index, options):
+    dev = gpu()
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, **OPTION_SETS[options])
+
+    def outputs(torch_, specs, device):
+        return {name: torch_.full(shape, 0x5a, dtype=dtype, device=device) for name, (shape, dtype) in specs.items()}
+
+    monkeypatch.setattr(encoding._device, "_outputs", outputs)
+    exact = host_encode(encoder, case)
+    for caps in (exact_capacities(exact, 2), dict(exact_capacities(exact), args=0)):
+        same_batch(host_encode(encoder, case, capacities=caps), device_encode(encoder, case, dev, capacities=caps))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("given", [False, True])
+def test_device_row_stream_wraps_and_flushes_live_rows(cases, layout, index, given):
+    dev = gpu()
+    case = cases["philosophers_table"] if "philosophers_table" in cases else cases["philosophers"]
+    n = min(33, case.n)
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, target_sources=("goal",),
+                                           predicate_virtual_nodes=True)
+    rows = to_device(case.rows[:n], dev)
+    ids = None if case.ids is None else to_device(case.ids[:n], dev)
+    derived = to_device(case.derived[:n], dev) if given else None
+    host = encoder.encode(case.rows[:n], None if case.ids is None else case.ids[:n])
+    caps = exact_capacities(host, factor=2)
+    caps["graphs"] = n + 4
+    ring = encoder.device_stream(n + 4, derived=given)
+    for _ in range(3):
+        ring.append(rows, ids, derived=derived)
+        assert len(ring) == n
+        batch = ring.flush(capacities=caps)
+        assert batch.device_graphs is not None
+        same_batch(host, batch)
+        assert len(ring) == 0
+    # an append that does not fit is dropped, and every flush until clear() reports it
+    ring.append(rows, ids, derived=derived)
+    ring.append(rows[:5], None if ids is None else ids[:5], derived=None if derived is None else derived[:5])
+    assert int(ring.device_overflow.item()) == 1
+    assert len(ring) == n
+    for _ in range(2):
+        dropped = ring.flush(capacities=caps)
+        assert dropped.sizes["capacity_overflow"]
+        assert not torch.count_nonzero(dropped.entity_offsets).item()
+    ring.clear()
+    assert int(ring.device_overflow.item()) == 0
+    empty = ring.flush(capacities=caps)
+    same_batch(encoder.encode(case.rows[:0], None if case.ids is None else case.ids[:0]), empty)
+    ring.append(rows, ids, derived=derived)
+    same_batch(host, ring.flush(capacities=caps))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_device_row_stream_flush_zeroes_the_per_graph_tails_and_leaves_the_variable_tails(cases, layout, monkeypatch):
+    dev = gpu()
+    case = cases["philosophers"]
+    n = min(33, case.n)
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, target_sources=("goal",),
+                                           predicate_virtual_nodes=True)
+
+    def outputs(torch_, specs, device):
+        return {name: torch_.full(shape, 0x5a, dtype=dtype, device=device) for name, (shape, dtype) in specs.items()}
+
+    monkeypatch.setattr(encoding._device, "_outputs", outputs)
+    caps = exact_capacities(encoder.encode(case.rows[:n]), factor=2)
+    caps["graphs"] = 64
+    ring = encoder.device_stream(64)
+    relations = encoder.schema.num_relations
+    for count in (n, 5, 0):
+        if count:
+            ring.append(to_device(case.rows[:count], dev))
+        batch = ring.flush(capacities=caps)
+        host = encoder.encode(case.rows[:count])
+        same_batch(host, batch)
+        assert int(batch.device_graphs.item()) == count == batch.num_graphs
+        sizes = batch.sizes
+        per_graph = {"task_ids": count, "num_objects": count, "entity_offsets": count + 1, "goal_complete": count,
+                     "target_offsets": count + 1, "relation_counts": count, "relation_offsets": count * relations + 1,
+                     "relation_arg_offsets": count * relations + 1}
+        for name, start in per_graph.items():
+            if name in batch._arrays:
+                assert not torch.count_nonzero(batch._arrays[name][start:]).item(), (count, name)
+        # the flush writes nothing past the sizes of the variable arrays
+        variable = {"entity_role": sizes["entities"], "entity_ref": sizes["entities"], "relation_args": sizes["args"],
+                    "target_entity": sizes["targets"], "target_group": sizes["targets"]}
+        for name, start in variable.items():
+            if name in batch._arrays:
+                assert bool((batch._arrays[name][start:] == 0x5a).all()), (count, name)
+
+
+@pytest.mark.parametrize("option", [{"max_goal_level": 1}, {"history": True}])
+def test_device_row_stream_refuses_subgoal_layers_and_history(cases, option):
+    gpu()
+    encoder = encoding.FlatRelationEncoder(cases["gripper"].source, **option)
+    with pytest.raises(ValueError, match="^mymyr: encoding: a device stream carries no subgoal layers or history steps"):
+        encoder.device_stream(8)
+
+
+def test_device_row_stream_append_and_flush_are_capturable(cases):
+    dev = gpu()
+    case = cases["philosophers"]
+    n = min(33, case.n)
+    encoder = encoding.FlatRelationEncoder(case.source, target_sources=("goal",))
+    host = encoder.encode(case.rows[:n])
+    rows = to_device(case.rows[:n], dev)
+    caps = exact_capacities(host, factor=2)
+    caps["graphs"] = n + 7
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream.wait_stream(torch.cuda.default_stream())
+        ring = encoder.device_stream(n + 7)
+        ring.append(rows)
+        ring.flush(capacities=caps)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            ring.append(rows)
+            batch = ring.flush(capacities=caps)
+        for _ in range(4):
+            graph.replay()
+        stream.synchronize()
+        same_batch(host, batch)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_device_collation_of_rollout_slices_equals_one_encode(cases, layout, index):
+    dev = gpu()
+    case = cases["philosophers_table"] if "philosophers_table" in cases else cases["philosophers"]
+    n = min(33, case.n)
+    encoder = encoding.FlatRelationEncoder(case.source, layout=layout, index_dtype=index, target_sources=("goal",),
+                                           predicate_virtual_nodes=True)
+    rows = to_device(case.rows[:n], dev)
+    ids = None if case.ids is None else to_device(case.ids[:n], dev)
+    host = encoder.encode(case.rows[:n], None if case.ids is None else case.ids[:n])
+    pieces = [(0, 3), (3, 3), (3, 11), (11, n)]
+    batches = [encoder.encode(rows[a:b], None if ids is None else ids[a:b]) for a, b in pieces]
+    same_batch(host, encoding.collate(batches))
+    plan = encoding.DeviceCollator(batches)
+    caps = exact_capacities(host)
+    batch = plan.encode(capacities=caps)
+    same_batch(host, batch)
+    ample = exact_capacities(host, factor=2)
+    host_ample = encoder.encode(case.rows[:n], None if case.ids is None else case.ids[:n], capacities=ample)
+    same_batch(host_ample, plan.encode(capacities=ample))
+    short = plan.encode(capacities={**caps, "args": 0})
+    assert short.sizes["capacity_overflow"]
+    assert not torch.count_nonzero(short.entity_offsets).item()
+    assert not torch.count_nonzero(short.relation_offsets).item()
+    same_batch(encoder.encode(case.rows[:0], None if case.ids is None else case.ids[:0]),
+               encoding.collate([batches[1], batches[1]]))
+    with pytest.raises(ValueError, match="^mymyr: encoding: collate received mixed host and device"):
+        encoding.collate([host, batches[0]])
+    other = encoding.FlatRelationEncoder(rl.TaskTable(list(case.tasks) * 2),
+                                         layout=layout, index_dtype=index, target_sources=("goal",),
+                                         predicate_virtual_nodes=True)
+    assert other.table_fingerprint != encoder.table_fingerprint
+    foreign = other.encode(rows[:3], torch.zeros(3, dtype=torch.int32, device=dev))
+    with pytest.raises(ValueError, match="^mymyr: encoding: collate received batches of different tables"):
+        encoding.DeviceCollator([batches[0], foreign])
+    wide = {**exact_capacities(host, factor=2), "graphs": n + 9}
+    tails = plan.encode(capacities=wide)
+    same_batch(encoder.encode(case.rows[:n], None if case.ids is None else case.ids[:n], capacities=wide), tails)
+    for name in ("task_ids", "num_objects", "entity_offsets", "relation_offsets", "relation_arg_offsets"):
+        start = n + 1 if name == "entity_offsets" else n * encoder.schema.num_relations + 1 if "relation" in name else n
+        assert not torch.count_nonzero(tails._arrays[name][start:]).item(), name
+    bad = encoder.encode(rows, ids, capacities={**caps, "args": 0})
+    invalid_plan = encoding.DeviceCollator([bad])
+    with pytest.raises(ValueError, match="^mymyr: encoding: cannot collate an overflowed batch"):
+        invalid_plan.encode()
+    assert invalid_plan.encode(capacities=caps).sizes["invalid_input"]
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream.wait_stream(torch.cuda.default_stream())
+        captured_plan = encoding.DeviceCollator(batches)
+        captured_plan.encode(capacities=caps)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = captured_plan.encode(capacities=caps)
+        for _ in range(3):
+            graph.replay()
+        stream.synchronize()
+        same_batch(host, captured)
+
+
+@pytest.mark.parametrize("mode", ["exact", "capacity"])
+def test_evaluated_derived_words_follow_the_encoding_stream(mode):
+    dev = gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string(
+        "(define (domain switching) (:requirements :strips :derived-predicates)"
+        " (:predicates (flag ?x) (available ?x)) (:derived (available ?x) (flag ?x))"
+        " (:action move :parameters (?a ?b) :precondition (flag ?a)"
+        " :effect (and (not (flag ?a)) (flag ?b))))")
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem p) (:domain switching) (:objects a b) (:init (flag a)) (:goal (and)))"))
+    old = np.asarray(task.encode([task.initial_state]))
+    successors = np.asarray(rl.expand(task, old).succ)
+    changed = next(row for row in successors if not np.array_equal(row, old[0]))[None, :]
+    encoder = encoding.FlatRelationEncoder(task)
+    before, host = encoder.encode(old), encoder.encode(changed)
+    assert np.array_equal(before.relation_counts, host.relation_counts)
+    assert not np.array_equal(before.relation_args, host.relation_args)
+    original, rows = to_device(old, dev), to_device(changed, dev)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream.wait_stream(torch.cuda.default_stream())
+        destination = original.clone()
+        encoder.encode(destination, capacities=exact_capacities(host))
+        stream.synchronize()
+        torch.cuda._sleep(10_000_000)
+        destination.copy_(rows)
+        result = encoder.encode(destination, **({"capacities": exact_capacities(host)} if mode == "capacity" else {}))
+        stream.synchronize()
+        same_batch(host, result)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_prepared_collation_keeps_ring_capacity_when_relations_grow(layout, index):
+    dev = gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    domain = mymyr.Domain.from_string(
+        "(define (domain switches) (:requirements :strips) (:predicates (left) (right))"
+        " (:action left_on :parameters () :precondition (and) :effect (left))"
+        " (:action right_on :parameters () :precondition (and) :effect (right)))")
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem p) (:domain switches) (:init) (:goal (and)))"))
+    one = task.successor_states(task.initial_state)[0]
+    two = max(task.successor_states(one), key=lambda state: sum(int(word).bit_count() for word in state.words))
+    empty_rows = np.asarray(task.encode([task.initial_state, task.initial_state]))
+    populated_rows = np.asarray(task.encode([two, one]))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, index_dtype=index, include_static=False,
+                                           include_actions=False, goal_derivations=())
+    empty_host, populated_host = encoder.encode(empty_rows), encoder.encode(populated_rows)
+    assert empty_host.entity_ref.size == empty_host.relation_args.size == 0
+    assert populated_host.entity_ref.size > 0 and populated_host.relation_args.size > 0
+    caps = dict(graphs=3, entities=8, args=16, targets=0)
+    rows, populated = to_device(empty_rows, dev), to_device(populated_rows, dev)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        stream.wait_stream(torch.cuda.default_stream())
+        ring = encoder.device_stream(3)
+        ring.append(rows)
+        ring.flush(capacities=caps)
+        stream.synchronize()
+        producer = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(producer, stream=stream):
+            ring.append(rows)
+            source = ring.flush(capacities=caps)
+        producer.replay()
+        stream.synchronize()
+        plan = encoding.DeviceCollator([source])
+        # Check the backing pointers before any replay can populate the empty live arrays.
+        prepared = plan._prepared[4][0]
+        for name in ("entity_role", "entity_ref", "relation_args"):
+            assert source._arrays[name].numel() > 0
+            assert prepared[name].data_ptr() == source._arrays[name].data_ptr() != 0
+        plan.encode(capacities=caps)
+        stream.synchronize()
+        consumer = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(consumer, stream=stream):
+            result = plan.encode(capacities=caps)
+        for values, host_rows in ((populated, populated_rows), (rows, empty_rows), (populated, populated_rows)):
+            if values is not rows:
+                rows.copy_(values)
+            else:
+                rows.zero_()
+            producer.replay()
+            consumer.replay()
+            stream.synchronize()
+            same_batch(encoder.encode(host_rows, capacities=caps), result)

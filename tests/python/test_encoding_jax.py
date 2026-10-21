@@ -22,6 +22,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
+from mymyr.encoding import _device
 from conftest import ROOT, text_task, walk
 
 jax = pytest.importorskip("jax")
@@ -436,11 +437,7 @@ def test_unsupported_calls_raise_value_error_when_traced(cases):
         enc = encoding.FlatRelationEncoder(table.source)
         with pytest.raises(ValueError, match=r"^mymyr: encoding: task_ids are required for a table of several"):
             jax.jit(lambda r: ej.encode(enc, r, capacities=caps))(halves(table.rows))
-    phil = cases["philosophers"]
-    enc = encoding.FlatRelationEncoder(phil.source)
     if _encoding_jax.has_cuda():
-        with pytest.raises(ValueError, match=r"^mymyr: encoding: the rows' derived words are required"):
-            jax.jit(lambda r: ej.encode(enc, r, capacities=caps))(halves(phil.rows))
         with pytest.raises(ValueError, match=r"^mymyr: encoding: the device does not encode action targets"):
             ej.encode(encoding.FlatRelationEncoder(case.source, target_sources=("action",)), rows, capacities=caps)
 
@@ -462,7 +459,7 @@ def test_a_jax_batch_has_the_accessors_of_a_host_batch(cases):
     for name in ("relation_counts", "entity_role", "entity_ref", "goal_complete", "target_offsets"):
         with pytest.raises(AttributeError, match=f"this batch has no {name}"):
             getattr(batch, name)
-    assert batch.device_sizes.dtype == jnp.uint32 and batch.device_sizes.shape == (5, 2)
+    assert batch.device_sizes.dtype == jnp.uint32 and batch.device_sizes.shape == (len(_device._SIZE_FIELDS), 2)
     assert int(batch.overflow) == 0
     assert set(batch.as_dict()) == set(host.as_dict())
     with pytest.raises(ValueError, match="exports to 'jax', 'dlpack' or 'numpy'"):
@@ -508,7 +505,7 @@ def test_the_cuda_target_runs_on_xla_memory_only(cases):
     lowered = jax.jit(lambda r: ej.encode(handle, r, capacities=caps)).lower(put(halves(case.rows), "cuda"))
     text = lowered.as_text()
     assert "mymyr_encode_flat" in text
-    need = _encoding_jax.scratch_bytes(handle, case.n, 0)
+    need = _encoding_jax.scratch_bytes(handle, case.n, 0, False)
     assert f"tensor<{need + 255}xui8>" in text
 
 

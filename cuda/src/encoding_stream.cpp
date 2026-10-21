@@ -1,0 +1,137 @@
+#include "mymyr/cuda/encoding.hpp"
+#include "encoding_rows.hpp"
+
+#include <limits>
+#include <optional>
+#include <stdexcept>
+
+namespace mymyr::cuda
+{
+void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream)
+{
+    if (!in.graphs) return;
+    auto invalid = [] { throw std::invalid_argument("mymyr: encoding: appended rows must match the device ring's columns and widths"); };
+    if (!status || !ring.graphs || !ring.states || !ring.task_ids || in.graphs_device || in.row_start || in.dropped ||
+        !in.states || in.state_words != ring.state_words || in.state_stride < in.state_words ||
+        ring.state_stride < ring.state_words)
+        invalid();
+    if (bool(in.derived) != bool(ring.derived) || (in.derived && in.derived_stride < ring.derived_stride) ||
+        bool(in.goal_pos) != bool(ring.goal_pos) || bool(in.goal_neg) != bool(ring.goal_neg) ||
+        bool(in.goal_derived_pos) != bool(ring.goal_derived_pos) || bool(in.goal_derived_neg) != bool(ring.goal_derived_neg) ||
+        (in.goal_pos && (in.goal_words != ring.goal_words || (in.goal_stride && in.goal_stride < in.goal_words))) ||
+        (in.goal_derived_pos && (in.goal_derived_words != ring.goal_derived_words ||
+                               (in.goal_derived_stride && in.goal_derived_stride < in.goal_derived_words))))
+        invalid();
+    check(launch_append_rows(in, ring, status, stream), "append encoding rows");
+}
+
+void finish_rows(u64* status, u64 capacity, cudaStream_t stream)
+{
+    if (!status || !capacity)
+        throw std::invalid_argument("mymyr: encoding: finish_rows needs ring status and a positive capacity");
+    check(launch_clear_rows(status, capacity, false, stream), "finish encoding rows");
+}
+
+void check_stream_schema(const encoding::EncodingSchema& schema)
+{
+    const auto& o = schema.options();
+    if (o.max_goal_level != 0 || o.history)
+        throw std::invalid_argument("mymyr: encoding: a device stream carries no subgoal layers or history steps");
+}
+
+void clear_rows(u64* status, u64 capacity, cudaStream_t stream)
+{
+    if (!status || !capacity)
+        throw std::invalid_argument("mymyr: encoding: clear_rows needs ring status and a positive capacity");
+    check(launch_clear_rows(status, capacity, true, stream), "clear encoding rows");
+}
+
+struct DeviceRowStream::Impl
+{
+    static const ContextPtr& checked(const ContextPtr& ctx, const std::shared_ptr<const encoding::FlatEncoder>& host)
+    {
+        if (!host)
+            throw std::invalid_argument("mymyr: encoding: a device stream needs an encoder");
+        check_stream_schema(host->schema());
+        return ctx;
+    }
+
+    ContextPtr context;
+    DeviceEncoder encoder;
+    cudaStream_t stream;
+    DeviceEncodeInput ring;
+    std::vector<DeviceBuffer> columns;
+    std::optional<EncodingWorkspace> workspace;
+
+    Impl(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> host, u64 capacity, cudaStream_t s,
+         bool goals, bool derived, bool derived_goals)
+        : context(std::move(ctx)), encoder(checked(context, host), host), stream(s ? s : context->stream())
+    {
+        if (!capacity || (derived_goals && !goals))
+            throw std::invalid_argument("mymyr: encoding: a device stream needs positive capacity and derived goals need fluent goals");
+        DeviceGuard guard(context->device());
+        ring.graphs = capacity;
+        ring.row_capacity = capacity;
+        ring.state_words = host->table().words();
+        ring.state_stride = ring.state_words;
+        ring.derived_stride = host->table().derived_words();
+        ring.goal_words = ring.state_words;
+        ring.goal_stride = ring.state_words;
+        ring.goal_derived_words = host->table().derived_words();
+        ring.goal_derived_stride = ring.goal_derived_words;
+        columns.reserve(9);
+        auto allocate = [&](u64 count, u64 width) -> void*
+        {
+            if (width && count > std::numeric_limits<u64>::max() / width)
+                throw std::overflow_error("mymyr: encoding: device stream size overflow");
+            columns.emplace_back(context, count * width, stream);
+            return columns.back().data();
+        };
+        auto* status = static_cast<u64*>(allocate(3, sizeof(u64)));
+        check(cudaMemsetAsync(status, 0, 3 * sizeof(u64), stream), "initialize encoding ring");
+        ring.row_start = status;
+        ring.graphs_device = status + 1;
+        ring.dropped = status + 2;
+        ring.states = static_cast<u64*>(allocate(capacity, ring.state_words * sizeof(u64)));
+        ring.task_ids = static_cast<i32*>(allocate(capacity, sizeof(i32)));
+        if (derived && ring.derived_stride)
+            ring.derived = static_cast<u64*>(allocate(capacity, ring.derived_stride * sizeof(u64)));
+        if (goals)
+        {
+            ring.goal_pos = static_cast<u64*>(allocate(capacity, ring.goal_words * sizeof(u64)));
+            ring.goal_neg = static_cast<u64*>(allocate(capacity, ring.goal_words * sizeof(u64)));
+        }
+        if (derived_goals && ring.goal_derived_words)
+        {
+            ring.goal_derived_pos = static_cast<u64*>(allocate(capacity, ring.goal_derived_words * sizeof(u64)));
+            ring.goal_derived_neg = static_cast<u64*>(allocate(capacity, ring.goal_derived_words * sizeof(u64)));
+        }
+        encoder.reserve(BatchShape{capacity, 0, 0, 0}, stream);
+        workspace.emplace(encoder.acquire(stream));
+    }
+};
+
+DeviceRowStream::DeviceRowStream(ContextPtr ctx, std::shared_ptr<const encoding::FlatEncoder> encoder, u64 capacity,
+                                 cudaStream_t stream, bool goals, bool derived, bool derived_goals)
+    : m_impl(std::make_unique<Impl>(std::move(ctx), std::move(encoder), capacity, stream, goals, derived, derived_goals)) {}
+DeviceRowStream::~DeviceRowStream() = default;
+u64 DeviceRowStream::capacity() const noexcept { return m_impl->ring.graphs; }
+cudaStream_t DeviceRowStream::stream() const noexcept { return m_impl->stream; }
+const u64* DeviceRowStream::status() const noexcept { return m_impl->ring.row_start; }
+void DeviceRowStream::append(const DeviceEncodeInput& in)
+{
+    DeviceGuard guard(m_impl->context->device());
+    append_rows(in, m_impl->ring, const_cast<u64*>(status()), stream());
+}
+void DeviceRowStream::flush(const DeviceOutput& output)
+{
+    DeviceGuard guard(m_impl->context->device());
+    m_impl->encoder.encode(*m_impl->workspace, m_impl->ring, output);
+    finish_rows(const_cast<u64*>(status()), capacity(), stream());
+}
+void DeviceRowStream::clear()
+{
+    DeviceGuard guard(m_impl->context->device());
+    clear_rows(const_cast<u64*>(status()), capacity(), stream());
+}
+}

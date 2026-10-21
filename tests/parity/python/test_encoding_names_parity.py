@@ -5,8 +5,8 @@ differences, exactly as the harness's own naming of a native graph is, and the t
 import pytest
 
 from encoding_parity import (
-    AUXILIARY, Context, SUPPORTED, Graph, compare, encode_records, fixture_cases, fixture_graph, lanes_of,
-    load, native_graph, read, replay, sources_of,
+    AUXILIARY, SUPPORTED, Graph, compare, encode_records, fixture_cases, fixture_graph, lanes_of, load, native_graph,
+    read, record_context, replay, sources_of,
 )
 
 
@@ -35,12 +35,10 @@ def test_the_described_graph_equals_mifrost_up_to_the_registered_differences(pat
     records = [r for r in fixture["encodings"] if r["config"] == config]
     states = {s["id"]: s for s in fixture["states"]}
     rows = [replay(task, states[r["state"]]["path"]) for r in records]
-    encoder, placed = encode_records(task, config, rows, records)
     lanes = lanes_of(config)
-    for record, (batch, row) in zip(records, placed):
-        goals = tuple(record["inputs"]["goals"]) if "goals" in record["inputs"] else None
-        actions = tuple(record["inputs"]["actions"]) if "actions" in record["inputs"] else None
-        context = Context(fixture, task, states[record["state"]], config, goals, actions)
+    for record, placed in zip(records, encode_records(task, config, rows, records)):
+        encoder, batch, row = placed.encoder, placed.batch, placed.row
+        context = record_context(fixture, task, states[record["state"]], config, record, placed.dropped)
         actual = described_graph(encoder, batch, row, lanes)
         assert compare(fixture_graph(fixture, record, sources_of(config)), actual, context) == [], (record["state"], config)
         # the harness names the same graph by its own rules

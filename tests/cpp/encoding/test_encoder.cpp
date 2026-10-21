@@ -466,29 +466,10 @@ TEST(EncoderDerived, ProvidedDerivedWordsGiveTheSameBundleAsEvaluatingThem)
     EXPECT_THROW((void)encoder->encode(in), std::invalid_argument);
 }
 
-TEST(EncoderRefusals, OptionsThatAreNotEncodedYet)
+TEST(EncoderRefusals, InvalidOptions)
 {
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-    auto refused = [&](auto change)
-    {
-        FlatOptions options = test::encoder_options();
-        change(options);
-        try
-        {
-            (void)FlatEncoder::create(table, options);
-            ADD_FAILURE() << "the options were accepted";
-        }
-        catch (const std::invalid_argument& error)
-        {
-            EXPECT_NE(std::string(error.what()).find("mymyr: encoding: "), std::string::npos) << error.what();
-            EXPECT_NE(std::string(error.what()).find("is not supported by this encoder yet"), std::string::npos) << error.what();
-        }
-    };
-    refused([](FlatOptions& o) { o.max_goal_level = 1; });
-    refused([](FlatOptions& o) { o.goal_derivations = {GoalDerivation::Plain}; o.targets = {TargetSource::Goal, TargetSource::History}; });
-    refused([](FlatOptions& o) { o.goal_derivations = {GoalDerivation::Plain}; o.targets = {TargetSource::Goal, TargetSource::Subgoal}; o.max_goal_level = 1; });
-    refused([](FlatOptions& o) { o.horizon.mode = HorizonMode::Full; });
-    // an invalid combination is reported as such, whether or not the encoder would encode its parts
+    // an invalid combination is reported as such
     try
     {
         FlatOptions options = test::encoder_options();
@@ -657,8 +638,8 @@ test::Rows first_successor_chain(const rl::TaskTable& table, u64 length)
 
 TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
 {
-    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 14883951552709315966ull},
-                                                               {"philosophers__p03-phil4", 12253892925669182561ull}};
+    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 9666753341531803529ull},
+                                                               {"philosophers__p03-phil4", 8295029642410720015ull}};
     for (const auto& [name, digest] : expected)
     {
         const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/" + name + ".txt");

@@ -125,23 +125,30 @@ WIDE = {
 
 @pytest.mark.parametrize("name", sorted(WIDE))
 def test_the_deadline_stops_inside_an_expansion(wide, expansion_seconds, name):
+    deadline = 0.02
     t0 = time.perf_counter()
-    r = WIDE[name](wide, max_seconds=0.02)
-    elapsed = time.perf_counter() - t0
+    r = WIDE[name](wide, max_seconds=deadline)
+    reaction = time.perf_counter() - t0 - deadline  # how long after the deadline the search returned
     assert r.status == Status.OUT_OF_TIME
-    assert elapsed < expansion_seconds / 3, (elapsed, expansion_seconds)
+    assert reaction < expansion_seconds / 3, (reaction, expansion_seconds)
 
 
 @pytest.mark.parametrize("name", sorted(WIDE))
 def test_a_cancellation_stops_inside_an_expansion(wide, expansion_seconds, name):
     token = search.CancelToken()
-    timer = threading.Timer(0.02, token.request)
+    requested = []
+
+    def request():
+        requested.append(time.perf_counter())
+        token.request()
+
+    timer = threading.Timer(0.02, request)
     timer.start()
-    t0 = time.perf_counter()
     try:
         r = WIDE[name](wide, cancel=token)
     finally:
         timer.cancel()
-    elapsed = time.perf_counter() - t0
+    returned = time.perf_counter()
     assert r.status == Status.CANCELLED
-    assert elapsed < expansion_seconds / 3, (elapsed, expansion_seconds)
+    reaction = returned - requested[0]  # how long the search took to react once the token was requested
+    assert reaction < expansion_seconds / 3, (reaction, expansion_seconds)

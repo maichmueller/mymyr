@@ -300,7 +300,7 @@ PaddedResult make_padded(const FlatResult& f, u32 k, Framework fw, WordEncoding 
     p.block = Block::make(lay.bytes);
     std::byte* b = p.block->data();
     rl::PaddedExpansion out;
-    out.K = k;
+    out.k = k;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);

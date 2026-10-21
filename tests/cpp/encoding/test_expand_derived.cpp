@@ -238,7 +238,7 @@ TEST(ExpandDerived, PaddedViewCarriesTheWords)
     std::vector<u64> padded(rows.size() * K * dw, 0xFF);
     std::vector<i32> index(rows.size() * K);
     rl::PaddedExpansion out;
-    out.K = K;
+    out.k = K;
     out.index = index.data();
     out.derived_words = dw;
     out.derived = padded.data();

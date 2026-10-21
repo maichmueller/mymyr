@@ -19,8 +19,9 @@ so it keeps working after its encoder is unregistered and every Python reference
 
 What the target encodes: what the device encodes, on both platforms (a function gives the same arrays wherever it
 runs): no action relations (they need an expansion, which JAX cannot pass), no schema the device refuses, and the
-rows' derived words are required when a graph reads derived atoms (the device does not evaluate them). Such calls raise
-``ValueError`` (``mymyr: encoding: ...``) when the function is traced.
+rows' derived words are required where the device cannot evaluate the axioms a graph reads (an axiom body or object
+set beyond the device's matcher limits). Such calls raise ``ValueError`` (``mymyr: encoding: ...``) when the function is
+traced.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
 
 _ARRAYS = _device._ARRAYS
 _SIZE_FIELDS = _device._SIZE_FIELDS
+_OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
 
 def _error(message: str) -> ValueError:
@@ -54,15 +56,16 @@ class _Registration:
     """What the Python side keeps of a registered encoder: its schema, which arrays it stores, what the target needs,
     and the scratch sizes asked so far."""
 
-    __slots__ = ("info", "layout", "options", "schema", "fingerprint", "scratch")
+    __slots__ = ("info", "layout", "options", "schema", "fingerprint", "table_fingerprint", "scratch")
 
     def __init__(self, encoder: Any, handle: int):
         self.schema = encoder.schema
         self.fingerprint = encoder.schema_fingerprint
+        self.table_fingerprint = encoder.table_fingerprint
         self.options = encoder.options
         self.layout = _device.layout_of(encoder)
         self.info = _encoding_jax.info(handle)
-        self.scratch: dict[tuple[int, int], int] = {}
+        self.scratch: dict[tuple[int, int, bool], int] = {}
 
 
 _lock = threading.Lock()
@@ -140,7 +143,8 @@ class JaxFlatBatch:
 
     __slots__ = ("_arrays", "_sizes", "_static")
 
-    # (names of the stored arrays, num_relations, layout, index_dtype, schema fingerprint, implicit entities, handle)
+    # (names of the stored arrays, num_relations, layout, index_dtype, schema fingerprint, implicit entities, handle,
+    # table fingerprint)
     def __init__(self, arrays: dict[str, Any], sizes: Optional[Any], static: tuple):
         self._arrays = arrays
         self._sizes = sizes
@@ -177,16 +181,16 @@ class JaxFlatBatch:
 
     @property
     def device_sizes(self) -> Optional[Any]:
-        """After an encoding with capacities: uint32 [5, 2], the five 64-bit words entities, tuples, args, targets and the
-        overflow flags (1: a capacity, 2: the index type, 4: an invalid row) as uint32 halves, low half first; None
-        for an exact batch."""
+        """After an encoding with capacities: uint32 [S, 2], the S 64-bit words named by ``DeviceFlatBatch.sizes`` (entities,
+        tuples, args, targets, history and the overflow flags: 1 a capacity, 2 the index type, 4 an invalid row) as
+        uint32 halves, low half first; None for an exact batch."""
         return self._sizes
 
     @property
     def overflow(self) -> Optional[Any]:
         """After an encoding with capacities: the overflow flags as a uint32 scalar (0: the batch fits), usable under
         ``jax.jit``; None for an exact batch."""
-        return None if self._sizes is None else self._sizes[..., 4, 0]
+        return None if self._sizes is None else self._sizes[..., _OVERFLOW_WORD, 0]
 
     @property
     def sizes(self) -> Optional[dict[str, Any]]:
@@ -199,10 +203,11 @@ class JaxFlatBatch:
         return _host_sizes(np.asarray(self._sizes))
 
     def as_dict(self, framework: Optional[str] = None) -> dict[str, Any]:
-        """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics) and the arrays
+        """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, table_fingerprint,
+        statics) and the arrays
         of the batch. framework: ``"jax"`` (default) or ``"dlpack"`` (the JAX arrays, which speak DLPack) or ``"numpy"``
         (host copies, which wait for the computation)."""
-        _, relations, layout, index, fingerprint, _, _ = self._static
+        _, relations, layout, index, fingerprint, _, _, table_fingerprint = self._static
         scalars = {
             "version": 1,
             "num_graphs": self.num_graphs,
@@ -210,6 +215,7 @@ class JaxFlatBatch:
             "layout": layout,
             "index_dtype": index,
             "schema_fingerprint": fingerprint,
+            "table_fingerprint": table_fingerprint,
             "statics": 0,
         }
         if framework in (None, "jax", "dlpack"):
@@ -245,8 +251,10 @@ del _name
 
 
 def _host_sizes(words: np.ndarray) -> dict[str, Any]:
-    halves = np.ascontiguousarray(words, dtype=np.uint32).reshape(5, 2).astype(np.uint64)
-    values = dict(zip(_SIZE_FIELDS, (int(lo) | (int(hi) << 32) for lo, hi in halves), strict=True))
+    halves = np.ascontiguousarray(words, dtype=np.uint32).reshape(len(_SIZE_FIELDS), 2).astype(np.uint64)
+    # a batch of this target has no history steps (the device refuses such schemas), as a host batch without history
+    values = {name: int(lo) | (int(hi) << 32) for name, (lo, hi) in zip(_SIZE_FIELDS, halves, strict=True)
+              if name != "history"}
     flags = values["overflow"]
     values["overflow"] = flags != 0
     values["capacity_overflow"] = bool(flags & _device._OVERFLOW_CAPACITY)
@@ -338,19 +346,20 @@ def _cuda_device() -> Optional[Any]:
     return devices[0] if devices else None
 
 
-def _scratch(reg: _Registration, handle: int, graphs: int) -> Optional[int]:
-    """The bytes of the call's scratch result: the device encoder's scratch for `graphs` rows plus 255 bytes of
-    alignment slack, or None without a CUDA backend (the CPU target needs none)."""
+def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Optional[int]:
+    """The bytes of the call's scratch result: the device encoder's scratch for `graphs` rows (with `derived`: the rows
+    come with their derived words, otherwise the device evaluates them) plus 255 bytes of alignment slack, or None
+    without a CUDA backend (the CPU target needs none)."""
     if not reg.info["cuda"]:
         return None
     device = _cuda_device()
     if device is None:
         return None
     ordinal = int(getattr(device, "local_hardware_id", None) or device.id)
-    key = (graphs, ordinal)
+    key = (graphs, ordinal, derived)
     n = reg.scratch.get(key)
     if n is None:
-        n = reg.scratch[key] = _encoding_jax.scratch_bytes(handle, graphs, ordinal) + 255
+        n = reg.scratch[key] = _encoding_jax.scratch_bytes(handle, graphs, ordinal, derived) + 255
     return n
 
 
@@ -360,8 +369,8 @@ def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entitie
     specs = reg.layout.specs(jnp, graphs, entities, args, targets)
     del specs["sizes"]
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
-    results.append(jax.ShapeDtypeStruct((5, 2), jnp.uint32))
-    scratch = _scratch(reg, handle, graphs)
+    results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))
+    scratch = _scratch(reg, handle, graphs, operands[2].shape[0] != 0)
     if scratch is not None:
         results.append(jax.ShapeDtypeStruct((scratch,), jnp.uint8))
     call = jax.ffi.ffi_call("mymyr_encode_flat", results, vmap_method="sequential")
@@ -421,8 +430,8 @@ def encode(
     if derived is None:
         need = info["needs_derived"]
         if need and need[0 if goals is None else (1 if len(goals) == 2 else 2)]:
-            raise _error("the rows' derived words are required: a graph reads derived atoms, which the target does not "
-                         "evaluate (pass derived=)")
+            raise _error("the rows' derived words are required: a graph reads derived atoms whose axioms the device "
+                         "cannot evaluate (pass derived=)")
         derived_words = jnp.zeros((0,), jnp.uint32)
     else:
         derived_words = _halves(derived, "derived", True)
@@ -439,6 +448,7 @@ def encode(
         _signed(reg.fingerprint),
         bool(not reg.layout.entity_arrays),
         handle,
+        _signed(reg.table_fingerprint),
     )
     if capacities is not None:
         caps_graphs, entities, args, targets = _device._capacities(capacities, reg.layout)

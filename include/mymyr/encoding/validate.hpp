@@ -22,15 +22,21 @@ namespace mymyr::encoding
 ///   local index num_objects, and has it iff one of its tuples uses an auxiliary slot;
 /// - no tuple occurs twice in a cell, and the tuples of a cell ascend strictly in lexicographic order;
 /// - goal_complete is present iff the schema has goal relations, with values 0 and 1; the target arrays are present iff
-///   the schema has targets, and target_offsets is a valid offset array;
+///   the schema has targets, and target_offsets is a valid offset array; the history arrays are present iff the schema
+///   has history, and history_offsets is a valid offset array;
 /// - the entities of a graph past its objects are, in this order: the auxiliary entity; the goal entities, one per tuple of
 ///   the plain goal relations with a goal target, numbered in the order of those relations and tuples, each the first
 ///   argument of its tuple and referring to the tuple by its index among the graph's tuples in graph-major order (the
-///   cells' tuples in relation order); the action entities, one per tuple of an action relation, numbered the same way,
-///   each the first argument of its tuple and referring to a row of the graph's expansion (a non-negative entity_ref);
-///   the predicate virtual entities, one per predicate that has a tuple in the graph and none for the others, ascending
+///   cells' tuples in relation order); the subgoal entities, one per tuple of the plain relations of the subgoal levels
+///   with a subgoal target, numbered and referring the same way; the action entities, one per tuple of an action
+///   relation, numbered the same way, each the first argument of its tuple and referring to a row of the graph's
+///   expansion (a non-negative entity_ref); the history step entities, one per step of the graph's history, listed
+///   in step order by history_entity and with ascending entity_ref; the history target entities, one per tuple of the
+///   history relations with a history target, numbered and referring like the goal entities; the predicate virtual
+///   entities, one per predicate that has a tuple in the graph and none for the others, ascending
 ///   in the name of the predicate (EncodingSchema::virtual_rank; the entity_ref is the predicate's key,
 ///   EncodingSchema::virtual_key), each the predicate slot of exactly the tuples of its predicate's relations;
-/// - the graph's targets are its goal entities in group 0, then, with action targets, its action entities in group 2.
+/// - the graph's targets are its goal entities in group 0, its subgoal entities in group 1, with action targets its
+///   action entities in group 2, and its history target entities in group 3.
 void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
 }

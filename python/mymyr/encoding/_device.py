@@ -11,14 +11,15 @@ sizes to the host and waits for them once, then allocates and fills the arrays. 
 every array at its capacity, writes the true sizes into a device tensor (``DeviceFlatBatch.device_sizes``) and never
 waits: it is what ``torch.compile`` and CUDA graphs run.
 
-Workspaces: the encoder keeps one workspace (the device scratch of the kernels and a lease of its uploaded context) for
-each stream it runs on, made by the first call on the stream and reused by every call after it. A batch of more rows
-than the stream's workspace holds makes the next call reserve a larger one; ``FlatRelationEncoder.reserve_device``
-reserves one in advance, which a CUDA graph capture needs (a reservation allocates, so it cannot happen inside a
-capture), and ``release_device`` frees them.
+Capacity calls allocate scratch through torch's caching allocator on the current stream. During capture the graph's
+private pool owns it through the last replay. Warm the encoder on the capture stream to upload and acquire its context;
+no scratch reservation is needed. Exact calls reuse a workspace per stream; ``reserve_device`` can size it in advance
+and ``release_device`` frees it.
 
-What the device does not encode: the action relations (``actions=``), and derived atoms it would have to evaluate
-(the derived words of the rows must be passed as ``derived=`` when a graph reads them).
+What the device does not encode: the action relations (``actions=``) and subgoal levels and history steps (an
+encoder with ``max_goal_level`` above 0 or with ``history`` is refused, and so are ``subgoals=`` and ``history=``). The
+device evaluates axioms into scratch when a graph needs derived atoms and ``derived=`` is absent; supplied derived
+words take precedence.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ _ARRAYS = (
 )
 _OUTPUTS = (*_ARRAYS, "sizes")
 _GOAL_LANES = {"goal", "goal_derivation", "goal_satisfaction"}
-_SIZE_FIELDS = ("entities", "tuples", "args", "targets", "overflow")
+_SIZE_FIELDS = ("entities", "tuples", "args", "targets", "history", "overflow")
 _OVERFLOW_CAPACITY, _OVERFLOW_INDEX, _OVERFLOW_INPUT = 1, 2, 4
 
 
@@ -153,11 +154,6 @@ def _device_encoder(encoder: Any, index: int) -> Any:
 # ------------------------------------------------------------------------------------------------ the arguments
 
 
-def _stream_of(torch: Any, device: Any) -> int:
-    """The cudaStream_t of torch's current stream on ``device``, as the native side takes it."""
-    return torch.cuda.current_stream(device).cuda_stream
-
-
 def _cuda_tensor(torch: Any, x: Any, name: str, keep: list) -> Any:
     """``x`` as a torch tensor on a CUDA device: a tensor as it is, another DLPack or CUDA-array-interface producer
     wrapped without a copy (and kept alive until the kernels that read it are done)."""
@@ -168,10 +164,13 @@ def _cuda_tensor(torch: Any, x: Any, name: str, keep: list) -> Any:
         keep.append(t)
     elif hasattr(x, "__cuda_array_interface__"):
         stream = x.__cuda_array_interface__.get("stream")
+        if stream == 0:
+            raise _error(f"'{name}' has CUDA array interface stream 0: use 1 for the legacy default stream or "
+                         "2 for the per-thread default stream")
         t = torch.as_tensor(x)
         keep.append(t)
         if stream is not None and t.device.type == "cuda":
-            if stream in (0, 1, 2):
+            if stream == 1:
                 wait = torch.cuda.default_stream(t.device)
             else:
                 wait = torch.cuda.ExternalStream(stream, t.device)
@@ -226,6 +225,8 @@ class _Rows:
     __slots__ = ("device", "fields", "graphs", "tensors")
 
     def __init__(self, torch: Any, states: Any, task_ids: Any, derived: Any, goals: Any):
+        if states.device.type != "cuda":
+            raise _error(f"'states' is on {states.device}: the rows must be CUDA tensors")
         w = _words(torch, states, "states")
         self.device = w.device
         graphs = w.shape[0]
@@ -335,35 +336,19 @@ def _drain(torch: Any) -> None:
 
 
 def _pointers(tensors: dict[str, Any]) -> list[int]:
-    return [tensors[name].data_ptr() if tensors[name].numel() else 0 for name in _OUTPUTS]
+    return [tensors[name].data_ptr() if tensors.get(name) is not None and tensors[name].numel() else 0
+            for name in _OUTPUTS]
 
 
-def _make(torch: Any, shape: tuple[int, ...], dtype: Any, device: Any, zero: bool) -> Any:
-    """A new tensor with a data pointer even when it has no entries (the native side takes 0 for no array)."""
-    make = torch.zeros if zero else torch.empty
-    n = 1
-    for extent in shape:
-        n *= extent
-    if n:
-        return make(shape, dtype=dtype, device=device)
-    return make(1, dtype=dtype, device=device)[:0].reshape(shape)
+def _outputs(torch: Any, specs: dict, device: Any) -> dict[str, Any]:
+    """Independent uninitialized outputs; the fill kernel writes the used entries and the tails it zeroes."""
+    return {name: torch.empty(shape, dtype=dtype, device=device) for name, (shape, dtype) in specs.items()}
 
 
-def _check_outputs(out: dict[str, Any], layout: _Layout, graphs: int) -> None:
-    """Refuses, before any launch, outputs whose per-graph arrays do not hold the batch's graphs: the kernels write one
-    entry per graph (and one cell per graph and relation) into them."""
-    r = layout.relations
-    per_graph = {"task_ids": graphs, "num_objects": graphs, "entity_offsets": graphs + 1,
-                 "relation_offsets": graphs * r + 1, "relation_arg_offsets": graphs * r + 1}
-    if layout.counts:
-        per_graph["relation_counts"] = graphs * r
-    if layout.goal_complete:
-        per_graph["goal_complete"] = graphs
-    if layout.targets:
-        per_graph["target_offsets"] = graphs + 1
-    for name, entries in per_graph.items():
-        if out[name].numel() != entries:
-            raise _error(f"the output '{name}' has {out[name].numel()} entries, a batch of {graphs} graphs needs {entries}")
+def _scratch(torch: Any, native: Any, stream: int, graphs: int, device: Any, derived: bool) -> Any:
+    """Per-call scratch, owned by the graph's private allocator pool during capture; `derived`: the rows' derived words
+    are given, so nothing is evaluated."""
+    return torch.empty(native.scratch_bytes(stream, graphs, derived), dtype=torch.uint8, device=device)
 
 
 def encode_arrays(
@@ -375,32 +360,41 @@ def encode_arrays(
     capacities: Optional[tuple[int, int, int, int]],
     keep: Optional[list] = None,
 ) -> dict[str, Any]:
-    """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [5] int64 (entities,
-    tuples, args, targets, overflow flags; None without capacities)."""
+    """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [6] int64 (entities,
+    tuples, args, targets, history, overflow flags; None without capacities)."""
     torch = _torch()
     layout = layout_of(encoder)
     rows = _Rows(torch, states, task_ids, derived, goals)
     device = rows.device
     native = _device_encoder(encoder, device.index)
-    stream = _stream_of(torch, device)
+    from mymyr.rl.torch._ops import _stream
+
+    stream = _stream(states)
     out: dict[str, Any] = {}
     if capacities is not None:
         graphs, entities, args, targets = capacities
         if rows.graphs > graphs:
             raise _error("the batch has more graphs than the output capacity")
         specs = layout.specs(torch, rows.graphs, entities, args, targets)
-        for name, (shape, dtype) in specs.items():
-            out[name] = _make(torch, shape, dtype, device, True)
-        _check_outputs(out, layout, rows.graphs)
-        native.encode(stream, rows.fields, _pointers(out), [rows.graphs, entities, args, targets])
+        out = _outputs(torch, specs, device)
+        scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
+        native.encode(stream, rows.fields, _pointers(out),
+                      [out["task_ids"].shape[0], entities, args, targets], scratch.data_ptr(), scratch.numel())
     else:
 
-        def allocate(entities: int, tuples: int, args: int, targets: int) -> list[int]:
+        def allocate(entities: int, tuples: int, args: int, targets: int, flags: int) -> list[int]:
+            if flags & _OVERFLOW_INPUT:
+                raise _error("a row is invalid: a task id outside the table, a state row or goal mask narrower than "
+                             "its instance, or a bit that its instance has no atom for")
+            if flags & _OVERFLOW_INDEX:
+                raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
+                                    f"(entities {entities}, tuples {tuples}, args {args}, targets {targets}): "
+                                    "use index_dtype='int64'")
             specs = layout.specs(torch, rows.graphs, entities, args, targets)
             for name, (shape, dtype) in specs.items():
-                out[name] = _make(torch, shape, dtype, device, name == "sizes")
-            _check_outputs(out, layout, rows.graphs)
-            return _pointers(out)
+                if name != "sizes":
+                    out[name] = torch.empty(shape, dtype=dtype, device=device)
+            return [out["task_ids"].shape[0], *_pointers(out)]
 
         native.encode_exact(stream, rows.fields, allocate)
         out["sizes"] = None
@@ -427,7 +421,7 @@ def encode(
         raise _error("actions are not encoded on the device: encode the rows on the host with actions, or without actions=")
     if pool is not None:
         raise _error("pool is a pool of host threads: it has no meaning for rows on the device")
-    if framework is not None and not (isinstance(framework, str) and framework.lower() in ("torch", "pytorch")):
+    if framework is not None and not (isinstance(framework, str) and framework in ("torch", "pytorch")):
         raise _error(f"device rows are encoded into torch tensors: framework must be 'torch' or None, got {framework!r}")
     layout = layout_of(encoder)
     caps = _capacities(capacities, layout) if capacities is not None else None
@@ -464,7 +458,9 @@ def _device_index(torch: Any, device: Any) -> int:
 
 def _stream_pointer(torch: Any, stream: Any, index: int) -> int:
     if stream is None:
-        return _stream_of(torch, index)
+        from mymyr.rl.torch._ops import _stream
+
+        return _stream(torch.device("cuda", index))
     handle = getattr(stream, "cuda_stream", stream)
     if isinstance(handle, bool) or not isinstance(handle, int):
         raise _error(f"stream must be a torch.cuda.Stream or an int cudaStream_t, got {stream!r}")
@@ -501,20 +497,41 @@ def workspace_state(encoder: Any, device: Any = None, stream: Any = None) -> dic
 
 
 class _Host:
-    """A DeviceFlatBatch's arrays on the host (NumPy), with the accessors the naming code reads."""
+    """One graph's arrays on the host, with graph-local offsets for the naming accessors."""
 
-    def __init__(self, batch: "DeviceFlatBatch"):
+    def __init__(self, batch: "DeviceFlatBatch", graph: int):
         import numpy as np
 
+        if not 0 <= graph < batch.num_graphs:
+            raise IndexError(f"mymyr: encoding: graph {graph} is out of range for a batch of {batch.num_graphs} graphs")
         self.schema = batch.schema
-        self.num_graphs = batch.num_graphs
+        self.num_graphs = 1
         self.num_relations = batch.num_relations
         self.implicit_entities = batch.implicit_entities
         self.sizes = batch.sizes
+        if self.sizes is not None and self.sizes["overflow"]:
+            return
         torch = _torch()
-        torch.cuda.current_stream(batch.device).synchronize()
-        for name, tensor in batch._arrays.items():
-            setattr(self, name, np.asarray(tensor.cpu().numpy()))
+        self.task_ids = batch.task_ids[graph:graph + 1].cpu().numpy()
+        self.num_objects = batch.num_objects[graph:graph + 1].cpu().numpy()
+        begin, end = batch.entity_offsets[graph:graph + 2].tolist()
+        self.entity_offsets = np.array([0, end - begin], dtype=np.int64)
+        if not self.implicit_entities:
+            self.entity_role = batch.entity_role[begin:end].cpu().numpy()
+            self.entity_ref = batch.entity_ref[begin:end].cpu().numpy()
+        r = self.num_relations
+        if batch._options["layout"] == "relation":
+            segments = torch.arange(r, device=batch.device) * batch.num_graphs + graph
+            bounds = torch.stack((batch.relation_arg_offsets[segments],
+                                  batch.relation_arg_offsets[segments + 1]), dim=1).tolist()
+            args = torch.cat([batch.relation_args[a:b] for a, b in bounds]) if r else batch.relation_args[:0]
+            lengths = [b - a for a, b in bounds]
+        else:
+            offsets = batch.relation_arg_offsets[graph * r:(graph + 1) * r + 1].tolist()
+            args = batch.relation_args[offsets[0]:offsets[-1]]
+            lengths = np.diff(offsets)
+        self.relation_arg_offsets = np.concatenate(([0], np.cumsum(lengths, dtype=np.int64)))
+        self.relation_args = args.cpu().numpy() - begin
 
 
 def _signed(fingerprint: int) -> int:
@@ -526,14 +543,18 @@ class DeviceFlatBatch:
     torch tensors. ``FlatRelationEncoder.encode`` returns it for rows on the device. The array names, shapes and dtypes are
     those of ``FlatBatch``; an array that the schema does not store raises ``AttributeError``. Encoded with ``capacities``,
     the variable-size arrays have the capacities' sizes and the true sizes are in ``device_sizes`` (a tensor: reading it
-    on the host waits for the device); ``sizes`` reads it. ``entity_names`` and ``describe`` of the encoder copy the batch
+    on the host waits for the device); ``sizes`` reads it. ``entity_names`` and ``describe`` of the encoder copy only the requested graph
     to the host (and wait for the device)."""
 
     def __init__(self, encoder: Any, arrays: dict[str, Any], exact: bool):
+        self._encoder = encoder
+        self._device_graphs = None
         self._schema = encoder.schema
         self._fingerprint = encoder.schema_fingerprint
+        self._table_fingerprint = encoder.table_fingerprint
         self._options = encoder.options
-        self._arrays = {name: arrays[name] for name in _ARRAYS if layout_of(encoder).present(name)}
+        layout = layout_of(encoder)
+        self._arrays = {name: arrays[name] for name in _ARRAYS if layout.present(name)}
         self._sizes = None if exact else arrays["sizes"]
         self._graphs = self._arrays["task_ids"].shape[0]
 
@@ -545,7 +566,12 @@ class DeviceFlatBatch:
     @property
     def num_graphs(self) -> int:
         """The number of graphs (states) in the batch."""
-        return self._graphs
+        return self._graphs if self._device_graphs is None else int(self._device_graphs.item())
+
+    @property
+    def device_graphs(self) -> Any:
+        """A device count for a dynamically sized stream batch; None for an ordinary row batch."""
+        return self._device_graphs
 
     @property
     def num_relations(self) -> int:
@@ -564,14 +590,14 @@ class DeviceFlatBatch:
 
     @property
     def device_sizes(self) -> Optional[Any]:
-        """After an encoding with capacities: a device tensor int64 [5] with the true entities, tuples, args and targets
-        of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no host wait;
+        """After an encoding with capacities: a device tensor int64 [6] with the true entities, tuples, args, targets and
+        history steps (always 0) of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no host wait;
         None otherwise."""
         return self._sizes
 
     @property
     def sizes(self) -> Optional[dict[str, Any]]:
-        """After an encoding with capacities: the true entities, tuples and args of the batch, and whether it overflowed
+        """After an encoding with capacities: the true entities, tuples, args and targets of the batch, and whether it overflowed
         (``overflow``: the batch is all zero) because of the capacities (``capacity_overflow``), the index type
         (``index_overflow``) or an invalid row (``invalid_input``: a task id outside the table, a row or goal mask
         narrower than its instance, an atom bit its instance has no slot for); None otherwise. It reads
@@ -579,6 +605,7 @@ class DeviceFlatBatch:
         if self._sizes is None:
             return None
         values = dict(zip(_SIZE_FIELDS, self._sizes.tolist(), strict=True))
+        del values["history"]  # the device encodes no history steps: the dict has the keys of a batch without them
         flags = values["overflow"]
         values["overflow"] = flags != 0
         values["capacity_overflow"] = bool(flags & _OVERFLOW_CAPACITY)
@@ -587,25 +614,37 @@ class DeviceFlatBatch:
         return values
 
     def as_dict(self, framework: Optional[str] = None) -> dict[str, Any]:
-        """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, statics) and the arrays
-        of the batch. framework: ``"torch"`` or ``"dlpack"`` (default; the tensors, which speak DLPack) or ``"numpy"``
+        """The scalars (version, num_graphs, num_relations, layout, index_dtype, schema_fingerprint, table_fingerprint,
+        statics) and the arrays of the batch. framework: ``"torch"`` or ``"dlpack"`` (default; the tensors, which speak DLPack) or ``"numpy"``
         (copies to the host and waits for the device)."""
         scalars = {
             "version": 1,
-            "num_graphs": self._graphs,
+            "num_graphs": self.num_graphs,
             "num_relations": self.num_relations,
             "layout": 1 if self._options["layout"] == "relation" else 0,
             "index_dtype": 1 if self._options["index_dtype"] == "int64" else 0,
             "schema_fingerprint": _signed(self._fingerprint),
+            "table_fingerprint": _signed(self._table_fingerprint),
             "statics": 0,
         }
-        name = "torch" if framework is None else str(framework).lower()
+        arrays = self._arrays
+        if self._device_graphs is not None:
+            g = scalars["num_graphs"]
+            sizes = self.sizes
+            arrays = dict(arrays)
+            extents = {"task_ids": g, "num_objects": g, "entity_offsets": g + 1, "goal_complete": g,
+                       "target_offsets": g + 1, "relation_offsets": g * self.num_relations + 1,
+                       "relation_arg_offsets": g * self.num_relations + 1, "entity_role": sizes["entities"],
+                       "entity_ref": sizes["entities"], "relation_args": sizes["args"],
+                       "target_entity": sizes["targets"], "target_group": sizes["targets"]}
+            arrays = {key: value[:g] if key == "relation_counts" else value[:extents[key]] for key, value in arrays.items()}
+        name = "torch" if framework is None else framework
         if name in ("torch", "pytorch", "dlpack", "array_api"):
-            return {**scalars, **self._arrays}
+            return {**scalars, **arrays}
         if name in ("numpy", "np"):
             torch = _torch()
             torch.cuda.current_stream(self.device).synchronize()
-            return {**scalars, **{key: t.cpu().numpy() for key, t in self._arrays.items()}}
+            return {**scalars, **{key: t.cpu().numpy() for key, t in arrays.items()}}
         raise _error(f"a device batch exports to 'torch', 'dlpack' or 'numpy', not {framework!r}")
 
     def __getattr__(self, name: str) -> Any:
@@ -616,7 +655,7 @@ class DeviceFlatBatch:
     @classmethod
     def from_arrays(cls, encoder: Any, arrays: Any, exact: bool = False) -> "DeviceFlatBatch":
         """The batch of the outputs of ``torch.ops.mymyr.encode_flat``: a tuple of its 14 tensors (the arrays in the
-        order of ``mymyr.encoding.DeviceFlatBatch.array_names``, then the sizes), for ``encoder``."""
+        order of ``mymyr.encoding.DeviceFlatBatch.array_names``, sizes last), for ``encoder``."""
         if len(arrays) != len(_OUTPUTS):
             raise _error(f"expected the {len(_OUTPUTS)} outputs of encode_flat, got {len(arrays)}")
         return cls(encoder, dict(zip(_OUTPUTS, arrays, strict=True)), exact)
@@ -637,3 +676,187 @@ def _array_property(name: str) -> property:
 for _name in _ARRAYS:
     setattr(DeviceFlatBatch, _name, _array_property(_name))
 del _name
+
+
+class DeviceFlatStream:
+    """A fixed-capacity ring of CUDA rows, task ids and optional goal masks and derived words.
+
+    The ring is bound to the current torch stream at construction. Append and capacity flush may be captured;
+    keep the stream, inputs, returned batches and this ring alive through the last replay. Append copies all rows
+    or sets the sticky device overflow flag without changing the ring. ``clear`` clears that flag. The mutable
+    stream remains host-only.
+    """
+
+    def __init__(self, encoder: Any, capacity: int, *, device: Any = None, goals: bool = False,
+                 derived: bool = False, derived_goals: bool = False):
+        torch = _torch()
+        from mymyr import rl
+        from mymyr.rl.torch._ops import _stream
+
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
+            raise _error("a device stream needs a positive integer capacity")
+        if derived_goals and not goals:
+            raise _error("derived goal masks need fluent goal masks")
+        self.encoder, self.capacity = encoder, capacity
+        self.device = torch.device("cuda", _device_index(torch, device))
+        self._stream = torch.cuda.current_stream(self.device)
+        self._stream_ptr = _stream(self.device)
+        if torch.cuda.is_current_stream_capturing():
+            raise _error("construct the device stream outside capture")
+        table = rl.as_table(encoder.table)
+        _native().check_stream_schema(encoder)
+        self._native = _device_encoder(encoder, self.device.index)
+        # Acquiring the immutable context before capture is independent of the scratch allocation.
+        self._native.scratch_bytes(self._stream_ptr, capacity)
+        self.device_status = torch.zeros(3, dtype=torch.int64, device=self.device)
+        self._states = torch.empty((capacity, table.words), dtype=torch.int64, device=self.device)
+        self._ids = torch.empty(capacity, dtype=torch.int32, device=self.device)
+        self._derived = torch.empty((capacity, table.derived_words), dtype=torch.int64, device=self.device) if derived else None
+        self._goals = None
+        if goals:
+            self._goals = tuple(torch.empty((capacity, table.words), dtype=torch.int64, device=self.device) for _ in range(2))
+            if derived_goals:
+                self._goals += tuple(torch.empty((capacity, table.derived_words), dtype=torch.int64, device=self.device) for _ in range(2))
+        self._rows = _Rows(torch, self._states, self._ids, self._derived, self._goals)
+
+    def _check_stream(self) -> None:
+        from mymyr.rl.torch._ops import _stream
+        if _stream(self.device) != self._stream_ptr:
+            raise _error("use the device stream on the torch stream that constructed it")
+
+    @property
+    def device_overflow(self) -> Any:
+        """A device int64 scalar view; nonzero means an append did not fit. Reading it on the host waits."""
+        return self.device_status[2]
+
+    def __len__(self) -> int:
+        """The number of live rows; waits for the device and cannot be read during capture."""
+        self._check_stream()
+        return int(self.device_status[1].item())
+
+    def append(self, states: Any, task_ids: Any = None, *, derived: Any = None, goals: Any = None) -> None:
+        """Copy CUDA rows into the ring. Widths and optional inputs match the columns chosen at construction."""
+        torch = _torch()
+        self._check_stream()
+        keep: list = []
+        states = _cuda_tensor(torch, states, "states", keep)
+        ids = None if task_ids is None else _cuda_tensor(torch, task_ids, "task_ids", keep)
+        d = None if derived is None else _cuda_tensor(torch, derived, "derived", keep)
+        g = None if goals is None else tuple(_cuda_tensor(torch, x, f"goals[{i}]", keep) for i, x in enumerate(goals))
+        rows = _Rows(torch, states, ids, d, g)
+        if rows.device != self.device:
+            raise _error("appended rows and the device ring must be on the same device")
+        if not rows.graphs:
+            return
+        self._native.append(self._stream_ptr, rows.fields, self._rows.fields, self.device_status.data_ptr())
+        for tensor in rows.tensors:
+            tensor.record_stream(self._stream)
+        if keep:
+            _retain(torch, keep, self.device)
+
+    def clear(self) -> None:
+        """Empty the ring and clear its sticky overflow flag, in stream order."""
+        self._check_stream()
+        self._native.clear(self._stream_ptr, self.device_status.data_ptr(), self.capacity)
+
+    def flush(self, *, capacities: dict[str, int]) -> DeviceFlatBatch:
+        """Encode all live rows once and empty the ring, without a host wait.
+
+        Graph capacity covers the entire ring. Arrays are allocated at capacity; ``device_graphs`` gives the live
+        graph count. ``num_graphs`` and exporting a compact dictionary read counts on the host and wait. Direct
+        tensor properties retain their capacities: per-graph entries past the live graphs are zero, variable entries
+        past the sizes are left unwritten.
+        """
+        torch = _torch()
+        self._check_stream()
+        layout = layout_of(self.encoder)
+        caps = _capacities(capacities, layout)
+        if caps[0] < self.capacity:
+            raise _error("flush graph capacity must cover the entire device ring")
+        out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:]), self.device)
+        graphs = torch.empty(1, dtype=torch.int64, device=self.device)
+        scratch = _scratch(torch, self._native, self._stream_ptr, self.capacity, self.device, self._derived is not None)
+        self._native.flush(self._stream_ptr, self._rows.fields, self.device_status.data_ptr(), _pointers(out),
+                           [self.capacity, *caps[1:]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
+        result = DeviceFlatBatch(self.encoder, out, exact=False)
+        result._device_graphs = graphs
+        result._keepalive = (self, scratch)
+        return result
+
+
+class DeviceCollator:
+    """A prepared list of CUDA batches for repeated or captured rollout collation.
+
+    Construct outside capture on the stream that will encode the batches. The batch tensors keep their addresses;
+    values may be updated in stream order before each encode, with graph counts and array shapes fixed.
+    Capacity calls allocate output and scratch through
+    torch, including its CUDA graph pool. Keep this object and the returned batch alive through the final replay.
+    """
+
+    def __init__(self, batches: Any):
+        batches = list(batches)
+        if not batches or not all(isinstance(batch, DeviceFlatBatch) for batch in batches):
+            raise _error("a DeviceCollator needs at least one device batch")
+        torch = _torch()
+        first = batches[0]
+        for batch in batches:
+            if batch.device != first.device:
+                raise _error("collate received mixed CUDA devices")
+            for option in ("layout", "index_dtype", "statics"):
+                if batch._options.get(option, "repeat") != first._options.get(option, "repeat"):
+                    raise _error(f"collate received mixed {option}")
+            if batch._fingerprint != first._fingerprint:
+                raise _error("collate received mixed schemas")
+            if batch._table_fingerprint != first._table_fingerprint:
+                raise _error("collate received batches of different tables: their task ids name different instances")
+        if torch.cuda.is_current_stream_capturing():
+            raise _error("prepare a DeviceCollator outside capture for captured collation")
+        from mymyr._core._encoding import DeviceCollator as NativeCollator
+        from mymyr.rl.torch._ops import _stream
+
+        encoder = first._encoder
+        # Keep capacity storage: empty live views have null data pointers.
+        arrays = [batch._arrays.copy() for batch in batches]
+        inputs = [_pointers({**a, "sizes": batch._sizes}) for a, batch in zip(arrays, batches, strict=True)]
+        counts = [batch.num_graphs for batch in batches]
+        encoders = [batch._encoder for batch in batches]
+        native = NativeCollator(encoders, first.device.index, _stream(first.device), inputs, counts)
+        self._prepared = (torch, first, encoder, native, arrays, batches, counts)
+        self._stream = _stream(first.device)
+
+    def encode(self, *, capacities: Any = None) -> DeviceFlatBatch:
+        """Concatenate the prepared graphs; a capacity call never waits and is capturable."""
+        from mymyr.rl.torch._ops import _stream
+        torch, first, encoder, native, arrays, batches, counts = self._prepared
+        if _stream(first.device) != self._stream:
+            raise _error("use the collator on the torch stream that constructed it")
+        scratch = torch.empty(native.scratch_bytes, dtype=torch.uint8, device=first.device)
+        layout = layout_of(encoder)
+        graphs = sum(counts)
+        out: dict[str, Any] = {}
+        caps = None if capacities is None else _capacities(capacities, layout)
+        if caps is None:
+            def allocate(entities: int, tuples: int, args: int, targets: int, flags: int) -> list[int]:
+                if flags & _OVERFLOW_INDEX:
+                    raise OverflowError("mymyr: encoding: collated totals exceed the index type")
+                if flags:
+                    raise _error("cannot collate an overflowed batch")
+                for name, (shape, dtype) in layout.specs(torch, graphs, entities, args, targets).items():
+                    if name != "sizes":
+                        out[name] = torch.empty(shape, dtype=dtype, device=first.device)
+                return _pointers(out)
+            native.encode_exact(scratch.data_ptr(), scratch.numel(), allocate)
+            out["sizes"] = None
+        else:
+            if caps[0] < graphs:
+                raise _error("collated graphs exceed the output capacity")
+            out = _outputs(torch, layout.specs(torch, graphs, *caps[1:]), first.device)
+            native.encode(_pointers(out), [graphs, *caps[1:]], scratch.data_ptr(), scratch.numel())
+        result = DeviceFlatBatch(encoder, out, exact=caps is None)
+        result._keepalive = (native, scratch, batches, arrays)
+        return result
+
+
+def collate_device(batches: list[DeviceFlatBatch], capacities: Any = None) -> DeviceFlatBatch:
+    """Concatenate device batches with one count/scan/fill, rebuilding offsets on the device."""
+    return DeviceCollator(batches).encode(capacities=capacities)

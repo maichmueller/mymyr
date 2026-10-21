@@ -12,6 +12,7 @@
 // streams must outlive the arrays produced on them.
 
 #include "arrays.hpp"
+#include "cuda_stream.hpp"
 #include "device_hooks.hpp"
 #include "dlpack.hpp"
 #include "py_table.hpp"
@@ -77,15 +78,6 @@ struct OpStream
     cudaStream_t s = nullptr;
     std::intptr_t dl = 0;  // the same stream as a DLPack stream value
 };
-
-cudaStream_t cuda_stream(std::intptr_t v)
-{
-    if (v == dl::k_stream_legacy)
-        return cudaStreamLegacy;
-    if (v == dl::k_stream_per_thread)
-        return cudaStreamPerThread;
-    return reinterpret_cast<cudaStream_t>(v);
-}
 
 // ------------------------------------------------------------------------------------------------ context
 
@@ -704,7 +696,7 @@ DevicePadded make_device_padded(const SuiteRef& ref, const PyContextPtr& c, cons
     p.buf = device_output(*c, lay.bytes, f.os);
     auto* b = static_cast<std::byte*>(p.buf->data());
     rl::PaddedExpansion out;
-    out.K = k;
+    out.k = k;
     out.index = reinterpret_cast<i32*>(b + p.off_index);
     out.mask = reinterpret_cast<u8*>(b + p.off_mask);
     out.count = reinterpret_cast<i32*>(b + p.off_count);
