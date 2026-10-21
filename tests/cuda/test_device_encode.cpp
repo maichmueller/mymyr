@@ -269,6 +269,15 @@ std::vector<u64> batch_sizes()
 
 // ------------------------------------------------------------------------------------------------ the matrix
 
+/// The largest batch of a corpus entry and configuration that the matrix encodes: the output of a batch of the wide
+/// instances with subgoal levels or history steps takes about 1 GB at 4097 rows and 4 GB at 16384, more than the shared
+/// GPU gives one test.
+u64 matrix_batch_cap(const Corpus& c, const Config& config)
+{
+    const bool layered = config.options.max_goal_level != 0 || config.options.history;
+    return layered && std::string_view(c.name) == "wide" ? 4097 : std::numeric_limits<u64>::max();
+}
+
 TEST(DeviceEncode, EqualsTheHostEncoderBitForBit)
 {
     SKIP_WITHOUT_GPU();
@@ -276,7 +285,7 @@ TEST(DeviceEncode, EqualsTheHostEncoderBitForBit)
     cuda::Stream stream;
     const std::vector<u64> sizes = batch_sizes();
     const u64 max_n = *std::max_element(sizes.begin(), sizes.end());
-    u64 compared = 0;
+    u64 compared = 0, capped = 0;
     for (const Corpus& c : corpus())
     {
         SCOPED_TRACE(c.name);
@@ -295,15 +304,18 @@ TEST(DeviceEncode, EqualsTheHostEncoderBitForBit)
                     const auto host_bytes = device.context().download();
                     ASSERT_EQ(host_bytes.size(), encoder->context().arrays().bytes());
                     ASSERT_EQ(std::memcmp(host_bytes.data(), encoder->context().arrays().block(), host_bytes.size()), 0);
-                    device.reserve(cuda::BatchShape{max_n, 0, 0, 0}, stream);
+                    const u64 cap = matrix_batch_cap(c, config);
+                    device.reserve(cuda::BatchShape{std::min(max_n, cap), 0, 0, 0}, stream);
                     for (const u64 n : sizes)
                     {
                         SCOPED_TRACE("N = " + std::to_string(n));
+                        if (n > cap)
+                        {
+                            ++capped;
+                            continue;
+                        }
                         const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
                         ASSERT_FALSE(host.sizes.overflowed());
-                        // the GPU is shared: the largest batches of the wide instances with levels and history are skipped
-                        if (device.output_layout(shape_of(n, host.sizes)).bytes > (u64{512} << 20))
-                            continue;
                         const DeviceResult result =
                             run_device(device, ctx, stream, rows.input(batch, n, config.inputs), shape_of(n, host.sizes));
                         expect_sizes(host.sizes, result.sizes);
@@ -316,6 +328,10 @@ TEST(DeviceEncode, EqualsTheHostEncoderBitForBit)
         }
     }
     EXPECT_GT(compared, 0u);
+    std::printf("[ batches  ] %llu compared, %llu above the batch cap of their corpus entry not encoded\n",
+                static_cast<unsigned long long>(compared), static_cast<unsigned long long>(capped));
+    RecordProperty("compared", static_cast<int>(compared));
+    RecordProperty("capped", static_cast<int>(capped));
 }
 
 // ------------------------------------------------------------------------------------------------ launches
