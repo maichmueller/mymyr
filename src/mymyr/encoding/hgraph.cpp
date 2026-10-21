@@ -43,6 +43,7 @@ HGraphView HGraphView::of(std::shared_ptr<const rl::ArrayBundle> batch, std::sha
     if (schema->options().predicate_virtual_nodes)
         fail("the HGraph view does not support predicate virtual nodes: every node type already is a predicate; encode "
              "without predicate_virtual_nodes");
+    require_repeated_statics(schema->options(), "HGraph");
     if (batch->scalar("statics", 0) != 0)
         fail("the HGraph view does not support shared static storage: it needs the static tuples of every graph in the "
              "batch; encode with the static tuples repeated per graph");

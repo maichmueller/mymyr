@@ -15,6 +15,9 @@ A batch stores no names. The naming rules, per entity role:
 - a state entity of a horizon graph is ``target:<k>``, with ``k`` its ``entity_ref``: the node's index in its graph (the
   root is ``target:0``; under the ``exclude`` root policy the graph has no entity for the root, and the root's relations
   are the plain ones).
+
+With shared statics (``statics="shared"``) the static relations of a graph are read from the static block of its
+instance, whose ids are graph-local.
 """
 
 import re
@@ -29,7 +32,7 @@ _TARGET_RELATION = re.compile(r"^\[([+-])\](.+?)(\[g\]|\[sg\]|\[ssg\]|\[sssg\]|\
 _DECORATION = re.compile(r"^(?:\[[+-]\])?(.+?)(?:\[[a-z+\-]+\])*$")
 
 _OBJECT, _PREDICATE_VIRTUAL, _STATE, _AUXILIARY = 0, 1, 7, 8
-_ARGUMENT_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT = 0, 3, 4
+_ARGUMENT_SLOT, _PREDICATE_SLOT, _ACTION_SLOT, _GOAL_TARGET_SLOT = 0, 1, 3, 4
 _SUBGOAL_TARGET_SLOT, _HISTORY_TARGET_SLOT, _HISTORY_SLOT = 5, 6, 7
 
 
@@ -134,16 +137,48 @@ class _Graph:
         else:
             self.role = np.asarray(batch.entity_role)[self.begin : self.end].astype(np.int64)
             self.ref = np.asarray(batch.entity_ref)[self.begin : self.end].astype(np.int64)
+        self.static = None
+        static_ids = getattr(batch, "static_task_ids", None)
+        if static_ids is not None:
+            sizes = batch.sizes
+            blocks = len(static_ids) if sizes is None else sizes["static_instances"]
+            relations = np.asarray(batch.static_relations)
+            self.static = (
+                int(np.searchsorted(np.asarray(static_ids)[:blocks], self.task_id)),
+                {int(relation): k for k, relation in enumerate(relations)},
+                np.asarray(batch.static_arg_offsets),
+                np.asarray(batch.static_args),
+            )
 
     def segment(self, relation):
         return relation * self.graphs + self.graph if self.by_relation else self.graph * self.relations + relation
 
     def tuples(self, relation):
         """The tuples of a relation in this graph as an array [count, arity] of graph-local entity ids."""
+        if self.static is not None and relation in self.static[1]:
+            return self._static_tuples(relation)
         segment = self.segment(relation)
         first, last = int(self.arg_offsets[segment]), int(self.arg_offsets[segment + 1])
         arity = self.arities[relation]
         return (self.args[first:last] - self.begin).reshape(-1, arity)
+
+    def _static_tuples(self, relation):
+        """The tuples of a static relation from the static block of the graph's instance: graph-local ids, with the key of
+        a predicate slot replaced by the graph's virtual node of that key."""
+        block, index, arg_offsets, args = self.static
+        segment = block * len(index) + index[relation]
+        first, last = int(arg_offsets[segment]), int(arg_offsets[segment + 1])
+        arity = self.arities[relation]
+        rows = args[first:last].astype(np.int64).reshape(-1, arity)
+        for position, role in enumerate(self.slot_roles[relation]):
+            if role == _PREDICATE_SLOT:
+                nodes = {
+                    ref: local
+                    for local, (kind, ref) in enumerate(zip(self.role.tolist(), self.ref.tolist()))
+                    if kind == _PREDICATE_VIRTUAL
+                }
+                rows[:, position] = [nodes[key] for key in rows[:, position].tolist()]
+        return rows
 
 
 def _argument_names(graph, relation, local, objects):

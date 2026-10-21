@@ -22,6 +22,7 @@ nanobind_add_module(_core FREE_THREADED NB_STATIC
     src/landmarks_bindings.cpp
     src/datasets_bindings.cpp
     src/encoding_bindings.cpp
+    src/encoding_jax_bindings.cpp
 )
 target_link_libraries(_core PRIVATE mymyr::core mymyr::encoding mymyr_warnings)
 # mymyr.Domain, when the loki front end is built (MYMYR_FRONTEND, the default).
@@ -35,8 +36,9 @@ if(TARGET mymyr_cuda)
     target_sources(_core PRIVATE src/cuda_datasets_bindings.cpp src/encoding_device_bindings.cpp)
     target_link_libraries(_core PRIVATE mymyr::cuda)
 endif()
-# The XLA FFI targets of mymyr.rl.jax need the XLA FFI headers, which ship with jaxlib: found through the build's
-# interpreter (no import of jax), or MYMYR_XLA_FFI_INCLUDE. Without them mymyr._core._rl_jax has no targets.
+# The XLA FFI targets of mymyr.rl.jax and mymyr.encoding.jax need the XLA FFI headers, which ship with jaxlib: found
+# through the build's interpreter (no import of jax), or MYMYR_XLA_FFI_INCLUDE. Without them mymyr._core._rl_jax and
+# mymyr._core._encoding_jax have no targets.
 set(MYMYR_XLA_FFI_INCLUDE "" CACHE PATH "The XLA FFI headers (jaxlib's include directory); empty: found through jaxlib")
 if(NOT MYMYR_XLA_FFI_INCLUDE)
     execute_process(

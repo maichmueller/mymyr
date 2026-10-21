@@ -523,18 +523,21 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 | `history_entity` | I `[S]` | the entity of each history step, graph after graph, oldest first |
 | `history_dt` | int32 `[S]` | the `dt` of each history step |
 | `numeric_values` | float32 or float64 `[T_num]` | the value of each numeric tuple, in the order of the numeric tuples in `relation_args`; present iff the schema has numeric relations and the `'relations'` output |
+| `static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations` | | the shared static tuples; present iff `statics='shared'` ([below](#shared-statics)) |
 
 With `outputs` holding `'simple'`, a batch also has the [Simple graph](#the-simple-graph)'s arrays, and without
 `'relations'` it has none of the `relation_*` arrays.
 
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),
-`schema_fingerprint` (the schema's fingerprint as a signed 64-bit value), `statics` (0: the static tuples are
-repeated in every graph) and, with `numeric_values`, `numeric_dtype` (0: float32, 1: float64) come with `batch.as_dict()`.
+`schema_fingerprint` (the schema's fingerprint as a signed 64-bit value), `table_fingerprint` (the table's
+`TaskTable.fingerprint`, likewise: the task ids of two batches name the same instances iff the values agree),
+`statics` (0: the static tuples are repeated in every graph, 1: [shared](#shared-statics)) and, with `numeric_values`,
+`numeric_dtype` (0: float32, 1: float64) come with `batch.as_dict()`.
 
 The tuples of a cell are the atoms of its predicate in the lexicographic order of their objects, so the atom slot
 layout of a task (`atoms='auto'`, `'reachable'`, `'dense'`) never reaches a model. A static tuple appears once per
-graph. In the graph layout, encoding a slice of a batch gives the slice of the batch's encoding with the offsets
+graph (with `statics='shared'`, once per instance of the batch). In the graph layout, encoding a slice of a batch gives the slice of the batch's encoding with the offsets
 rebased (`entity_ref` needs no rebase); in the relation layout a slice's cells lie in `R` separate runs, so it is
 encoded, not cut. An object's
 instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]` is its name.
@@ -543,6 +546,85 @@ instance-local id is `entity - entity_offsets[g]`, and `task.objects[entity_ref]
 batch's framework. NumPy arrays are read-only; do not mutate the shared buffers through frameworks whose tensor APIs
 cannot enforce that flag. The batch owns its memory and stays valid after the encoder, the task and the inputs are gone.
 `batch.schema` is its `EncodingSchema`.
+
+## Shared statics
+
+The static tuples of an instance are the same in every state, yet by default every graph holds its own copy: a batch of
+a thousand states of one gripper task repeats the `ball`, `room` and `gripper` tuples a thousand times. `statics='shared'`
+stores them once per instance of the batch instead. The static relations (the relations of lane `static`, as
+`schema.relation_lanes` tells) are then empty in every graph (`relation_counts` is 0 in their cells), and five more
+arrays hold the tuples. With `S` static relations (`R_s = S`) and `I_b` distinct instances in the batch:
+
+| Array | dtype, shape | Meaning |
+|---|---|---|
+| `static_task_ids` | int32 `[I_b]` | the instances of the batch, ascending |
+| `static_relations` | I `[R_s]` | the relation ids of the static relations, ascending |
+| `static_offsets` | I `[I_b * R_s + 1]` | the tuples of the `k`-th static relation in the block of the `b`-th instance are the segment `b * R_s + k` |
+| `static_arg_offsets` | I `[I_b * R_s + 1]` | the same offsets into `static_args` |
+| `static_args` | I `[A_s]` | the entities of the static tuples, tuple after tuple, `relation_arities[r]` per tuple |
+
+The blocks come instance after instance in ascending order of the instance, relation after relation in the order of
+`static_relations`; the tuples of a cell are in the order they have in the repeated form, so the arrays are
+deterministic and do not depend on the threads, the pool or the order of the rows (a batch that permutes its rows gives
+the same blocks). The blocks of a batch are those of its distinct instances: a slice of the rows has the blocks of
+the instances it holds, so `block(task_ids[g])` is `searchsorted(static_task_ids, task_ids[g])`.
+
+The entities in `static_args` are **graph-local**, because the block belongs to the instance and not to a graph: an
+object is its instance-local id (`task.objects[id]`), the auxiliary entity of a nullary tuple is `num_objects`, and the
+predicate slot of a predicate relation (with `predicate_virtual_nodes`) holds the predicate's key, the `entity_ref` of
+its virtual node. A model that wants the repeated form adds `entity_offsets[g]` to the object and auxiliary ids of every
+graph `g` that uses the block of `task_ids[g]`, and looks the key up among the virtual nodes of `g`. A graph's
+entities are the same as in the repeated form: an object, auxiliary or virtual node that only a static tuple uses
+still exists in the graph. The `entity_ref` of a goal, subgoal or history target entity is its tuple index among the
+graph's own tuples, which in the shared form does not count the static tuples. Subgoal layers and history steps need
+nothing of the static blocks: their relations are not static.
+
+```python
+import numpy as np
+import mymyr
+from mymyr import encoding
+
+task = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+shared = encoding.FlatRelationEncoder(task, statics="shared")
+repeated = encoding.FlatRelationEncoder(task)
+states = [task.initial_state, task.successor_states(task.initial_state)[0]]
+small, full = shared.encode(states).as_dict(), repeated.encode(states).as_dict()
+
+arities = shared.schema.relation_arities
+k = 0                                               # the first static relation
+relation = int(small["static_relations"][k])
+for g in range(small["num_graphs"]):
+    block = int(np.searchsorted(small["static_task_ids"], small["task_ids"][g]))
+    lo, hi = small["static_arg_offsets"][block * len(small["static_relations"]) + k :][:2]
+    local = small["static_args"][lo:hi].reshape(-1, arities[relation])
+    rebuilt = local + small["entity_offsets"][g]    # no predicate slots without predicate_virtual_nodes
+    cell = g * small["num_relations"] + relation
+    lo, hi = full["relation_arg_offsets"][cell : cell + 2]
+    assert np.array_equal(rebuilt, full["relation_args"][lo:hi].reshape(-1, arities[relation]))
+    assert small["relation_counts"][g, relation] == 0   # the graph's own cell is empty
+```
+
+The rest of the batch follows the same rules as a repeated one:
+
+- **Layouts and index types** are as before; the static arrays are in the batch's index type.
+- **Slices.** Encoding a slice of a shared batch gives the slice of its graphs, rebased as in the repeated form, with the
+  blocks of the instances the slice holds. The block of an instance is the same in the slice and in the batch.
+- **Capacities.** `capacities` takes the keys `static_instances` (the blocks, `I_b`) and `static_args` (`A_s`) as well,
+  required with `statics='shared'` and refused otherwise. `static_task_ids` and `static_args` are zero after the
+  true sizes, `static_offsets` and `static_arg_offsets` repeat their last value, and `sizes` gains `static_instances`,
+  `static_tuples` and `static_args`. A batch that does not fit overflows like any capacity.
+- **Streams** flush the same batch as `encode` over the rows, with `capacities` as above.
+- **Collation.** `encoding.collate` of host batches gives the batch of one encode of all their rows, blocks included;
+  the device encodes no shared form, so device batches and `DeviceCollator` have none.
+- **Names.** `entity_names` and `describe` give the same names and tuples as for the repeated batch; the static tuples
+  of a graph are listed in their relations, in the order of the repeated form.
+- **Validation.** The C++ `validate` also checks the blocks: the instances, the offsets, the
+  entities against the instance's objects and the sort order of the tuples.
+- **Horizons** do not have a shared form: `statics='shared'` together with a `horizon_mode` (the horizon, rooted
+  horizon and transition encoders) raises `ValueError` when the schema is made, because the static tuples of a horizon
+  graph are anchored by its root's state node and so are not the instance's.
+- **The device** does not encode shared statics: the device encoder and the torch op refuse them before any launch, with
+  a `mymyr: encoding:` message. Encode the rows on the host.
 
 ## Memory of batches
 
@@ -847,23 +929,40 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   (`[N, D]`, for instance `rl.expand(table, rows, derived=True).succ` and `.derived` moved to the device), `goals` the
   goal masks `(goal_pos, goal_neg)` or `(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)` with `N` rows or a
   single shared row. All of them are on one device or all on the host; a call mixing the two raises `ValueError`.
-  The derived words must be given when a graph reads derived atoms (a schema with derived relations or derived goal
-  literals): the device does not evaluate derived atoms.
-- **Refused.** `actions=` (the action relations are not encoded on the device), `subgoals=` and `history=` (an encoder
-  with `max_goal_level` above 0 or with `history` is refused for device rows), an encoder of a numeric table (with or
+  Supplied derived words take precedence. When they are absent and a graph reads derived atoms, the device axiom
+  evaluator runs on the encoder stream into its scratch, one launch per object-bitset width over all rows of the batch.
+  Subgoal layers with derived masks read the derived atoms of the instances whose layers can name them, under every goal
+  mode. Tasks with no required derived atoms keep the ordinary encoder launches and scratch size. An instance whose
+  axioms exceed the device limits (a body beyond the matcher limits, an object bitset wider than the device evaluates)
+  needs supplied words for its own rows only: a batch with such rows and no derived words sets `invalid_input`, and a
+  batch without `task_ids` (all rows of instance 0) whose instance 0 exceeds the limits raises `ValueError`. Rows of the
+  other instances encode as usual.
+- **Subgoal layers and history.** `subgoals=` and `history=` take CUDA tensors of the forms of the host call (the
+  masks `[N, L, W]` of 64-bit words, `[1, L, W]` for subgoal layers that every row shares, `dt` `int32` `[N, H]` and the
+  valid step `count` `int32` `[N]`, with the derived masks last), and the device encodes the subgoal levels, the history
+  steps and their targets exactly as the host does: the levels as layers minus the goal and the lower layers, the newest
+  `history_max_steps` of each row's valid steps (all of them when it is not set), history targets numbered relation,
+  then step, then slot. A row may use fewer layers than the call has (an empty layer adds nothing) and have fewer valid
+  steps than `H`, down to none. The subgoal levels of a graph are computed once into the workspace's scratch, so a
+  schema with levels needs scratch of one mask per level and sign over the instance's words for every graph of a
+  batch, on top of the scratch of a schema without them.
+- **Refused.** `actions=` (the action relations are not encoded on the device), an encoder of a numeric table (with or
   without `include_numeric`: "the device does not encode numeric relations"), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
-  prefix; `threads` has no effect. A row that is invalid (a task id outside the table, a row or goal mask narrower
-  than its instance, a goal bit its instance has no atom for) raises `ValueError` without capacities and sets
-  `invalid_input` in `sizes` with them.
+  prefix, as do an encoder with action targets or a horizon mode and layers or history given to an encoder whose
+  schema has no subgoal or history relations; `threads` has no effect. A row that is invalid (a task id outside the
+  table, a row, goal mask, subgoal layer or history step narrower than its instance, a goal, layer or step bit its
+  instance has no atom for, a history count outside `[0, H]`) raises `ValueError` without capacities and sets
+  `invalid_input` in `sizes` with them. The steps of a history that the row does not use (beyond its count, or older
+  than `history_max_steps` newest) are not read.
 - **One wait without capacities.** An encoding without `capacities` must size its arrays by the batch: it counts the
-  batch on the stream, copies the five sizes to the host and waits for them (the only host wait of the call), allocates
+  batch on the stream, copies the sizes to the host and waits for them (the only host wait of the call), allocates
   exact arrays and fills them. A batch that needs more indices than `int32` holds raises `OverflowError`; use
   `index_dtype='int64'`.
-- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=)` (`targets` only with target
-  sources) every variable-size array is allocated at its capacity, zero-filled, and the kernels write the true sizes into
-  `batch.device_sizes` (an `int64` `[6]` tensor: entities, tuples, args, targets, history steps (always 0) and the
-  overflow flags, 1 for a capacity, 2 for the index type, 4 for an invalid row). The call never waits and can be captured in a CUDA graph. A batch
+- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=, history=)` (`targets` only with
+  target sources, `history` only with a history) every variable-size array is allocated at its capacity, zero-filled,
+  and the kernels write the true sizes into `batch.device_sizes` (an `int64` `[6]` tensor: entities, tuples, args,
+  targets, history steps and the overflow flags, 1 for a capacity, 2 for the index type, 4 for an invalid row). The call never waits and can be captured in a CUDA graph. A batch
   that does not fit its capacities stays all zero with the flag set. `batch.sizes` reads `device_sizes` into a dict (and
   waits).
 - **`DeviceFlatBatch`** has the accessors of `FlatBatch`: the arrays (an array the schema does not store raises
@@ -881,11 +980,12 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 ### The torch op
 
 `torch.ops.mymyr.encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
-graphs, entities, args, targets)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs
-(`import mymyr.rl.torch` registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors
-are as above (`None` for an input that is absent) and the four ints are the capacities (`targets` 0 without target
-sources). It returns the list of 14 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the
-batch table and `sizes` last; an array the schema does not store is an empty tensor, and
+subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
+history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)` is the capacity form as a torch
+custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch` registers it). `encoder` is the handle
+`mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that is absent) and the five
+ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It returns the list of 17
+tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema does not store is an empty tensor, and
 `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch. The op waits for nothing, allocates only
 its outputs and scratch and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
 traces it without a graph break. The registry keeps the encoder alive until `unregister(handle)`. A compiled function
@@ -896,6 +996,86 @@ and acquire its context. No scratch reservation is needed. An encoding without c
 cannot be captured. The graph reads its input tensors where they were captured: write new rows in place and replay.
 Keep the encoder registered or referenced while the graph can replay: a captured `encode` holds raw context pointers
 and does not retain the Python encoder. Graphs of different sizes can share a capture stream; each owns its scratch.
+
+## Encoding inside JAX
+
+`mymyr.encoding.jax.encode(encoder, states, task_ids=None, *, derived=None, goals=None, capacities=None, threads=1)` is
+`encoder.encode` as the XLA FFI target `mymyr_encode_flat`, so a jitted function, a `lax.scan` body or a `jax.vmap`
+can encode states. On the CPU the target runs the host encoder, on CUDA the device kernels on XLA's stream; both return
+the arrays of the host encoder's capacity form bit for bit, so a function gives the same batch wherever it runs. It
+needs a mymyr built with jaxlib's XLA FFI headers (as `mymyr.rl.jax`).
+
+```python needs-jax
+import jax
+import jax.numpy as jnp
+import numpy as np
+import mymyr
+from mymyr import encoding
+import mymyr.encoding.jax as ej
+
+gripper = mymyr.Task.from_text("tests/data/tasks/gripper__prob05.txt")
+gripper_encoder = encoding.FlatRelationEncoder(gripper)
+words = np.asarray(gripper.encode([gripper.initial_state] + gripper.successor_states(gripper.initial_state)))
+rows = jnp.asarray(words.view(np.uint32))                 # uint32 halves of the u64 words: [N, 2 W]
+
+host = gripper_encoder.encode(words)
+capacities = dict(graphs=len(words), entities=int(host.entity_offsets[-1]), args=2 * int(host.relation_arg_offsets[-1]))
+jax_batch = jax.jit(lambda r: ej.encode(gripper_encoder, r, capacities=capacities))(rows)
+assert isinstance(jax_batch, ej.JaxFlatBatch) and jax_batch.relation_args.shape == (capacities["args"],)
+assert int(jax_batch.overflow) == 0                       # usable inside jit; jax_batch.sizes reads it on the host
+assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["args"]], host.relation_args)
+```
+
+- **Rows.** JAX has no 64-bit types by default, so rows are the u64 words of each state as `uint32` halves, low half
+  first (`[N, 2 W]`, or one row `[2 W]`), as `mymyr.rl.jax` takes them; `uint64` or `int64` words (`[N, W]`, with
+  `jax_enable_x64` or as NumPy arrays) and `int32` halves are accepted too. `task_ids` is `int32` `[N]` (required for a
+  table of several instances), `derived` the rows' derived words, and `goals` the masks `(goal_pos, goal_neg)` or all
+  four, with `N` rows or one row for all, as in `encoder.encode`.
+- **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
+  args=, targets=)` (`targets` only with target sources; `graphs` at least `N`): the per-graph arrays have `N`
+  entries, the variable-size arrays the capacities' sizes, zero past the batch. `batch.device_sizes` is `uint32` `[S,
+  2]`, the `S` 64-bit words of `DeviceFlatBatch.sizes` (entities, tuples, args, targets, history and the overflow
+  flags: 1 a capacity, 2 the index type, 4 an invalid row) as halves, low half first; `batch.overflow` is the flags as
+  a `uint32` scalar for use inside the function, and `batch.sizes` reads them on the host (NumPy arrays over the
+  stacked axes for a batch stacked by `lax.scan` or `jax.vmap`). A batch that does not fit, or has an invalid row, is
+  all zero with its flag set. An eager call without capacities waits once for the batch's sizes (the first call for a
+  number of rows also counts the batch; later ones reuse the capacities held for it, which only grow) and returns
+  exact arrays (`ValueError` for an invalid row, `OverflowError` when `int32` indices do not suffice); a traced call
+  without them raises `ValueError`.
+- **`JaxFlatBatch`** is a pytree with the arrays of `FlatBatch` under the same names, dtypes and shapes (an array the
+  schema does not store raises `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities` and
+  `as_dict(framework=None)` (`'jax'`, `'dlpack'` or `'numpy'`, with the scalars of `FlatBatch.as_dict`, the table's
+  fingerprint included). It is returned from jitted functions and stacked by
+  `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
+  the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
+- **What it encodes.** What the device encodes, on both platforms: a schema the device refuses (action, subgoal or
+  history targets, subgoal levels, horizons) or whose kernels need more shared memory than a block has (very many
+  predicate virtual nodes or relations) and rows without their derived words where the device cannot evaluate the
+  axioms that a graph reads (a body or object set beyond the device's matcher limits) raise `ValueError` (`mymyr:
+  encoding: ...`) when the function is traced. Otherwise the device evaluates missing derived words, as the CPU
+  encoder does. Action relations need an expansion, which JAX cannot pass, so their tuples are never encoded here. In
+  a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies, except that an
+  encoder with shared statics (`statics='shared'`) has no device form on either target: registering it raises
+  `ValueError`.
+- **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
+  `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place
+  of the encoder, so a function can hold the integer only); the registry keeps the encoder, its table and its device
+  contexts until `ej.unregister(encoder or handle)`. Every compiled function that calls the encoder holds it as well,
+  so it keeps working after the encoder is unregistered and every Python reference to it is gone; the encoder is freed
+  when the last of these executables is (`jax.clear_caches()` and dropping the jitted functions). A function traced
+  after `unregister` registers the encoder again, or fails if it holds only the handle; one that is being traced or
+  compiled while its encoder is unregistered fails with `no encoder is registered` (an executable looks its encoder up
+  when it is created), so unregister an encoder only after the functions that use it are compiled. Destroying the last
+  reference of an encoder on a CUDA device waits for the device; where the device cannot synchronize (CUDA refuses the
+  wait while another thread captures a CUDA graph, which invalidates that capture) the encoder's device memory is kept
+  rather than freed under work that may still read it.
+- **On CUDA** the first call of a compiled function on a device uploads the encoder's context there (before XLA runs
+  or traces the call); every call then enqueues the encoding kernels on XLA's stream (they zero what the batch leaves unused), with
+  the device scratch as one more result of the call that XLA allocates, and nothing else: no allocation,
+  synchronization or event. The target is registered command-buffer compatible, as the environment targets of
+  `mymyr.rl.jax`, so XLA may trace it into its CUDA graphs (`--xla_gpu_enable_command_buffer` with `CUSTOM_CALL`).
+- **On the CPU** `threads` sets the host encoder's worker threads (0: one per hardware thread); the arrays do not
+  depend on it. A call holds the encoder's host scratch, so the CPU calls of one encoder run one at a time.
 
 ## Names
 
@@ -966,17 +1146,21 @@ relations. An encoder has the same properties.
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
   targets together with a horizon mode; history targets or `history_max_steps` without `history`; a `history_max_steps` of 0; `history` together with a
   horizon mode; the action horizon mode without `include_actions`; `parent_relation`, `sibling_relation`,
-  `cousin_relation` or a `root_policy` other than `include` without a horizon mode; no `outputs`; `constant_labels`
-  without the `'simple'` output; the `'simple'` output with `predicate_virtual_nodes` or `entity_arrays='auto'`; and,
-  without the `'relations'` output, a `layout` other than `'graph'` or `emit_counts=False`.
+  `cousin_relation` or a `root_policy` other than `include` without a horizon mode; `statics='shared'` together with
+  a horizon mode or with the `'simple'` output; no `outputs`; `constant_labels` without the `'simple'` output; the
+  `'simple'` output with `predicate_virtual_nodes` or `entity_arrays='auto'`; and, without the `'relations'` output, a
+  `layout` other than `'graph'` or `emit_counts=False`.
 - **Numeric relations.** `include_numeric=True` (the default) adds the relation `[num]f` for each fluent function `f`
   of the domain ([Numeric functions](#numeric-functions)); `numeric_dtype` is the dtype of `numeric_values`. A horizon
-  mode over a domain with fluent functions raises `ValueError`, whatever `include_numeric` says.
+  mode over a domain with fluent functions raises `ValueError`, whatever `include_numeric` says. The numeric relations
+  are never static, so `statics='shared'` leaves them in the graphs.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
-  shape the output but not the catalog (target sources, layout, index type, `numeric_dtype` where values are stored, history and `history_max_steps`, horizon
-  mode and root policy), the outputs and, with `constant_labels`, the names of the constants, and which arrays are omitted: `relation_counts` (`emit_counts=False`) and `entity_role` /
-  `entity_ref` (implicit entity arrays); an encoding that stores every array has one fingerprint however it was asked
-  for. It does not depend on declaration order, on predicate ids, on the process or on the build.
+  shape the output but not the catalog (target sources, layout, index type, `numeric_dtype` where values are stored,
+  history and `history_max_steps`, horizon mode and root policy), `statics='shared'` (the repeated form adds nothing to
+  the hash), the outputs and, with `constant_labels`, the names of the constants, and which arrays are omitted:
+  `relation_counts` (`emit_counts=False`) and `entity_role` / `entity_ref` (implicit entity arrays); an encoding that
+  stores every array has one fingerprint however it was asked for. It does not depend on declaration order, on
+  predicate ids, on the process or on the build.
 
 ## C++
 
@@ -1024,6 +1208,14 @@ sizes when a capacity is too small. `encode_capacity(in, capacities, pool, scrat
 variable arrays have the capacity sizes, zero after the batch; `validate` accepts such a bundle. The host encoder
 runs on the CPU.
 
+With `FlatOptions::statics = Statics::Shared` (`schema.shared_statics()`) the calls take the capacity
+`StaticShape{instances, args}` and report `StaticSizes{instances, tuples, args}` after the batch's: `count(in, pool,
+scratch, &static_sizes)`, `encode_capacity(..., sizes, &static_shape, &static_sizes)`, `encode_into(..., scratch,
+&static_shape, &static_sizes)` and the stream `flush` overloads. `FlatBuffers` has the five static arrays
+(`static_task_ids`, `static_offsets`, `static_arg_offsets`, `static_args`, `static_relations`), null iff the statics are
+repeated. `require_repeated_statics(options, family)` is the refusal for an encoding family whose graphs need the static
+tuples among their own tuples; the device encoder refuses shared statics when it is made.
+
 `mymyr/cuda/encoding.hpp`, linked with `mymyr::cuda`, has the [device encoder](#encoding-on-the-device):
 `cuda::DeviceEncoder(context, encoder)` uploads the encoder's context, `reserve` and `acquire` give an
 `EncodingWorkspace` per stream, and `encode(workspace, in, out)` encodes device rows within the capacities of `out`
@@ -1060,3 +1252,61 @@ captured thread and warp fill launches.
 `scratch_bytes(acquisition, shape)` sizes scratch for that acquired generation. Its bounds, launch classes and derived
 word requirements remain attached to the acquisition across refreshes. A split count/fill uses the same acquisition,
 scratch address and shape in both calls; a refresh between them preserves that layout.
+
+### Device row streams and collation
+
+`encoder.device_stream(capacity, device=None, goals=False, derived=False, derived_goals=False)` creates a
+`DeviceFlatStream` bound to the current torch stream. Its ring stores table-width state words and int32 task ids,
+with optional derived words and positive/negative fluent and derived goal masks. Choose the optional columns at
+construction; every append supplies the same columns. Without a derived column, the encoder evaluates axioms when
+its schema needs them. The mutable stream stays host-only.
+
+```python needs-torch skip-if-no-cuda
+ring = encoder.device_stream(1024, device=0)
+ring.append(device_rows)
+batch = ring.flush(capacities=dict(graphs=1024, entities=32768, args=262144))
+```
+
+Append copies all rows or sets `ring.device_overflow` without changing the ring. The flag stays set until
+`ring.clear()`, and every flush while it is set reports `capacity_overflow` in its sizes with every per-graph array zero: a batch
+never silently lacks the rows of an append that did not fit. A device stream carries no subgoal layers or history
+steps: an encoder with `max_goal_level` above 0 or with `history` raises `ValueError`. The device status is int64 `[head, live_rows, overflow]`; `len(ring)` reads the live count and waits.
+Flush encodes the live rows once, advances the circular head and resets the tail, all on the ring's stream.
+`batch.device_graphs` gives its live graph count without a host read; `batch.num_graphs` reads that count and waits.
+Tensor properties have capacity shapes: every per-graph and per-cell entry past the live graphs is zero up to the graph
+capacity, and the variable entries past the sizes are left unwritten (the arrays are not cleared), so read them up to
+the sizes or the offsets. The count, scan and fill of a flush are bounded by its live rows; only zeroing the per-graph
+and per-cell tails spans the capacity. `as_dict()` exports
+the compact live batch and waits for its
+counts. Append and capacity flush can be captured. Construct the ring before capture and keep it, its inputs and
+returned batches alive through the final replay.
+
+`encoding.collate(batches)` concatenates host or CUDA batches in list order. Empty slices retain their schema; the
+list must contain at least one batch. The result equals one encode of all rows in the same order. Entity references
+stay local to their graph; entity ids and offsets receive the appropriate prefixes. Relation-major cells are
+interleaved by relation across the slices. Mixed schemas, tables (`table_fingerprint`), layouts, index types,
+static representations or devices raise `ValueError`; so does a device batch of an encoder with subgoal layers or
+history steps. Host collation also takes batches with [shared statics](#shared-statics): the result holds one static
+block per instance of its graphs, in ascending instance order, as one encode of all rows does. Overflowed inputs are
+refused. Host collation allocates exact arrays; device collation accepts
+`capacities=` and reports overflow through `device_sizes`. All accumulated totals use uint64 before index checks.
+
+For repeated or captured device collation, prepare `encoding.DeviceCollator(batches)` outside capture and call
+`collator.encode(capacities=...)` on the same stream. It uploads the slice descriptors once; each encode runs count,
+scan and fill without a host loop over graphs. Keep the collator, source tensors and returned batches alive through
+all replays. A call without capacities waits once for exact output sizes. The collator fixes each batch's graph count
+when it is prepared: the graphs of a stream batch are those its `device_graphs` held then (reading them waits once),
+and later replays collate that many graphs of each batch. With capacities, the per-graph and per-cell entries past the
+collated graphs and the variable entries past the sizes are zero.
+
+The C++ forms are `cuda::DeviceRowStream(context, encoder, capacity, stream, goals, derived, derived_goals)` with
+`append`, `flush(DeviceOutput)`, `clear`, and `status()`; and `cuda::DeviceCollator(context, batch_views, stream)` with
+caller scratch sized by `scratch_bytes()`. `DeviceOutput::graphs` optionally receives a live graph count. Host
+`encoding::collate` is declared in `mymyr/encoding/collate.hpp` and takes a span of shared array bundles.
+
+`DeviceEncoder::scratch_bytes(encoder, shape)` also sizes caller scratch before constructing a device encoder.
+Derived evaluation storage is included in every scratch size query, with table-width derived rows and the largest
+instance view, unless the query passes `cuda::DerivedWords::Supplied`: that size holds the encodes that pass their
+derived words, and an encode that would evaluate them in such scratch is refused before any launch. The Python
+device encoder sizes its scratch that way when `derived=` is given. Split count/fill reuses the derived rows produced by count. Acquired generations retain their axiom
+tables and scratch requirements across refreshes.

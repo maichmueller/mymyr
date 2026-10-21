@@ -6,6 +6,7 @@
 //   - _rl: batched expand and friends (rl_bindings.cpp);
 //   - _rl_torch: batched planning environments and the counter-based RNG (rl_torch_bindings.cpp; mymyr.rl.torch);
 //   - _rl_jax: the XLA FFI targets of the planning environments (rl_jax_bindings.cpp; mymyr.rl.jax);
+//   - _encoding_jax: the XLA FFI target of the relational encoder (encoding_jax_bindings.cpp; mymyr.encoding.jax);
 //   - _rl_ops: novelty rewards, prefix masks and hindsight relabels (rl_ops_bindings.cpp; mymyr.rl);
 //   - _search: the search family and heuristics (search_bindings.cpp);
 //   - _datasets: state spaces, generalized state spaces, samplers, tuple graphs, knowledge bases
@@ -41,6 +42,7 @@ void bind_rl_torch(nb::module_& parent);
 void bind_rl_jax(nb::module_& parent);
 void bind_rl_ops(nb::module_& parent);
 void bind_encoding(nb::module_& parent);
+void bind_encoding_jax(nb::module_& parent);
 #if defined(MYMYR_HAS_CUDA)
 void bind_cuda(nb::module_& parent);
 void bind_cuda_datasets(nb::module_& parent);
@@ -141,6 +143,7 @@ NB_MODULE(_core, m)
     mymyr::python::bind_rl_jax(m);
     mymyr::python::bind_rl_ops(m);
     mymyr::python::bind_encoding(m);
+    mymyr::python::bind_encoding_jax(m);
     mymyr::python::bind_search(m);
     mymyr::python::bind_datasets(m);
     mymyr::python::bind_ext_api(m);

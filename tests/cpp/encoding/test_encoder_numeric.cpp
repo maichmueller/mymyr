@@ -845,10 +845,10 @@ TEST(EncoderNumeric, TheLaneGroupFormsWriteTheSameValues)
                     const auto v = ed::instance_view(encoder->context().view(), static_cast<u32>(rows.task_ids[g]));
                     ed::RowInput row{rows.data.data() + g * row_width, nullptr};
                     row.numeric = row.atoms + rows.words;
-                    const u32 cells = ed::cell_list(v, row).count;
+                    const u32 cells = ed::cell_list<false>(v, row).count;
                     std::vector<u32> a(cells), b(cells), va(v.num_virtual), vb(v.num_virtual);
-                    const auto ta = ed::count_graph(v, row, a.data(), va.data());
-                    const auto tb = ed::count_graph_group(ed::SoloGroup{}, v, row, b.data(), vb.data());
+                    const auto ta = ed::count_graph<false>(v, row, a.data(), va.data());
+                    const auto tb = ed::count_graph_group<false>(ed::SoloGroup{}, v, row, b.data(), vb.data());
                     ASSERT_EQ(ta.tuples, tb.tuples);
                     ASSERT_EQ(a, b);
                     const u64 entity = static_cast<u64>(entity_offsets[g]);
@@ -856,16 +856,17 @@ TEST(EncoderNumeric, TheLaneGroupFormsWriteTheSameValues)
                     {
                         const u64 tuple = static_cast<u64>(offsets[g * R]);
                         const u64 arg = static_cast<u64>(arg_offsets[g * R]);
-                        ed::fill_graph<i32>(v, row, g, tuple, arg, entity, ta, plain_out, 0, va.data(), a.data(), 0,
-                                            numeric_base);
-                        ed::fill_graph_group<i32>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb, grouped_out, 0,
-                                                  vb.data(), b.data(), numeric_base);
+                        ed::fill_graph<i32, false>(v, row, g, tuple, arg, entity, ta, plain_out, 0, va.data(),
+                                                   a.data(), 0, numeric_base);
+                        ed::fill_graph_group<i32, false>(ed::SoloGroup{}, v, row, g, tuple, arg, entity, tb,
+                                                         grouped_out, 0, vb.data(), b.data(), 0, numeric_base);
                     }
                     else
                     {
-                        ed::fill_graph_positioned<i32>(v, row, g, entity, ta, plain_out, positions, 0, va.data(), a.data());
-                        ed::fill_graph_positioned_group<i32>(ed::SoloGroup{}, v, row, g, entity, tb, grouped_out, positions, 0,
-                                                             vb.data(), b.data());
+                        ed::fill_graph_positioned<i32, decltype(positions), false>(v, row, g, entity, ta, plain_out,
+                                                                                   positions, 0, va.data(), a.data());
+                        ed::fill_graph_positioned_group<i32, decltype(positions), false>(
+                            ed::SoloGroup{}, v, row, g, entity, tb, grouped_out, positions, 0, vb.data(), b.data());
                     }
                     numeric_base += ed::numeric_slot_count(v);
                 }
