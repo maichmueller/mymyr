@@ -264,8 +264,8 @@ struct InstanceView
     u32 num_cells, num_row_cells, num_plain_cells, num_plain_row_cells;
     const Cell *cells, *row_cells, *plain_cells, *plain_row_cells;
     const Cell* cell_base;   // the context's cells: the rows of the extended lists are relative to it
-    const u64* columns;      // the instance's k_instance_columns columns: the ones not resolved here (the extended
-                             // lists, the numeric slots) are read from it where needed
+    const u64* lazy_columns;  // the instance's columns from k_ext_lists on (the extended lists, the numeric slots):
+                              // not resolved here, read through lazy_column where needed
     const i32* slot_args;
     const i32* derived_args;
     const i32* static_args;
@@ -288,12 +288,15 @@ struct InstanceView
     u32 numeric_storage;
 };
 
+/// Column `k` of the instance, one of the columns from k_ext_lists to k_instance_columns.
+MYMYR_HD u64 lazy_column(const InstanceView& v, u32 k) { return v.lazy_columns[k - k_ext_lists]; }
+
 /// The first row of the instance's numeric slots in InstanceView::numeric_args. Read from the instance's columns when
 /// needed: the graphs of an instance without numeric cells never use it.
-MYMYR_HD u64 numeric_arg_row(const InstanceView& v) { return v.columns[k_numeric_args_offset]; }
+MYMYR_HD u64 numeric_arg_row(const InstanceView& v) { return lazy_column(v, k_numeric_args_offset); }
 
 /// The numeric slots of the instance: the tuples of its numeric cells.
-MYMYR_HD u32 numeric_slot_count(const InstanceView& v) { return static_cast<u32>(v.columns[k_numeric_tuples]); }
+MYMYR_HD u32 numeric_slot_count(const InstanceView& v) { return static_cast<u32>(lazy_column(v, k_numeric_tuples)); }
 
 MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
 {
@@ -313,7 +316,7 @@ MYMYR_HD InstanceView instance_view(const ContextView& c, u32 instance)
     v.plain_cells = c.cells + row[k_plain_cell_offset];
     v.plain_row_cells = c.cells + row[k_plain_row_cell_offset];
     v.cell_base = c.cells;
-    v.columns = row;
+    v.lazy_columns = row + k_ext_lists;
     v.slot_args = c.slot_args + row[k_slot_args_offset] * c.max_arity;
     v.derived_args = c.derived_args + row[k_derived_args_offset] * c.max_arity;
     v.static_args = c.static_args + row[k_static_args_offset] * c.max_arity;
@@ -502,7 +505,7 @@ MYMYR_HD CellList cell_list(const InstanceView& v, bool row_goals, bool actions,
         return cell_list(v, row_goals, actions);
     const u32 extension = (subgoals ? 1u : 0u) | (history ? 2u : 0u);  // 1 to 3
     const u32 base = (row_goals ? 1u : 0u) + (actions ? 0u : 2u);  // the index of the list without layers
-    const u64* entry = v.columns + k_ext_lists + 2u * ((extension - 1u) * 4u + base);
+    const u64* entry = v.lazy_columns + 2u * ((extension - 1u) * 4u + base);  // its pair of the k_ext_lists columns
     return CellList{v.cell_base + entry[1], static_cast<u32>(entry[0])};
 }
 
