@@ -1443,9 +1443,9 @@ void bind_encoding(nb::module_& parent)
              "sizes['targets'] / sizes['history'] entries hold the encoding, the rest is "
              "zero) and `sizes` reports the true sizes. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
-             "set; nothing raises. Rows (and task_ids, derived, goals) in CUDA memory are encoded on the device into "
-             "torch tensors: a DeviceFlatBatch is returned, actions, subgoals and history are refused, threads has no effect and pool is "
-             "refused.")
+             "set; nothing raises. Rows (and task_ids, derived, goals, subgoals, history) in CUDA memory are encoded on "
+             "the device into torch tensors: a DeviceFlatBatch is returned, actions are refused, threads has no effect "
+             "and pool is refused.")
         .def(
             "reserve_device",
             [](nb::handle self, IntArg graphs, Arg<ann::Any> device, StreamArg stream)

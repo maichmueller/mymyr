@@ -538,7 +538,7 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   `invalid_input` in `sizes` with them. The steps of a history that the row does not use (beyond its count, or older
   than `history_max_steps` newest) are not read.
 - **One wait without capacities.** An encoding without `capacities` must size its arrays by the batch: it counts the
-  batch on the stream, copies the five sizes to the host and waits for them (the only host wait of the call), allocates
+  batch on the stream, copies the sizes to the host and waits for them (the only host wait of the call), allocates
   exact arrays and fills them. A batch that needs more indices than `int32` holds raises `OverflowError`; use
   `index_dtype='int64'`.
 - **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=, history=)` (`targets` only with
