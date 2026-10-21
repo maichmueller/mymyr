@@ -1173,9 +1173,9 @@ MYMYR_HD bool cell_present(const Cell& c, u32 n)
 
 /// Adds a cell with `n` tuples to the totals of its graph: tuples, arguments, the goal entities (the tuples of a plain
 /// goal cell with a goal target; the subgoal entities likewise), the action entities (the tuples of an action cell) and
-/// the auxiliary flag (a nullary cell with a tuple, goal cells included; an action relation has no auxiliary slot, its
-/// action entity is its only entity). The entity count, the used predicates and the bad-row flags are set by
-/// count_graph and finish_totals.
+/// the auxiliary flag (a nullary cell that cell_present counts, goal cells and shared static cells included; an action
+/// relation has no auxiliary slot, its action entity is its only entity). The entity count, the used predicates and the
+/// bad-row flags are set by count_graph and finish_totals.
 template<bool Layered = true>
 MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
 {
@@ -1183,7 +1183,7 @@ MYMYR_HD void accumulate_cell(GraphTotals& t, const Cell& c, u32 n)
     t.args += static_cast<u64>(n) * c.arity;
     if (c.op <= static_cast<u32>(CellOp::Static))
     {
-        if (c.logical_arity == 0 && n > 0)
+        if (c.logical_arity == 0 && cell_present(c, n))
             t.flags |= k_graph_auxiliary;
         return;
     }

@@ -337,6 +337,47 @@ def test_names_and_descriptions_are_those_of_the_repeated_batch(options):
         assert shared.describe(padded, g) == repeated.describe(b, g)
 
 
+# A nullary static atom (powered) beside a nullary fluent (lit), and a domain whose only nullary atom is static (ready):
+# in the shared form the auxiliary entity of a graph can come from the static block alone.
+NULLARY_STATIC_TASKS = {
+    "lamp": (
+        """(define (domain lamp) (:requirements :strips)
+  (:predicates (powered) (lit) (at ?x) (link ?x ?y))
+  (:action go :parameters (?x ?y) :precondition (and (at ?x) (link ?x ?y)) :effect (and (at ?y) (not (at ?x))))
+  (:action on :parameters () :precondition (powered) :effect (lit))
+  (:action off :parameters () :precondition (lit) :effect (not (lit))))""",
+        """(define (problem p) (:domain lamp) (:objects a b c)
+  (:init (powered) (at a) (link a b) (link b c) (link c a))
+  (:goal (at c)))""",
+    ),
+    "ready": (
+        """(define (domain ready) (:requirements :strips)
+  (:predicates (ready) (at ?x) (link ?x ?y))
+  (:action go :parameters (?x ?y) :precondition (and (ready) (at ?x) (link ?x ?y)) :effect (and (at ?y) (not (at ?x)))))""",
+        """(define (problem p) (:domain ready) (:objects a b c)
+  (:init (ready) (at a) (link a b) (link b c))
+  (:goal (at c)))""",
+    ),
+}
+
+
+@pytest.mark.skipif(not hasattr(mymyr, "Domain"), reason="built without the loki front end")
+@pytest.mark.parametrize("rows", ["single", "batch"])
+@pytest.mark.parametrize("options", ["default", "virtual", "everything"])
+@pytest.mark.parametrize("name", NULLARY_STATIC_TASKS)
+def test_a_nullary_static_atom_gives_every_graph_of_its_instance_the_auxiliary_entity(name, options, rows):
+    domain, problem = NULLARY_STATIC_TASKS[name]
+    task = mymyr.Task(mymyr.Domain.from_string(domain).instantiate_string(problem))
+    states = [task.initial_state] if rows == "single" else walk(task, steps=8, walks=3)
+    common = OPTION_SETS[options]
+    shared = encoding.FlatRelationEncoder(task, statics="shared", **common)
+    repeated = encoding.FlatRelationEncoder(task, **common)
+    kwargs = {"actions": rl.expand(rl.as_table(task), states)}
+    batch = assert_rebuilds(shared, repeated, states, **kwargs)
+    objects = batch.as_dict()["num_objects"]
+    assert (np.diff(batch.as_dict()["entity_offsets"]) > objects).all()  # the auxiliary entity is in every graph
+
+
 def literal(atom, positive=True):
     text = f"({' '.join([atom.predicate.name, *(o.name for o in atom.objects)])})"
     return text if positive else f"(not {text})"

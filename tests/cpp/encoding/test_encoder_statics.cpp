@@ -6,6 +6,7 @@
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/stream.hpp"
 #include "mymyr/encoding/validate.hpp"
+#include "mymyr/frontend/domain.hpp"
 
 #include <gtest/gtest.h>
 
@@ -491,6 +492,63 @@ TEST(SharedStatics, ActionsAndTargetsKeepTheirReferences)
                                         std::string(domain) + (virtual_nodes ? "/virtual/" : "/") + shape.text());
             }
     }
+}
+
+// ------------------------------------------------------------------------------------------------ nullary statics
+
+/// A domain with a nullary static atom (powered) beside a nullary fluent (lit), and one whose only nullary atom is
+/// static (ready): in the shared form the auxiliary entity of a graph can come from the static block alone.
+constexpr const char* k_lamp_domain = R"((define (domain lamp) (:requirements :strips)
+  (:predicates (powered) (lit) (at ?x) (link ?x ?y))
+  (:action go :parameters (?x ?y) :precondition (and (at ?x) (link ?x ?y)) :effect (and (at ?y) (not (at ?x))))
+  (:action on :parameters () :precondition (powered) :effect (lit))
+  (:action off :parameters () :precondition (lit) :effect (not (lit)))))";
+constexpr const char* k_lamp_problem = R"((define (problem p) (:domain lamp) (:objects a b c)
+  (:init (powered) (at a) (link a b) (link b c) (link c a))
+  (:goal (at c))))";
+constexpr const char* k_ready_domain = R"((define (domain ready) (:requirements :strips)
+  (:predicates (ready) (at ?x) (link ?x ?y))
+  (:action go :parameters (?x ?y) :precondition (and (ready) (at ?x) (link ?x ?y)) :effect (and (at ?y) (not (at ?x))))))";
+constexpr const char* k_ready_problem = R"((define (problem p) (:domain ready) (:objects a b c)
+  (:init (ready) (at a) (link a b) (link b c))
+  (:goal (at c))))";
+// the instance without its nullary atom, with another number of objects
+constexpr const char* k_unready_problem = R"((define (problem q) (:domain ready) (:objects a b c d)
+  (:init (at a) (link a b) (link b c) (link c d))
+  (:goal (at d))))";
+
+rl::TaskTablePtr string_table(const char* domain, const std::vector<const char*>& problems)
+{
+    const auto d = frontend::Domain::from_string(domain);
+    std::vector<TaskPtr> tasks;
+    for (const char* problem : problems)
+        tasks.push_back(Task::create(*d->instantiate_string(problem)));
+    return rl::TaskTable::create(std::move(tasks));
+}
+
+TEST(SharedStatics, ANullaryStaticAtomGivesEveryGraphOfItsInstanceTheAuxiliaryEntity)
+{
+    const std::pair<const char*, rl::TaskTablePtr> tables[] = {
+        {"lamp", string_table(k_lamp_domain, {k_lamp_problem})},
+        {"ready", string_table(k_ready_domain, {k_ready_problem})},
+        {"ready_unready", string_table(k_ready_domain, {k_unready_problem, k_ready_problem})}};
+    for (const auto& [name, table] : tables)
+    {
+        const em::Batch batch = em::make_batch(table, 48, true, 17);
+        for (const u64 rows : {u64{1}, batch.count})
+            for (const em::Config& config : em::configs())
+                for (const Shape& shape : k_shapes)
+                    expect_same_as_repeated(table, em::with(config.options, shape.layout, shape.index),
+                                            em::host_input(batch, rows, config.inputs),
+                                            std::string(name) + "/" + std::to_string(rows) + "/" + config.name + "/" +
+                                                shape.text());
+    }
+    // the first row of the single instance holds no fluent nullary atom: the static block alone needs the entity
+    const rl::TaskTablePtr table = string_table(k_ready_domain, {k_ready_problem});
+    const em::Batch batch = em::make_batch(table, 1, false, 1);
+    const auto encoder = FlatEncoder::create(table, shared_of(test::encoder_options()));
+    const Arrays a = read(*encoder->encode(em::host_input(batch, 1, {})));
+    EXPECT_EQ(a.at("entity_offsets"), (std::vector<i64>{0, 4}));
 }
 
 // ------------------------------------------------------------------------------------------------ layers and history
