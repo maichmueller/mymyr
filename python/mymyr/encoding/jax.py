@@ -10,8 +10,10 @@ uint64 and int64 words are accepted too, and int32 halves.
 Capacities: shapes are static under ``jax.jit``, so a traced call needs ``capacities=dict(graphs=, entities=, args=,
 targets=)`` (``targets`` only with target sources): the variable-size arrays have the capacities' sizes, the true
 sizes and the overflow flags are in ``batch.device_sizes``, and a batch that does not fit is all zero with its flag
-set. An eager call without capacities waits once: it counts the batch, reads the sizes and encodes it at a size that
-holds it, then cuts the arrays to the batch.
+set. An eager call without capacities waits once for the batch's sizes: it encodes at the capacities held for the encoder
+and the number of rows (the first call counts the batch to find them, rounded up to powers of two), encodes again at
+larger ones if the batch did not fit, and cuts the arrays to the batch. The held capacities only grow, so batches of
+similar sizes share one compiled call.
 
 Handles: the target finds the encoder through the FFI handle registry. :func:`register` enters an encoder (``encode``
 does so on first use) and the registry holds it until :func:`unregister`; a compiled function also holds what it calls,
@@ -54,9 +56,9 @@ def _error(message: str) -> ValueError:
 
 class _Registration:
     """What the Python side keeps of a registered encoder: its schema, which arrays it stores, what the target needs,
-    and the scratch sizes asked so far."""
+    the scratch sizes asked so far and the capacities of its eager calls."""
 
-    __slots__ = ("info", "layout", "options", "schema", "fingerprint", "table_fingerprint", "scratch")
+    __slots__ = ("info", "layout", "options", "schema", "fingerprint", "table_fingerprint", "scratch", "held")
 
     def __init__(self, encoder: Any, handle: int):
         self.schema = encoder.schema
@@ -66,6 +68,8 @@ class _Registration:
         self.layout = _device.layout_of(encoder)
         self.info = _encoding_jax.info(handle)
         self.scratch: dict[tuple[int, int, bool], int] = {}
+        # the capacities of eager calls without capacities, per number of rows: they only grow
+        self.held: dict[int, tuple[int, int, int]] = {}
 
 
 _lock = threading.Lock()
@@ -470,8 +474,40 @@ def encode(
     if _traced(*operands):
         raise _error("capacities are required under jax.jit and other transformations (the arrays need static shapes): "
                      "pass capacities=dict(graphs=, entities=, args=, targets=)")
-    _, counted = _call(handle, reg, operands, graphs, 0, 0, 0, threads)
-    sizes = _host_sizes(np.asarray(counted))
+    arrays, sizes = _eager(handle, reg, operands, graphs, threads)
+    cut = {"entity_role": "entities", "entity_ref": "entities", "relation_args": "args", "target_entity": "targets",
+           "target_group": "targets"}  # fmt: skip
+    arrays = {name: a[: sizes[cut[name]]] if name in cut else a for name, a in arrays.items()}
+    return JaxFlatBatch(arrays, None, static)
+
+
+def _eager(handle: int, reg: _Registration, operands: tuple, graphs: int, threads: int) -> tuple[dict[str, Any], dict]:
+    """The arrays and sizes of an eager call without capacities. The call runs at the capacities held for this encoder
+    and number of rows (the first call counts the batch at zero capacities to find them), reads its sizes and, if the
+    batch did not fit, runs once more at capacities that hold it; the held capacities only grow, so that batches of
+    similar sizes reuse one compiled call."""
+    with _lock:
+        held = reg.held.get(graphs)
+    if held is None:
+        _, counted = _call(handle, reg, operands, graphs, 0, 0, 0, threads)
+        sizes = _host_sizes(np.asarray(counted))
+        _check_sizes(sizes)
+        held = (_rounded(sizes["entities"]), _rounded(sizes["args"]), _rounded(sizes["targets"]))
+    while True:
+        arrays, words = _call(handle, reg, operands, graphs, *held, threads)
+        sizes = _host_sizes(np.asarray(words))
+        _check_sizes(sizes)
+        if not sizes["capacity_overflow"]:
+            break
+        held = tuple(max(h, _rounded(sizes[key])) for h, key in zip(held, ("entities", "args", "targets")))
+    with _lock:
+        old = reg.held.get(graphs, (0, 0, 0))
+        reg.held[graphs] = tuple(max(a, b) for a, b in zip(old, held))
+    return arrays, sizes
+
+
+def _check_sizes(sizes: dict) -> None:
+    """Raises for a batch with an invalid row or one that its index type cannot hold."""
     if sizes["invalid_input"]:
         raise _error("a row is invalid: a task id outside the table, a state row or goal mask narrower than its "
                      "instance, or a bit that its instance has no atom for")
@@ -480,13 +516,6 @@ def encode(
             f"mymyr: encoding: the batch needs more indices than its index type holds (entities {sizes['entities']}, "
             f"tuples {sizes['tuples']}, args {sizes['args']}, targets {sizes['targets']}): use index_dtype='int64'"
         )
-    # a capacity rounded up to a power of two, so that batches of similar sizes share a compiled call
-    held = {key: _rounded(sizes[key]) for key in ("entities", "args", "targets")}
-    arrays, _ = _call(handle, reg, operands, graphs, held["entities"], held["args"], held["targets"], threads)
-    cut = {"entity_role": "entities", "entity_ref": "entities", "relation_args": "args", "target_entity": "targets",
-           "target_group": "targets"}  # fmt: skip
-    arrays = {name: a[: sizes[cut[name]]] if name in cut else a for name, a in arrays.items()}
-    return JaxFlatBatch(arrays, None, static)
 
 
 def _rounded(n: int) -> int:

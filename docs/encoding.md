@@ -725,7 +725,8 @@ assert np.array_equal(np.asarray(jax_batch.relation_args)[: jax_batch.sizes["arg
   64-bit words of `DeviceFlatBatch.sizes` (entities, tuples, args, targets, history and the overflow flags: 1 a capacity,
   2 the index type, 4 an invalid row) as halves, low half first; `batch.overflow` is the flags as a `uint32` scalar
   for use inside the function, and `batch.sizes` reads them on the host. A batch that does not fit, or has an invalid row, is all zero with its flag set. An eager call
-  without capacities waits once for the batch's sizes and returns exact arrays (`ValueError` for an invalid row,
+  without capacities waits once for the batch's sizes (the first call for a number of rows also counts the batch; later
+  ones reuse the capacities held for it, which only grow) and returns exact arrays (`ValueError` for an invalid row,
   `OverflowError` when `int32` indices do not suffice); a traced call without them raises `ValueError`.
 - **`JaxFlatBatch`** is a pytree with the arrays of `FlatBatch` under the same names, dtypes and shapes (an array the
   schema does not store raises `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities` and

@@ -614,6 +614,45 @@ def test_the_device_ordinal_is_the_local_hardware_id_even_when_it_is_zero():
     assert ej._ordinal(types.SimpleNamespace(local_hardware_id=3, id=5)) == 3
     assert ej._ordinal(types.SimpleNamespace(id=5)) == 5
     assert ej._ordinal(types.SimpleNamespace(local_hardware_id=None, id=2)) == 2
+
+
+def test_eager_calls_without_capacities_reuse_the_capacities_held_for_their_size(cases):
+    case = cases["gripper"].resized(8)
+    encoder = encoding.FlatRelationEncoder(case.source)
+    handle = ej.register(encoder)
+    want = host_encode(encoder, case)
+    rows = put(halves(case.rows), "cpu")
+
+    def calls():
+        return _encoding_jax.calls(handle)["cpu"]
+
+    same_batch(want, ej.encode(handle, rows))
+    assert calls() == 2  # the first call counts the batch, then encodes it
+    for k in range(3):
+        same_batch(want, ej.encode(handle, rows))
+        assert calls() == 3 + k  # one compiled call from then on
+    # a batch larger than the held capacities is encoded again at capacities that hold it, and they stay
+    reg = ej._registrations[handle]
+    reg.held[8] = (0, 0, 0)
+    same_batch(want, ej.encode(handle, rows))
+    assert calls() == 7
+    assert all(h >= 64 for h in reg.held[8][:2])
+    same_batch(want, ej.encode(handle, rows))
+    assert calls() == 8
+
+
+def test_the_flags_of_a_call_at_held_capacities_are_checked(cases):
+    if "blocks_table" not in cases:
+        pytest.skip("built without the loki front end")
+    case = cases["blocks_table"].resized(8)
+    encoder = encoding.FlatRelationEncoder(case.source)
+    handle = ej.register(encoder)
+    rows = put(halves(case.rows), "cpu")
+    ej.encode(handle, rows, put(case.ids, "cpu"))  # the capacities are held now
+    ids = case.ids.copy()
+    ids[3] = 7
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: a row is invalid"):
+        ej.encode(handle, rows, put(ids, "cpu"))
 def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     """Destroying the last reference of an encoder waits for the device. CUDA refuses that wait while another thread
     captures a CUDA graph; the generation is then kept (not freed under work that may still read it) and counted."""
