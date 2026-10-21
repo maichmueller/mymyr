@@ -103,8 +103,10 @@ struct Pass
     bool relation_major;
     bool evaluate;  // the derived words of the rows are evaluated here, into s.derived
     u64 starts_stride;  // the words of run starts of one graph: num_schemas + 1 with expansion rows, else 0
+    // the subgoal layers and history of the call, as the lanes read them
+    detail::LayerSource source = {in.subgoals, in.history, context.schema().options().history_max_steps.value_or(0)};
     // some row may have subgoal layers or history steps
-    bool layered = in.subgoals.layers != 0 || in.history.masks.layers != 0 || in.history.count != nullptr;
+    bool layered = source.layered();
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
 
@@ -125,18 +127,7 @@ struct Pass
     }
 
     /// The valid history steps of graph g, and how many of the newest of them are encoded.
-    [[nodiscard]] u32 history_valid(u64 g) const noexcept
-    {
-        return in.history.count ? static_cast<u32>(in.history.count[g]) : in.history.masks.layers;
-    }
-    [[nodiscard]] u32 history_used(u64 g) const noexcept
-    {
-        if (in.history.masks.layers == 0)
-            return 0;
-        const u32 valid = history_valid(g);
-        const std::optional<u32> k = context.schema().options().history_max_steps;
-        return k && valid > *k ? *k : valid;
-    }
+    [[nodiscard]] u32 history_used(u64 g) const noexcept { return detail::history_used(source, g); }
 
     /// The cells of graph g of `v`'s instance.
     template<bool Layered>
@@ -152,39 +143,8 @@ struct Pass
     /// rows without layers are the hot ones.
     [[gnu::noinline]] void attach_layers(u64 g, detail::RowLayers& layers, detail::RowInput& row) const noexcept
     {
-        const u32 used = history_used(g);
-        if (in.subgoals.layers == 0 && used == 0)
-            return;
-        layers = {};
-        if (const LayerInput& l = in.subgoals; l.layers != 0)
-        {
-            const u64 at = g * l.stride;
-            const u64 derived_at = g * l.derived_stride;
-            layers.subgoals = {l.pos + at,
-                               l.neg + at,
-                               l.derived_pos ? l.derived_pos + derived_at : nullptr,
-                               l.derived_neg ? l.derived_neg + derived_at : nullptr,
-                               l.layers,
-                               l.words,
-                               l.derived_words};
-        }
-        if (used != 0)
-        {
-            const LayerInput& l = in.history.masks;
-            const u32 first = history_valid(g) - used;
-            const u64 at = g * l.stride + u64{first} * l.words;
-            const u64 derived_at = g * l.derived_stride + u64{first} * l.derived_words;
-            layers.history.masks = {l.pos ? l.pos + at : nullptr,
-                                    l.neg ? l.neg + at : nullptr,
-                                    l.derived_pos ? l.derived_pos + derived_at : nullptr,
-                                    l.derived_neg ? l.derived_neg + derived_at : nullptr,
-                                    used,
-                                    l.words,
-                                    l.derived_words};
-            layers.history.dt = in.history.dt + g * l.layers + first;
-            layers.history.first = first;
-        }
-        row.layers = &layers;
+        if (detail::bind_layers(source, g, layers))
+            row.layers = &layers;
     }
 
     /// Computes the subgoal levels of a row that has subgoal layers, into `storage`; the state words, and so the
@@ -195,8 +155,7 @@ struct Pass
         if (layers.subgoals.layers == 0)
             return;
         storage.resize(detail::effective_layer_words(v, layers.subgoals));
-        layers.levels = detail::effective_layers(v, detail::goal_words(v, row), layers.subgoals, row.atoms, row.derived,
-                                                 storage.data());
+        detail::bind_levels(detail::SoloGroup{}, v, row, layers, storage.data());
     }
 
     /// The input of graph g; `layers` is the storage of its subgoal layers and history steps (the row refers to it iff
@@ -246,26 +205,14 @@ struct Pass
 /// outside [0, H], or masks narrower than the instance. The first graph of each kind is recorded in the member.
 [[gnu::noinline]] bool refuse_layers(const Pass& p, Member& m, const detail::InstanceView& v, u64 g)
 {
-    if (p.in.history.count && (p.in.history.count[g] < 0 ||
-                               static_cast<u32>(p.in.history.count[g]) > p.in.history.masks.layers))
+    switch (detail::layer_validity(v, p.source, g))
     {
-        m.bad_history_count = std::min(m.bad_history_count, g);
-        return true;
+        case detail::LayerValidity::Valid: return false;
+        case detail::LayerValidity::BadHistoryCount: m.bad_history_count = std::min(m.bad_history_count, g); break;
+        case detail::LayerValidity::NarrowSubgoals: m.narrow_subgoals = std::min(m.narrow_subgoals, g); break;
+        case detail::LayerValidity::NarrowHistory: m.narrow_history = std::min(m.narrow_history, g); break;
     }
-    if (p.in.subgoals.layers != 0 && (p.in.subgoals.words < v.words ||
-                                      (p.in.subgoals.derived_pos && p.in.subgoals.derived_words < v.derived_words)))
-    {
-        m.narrow_subgoals = std::min(m.narrow_subgoals, g);
-        return true;
-    }
-    if (p.history_used(g) != 0 &&
-        (p.in.history.masks.words < v.words ||
-         (p.in.history.masks.derived_pos && p.in.history.masks.derived_words < v.derived_words)))
-    {
-        m.narrow_history = std::min(m.narrow_history, g);
-        return true;
-    }
-    return false;
+    return true;
 }
 
 /// Pass one of a member: validates its graphs, evaluates their derived words, counts them, and (relation-major) tallies
@@ -523,6 +470,7 @@ std::shared_ptr<const FlatEncoder> FlatEncoder::create(rl::TaskTablePtr table, c
         invalid("an encoder needs a task table");
     auto encoder = std::shared_ptr<FlatEncoder>(new FlatEncoder());
     encoder->m_schema = EncodingSchema::create(*table, options);
+    encoder->m_table_fingerprint = table->fingerprint();
     encoder->m_context = EncodingContext::create(std::move(table), encoder->m_schema);
     return encoder;
 }
@@ -933,6 +881,7 @@ FlatEncoder::Allocation FlatEncoder::allocate(u64 graphs, u64 entities, u64 args
     builder.scalar("layout", m_schema->options().layout == Layout::Relation ? 1 : 0);
     builder.scalar("index_dtype", index == IndexType::I64 ? 1 : 0);
     builder.scalar("schema_fingerprint", std::bit_cast<i64>(m_schema->fingerprint()));
+    builder.scalar("table_fingerprint", std::bit_cast<i64>(m_table_fingerprint));
     builder.scalar("statics", m_schema->shared_statics() ? 1 : 0);
     Allocation allocation{std::make_shared<rl::ArrayBundle>(builder.build()), {}};
     rl::ArrayBundle& bundle = *allocation.bundle;

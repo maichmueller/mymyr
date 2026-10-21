@@ -37,8 +37,9 @@
 //   history_entity       I   [S]       the entity of each history step, graph after graph in step order
 //   history_dt           i32 [S]       the dt of each history step
 // and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0:
-// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
-// tuples are repeated in every graph; 1: they are shared, see below).
+// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern), table_fingerprint (the
+// table's, rl::TaskTable::fingerprint, as an i64 bit pattern: the task ids of batches with equal ones name the same
+// instances) and statics (0: the static tuples are repeated in every graph; 1: they are shared, see below).
 //
 // Shared statics. With FlatOptions::statics = Shared the cells of the static relations (EncodingSchema::
 // static_relations, R_s of them) are empty in every graph: relation_counts is 0 there, the segments have no tuple, and
@@ -100,6 +101,7 @@
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/encoding/buffers.hpp"
 #include "mymyr/encoding/context.hpp"
+#include "mymyr/encoding/layers.hpp"
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/rl/expand.hpp"
 
@@ -107,36 +109,6 @@
 
 namespace mymyr::encoding
 {
-/// Masks in layers, one set of layers per row: the subgoal layers of the rows, or (in HistoryInput) their history
-/// steps. A row's layer l is the pair of masks pos[row * stride + l * words ...] and neg[...] over the fluent slots,
-/// optionally the same over the derived slots (derived_pos, derived_neg, `derived_words` wide, `derived_stride` per
-/// row). The masks are `words` wide, at least as wide as the words (derived words) of every instance in the batch; a
-/// set bit of a slot an instance does not have is an error. A stride of 0 is one set of layers that every row shares.
-struct LayerInput
-{
-    const u64* pos = nullptr;
-    const u64* neg = nullptr;
-    u64 stride = 0;
-    u32 layers = 0;
-    u32 words = 0;
-    const u64* derived_pos = nullptr;
-    const u64* derived_neg = nullptr;
-    u64 derived_stride = 0;
-    u32 derived_words = 0;
-};
-
-/// The history of each row: steps of literals, oldest first. `masks` has one set of layers per row, as many as the
-/// longest history (`masks.layers`), and a nonzero stride of at least layers * words (derived_stride likewise): rows
-/// never share. `dt` [rows, masks.layers] is the dt of each step and `count` [rows] the valid steps of each row, a
-/// prefix of its layers (null: all of them). Only the newest FlatOptions::history_max_steps of a row's valid steps are
-/// encoded (all of them when it is not set).
-struct HistoryInput
-{
-    LayerInput masks;
-    const i32* dt = nullptr;
-    const i32* count = nullptr;
-};
-
 /// The graphs of a horizon batch: G graphs, each a root state and the nodes below it, as rows of one state batch, and
 /// the edges between the nodes. The rows of graph g are [node_offsets[g], node_offsets[g + 1]) of `nodes`; the first of
 /// them is the graph's root, so every graph has at least one node, and node k of graph g is row node_offsets[g] + k.
@@ -239,6 +211,8 @@ public:
     [[nodiscard]] const std::shared_ptr<const EncodingSchema>& schema_ptr() const noexcept { return m_schema; }
     [[nodiscard]] const EncodingContext& context() const noexcept { return *m_context; }
     [[nodiscard]] const std::shared_ptr<const EncodingContext>& context_ptr() const noexcept { return m_context; }
+    /// rl::TaskTable::fingerprint of the table, the batches' table_fingerprint.
+    [[nodiscard]] u64 table_fingerprint() const noexcept { return m_table_fingerprint; }
 
     /// Encodes the rows on the calling thread into a new bundle. Const and reentrant. Throws std::invalid_argument for
     /// invalid input (a task id out of range, a row narrower than its instance, a state or goal bit its instance does
@@ -312,6 +286,7 @@ private:
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;
+    u64 m_table_fingerprint = 0;  // rl::TaskTable::fingerprint of the table
 };
 
 namespace detail

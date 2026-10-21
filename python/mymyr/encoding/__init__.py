@@ -38,13 +38,15 @@ from mymyr._core._encoding import (
     FlatTransitionEffectsEncoder,
     FlatTransitionEncoder,
 )
-from mymyr.encoding._device import DeviceFlatBatch
+from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatStream
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
 
 __all__ = [
+    "DeviceCollator",
     "DeviceFlatBatch",
+    "DeviceFlatStream",
     "EncodingSchema",
     "FlatBatch",
     "FlatHorizonEncoder",
@@ -56,8 +58,29 @@ __all__ = [
     "FlatTransitionEncoder",
     "GraphDescription",
     "HorizonView",
+    "collate",
     "history_masks",
     "horizon",
     "horizon_of_space",
     "subgoal_masks",
 ]
+
+
+def collate(batches, *, capacities=None):
+    """Concatenate encoded graphs in batch order, rebuilding offsets and shifting entity ids.
+
+    Batches must share a table, schema, layout, index type and static representation. Empty slices are allowed;
+    the list itself must contain a batch to establish the schema. Host and CUDA batches cannot be mixed.
+    """
+    batches = list(batches)
+    if not batches:
+        raise ValueError("mymyr: encoding: collate needs at least one batch")
+    if all(isinstance(batch, FlatBatch) for batch in batches):
+        if capacities is not None:
+            raise ValueError("mymyr: encoding: host collation allocates exactly; capacities are for device batches")
+        from mymyr._core._encoding import _collate
+        return _collate(batches)
+    if all(isinstance(batch, DeviceFlatBatch) for batch in batches):
+        from mymyr.encoding._device import collate_device
+        return collate_device(batches, capacities)
+    raise ValueError("mymyr: encoding: collate received mixed host and device batches or an invalid batch")
