@@ -66,6 +66,16 @@ struct EncodeParams
     u32* flags = nullptr;    // flags[0]: a row is invalid
     u32* cell_counts = nullptr;  // graph-major: [graphs, cell_stride] the counts of each graph's cells
     u64 cell_stride = 0;
+    // The live launches (LaunchShape::live): the batch is the first min(*graphs_device, graphs) rows, read on the
+    // device, of a circular row view (logical row g is source row (*row_start + g) mod row_capacity).
+    const u64* graphs_device = nullptr;
+    const u64* row_start = nullptr;
+    u64 row_capacity = 0;
+    bool derived_logical = false;      // `derived` is indexed by the logical row (evaluated words), not the source row
+    const u64* rows_overflow = nullptr;  // nonzero: rows were dropped before the encode; the batch reports k_overflow_capacity
+    u64* output_graphs = nullptr;      // receives the live graph count
+    void* scan_state = nullptr;        // the tile states of the scan over the live totals (live_scan::State, one site)
+    u64 scan_tiles = 0;
 };
 
 /// How a batch is launched.
@@ -79,6 +89,12 @@ struct LaunchShape
     u64 scan_temp_bytes = 0;
     void* zero_begin = nullptr;  // cleared before the count: the flags and scanned totals
     u64 zero_bytes = 0;
+    /// The live launches: the graph count and the rows are read on the device (EncodeParams::graphs_device). Only the
+    /// flags are cleared; the count kernel writes every entry of the live totals and clears the scan's tile states, the
+    /// scan is a single-pass scan over the live entries, and the fill kernel's blocks past the live graphs exit at once
+    /// beyond a fixed number that zero the unused tails. Their cost follows the live rows, not the capacity.
+    bool live = false;
+    bool cleared = false;  // launch_clear ran already on the stream
 };
 
 /// The threads of the launches' blocks.
@@ -102,8 +118,11 @@ __host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceVi
     return warp_fill_for(rough, relation_major) || warp_fill_for(encoding::detail::graph_width(v), relation_major);
 }
 
-/// The temporary storage of the scan of `length` entries, u64 entries when `wide`.
+/// The temporary storage of the scan of `length` entries, u64 entries when `wide`: CUB's storage, or the tile states of
+/// the live scan if they are larger.
 [[nodiscard]] u64 totals_scan_temp_bytes(u64 length, bool wide);
+/// The tiles of the live scan over `length` entries.
+[[nodiscard]] u64 live_scan_tiles(u64 length);
 
 /// The dynamic shared memory of the count and fill kernels: the virtual-node scratch of every graph in flight, and, for
 /// the relation-major fill, the argument position of every relation.
@@ -112,6 +131,9 @@ __host__ __device__ inline bool warp_fill_for(const encoding::detail::InstanceVi
 [[nodiscard]] u64 count_shared_required(u32 virtual_nodes, u32 lanes);
 [[nodiscard]] u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp_fill, bool relation_major, bool index64);
 
+/// The clear the counting starts with: the flags, and the scanned totals unless the launch is live. A caller that sets
+/// the input flag before the count (the axiom evaluation) enqueues it first and sets LaunchShape::cleared.
+cudaError_t launch_clear(const LaunchShape& shape, cudaStream_t stream);
 /// Enqueues the encoding on `stream`: a clear of the flags (and cell row), the count kernel, the scan and the fill kernel.
 cudaError_t launch_encode(const EncodeParams& params, const LaunchShape& shape, cudaStream_t stream);
 /// The first half of the encoding: the clear, the count kernel and the scan, then a one-block kernel that writes the true

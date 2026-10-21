@@ -99,6 +99,10 @@ FlatOptions normalized(const FlatOptions& options)
     {
         if (out.horizon.parent_relation)
             invalid("parent_relation needs a horizon mode");
+        if (out.horizon.sibling_relation)
+            invalid("sibling_relation needs a horizon mode");
+        if (out.horizon.cousin_relation)
+            invalid("cousin_relation needs a horizon mode");
         if (out.horizon.root != RootPolicy::Include)
             invalid("root_policy '" + std::string(to_string(out.horizon.root)) + "' needs a horizon mode");
     }

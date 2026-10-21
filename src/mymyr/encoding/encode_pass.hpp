@@ -4,9 +4,11 @@
 // the state of one pool member, the scratch of a call, and the loop of the fill pass over a member's graphs in either
 // layout. Not part of the interface.
 
+#include "mymyr/encoding/detail/horizon.hpp"
 #include "mymyr/encoding/encoder.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -20,6 +22,16 @@ inline constexpr usize k_cache_line = 64;
 // strided writes (G entries apart) fill whole cache lines.
 inline constexpr u64 k_scan_tile = 128;
 inline constexpr u64 k_none = std::numeric_limits<u64>::max();
+
+/// The kin scratch of the graphs of a member's slice (horizon relations _sibling_ and _cousin_): per graph, the words
+/// of horizon_kin_words followed by its far lists, from the count to the fill. Made when the schema needs it, behind a
+/// pointer so that the members of the other schemas stay small.
+struct KinStore
+{
+    std::vector<u32> words;
+    std::vector<u64> at;    // [slice graphs] where the words of each graph start
+    u64 overflow = k_none;  // the first graph with more far list entries or tuples than 32 bits count
+};
 
 /// The state of one pool member: it counts a contiguous slice of the graphs and later fills the same slice, so that the
 /// per-graph data of the slice stays with the member. Aligned so that members never share a cache line.
@@ -48,6 +60,7 @@ struct alignas(k_cache_line) Member
     // pass two
     std::vector<u64> run_tuples, run_args;  // [R] the running positions
     std::vector<u32> tile_counts;           // [R, k_scan_tile] the counts of the tile being scanned
+    std::unique_ptr<KinStore> kin;          // horizon: the kinship of the slice's graphs, made when the schema needs it
 };
 }  // namespace detail
 

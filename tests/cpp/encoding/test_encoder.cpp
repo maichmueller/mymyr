@@ -638,8 +638,8 @@ test::Rows first_successor_chain(const rl::TaskTable& table, u64 length)
 
 TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
 {
-    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 14883951552709315966ull},
-                                                               {"philosophers__p03-phil4", 12253892925669182561ull}};
+    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 9666753341531803529ull},
+                                                               {"philosophers__p03-phil4", 8295029642410720015ull}};
     for (const auto& [name, digest] : expected)
     {
         const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/" + name + ".txt");

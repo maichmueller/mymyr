@@ -228,6 +228,47 @@ struct Strata
 cudaError_t launch_axioms(const rl::dev::TaskView& t, Parents p, Views v, Derived d, bool fc, const Strata& strata,
                           cudaStream_t s);
 
+/// One instance of a task table for the encoder's axiom evaluation (launch_encoding_axioms), in device memory.
+struct EncodingAxiomInstance
+{
+    rl::dev::TaskView view;      // the instance's uploaded task (device pointers)
+    const u64* reads = nullptr;  // Derived::reads of its axioms (device; null: every axiom in every round)
+    u32 modes = 0;   // bit m: its graphs read derived atoms under mode m (0: the instance's goal, 1: row goals,
+                     // 2: row goals with derived literals; 3 to 5: the same with subgoal layers over derived slots)
+    u32 refused = 0;  // nonzero: its axioms are beyond the device's matchers (a row of it that reads them is invalid)
+};
+/// The derived words of a batch of table rows, into the encoder's scratch: row i's closure at derived + i * derived_words
+/// (logical rows: row i reads source row (*row_start + i) mod row_capacity of a circular view), its view at
+/// views + i * view_words. One launch per object-bitset width class (class_ow[k], forward checking class_fc[k], which
+/// needs ow <= k_max_fc_ow), each over every row: the rows of its class's instances close with their instance's axioms,
+/// matchers and skipping data stratum by stratum, as launch_axioms does (the workers of a row split the bodies of flat
+/// strata; few rows get more workers each). Rows of instances that
+/// read no derived atoms under `mode` are skipped; rows of refused instances set *invalid (the first launch). Rows
+/// narrower than their instance get zero derived words (the encoder flags them).
+struct EncodingAxioms
+{
+    const EncodingAxiomInstance* instances = nullptr;  // [count] (device)
+    u32 count = 0;
+    const u64* states = nullptr;
+    u64 stride = 0;
+    u32 words = 0;
+    u64 rows = 0;
+    const i32* task_ids = nullptr;  // [rows] (device; null: instance 0)
+    u32 mode = 0;
+    u64* views = nullptr;
+    u64 view_words = 0;
+    u64* derived = nullptr;
+    u32 derived_words = 0;
+    u32* invalid = nullptr;
+    const u64* live = nullptr;  // the live rows (device; null: rows)
+    const u64* row_start = nullptr;
+    u64 row_capacity = 0;
+    const u32* class_ow = nullptr;  // [launches] (host)
+    const u8* class_fc = nullptr;   // [launches] (host; null: none)
+    u32 launches = 0;
+};
+cudaError_t launch_encoding_axioms(const EncodingAxioms& axioms, cudaStream_t stream);
+
 /// launch_goal_rows with the rows' derived bitsets ([n, derived_words], for goals with derived literals).
 cudaError_t launch_goal_rows_derived(const rl::dev::TaskView& t, const u64* states, u32 words, u64 n, const u64* derived,
                                      u32 derived_words, u8* out, cudaStream_t s);

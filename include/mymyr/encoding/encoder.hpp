@@ -37,8 +37,9 @@
 //   history_entity       I   [S]       the entity of each history step, graph after graph in step order
 //   history_dt           i32 [S]       the dt of each history step
 // and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0:
-// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
-// tuples are repeated in every graph).
+// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern), table_fingerprint (the
+// table's, rl::TaskTable::fingerprint, as an i64 bit pattern: the task ids of batches with equal ones name the same
+// instances) and statics (0: the static tuples are repeated in every graph).
 //
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
@@ -188,6 +189,8 @@ public:
     [[nodiscard]] const std::shared_ptr<const EncodingSchema>& schema_ptr() const noexcept { return m_schema; }
     [[nodiscard]] const EncodingContext& context() const noexcept { return *m_context; }
     [[nodiscard]] const std::shared_ptr<const EncodingContext>& context_ptr() const noexcept { return m_context; }
+    /// rl::TaskTable::fingerprint of the table, the batches' table_fingerprint.
+    [[nodiscard]] u64 table_fingerprint() const noexcept { return m_table_fingerprint; }
 
     /// Encodes the rows on the calling thread into a new bundle. Const and reentrant. Throws std::invalid_argument for
     /// invalid input (a task id out of range, a row narrower than its instance, a state or goal bit its instance does
@@ -252,6 +255,7 @@ private:
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;
+    u64 m_table_fingerprint = 0;  // rl::TaskTable::fingerprint of the table
 };
 
 namespace detail

@@ -144,9 +144,15 @@ Encodings
   entity ids in mymyr and in the reference's backend order there; nullary atoms are unary tuples over one auxiliary
   entity in mymyr, which the reference lacks. `encoding_parity.REGISTRY` lists each such difference with its reason,
   its scope and the fixture cases that need it; a difference outside the registry fails.
-- Horizons (`FlatHorizonEncoder`, configs C7A to C7D, C7G to C7K, C7S, C7T; the rooted variants with sibling and cousin
-  relations are not compared): the fixtures' dags become one graph each, the nodes in the dag's order and the edges in
-  its order, one action and one `_parent_` tuple per edge. The reference names the root that a root policy excludes
+- Horizons (`FlatHorizonEncoder`, configs C7A to C7D, C7G to C7K, C7S, C7T; `FlatRootedHorizonEncoder`, C7E and C7F
+  with the sibling and cousin relations): the fixtures' dags become one graph each, the nodes in the dag's order and the
+  edges in its order, one action and one `_parent_` tuple per edge.
+- Transitions (`FlatTransitionEncoder`, `FlatTransitionEffectsEncoder`, configs C8A and C8B): the reference encodes a
+  state and one successor; mymyr encodes a state with all its successors in one graph. The test cuts the native graph down to
+  the state and the recorded successor (the registry's `unrecorded_successors`; the cut also drops the auxiliary entity
+  when no tuple is left over it); everything else is compared as for the horizon configs. The configs have no action
+  relations, so the action and `_parent_` tuples of a transition graph are checked only natively (the transition
+  encoders equal the horizon encoder on the depth-one view). The reference names the root that a root policy excludes
   `_root_state_`, an entity that none of its tuples mentions; mymyr has no entity for it. Nullary relations are tuples of a
   node's state entity and the auxiliary entity in mymyr and empty in the reference. The reference lists delta relations
   of static predicates, always empty; mymyr has none. The reference evaluates the goal at the nodes below the root

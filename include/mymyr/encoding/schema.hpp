@@ -71,6 +71,8 @@ enum class Lane : u8
     History,          // literals of earlier steps
     Action,           // the ground actions of one action schema
     Parent,           // the parent relation of a horizon
+    Sibling,          // the sibling relation of a horizon
+    Cousin,           // the cousin relation of a horizon
 };
 
 [[nodiscard]] std::string_view to_string(Lane lane) noexcept;

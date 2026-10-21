@@ -99,8 +99,8 @@ second parse of the same file), and refused with a `ValueError` naming the row a
   and `sizes['index_overflow']` tell which, and `sizes['entities']`, `['tuples']`, `['args']`, `['targets']` and
   (with history) `['history']` are the true sizes.
 
-`FlatRelationEncoder` takes no horizon options (`horizon_mode`, `root_policy`, `parent_relation`: `TypeError`); the
-[horizon encoder](#horizons) encodes them. Numeric tasks raise `ValueError`.
+`FlatRelationEncoder` takes no horizon options (`horizon_mode`, `root_policy`, `parent_relation`, `sibling_relation`,
+`cousin_relation`: `TypeError`); the [horizon encoder](#horizons) encodes them. Numeric tasks raise `ValueError`.
 Every other invalid input (a task id out of range, a missing `task_ids`, a `State` of another task, a malformed
 `derived` array) raises `ValueError` too; a batch that needs more indices than the index type holds raises
 `OverflowError` (`index_dtype='int64'` lifts the limit).
@@ -237,9 +237,10 @@ auxiliary entity. Actions are not virtual-node predicates.
 the root and the nodes below it (states reached from the root by actions) as state entities, so that a model sees a
 root and its candidate successors in one graph. It has the options of `FlatRelationEncoder` except `history` (a horizon
 has none), with `horizon_mode` required (`'full'`, `'delta'` or `'action'`; `None` raises `ValueError`, there is no
-horizon without a mode) and `root_policy` and `parent_relation` new. It shares the batch format,
+horizon without a mode) and `root_policy`, `parent_relation`, `sibling_relation` and `cousin_relation` new. It shares the batch format,
 `schema`, `table`, `entity_names`, `describe` and pickling of the flat encoder, and a `FlatBatch` of a horizon encoder
-has `batch.schema.options['horizon_mode']` set. `EncodingSchema` takes the same three options.
+has `batch.schema.options['horizon_mode']` set. `EncodingSchema` takes the same five options (`horizon_mode=None` there is no horizon; `FlatHorizonEncoder` with
+`horizon_mode=None` raises `ValueError`, as a horizon encoder has no such mode).
 `encoder.encode(view, *, derived=None, goals=None, subgoals=None, framework=None, threads=1, pool=None,
 capacities=None)` returns a `FlatBatch` of `G` graphs, one per root.
 
@@ -329,6 +330,117 @@ batch = horizon.encode(view)
 assert horizon.entity_names(batch, 0)[-n - 1:] == [f"target:{k}" for k in range(n + 1)]
 ```
 
+### Building horizons
+
+`encoding.horizon(table_or_task, roots, depth=1, *, task_ids=None, max_nodes=None, truncate=False, merge=True, threads=1,
+pool=None)` builds the `HorizonView` of states by expanding them in C++ (`rl.expand`), so you need not write the loop
+of the example above. `roots` are states (`State`s or an array `[N, W]`); graph `g` is the horizon of `roots[g]`, an
+instance `task_ids[g]` of the table. `encoding.horizon_of_space(space, roots=None, depth=1, *, max_nodes=None,
+truncate=False, merge=True)` does the same over a `datasets.StateSpace` generated with its transition labels
+(`roots`: state ids, `None` for every state): the nodes and edges follow the space's recorded transitions, and
+`FlatHorizonEncoder(space.task, ...)` encodes the view.
+
+- **Order.** A graph is built breadth first. The root is node 0; then, level by level, the successors of the nodes of the
+  level before, in node order, each node's successors in the canonical order of `rl.expand` (by action schema, then by
+  objects). The nodes of the last level (`depth`) are not expanded; `depth=0` gives root-only graphs. Edge `e` of a
+  graph goes from a node to one of its successors: one edge per (node, successor row), so two actions that lead to the
+  same state are two edges. The edges are ordered by destination node, then by action schema, then by objects; edges
+  that agree keep the order of their source nodes and of `rl.expand`. In a tree (`merge=False`) that is the order the
+  nodes are numbered in.
+- **Dedupe.** With `merge=True` a state is one node per graph: the first time it is reached it gets the next node
+  number, and every later successor row with the same state words is an edge to that node. A state with several
+  predecessors is one node with several incoming edges, a cycle is an edge to an earlier node, and a successor equal to
+  its state is a self-loop. Graphs do not share nodes. With `merge=False` every successor row is a node of its own and
+  the graph is a tree (the horizon of the example above).
+- **Determinism.** The view does not depend on `threads`, on `pool` or on the process: expansion is deterministic and
+  merging and numbering follow the fixed order above. `threads=0` uses one per hardware thread; `pool` is a
+  `mymyr.rl.ThreadPool`.
+- **Memory.** All the graphs of a call are built at once and held in memory. While they are built every node takes
+  `8 * W + 8` bytes (`W` state words, its graph and number) and, when merging, `8` more for its hash and `8` to `16` for
+  the hash table; every edge takes `4 * (4 + L)` bytes (`L` action label columns). The view (`8 * W * nodes + 4 * (3 + L) *
+  edges` bytes) is then written from them, so the peak is about the sum of the two; expansion runs in chunks of 4096
+  states, so nothing else grows with the number of nodes. The nodes of a graph are the states within `depth` actions of
+  its root, which grows exponentially with `depth`, so bound it: `max_nodes` is the most nodes of a graph (the root
+  included; `None` is unbounded). A graph that would have more raises `ValueError` ("mymyr: encoding: graph 3 of the horizon would have
+  more than `max_nodes = 100` nodes"), or, with `truncate=True`, stops growing: a successor that is not yet a node is left
+  out together with its edge (successors that are nodes already still get their edges), and `view.truncated[g]` is 1.
+  A result of more than 2^31 - 1 nodes or edges raises `ValueError`.
+
+### Rooted horizons
+
+`FlatRootedHorizonEncoder(table_or_task, *, horizon_mode='full', root_policy='encode_only', parent_relation=True,
+sibling_relation=False, cousin_relation=False, <options>)` is a `FlatHorizonEncoder` (same `encode`, same view) with the
+defaults of a graph seen from its root: the root is the state entity `target:0`, encoded but not a target candidate,
+and `_parent_` holds the edges. `FlatHorizonEncoder` takes `sibling_relation` and `cousin_relation` too, as does
+`EncodingSchema`; each needs a horizon mode.
+
+The relations `_sibling_` and `_cousin_` (slot roles `state`, `state`) relate the nodes of a graph through its `_parent_`
+edges, as sets over the merged nodes. The parents of a node `x` are the sources of the `_parent_` edges into `x`: parallel
+edges count once, every distinct parent counts, a self-loop does not (a node is never its own parent), and under
+`root_policy='exclude'` the root has no entity, so its edges are no parent edges: it is nobody's parent and nobody's child.
+
+- `_sibling_(i, j)` holds iff `i != j` and `i` and `j` have a parent in common.
+- `_cousin_(i, j)` holds iff `i != j` and some parent `p` of `i` and some parent `q` of `j` are different siblings
+  (`p != q`, `_sibling_(p, q)`).
+
+Both relations list each pair in both orders, in ascending `(i, j)` order of the nodes' indices. A tree has the usual
+meaning: siblings share a parent, cousins have parents that are siblings; edges that give a node a second parent make
+more siblings and cousins (a node is related through each of its parents). The pair lists grow with the square of a
+node's parents' fan-out: a dense dag (a wide horizon of a task with many applicable actions) can give `_sibling_` and
+`_cousin_` far more tuples than it has edges, and the encoding time grows with them. An example, the dag with the
+edges `0->1, 0->2, 0->1 (again), 1->3, 2->3, 1->4, 2->5, 3->6, 4->0`:
+
+| | parents | children |
+|---|---|---|
+| 0 | 4 | 1, 2 |
+| 1 | 0 | 3, 4 |
+| 2 | 0 | 3, 5 |
+| 3 | 1, 2 | 6 |
+| 4 | 1 | 0 |
+| 5 | 2 | |
+| 6 | 3 | |
+
+`_sibling_` is `(1,2) (2,1) (3,4) (3,5) (4,3) (5,3)`: 1 and 2 share the parent 0; 3 has the parents 1 and 2, so it is a
+sibling of 1's other child 4 and of 2's other child 5, and 4 and 5 (parents 1 and 2) are not siblings. `_cousin_` is
+`(0,6) (3,4) (3,5) (4,3) (4,5) (5,3) (5,4) (6,0)`: the siblings 1 and 2 make a child of 1 and a different child of 2
+cousins (children of 1: 3 and 4; of 2: 3 and 5; so `(3,5)`, `(4,3)`, `(4,5)` and their reverses), and the siblings 3 and
+4 make their children 6 and 0 cousins; 5 has no children. With `root_policy='exclude'` the edges `0->1`, `0->2` and `4->0`
+are not parent edges: `_sibling_` is `(3,4) (3,5) (4,3) (5,3)` and `_cousin_` is empty. A self-loop does not make
+relatives: with the edge `4->4` added, nothing above changes.
+
+### Transitions
+
+`FlatTransitionEncoder(table_or_task, *, root_policy='exclude', parent_relation=False, <options>)` and
+`FlatTransitionEffectsEncoder(...)` encode the **transitions** of states: the graph of a state is its horizon of depth
+one, with one node per successor (no merging: a successor that equals its state is a node of its own) and one edge per
+successor, in the order of `rl.expand`. `FlatTransitionEncoder` is the `full` mode, each successor with its facts;
+`FlatTransitionEffectsEncoder` the `delta` mode, each successor with what it adds to and deletes from its state (a
+self-loop, or any transition that changes nothing, has no tuples). By default the state is not encoded as an entity
+(`root_policy='exclude'`: its facts are the plain relations). The goal and action options are those of the horizon
+encoder; the horizon mode is fixed.
+
+`encoder.encode(states, task_ids=None, *, derived=None, goals=None, actions=None, subgoals=None, framework=None,
+threads=1, pool=None, capacities=None)` takes the parent states: the expansion is made here (on the pool), or given as
+`actions=` (the `rl.expand` of the same states; `derived` then needs an expansion made with `derived=True`). The batch
+equals what `FlatHorizonEncoder` with the same options (`horizon_mode='full'` or `'delta'`) encodes of
+`encoding.horizon(table, states, depth=1, merge=False)`, bit for bit. Streams and the device do not encode
+transitions.
+
+```python
+roots = np.ascontiguousarray(task.encode([task.initial_state]))
+view = encoding.horizon(task, roots, depth=2, max_nodes=10_000)        # merged by state, bounded
+assert view.truncated[0] == 0 and view.node_offsets[-1] == len(view.nodes)
+
+rooted = encoding.FlatRootedHorizonEncoder(task, sibling_relation=True, cousin_relation=True)
+rooted_batch = rooted.encode(view)
+assert {"_parent_", "_sibling_", "_cousin_"} <= set(rooted.describe(rooted_batch, 0).relations)
+
+transitions = encoding.FlatTransitionEncoder(task)
+tree = encoding.horizon(task, roots, depth=1, merge=False)
+same = encoding.FlatHorizonEncoder(task, horizon_mode="full", root_policy="exclude").encode(tree)
+assert np.array_equal(transitions.encode([task.initial_state]).relation_args, same.relation_args)
+```
+
 ## The batch
 
 For `G` graphs and `R = schema.num_relations` relations, with `I` the index type (`int32` by default, `int64` with
@@ -355,8 +467,9 @@ For `G` graphs and `R = schema.num_relations` relations, with `I` the index type
 
 The scalars `version`, `num_graphs`, `num_relations`, `layout` (0: graph, 1: relation), `index_dtype` (0: int32,
 1: int64),
-`schema_fingerprint` (the schema's fingerprint as a signed 64-bit value) and `statics` (0: the static tuples are
-repeated in every graph) come with `batch.as_dict()`.
+`schema_fingerprint` (the schema's fingerprint as a signed 64-bit value), `table_fingerprint` (the table's
+`TaskTable.fingerprint`, likewise: the task ids of two batches name the same instances iff the values agree) and
+`statics` (0: the static tuples are repeated in every graph) come with `batch.as_dict()`.
 
 The tuples of a cell are the atoms of its predicate in the lexicographic order of their objects, so the atom slot
 layout of a task (`atoms='auto'`, `'reachable'`, `'dense'`) never reaches a model. A static tuple appears once per
@@ -518,8 +631,14 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   (`[N, D]`, for instance `rl.expand(table, rows, derived=True).succ` and `.derived` moved to the device), `goals` the
   goal masks `(goal_pos, goal_neg)` or `(goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)` with `N` rows or a
   single shared row. All of them are on one device or all on the host; a call mixing the two raises `ValueError`.
-  The derived words must be given when a graph reads derived atoms (a schema with derived relations, derived goal
-  literals or subgoal layers over derived atoms): the device does not evaluate derived atoms.
+  Supplied derived words take precedence. When they are absent and a graph reads derived atoms, the device axiom
+  evaluator runs on the encoder stream into its scratch, one launch per object-bitset width over all rows of the batch.
+  Subgoal layers with derived masks read the derived atoms of the instances whose layers can name them, under every goal
+  mode. Tasks with no required derived atoms keep the ordinary encoder launches and scratch size. An instance whose
+  axioms exceed the device limits (a body beyond the matcher limits, an object bitset wider than the device evaluates)
+  needs supplied words for its own rows only: a batch with such rows and no derived words sets `invalid_input`, and a
+  batch without `task_ids` (all rows of instance 0) whose instance 0 exceeds the limits raises `ValueError`. Rows of the
+  other instances encode as usual.
 - **Subgoal layers and history.** `subgoals=` and `history=` take CUDA tensors of the forms of the host call (the
   masks `[N, L, W]` of 64-bit words, `[1, L, W]` for subgoal layers that every row shares, `dt` `int32` `[N, H]` and the
   valid step `count` `int32` `[N]`, with the derived masks last), and the device encodes the subgoal levels, the history
@@ -612,7 +731,8 @@ The names are a function of the batch and the task: they do not depend on the la
 
 ## Pickling
 
-A `FlatRelationEncoder` pickles as its table (or task), its options and the fingerprint of its schema, so an encoder
+A `FlatRelationEncoder` (or any other flat encoder: the horizon, rooted horizon and transition encoders) pickles as
+its class, its table (or task), its options and the fingerprint of its schema, so an encoder
 can go to worker processes with `multiprocessing` or `torch.multiprocessing`. Loading rebuilds the encoder from the
 table and the options and compares the schema fingerprint with the pickled one: an encoder that would encode otherwise
 (one that a different mymyr version builds with another schema, say) raises `ValueError` instead of producing batches that differ from the
@@ -646,8 +766,8 @@ relations. An encoder has the same properties.
   `max_goal_level >= 1`; action targets without `include_actions`; goal or subgoal targets without the `plain` goal
   derivation (only the plain goal relations carry the target slot); added derivations without the delta horizon mode;
   targets together with a horizon mode; history targets or `history_max_steps` without `history`; a `history_max_steps` of 0; `history` together with a
-  horizon mode; the action horizon mode without `include_actions`; `parent_relation` or a
-  `root_policy` other than `include` without a horizon mode.
+  horizon mode; the action horizon mode without `include_actions`; `parent_relation`, `sibling_relation`,
+  `cousin_relation` or a `root_policy` other than `include` without a horizon mode.
 - **Fingerprint.** `schema_fingerprint` hashes the catalog (names, lanes, arities, slot roles) and the options that
   shape the output but not the catalog (target sources, layout, index type, history and `history_max_steps`, horizon
   mode and root policy), and which arrays are omitted: `relation_counts` (`emit_counts=False`) and `entity_role` /
@@ -655,6 +775,13 @@ relations. An encoder has the same properties.
   for. It does not depend on declaration order, on predicate ids, on the process or on the build.
 
 ## C++
+
+`mymyr/encoding/horizon_graphs.hpp` builds horizons: `build_horizon_graphs(table, roots, task_ids, HorizonBuild{depth,
+max_nodes, truncate, merge}[, pool, scratch])` (and an overload over a `SuccessorGraph`, the transitions of a state
+space) returns `HorizonGraphs`, the arrays of a view with `input()` the `HorizonInput`; `transition_graphs(table,
+parents, task_ids, expansion)` makes the depth-one graphs of an existing expansion. The kinship of `_sibling_` and
+`_cousin_` is built per graph from the canonical parent edges by `MYMYR_HD` functions over scratch words
+(`mymyr/encoding/detail/horizon.hpp`: `horizon_kin_words`, `horizon_kin_prepare`, `horizon_kin_fill_far`).
 
 `mymyr/encoding/encoder.hpp`, linked with `mymyr::encoding`: `FlatEncoder::create(table_or_task, options)` returns the
 encoder, and `encode(EncodeInput{states, task_ids, derived, derived_stride, goal_pos, goal_neg, goal_stride, goal_words, ..., actions, subgoals, history})`
@@ -705,3 +832,59 @@ captured thread and warp fill launches.
 `scratch_bytes(acquisition, shape)` sizes scratch for that acquired generation. Its bounds, launch classes and derived
 word requirements remain attached to the acquisition across refreshes. A split count/fill uses the same acquisition,
 scratch address and shape in both calls; a refresh between them preserves that layout.
+
+### Device row streams and collation
+
+`encoder.device_stream(capacity, device=None, goals=False, derived=False, derived_goals=False)` creates a
+`DeviceFlatStream` bound to the current torch stream. Its ring stores table-width state words and int32 task ids,
+with optional derived words and positive/negative fluent and derived goal masks. Choose the optional columns at
+construction; every append supplies the same columns. Without a derived column, the encoder evaluates axioms when
+its schema needs them. The mutable stream stays host-only.
+
+```python needs-torch skip-if-no-cuda
+ring = encoder.device_stream(1024, device=0)
+ring.append(device_rows)
+batch = ring.flush(capacities=dict(graphs=1024, entities=32768, args=262144))
+```
+
+Append copies all rows or sets `ring.device_overflow` without changing the ring. The flag stays set until
+`ring.clear()`, and every flush while it is set reports `capacity_overflow` in its sizes with every per-graph array zero: a batch
+never silently lacks the rows of an append that did not fit. A device stream carries no subgoal layers or history
+steps: an encoder with `max_goal_level` above 0 or with `history` raises `ValueError`. The device status is int64 `[head, live_rows, overflow]`; `len(ring)` reads the live count and waits.
+Flush encodes the live rows once, advances the circular head and resets the tail, all on the ring's stream.
+`batch.device_graphs` gives its live graph count without a host read; `batch.num_graphs` reads that count and waits.
+Tensor properties have capacity shapes: every per-graph and per-cell entry past the live graphs is zero up to the graph
+capacity, and the variable entries past the sizes are left unwritten (the arrays are not cleared), so read them up to
+the sizes or the offsets. The count, scan and fill of a flush are bounded by its live rows; only zeroing the per-graph
+and per-cell tails spans the capacity. `as_dict()` exports
+the compact live batch and waits for its
+counts. Append and capacity flush can be captured. Construct the ring before capture and keep it, its inputs and
+returned batches alive through the final replay.
+
+`encoding.collate(batches)` concatenates host or CUDA batches in list order. Empty slices retain their schema; the
+list must contain at least one batch. The result equals one encode of all rows in the same order. Entity references
+stay local to their graph; entity ids and offsets receive the appropriate prefixes. Relation-major cells are
+interleaved by relation across the slices. Mixed schemas, tables (`table_fingerprint`), layouts, index types,
+static representations or devices raise `ValueError`; so does a device batch of an encoder with subgoal layers or
+history steps. Overflowed inputs are refused. Host collation allocates exact arrays; device collation accepts
+`capacities=` and reports overflow through `device_sizes`. All accumulated totals use uint64 before index checks.
+
+For repeated or captured device collation, prepare `encoding.DeviceCollator(batches)` outside capture and call
+`collator.encode(capacities=...)` on the same stream. It uploads the slice descriptors once; each encode runs count,
+scan and fill without a host loop over graphs. Keep the collator, source tensors and returned batches alive through
+all replays. A call without capacities waits once for exact output sizes. The collator fixes each batch's graph count
+when it is prepared: the graphs of a stream batch are those its `device_graphs` held then (reading them waits once),
+and later replays collate that many graphs of each batch. With capacities, the per-graph and per-cell entries past the
+collated graphs and the variable entries past the sizes are zero.
+
+The C++ forms are `cuda::DeviceRowStream(context, encoder, capacity, stream, goals, derived, derived_goals)` with
+`append`, `flush(DeviceOutput)`, `clear`, and `status()`; and `cuda::DeviceCollator(context, batch_views, stream)` with
+caller scratch sized by `scratch_bytes()`. `DeviceOutput::graphs` optionally receives a live graph count. Host
+`encoding::collate` is declared in `mymyr/encoding/collate.hpp` and takes a span of shared array bundles.
+
+`DeviceEncoder::scratch_bytes(encoder, shape)` also sizes caller scratch before constructing a device encoder.
+Derived evaluation storage is included in every scratch size query, with table-width derived rows and the largest
+instance view, unless the query passes `cuda::DerivedWords::Supplied`: that size holds the encodes that pass their
+derived words, and an encode that would evaluate them in such scratch is refused before any launch. The Python
+device encoder sizes its scratch that way when `derived=` is given. Split count/fill reuses the derived rows produced by count. Acquired generations retain their axiom
+tables and scratch requirements across refreshes.

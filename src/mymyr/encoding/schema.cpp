@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <tuple>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -298,6 +299,16 @@ void Catalog::build()
         parent.roles = {SlotRole::State, SlotRole::State};
         add(std::move(parent));
     }
+    for (const auto& [enabled, name, lane] : {std::tuple{o.horizon.sibling_relation, "_sibling_", Lane::Sibling},
+                                              std::tuple{o.horizon.cousin_relation, "_cousin_", Lane::Cousin}})
+        if (enabled)
+        {
+            Pending kin;
+            kin.relation.name = name;
+            kin.relation.lane = lane;
+            kin.roles = {SlotRole::State, SlotRole::State};
+            add(std::move(kin));
+        }
 }
 
 /// FNV-1a over a canonical byte stream: integers as 8 little-endian bytes, strings with their length in front.
@@ -368,6 +379,8 @@ std::string_view to_string(Lane lane) noexcept
     case Lane::History: return "history";
     case Lane::Action: return "action";
     case Lane::Parent: return "parent";
+    case Lane::Sibling: return "sibling";
+    case Lane::Cousin: return "cousin";
     }
     return "";
 }
