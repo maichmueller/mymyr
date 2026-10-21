@@ -367,6 +367,82 @@ TEST(EncoderNumeric, TuplesAndValuesAreThoseOfTheRowsInEveryConfiguration)
     }
 }
 
+TEST(EncoderNumeric, TuplesAndValuesWithSubgoalLayersAndHistory)
+{
+    // every row has one subgoal layer and one history step (both its own atoms), so the numeric cells sit in the
+    // cell lists of a graph with layers and history, and the history and subgoal entities and targets count only the
+    // cells of those lanes
+    u32 with_subgoals = 0;
+    for (const Table& t : tables())
+    {
+        const test::Rows rows = mixed_rows(*t.table, 6, 3);
+        const u64 n = rows.size();
+        const u32 words = rows.words;
+        const u32 width = t.table->row_words();
+        std::vector<u64> pos(n * words), neg(n * words, 0);
+        for (u64 g = 0; g < n; ++g)
+            for (u32 w = 0; w < words; ++w)
+                pos[g * words + w] = rows.data[g * width + w];
+        std::vector<i32> dt(n, -1), count(n, 1);
+        for (const bool targets : {false, true})
+            for (const Layout layout : k_layouts)
+                for (const IndexType index : k_indices)
+                {
+                    SCOPED_TRACE(t.name + " layout=" + std::string(to_string(layout)) +
+                                 (index == IndexType::I64 ? " int64" : " int32") + (targets ? " targets" : ""));
+                    FlatOptions options = options_with(layout, index, NumericDtype::F64);
+                    options.max_goal_level = 1;
+                    options.history = true;
+                    options.goal_derivations = {GoalDerivation::Plain, GoalDerivation::Satisfied};
+                    if (targets)
+                        options.targets = {TargetSource::Goal, TargetSource::Subgoal, TargetSource::History};
+                    const auto encoder = FlatEncoder::create(t.table, options);
+                    EncodeInput in = input_of(rows);
+                    const LayerInput layer{.pos = pos.data(), .neg = neg.data(), .stride = words, .layers = 1, .words = words};
+                    // a table whose goals have no atoms (only numeric conditions) has no subgoal relations
+                    if (encoder->schema().has_subgoals())
+                    {
+                        in.subgoals = layer;
+                        ++with_subgoals;
+                    }
+                    in.history.masks = layer;
+                    in.history.dt = dt.data();
+                    in.history.count = count.data();
+                    std::shared_ptr<const rl::ArrayBundle> batch;
+                    ASSERT_NO_THROW(batch = encoder->encode(in));
+                    EXPECT_NO_THROW(validate(*batch, encoder->schema()));
+                    expect_equal(decode(*batch, encoder->schema()), expected(*t.table, encoder->schema(), rows, *batch));
+                    EXPECT_EQ(batch->find("target_offsets") != nullptr, targets);
+                    // the numeric tuples add no goal, subgoal, history or target entity: per graph, the entities of
+                    // every role but the auxiliary one, the history steps and the targets of every group are those of
+                    // the encoding without the numeric lane
+                    options.include_numeric = false;
+                    const auto classical = FlatEncoder::create(t.table, options)->encode(in);
+                    EXPECT_EQ(ints(*batch, "history_offsets"), ints(*classical, "history_offsets"));
+                    auto per_graph = [](const rl::ArrayBundle& b, const char* offsets_name, const char* values_name,
+                                        i64 skip)
+                    {
+                        const auto offsets = ints(b, offsets_name);
+                        const auto values = ints(b, values_name);
+                        std::vector<std::map<i64, u64>> out(offsets.size() - 1);
+                        for (u64 g = 0; g + 1 < offsets.size(); ++g)
+                            for (i64 k = offsets[g]; k < offsets[g + 1]; ++k)
+                                if (values[static_cast<u64>(k)] != skip)
+                                    ++out[g][values[static_cast<u64>(k)]];
+                        return out;
+                    };
+                    EXPECT_EQ(per_graph(*batch, "entity_offsets", "entity_role", ed::k_role_auxiliary),
+                              per_graph(*classical, "entity_offsets", "entity_role", ed::k_role_auxiliary));
+                    if (targets)
+                    {
+                        EXPECT_EQ(per_graph(*batch, "target_offsets", "target_group", -1),
+                                  per_graph(*classical, "target_offsets", "target_group", -1));
+                    }
+                }
+    }
+    EXPECT_GT(with_subgoals, 0u);
+}
+
 TEST(EncoderNumeric, ValuesFollowTheStateAlongAWalk)
 {
     // the values change from row to row and instances differ in their slots: not every row has the same values
