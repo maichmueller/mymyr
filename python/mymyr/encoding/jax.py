@@ -75,7 +75,6 @@ class _Registration:
 _lock = threading.Lock()
 _handles: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
 _registrations: dict[int, _Registration] = {}
-_schemas: dict[int, Any] = {}  # kept after unregister: batches name their schema by handle
 
 
 def register(encoder: Any) -> int:
@@ -91,7 +90,6 @@ def register(encoder: Any) -> int:
         except BaseException:
             _encoding_jax.unregister(handle)
             raise
-        _schemas[handle] = _registrations[handle].schema
         _handles[encoder] = handle
         return handle
 
@@ -137,6 +135,23 @@ def _signed(fingerprint: int) -> int:
     return fingerprint - (1 << 64) if fingerprint >= 1 << 63 else fingerprint
 
 
+class _SchemaRef:
+    """The schema of a batch, held by the batch's pytree structure (so a batch outlives the unregistration of its
+    encoder). Two references are equal when they name the same registration, as pytree structures compare."""
+
+    __slots__ = ("handle", "schema")
+
+    def __init__(self, schema: Any, handle: int):
+        self.schema = schema
+        self.handle = handle
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _SchemaRef) and self.handle == other.handle
+
+    def __hash__(self) -> int:
+        return hash(self.handle)
+
+
 @jax.tree_util.register_pytree_node_class
 class JaxFlatBatch:
     """The graphs of a batch of states as JAX arrays: what a ``FlatBatch`` is, with the same array names, shapes and
@@ -147,7 +162,7 @@ class JaxFlatBatch:
 
     __slots__ = ("_arrays", "_sizes", "_static")
 
-    # (names of the stored arrays, num_relations, layout, index_dtype, schema fingerprint, implicit entities, handle,
+    # (names of the stored arrays, num_relations, layout, index_dtype, schema fingerprint, implicit entities, schema,
     # table fingerprint)
     def __init__(self, arrays: dict[str, Any], sizes: Optional[Any], static: tuple):
         self._arrays = arrays
@@ -176,7 +191,7 @@ class JaxFlatBatch:
     @property
     def schema(self) -> Any:
         """The EncodingSchema the batch was encoded for."""
-        return _schemas[self._static[6]]
+        return self._static[6].schema
 
     @property
     def implicit_entities(self) -> bool:
@@ -469,7 +484,7 @@ def encode(
         1 if reg.options["index_dtype"] == "int64" else 0,
         _signed(reg.fingerprint),
         bool(not reg.layout.entity_arrays),
-        handle,
+        _SchemaRef(reg.schema, handle),
         _signed(reg.table_fingerprint),
     )
     if capacities is not None:

@@ -656,6 +656,24 @@ def test_the_flags_of_a_call_at_held_capacities_are_checked(cases):
     ids[3] = 7
     with pytest.raises(ValueError, match=r"^mymyr: encoding: a row is invalid"):
         ej.encode(handle, rows, put(ids, "cpu"))
+
+
+def test_a_batch_keeps_its_schema_after_the_encoder_is_unregistered(cases):
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source)
+    caps = exact_capacities(host_encode(encoder, case))
+    handle = ej.register(encoder)
+    batch = ej.encode(handle, put(halves(case.rows), "cpu"), capacities=caps)
+    schema = batch.schema
+    ej.unregister(handle)
+    del encoder
+    gc.collect()
+    assert batch.schema is schema  # held by the batch
+    del batch
+    jax.clear_caches()
+    gc.collect()
+    probe = object()
+    assert sys.getrefcount(schema) == sys.getrefcount(probe)  # and by nothing else
 def test_an_encoder_whose_device_cannot_synchronize_keeps_its_generation(cases):
     """Destroying the last reference of an encoder waits for the device. CUDA refuses that wait while another thread
     captures a CUDA graph; the generation is then kept (not freed under work that may still read it) and counted."""
