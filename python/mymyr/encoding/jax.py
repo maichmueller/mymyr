@@ -104,7 +104,9 @@ def registered(encoder: Any) -> Optional[int]:
 def unregister(encoder: Any) -> None:
     """Drops the registry's reference to an encoder (or to the encoder of a handle). Functions traced afterwards register
     it again; executables already compiled keep the encoder until they are destroyed (``jax.clear_caches()`` and
-    dropping the jitted functions frees them)."""
+    dropping the jitted functions frees them). A function that is being traced or compiled while its encoder is
+    unregistered fails with ``no encoder is registered`` (an executable looks its encoder up when it is created), so
+    unregister an encoder only once the functions that use it are compiled or no longer needed."""
     with _lock:
         if isinstance(encoder, int) and not isinstance(encoder, bool):
             handle: Optional[int] = encoder
