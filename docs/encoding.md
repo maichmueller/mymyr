@@ -6,10 +6,11 @@ numeric tasks, of its numeric function terms with their values). It runs in C++,
 needs no model framework. The result is a batch of flat arrays that every framework imports without a copy. Options
 follow the [API conventions](conventions.md).
 
-A graph holds only what its state and its instance have: an entity per object of the instance, a tuple per atom, and
-the auxiliary entity, a predicate's virtual node, a goal, action or history entity only when a tuple of the graph uses
-it. No entity or tuple stands for something absent, and no node is reserved for a catalog entry that the state does
-not fill, so the graphs of a small instance and of a large one differ only in how much they hold. A model that is
+A graph holds only what its state, its instance and the inputs of the call have: an entity per object of the instance,
+a tuple per atom, the auxiliary entity and a predicate's virtual node only when a tuple of the graph uses them, and a
+goal, action or history entity only for a goal literal, an action or a step that the graph has. No entity or tuple
+stands for something absent, and no node is reserved for a catalog entry that the state does not fill, so the graphs
+of a small instance and of a large one differ only in how much they hold. A model that is
 trained on the graphs of small instances reads those of larger ones of the same domain unchanged: the relation ids are
 a function of the domain and the options alone.
 
@@ -273,12 +274,13 @@ A relation's lane (`schema.relation_lanes`) says what fills its tuples:
 - the **nullary** atoms (`nullary=True`, the default): all nullary atoms of a graph share one auxiliary entity, and each
   one is the unary tuple over it. The graph has the auxiliary entity exactly when it has such a tuple. With
   `nullary=False` there are no nullary relations and no auxiliary entity. The nullary literals of goals, subgoal layers
-  and history steps are unary tuples over the auxiliary entity as well.
+  and history steps are tuples over the auxiliary entity as well.
 - **goal**, **goal_derivation** and **goal_satisfaction**: the [goal](#goals) and [subgoal](#subgoals) literals;
 - **action**: one tuple per action of the state ([Actions](#actions));
 - **history**: the literals of the row's [history](#history) steps;
 - **numeric**: one tuple per numeric slot of the instance ([Numeric functions](#numeric-functions));
-- in horizons, the lanes of the nodes' facts and edges ([Horizons and transitions](#horizons-and-transitions)).
+- **parent**, **sibling** and **cousin**: the edges of a horizon and the kinship of its nodes
+  ([Horizons and transitions](#horizons-and-transitions)).
 
 A call without `subgoals`, `history` or `actions` has no tuples in their relations.
 
@@ -453,6 +455,7 @@ the rows of one batch of states plus offsets and edges, as `rl.expand` produces 
 | `edge_schema` | int32 `[E]`: the action schema of an edge |
 | `edge_binding` | int32 `[E, L]`: the objects of an edge's ground action (`L` at least the table's `label_width`; only the schema's arity entries of a row are read) |
 | `task_ids` | int32 `[G]`: the instance of each graph (required for a table of several instances) |
+| `truncated` | uint8 `[G]`: set where `encoding.horizon` stopped a graph at `max_nodes`; `None` when not known |
 
 **The edges.** The graph is a dag: a node may have several parents, an edge may lead back to the root or to its own
 source, and the edges may come in any order and more than once. The **action tuples** of a relation are the distinct
@@ -651,8 +654,8 @@ whatever the batch holds.
   from 0 across the batch, graph after graph, in the order of the batch's tuples (`ptr` is a new array of `G + 1`
   entries). The `_symbol_` nodes are numbered by the batch's entity ids, so `ptr('_symbol_')` is `batch.entity_offsets`
   itself and an edge's entity needs no renumbering. Every entity is a `_symbol_` node: the objects, the auxiliary
-  entity and the goal, action, history and state entities. The node feature `view.entity_role` is the `entity_role` of
-  the batch (made from `num_objects` when the batch's entity arrays are implicit).
+  entity and the goal, subgoal, action, history and state entities. The node feature `view.entity_role` is the
+  `entity_role` of the batch (made from `num_objects` when the batch's entity arrays are implicit).
 - **Edge types**: there is one edge type `(relation, position, '_symbol_')` for every relation and position of its
   tuples (`view.edge_types`; the position is the slot's number as text, the slots of `relation_slot_roles`). Its edge
   `i` leads from tuple `i` of the relation to the entity at that position of the tuple. `view.reverse_edge_types` are
@@ -1088,8 +1091,8 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 The device (the torch path, the torch op, device streams and the CUDA target of `mymyr.encoding.jax`) encodes the rows
 of a `FlatRelationEncoder` with their task ids, goals, derived atoms (given, or evaluated on the device), subgoal
 layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, both layouts, both index
-types and the omitted arrays. Everything else raises `ValueError` with the `mymyr: encoding:` prefix, before any
-launch:
+types and the omitted arrays. What it does not encode raises `ValueError` with the `mymyr: encoding:` prefix (the
+schemas and calls below before any launch):
 
 - **Schemas:** an encoder with action targets, a horizon mode (the horizon, rooted horizon and transition encoders), the
   Simple output (`"the device does not encode Simple"`), shared statics (`statics='shared'`), or of a numeric table
@@ -1179,7 +1182,7 @@ and does not retain the Python encoder. Graphs of different sizes can share a ca
 
 ### Device row streams and collation
 
-`encoder.device_stream(capacity, device=None, goals=False, derived=False, derived_goals=False)` creates a
+`encoder.device_stream(capacity, *, device=None, goals=False, derived=False, derived_goals=False)` creates a
 `DeviceFlatStream` bound to the current torch stream. Its ring stores table-width state words and int32 task ids,
 with optional derived words and positive/negative fluent and derived goal masks. Choose the optional columns at
 construction; every append supplies the same columns. Without a derived column, the encoder evaluates axioms when
