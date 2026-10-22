@@ -137,6 +137,8 @@ struct GraphBounds
     u64 step_entities = 0, step_tuples = 0, step_args = 0, step_targets = 0;
     u32 levels = 0;
     bool history = false;
+    bool variable_inputs = false;  // expansion rows and horizon nodes have no per-graph schema bound
+    u32 schemas = 0;
 };
 
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
@@ -176,6 +178,11 @@ void clear_rows(u64* status, u64 capacity, cudaStream_t stream);
 void finish_rows(u64* status, u64 capacity, cudaStream_t stream);
 /// Throws std::invalid_argument for a schema whose rows a device ring does not carry: subgoal layers and history steps.
 void check_stream_schema(const encoding::EncodingSchema& schema);
+
+/// Builds depth-one horizons from parent and successor rows on the stream. Output storage follows DeviceHorizonBuild;
+/// children hold actions.capacity rows of child_stride words. No host wait; a bad expansion writes invalid offsets.
+void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
+                             const DeviceHorizonBuild& output, cudaStream_t stream);
 
 enum class FillMode : u8
 {
@@ -220,8 +227,8 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: action targets, numeric relations,
-    /// horizons (with the goal derivations that only a delta horizon has), the Simple graph and shared statics.
+    /// Throws std::invalid_argument for a schema the device does not encode: numeric relations,
+    /// the Simple graph and shared statics. Horizons accept only depth-one device views.
     static void check_schema(const encoding::EncodingSchema& schema);
     /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, a table with
     /// numeric state words, or a schema whose predicate virtual nodes or relations need more shared memory than a block

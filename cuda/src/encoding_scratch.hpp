@@ -24,6 +24,7 @@ struct ScratchLayout
     u64 cell_entries = 0, scan_length = 0;
     u64 scan_temp_bytes = 0, bytes = 0;
     u64 derived = 0, axiom_views = 0;
+    u64 action_storage = 0, action_stride = 0;
     u64 relations = 0;
     bool wide = false;
     bool relation_major = false;
@@ -48,6 +49,8 @@ struct ScratchView
     u64 cell_stride = 0;
     u64* level_storage = nullptr;  // [G, level_stride] words
     u64 level_stride = 0;
+    u32* action_storage = nullptr;
+    u64 action_stride = 0;
     void* scan_temp = nullptr;
     u64 scan_temp_bytes = 0;
     bool wide = false;
@@ -88,6 +91,7 @@ struct EncodingFacts
     std::shared_ptr<DeviceBuffer> axiom_block;
     std::array<std::vector<u32>, k_evaluation_modes> class_ow;
     std::array<std::vector<u8>, k_evaluation_modes> class_fc;
+    const i32* schema_relations = nullptr;
 };
 
 /// The scratch of a batch: scratch_layout(shape, facts.bounds, ...), followed, when an instance's graphs read derived

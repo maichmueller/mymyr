@@ -31,6 +31,42 @@ struct DeviceOutput
     /// and per-cell arrays past the live graphs of such an input are zero up to the graph capacity.
     u64* graphs = nullptr;
 };
+/// Device expansion labels. The offsets delimit one canonical (schema, binding) run per parent row; capacity bounds
+/// every label array, including unused capacity tails. Overflow is a device scalar (nonzero: expansion overflowed).
+struct DeviceActionInput
+{
+    const i32* offsets = nullptr;  // [graphs + 1]
+    const i32* schema = nullptr;   // [capacity]
+    const i32* binding = nullptr;  // [capacity, label_width]
+    const i32* parent = nullptr;   // optional [capacity]
+    u64 capacity = 0;
+    u32 label_width = 0;
+    const u64* overflow = nullptr;
+};
+
+/// A depth-one horizon in device memory. Every edge starts at node zero; deeper views are invalid input. Node and
+/// edge offsets start at zero and delimit disjoint graph slices. Scratch holds horizon_scratch_words() uint32 words,
+/// remains alive and unchanged between count and fill, and belongs to this call (including captured replays).
+struct DeviceHorizonInput
+{
+    const i32* node_offsets = nullptr;  // [graphs + 1], strictly ascending
+    const i32* edge_offsets = nullptr;  // [graphs + 1], nondecreasing
+    const i32* src = nullptr;
+    const i32* dst = nullptr;
+    const i32* schema = nullptr;
+    const i32* binding = nullptr;
+    u64 nodes = 0, edges = 0;           // capacities of the node rows and edge arrays
+    u32 label_width = 0;
+    u32* scratch = nullptr;
+    u64 scratch_words = 0;
+};
+
+/// Canonical edges and kinship storage for device depth-one horizons. Cousin lists are empty at this depth.
+MYMYR_HD constexpr u64 horizon_scratch_words(u64 graphs, u64 nodes, u64 edges)
+{
+    return 6 * graphs + 8 * nodes + 5 * edges;
+}
+
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
 struct DeviceEncodeInput
 {
@@ -58,6 +94,8 @@ struct DeviceEncodeInput
     // narrower than its instance or set a bit it does not have, is invalid.
     encoding::LayerInput subgoals{};
     encoding::HistoryInput history{};
+    DeviceActionInput actions{};
+    DeviceHorizonInput horizon{};
     /// Optional device count, bounded by `graphs`. A circular row view starts at *row_start modulo row_capacity.
     /// Counts and starts are read on the encoder's stream; derived inputs and goal masks use the same row order.
     /// An encode with any of them (or with DeviceOutput::graphs) is sized for `graphs` rows but costs what the live rows
@@ -88,4 +126,18 @@ struct DeviceCollationBatch
     bool history = false;
 };
 
+}
+
+namespace mymyr::cuda
+{
+/// Caller-owned output of a depth-one builder. Nodes hold graphs + action capacity rows, node_offsets graphs + 1,
+/// and source/destination action capacity entries. The edge labels and offsets remain those of the expansion.
+struct DeviceHorizonBuild
+{
+    u64* nodes = nullptr;
+    i32* node_offsets = nullptr;
+    i32* src = nullptr;
+    i32* dst = nullptr;
+    bool merge = true;
+};
 }

@@ -661,6 +661,16 @@ def encode_flat(
     args: int,
     targets: int,
     history: int,
+    action_schema: Optional[Tensor] = None,
+    action_binding: Optional[Tensor] = None,
+    action_offsets: Optional[Tensor] = None,
+    action_parent: Optional[Tensor] = None,
+    node_offsets: Optional[Tensor] = None,
+    edge_offsets: Optional[Tensor] = None,
+    edge_src: Optional[Tensor] = None,
+    edge_dst: Optional[Tensor] = None,
+    edge_schema: Optional[Tensor] = None,
+    edge_binding: Optional[Tensor] = None,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
@@ -688,8 +698,23 @@ def encode_flat(
     steps = _layer_tuple(
         "history", (history_pos, history_neg), (history_derived_pos, history_derived_neg), (history_dt, history_count)
     )
+    actions = None
+    if any(a is not None for a in (action_schema, action_binding, action_offsets, action_parent)):
+        if any(a is None for a in (action_schema, action_binding, action_offsets)):
+            raise ValueError("mymyr: encoding: actions need schema, binding and offsets")
+        from types import SimpleNamespace
+        actions = SimpleNamespace(schema=action_schema, binding=action_binding, offsets=action_offsets,
+                                  parent=action_parent)
+    horizon = None
+    if node_offsets is not None:
+        if steps is not None or actions is not None:
+            raise ValueError("mymyr: encoding: horizons take edge labels and no history or expansion rows")
+        from mymyr.encoding import HorizonView
+        horizon = HorizonView(states, node_offsets, edge_offsets, edge_src, edge_dst, edge_schema,
+                              edge_binding, task_ids)
     arrays = _device.encode_arrays(
-        enc, states, task_ids, derived, tuple(given) or None, caps, subgoals=subgoals, history=steps
+        enc, states, task_ids, derived, tuple(given) or None, caps, subgoals=subgoals, history=steps,
+        actions=actions, horizon=horizon
     )
     return [arrays[name] for name in _device.DeviceFlatBatch.array_names]
 
@@ -713,5 +738,9 @@ def _(
     encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, subgoal_pos, subgoal_neg,
     subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
     history_derived_pos, history_derived_neg, graphs, entities, args, targets, history,
+    action_schema=None, action_binding=None, action_offsets=None, action_parent=None,
+    node_offsets=None, edge_offsets=None, edge_src=None, edge_dst=None, edge_schema=None, edge_binding=None,
 ):  # fmt: skip
+    if node_offsets is not None:
+        states = states[:node_offsets.shape[0] - 1]
     return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history)

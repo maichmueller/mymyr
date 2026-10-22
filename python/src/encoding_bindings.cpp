@@ -193,7 +193,7 @@ struct type_caster<mymyr::python::ann::EncodingDeviceStream>
 template<>
 struct type_caster<mymyr::python::ann::EncodingActions>
 {
-    static constexpr auto Name = const_name("mymyr._core._rl.Expansion");
+    static constexpr auto Name = const_name("mymyr._core._rl.Expansion | mymyr._typing.DeviceActionRows | tuple[typing.Any, ...]");
 };
 template<>
 struct type_caster<mymyr::python::ann::HGraphEdgeType>
@@ -1447,7 +1447,7 @@ void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb
         import_subgoals(rows.imports, subgoals_arg, horizon.graphs, input);
 }
 
-PyFlatBatch encode_horizon(PyFlatHorizonEncoder& self, Arg<ann::EncodingHorizonView> view, DerivedArg derived_arg,
+Arg<ann::EncodingBatch> encode_horizon(PyFlatHorizonEncoder& self, Arg<ann::EncodingHorizonView> view, DerivedArg derived_arg,
                            GoalsArg goals_arg, SubgoalsArg subgoals_arg, Arg<ann::Framework> framework,
                            IntArg threads_in, PoolArg pool_in, CapacitiesArg capacities_in)
 {
@@ -1456,8 +1456,13 @@ PyFlatBatch encode_horizon(PyFlatHorizonEncoder& self, Arg<ann::EncodingHorizonV
         capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
                       : std::nullopt;
     ImportedRows rows;
+    if (on_device(nb::getattr(view, "nodes")))
+        return Arg<ann::EncodingBatch>(nb::module_::import_("mymyr.encoding._device_horizon")
+            .attr("encode_horizon")(nb::find(&self), view, derived_arg, goals_arg, subgoals_arg, framework,
+                                    threads_in, pool_in, capacities_in ? nb::object(*capacities_in) : nb::none()));
     import_horizon(rows, *self.encoder, view, derived_arg, goals_arg, subgoals_arg);
-    return run_encoding(self, rows, parse_framework(framework, nb::getattr(view, "nodes")), threads, pool_in, capacities);
+    return Arg<ann::EncodingBatch>(nb::cast(run_encoding(self, rows,
+        parse_framework(framework, nb::getattr(view, "nodes")), threads, pool_in, capacities)));
 }
 
 /// The expansion of the parent rows of a transition encoding, made here: the successors of every row with their labels
@@ -1501,11 +1506,16 @@ struct OwnExpansion
 };
 
 template<class Py>
-PyFlatBatch encode_transitions(Py& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
+Arg<ann::EncodingBatch> encode_transitions(Py& self, StatesLike state_arg, TaskIdsArg task_ids, DerivedArg derived_arg,
                                GoalsArg goals_arg, ActionsArg actions_arg, SubgoalsArg subgoals_arg,
                                Arg<ann::Framework> framework, IntArg threads_in, PoolArg pool_in,
                                CapacitiesArg capacities_in)
 {
+    if (on_device(state_arg))
+        return Arg<ann::EncodingBatch>(nb::module_::import_("mymyr.encoding._device_horizon")
+            .attr("encode_transitions")(nb::find(&self), state_arg, task_ids, derived_arg, goals_arg, actions_arg,
+                                        subgoals_arg, framework, threads_in, pool_in,
+                                        capacities_in ? nb::object(*capacities_in) : nb::none()));
     const u32 threads = threads_arg(threads_in);
     const std::optional<Capacities> capacities =
         capacities_in ? std::optional(capacities_of(*capacities_in, self.encoder->schema()))
@@ -1526,7 +1536,7 @@ PyFlatBatch encode_transitions(Py& self, StatesLike state_arg, TaskIdsArg task_i
 
     OwnExpansion own;
     encoding::HorizonGraphs graphs;
-    return run_encoding(
+    return Arg<ann::EncodingBatch>(nb::cast(run_encoding(
         self, rows, parse_framework(framework, state_arg), threads, pool_in, capacities,
         [&](ThreadPool& pool)
         {
@@ -1539,7 +1549,7 @@ PyFlatBatch encode_transitions(Py& self, StatesLike state_arg, TaskIdsArg task_i
             input.horizon = graphs.input();
             input.derived = graphs.derived.empty() ? nullptr : graphs.derived.data();
             input.derived_stride = graphs.derived_words;
-        });
+        })));
 }
 
 constexpr std::pair<const char*, const char*> k_batch_arrays[] = {
@@ -2747,7 +2757,7 @@ void bind_encoding(nb::module_& parent)
         "deletes from its root (the delta mode) and the edges of the horizon: one action tuple (the action relations, "
         "with the action's objects) and, with parent_relation, one `_parent_` tuple per edge. The nodes and edges are "
         "given as a HorizonView (mymyr.encoding.HorizonView; `rl.expand` rows have this form). Streams and the device "
-        "do not encode horizons.");
+        "do not encode horizons; the device encodes depth-one horizons into torch arrays.");
     static const std::string horizon_doc =
         std::string("The horizon encoder of a Task, TaskHandle or one-domain TaskTable. horizon_mode ('full', 'delta' or "
                     "'action') is required; `history` is not an option of a horizon. ") +

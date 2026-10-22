@@ -576,6 +576,7 @@ def encode(
     task_ids: Any = None,
     *,
     derived: Any = None,
+    actions: Any = None,
     goals: Any = None,
     subgoals: Any = None,
     history: Any = None,
@@ -611,9 +612,13 @@ def encode(
 
     threads: the CPU target's worker threads (0: one per hardware thread); the result does not depend on it.
     ``index_dtype='int64'`` needs ``jax_enable_x64``."""
+    if actions is not None:
+        raise _error("JAX FFI does not encode action rows: its operands carry no expansion labels or offsets; use the torch device encoder")
     _ffi.register()
     handle, reg = _registration(encoder)
     info = reg.info
+    if reg.options["horizon_mode"] is not None:
+        raise _error("JAX FFI does not encode horizons or transitions: its operands carry no node offsets or edges; use the torch device encoder")
     if info["device_refusal"]:
         raise ValueError(info["device_refusal"])
     if reg.options["index_dtype"] == "int64" and not jax.config.read("jax_enable_x64"):

@@ -225,6 +225,12 @@ successor: a policy that picks an action entity picks that row. With `target_sou
 entities of their graph; without it they are entities and tuple arguments only. A call without `actions` has no action
 tuples and no action entities.
 
+Device rows accept a CUDA expansion as `actions=` or `(schema, binding, offsets)` device tensors, including
+`expand_flat`'s six outputs. Split-schema runs use the same k-way merge as the host, and action targets, graph-local
+references, both layouts and both index widths have identical output. The torch `encode_flat` op accepts
+`action_schema`, `action_binding`, `action_offsets` and optional `action_parent` tensors. JAX FFI refuses action rows
+because its operand list has no expansion labels or offsets.
+
 ### Predicate virtual nodes
 
 With `predicate_virtual_nodes=True` a graph has one **predicate virtual node** (entity role 1, the last entities of
@@ -327,8 +333,13 @@ without action and parent relations, `edge_schema` and `edge_binding` without ac
 without any edge may be `None`. `derived` is per node row `[M, D]`; `goals` and `subgoals` are
 per graph (`[G, ...]`, or one row for all graphs) and replace the instance's goal and layers for that graph.
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon encoder has no
-`stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. The device encoder refuses a horizon
-schema (`ValueError`, "mymyr: encoding: ..."). Invalid views raise `ValueError` naming the graph
+`stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. CUDA `HorizonView` arrays encode
+full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, into torch
+`DeviceFlatBatch` arrays. `horizon(table, cuda_rows, depth=1)` builds compact device nodes from an expansion;
+`merge` controls first-seen state merging. Depth 2 or more is refused. Device transition encoders expand and encode
+on the current stream; supplied expansions reuse their successor rows. The torch op takes node and edge offsets,
+endpoints and labels; JAX FFI refuses horizons and transitions because it has no node-offset or edge operands.
+Host invalid views raise `ValueError` naming the graph
 (`graph 3 of the horizon has no nodes`, `edge 2 of graph 0 of the horizon has an endpoint outside the graph's nodes`,
 `node 1 of graph 2 sets an atom bit its instance does not have`).
 
@@ -947,10 +958,10 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   steps than `H`, down to none. The subgoal levels of a graph are computed once into the workspace's scratch, so a
   schema with levels needs scratch of one mask per level and sign over the instance's words for every graph of a
   batch, on top of the scratch of a schema without them.
-- **Refused.** `actions=` (the action relations are not encoded on the device), an encoder of a numeric table (with or
+- **Refused.** Horizons of depth 2 or more, an encoder of a numeric table (with or
   without `include_numeric`: "the device does not encode numeric relations"), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
-  prefix, as do an encoder with action targets or a horizon mode and layers or history given to an encoder whose
+  prefix, as do layers or history given to an encoder whose
   schema has no subgoal or history relations; `threads` has no effect. A row that is invalid (a task id outside the
   table, a row, goal mask, subgoal layer or history step narrower than its instance, a goal, layer or step bit its
   instance has no atom for, a history count outside `[0, H]`) raises `ValueError` without capacities and sets
@@ -1070,7 +1081,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
 - **What it encodes.** What the device encodes, on both platforms: the rows with their goals, subgoal layers and
-  history steps. A schema the device refuses (action targets, horizons) or whose kernels need more shared memory than
+  history steps. Action targets are accepted without expansion rows. Action rows, horizons and transitions are refused
+  because the FFI operand list has no expansion labels, node offsets or edges. A schema whose kernels need more shared memory than
   a block has (very many predicate virtual nodes or relations) and rows without their derived words where the device
   cannot evaluate the axioms that a graph or its derived subgoal masks read (a body or object set beyond the device's
   matcher limits) raise `ValueError` (`mymyr: encoding: ...`) when the function is traced, as do subgoal layers or

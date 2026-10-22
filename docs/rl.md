@@ -487,3 +487,7 @@ action-schema one-hot and by the agent's position in the native relational encod
 truncations, elapsed time and a counted subset of live array storage (not process peak memory).
 The scorer is intentionally small: the position is the object index of the successor's `at` tuple, which equals the
 chain position because the example declares its cells in chain order. It is not object-level relational reasoning. It exercises the path from collection through native encoding to a policy update, not general planning ability.
+
+`torch.BatchedEnv.encode_transitions(encoder, *, actions=None, capacities=None)` encodes its current rows and
+successors with a `FlatTransitionEncoder` or `FlatTransitionEffectsEncoder` on the environment's device. Device
+expansion labels and depth-one horizons are encoded into torch arrays on the current stream.

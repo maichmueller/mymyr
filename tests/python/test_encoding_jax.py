@@ -852,9 +852,6 @@ def test_unsupported_calls_raise_value_error_when_traced(cases):
         enc = encoding.FlatRelationEncoder(table.source)
         with pytest.raises(ValueError, match=r"^mymyr: encoding: task_ids are required for a table of several"):
             jax.jit(lambda r: ej.encode(enc, r, capacities=caps))(halves(table.rows))
-    if _encoding_jax.has_cuda():
-        with pytest.raises(ValueError, match=r"^mymyr: encoding: the device does not encode action targets"):
-            ej.encode(encoding.FlatRelationEncoder(case.source, target_sources=("action",)), rows, capacities=caps)
 
 
 def test_shared_statics_are_refused_before_tracing_on_every_platform(cases):

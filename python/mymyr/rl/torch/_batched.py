@@ -232,6 +232,23 @@ class BatchedEnv:
             keep(self.at_goal),
         )
 
+    def encode_transitions(self, encoder: Any, *, actions: Any = None, capacities: Any = None) -> Any:
+        """Encode the current rows and successors with a transition or transition-effects encoder on this device.
+
+        ``actions`` may supply an existing expansion; otherwise successors are expanded on the current stream.
+        ``capacities`` has the encoder's usual meaning. The returned arrays own their storage.
+        """
+        from mymyr import encoding
+        from mymyr.rl import as_table
+
+        if not isinstance(encoder, (encoding.FlatTransitionEncoder, encoding.FlatTransitionEffectsEncoder)):
+            raise ValueError("mymyr: encoding: encode_transitions needs a transition encoder")
+        if as_table(encoder.table).fingerprint != as_table(self.core.table).fingerprint:
+            raise ValueError("mymyr: encoding: the transition encoder belongs to another table")
+        goals = (self.goal_pos, self.goal_neg) if self.goals else None
+        return encoder.encode(self.states, self.task_ids, goals=goals, actions=actions,
+                              framework="torch", capacities=capacities)
+
     def is_goal(self) -> Tensor:
         """Whether each environment's current state is a goal (the goal masks' test with goals=True): [N] bool on
         ``device``, tested on torch's current stream without stepping (``at_goal`` holds the same flags when the

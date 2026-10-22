@@ -881,16 +881,15 @@ def test_names_and_descriptions_of_a_device_batch_equal_the_host_ones(cases, lay
         encoder.entity_names(batch, case.n)
 
 
-def test_the_encoder_without_a_device_encoding_is_refused_clearly():
+def test_action_target_schemas_without_expansion_rows_are_encoded():
     dev = gpu()
     task = text_task("gripper__prob05")
     states = walk(task, steps=3, walks=1)
     encoder = encoding.FlatRelationEncoder(task, target_sources=("action",))
     rows = to_device(np.asarray(task.encode(states)), dev)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode action targets"):
-        encoder.encode(rows)
-    with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode action targets"):
-        encoder.reserve_device(8)
+    batch = encoder.encode(rows)
+    assert batch.sizes["targets"] == 0
+    encoder.reserve_device(8)
 
 
 @pytest.mark.parametrize("lane", ["numeric", "numeric_table", "simple"])

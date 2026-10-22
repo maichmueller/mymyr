@@ -19,7 +19,7 @@ and ``release_device`` frees it.
 The subgoal layers and history steps of the rows (``subgoals=``, ``history=``) are CUDA tensors of the same forms as on
 the host: masks [N, L, W] (or [1, L, W] for layers that every row shares) of 64-bit words, ``dt`` int32 [N, H] and the
 valid step ``count`` int32 [N]; device streams and device collation carry neither. What the device does not encode: the
-action relations (``actions=``), action targets and horizons. The device evaluates axioms into scratch when a graph
+numeric relations, shared statics, Simple graphs and horizons of depth 2 or more. The device evaluates axioms into scratch when a graph
 needs derived atoms and ``derived=`` is absent; supplied derived words take precedence.
 """
 
@@ -348,7 +348,8 @@ class _Rows:
         self.tensors = tensors
         self.fields = [graphs, w.data_ptr() if w.numel() else 0, _stride(w), w.shape[1], ids_ptr, derived_ptr,
                        derived_stride, *goal[:4], *goal[4:], *sub, *hist]
-        if len(self.fields) != 35:
+        self.fields += [0] * 18
+        if len(self.fields) != 53:
             raise AssertionError("the row fields have a fixed length")
 
     def _same_device(self, t: Any, name: str) -> None:
@@ -506,17 +507,33 @@ def encode_arrays(
     keep: Optional[list] = None,
     subgoals: Any = None,
     history: Any = None,
+    actions: Any = None,
+    horizon: Any = None,
 ) -> dict[str, Any]:
     """The arrays of the encoding of checked tensors, by name (absent arrays empty), with ``sizes`` [6] int64 (entities,
     tuples, args, targets, history, overflow flags; None without capacities)."""
     torch = _torch()
     layout = layout_of(encoder)
-    rows = _Rows(torch, states, task_ids, derived, goals, subgoals, history)
+    if horizon is None:
+        rows = _Rows(torch, states, task_ids, derived, goals, subgoals, history)
+        if actions is not None:
+            from mymyr.encoding._device_horizon import bind_actions
+            bind_actions(encoder, rows, actions)
+    else:
+        from mymyr.encoding._device_horizon import horizon_rows
+        rows = horizon_rows(encoder, horizon, derived, goals, subgoals)
+    return _encode_rows(encoder, rows, capacities, keep)
+
+
+def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> dict[str, Any]:
+    torch = _torch()
+    layout = layout_of(encoder)
     device = rows.device
     native = _device_encoder(encoder, device.index)
     from mymyr.rl.torch._ops import _stream
 
-    stream = _stream(states)
+    stream = _stream(device)
+    scratch_rows = max(rows.graphs, rows.fields[48]) if rows.fields[42] else rows.graphs
     out: dict[str, Any] = {}
     if capacities is not None:
         graphs, entities, args, targets, steps = capacities
@@ -524,7 +541,7 @@ def encode_arrays(
             raise _error("the batch has more graphs than the output capacity")
         specs = layout.specs(torch, rows.graphs, entities, args, targets, steps)
         out = _outputs(torch, specs, device)
-        scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
+        scratch = _scratch(torch, native, stream, scratch_rows, device, rows.fields[5] != 0)
         native.encode(stream, rows.fields, _pointers(out),
                       [out["task_ids"].shape[0], entities, args, targets, steps], scratch.data_ptr(), scratch.numel())
     else:
@@ -532,7 +549,7 @@ def encode_arrays(
         def allocate(entities: int, tuples: int, args: int, targets: int, steps: int, flags: int) -> list[int]:
             if flags & _OVERFLOW_INPUT:
                 raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or "
-                             "history step narrower than its instance, a history count outside [0, steps], or a bit "
+                             "history step narrower than its instance, invalid expansion labels or horizon offsets (the device refuses horizons of depth 2 or more), a history count outside [0, steps], or a bit "
                              "that its instance has no atom for")
             if flags & _OVERFLOW_INDEX:
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "
@@ -567,8 +584,6 @@ def encode(
 ) -> "DeviceFlatBatch":
     """``FlatRelationEncoder.encode`` for arguments that are CUDA arrays."""
     torch = _torch()
-    if actions is not None:
-        raise _error("actions are not encoded on the device: encode the rows on the host with actions, or without actions=")
     if pool is not None:
         raise _error("pool is a pool of host threads: it has no meaning for rows on the device")
     if framework is not None and not (isinstance(framework, str) and framework in ("torch", "pytorch")):
@@ -589,7 +604,7 @@ def encode(
         g = tuple(_cuda_tensor(torch, mask, f"goals[{k}]", keep) for k, mask in enumerate(goals))
     sub = _cuda_tuple(torch, subgoals, "subgoals", keep)
     hist = _cuda_tuple(torch, history, "history", keep)
-    arrays = encode_arrays(encoder, s, ids, d, g, caps, keep, sub, hist)
+    arrays = encode_arrays(encoder, s, ids, d, g, caps, keep, sub, hist, actions=actions)
     return DeviceFlatBatch(encoder, arrays, exact=caps is None)
 
 

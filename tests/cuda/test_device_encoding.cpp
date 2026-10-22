@@ -1160,20 +1160,6 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
     EXPECT_THROW(cuda::DeviceEncoder(nullptr, blocks_encoder()), std::invalid_argument);
     EXPECT_THROW(cuda::DeviceEncoder(ctx, nullptr), std::invalid_argument);
     const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
-    // action targets
-    encoding::FlatOptions options = test::encoder_options();
-    options.targets = {encoding::TargetSource::Action};
-    try
-    {
-        cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, options));
-        ADD_FAILURE() << "action targets were accepted";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode action targets"),
-                  std::string::npos)
-            << e.what();
-    }
     // numeric relations, and the numeric state words of a table whose encoder leaves the relations out
     {
         const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
@@ -1221,17 +1207,7 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         horizon.horizon.parent_relation = c.parent;
         horizon.horizon.sibling_relation = c.sibling;
         horizon.horizon.cousin_relation = c.cousin;
-        try
-        {
-            cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(table, horizon));
-            ADD_FAILURE() << "the " << c.what << " was accepted";
-        }
-        catch (const std::invalid_argument& e)
-        {
-            EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode horizons"),
-                      std::string::npos)
-                << c.what << ": " << e.what();
-        }
+        EXPECT_NO_THROW(cuda::DeviceEncoder(ctx, encoding::FlatEncoder::create(table, horizon))) << c.what;
     }
     // subgoal and history relations are encoded
     {
@@ -1296,11 +1272,12 @@ TEST(DeviceEncoderSchema, AcceptsSubgoalLevelsHistoryAndTheirTargets)
     o.targets = {encoding::TargetSource::History};
     EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, RefusesActionTargets)
+TEST(DeviceEncoderSchema, AcceptsActionTargets)
 {
     encoding::FlatOptions o;
     o.targets = {encoding::TargetSource::Action};
-    expect_schema_refusal(o, "action targets");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
 TEST(DeviceEncoderSchema, RefusesNumericRelations)
 {
@@ -1324,24 +1301,27 @@ TEST(DeviceEncoderSchema, RefusesSharedStatics)
     o.statics = encoding::Statics::Shared;
     expect_schema_refusal(o, "shared statics (statics='shared')");
 }
-TEST(DeviceEncoderSchema, RefusesFullHorizons)
+TEST(DeviceEncoderSchema, AcceptsFullHorizons)
 {
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Full;
-    expect_schema_refusal(o, "horizons");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, RefusesDeltaHorizons)
+TEST(DeviceEncoderSchema, AcceptsDeltaHorizons)
 {
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Delta;
     o.goal_derivations = {encoding::GoalDerivation::AddedSatisfied};
-    expect_schema_refusal(o, "horizons");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
-TEST(DeviceEncoderSchema, RefusesActionHorizons)
+TEST(DeviceEncoderSchema, AcceptsActionHorizons)
 {
     encoding::FlatOptions o;
     o.horizon.mode = encoding::HorizonMode::Action;
-    expect_schema_refusal(o, "horizons");
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*encoding::EncodingSchema::create(*table, o)));
 }
 TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstructed)
 {
@@ -1402,8 +1382,6 @@ TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncod
     add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
     add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Relations, encoding::Output::Simple}; });
     add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });
-    add("action targets", table, [](auto& o) { o.targets = {encoding::TargetSource::Action}; });
-    add("horizons", table, [](auto& o) { o.horizon.mode = encoding::HorizonMode::Full; });
     for (const Refused& c : cases)
     {
         const auto encoder = encoding::FlatEncoder::create(c.table, c.options);

@@ -3,6 +3,7 @@
 // as C++23.
 
 #include "encoding_kernels.hpp"
+#include "mymyr/encoding/detail/horizon.hpp"
 #include "live_scan.cuh"
 
 #include <algorithm>
@@ -817,6 +818,8 @@ template<class Kernel> u64 static_shared(Kernel kernel)
     cuda::check(cudaFuncGetAttributes(&attributes, kernel), "cudaFuncGetAttributes (encoding)");
     return attributes.sharedSizeBytes;
 }
+#include "encoding_structured.cuh"
+
 template<class I, bool Warp, bool Relation> u64 fill_static()
 {
     static const u64 bytes = std::max({static_shared(fill_kernel<I, Warp, Relation, false, false>),
@@ -844,6 +847,15 @@ u64 fill_shared_required(u32 virtual_nodes, u32 relations, bool warp, bool relat
     return fill_shared_bytes(virtual_nodes, relations, warp, relation) + bytes;
 }
 
+cudaError_t launch_horizon_instances(const EncodeParams& p, i32* instances, cudaStream_t stream)
+{
+    cudaError_t error = cudaMemsetAsync(instances, 0xff, p.horizon.nodes * sizeof(i32), stream);
+    if (error != cudaSuccess)
+        return error;
+    horizon_instances_kernel<<<std::max<u32>(1, blocks_for(p.graphs)), k_block, 0, stream>>>(p, instances);
+    return cudaPeekAtLastError();
+}
+
 cudaError_t launch_clear(const LaunchShape& shape, cudaStream_t stream)
 {
     return cudaMemsetAsync(shape.zero_begin, 0, shape.zero_bytes, stream);
@@ -858,8 +870,17 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
     cudaError_t error = shape.cleared ? cudaSuccess : launch_clear(shape, stream);
     if (error != cudaSuccess)
         return error;
+    const bool structured = p.actions.offsets || p.horizon_mode;
+    if (structured)
+    {
+        structured_count_kernel<<<std::max<u32>(1, blocks_for(p.graphs * k_warp)), k_block,
+                                  count_shared_bytes(p.context.num_virtual, k_warp), stream>>>(p);
+        error = cudaPeekAtLastError();
+        if (error != cudaSuccess)
+            return error;
+    }
     bool first = true;
-    for (u32 kind = 0; kind < 2; ++kind)
+    for (u32 kind = 0; !structured && kind < 2; ++kind)
     {
         if (!(shape.fill_mask & (1u << kind)))
             continue;
@@ -902,6 +923,14 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
 template<bool Live>
 cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaStream_t stream)
 {
+    if (p.actions.offsets || p.horizon_mode)
+    {
+        const u32 blocks = std::max<u32>(1, blocks_for(p.graphs * k_warp));
+        const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, true, p.relation_major);
+        p.index64 ? structured_fill_kernel<i64><<<blocks, k_block, shared, stream>>>(p)
+                  : structured_fill_kernel<i32><<<blocks, k_block, shared, stream>>>(p);
+        return cudaPeekAtLastError();
+    }
     bool first = true;
     for (u32 kind = 0; kind < 2; ++kind)
     {
@@ -961,3 +990,13 @@ cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStr
 }
 
 }  // namespace mymyr::cuda::detail
+
+namespace mymyr::cuda::detail
+{
+cudaError_t launch_horizon_builder(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
+                                  const DeviceHorizonBuild& output, cudaStream_t stream)
+{
+    horizon_build_kernel<<<1, 1, 0, stream>>>(parents, children, child_stride, output);
+    return cudaPeekAtLastError();
+}
+}
