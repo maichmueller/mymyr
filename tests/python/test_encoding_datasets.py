@@ -9,6 +9,7 @@ import pytest
 import mymyr
 from mymyr import datasets, encoding, rl
 from conftest import ROOT, python_lines, text_task, walk
+from test_encoding_goals import fluent_masks
 from test_encoding_pool import arrays_equal
 from test_rl_task_suite import suite_batch, suite_of
 from test_rl_table import sets  # noqa: F401  (a fixture: the table instances of several domains)
@@ -91,6 +92,32 @@ def test_actions_and_goals_are_encoded_when_asked(knowledge_base):
         datasets.EncodingCollate(encoder)(items_of(with_goals, chosen)).graphs,
         encoder.encode(dataset.rows[chosen], dataset.task_ids[chosen], goals=(goals[0][chosen], goals[1][chosen])),
     )
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_rows_with_goals_of_their_own_are_encoded_with_them(layout):
+    task = text_task("blocks__probBLOCKS-8-0")
+    states = walk(task, steps=10, walks=2)
+    rows = np.ascontiguousarray(np.asarray(task.encode(states)))
+    pos, neg, _ = fluent_masks(task, states, seed=7)
+    # positive and negative goal literals, another goal on every row, none of them the instance's
+    instance_pos, instance_neg = (np.asarray(g)[0] for g in rl.goal_masks(rl.as_table(task), np.zeros(1, np.int32)))
+    assert pos.any(axis=1).all() and neg.any(axis=1).all()
+    assert len({p.tobytes() + q.tobytes() for p, q in zip(pos, neg)}) == len(rows)
+    assert not any(np.array_equal(p, instance_pos) and np.array_equal(q, instance_neg) for p, q in zip(pos, neg))
+    dataset = datasets.StateRows(rows, goals=(pos, neg))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, target_sources=("goal",))
+    collate = datasets.EncodingCollate(encoder)
+    chosen = [5, 0, 13, 13, 2]
+
+    expected = encoder.encode(rows[chosen], goals=(pos[chosen], neg[chosen]))
+    with_instance_goal = encoder.encode(rows[chosen])
+    assert any(
+        not np.array_equal(value, with_instance_goal.as_dict()[key]) for key, value in expected.as_dict().items()
+    )
+    arrays_equal(collate(items_of(dataset, chosen)).graphs, expected)
+    arrays_equal(collate(dataset.take(chosen)).graphs, expected)
+    arrays_equal(collate(dataset.__getitems__(chosen)).graphs, expected)
 
 
 def test_a_knowledge_base_gives_rows_of_all_its_spaces(knowledge_base):
