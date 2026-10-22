@@ -51,6 +51,15 @@ void refuse_capture(cudaStream_t stream)
             "mymyr: encoding: acquire outside a stream capture and hold the acquisition through the last replay");
 }
 
+/// Throws std::invalid_argument for an encoder whose batches the device does not encode: a schema it does not encode
+/// (DeviceEncoder::check_schema) or a table with numeric state words, whose relations the encoder may leave out.
+void check_encodes(const encoding::FlatEncoder& encoder)
+{
+    DeviceEncoder::check_schema(encoder.schema());
+    if (encoder.table().numeric())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
+}
+
 [[noreturn]] void not_an_extension(const std::string& why)
 {
     throw std::invalid_argument("mymyr: encoding: the grown context is not an extension of the uploaded one: " + why);
@@ -461,6 +470,7 @@ std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) cons
 DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const encoding::FlatBuffers& arrays,
                                      const encoding::FlatSizes* sizes, u64 graphs)
 {
+    check_encodes(encoder);
     const auto& schema = encoder.schema();
     DeviceCollationBatch batch;
     batch.arrays = arrays;
@@ -471,6 +481,7 @@ DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const
     batch.table_fingerprint = encoder.table_fingerprint();
     batch.layout = schema.options().layout;
     batch.index = schema.options().index;
+    batch.shared_statics = schema.shared_statics();
     batch.stored = output_arrays(schema);
     batch.max_goal_level = schema.options().max_goal_level;
     batch.history = schema.options().history;
@@ -664,9 +675,7 @@ DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::Fla
     if (!m_ctx || !m_encoder)
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
     m_schema = m_encoder->schema_ptr();
-    check_schema(*m_schema);
-    if (m_encoder->table().numeric())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
+    check_encodes(*m_encoder);
     m_context = DeviceEncodingContext::create(m_ctx, m_encoder->context_ptr(), true, nullptr);
     m_bounds = m_context->m_facts->bounds;
 }
@@ -858,7 +867,8 @@ bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, 
     std::unique_lock lock(m_state_mutex);
     if (grown->schema().fingerprint() != m_schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the grown encoder has another schema or options");
-    check_schema(grown->schema());
+    // the grown table may have numeric state words that the schema (without include_numeric) does not show
+    check_encoder(*grown);
     const bool copied = m_context->refresh(grown->context_ptr(), stream);
     m_encoder = std::move(grown);
     m_bounds = m_context->facts()->bounds;
@@ -922,9 +932,7 @@ LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bo
 
 void DeviceEncoder::check_encoder(const encoding::FlatEncoder& encoder)
 {
-    check_schema(encoder.schema());
-    if (encoder.table().numeric())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
+    check_encodes(encoder);
     if (device_count() == 0)  // the shared memory of the kernels is read from the device
         return;
     const auto facts = context_facts(encoder.context());
@@ -1016,9 +1024,11 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
                     std::to_string(opts.max_goal_level) + " levels");
         check_layers(sub, "subgoal layers", true);
     }
+    // a count without steps (H = 0) is checked against zero steps whether or not the schema has history, as the host
+    // encoder does
     if (hist.masks.layers != 0 || hist.count)
     {
-        if (!schema.has_history())
+        if (hist.masks.layers != 0 && !schema.has_history())
             invalid("history steps are given, but the schema has no history relations");
         if (hist.masks.layers != 0 && graphs != 0 && !hist.dt)
             invalid("the history steps need their dt");
@@ -1154,7 +1164,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if (phase != Phase::Fill && !facts.class_ow[mode].empty())
         {
             // the evaluation flags the rows of instances it cannot evaluate: the clear goes first
-            check(detail::launch_clear(shape, context.stream()), "encoding kernels (clear)");
+            check(detail::launch_clear(shape, stream), "encoding kernels (clear)");
             shape.cleared = true;
             lifted::EncodingAxioms ax;
             ax.instances = static_cast<const lifted::EncodingAxiomInstance*>(facts.axiom_block->data());
@@ -1176,7 +1186,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             ax.class_ow = facts.class_ow[mode].data();
             ax.class_fc = facts.class_fc[mode].data();
             ax.launches = static_cast<u32>(facts.class_ow[mode].size());
-            check(lifted::launch_encoding_axioms(ax, context.stream()), "encoding axiom kernels");
+            check(lifted::launch_encoding_axioms(ax, stream), "encoding axiom kernels");
         }
     }
     switch (phase)

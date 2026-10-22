@@ -391,20 +391,46 @@ def _layer_halves(x: Any, name: str) -> Any:
     return x
 
 
-def _ints(x: Any, name: str, shape: tuple[int, ...]) -> Any:
-    """``x`` as int32 of ``shape``: integers (converted to int32)."""
+_INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
+
+
+def _outside_int32(a: np.ndarray) -> bool:
+    """Whether an integer array has an entry that int32 cannot hold."""
+    if not a.size:
+        return False
+    if np.issubdtype(a.dtype, np.unsignedinteger):
+        return bool(a.max() > _INT32_MAX)
+    return bool(a.min() < _INT32_MIN or a.max() > _INT32_MAX)
+
+
+def _ints(x: Any, name: str, shape: tuple[int, ...]) -> tuple[Any, Optional[Any]]:
+    """``x`` as int32 of ``shape`` and, for a traced array of an integer type wider than int32, the mask of its entries
+    that int32 cannot hold (None where every entry is known to fit). A concrete entry outside int32 raises ValueError,
+    as the host encoder does."""
+    def refuse() -> ValueError:
+        return ValueError(f"mymyr: '{name}' has a value that int32 cannot hold")
+
+    outside = None
     if isinstance(x, jax.Array):
         if not jnp.issubdtype(x.dtype, jnp.integer):
             raise _error(f"'{name}' must be integers, not {x.dtype}")
+        limits = jnp.iinfo(x.dtype)
+        if limits.min < _INT32_MIN or limits.max > _INT32_MAX:
+            if _traced(x):
+                outside = x > _INT32_MAX if limits.min >= 0 else (x < _INT32_MIN) | (x > _INT32_MAX)
+            elif _outside_int32(np.asarray(x)):
+                raise refuse()
         t = x.astype(jnp.int32)
     else:
         a = np.asarray(x)
         if a.size and not np.issubdtype(a.dtype, np.integer):
             raise _error(f"'{name}' must be integers, not {a.dtype}")
+        if _outside_int32(a):
+            raise refuse()
         t = jnp.asarray(a.astype(np.int32))
     if tuple(t.shape) != shape:
         raise _error(f"'{name}' must be int32 of shape {list(shape)}, not of shape {list(t.shape)}")
-    return t
+    return t, outside
 
 
 def _layer_pair(items: tuple, at: int, names: tuple, graphs: int, may_share: bool) -> tuple[Any, Any]:
@@ -458,13 +484,28 @@ def _history(history: Any, graphs: int, reg: _Registration) -> tuple[Any, ...]:
     steps = pos.shape[1]
     if steps and not reg.options["history"]:
         raise _error("history steps are given, but the schema has no history relations")
+    dt_outside = count_outside = None
     if items[2] is None:
         if graphs * steps:
             raise _error(f"'{names[2]}' must be an array, not None")
         dt = none
     else:
-        dt = _ints(items[2], names[2], (graphs, steps))
-    count = none if len(items) < 4 or items[3] is None else _ints(items[3], names[3], (graphs,))
+        dt, dt_outside = _ints(items[2], names[2], (graphs, steps))
+    count = none
+    if len(items) >= 4 and items[3] is not None:
+        count, count_outside = _ints(items[3], names[3], (graphs,))
+    if steps == 0:
+        dt_outside = None
+    if dt_outside is not None or count_outside is not None:
+        # a traced entry that int32 cannot hold makes its row invalid: its count becomes -1, which the target flags
+        # (the invalid-input flag) as it flags any count outside [0, steps]
+        bad = jnp.zeros((graphs,), jnp.bool_)
+        if dt_outside is not None:
+            bad = bad | dt_outside.any(axis=1)
+        if count_outside is not None:
+            bad = bad | count_outside
+        valid = count if count.shape == (graphs,) else jnp.full((graphs,), steps, jnp.int32)
+        count = jnp.where(bad, jnp.int32(-1), valid)
     derived = (empty, empty)
     if len(items) == 6:
         derived = _layer_pair((pos, *items[1:]), 4, names, graphs, False)
@@ -558,8 +599,9 @@ def encode(
     [N, L, 2 W] (halves; or [N, L, W] words; one row [1, L, ...] for all), at most as many layers as the encoder's
     ``max_goal_level``. history: ``(pos, neg, dt)``, ``(pos, neg, dt, count)`` or ``(pos, neg, dt, count,
     derived_pos, derived_neg)``, the history steps of the rows, oldest first: masks [N, H, 2 W], ``dt`` int32 [N, H]
-    and ``count`` int32 [N], the valid steps of each row (None: all H). Both as in ``FlatRelationEncoder.encode``;
-    the schema needs subgoal levels or history.
+    and ``count`` int32 [N], the valid steps of each row (None: all H); wider integers are accepted where int32 holds
+    their values: a concrete value outside int32 raises ``ValueError``, a traced one makes its row invalid (its
+    ``invalid_input`` flag). Both as in ``FlatRelationEncoder.encode``; the schema needs subgoal levels or history.
 
     capacities: ``dict(graphs=, entities=, args=, targets=, history=)`` (``targets`` only with target sources,
     ``history`` only with history steps; ``graphs`` at least N), required under ``jax.jit``: the arrays have static

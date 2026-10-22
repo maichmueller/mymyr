@@ -1049,7 +1049,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   four, with `N` rows or one row for all, as in `encoder.encode`. `subgoals` (`(pos, neg)` or all four masks, `[N, L,
   2 W]` halves or `[N, L, W]` words, or one row `[1, L, ...]` for all) and `history` (`(pos, neg, dt)`, `(pos, neg,
   dt, count)` or all six, masks `[N, H, ...]`, `dt` `int32` `[N, H]` and `count` `int32` `[N]`) are the subgoal layers
-  and history steps of `encoder.encode`, on both platforms.
+  and history steps of `encoder.encode`, on both platforms. A wider integer `dt` or `count` is taken where int32 holds
+  its values: a concrete value outside int32 raises `ValueError`, a traced one marks its row invalid.
 - **Capacities.** Shapes are static under `jax.jit`, so a traced call needs `capacities=dict(graphs=, entities=,
   args=, targets=, history=)` (`targets` only with target sources, `history` only with history steps; `graphs` at
   least `N`): the per-graph arrays have `N` entries, the variable-size arrays (`history_entity` and `history_dt` among
@@ -1309,9 +1310,11 @@ stay local to their graph; entity ids and offsets receive the appropriate prefix
 interleaved by relation across the slices. Mixed schemas, tables (`table_fingerprint`), layouts, index types,
 static representations or devices raise `ValueError`; so does a device batch of an encoder with subgoal layers or
 history steps. Host collation also takes batches with [shared statics](#shared-statics): the result holds one static
-block per instance of its graphs, in ascending instance order, as one encode of all rows does. It takes
-`numeric_values` (each value follows its tuple into the result's segment order) and the
-[Simple graph](#the-simple-graph) (the node ids in `edge_index` are shifted by the nodes of the batches before).
+block per instance of its graphs, in ascending instance order, as one encode of all rows does; slices whose static
+relations differ, or whose blocks of one instance differ in their tuples or arguments, raise `ValueError`. It takes
+`numeric_values` (each value follows its tuple into the result's segment order; the slices agree on
+`numeric_relations` and `numeric_dtype`) and the [Simple graph](#the-simple-graph) (the node ids in `edge_index` are
+shifted by the nodes of the batches before).
 Overflowed inputs are refused. Host collation allocates exact arrays; device collation accepts
 `capacities=` and reports overflow through `device_sizes`. All accumulated totals use uint64 before index checks.
 
@@ -1325,7 +1328,8 @@ collated graphs and the variable entries past the sizes are zero.
 
 The C++ forms are `cuda::DeviceRowStream(context, encoder, capacity, stream, goals, derived, derived_goals)` with
 `append`, `flush(DeviceOutput)`, `clear`, and `status()`; and `cuda::DeviceCollator(context, batch_views, stream)` with
-caller scratch sized by `scratch_bytes()`. `DeviceOutput::graphs` optionally receives a live graph count. Host
+caller scratch sized by `scratch_bytes()`, whose batch views `cuda::collation_batch(encoder, arrays, sizes, graphs)`
+makes (it refuses an encoder that the device does not encode). `DeviceOutput::graphs` optionally receives a live graph count. Host
 `encoding::collate` is declared in `mymyr/encoding/collate.hpp` and takes a span of shared array bundles.
 
 `DeviceEncoder::scratch_bytes(encoder, shape)` also sizes caller scratch before constructing a device encoder.

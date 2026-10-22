@@ -1115,6 +1115,44 @@ TEST(DeviceEncoder, GrowsWithItsTable)
     EXPECT_THROW(device.refresh(encoding::FlatEncoder::create(rl::TaskTable::create(tasks), other)), std::invalid_argument);
 }
 
+TEST(DeviceEncoder, RefusesToGrowIntoATableWithNumericStateWords)
+{
+    // the first instance has no object of the numeric function's type: without include_numeric both tables have one
+    // schema, and only the grown one has numeric state words
+    SKIP_WITHOUT_GPU();
+    const auto domain = frontend::Domain::from_string(
+        "(define (domain grow) (:requirements :strips :typing :numeric-fluents) (:types a)"
+        " (:predicates (p)) (:functions (f ?x - a))"
+        " (:action inc :parameters (?x - a) :precondition (p) :effect (increase (f ?x) 1)))");
+    const auto empty = Task::create(*domain->instantiate_string(
+        "(define (problem empty) (:domain grow) (:init (p)) (:goal (p)))"));
+    const auto one = Task::create(*domain->instantiate_string(
+        "(define (problem one) (:domain grow) (:objects x - a) (:init (p) (= (f x) 0)) (:goal (p)))"));
+    auto options = test::encoder_options();
+    options.include_numeric = false;
+    const auto base = encoding::FlatEncoder::create(rl::TaskTable::single(empty), options);
+    const auto grown = encoding::FlatEncoder::create(rl::TaskTable::create({empty, one}), options);
+    ASSERT_FALSE(base->table().numeric());
+    ASSERT_TRUE(grown->table().numeric());
+    ASSERT_EQ(base->schema().fingerprint(), grown->schema().fingerprint());
+    cuda::DeviceEncoder device(device_context(), base);
+    try
+    {
+        (void)device.refresh(grown);
+        ADD_FAILURE() << "the device grew into a table with numeric state words";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode numeric relations"),
+                  std::string::npos)
+            << e.what();
+    }
+    // nothing was uploaded
+    EXPECT_EQ(device.context().generation(), 1u);
+    EXPECT_EQ(device.context().num_instances(), 1u);
+    EXPECT_EQ(device.encoder(), base);
+}
+
 TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
 {
     SKIP_WITHOUT_GPU();
@@ -1316,6 +1354,76 @@ TEST(DeviceEncoderSchema, TheEncoderAndTheRowStreamRefuseSharedStaticsWhenConstr
     cuda::Stream stream;
     EXPECT_THROW(cuda::DeviceEncoder(ctx, encoder), std::invalid_argument);
     EXPECT_THROW(cuda::DeviceRowStream(ctx, encoder, 8, stream), std::invalid_argument);
+}
+TEST(DeviceEncoderSchema, TheCollatorRefusesTheBatchesOfSharedStaticsWhenConstructed)
+{
+    // the descriptor of an empty batch, from the public helper: nothing is read and no kernel is launched
+    SKIP_WITHOUT_GPU();
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions o;
+    o.statics = encoding::Statics::Shared;
+    const auto encoder = encoding::FlatEncoder::create(table, o);
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    try
+    {
+        const cuda::DeviceCollator collator(ctx, {cuda::collation_batch(*encoder, {}, nullptr, 0)}, stream);
+        ADD_FAILURE() << "the collator accepted a batch of shared statics";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode shared statics"),
+                  std::string::npos)
+            << e.what();
+    }
+}
+TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncode)
+{
+    // descriptors of empty batches, on the host: no device is needed and nothing is launched
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
+    const auto numeric_table =
+        rl::TaskTable::single(Task::create(*frontend::load_task(dir + "domain.pddl", dir + "p01.pddl")));
+    struct Refused
+    {
+        const char* what;
+        rl::TaskTablePtr table;
+        encoding::FlatOptions options;
+    };
+    std::vector<Refused> cases;
+    auto add = [&](const char* what, const rl::TaskTablePtr& t, auto&& change)
+    {
+        encoding::FlatOptions o = test::encoder_options();
+        change(o);
+        cases.push_back({what, t, o});
+    };
+    add("numeric relations", numeric_table, [](auto&) {});
+    add("numeric relations (the table has numeric state words)", numeric_table, [](auto& o) { o.include_numeric = false; });
+    add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
+    add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Relations, encoding::Output::Simple}; });
+    add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });
+    add("action targets", table, [](auto& o) { o.targets = {encoding::TargetSource::Action}; });
+    add("horizons", table, [](auto& o) { o.horizon.mode = encoding::HorizonMode::Full; });
+    for (const Refused& c : cases)
+    {
+        const auto encoder = encoding::FlatEncoder::create(c.table, c.options);
+        try
+        {
+            (void)cuda::collation_batch(*encoder, {}, nullptr, 0);
+            ADD_FAILURE() << "the descriptor accepted " << c.what;
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(std::string("mymyr: encoding: the device does not encode ") + c.what),
+                      std::string::npos)
+                << e.what();
+        }
+    }
+    // what the device encodes is described
+    const auto accepted = encoding::FlatEncoder::create(table, test::encoder_options());
+    const cuda::DeviceCollationBatch batch = cuda::collation_batch(*accepted, {}, nullptr, 0);
+    EXPECT_EQ(batch.schema_fingerprint, accepted->schema().fingerprint());
+    EXPECT_FALSE(batch.shared_statics);
 }
 }
 
