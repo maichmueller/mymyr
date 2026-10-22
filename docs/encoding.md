@@ -337,7 +337,8 @@ Streams do not encode horizons (a horizon is a batch of graphs with offsets, not
 `stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. CUDA `HorizonView` arrays encode
 full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, into torch
 `DeviceFlatBatch` arrays. `horizon(table, cuda_rows, depth=1)` builds compact device nodes from an expansion;
-`merge` controls first-seen state merging. Depth 2 or more is refused. Device transition encoders expand and encode
+`merge` controls first-seen state merging. Device construction requires `depth=1`; node limits and host pools raise
+`ValueError`. Encoding views of depth 2 or more is refused. Device transition encoders expand and encode
 on the current stream; supplied expansions reuse their successor rows. The torch op takes node and edge offsets,
 endpoints and labels; JAX FFI refuses horizons and transitions because it has no node-offset or edge operands.
 Host invalid views raise `ValueError` naming the graph

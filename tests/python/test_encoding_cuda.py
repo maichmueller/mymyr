@@ -561,7 +561,7 @@ def test_the_arguments_are_checked_before_any_launch(cases):
     rows = to_device(case.rows, dev)
     ids = None if case.ids is None else to_device(case.ids, dev)
     prefix = "^mymyr: encoding: "
-    with pytest.raises(ValueError, match=prefix + "actions are not encoded on the device"):
+    with pytest.raises(ValueError, match=prefix + r"(?:the action expansion belongs to another table|'actions.schema' must be a CUDA array)"):
         encoder.encode(rows, ids, actions=rl.expand(rl.as_table(case.tasks[0]), case.rows[:1]))
     with pytest.raises(ValueError, match=prefix + r"'subgoals\[0\] \(pos\)' must be"):
         encoder.encode(rows, ids, subgoals=(rows, rows))

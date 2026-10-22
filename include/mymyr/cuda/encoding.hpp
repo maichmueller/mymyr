@@ -172,6 +172,7 @@ struct OutputLayout
 /// [head, live rows, overflow]; a grid copies the rows, then one thread advances the tail. One stream orders all uses.
 /// The ring's columns have table-wide widths, fixed presence, and room for ring.graphs rows. Its status is zeroed
 /// before first use. The input's widths equal the columns' widths; row strides may differ or broadcast goals.
+/// Neither view carries expansion labels or horizon nodes.
 void append_rows(const DeviceEncodeInput& input, const DeviceEncodeInput& ring, u64* status, cudaStream_t stream);
 /// Advances the head by the live rows modulo capacity, empties the ring, and clears the overflow flag.
 void clear_rows(u64* status, u64 capacity, cudaStream_t stream);

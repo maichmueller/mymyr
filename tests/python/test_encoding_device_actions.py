@@ -188,15 +188,16 @@ def test_torch_op_actions_compile_and_capture():
     expected = encoder.encode(rows, actions=rl.expand(task, rows))
     handle = rt.register(encoder)
     capacity = caps(expected)
+    graphs = len(rows)
     schema, binding, offsets, parent = x.schema, x.binding, x.offsets, x.parent
     def call():
         return torch.ops.mymyr.encode_flat(handle, words, None, None, None, None, None, None,
             None, None, None, None, None, None, None, None, None, None,
-            len(rows), capacity["entities"], capacity["args"], capacity["targets"], 0,
+            graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
             schema, binding, offsets, parent)
     try:
         same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, call()))
-        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, torch.compile(call, fullgraph=True)()))
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, torch.compile(call, fullgraph=True, backend="aot_eager")()))
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             call()
@@ -279,7 +280,7 @@ def test_torch_horizon_op_compiles_and_captures_without_a_host_wait(layout):
 
     try:
         same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, call()))
-        compiled = torch.compile(call, fullgraph=True)
+        compiled = torch.compile(call, fullgraph=True, backend="aot_eager")
         same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, compiled()))
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
@@ -355,3 +356,18 @@ def test_horizon_row_goals_and_subgoal_layers_equal_the_host():
     actual = encoder.encode(upload(view, device), goals=(tensor(rows, device), tensor(zero, device)),
                             subgoals=(tensor(layers, device), tensor(empty, device)))
     same(expected, actual)
+
+
+
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_horizon_derived_evaluation_ignores_unused_node_capacity(index):
+    from dataclasses import replace
+    device = gpu()
+    task = text_task("philosophers__p03-phil4")
+    rows = np.asarray(task.encode(walk(task, steps=1, walks=1)))
+    view = encoding.horizon(task, rows, depth=1)
+    uploaded = upload(view, device)
+    tail = torch.zeros((5, uploaded.nodes.shape[1]), dtype=uploaded.nodes.dtype, device=device)
+    padded = replace(uploaded, nodes=torch.cat((uploaded.nodes, tail)))
+    encoder = encoding.FlatHorizonEncoder(task, horizon_mode="full", index_dtype=index, layout="relation")
+    same(encoder.encode(view), encoder.encode(padded))

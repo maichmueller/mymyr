@@ -96,6 +96,7 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
     detail::EncodingFacts& facts = *out;
     facts.derived_words = host.max_derived_words();
     facts.label_width = host.table().label_width();
+    facts.numeric_table = host.table().numeric();
     GraphBounds& bounds = facts.bounds;
     const bool levels = schema.has_subgoals();
     const bool history = schema.has_history();
@@ -982,6 +983,13 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     const bool evaluate =
         graphs && !in.derived && (facts.reads_derived[goal_mode] || (layer_derived && facts.reads_derived_layers));
     const bool horizon = schema.has_horizon();
+    if (horizon || in.actions.offsets)
+    {
+        if (opts.outputs != encoding::Outputs{encoding::Output::Relations})
+            invalid("device action rows and horizons require relational output");
+        if (facts.numeric_table)
+            invalid("device action rows and horizons do not encode numeric state rows");
+    }
     const u64 input_rows = horizon ? in.horizon.nodes : graphs;
     const bool live = in.graphs_device || in.row_start || in.dropped || out.graphs;
 

@@ -10,6 +10,8 @@ from mymyr.rl import as_table
 
 
 def _integer(torch: Any, value: Any, name: str, device: Any, keep: list, ndim: int) -> Any:
+    if hasattr(value, "__dlpack_device__") and value.__dlpack_device__()[0] != 2:
+        raise d._error(f"'{name}' must be a CUDA array on {device}")
     t = d._cuda_tensor(torch, value, name, keep)
     if t.device != device or t.dtype != torch.int32 or t.ndim != ndim or not t.is_contiguous():
         raise d._error(f"'{name}' must be a contiguous int32 CUDA tensor with {ndim} dimensions on {device}")
