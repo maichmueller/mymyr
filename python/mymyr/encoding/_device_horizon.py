@@ -285,8 +285,8 @@ def build_space_horizons(space: Any, roots: Any, depth: int, max_nodes: int | No
 
     torch = d._torch()
     depth = operator.index(depth)
-    if not 0 <= depth <= 1 << 20:
-        raise d._error("depth must be between 0 and 1048576")
+    if not 0 <= depth <= 0xffffffff:
+        raise d._error("depth must be between 0 and 4294967295")
     if not merge:
         raise d._error("device state-space horizons traverse recorded unique ids and require merge=True")
     if space.numeric_words:
@@ -320,15 +320,16 @@ def build_space_horizons(space: Any, roots: Any, depth: int, max_nodes: int | No
     src = torch.empty(edges, dtype=torch.int32, device=device)
     dst, schema = torch.empty_like(src), torch.empty_like(src)
     binding = torch.empty((edges, space.label_width), dtype=torch.int32, device=device)
-    scratch = torch.empty(max(1, 2 * space.num_states), dtype=torch.int32, device=device)
     truncated = torch.zeros(graphs, dtype=torch.uint8, device=device)
     encoder = FlatHorizonEncoder(space.task, horizon_mode="full")
     native = d._device_encoder(encoder, space.device)
+    scratch = torch.empty(native.space_horizon_scratch_bytes(space.num_states, space.num_transitions, graphs),
+                          dtype=torch.uint8, device=device)
     inputs = [rows, arrays["forward_offsets"], arrays["forward_targets"], arrays["label_schemas"],
               arrays["label_bindings"], ids]
     outputs = [output_nodes, no, eo, src, dst, schema, binding, scratch, truncated]
     native.build_space_horizons(_stream(rows), [x.data_ptr() for x in inputs], [x.data_ptr() for x in outputs],
                                space.num_states, space.num_transitions, space.words, space.label_width,
-                               graphs, depth, limit, truncate)
+                               graphs, depth, limit, truncate, scratch.numel())
     d._retain(torch, [space, arrays, *inputs, *outputs, *keep], device)
     return HorizonView(output_nodes, no, eo, src, dst, schema, binding, truncated=truncated)

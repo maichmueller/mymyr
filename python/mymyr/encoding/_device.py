@@ -19,7 +19,7 @@ and ``release_device`` frees it.
 The subgoal layers and history steps of the rows (``subgoals=``, ``history=``) are CUDA tensors of the same forms as on
 the host: masks [N, L, W] (or [1, L, W] for layers that every row shares) of 64-bit words, ``dt`` int32 [N, H] and the
 valid step ``count`` int32 [N]; device streams and device collation carry neither. What the device does not encode: the
-numeric relations, shared statics, Simple graphs and horizons of depth 2 or more. The device evaluates axioms into scratch when a graph
+numeric relations, shared statics and Simple graphs. The device evaluates axioms into scratch when a graph
 needs derived atoms and ``derived=`` is absent; supplied derived words take precedence.
 """
 
@@ -554,7 +554,7 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> 
         def allocate(entities: int, tuples: int, args: int, targets: int, steps: int, flags: int) -> list[int]:
             if flags & _OVERFLOW_INPUT:
                 raise _error("a row is invalid: a task id outside the table, a state row, goal mask, subgoal layer or "
-                             "history step narrower than its instance, invalid expansion labels or horizon offsets (the device refuses horizons of depth 2 or more), a history count outside [0, steps], or a bit "
+                             "history step narrower than its instance, invalid expansion labels, horizon offsets or endpoints, a history count outside [0, steps], or a bit "
                              "that its instance has no atom for")
             if flags & _OVERFLOW_INDEX:
                 raise OverflowError("mymyr: encoding: the batch needs more indices than its index type holds "

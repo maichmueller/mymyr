@@ -193,6 +193,9 @@ void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* childr
 /// The scratch bytes of build_depth_one_horizon over an expansion of `capacity` rows.
 [[nodiscard]] u64 depth_one_horizon_scratch_bytes(u64 capacity, bool merge);
 
+/// The scratch bytes for traversing recorded state ids independently for each root.
+[[nodiscard]] u64 space_horizon_scratch_bytes(u32 states, u64 edges, u32 graphs);
+
 /// Builds horizons of any depth by traversing a labelled state space's recorded ids, without comparing state words.
 /// Uses the caller's stream and storage, with no allocation or host wait. Input CSR and labels must be valid.
 void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output, cudaStream_t stream);

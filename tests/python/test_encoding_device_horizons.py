@@ -88,6 +88,29 @@ def test_deep_horizon_corpus_configurations(options, depth, layout, name):
     same(expected, encoder.encode(upload(view, device), subgoals=None if sub is None else tuple(tensor(x, device) for x in sub)))
 
 
+@pytest.mark.parametrize("mode", ["full", "delta", "action"])
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_deep_supplied_derived_words_and_per_graph_goals(mode, layout):
+    from test_encoding import derived_words
+
+    device = gpu()
+    task = text_task("philosophers__p03-phil4")
+    rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
+    view = encoding.horizon(task, rows, depth=3)
+    derived = derived_words(task, task.decode(view.nodes))
+    empty = np.zeros_like(rows)
+    layers = np.repeat(rows[:, None, :], 2, axis=1)
+    encoder = encoding.FlatHorizonEncoder(task, horizon_mode=mode, root_policy="exclude", layout=layout,
+        max_goal_level=2, goal_derivations=ADDED if mode == "delta" else ("plain", "satisfied", "unsatisfied"),
+        parent_relation=True, sibling_relation=True, cousin_relation=True)
+    expected = encoder.encode(view, derived=derived, goals=(rows, empty), subgoals=(layers, np.zeros_like(layers)))
+    inputs = upload(view, device)
+    kwargs = dict(goals=(tensor(rows, device), tensor(empty, device)),
+                  subgoals=(tensor(layers, device), tensor(np.zeros_like(layers), device)))
+    same(expected, encoder.encode(inputs, **kwargs))
+    same(expected, encoder.encode(inputs, derived=tensor(derived, device), capacities=caps(expected), **kwargs))
+
+
 @pytest.mark.parametrize("root", ["include", "exclude", "encode_only"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 def test_deep_dag_cycles_parallel_edges_and_nonempty_cousins(root, layout):

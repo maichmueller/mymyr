@@ -1009,15 +1009,3 @@ cudaError_t launch_fill(const EncodeParams& p, const LaunchShape& shape, cudaStr
 }
 
 }  // namespace mymyr::cuda::detail
-
-namespace mymyr::cuda::detail
-{
-#include "encoding_space_horizon.cuh"
-
-cudaError_t launch_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output,
-                                cudaStream_t stream)
-{
-    space_horizon_kernel<<<1, 1, 0, stream>>>(space, output);
-    return cudaPeekAtLastError();
-}
-}

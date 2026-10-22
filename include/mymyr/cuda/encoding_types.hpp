@@ -85,7 +85,7 @@ struct DeviceHorizonSpace
 
 /// Output of a breadth-first traversal of recorded state ids, with compact graph slices and graph-local endpoints.
 /// Storage holds graphs * min(limit or states, states) node rows and graphs * edges edge rows.
-/// Scratch holds 2 * states int32 entries.
+/// Scratch holds space_horizon_scratch_bytes(states, edges, graphs) bytes at a 256-byte aligned address.
 /// The builder reads roots[graphs], writes offsets[graphs + 1], and keeps at most limit nodes per graph (0: states).
 /// A limit reached with truncate=false or an invalid root writes negative offsets; truncated[graphs] records limits.
 struct DeviceSpaceHorizonBuild
@@ -100,7 +100,8 @@ struct DeviceSpaceHorizonBuild
     i32* dst = nullptr;
     i32* schema = nullptr;
     i32* binding = nullptr;
-    i32* scratch = nullptr;
+    void* scratch = nullptr;
+    u64 scratch_bytes = 0;
     u8* truncated = nullptr;
 };
 

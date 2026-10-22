@@ -242,7 +242,7 @@ public:
 
     void build_space_horizons(std::intptr_t stream, const std::vector<std::uintptr_t>& inputs,
                               const std::vector<std::uintptr_t>& outputs, u32 states, u64 edges, u32 words,
-                              u32 label_width, u32 graphs, u32 depth, u32 limit, bool truncate)
+                              u32 label_width, u32 graphs, u32 depth, u32 limit, bool truncate, u64 scratch_bytes)
     {
         if (inputs.size() != 6 || outputs.size() != 9)
             refuse("the state-space horizon builder needs six input arrays and nine output arrays");
@@ -250,7 +250,7 @@ public:
             ptr<const u32>(inputs[2]), ptr<const u32>(inputs[3]), ptr<const u32>(inputs[4]), states, words, label_width, edges};
         const cuda::DeviceSpaceHorizonBuild out{ptr<const i32>(inputs[5]), graphs, depth, limit, truncate,
             ptr<u64>(outputs[0]), ptr<i32>(outputs[1]), ptr<i32>(outputs[2]), ptr<i32>(outputs[3]),
-            ptr<i32>(outputs[4]), ptr<i32>(outputs[5]), ptr<i32>(outputs[6]), ptr<i32>(outputs[7]), ptr<u8>(outputs[8])};
+            ptr<i32>(outputs[4]), ptr<i32>(outputs[5]), ptr<i32>(outputs[6]), ptr<void>(outputs[7]), scratch_bytes, ptr<u8>(outputs[8])};
         nb::gil_scoped_release release;
         cuda::DeviceGuard guard(m_device);
         cuda::build_space_horizons(space, out, cuda_stream(stream));
@@ -570,7 +570,9 @@ void bind_encoding_device(nb::module_& parent)
         .def_prop_ro("device", &DeviceEncoderHandle::device, "The CUDA device index.")
         .def("build_space_horizons", &DeviceEncoderHandle::build_space_horizons, "stream"_a, "inputs"_a,
              "outputs"_a, "states"_a, "edges"_a, "words"_a, "label_width"_a, "graphs"_a, "depth"_a,
-             "limit"_a, "truncate"_a, "Traverses recorded state ids into compact device horizon slices on the stream.")
+             "limit"_a, "truncate"_a, "scratch_bytes"_a, "Traverses recorded state ids into compact device horizon slices on the stream.")
+        .def_static("space_horizon_scratch_bytes", &cuda::space_horizon_scratch_bytes, "states"_a, "edges"_a, "graphs"_a,
+                    "The scratch bytes for independent traversals of recorded state ids.")
         .def("build_horizon", &DeviceEncoderHandle::build_horizon, "stream"_a, "rows"_a, "children"_a,
              "child_stride"_a, "outputs"_a, "merge"_a, "scratch"_a, "scratch_bytes"_a,
              "Builds compact depth-one node slices from a device expansion without a host wait.")

@@ -22,7 +22,7 @@ merged by state, in the order they are reached; ``max_nodes`` bounds the size). 
 horizon encoder for rooted graphs, with the root as an encoded node, the ``_parent_`` relation and, on request, the
 ``_sibling_`` and ``_cousin_`` relations between nodes. FlatTransitionEncoder and FlatTransitionEffectsEncoder encode
 the transitions of states (the horizons of depth one, with the successors' facts or their deltas) from the states
-themselves. Streams do not encode horizons; the device encodes depth-one horizons into torch arrays.
+themselves. Streams do not encode horizons; the device encodes horizon views of any depth into torch arrays.
 
 SimpleEncoder encodes states into homogeneous graphs with integer node and edge labels, the form that standard graph
 neural networks consume: a node for each entity and for each tuple of the relational encoding and, for every position
