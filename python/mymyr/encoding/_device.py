@@ -564,8 +564,7 @@ def _encode_rows(encoder: Any, rows: Any, capacities: Any, keep: Any = None) -> 
 
         native.encode_exact(stream, rows.fields, allocate)
         out["sizes"] = None
-    if keep:
-        _retain(torch, keep, device)
+    _retain(torch, [*rows.tensors, *(keep or [])], device)
     return out
 
 
