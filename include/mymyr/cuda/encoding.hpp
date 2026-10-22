@@ -123,7 +123,8 @@ enum class DerivedWords : u8
     Supplied,
 };
 
-/// Conservative maxima per graph over the instances of the context, covering every lane the device encodes: the state,
+/// Conservative maxima per graph over the instances of the context for rows without expansion labels or horizon
+/// nodes. External expansion rows and horizon nodes require their own output capacities. These bounds cover the state,
 /// static and derived cells, the nullary (auxiliary) entity, the goal cells of the instance's goal and of a row's own
 /// goal, the subgoal levels, the goal and subgoal targets and one entity per predicate virtual node. `words` is the
 /// widest row of an instance (state or derived words), `cells` the longest cell list of a graph (with its subgoal and

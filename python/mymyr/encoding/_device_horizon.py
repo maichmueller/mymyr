@@ -145,11 +145,12 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     no = torch.empty(rows.graphs + 1, dtype=torch.int32, device=states.device)
     src = torch.empty(a.capacity, dtype=torch.int32, device=states.device)
     dst = torch.empty_like(src)
+    schema, binding = torch.empty_like(a.schema), torch.empty_like(a.binding)
     native = d._device_encoder(encoder, states.device.index)
     native.build_horizon(_stream(states), rows.fields, children.data_ptr(), d._stride(children),
-                         [nodes.data_ptr(), no.data_ptr(), src.data_ptr(), dst.data_ptr()], merge)
+                         [nodes.data_ptr(), no.data_ptr(), src.data_ptr(), dst.data_ptr(), schema.data_ptr(), binding.data_ptr()], merge)
     d._retain(torch, [actions, children, *keep], states.device)
-    return HorizonView(nodes, no, a.offsets, src, dst, a.schema, a.binding, ids)
+    return HorizonView(nodes, no, a.offsets, src, dst, schema, binding, ids)
 
 
 def encode_transitions(encoder: Any, states: Any, task_ids: Any, derived: Any, goals: Any, actions: Any,

@@ -929,6 +929,16 @@ cudaError_t launch_fills(const EncodeParams& p, const LaunchShape& shape, cudaSt
         const u64 shared = fill_shared_bytes(p.context.num_virtual, p.context.num_relations, true, p.relation_major);
         p.index64 ? structured_fill_kernel<i64><<<blocks, k_block, shared, stream>>>(p)
                   : structured_fill_kernel<i32><<<blocks, k_block, shared, stream>>>(p);
+        const cudaError_t error = cudaPeekAtLastError();
+        if (error != cudaSuccess)
+            return error;
+        if (p.zero_unused && (p.out.history_offsets || p.out.history_entity || p.out.history_dt))
+        {
+            const u64 entries = std::max(p.capacities.history, p.capacities.graphs + 1);
+            const u32 tail_blocks = std::min<u32>(blocks_for(entries), 4096);
+            p.index64 ? zero_history_kernel<i64><<<tail_blocks, k_block, 0, stream>>>(p)
+                      : zero_history_kernel<i32><<<tail_blocks, k_block, 0, stream>>>(p);
+        }
         return cudaPeekAtLastError();
     }
     bool first = true;

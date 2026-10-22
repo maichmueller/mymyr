@@ -84,6 +84,7 @@ struct EncodingFacts
     std::array<bool, 3> reads_derived{};
     bool reads_derived_layers = false;  // some instance reads derived words for subgoal layers over derived slots
     u32 derived_words = 0;
+    u32 label_width = 0;
     u64 axiom_view_words = 0;  // the widest view of an evaluated instance
     std::vector<Axioms> axioms;  // [instances], or empty when no graph reads derived atoms
     /// Uploaded with the generation: the instances' lifted::EncodingAxiomInstance records and their reads, and per goal

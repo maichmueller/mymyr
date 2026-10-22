@@ -95,6 +95,7 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
     auto out = std::make_shared<detail::EncodingFacts>();
     detail::EncodingFacts& facts = *out;
     facts.derived_words = host.max_derived_words();
+    facts.label_width = host.table().label_width();
     GraphBounds& bounds = facts.bounds;
     const bool levels = schema.has_subgoals();
     const bool history = schema.has_history();
@@ -617,7 +618,7 @@ ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds,
     out.level_storage = add(out.cell_counts, round_up(mul(4, out.cell_entries)));
     out.action_storage = add(out.level_storage, round_up(mul(8, mul(G, out.level_stride))));
     // Independent cursors per graph: the action merge is serial within a graph.
-    out.action_stride = bounds.variable_inputs ? add(mul(2, bounds.schemas), 1) : 0;
+    out.action_stride = bounds.variable_inputs ? add(mul(2, bounds.schemas), 3) : 0;
     out.scan_temp = add(out.action_storage, round_up(mul(4, mul(G, out.action_stride))));
     out.scan_temp_bytes = totals_scan_temp_bytes(out.scan_length, out.wide);
     out.bytes = add(out.scan_temp, round_up(out.scan_temp_bytes));
@@ -1014,7 +1015,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if (in.horizon.edges && opts.include_actions &&
             (!in.horizon.schema || (in.horizon.label_width && !in.horizon.binding)))
             invalid("the device horizon needs action labels");
-        if (opts.include_actions && in.horizon.label_width < m_encoder->table().label_width())
+        if (opts.include_actions && in.horizon.label_width < facts.label_width)
             invalid("the horizon label width is narrower than the table's");
     }
     if (in.actions.offsets)
@@ -1024,7 +1025,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if ((in.actions.capacity && !in.actions.schema) ||
             (in.actions.capacity && in.actions.label_width && !in.actions.binding))
             invalid("the device expansion needs schema and binding arrays");
-        if (in.actions.label_width < m_encoder->table().label_width())
+        if (in.actions.label_width < facts.label_width)
             invalid("the action label width is narrower than the table's");
     }
     if (graphs > out.capacities.graphs)
@@ -1035,7 +1036,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("a circular row view needs a positive capacity");
     if (live && launch.order)
         invalid("a launch order needs the graph count on the host: it cannot order a live row count");
-    if (graphs && !in.states)
+    if (graphs && in.state_words && !in.states)
         invalid("the state buffer is null");
     if (in.state_stride < in.state_words)
         invalid("the state row stride is smaller than its width");
@@ -1243,7 +1244,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             {
                 // The cursor region is no longer needed after horizon instance mapping; the per-node ids survive
                 // until evaluation completes on this stream.
-                auto* node_ids = reinterpret_cast<i32*>(scratch.action_storage);
+                auto* node_ids = reinterpret_cast<i32*>(scratch.action_storage) + 2;
                 check(detail::launch_horizon_instances(p, node_ids, stream), "horizon node instances");
                 ax.task_ids = node_ids;
             }
@@ -1253,7 +1254,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             ax.derived = reinterpret_cast<u64*>(base + layout.derived);
             ax.derived_words = facts.derived_words;
             ax.invalid = scratch.flags;
-            ax.live = in.graphs_device;
+            ax.live = horizon ? reinterpret_cast<const u64*>(scratch.action_storage) : in.graphs_device;
             ax.row_start = in.row_start;
             ax.row_capacity = in.row_capacity;
             ax.class_ow = facts.class_ow[mode].data();
@@ -1342,8 +1343,9 @@ void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* childr
                              const DeviceHorizonBuild& output, cudaStream_t stream)
 {
     if (!parents.actions.offsets || !output.node_offsets ||
-        ((parents.graphs + parents.actions.capacity) && !output.nodes) ||
-        (parents.actions.capacity && (!children || !output.src || !output.dst)) || child_stride < parents.state_words)
+        ((parents.graphs + parents.actions.capacity) && parents.state_words && !output.nodes) ||
+        (parents.actions.capacity && (!children || !output.src || !output.dst || !output.schema ||
+                                     (parents.actions.label_width && !output.binding))) || child_stride < parents.state_words)
         throw std::invalid_argument("mymyr: encoding: depth-one builder needs parent rows, child rows, offsets and output storage");
     if (parents.graphs + parents.actions.capacity > 0x7fffffffull)
         throw std::invalid_argument("mymyr: encoding: depth-one horizon node capacity exceeds int32");

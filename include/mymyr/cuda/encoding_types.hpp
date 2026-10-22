@@ -131,7 +131,8 @@ struct DeviceCollationBatch
 namespace mymyr::cuda
 {
 /// Caller-owned output of a depth-one builder. Nodes hold graphs + action capacity rows, node_offsets graphs + 1,
-/// and source/destination action capacity entries. The edge labels and offsets remain those of the expansion.
+/// and source/destination/schema action capacity entries, binding capacity * label_width entries. Edges are ordered
+/// by destination and then by their canonical expansion label; edge offsets remain those of the expansion.
 struct DeviceHorizonBuild
 {
     u64* nodes = nullptr;
@@ -139,5 +140,7 @@ struct DeviceHorizonBuild
     i32* src = nullptr;
     i32* dst = nullptr;
     bool merge = true;
+    i32* schema = nullptr;
+    i32* binding = nullptr;
 };
 }

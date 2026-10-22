@@ -519,6 +519,7 @@ def encode_arrays(
         if actions is not None:
             from mymyr.encoding._device_horizon import bind_actions
             bind_actions(encoder, rows, actions)
+            keep = [*(keep or []), actions, *rows.tensors]
     else:
         from mymyr.encoding._device_horizon import horizon_rows
         rows = horizon_rows(encoder, horizon, derived, goals, subgoals)

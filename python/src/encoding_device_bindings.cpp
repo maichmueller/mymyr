@@ -99,9 +99,8 @@ Rows rows_of(const std::vector<std::uintptr_t>& v)
             field = v[i++];
     r.history_dt = v[i++];
     r.history_count = v[i++];
-    for (auto* fields : {&r.actions})
-        for (auto& field : *fields)
-            field = v[i++];
+    for (auto& field : r.actions)
+        field = v[i++];
     for (auto& field : r.horizon)
         field = v[i++];
     return r;
@@ -245,11 +244,11 @@ public:
                        std::uintptr_t children, u64 child_stride, const std::vector<std::uintptr_t>& outputs,
                        bool merge)
     {
-        if (outputs.size() != 4)
-            refuse("the horizon builder needs nodes, node offsets, sources and destinations");
+        if (outputs.size() != 6)
+            refuse("the horizon builder needs nodes, node offsets, sources, destinations, schemas and bindings");
         const auto in = input_of(rows_of(row_fields));
         const cuda::DeviceHorizonBuild out{ptr<u64>(outputs[0]), ptr<i32>(outputs[1]), ptr<i32>(outputs[2]),
-                                            ptr<i32>(outputs[3]), merge};
+                                            ptr<i32>(outputs[3]), merge, ptr<i32>(outputs[4]), ptr<i32>(outputs[5])};
         nb::gil_scoped_release release;
         cuda::DeviceGuard guard(m_device);
         cuda::build_depth_one_horizon(in, ptr<const u64>(children), child_stride, out, cuda_stream(stream));

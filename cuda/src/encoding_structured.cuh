@@ -82,6 +82,12 @@ __device__ bool structured_row(const EncodeParams& p, u64 g, RowView& r, ed::Hor
 __global__ void structured_count_kernel(const EncodeParams p)
 {
     extern __shared__ __align__(8) unsigned char shared_bytes[];
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        if ((p.actions.offsets && p.actions.offsets[0] != 0) ||
+            (p.horizon_mode && (p.horizon.node_offsets[0] != 0 || p.horizon.edge_offsets[0] != 0)))
+            atomicOr(p.flags, 1u);
+    }
     if (threadIdx.x % k_warp)
         return;
     const u64 gi = u64(blockIdx.x) * (k_block / k_warp) + threadIdx.x / k_warp;
@@ -260,6 +266,14 @@ __global__ void structured_fill_kernel(const EncodeParams p)
 __global__ void horizon_instances_kernel(const EncodeParams p, i32* ids)
 {
     const u64 g = u64(blockIdx.x) * k_block + threadIdx.x;
+    if (g == 0)
+    {
+        const i32 count = p.horizon.node_offsets[p.graphs];
+        const bool valid = count >= 0 && u64(count) <= p.horizon.nodes;
+        *reinterpret_cast<u64*>(p.action_storage) = valid ? u64(count) : 0;
+        if (!valid)
+            atomicOr(p.flags, 1u);
+    }
     if (g >= p.graphs)
         return;
     const i32 first = p.horizon.node_offsets[g], last = p.horizon.node_offsets[g + 1];
@@ -301,6 +315,12 @@ __global__ void horizon_build_kernel(const DeviceEncodeInput in, const u64* chil
             out.nodes[base * in.state_words + w] = in.states[g * in.state_stride + w];
         for (i32 e = first; e < last; ++e)
         {
+            if (a.parent && a.parent[e] != i32(g))
+            {
+                for (u64 q = g + 1; q <= in.graphs; ++q)
+                    out.node_offsets[q] = -1;
+                return;
+            }
             const u64* child = children + u64(e) * child_stride;
             u64 node = next;
             if (out.merge)
@@ -318,7 +338,25 @@ __global__ void horizon_build_kernel(const DeviceEncodeInput in, const u64* chil
             }
             out.src[e] = 0;
             out.dst[e] = i32(node - base);
+            out.schema[e] = a.schema[e];
+            for (u32 k = 0; k < a.label_width; ++k)
+                out.binding[u64(e) * a.label_width + k] = a.binding[u64(e) * a.label_width + k];
         }
+        // Stable insertion by destination preserves the expansion's schema/binding order within each destination.
+        for (i32 e = first + 1; e < last; ++e)
+            for (i32 j = e; j > first && out.dst[j] < out.dst[j - 1]; --j)
+            {
+                const i32 dst = out.dst[j], schema = out.schema[j];
+                out.dst[j] = out.dst[j - 1]; out.dst[j - 1] = dst;
+                out.schema[j] = out.schema[j - 1]; out.schema[j - 1] = schema;
+                for (u32 k = 0; k < a.label_width; ++k)
+                {
+                    const u64 at = u64(j) * a.label_width + k;
+                    const i32 object = out.binding[at];
+                    out.binding[at] = out.binding[at - a.label_width];
+                    out.binding[at - a.label_width] = object;
+                }
+            }
         out.node_offsets[g + 1] = i32(next);
     }
 }

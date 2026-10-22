@@ -172,7 +172,7 @@ def test_self_loop_has_no_delta_and_deeper_device_horizons_are_refused():
 
 
 @pytest.mark.needs_gil
-def test_torch_op_actions_and_horizons_compile_and_capture():
+def test_torch_op_actions_compile_and_capture():
     device = gpu()
     import mymyr.rl.torch as rt
     task = text_task("gripper__prob05")
@@ -223,3 +223,100 @@ def test_jax_ffi_refuses_action_rows_and_horizons_with_the_operand_reason():
         ej.encode(encoding.FlatRelationEncoder(task), rows, actions=object())
     with pytest.raises(ValueError, match="operands carry no node offsets or edges"):
         ej.encode(encoding.FlatTransitionEncoder(task), rows)
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_action_rows_combine_with_row_goals_subgoals_and_history(layout):
+    device = gpu()
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode(walk(task, steps=2, walks=1)))
+    positive, negative = rows.copy(), np.zeros_like(rows)
+    layers = np.ascontiguousarray(rows[:, None, :])
+    empty = np.zeros_like(layers)
+    dt = np.full((len(rows), 1), 3, np.int32)
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, max_goal_level=1, history=True,
+        target_sources=("goal", "subgoal", "action", "history"), predicate_virtual_nodes=True)
+    host = encoder.encode(rows, goals=(positive, negative), subgoals=(layers, empty), history=(layers, empty, dt),
+                          actions=rl.expand(task, rows))
+    words = tensor(rows, device)
+    kwargs = dict(goals=(tensor(positive, device), tensor(negative, device)),
+                  subgoals=(tensor(layers, device), tensor(empty, device)),
+                  history=(tensor(layers, device), tensor(empty, device), tensor(dt, device)),
+                  actions=rl.expand(task, words, framework="torch"))
+    same(host, encoder.encode(words, **kwargs))
+    capacity = caps(host)
+    capacity["history"] = len(host.history_dt) + 3
+    same(host, encoder.encode(words, capacities=capacity, **kwargs))
+
+
+@pytest.mark.needs_gil
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+def test_torch_horizon_op_compiles_and_captures_without_a_host_wait(layout):
+    device = gpu()
+    import mymyr.rl.torch as rt
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode(walk(task, steps=1, walks=1)))
+    view = encoding.horizon(task, rows, depth=1, merge=False)
+    inputs = upload(view, device)
+    encoder = encoding.FlatHorizonEncoder(task, horizon_mode="delta", layout=layout, parent_relation=True)
+    expected = encoder.encode(view)
+    capacity = caps(expected)
+    handle = rt.register(encoder)
+
+    def call():
+        return torch.ops.mymyr.encode_flat(handle, inputs.nodes, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None,
+            expected.num_graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
+            None, None, None, None, inputs.node_offsets, inputs.edge_offsets,
+            inputs.edge_src, inputs.edge_dst, inputs.edge_schema, inputs.edge_binding)
+
+    try:
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, call()))
+        compiled = torch.compile(call, fullgraph=True)
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, compiled()))
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            call()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = call()
+        graph.replay()
+        same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, output))
+    finally:
+        rt.unregister(handle)
+
+
+def test_many_split_schema_runs_have_no_fixed_cursor_limit():
+    device = gpu()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the PDDL front end")
+    predicates = " ".join(f"(p{i} ?x)" for i in range(33))
+    alternatives = " ".join(f"(p{i} ?x)" for i in range(33))
+    domain = mymyr.Domain.from_string(f"""(define (domain many) (:requirements :strips :disjunctive-preconditions)
+        (:predicates (done ?x) {predicates})
+        (:action go :parameters (?x) :precondition (or {alternatives}) :effect (done ?x)))""")
+    facts = " ".join(f"(p{i} a)" for i in range(33))
+    task = mymyr.Task(domain.instantiate_string(f"""(define (problem p) (:domain many) (:objects a b)
+        (:init {facts}) (:goal (done a)))"""))
+    rows = np.asarray(task.encode([task.initial_state]))
+    encoder = encoding.FlatRelationEncoder(task, target_sources=("action",))
+    host_actions = rl.expand(task, rows)
+    assert len(host_actions.schema) == 33
+    same(encoder.encode(rows, actions=host_actions),
+         encoder.encode(tensor(rows, device), actions=rl.expand(task, tensor(rows, device), framework="torch")))
+
+
+def test_device_transition_supplied_derived_words_equal_the_host():
+    device = gpu()
+    from test_encoding import derived_words
+    task = text_task("philosophers__p03-phil4")
+    states = walk(task, steps=1, walks=1)
+    rows = np.asarray(task.encode(states))
+    derived = derived_words(task, states)
+    encoder = encoding.FlatTransitionEffectsEncoder(task)
+    host_actions = rl.expand(task, rows, derived=True)
+    words = tensor(rows, device)
+    actions = rl.expand(task, words, derived=True, framework="torch")
+    same(encoder.encode(rows, derived=derived, actions=host_actions),
+         encoder.encode(words, derived=tensor(derived, device), actions=actions))
