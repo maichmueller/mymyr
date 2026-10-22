@@ -86,21 +86,41 @@ def main():
             domain, problem = task_files(name, args.data)
             samples = {key: [] for key in binaries}
             loads = []
-            for round_index in range(args.rounds):
-                order = list(binaries.items())
-                if round_index % 2:
-                    order.reverse()
-                for label, binary in order:
-                    loads.append(os.getloadavg())
-                    result = subprocess.run(
-                        [str(binary), "--targets", str(domain), str(problem), str(args.states), str(args.seed)],
-                        text=True, capture_output=True, check=True,
+            servers = {}
+            try:
+                for label, binary in binaries.items():
+                    servers[label] = subprocess.Popen(
+                        [str(binary), "--targets-server", str(domain), str(problem), str(args.states), str(args.seed)],
+                        text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     )
-                    record = json.loads(result.stdout)
-                    samples[label].append(record)
-                    if raw:
-                        raw.write(json.dumps(dict(task=name, binary=label, round=round_index, load=loads[-1], **record)) + "\n")
-                        raw.flush()
+                for round_index in range(args.rounds):
+                    order = list(servers.items())
+                    if round_index % 2:
+                        order.reverse()
+                    for label, server in order:
+                        loads.append(os.getloadavg())
+                        server.stdin.write("run\n")
+                        server.stdin.flush()
+                        line = server.stdout.readline()
+                        if not line:
+                            raise RuntimeError(f"{name}/{label}: {server.stderr.read()}")
+                        record = json.loads(line)
+                        samples[label].append(record)
+                        if raw:
+                            raw.write(json.dumps(dict(task=name, binary=label, round=round_index, load=loads[-1], **record)) + "\n")
+                            raw.flush()
+            finally:
+                for server in servers.values():
+                    if server.poll() is None:
+                        try:
+                            server.stdin.write("quit\n")
+                            server.stdin.flush()
+                        except BrokenPipeError:
+                            pass
+                    server.wait()
+                    server.stdin.close()
+                    server.stdout.close()
+                    server.stderr.close()
             single = None if args.skip_python else python_single(domain, problem)
             for label, values in samples.items():
                 metrics = {}
@@ -119,7 +139,7 @@ def main():
                 targets = {
                     "core": best("core_us") <= best("core_limit_us"),
                     "actions": None if metrics["action_ns_per_int"] is None else best("action_ns_per_int") <= 1,
-                    "derived_reuse": best("reused_derived_us") <= best("core_limit_us"),
+                    "derived_reuse": None if best("derived_words") == 0 else best("reused_derived_us") <= best("core_limit_us"),
                     "single_cpp": best("single_cpp_us") <= 0.5,
                     "single_python": None if single is None else single["min"] <= 3,
                     "threads": None if args.states < 4096 else best("eight_threads_speedup") >= 3.5,

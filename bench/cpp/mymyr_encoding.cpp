@@ -2,6 +2,12 @@
 //
 //   mymyr_encoding domain.pddl problem.pddl [N = 1024] [seed = 1] [layout = graph|relation] [threads = 1]
 //   [goals = off|on|targets] [actions = off|on|targets|virtual] [singles = 256] [subgoals = 0] [history = 0]
+//   mymyr_encoding --targets domain.pddl problem.pddl [N = 1024] [seed = 1]
+//
+// --targets reports every CPU path on the same walk: core, actions, derived evaluation and supplied words, single
+// calls, eight threads, relation-major with its HGraph view, and Simple. --targets-server keeps the task, walk and
+// expansion alive: each stdin line "run" emits one report and "quit" closes it. bench/python/encoding.py uses this
+// mode to interleave executables and rounds without repeating fixture preparation.
 //
 // The walk starts at the initial state and restarts there at dead ends. The line reports the best of 5 timed encodes of
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
@@ -50,6 +56,7 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <iostream>
 #include <random>
 #include <sys/resource.h>
 #include <stdexcept>
@@ -259,7 +266,8 @@ EncodeTimes time_encode(const encoding::FlatEncoder& encoder, const encoding::En
 
 /// Measures the core and each optional path over identical walk rows. Derived-word preparation and action expansion
 /// are outside the encoding timers. Ratios include output allocation and use the fastest of nine warmed calls.
-void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::vector<u64>& rows, u64 n)
+void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::vector<u64>& rows, u64 n,
+                  const std::shared_ptr<Expanded>& expanded)
 {
     encoding::FlatOptions options;
     options.goal_derivations = {};
@@ -271,7 +279,6 @@ void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::
     if (batch_hash(*graph.bundle) != batch_hash(*parallel.bundle))
         throw std::runtime_error("thread counts produced different batches");
 
-    const auto expanded = expand_rows(*table, rows.data(), n, table->words());
     auto action_input = in;
     action_input.actions = &expanded->x;
     const EncodeTimes actions = time_encode(*core, action_input, 1);
@@ -378,7 +385,8 @@ Horizon build_horizon(const rl::TaskTable& table, const std::vector<u64>& roots,
 
 int main(int argc, char** argv)
 {
-    const bool targets = argc > 1 && std::string(argv[1]) == "--targets";
+    const bool server = argc > 1 && std::string(argv[1]) == "--targets-server";
+    const bool targets = server || (argc > 1 && std::string(argv[1]) == "--targets");
     if (targets)
     {
         --argc;
@@ -433,7 +441,20 @@ int main(int argc, char** argv)
 
         if (targets)
         {
-            time_targets(table, rows, n);
+            const auto expanded = expand_rows(*table, rows.data(), n, words);
+            if (server)
+            {
+                std::string command;
+                while (std::getline(std::cin, command) && command != "quit")
+                {
+                    if (command != "run")
+                        throw std::invalid_argument("expected run or quit");
+                    time_targets(table, rows, n, expanded);
+                    std::fflush(stdout);
+                }
+            }
+            else
+                time_targets(table, rows, n, expanded);
             return 0;
         }
         const std::string layout = argc > 5 ? argv[5] : "graph";
