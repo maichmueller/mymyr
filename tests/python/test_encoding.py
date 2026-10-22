@@ -452,10 +452,7 @@ def test_invalid_options_raise_like_the_schema(options, error, match):
         encoding.EncodingSchema(task, **{"goal_derivations": (), **options})
 
 
-def test_numeric_tasks_and_bad_tables_are_refused():
-    numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError, match="^mymyr: encoding: numeric"):
-        encoder_of(numeric)
+def test_bad_tables_are_refused():
     with pytest.raises(TypeError):
         encoder_of("gripper")
     task = text_task("gripper__prob05")
@@ -548,8 +545,8 @@ def test_a_derived_array_narrower_than_the_instance_needs_is_refused():
 # digest of the encoder's rl::ArrayBundle. tests/cpp/encoding/test_encoder.cpp asserts the same constants for the same
 # encodings, so the arrays that Python exports are the bytes that the C++ encoder wrote.
 GOLDEN_DIGESTS = {
-    "gripper__prob05": 14883951552709315966,
-    "philosophers__p03-phil4": 12253892925669182561,
+    "gripper__prob05": 9666753341531803529,
+    "philosophers__p03-phil4": 8295029642410720015,
 }
 
 

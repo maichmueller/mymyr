@@ -66,9 +66,12 @@ public:
     /// batch is the j-th row appended. If the encoding throws, the rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);
     /// The capacity form (FlatEncoder::encode_capacity): the rows are dropped iff the batch fits (sizes.overflow == 0),
-    /// so that a flush that overflowed can be repeated with larger capacities.
+    /// so that a flush that overflowed can be repeated with larger capacities. `extra` receives the numeric count and
+    /// the sizes of the static blocks, whose capacities are given with shared statics (FlatEncoder::encode_capacity).
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const BatchShape& capacities,
-                                                               FlatSizes& sizes);
+                                                               FlatSizes& sizes,
+                                                               const StaticShape* static_capacities = nullptr,
+                                                               ExtraSizes* extra = nullptr);
 
 private:
     struct Impl;
@@ -109,9 +112,11 @@ public:
     /// Encodes the rows held, in ascending order of their indices, on the members of `pool`: graph j of the batch is the
     /// row of indices()[j]. The rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool);
-    /// The capacity form (FlatEncoder::encode_capacity). The rows are kept.
+    /// The capacity form (FlatEncoder::encode_capacity, with its static capacities and extra sizes). The rows are kept.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> flush(ThreadPool& pool, const BatchShape& capacities,
-                                                               FlatSizes& sizes);
+                                                               FlatSizes& sizes,
+                                                               const StaticShape* static_capacities = nullptr,
+                                                               ExtraSizes* extra = nullptr);
 
 private:
     struct Impl;

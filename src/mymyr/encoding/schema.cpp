@@ -56,6 +56,7 @@ struct Pending
 {
     Relation relation;
     std::vector<SlotRole> roles;
+    bool numeric = false;  // a numeric relation: it follows the others in the catalog
 };
 
 /// The catalog under construction: relations are added in any order and sorted by name in the end.
@@ -92,6 +93,7 @@ private:
         return kind == PredicateKind::Static ? Lane::Static : kind == PredicateKind::Derived ? Lane::Derived : Lane::Fluent;
     }
 
+    void add_numeric(u32 function);
     void build_flat(u32 predicate, bool state_relation, bool top);
     void build_horizon(u32 predicate, bool state_relation, bool top);
 
@@ -149,6 +151,22 @@ void Catalog::add_action(u32 schema, bool split, std::initializer_list<SlotRole>
     pending.relation.logical_arity = source.arity;
     pending.roles.assign(lead.begin(), lead.end());
     pending.roles.insert(pending.roles.end(), source.arity, SlotRole::Argument);
+    add(std::move(pending));
+}
+
+void Catalog::add_numeric(u32 function)
+{
+    const DomainSignature::Function& source = m_domain.functions[function];
+    Pending pending;
+    pending.numeric = true;
+    pending.relation.name = "[num]" + source.name;
+    pending.relation.lane = Lane::Numeric;
+    pending.relation.function = static_cast<i32>(function);
+    pending.relation.logical_arity = source.arity;
+    if (source.arity == 0)
+        pending.roles.push_back(SlotRole::Auxiliary);
+    else
+        pending.roles.assign(source.arity, SlotRole::Argument);
     add(std::move(pending));
 }
 
@@ -291,6 +309,10 @@ void Catalog::build()
                 add_action(schema, arities[source.name].size() > 1, {SlotRole::Action});
         }
     }
+    if (o.include_numeric && !horizon)
+        for (u32 f = 0; f < m_domain.functions.size(); ++f)
+            if (m_domain.functions[f].kind == DomainSignature::FunctionKind::Fluent)
+                add_numeric(f);
     if (o.horizon.parent_relation)
     {
         Pending parent;
@@ -345,10 +367,29 @@ private:
 
 DomainSignature DomainSignature::of(const rl::TaskTable& table)
 {
-    for (const auto& instance : table.instances())
-        if (instance.task->data().has_numerics() || !instance.task->data().constraints.empty())
-            invalid("numeric functions and constraints are not supported");
     DomainSignature domain;
+    if (table.size() != 0)
+    {
+        const auto functions_of = [](const formalism::TaskData& data)
+        {
+            std::vector<Function> out;
+            for (const formalism::Function& function : data.functions)
+                out.push_back({std::string(data.str(function.name)), function.arity,
+                               function.kind == formalism::FuncKind::Fluent      ? FunctionKind::Fluent
+                               : function.kind == formalism::FuncKind::Auxiliary ? FunctionKind::Auxiliary
+                                                                                 : FunctionKind::Static});
+            return out;
+        };
+        const auto same = [](const Function& a, const Function& b)
+        { return a.name == b.name && a.arity == b.arity && a.kind == b.kind; };
+        domain.functions = functions_of(table.instance(0).task->data());
+        for (u32 i = 1; i < table.size(); ++i)
+        {
+            const std::vector<Function> other = functions_of(table.instance(i).task->data());
+            if (!std::ranges::equal(domain.functions, other, same))
+                invalid("instance " + std::to_string(i) + " does not declare the numeric functions of instance 0");
+        }
+    }
     const auto& names = table.predicate_names();
     for (u32 p = 0; p < table.num_domain_predicates(); ++p)
     {
@@ -363,6 +404,18 @@ DomainSignature DomainSignature::of(const rl::TaskTable& table)
     }
     for (u32 s = 0; s < table.num_schemas(); ++s)
         domain.schemas.push_back({table.schema_names()[s], table.schema_arities()[s]});
+    for (u32 i = 0; i < table.size(); ++i)
+        domain.constants_recorded = domain.constants_recorded && table.instance(i).task->data().constants_recorded;
+    if (table.size() != 0)
+    {
+        const formalism::TaskData& data = table.instance(0).task->data();
+        for (const formalism::Object& object : data.objects)
+        {
+            if (!object.constant)
+                break;
+            domain.constants.emplace_back(data.str(object.name));
+        }
+    }
     return domain;
 }
 
@@ -381,6 +434,7 @@ std::string_view to_string(Lane lane) noexcept
     case Lane::Parent: return "parent";
     case Lane::Sibling: return "sibling";
     case Lane::Cousin: return "cousin";
+    case Lane::Numeric: return "numeric";
     }
     return "";
 }
@@ -401,16 +455,29 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
                 invalid("the domain has two predicates named '" + predicate.name + "'");
     }
 
+    if (schema->m_options.horizon.mode != HorizonMode::None &&
+        std::ranges::any_of(domain.functions, [](const auto& f) { return f.kind == DomainSignature::FunctionKind::Fluent; }))
+        invalid("horizon encodings do not encode numeric functions");
+    {
+        std::unordered_set<std::string_view> seen;
+        for (const auto& function : domain.functions)
+            if (!seen.insert(function.name).second)
+                invalid("the domain has two functions named '" + function.name + "'");
+    }
+
     Catalog catalog(domain, schema->m_options);
     catalog.build();
     std::vector<Pending> pending = catalog.take();
-    std::ranges::sort(pending, {}, [](const Pending& p) -> const std::string& { return p.relation.name; });
+    std::ranges::sort(pending, {},
+                      [](const Pending& p) { return std::tie(p.numeric, p.relation.name); });
     for (usize i = 1; i < pending.size(); ++i)
         if (pending[i].relation.name == pending[i - 1].relation.name)
             invalid("two relations are named '" + pending[i].relation.name + "'");
 
     schema->m_role_offsets.reserve(pending.size() + 1);
     schema->m_role_offsets.push_back(0);
+    schema->m_first_numeric = static_cast<u32>(
+        std::ranges::find_if(pending, [](const Pending& p) { return p.numeric; }) - pending.begin());
     for (Pending& entry : pending)
     {
         schema->m_roles.insert(schema->m_roles.end(), entry.roles.begin(), entry.roles.end());
@@ -455,6 +522,9 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     schema->m_goal_complete = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
         { return r.lane == Lane::Goal || r.lane == Lane::GoalDerivation || r.lane == Lane::GoalSatisfaction; });
+    for (u32 id = 0; id < schema->m_relations.size(); ++id)
+        if (schema->m_relations[id].lane == Lane::Static)
+            schema->m_static_relations.push_back(id);
     schema->m_subgoals = std::ranges::any_of(
         schema->m_relations, [](const Relation& r)
         {
@@ -462,6 +532,16 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
                    r.level.value_or(0) > 0;
         });
     const FlatOptions& o = schema->m_options;
+    for (const Relation& relation : schema->m_relations)
+        schema->m_simple_max_arity = std::max(schema->m_simple_max_arity, relation.arity);
+    if (o.constant_labels)
+    {
+        if (!domain.constants_recorded)
+            invalid("constant_labels needs the constants of the domain, which a task read from mymyr's text format "
+                    "does not record: load the task from PDDL");
+        schema->m_constants = domain.constants;
+        schema->m_simple_constants = static_cast<u32>(domain.constants.size());
+    }
     schema->m_implicit_entities = o.entity_arrays == EntityArrays::Auto && o.targets.empty() &&
                                   !o.predicate_virtual_nodes && !o.include_actions && !o.history &&
                                   o.horizon.mode == HorizonMode::None;
@@ -476,14 +556,33 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
         hasher.text("omit relation_counts");
     if (schema->m_implicit_entities)
         hasher.text("omit entity_role, entity_ref");
+    if (o.statics == Statics::Shared)
+        hasher.text("shared statics");
     hasher.integer(o.targets.bits());
     if (o.history)
     {
         hasher.text("history");
         hasher.integer(o.history_max_steps.value_or(0));  // 0 (never a limit): all steps
     }
+    if (schema->stores_numeric_values())
+    {
+        hasher.text("numeric dtype");
+        hasher.integer(static_cast<u64>(o.numeric_dtype));
+    }
     hasher.integer(static_cast<u64>(o.horizon.mode));
     hasher.integer(o.horizon.mode == HorizonMode::None ? 0 : static_cast<u64>(o.horizon.root));
+    if (o.outputs != Outputs{Output::Relations})
+    {
+        hasher.text("outputs");
+        hasher.integer(o.outputs.bits());
+    }
+    if (o.constant_labels)
+    {
+        hasher.text("constant labels");
+        hasher.integer(domain.constants.size());
+        for (const std::string& constant : domain.constants)
+            hasher.text(constant);
+    }
     hasher.integer(schema->m_relations.size());
     for (u32 id = 0; id < schema->m_relations.size(); ++id)
     {
@@ -498,12 +597,41 @@ std::shared_ptr<const EncodingSchema> EncodingSchema::create(const DomainSignatu
     return schema;
 }
 
+std::vector<std::string> EncodingSchema::simple_label_names() const
+{
+    std::vector<std::string> names;
+    names.reserve(simple_node_labels());
+    for (const std::string_view role : k_entity_role_names)
+        names.emplace_back(role);
+    for (const Relation& relation : m_relations)
+        names.push_back(relation.name);
+    names.insert(names.end(), m_constants.begin(), m_constants.end());
+    return names;
+}
+
+std::vector<std::string> EncodingSchema::simple_edge_label_names() const
+{
+    std::vector<std::string> names;
+    names.reserve(simple_edge_labels());
+    for (u32 k = 0; k < m_simple_max_arity; ++k)
+        names.push_back(std::to_string(k));
+    for (u32 k = 0; k < m_simple_max_arity; ++k)
+        names.push_back(std::to_string(k) + "^-1");
+    return names;
+}
+
 std::optional<u32> EncodingSchema::find(std::string_view name) const
 {
-    const auto it = std::ranges::lower_bound(m_relations, name, {}, [](const Relation& r) -> std::string_view { return r.name; });
-    if (it == m_relations.end() || it->name != name)
-        return std::nullopt;
-    return static_cast<u32>(it - m_relations.begin());
+    // the relations before the numeric ones, and the numeric ones, are each sorted by name
+    const auto name_of = [](const Relation& r) -> std::string_view { return r.name; };
+    const auto split = m_relations.begin() + m_first_numeric;
+    for (const auto& [first, last] : {std::pair{m_relations.begin(), split}, std::pair{split, m_relations.end()}})
+    {
+        const auto it = std::ranges::lower_bound(first, last, name, {}, name_of);
+        if (it != last && it->name == name)
+            return static_cast<u32>(it - m_relations.begin());
+    }
+    return std::nullopt;
 }
 
 std::span<const SlotRole> EncodingSchema::slot_roles(u32 id) const

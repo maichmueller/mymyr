@@ -45,6 +45,8 @@ struct HPass
     bool exclude;
     bool include_root_target;
     const i32* schema_relation;
+    bool simple;  // the batch stores the Simple graph
+    SimpleParams simple_params;
     bool one_schema_per_relation;  // no two schemas share an action relation
 
     [[nodiscard]] u32 instance_of(u64 g) const noexcept { return in.task_ids ? static_cast<u32>(in.task_ids[g]) : 0; }
@@ -209,7 +211,7 @@ void count_range(const HPass& p, u32 t)
         m.kin->at.assign(hi - lo, 0);
         m.kin->overflow = k_none;
     }
-    const bool keep_counts = p.relation_major || p.view.num_virtual != 0;
+    const bool keep_counts = p.relation_major || p.view.num_virtual != 0 || p.simple;
     if (p.relation_major)
         m.tally.assign(p.R, 0);
     m.cell_counts.clear();
@@ -350,6 +352,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
                           nullptr,
                           nullptr,
                           nullptr};
+    const SimpleOut<I> simple{static_cast<I*>(b.node_offsets), static_cast<I*>(b.edge_offsets), b.node_label,
+                              static_cast<I*>(b.edge_index),
+                              b.edge_index ? static_cast<I*>(b.edge_index) + b.edge_stride : nullptr, b.edge_label};
     I* entity_offsets = static_cast<I*>(b.entity_offsets);
     Member& m = p.s.members[t];
     u64 entity = m.entity_start, tuple = m.tuple_start, arg = m.arg_start, target = m.target_start;
@@ -436,6 +441,9 @@ void fill_range(const HPass& p, const FlatBuffers& b, u32 t)
         else if (counts)
             for (; r < R; ++r)
                 counts[r] = static_cast<I>(0);
+        if (p.simple)
+            simple_fill_graph<I>(p.simple_params, simple, out, list, graph_counts, p.relation_major, g,
+                                 {entity, totals.entities, tuple, totals.tuples, arg, totals.args});
         entity += totals.entities;
         tuple += totals.tuples;
         arg += totals.args;
@@ -482,6 +490,9 @@ HPass make_pass(const EncodeInput& in, Scratch& s, const EncodingContext& contex
                  o.horizon.root == RootPolicy::Exclude,
                  o.horizon.root == RootPolicy::Include,
                  context.schema().schema_relations().data(),
+                 context.schema().emits_simple(),
+                 SimpleParams{static_cast<u32>(context.schema().num_relations()), context.schema().simple_max_arity(),
+                              context.schema().simple_constants()},
                  one_schema_per_relation(context.schema())};
 }
 }  // namespace
@@ -504,7 +515,7 @@ FlatSizes FlatEncoder::count_horizon(const EncodeInput& in, ThreadPool& pool, En
     if (in.history.masks.layers != 0 || in.history.count || in.history.dt)
         invalid("a horizon has no history steps");
     if (h.nodes.numeric_words != 0)
-        invalid("numeric state rows are not supported");
+        invalid("horizon encodings do not encode numeric state rows");
     if (h.nodes.stride && h.nodes.stride < h.nodes.words)
         invalid("the node row stride is smaller than its width");
     if (graphs && (!h.node_offsets || !h.edge_offsets))

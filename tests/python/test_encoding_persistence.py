@@ -11,15 +11,14 @@ import pytest
 from mymyr import encoding, rl
 from conftest import text_task, walk
 from test_encoding_pickle import OPTION_SETS, TASKS
-from test_encoding_pool import arrays_equal
+from test_encoding_pool import SCALARS, arrays_equal
 
-SCALARS = {"version", "num_graphs", "num_relations", "layout", "index_dtype", "schema_fingerprint", "statics"}
 
 
 # ------------------------------------------------------------------------------------------------ schemas
 
 
-@pytest.mark.parametrize("options", OPTION_SETS, ids=["default", "all-lanes", "plain"])
+@pytest.mark.parametrize("options", OPTION_SETS, ids=["default", "all-lanes", "plain", "shared"])
 @pytest.mark.parametrize("name", TASKS)
 def test_a_schema_record_rebuilds_the_schema_over_a_table(name, options):
     task = text_task(name)
@@ -284,7 +283,9 @@ def test_the_arrays_of_a_batch_are_checked_before_they_are_read():
         encoding.FlatBatch.from_arrays(encoder.schema, {k: v for k, v in arrays.items() if k in SCALARS})
     with pytest.raises(TypeError, match="mapping"):
         encoding.FlatBatch.from_arrays(encoder.schema, [1, 2])
-    with pytest.raises(TypeError, match="int32, int64 or uint8"):
+    with pytest.raises(TypeError, match="int32, int64, uint8, float32 or float64"):
+        encoding.FlatBatch.from_arrays(encoder.schema, dict(arrays, task_ids=np.zeros(2, np.float16)))
+    with pytest.raises(ValueError, match="task_ids has the wrong dtype"):
         encoding.FlatBatch.from_arrays(encoder.schema, dict(arrays, task_ids=np.zeros(2, np.float32)))
     with pytest.raises(TypeError, match="must be an integer"):
         encoding.FlatBatch.from_arrays(encoder.schema, dict(arrays, layout="graph"))

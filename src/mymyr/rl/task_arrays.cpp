@@ -262,6 +262,105 @@ std::vector<u64> padded_words(std::span<const u64> w, u32 W)
     return out;
 }
 
+/// The device's compact view of a compiled task (compact_view_of).
+struct CompactView
+{
+    std::vector<u32> map;  // ViewLayout row -> device view row (k_none: no matcher reads it)
+    std::vector<u8> live;  // ViewLayout row -> kept (not the zero row, not dropped)
+    u32 rows = 0;
+};
+
+/// The device's compact view: of the rows of the CPU's ViewLayout, only those that an exported matcher reads
+/// (a schema's two matchers, the conditions of its conditional effects, the axiom bodies) and that some atom can
+/// set. A unary reference reads its one row; a reference indexed by a bound object (plan::Row, plan::Edge) reads
+/// row base + o, which some atom can set only if o lies in the canonical layout's domain of the indexing position
+/// (forward rows: position 0, backward rows: position 1). The kept rows are renumbered in order; the rows a matcher
+/// reads that no atom sets share one zero row (the last). `map` maps every ViewLayout row to its device row
+/// (k_none: no matcher reads it) and is exported as plan_view_map: the matchers' TableRefs keep the CPU's rows and
+/// the device reads row view_map[ref + o]. Views are built, stored and read per state by every device kernel,
+/// while an object-indexed table is mostly rows of objects of other types: philosophers-6 keeps 84 of its 509
+/// rows, schedule 12 of 210.
+CompactView compact_view_of(const plan::Compiled& C)
+{
+    const ViewLayout& V = C.view;
+    const CanonicalLayout& L = C.layout;
+    const u32 R = V.rows;
+    const u32 n = C.num_objects;
+    // live[r]: some atom can set row r (its predicate has atoms, and the object indexing it lies in the domain)
+    std::vector<u8> live(R, 0);
+    const u32 P = static_cast<u32>(C.arity.size());
+    for (u32 p = 0; p < P; ++p)
+    {
+        if (p >= L.offset.size() || L.offset[p] == CanonicalLayout::k_none || L.size[p] == 0)
+            continue;
+        if (V.unary_row[p] != ViewLayout::k_none && V.unary_row[p] < R)
+            live[V.unary_row[p]] = 1;
+        for (u32 pos = 0; pos < 2; ++pos)
+        {
+            const u32 first = pos == 0 ? V.fwd_row[p] : V.bwd_row[p];
+            if (first == ViewLayout::k_none || L.arity[p] != 2)
+                continue;
+            const u64* rs = L.position_table(p, pos);
+            for (u32 o = 0; o < n && first + o < R; ++o)
+                if (rs[o] != CanonicalLayout::k_outside)
+                    live[first + o] = 1;
+        }
+    }
+    std::vector<u8> read(R, 0);
+    auto one = [&](plan::TableRef r)
+    {
+        if (r.is_view() && r.value() < R)
+            read[r.value()] = 1;
+    };
+    auto block = [&](plan::TableRef r)
+    {
+        if (r.is_view())
+            for (u64 i = r.value(); i < r.value() + n && i < R; ++i)
+                read[i] = 1;
+    };
+    auto mark = [&](const plan::Matcher& m)
+    {
+        for (const plan::Unary& u : m.unary)
+            one(u.ptr);
+        for (const plan::Row& r : m.rows)
+            block(r.base);
+        for (const plan::Edge& e : m.fc_out)
+            block(e.base);
+        for (const plan::Row& r : m.fc_pre)
+            block(r.base);
+    };
+    for (const plan::Schema& s : C.schemas)
+    {
+        mark(s.pre[0]);
+        mark(s.pre[1]);
+        for (const plan::CondEffect& ce : s.ces)
+            mark(ce.cond);
+    }
+    for (const plan::Stratum& st : C.strata)
+        for (const plan::Axiom& x : st.axioms)
+            mark(x.body);
+    CompactView out;
+    out.map.assign(R, dev::k_none);
+    out.live.assign(R, 0);
+    bool zero = false;
+    for (u32 i = 0; i < R; ++i)
+        if (read[i] && live[i])
+        {
+            out.map[i] = out.rows++;
+            out.live[i] = 1;
+        }
+        else if (read[i])
+            zero = true;
+    if (zero)
+    {
+        for (u32 i = 0; i < R; ++i)
+            if (read[i] && !live[i])
+                out.map[i] = out.rows;
+        ++out.rows;
+    }
+    return out;
+}
+
 /// Section "plan" of version 2 (task_arrays_view.hpp): the compiled plans with every pointer turned into an offset.
 /// Tables are appended in a fixed traversal order (schemas: pre[0], pre[1], conditional effects; then strata; then
 /// the goal), so the export is deterministic.
@@ -441,94 +540,12 @@ private:
         return static_cast<u32>(v);
     }
 
-    /// The device's compact view: of the rows of the CPU's ViewLayout, only those that an exported matcher reads
-    /// (a schema's two matchers, the conditions of its conditional effects, the axiom bodies) and that some atom can
-    /// set. A unary reference reads its one row; a reference indexed by a bound object (plan::Row, plan::Edge) reads
-    /// row base + o, which some atom can set only if o lies in the canonical layout's domain of the indexing position
-    /// (forward rows: position 0, backward rows: position 1). The kept rows are renumbered in order; the rows a matcher
-    /// reads that no atom sets share one zero row (the last). m_view_map maps every ViewLayout row to its device row
-    /// (k_none: no matcher reads it) and is exported as plan_view_map: the matchers' TableRefs keep the CPU's rows and
-    /// the device reads row view_map[ref + o]. Views are built, stored and read per state by every device kernel,
-    /// while an object-indexed table is mostly rows of objects of other types: philosophers-6 keeps 84 of its 509
-    /// rows, schedule 12 of 210.
     void compact_view()
     {
-        const ViewLayout& V = C.view;
-        const CanonicalLayout& L = C.layout;
-        const u32 R = V.rows;
-        const u32 n = C.num_objects;
-        // live[r]: some atom can set row r (its predicate has atoms, and the object indexing it lies in the domain)
-        std::vector<u8> live(R, 0);
-        const u32 P = static_cast<u32>(C.arity.size());
-        for (u32 p = 0; p < P; ++p)
-        {
-            if (p >= L.offset.size() || L.offset[p] == CanonicalLayout::k_none || L.size[p] == 0)
-                continue;
-            if (V.unary_row[p] != ViewLayout::k_none && V.unary_row[p] < R)
-                live[V.unary_row[p]] = 1;
-            for (u32 pos = 0; pos < 2; ++pos)
-            {
-                const u32 first = pos == 0 ? V.fwd_row[p] : V.bwd_row[p];
-                if (first == ViewLayout::k_none || L.arity[p] != 2)
-                    continue;
-                const u64* rs = L.position_table(p, pos);
-                for (u32 o = 0; o < n && first + o < R; ++o)
-                    if (rs[o] != CanonicalLayout::k_outside)
-                        live[first + o] = 1;
-            }
-        }
-        std::vector<u8> read(R, 0);
-        auto one = [&](plan::TableRef r)
-        {
-            if (r.is_view() && r.value() < R)
-                read[r.value()] = 1;
-        };
-        auto block = [&](plan::TableRef r)
-        {
-            if (r.is_view())
-                for (u64 i = r.value(); i < r.value() + n && i < R; ++i)
-                    read[i] = 1;
-        };
-        auto mark = [&](const plan::Matcher& m)
-        {
-            for (const plan::Unary& u : m.unary)
-                one(u.ptr);
-            for (const plan::Row& r : m.rows)
-                block(r.base);
-            for (const plan::Edge& e : m.fc_out)
-                block(e.base);
-            for (const plan::Row& r : m.fc_pre)
-                block(r.base);
-        };
-        for (const plan::Schema& s : C.schemas)
-        {
-            mark(s.pre[0]);
-            mark(s.pre[1]);
-            for (const plan::CondEffect& ce : s.ces)
-                mark(ce.cond);
-        }
-        for (const plan::Stratum& st : C.strata)
-            for (const plan::Axiom& x : st.axioms)
-                mark(x.body);
-        m_view_map.assign(R, dev::k_none);
-        m_view_live.assign(R, 0);
-        m_view_rows = 0;
-        bool zero = false;
-        for (u32 i = 0; i < R; ++i)
-            if (read[i] && live[i])
-            {
-                m_view_map[i] = m_view_rows++;
-                m_view_live[i] = 1;
-            }
-            else if (read[i])
-                zero = true;
-        if (zero)
-        {
-            for (u32 i = 0; i < R; ++i)
-                if (read[i] && !live[i])
-                    m_view_map[i] = m_view_rows;
-            ++m_view_rows;
-        }
+        CompactView v = compact_view_of(C);
+        m_view_map = std::move(v.map);
+        m_view_live = std::move(v.live);
+        m_view_rows = v.rows;
     }
 
     static bool fixed_in_order(const plan::Matcher& m)
@@ -775,6 +792,8 @@ void add_plan_section(ArrayBundle::Builder& b, const Task& task, u32 fluent_slot
     PlanWriter(task, fluent_slots, derived_slots).write(b);
 }
 }  // namespace
+
+u32 device_view_rows(const Task& task) { return compact_view_of(task.compiled()).rows; }
 
 ArrayBundle atom_metadata(const Task& task)
 {

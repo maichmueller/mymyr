@@ -15,9 +15,9 @@ can store by reference (native nanobind functions cannot be pickled).
   KnowledgeBase as its tasks, options, state spaces, task indices and packed tuple graphs. Nothing is generated again.
 - A search result pickles as its task, the fingerprint and its fields: the plan as action labels (schema, objects),
   states as States, statistics and statuses as numbers; loading checks the labels and atoms against the task.
-- A mymyr.encoding encoder (FlatRelationEncoder, FlatHorizonEncoder, FlatRootedHorizonEncoder, FlatTransitionEncoder,
-  FlatTransitionEffectsEncoder) pickles as its class, its table, its options and its schema's fingerprint; loading
-  builds the encoder again and checks the fingerprint.
+- A mymyr.encoding encoder (FlatRelationEncoder, SimpleEncoder, FlatHorizonEncoder, FlatRootedHorizonEncoder,
+  FlatTransitionEncoder, FlatTransitionEffectsEncoder) pickles as its class, its table, its options and its schema's
+  fingerprint; loading builds the encoder again and checks the fingerprint.
 - A mymyr.search.Heuristic pickles as its specification (task, kind, costs, evaluation; a perfect heuristic: its state
   space and costs) and is built again when loaded.
 """
@@ -78,6 +78,7 @@ _HISTORY_OPTIONS = ("history", "history_max_steps")
 # the options that each encoder class does not take (its constructor has none of them or fixes them)
 _NOT_TAKEN = {
     "FlatRelationEncoder": _HORIZON_OPTIONS,
+    "SimpleEncoder": (*_HORIZON_OPTIONS, "outputs"),
     "FlatHorizonEncoder": _HISTORY_OPTIONS,
     "FlatRootedHorizonEncoder": _HISTORY_OPTIONS,
     "FlatTransitionEncoder": (*_HISTORY_OPTIONS, "horizon_mode", "sibling_relation", "cousin_relation"),

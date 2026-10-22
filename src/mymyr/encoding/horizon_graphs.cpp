@@ -339,7 +339,7 @@ HorizonGraphs build_horizon_graphs(const rl::TaskTable& table, rl::StateBatchVie
                                    const HorizonBuild& options)
 {
     if (roots.numeric_words != 0)
-        invalid("numeric state rows are not supported");
+        invalid("horizon encodings do not encode numeric state rows");
     ExpandSource source(table, roots.words, nullptr, nullptr);
     return run(source, checked_ids(table, task_ids, roots.rows), roots.rows, [&roots](u64 g) { return roots.row(g); },
                roots.words, table.label_width(), options);
@@ -349,7 +349,7 @@ HorizonGraphs build_horizon_graphs(const rl::TaskTable& table, rl::StateBatchVie
                                    const HorizonBuild& options, ThreadPool& pool, rl::ExpandScratch& scratch)
 {
     if (roots.numeric_words != 0)
-        invalid("numeric state rows are not supported");
+        invalid("horizon encodings do not encode numeric state rows");
     ExpandSource source(table, roots.words, &pool, &scratch);
     return run(source, checked_ids(table, task_ids, roots.rows), roots.rows, [&roots](u64 g) { return roots.row(g); },
                roots.words, table.label_width(), options);
@@ -359,7 +359,7 @@ HorizonGraphs transition_graphs(const rl::TaskTable& table, rl::StateBatchView p
                                 const rl::Expansion& expansion, const u64* parent_derived, u64 parent_derived_stride)
 {
     if (parents.numeric_words != 0 || expansion.numeric_words != 0)
-        invalid("numeric state rows are not supported");
+        invalid("horizon encodings do not encode numeric state rows");
     if (expansion.overflow())
         invalid("the expansion overflowed: its capacity is " + std::to_string(expansion.capacity) + " rows, it has " +
                 std::to_string(expansion.total));

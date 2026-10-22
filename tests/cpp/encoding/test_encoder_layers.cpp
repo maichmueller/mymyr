@@ -4,6 +4,7 @@
 
 #include "support.hpp"
 
+#include "mymyr/encoding/collate.hpp"
 #include "mymyr/encoding/encoder.hpp"
 #include "mymyr/encoding/stream.hpp"
 #include "mymyr/encoding/validate.hpp"
@@ -1261,6 +1262,124 @@ TEST(EncoderLayers, TheFillRefusesLayersThatTheCountDidNotSee)
     EncodeInput changed = in;
     changed.subgoals = layer_input(other);
     EXPECT_THROW(encoder->fill(changed, sizes, FlatBuffers{}, pool, scratch), std::invalid_argument);
+}
+
+// ------------------------------------------------------------------------------------------------ collation
+
+test::Rows rows_between(const test::Rows& rows, u64 start, u64 count)
+{
+    test::Rows out;
+    out.words = rows.words;
+    out.data.assign(rows.data.begin() + static_cast<std::ptrdiff_t>(start * rows.words),
+                    rows.data.begin() + static_cast<std::ptrdiff_t>((start + count) * rows.words));
+    out.task_ids.assign(rows.task_ids.begin() + static_cast<std::ptrdiff_t>(start),
+                        rows.task_ids.begin() + static_cast<std::ptrdiff_t>(start + count));
+    return out;
+}
+
+void expect_same_bundles(const rl::ArrayBundle& a, const rl::ArrayBundle& b)
+{
+    EXPECT_EQ(a.scalars(), b.scalars());
+    ASSERT_EQ(a.arrays().size(), b.arrays().size());
+    for (const auto& info : a.arrays())
+    {
+        const auto* other = b.find(info.name.view());
+        ASSERT_NE(other, nullptr) << info.name;
+        ASSERT_EQ(info.shape, other->shape) << info.name;
+        EXPECT_EQ(std::memcmp(a.data(info), b.data(*other), info.elements() * rl::dtype_bytes(info.dtype)), 0)
+            << info.name;
+    }
+}
+
+/// The batch with array `name` one element shorter.
+std::shared_ptr<const rl::ArrayBundle> shortened(const rl::ArrayBundle& batch, std::string_view name)
+{
+    rl::ArrayBundle::Builder builder;
+    for (const auto& [key, value] : batch.scalars())
+        builder.scalar(key, value);
+    for (const auto& a : batch.arrays())
+    {
+        const auto* p = static_cast<const std::byte*>(batch.data(a));
+        u64 n = a.elements();
+        rl::ArrayShape shape = a.shape;
+        if (a.name.view() == name)
+            shape = rl::ArrayShape{static_cast<i64>(--n)};
+        builder.add_bytes(a.name, a.dtype, shape, std::vector<std::byte>(p, p + n * rl::dtype_bytes(a.dtype)), a.words);
+    }
+    return std::make_shared<const rl::ArrayBundle>(builder.build());
+}
+
+TEST(EncoderLayers, CollatedHistorySlicesEqualOneEncodeInBothLayoutsAndIndexTypes)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const u64 n = 60;
+    const test::Rows rows = test::random_walk(*table, 0, n, 11);
+    const std::vector<Steps> per_row = random_steps(*table->task(0), n, 5, 13);
+    const History history = make_history(*table, std::vector<u32>(n, 0), per_row);
+    for (const u32 k : {0u, 2u})
+        for (const Layout layout : {Layout::Graph, Layout::Relation})
+            for (const IndexType index : {IndexType::I32, IndexType::I64})
+            {
+                SCOPED_TRACE(testing::Message() << k << " " << static_cast<int>(layout) << " " << static_cast<int>(index));
+                FlatOptions options = layer_options(0, true, k, layout);
+                options.index = index;
+                const auto encoder = FlatEncoder::create(table, options);
+                EncodeInput in = input_of(rows);
+                in.history = history.input();
+                const auto whole = encoder->encode(in);
+                ASSERT_GT(whole->find("history_entity")->elements(), 0u);
+                std::vector<std::shared_ptr<const rl::ArrayBundle>> batches;
+                u64 start = 0;
+                for (const u64 count : {9u, 0u, 51u})
+                {
+                    const test::Rows part = rows_between(rows, start, count);
+                    const std::vector<Steps> steps(per_row.begin() + static_cast<std::ptrdiff_t>(start),
+                                                   per_row.begin() + static_cast<std::ptrdiff_t>(start + count));
+                    const History h = make_history(*table, std::vector<u32>(count, 0), steps);
+                    EncodeInput slice = input_of(part);
+                    slice.history = h.input();
+                    batches.push_back(encoder->encode(slice));
+                    start += count;
+                }
+                const auto collated = collate(batches);
+                validate(*collated, encoder->schema());
+                expect_same_bundles(*whole, *collated);
+            }
+}
+
+TEST(EncoderLayers, CollationRefusesEveryArrayShorterThanItsCountsBeforeReadingIt)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const u64 n = 5;
+    const test::Rows rows = test::random_walk(*table, 0, n, 17);
+    const History history = make_history(*table, std::vector<u32>(n, 0), random_steps(*table->task(0), n, 3, 19));
+    const auto encoder = FlatEncoder::create(table, layer_options(0, true));
+    EncodeInput in = input_of(rows);
+    in.history = history.input();
+    const auto batch = encoder->encode(in);
+    std::set<std::string> checked;
+    for (const auto& a : batch->arrays())
+    {
+        const std::string name = a.name.str();
+        SCOPED_TRACE(name);
+        ASSERT_GT(a.elements(), 0u);
+        const std::vector<std::shared_ptr<const rl::ArrayBundle>> batches{batch, shortened(*batch, name)};
+        try
+        {
+            (void)collate(batches);
+            ADD_FAILURE() << "collated a batch with a short " << name;
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find("too short: " + name), std::string::npos) << e.what();
+        }
+        checked.insert(name);
+    }
+    for (const char* name : {"task_ids", "num_objects", "goal_complete", "entity_offsets", "entity_role", "entity_ref",
+                             "relation_offsets", "relation_arg_offsets", "relation_counts", "relation_args",
+                             "target_offsets", "target_entity", "target_group", "history_offsets", "history_entity",
+                             "history_dt"})
+        EXPECT_TRUE(checked.count(name)) << name;
 }
 
 }  // namespace

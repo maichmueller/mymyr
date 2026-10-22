@@ -8,6 +8,7 @@
 #include "mymyr/encoding/encoder.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <functional>
 #include <limits>
@@ -45,6 +46,7 @@ struct alignas(k_cache_line) Member
     std::vector<u32> action_cursors;  // [num_schemas] the cursors of the merge of one action relation's runs
     std::vector<u64> tally;           // [R] tuples per relation in the slice (relation-major)
     u64 entities = 0, tuples = 0, args = 0, targets = 0, history = 0;  // the slice's sizes
+    u64 numeric = 0;  // the slice's numeric tuples (the entries of its numeric values)
     u64 bad_id = k_none, narrow = k_none, bad_bits = k_none;  // the first row of each kind of invalid input
     u64 narrow_goal = k_none, bad_goal_bits = k_none;
     u64 narrow_subgoals = k_none, bad_subgoal_bits = k_none;
@@ -56,6 +58,7 @@ struct alignas(k_cache_line) Member
     // between the passes
     u64 entity_start = 0, tuple_start = 0, arg_start = 0, target_start = 0, history_start = 0;  // where the slice
                                                                                                 // starts in the batch
+    u64 numeric_start = 0;
     std::vector<u64> start_tuples, start_args;  // [R] where the slice starts in each relation (relation-major)
     // pass two
     std::vector<u64> run_tuples, run_args;  // [R] the running positions
@@ -70,8 +73,16 @@ struct EncodeScratch::Impl
     bool counted = false;
     EncodeInput counted_input;
     FlatSizes sizes;
+    u64 numeric_total = 0;  // the numeric tuples of the counted batch
 
     std::vector<u32> arity;          // [R] the arguments per tuple of each relation
+    std::unique_ptr<std::byte[]> relation_scratch;  // the relation arrays of an encoding that does not store them
+    u64 relation_scratch_bytes = 0;
+    // shared statics: the distinct instances of the counted rows, ascending, and the sizes of their static blocks;
+    // `seen` marks an instance while the rows are scanned and is all zero between calls
+    std::vector<u32> present;
+    std::vector<u8> seen;
+    StaticSizes static_sizes;
     std::unique_ptr<u64[]> derived;  // [rows, derived_stride] when the rows' derived words are evaluated here
     u64 derived_capacity = 0;
     u64 derived_stride = 0;
@@ -194,9 +205,11 @@ void fill_member(Member& m, const FillShape& shape, u64 lo, u64 hi, I* relation_
 inline FlatSizes scan_members(EncodeScratch::Impl& s, const EncodingSchema& schema, u64 graphs)
 {
     const u32 R = static_cast<u32>(schema.num_relations());
-    u64 entities = 0, tuples = 0, args = 0, targets = 0, history = 0;
+    u64 entities = 0, tuples = 0, args = 0, targets = 0, history = 0, numeric = 0;
     for (Member& m : s.members)
     {
+        m.numeric_start = numeric;
+        numeric += m.numeric;
         m.entity_start = entities;
         m.tuple_start = tuples;
         m.arg_start = args;
@@ -229,6 +242,7 @@ inline FlatSizes scan_members(EncodeScratch::Impl& s, const EncodingSchema& sche
             }
         }
     }
+    s.numeric_total = numeric;
     FlatSizes sizes;
     sizes.entities = entities;
     sizes.tuples = tuples;
@@ -239,6 +253,8 @@ inline FlatSizes scan_members(EncodeScratch::Impl& s, const EncodingSchema& sche
                                                                                  : std::numeric_limits<i32>::max());
     if (entities > limit || tuples > limit || args > limit || targets > limit || history > limit ||
         graphs * R + 1 > limit || graphs + 1 > limit)
+        sizes.overflow |= k_overflow_index;
+    if (schema.emits_simple() && (entities + tuples > limit || 2 * args > limit))
         sizes.overflow |= k_overflow_index;
     return sizes;
 }

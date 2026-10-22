@@ -16,7 +16,7 @@ import mymyr  # noqa: F401
 from python_children import run_code
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SUBMODULES = {"__init__.pyi", "_datasets.pyi", "_encoding.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi",
+SUBMODULES = {"__init__.pyi", "_datasets.pyi", "_encoding.pyi", "_encoding_jax.pyi", "_formalism.pyi", "_rl.pyi", "_rl_jax.pyi", "_rl_ops.pyi", "_rl_torch.pyi",
               "_search.pyi"}
 
 
@@ -150,6 +150,9 @@ def test_stubs_parse_and_are_typed():
     assert "witness_pruning: bool = False, path: Literal['auto', 'fast', 'general'] = 'auto') -> None" in jx
     assert "def ffi_targets() -> list[tuple[str, str, dict[str, types.CapsuleType], bool]]" in jx
     assert "def initial_states(self) -> list[int]" in jx and "def initial_counts(self) -> list[int]" in jx
+    ejx = (d / "_encoding_jax.pyi").read_text()
+    assert "def ffi_targets() -> list[tuple[str, str, dict[str, types.CapsuleType], bool]]" in ejx
+    assert "def scratch_bytes(handle: int, graphs: int, device: int, derived: bool) -> int" in ejx
     # task tables, per-row task ids, the CPU pool
     assert "class TaskTable:" in rl and "def __init__(self, tasks: Sequence[mymyr._core.Task | mymyr._core.TaskHandle]) -> None" in rl
     rows = "states: mymyr._core.State | Sequence[mymyr._core.State] | mymyr._typing.SupportsDLPack"

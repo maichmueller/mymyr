@@ -522,9 +522,16 @@ TEST(EncoderRefusals, InvalidInput)
     EXPECT_THROW((void)encode(past, past.words), std::invalid_argument);
     // numeric words
     EXPECT_THROW((void)encode(rows, rows.words, 1), std::invalid_argument);
-    // a numeric table cannot be encoded
+    // the rows of a numeric table carry the table's numeric words
     const auto numeric = rl::TaskTable::single(Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/numeric_tasks/cs-counters.txt"));
-    EXPECT_THROW((void)FlatEncoder::create(numeric, test::encoder_options()), std::invalid_argument);
+    const auto numeric_encoder = FlatEncoder::create(numeric, test::encoder_options());
+    test::Rows numeric_rows = test::random_walk(*numeric, 0, 2, 1);
+    EncodeInput numeric_in;
+    numeric_in.states = numeric_rows.view();
+    numeric_in.task_ids = numeric_rows.task_ids.data();
+    EXPECT_NO_THROW((void)numeric_encoder->encode(numeric_in));
+    numeric_in.states.numeric_words = 0;
+    EXPECT_THROW((void)numeric_encoder->encode(numeric_in), std::invalid_argument);
 }
 
 TEST(EncoderOverflow, IndexRangeIsCheckedForBothTypes)
@@ -638,8 +645,8 @@ test::Rows first_successor_chain(const rl::TaskTable& table, u64 length)
 
 TEST(EncoderBytes, TheDigestsOfTextTasksAreStable)
 {
-    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 14883951552709315966ull},
-                                                               {"philosophers__p03-phil4", 12253892925669182561ull}};
+    const std::vector<std::pair<std::string, u64>> expected = {{"gripper__prob05", 9666753341531803529ull},
+                                                               {"philosophers__p03-phil4", 8295029642410720015ull}};
     for (const auto& [name, digest] : expected)
     {
         const auto task = Task::from_text_file(std::string(MYMYR_TEST_DATA_DIR) + "/tasks/" + name + ".txt");

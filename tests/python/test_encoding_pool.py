@@ -11,7 +11,8 @@ from conftest import text_task, walk
 from test_rl_table import sets  # noqa: F401  (a fixture: the table instances of several domains)
 
 OPTIONS = dict(target_sources=("action",), include_actions=True)
-SCALARS = {"version", "num_graphs", "num_relations", "layout", "index_dtype", "schema_fingerprint", "statics"}
+SCALARS = {"version", "num_graphs", "num_relations", "layout", "index_dtype", "schema_fingerprint", "table_fingerprint",
+           "statics", "numeric_dtype", "numeric_relations", "simple_node_labels", "simple_edge_labels"}
 
 
 def arrays_equal(a, b):

@@ -13,6 +13,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
+from encoding_hgraph_parity import HGRAPH_CONFIGS
 from encoding_parity import (
     COMPARED_LANES, COMPARED_SOURCES, encode_records, FIXTURES, NAMES, PENDING_CONFIGS, PENDING_SOURCES, REGISTRY, SUPPORTED, AUXILIARY,
     HELPER, Context, horizon_dag, horizon_view, native_graph, base_predicate, Graph, Mismatch, compare, compare_exactly, fixture_cases, fixture_graph, load, native_encoder,
@@ -40,7 +41,8 @@ def test_every_config_is_compared_or_pending_and_the_tables_name_existing_config
     configs = set(CONFIGS)
     assert set(SUPPORTED) <= configs and set(PENDING_CONFIGS) <= configs
     assert not set(SUPPORTED) & set(PENDING_CONFIGS)
-    assert set(SUPPORTED) | set(PENDING_CONFIGS) == configs
+    assert not set(SUPPORTED) & set(HGRAPH_CONFIGS) and not set(PENDING_CONFIGS) & set(HGRAPH_CONFIGS)
+    assert set(SUPPORTED) | set(PENDING_CONFIGS) | set(HGRAPH_CONFIGS) == configs
     assert all(PENDING_CONFIGS.values())
 
 

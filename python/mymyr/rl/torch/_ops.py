@@ -36,11 +36,13 @@ the states again; required on a device).
   size under ``torch.compile``; a capacity gives static shapes (rows past it are dropped, rows past the total are
   padding: succ 0, parent / schema / binding -1, goal False; offsets keep the true counts).
 - ``mymyr::encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
-  graphs, entities, args, targets)``: the encoding of device rows by a ``FlatRelationEncoder`` (``register`` handle) with
-  the capacities ``graphs``, ``entities``, ``args`` and ``targets`` (0 without target sources): a list of 14 tensors, the
-  arrays of a batch in the order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty
-  tensor) and ``sizes`` int64 [6]. It waits for nothing and allocates only its outputs, on torch's current stream, so it
-  captures in a CUDA graph (after ``encoder.reserve_device`` on the capture stream) and traces under ``torch.compile``.
+  subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt,
+  history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)``: the encoding of
+  device rows by a ``FlatRelationEncoder`` (``register`` handle) with the capacities ``graphs``, ``entities``, ``args``,
+  ``targets`` and ``history`` (0 without target sources or history): a list of 17 tensors, the arrays of a batch in the
+  order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty tensor) and ``sizes`` int64
+  [6]. It waits for nothing and allocates only its outputs, on torch's current stream, so it captures in a CUDA graph
+  (after ``encoder.reserve_device`` on the capture stream) and traces under ``torch.compile``.
 - ``mymyr::expand_derived`` / ``mymyr::expand_flat_derived``: the same with the derived words of the successors as a
   seventh result, int64 [N, K, D] / [M, D] (D = ``table.derived_words``; the rows of ``rl.expand(..., derived=True)``).
 """
@@ -623,12 +625,14 @@ def _(table, states, task_ids, capacity=None, witness_pruning=False):
 # ------------------------------------------------------------------------------------------------ encoding
 
 
-def _encode_flat_outputs(encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int) -> list[Tensor]:
+def _encode_flat_outputs(
+    encoder: int, states: Tensor, graphs: int, entities: int, args: int, targets: int, history: int
+) -> list[Tensor]:
     layout = _device.layout_of(lookup(int(encoder)))
     n = states.shape[0] if states.ndim == 2 else 1
     if n > graphs:
         raise ValueError("mymyr: encoding: the batch has more graphs than the output capacity")
-    specs = layout.specs(torch, n, entities, args, targets)
+    specs = layout.specs(torch, n, entities, args, targets, history)
     return [torch.empty(shape, dtype=dtype, device=states.device) for shape, dtype in specs.values()]
 
 
@@ -642,35 +646,72 @@ def encode_flat(
     goal_neg: Optional[Tensor],
     goal_derived_pos: Optional[Tensor],
     goal_derived_neg: Optional[Tensor],
+    subgoal_pos: Optional[Tensor],
+    subgoal_neg: Optional[Tensor],
+    subgoal_derived_pos: Optional[Tensor],
+    subgoal_derived_neg: Optional[Tensor],
+    history_pos: Optional[Tensor],
+    history_neg: Optional[Tensor],
+    history_dt: Optional[Tensor],
+    history_count: Optional[Tensor],
+    history_derived_pos: Optional[Tensor],
+    history_derived_neg: Optional[Tensor],
     graphs: int,
     entities: int,
     args: int,
     targets: int,
+    history: int,
 ) -> list[Tensor]:
     """``mymyr::encode_flat``: ``FlatRelationEncoder.encode`` of the device rows ``states`` [N, W] (int64 words; the
     other arguments as in ``encode``: ``task_ids`` int32 [N], ``derived`` [N, D], the goal masks [N or 1, W] and
-    [N or 1, D]) with the capacities ``graphs``, ``entities``, ``args`` and ``targets`` (0 without target sources).
-    ``encoder`` is a :func:`register` handle of the encoder. Returns the 14 arrays of ``DeviceFlatBatch.array_names``
-    (arrays that the schema does not store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them.
-    A batch exceeding ``graphs`` raises before launch. Nothing waits for the device, and a batch that exceeds its
-    array capacities is all zero with the overflow flags in ``sizes``. Warm it on the capture stream to acquire its
-    context before capturing a CUDA graph, and keep the encoder registered while the graph can replay. Scratch belongs
-    to torch's allocator and needs no reservation."""
+    [N or 1, D], the subgoal layers [N or 1, L, W] (and [N or 1, L, D]), the history masks [N, H, W] (and [N, H, D]),
+    ``history_dt`` int32 [N, H] and ``history_count`` int32 [N] or None) with the capacities ``graphs``, ``entities``,
+    ``args``, ``targets`` and ``history`` (0 without target sources or history). ``encoder`` is a :func:`register`
+    handle of the encoder. Returns the 17 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
+    store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them. A batch exceeding ``graphs``
+    raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
+    the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA
+    graph, and keep the encoder registered while the graph can replay. Scratch belongs to torch's allocator and needs
+    no reservation."""
     goals = (goal_pos, goal_neg, goal_derived_pos, goal_derived_neg)
     given = [g for g in goals if g is not None]
     if len(given) not in (0, 2, 4) or any(goals[k] is None for k in range(len(given))):
         raise ValueError("mymyr: encoding: goals are (goal_pos, goal_neg) or all four masks")
     enc = lookup(encoder)
     caps = _device._capacities(
-        {"entities": entities, "graphs": graphs, "args": args, "targets": targets}, _device.layout_of(enc)
+        {"entities": entities, "graphs": graphs, "args": args, "targets": targets, "history": history},
+        _device.layout_of(enc),
     )
-    arrays = _device.encode_arrays(enc, states, task_ids, derived, tuple(given) or None, caps)
+    subgoals = _layer_tuple(
+        "subgoals", (subgoal_pos, subgoal_neg), (subgoal_derived_pos, subgoal_derived_neg), ()
+    )
+    steps = _layer_tuple(
+        "history", (history_pos, history_neg), (history_derived_pos, history_derived_neg), (history_dt, history_count)
+    )
+    arrays = _device.encode_arrays(
+        enc, states, task_ids, derived, tuple(given) or None, caps, subgoals=subgoals, history=steps
+    )
     return [arrays[name] for name in _device.DeviceFlatBatch.array_names]
+
+
+def _layer_tuple(name: str, masks: tuple, derived: tuple, rest: tuple) -> Optional[tuple]:
+    """The ``subgoals`` or ``history`` argument of ``encode`` from the operands of the op: the masks, then for the
+    history (dt, count) and the derived masks (None when the pair is absent)."""
+    if all(m is None for m in (*masks, *derived, *rest)):
+        return None
+    if (masks[0] is None) != (masks[1] is None) or (derived[0] is None) != (derived[1] is None):
+        raise ValueError(f"mymyr: encoding: the {name} masks come in pairs (positive and negative)")
+    if masks[0] is None:
+        raise ValueError(f"mymyr: encoding: the {name} need their masks over the fluent slots")
+    if name == "history":
+        return (*masks, *rest, *(derived if derived[0] is not None else ()))
+    return (*masks, *(derived if derived[0] is not None else ()))
 
 
 @encode_flat.register_fake
 def _(
-    encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, graphs, entities, args,
-    targets,
+    encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, subgoal_pos, subgoal_neg,
+    subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
+    history_derived_pos, history_derived_neg, graphs, entities, args, targets, history,
 ):  # fmt: skip
-    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets)
+    return _encode_flat_outputs(encoder, states, graphs, entities, args, targets, history)

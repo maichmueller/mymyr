@@ -330,12 +330,16 @@ def test_root_policy_include_is_accepted_without_a_horizon():
     assert EncodingSchema(task, horizon_mode="full", root_policy="exclude").options["root_policy"] == "exclude"
 
 
-def test_numeric_tasks_are_refused():
+def test_numeric_tasks_have_a_relation_per_fluent_function():
     numeric = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-    with pytest.raises(ValueError, match="^mymyr: encoding: numeric functions and constraints are not supported"):
-        EncodingSchema(numeric)
-    with pytest.raises(ValueError, match="numeric"):
-        EncodingSchema(rl.TaskTable([numeric]))
+    for source in (numeric, rl.TaskTable([numeric])):
+        schema = EncodingSchema(source)
+        assert schema.relation_names[-1] == "[num]value" and schema.relation_lanes[-1] == "numeric"
+        assert schema.relation_arities[-1] == 1
+        assert schema.options["include_numeric"] is True and schema.options["numeric_dtype"] == "float32"
+    assert "numeric" not in EncodingSchema(numeric, include_numeric=False).relation_lanes
+    with pytest.raises(ValueError, match="^mymyr: encoding: horizon encodings do not encode numeric functions"):
+        EncodingSchema(numeric, horizon_mode="full")
 
 
 def test_invalid_tables_raise():

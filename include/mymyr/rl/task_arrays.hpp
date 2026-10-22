@@ -252,6 +252,8 @@ inline constexpr u32 k_section_plan_version = 2;  // compiled plans (task_arrays
 /// The versioned POD export of the task. Throws std::invalid_argument for an unknown version, and
 /// std::length_error when a version-2 table outgrows its u32 offsets.
 [[nodiscard]] ArrayBundle device_arrays(const Task& task, u32 version = k_device_arrays_version);
+/// The rows of the per-state view of device_arrays' plan section (plan_view_rows), without the export.
+[[nodiscard]] u32 device_view_rows(const Task& task);
 
 /// The work of the device's two matchers of one plan matcher: its fixed-order search and its fail-first forward
 /// checking (cuda/src/lifted_device.cuh run_fixed / run_fc), in units of a word read or written, summed over the

@@ -36,9 +36,69 @@
 //                                      (present iff the options have history)
 //   history_entity       I   [S]       the entity of each history step, graph after graph in step order
 //   history_dt           i32 [S]       the dt of each history step
+//   numeric_values       f32 or f64 [N]  the value of each numeric tuple (present iff the schema has numeric relations and
+//                                      stores the relation arrays), see below
 // and the scalars version, num_graphs, num_relations, layout (0: graph-major, 1: relation-major), index_dtype (0:
-// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern) and statics (0: the static
-// tuples are repeated in every graph).
+// int32, 1: int64), schema_fingerprint (the schema's fingerprint as an i64 bit pattern), table_fingerprint (the
+// table's, rl::TaskTable::fingerprint, as an i64 bit pattern: the task ids of batches with equal ones name the same
+// instances), statics (0: the static tuples are repeated in every graph; 1: they are shared, see below) and, with
+// numeric values, numeric_dtype (0: float32, 1: float64) and numeric_relations (the number of numeric relations: the
+// last ones of the catalog).
+//
+// The Simple graph. With FlatOptions::outputs holding Simple, a batch also has the atom-object incidence graph of its
+// tuples (it needs the entity arrays), and without Relations in the outputs it has no relation arrays (relation_*) and
+// no relation_counts:
+//   node_offsets         I   [G + 1]   graph g's nodes are [node_offsets[g], node_offsets[g + 1])
+//   node_label           i32 [V]       the label of each node
+//   edge_offsets         I   [G + 1]   graph g's edges are [edge_offsets[g], edge_offsets[g + 1])
+//   edge_index           I   [2, E]    row 0 the source, row 1 the target node of each edge (batch-global ids)
+//   edge_label           i32 [E]       the label of each edge
+//   node_value           f32 [V]       the value of a numeric atom node, 0 for every other node (present iff the schema
+//                                      has numeric relations)
+// and the scalars simple_node_labels and simple_edge_labels (the sizes of the label vocabularies). Graph g has one node
+// per entity (the node ids of its entities are the entity ids plus the tuples of the graphs before it) followed by one
+// node per tuple, in graph-major tuple order: V is the entities plus the tuples. Every tuple position gives two edges,
+// entity -> atom with the label k (the position) and atom -> entity with the label K + k, K the largest arity of a
+// relation (EncodingSchema::simple_max_arity): the graph's edges are all its forward edges in (tuple, position) order,
+// then all its reverse edges in the same order, so there are twice as many edges as tuple arguments. A node's label is
+// the role of its entity (0 to 8), or 9 + R + j for the j-th object when FlatOptions::constant_labels is set and the
+// object is the j-th constant of the domain, and 9 + r for an atom of relation r. The graph is the same in both layouts
+// and in every call form: the tuples are the ones above.
+//
+// Numeric tuples. A numeric function of the domain that states give values to (a fluent function, not total-cost) is a
+// relation `[num]f`, with one tuple per ground term of f in the instance: the instance's numeric slots of f, in the
+// lexicographic order of their objects (the tuple of a nullary function is [auxiliary entity]). The numeric relations
+// follow all others in the catalog, so their tuples are the last ones of a graph, and a graph of an instance has the same
+// number of them whatever its state. The rows of a numeric table are [atom words | numeric words] (rl::StateBatchView
+// numeric_words equal to the table's) and the value of a tuple is the value of its slot in the row, undefined (NaN) until
+// an assign effect gives it one. numeric_values lists the values of the numeric tuples in the order in which the tuples
+// appear in relation_args (the numeric tuples of the segments in segment order), rounded to FlatOptions::numeric_dtype:
+// in the relation-major layout the values of one relation are consecutive, and
+// numeric_values[relation_offsets[s] - relation_offsets[first_numeric_relation() * G]] is the value of the first tuple of
+// numeric segment s; in the graph-major layout graph g's values follow those of the graphs before it. A schema that
+// stores only the Simple graph has no numeric_values; node_value gives every numeric atom node its value as a float.
+//
+// Shared statics. With FlatOptions::statics = Shared the cells of the static relations (EncodingSchema::
+// static_relations, R_s of them) are empty in every graph: relation_counts is 0 there, the segments have no tuple, and
+// the static tuples of an instance are stored once for the batch, in its static block. The batch holds the blocks of the
+// distinct instances of its graphs, in ascending instance order (so that the blocks of a slice of the graphs are those of
+// the batch the slice needs, in the same order), and these arrays (I_b blocks):
+//   static_task_ids      i32 [I_b]            the instance of each block, ascending
+//   static_offsets       I   [I_b * R_s + 1]  the tuples of static relation s in block b: segment b * R_s + s, the tuples
+//                                             [static_offsets[b * R_s + s], static_offsets[b * R_s + s + 1])
+//   static_arg_offsets   I   [I_b * R_s + 1]  the same offsets into static_args
+//   static_args          I   [A_s]            the tuples' entities, tuple after tuple, Relation::arity per tuple, in the
+//                                             lexicographic order of the objects
+//   static_relations     I   [R_s]            the relation ids of the static relations, ascending
+// A static tuple's entity ids are graph-local, 0-based: an object is its instance-local id and the auxiliary entity is
+// num_objects. A model adds entity_offsets[g] to the ids of every graph g it applies the block of its instance
+// task_ids[g] to (the block is found by searching task_ids[g] in static_task_ids). With predicate virtual nodes the
+// predicate slot of a static tuple is not an entity id but the predicate's key, the entity_ref of its virtual node: the
+// node is the entity of the graph with role predicate_virtual and that entity_ref. The graph's entities, and with them
+// every other array, are those of the repeated form (the auxiliary entity and the virtual nodes of the static tuples are
+// there), except that the tuples of a graph do not include the static ones: the entity_ref of a goal, subgoal or history
+// target entity indexes the graph's tuples of this batch. A horizon schema has no shared form (FlatOptions::statics must
+// be Repeat), and neither has the Simple graph; the numeric relations are never static relations.
 //
 // Layouts. The segment of cell (g, r) is s = g * R + r in the graph-major layout and s = r * G + g in the
 // relation-major one: the relation-major layout holds the tuples of a relation contiguously across the graphs. The two
@@ -78,6 +138,7 @@
 #include "mymyr/core/thread_pool.hpp"
 #include "mymyr/encoding/buffers.hpp"
 #include "mymyr/encoding/context.hpp"
+#include "mymyr/encoding/layers.hpp"
 #include "mymyr/encoding/options.hpp"
 #include "mymyr/rl/expand.hpp"
 
@@ -85,36 +146,6 @@
 
 namespace mymyr::encoding
 {
-/// Masks in layers, one set of layers per row: the subgoal layers of the rows, or (in HistoryInput) their history
-/// steps. A row's layer l is the pair of masks pos[row * stride + l * words ...] and neg[...] over the fluent slots,
-/// optionally the same over the derived slots (derived_pos, derived_neg, `derived_words` wide, `derived_stride` per
-/// row). The masks are `words` wide, at least as wide as the words (derived words) of every instance in the batch; a
-/// set bit of a slot an instance does not have is an error. A stride of 0 is one set of layers that every row shares.
-struct LayerInput
-{
-    const u64* pos = nullptr;
-    const u64* neg = nullptr;
-    u64 stride = 0;
-    u32 layers = 0;
-    u32 words = 0;
-    const u64* derived_pos = nullptr;
-    const u64* derived_neg = nullptr;
-    u64 derived_stride = 0;
-    u32 derived_words = 0;
-};
-
-/// The history of each row: steps of literals, oldest first. `masks` has one set of layers per row, as many as the
-/// longest history (`masks.layers`), and a nonzero stride of at least layers * words (derived_stride likewise): rows
-/// never share. `dt` [rows, masks.layers] is the dt of each step and `count` [rows] the valid steps of each row, a
-/// prefix of its layers (null: all of them). Only the newest FlatOptions::history_max_steps of a row's valid steps are
-/// encoded (all of them when it is not set).
-struct HistoryInput
-{
-    LayerInput masks;
-    const i32* dt = nullptr;
-    const i32* count = nullptr;
-};
-
 /// The graphs of a horizon batch: G graphs, each a root state and the nodes below it, as rows of one state batch, and
 /// the edges between the nodes. The rows of graph g are [node_offsets[g], node_offsets[g + 1]) of `nodes`; the first of
 /// them is the graph's root, so every graph has at least one node, and node k of graph g is row node_offsets[g] + k.
@@ -128,7 +159,8 @@ struct HistoryInput
 /// relations; the other edge arrays may be null then. A schema without either does not read the edges at all.
 struct HorizonInput
 {
-    rl::StateBatchView nodes;           // M node rows (numeric_words must be 0); the stride is honoured
+    rl::StateBatchView nodes;           // M node rows (numeric_words must be 0: horizons have no numeric part); the stride is
+                                        // honoured
     u64 graphs = 0;                     // G
     const i32* node_offsets = nullptr;  // [G + 1] strictly ascending from 0, the last at most nodes.rows
     const i32* edge_offsets = nullptr;  // [G + 1] ascending from 0
@@ -144,7 +176,7 @@ struct HorizonInput
 /// rows). Without one, `horizon` is empty.
 struct EncodeInput
 {
-    rl::StateBatchView states;      // N rows (numeric_words must be 0); the stride is honoured
+    rl::StateBatchView states;      // N rows (numeric_words must be the table's); the stride is honoured
     const i32* task_ids = nullptr;  // [N] the instance of each row; null: instance 0
     const u64* derived = nullptr;   // [N, derived_stride] the derived words of each row; null: evaluated here
     u64 derived_stride = 0;         // words from one row of `derived` to the next (at least max_derived_words())
@@ -217,12 +249,14 @@ public:
     [[nodiscard]] const std::shared_ptr<const EncodingSchema>& schema_ptr() const noexcept { return m_schema; }
     [[nodiscard]] const EncodingContext& context() const noexcept { return *m_context; }
     [[nodiscard]] const std::shared_ptr<const EncodingContext>& context_ptr() const noexcept { return m_context; }
+    /// rl::TaskTable::fingerprint of the table, the batches' table_fingerprint.
+    [[nodiscard]] u64 table_fingerprint() const noexcept { return m_table_fingerprint; }
 
     /// Encodes the rows on the calling thread into a new bundle. Const and reentrant. Throws std::invalid_argument for
     /// invalid input (a task id out of range, a row narrower than its instance, a state or goal bit its instance does
     /// not have, a goal mask narrower than its instance, goal masks without their pair, subgoal layers or history steps
     /// that the schema has no relations for, that are narrower than their instance or set a bit it does not have, a
-    /// history count beyond its row's steps, numeric words, expansion rows that are not the canonical rows of their
+    /// history count beyond its row's steps, a number of numeric words other than the table's, expansion rows that are not the canonical rows of their
     /// state) and
     /// std::overflow_error when a count exceeds the index type.
     [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode(const EncodeInput& in) const;
@@ -235,11 +269,16 @@ public:
     /// The capacity form into a new bundle whose variable-size arrays (the entity arrays, relation_args, the target
     /// entity and group arrays and the history entity and dt arrays) have the capacities' sizes. The arrays hold the
     /// batch in their first `sizes.entities` / `sizes.args` / ... entries and are zero beyond; if `sizes.overflow` is
-    /// set, every array is zero (no valid encoding). `sizes` is set to the true sizes.
-    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(const EncodeInput& in,
-                                                                         const BatchShape& capacities,
-                                                                         ThreadPool& pool, EncodeScratch& scratch,
-                                                                         FlatSizes& sizes) const;
+    /// set, every array is zero (no valid encoding). `sizes` is set to the true sizes, and `extra` (if not null) to the
+    /// true numeric count and static block sizes; a numeric count past capacities.numeric sets k_overflow_capacity.
+    /// With shared statics the static blocks have capacities too (`static_capacities`: the arrays static_task_ids and
+    /// static_args, and static_offsets and static_arg_offsets for that many blocks, have these sizes; the entries past
+    /// the batch's blocks are zero, the offsets past them repeat their last entry), and a static size past its capacity
+    /// sets k_overflow_capacity. `static_capacities` and `extra` are required with shared statics, and
+    /// `static_capacities` must be null otherwise.
+    [[nodiscard]] std::shared_ptr<const rl::ArrayBundle> encode_capacity(
+        const EncodeInput& in, const BatchShape& capacities, ThreadPool& pool, EncodeScratch& scratch,
+        FlatSizes& sizes, const StaticShape* static_capacities = nullptr, ExtraSizes* extra = nullptr) const;
 
     /// Throws std::invalid_argument for the subgoal layers and history steps of `in` that the input alone shows
     /// invalid: given for a schema without subgoal or history relations, more layers than levels, a missing pair of
@@ -248,18 +287,21 @@ public:
 
     /// The capacity form, step one: checks the input (the exceptions of encode, except std::overflow_error), counts and
     /// scans the batch, and returns its true sizes; `overflow` has k_overflow_index set when a size or count does not
-    /// fit the index type. `scratch` keeps the counts for fill().
-    [[nodiscard]] FlatSizes count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
+    /// fit the index type. `scratch` keeps the counts for fill(). `extra` (if not null) receives the numeric count and,
+    /// with shared statics, the sizes of the static blocks, which also count for the index type.
+    [[nodiscard]] FlatSizes count(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch,
+                                  ExtraSizes* extra = nullptr) const;
     /// Step two: writes the batch counted by the last count() of `scratch` (`in` and `sizes` must be that call's) into
-    /// `out`. Requires sizes.overflow == 0 and the buffers as described at FlatBuffers; throws std::invalid_argument
-    /// otherwise, and when `scratch` does not hold the count of `in`.
+    /// `out`, the static blocks included. Requires sizes.overflow == 0 and the buffers as described at FlatBuffers;
+    /// throws std::invalid_argument otherwise, and when `scratch` does not hold the count of `in`.
     void fill(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,
               EncodeScratch& scratch) const;
     /// Both steps against capacities: counts, and fills `out` iff the sizes fit the index type and `capacities`. The
     /// returned sizes are true; if they overflow, no array of `out` is written. Entries of `out` past the sizes are
-    /// left as they were. Reuses the buffers of `scratch`.
+    /// left as they were. Reuses the buffers of `scratch`. `static_capacities` and `extra` are as at encode_capacity.
     FlatSizes encode_into(const EncodeInput& in, const BatchShape& capacities, const FlatBuffers& out,
-                          ThreadPool& pool, EncodeScratch& scratch) const;
+                          ThreadPool& pool, EncodeScratch& scratch, const StaticShape* static_capacities = nullptr,
+                          ExtraSizes* extra = nullptr) const;
 
 private:
     FlatEncoder() = default;
@@ -270,8 +312,10 @@ private:
         FlatBuffers buffers;
     };
     /// An uninitialized bundle of `graphs` graphs with room for `entities` entities, `args` tuple arguments, `targets`
-    /// targets and `history` history steps.
-    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history) const;
+    /// targets, `history` history steps, `numeric` numeric values, with the Simple graph `nodes` nodes and `edges` edges
+    /// and, with shared statics, the static blocks of `statics`.
+    [[nodiscard]] Allocation allocate(u64 graphs, u64 entities, u64 args, u64 targets, u64 history, u64 numeric,
+                                      u64 nodes, u64 edges, const StaticShape& statics) const;
     /// count() and fill() for a horizon schema (horizon.cpp).
     [[nodiscard]] FlatSizes count_horizon(const EncodeInput& in, ThreadPool& pool, EncodeScratch& scratch) const;
     void fill_horizon(const EncodeInput& in, const FlatSizes& sizes, const FlatBuffers& out, ThreadPool& pool,
@@ -281,6 +325,7 @@ private:
 
     std::shared_ptr<const EncodingSchema> m_schema;
     std::shared_ptr<const EncodingContext> m_context;
+    u64 m_table_fingerprint = 0;  // rl::TaskTable::fingerprint of the table
 };
 
 namespace detail
