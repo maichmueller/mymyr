@@ -222,3 +222,46 @@ def test_numeric_environment_rows_on_the_general_device_path(name, layout, index
         env.step()
         host = encoder.encode(env.states.cpu().numpy())
         equal(host, encoder.encode(env.states))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_numeric_values_with_subgoal_history_and_virtual_nodes(numeric_cases, layout, index, dtype):
+    torch = cuda()
+    if "mixed" not in numeric_cases:
+        pytest.skip("PDDL front end required")
+    case = numeric_cases["mixed"]
+    rows, ids = rows_of(case), case.ids
+    pos = rows[:, None, :case.table.words].copy()
+    neg = np.zeros_like(pos)
+    history = (pos, neg, np.full((len(rows), 1), -1, np.int32), np.ones(len(rows), np.int32))
+    subgoals = (pos, neg)
+    encoder = encoding.FlatRelationEncoder(case.table, layout=layout, index_dtype=index, numeric_dtype=dtype,
+        max_goal_level=1, history=True, predicate_virtual_nodes=True,
+        goal_derivations=("plain", "satisfied"), target_sources=("goal", "subgoal", "history"))
+    expected = encoder.encode(rows, ids, subgoals=subgoals, history=history)
+    equal(expected, encoder.encode(tensor(torch, rows), tensor(torch, ids),
+        subgoals=tuple(tensor(torch, a) for a in subgoals), history=tuple(tensor(torch, a) for a in history)))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_undefined_nullary_and_ground_functions_on_device(layout, index, dtype):
+    torch = cuda()
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("PDDL front end required")
+    domain = mymyr.Domain.from_string(
+        "(define (domain undef) (:requirements :strips :typing :numeric-fluents) (:types o) (:predicates (p))"
+        " (:functions (u) (w ?x - o))"
+        " (:action set-u :parameters () :precondition (and) :effect (assign (u) 1))"
+        " (:action set-w :parameters (?x - o) :precondition (and) :effect (assign (w ?x) 4)))")
+    task = mymyr.Task(domain.instantiate_string(
+        "(define (problem undefined) (:domain undef) (:objects a b - o) (:init (= (w a) 2)) (:goal (and (p))))"))
+    rows = np.asarray(task.encode([task.initial_state]))
+    encoder = encoding.FlatRelationEncoder(task, layout=layout, index_dtype=index, numeric_dtype=dtype,
+                                           goal_derivations=())
+    expected = encoder.encode(rows)
+    assert np.isnan(expected.numeric_values).sum() == 2
+    equal(expected, encoder.encode(tensor(torch, rows)))

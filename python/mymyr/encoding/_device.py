@@ -86,7 +86,8 @@ def _native() -> Any:
 class _Layout:
     """Which arrays a batch of an encoder stores, and their dtypes."""
 
-    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets", "numeric", "numeric_dtype", "numeric_relations")
+    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets",
+                 "numeric", "numeric_dtype", "numeric_relations")
 
     def __init__(self, encoder: Any):
         options = encoder.options
@@ -753,9 +754,9 @@ class DeviceFlatBatch:
 
     @property
     def device_sizes(self) -> Optional[Any]:
-        """After an encoding with capacities: a device tensor int64 [6] ([7] with numeric values) with the true entities, tuples, args, targets and
-        history steps of the batch and the overflow flags (1: a capacity, 2: the index type, 4: an invalid row), with no
-        host wait; numeric batches append the numeric value count. None otherwise."""
+        """After an encoding with capacities: int64 [6] with entities, tuples, args, targets, history steps and overflow
+        flags (1: a capacity, 2: the index type, 4: an invalid row). Numeric batches append the numeric value count
+        (int64 [7]). Reading the tensor on the host waits; None for exact calls."""
         return self._sizes
 
     @property
@@ -973,9 +974,13 @@ class DeviceCollator:
         for batch in batches:
             if batch.device != first.device:
                 raise _error("collate received mixed CUDA devices")
-            for option in ("layout", "index_dtype", "statics", "numeric_dtype"):
+            for option in ("layout", "index_dtype", "statics"):
                 if batch._options.get(option, "repeat") != first._options.get(option, "repeat"):
                     raise _error(f"collate received mixed {option}")
+            if batch._layout.numeric_relations != first._layout.numeric_relations:
+                raise _error("collate received mixed numeric_relations")
+            if batch._layout.numeric and batch._layout.numeric_dtype != first._layout.numeric_dtype:
+                raise _error("collate received mixed numeric_dtype")
             if batch._fingerprint != first._fingerprint:
                 raise _error("collate received mixed schemas")
             if batch._table_fingerprint != first._table_fingerprint:

@@ -68,6 +68,8 @@ struct DeviceCollator::Impl
             if (b.schema_fingerprint != first.schema_fingerprint) invalid("collate received mixed schemas");
             if (b.table_fingerprint != first.table_fingerprint)
                 invalid("collate received batches of different tables: their task ids name different instances");
+            if (b.stored.numeric != (b.numeric_relations != 0))
+                invalid("collate received inconsistent numeric metadata");
             if (b.numeric_relations != first.numeric_relations || b.numeric_relations > b.relations)
                 invalid("collate received different numeric_relations");
             if (b.shared_statics) invalid("device collate requires repeated statics");

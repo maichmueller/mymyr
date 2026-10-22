@@ -121,3 +121,41 @@ TEST(DeviceEncodingNumeric, SimpleWithNumericRelationsIsRefusedBeforeUpload)
     EXPECT_THROW(cuda::DeviceEncoder::check_schema(*schema), std::invalid_argument);
 }
 }
+
+namespace
+{
+TEST(DeviceEncodingNumeric, CollationDescriptorsCarryNumericScalarsForEverySlice)
+{
+    const auto table = numeric_tables().front();
+    for (const auto dtype : {encoding::NumericDtype::F32, encoding::NumericDtype::F64})
+    {
+        auto options = test::encoder_options();
+        options.numeric_dtype = dtype;
+        const auto encoder = encoding::FlatEncoder::create(table, options);
+        for (const u64 graphs : {0u, 1u, 4u})
+        {
+            const auto batch = cuda::collation_batch(*encoder, {}, nullptr, graphs);
+            EXPECT_EQ(batch.numeric_relations, 1u);
+            EXPECT_TRUE(batch.stored.numeric);
+            EXPECT_EQ(batch.stored.numeric_dtype, dtype);
+        }
+    }
+}
+}
+
+namespace
+{
+TEST(DeviceEncodingNumeric, CollationChecksNumericMetadataOfEmptySlices)
+{
+    if (!cuda::device_count()) GTEST_SKIP() << "no CUDA device";
+    const auto context = cuda::DeviceContext::create(0);
+    const auto encoder = encoding::FlatEncoder::create(numeric_tables().front(), test::encoder_options());
+    const auto first = cuda::collation_batch(*encoder, {}, nullptr, 0);
+    auto other = first;
+    other.numeric_relations = 0;
+    EXPECT_THROW((cuda::DeviceCollator(context, {first, other})), std::invalid_argument);
+    other = first;
+    other.stored.numeric_dtype = encoding::NumericDtype::F64;
+    EXPECT_THROW((cuda::DeviceCollator(context, {first, other})), std::invalid_argument);
+}
+}
