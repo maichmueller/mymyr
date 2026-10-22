@@ -246,6 +246,32 @@ def test_builder_merges_repeated_and_root_equal_successors_like_the_host(merge):
     assert (view.node_offsets.cpu().numpy()[4:] == -1).all()
 
 
+@pytest.mark.parametrize("merge", [False, True])
+def test_builder_keeps_the_graphs_before_offsets_that_fall_back(merge):
+    device = gpu()
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatTransitionEffectsEncoder(task)
+    rng = np.random.default_rng(3)
+    parents = rng.integers(0, 1 << 40, (8, 2)).astype(np.uint64)
+    children = rng.integers(0, 1 << 40, (8, 2)).astype(np.uint64)
+    children[3] = children[2]
+    offsets = np.array([0, 2, 4, 6, 1, 1, 1, 1, 8], np.int32)  # graph 3 ends before it starts, the rest fall back
+    parent = np.array([0, 0, 1, 1, 2, 2, 3, 3], np.int32)
+    schema = rng.integers(0, 3, 8).astype(np.int32)
+    binding = rng.integers(-1, 6, (8, 4)).astype(np.int32)
+    actions = SimpleNamespace(succ=tensor(children, device), schema=tensor(schema, device),
+                              binding=tensor(binding, device), offsets=tensor(offsets, device),
+                              parent=tensor(parent, device))
+    view = _device_horizon.build_horizon(encoder, tensor(parents, device), None, actions, merge=merge)
+    nodes, node_offsets, dst, order = reference_build(parents[:3], children[:6], offsets[:4], merge)
+    np.testing.assert_array_equal(view.node_offsets.cpu().numpy()[:4], node_offsets)
+    assert (view.node_offsets.cpu().numpy()[4:] == -1).all()
+    np.testing.assert_array_equal(view.nodes[:node_offsets[-1]].cpu().numpy().view(np.uint64), nodes)
+    np.testing.assert_array_equal(view.edge_dst[:6].cpu().numpy(), dst)
+    np.testing.assert_array_equal(view.edge_schema[:6].cpu().numpy(), schema[:6][order])
+    np.testing.assert_array_equal(view.edge_binding[:6].cpu().numpy(), binding[:6][order])
+
+
 @pytest.mark.parametrize("fanout", [32, 256])
 def test_builder_of_wide_fanouts_equals_the_host(fanout):
     device = gpu()

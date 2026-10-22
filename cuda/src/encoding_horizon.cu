@@ -2,9 +2,10 @@
 // parallel, with the host builder's result.
 //   check   a thread per graph flags offsets that do not delimit its slice of the expansion, or a slice with rows of
 //           another parent (the first such graph and every graph after it get node offset -1);
-//   edges   a thread per expansion row finds its graph (a binary search of the offsets) and, merging, marks the rows
-//           equal to their root and inserts the others into an open-addressing table over (graph, row) whose slots
-//           keep the smallest row of each class (atomicMin): the first-seen successor;
+//   edges   a thread per row of the valid graphs (those before the first invalid one) finds its graph (a binary
+//           search of their offsets) and, merging, marks the rows equal to their root and inserts the others into an
+//           open-addressing table over (graph, row) whose slots keep the smallest row of each class (atomicMin): the
+//           first-seen successor;
 //   reps    merging, each row looks its class up: the class's first row is a new node, every row of the class goes
 //           to it;
 //   scan    an exclusive scan of the new-node flags numbers the new nodes in batch order, so graph g's nodes start at
@@ -116,15 +117,8 @@ u32 blocks_of(u64 threads)
     return static_cast<u32>(blocks);
 }
 
-/// The rows of the expansion: its last offset within [0, capacity].
-__device__ __forceinline__ u64 rows_of(const DeviceActionInput& a, u64 graphs)
-{
-    const i32 total = a.offsets[graphs];
-    return total < 0 ? 0 : (u64(total) < a.capacity ? u64(total) : a.capacity);
-}
-
-/// The graph of row e: the last graph whose first offset is at most e (that of a valid expansion; some graph in
-/// [0, graphs) whatever the offsets hold).
+/// The graph of row e < offsets[graphs] of graphs whose offsets are valid: the last graph whose first offset is at
+/// most e.
 __device__ __forceinline__ u32 graph_of(const i32* offsets, u64 graphs, u64 e)
 {
     u64 lo = 0, hi = graphs;
@@ -173,6 +167,21 @@ struct BuildArgs
     BuildScratch s;
 };
 
+/// The graphs before the first invalid one, whose offsets build_check_kernel validated.
+__device__ __forceinline__ u64 valid_graphs(const BuildArgs& b)
+{
+    const u64 invalid = *b.s.invalid;
+    return b.in.graphs < invalid ? b.in.graphs : invalid;
+}
+
+/// The rows of the valid graphs: [0, offsets[valid_graphs()]), within the capacity. Rows of an invalid graph and
+/// past it are not read: offsets past the first invalid graph may hold anything.
+__device__ __forceinline__ u64 valid_rows(const BuildArgs& b)
+{
+    const u64 g = valid_graphs(b);
+    return g ? u64(b.in.actions.offsets[g]) : 0;
+}
+
 __global__ void __launch_bounds__(k_build_block) build_check_kernel(const BuildArgs b)
 {
     const u64 g = u64(blockIdx.x) * k_build_block + threadIdx.x;
@@ -194,15 +203,15 @@ __global__ void __launch_bounds__(k_build_block) build_edges_kernel(const BuildA
     const auto& a = b.in.actions;
     if (e > a.capacity)
         return;
-    const u64 rows = b.in.graphs ? rows_of(a, b.in.graphs) : 0;
-    if (e >= rows)
+    const u64 G = valid_graphs(b);
+    if (e >= valid_rows(b))
     {
         b.s.fresh[e] = 0;
         if (e < a.capacity)
             b.s.rep[e] = k_none;
         return;
     }
-    const u32 g = graph_of(a.offsets, b.in.graphs, e);
+    const u32 g = graph_of(a.offsets, G, e);
     b.s.graph[e] = g;
     const u32 W = b.in.state_words;
     const u64* child = b.children + e * b.child_stride;
@@ -229,7 +238,7 @@ __global__ void __launch_bounds__(k_build_block) build_edges_kernel(const BuildA
             if (v == k_none)
                 break;
         }
-        if (graph_of(a.offsets, b.in.graphs, v) == g && same_row(b.children + u64(v) * b.child_stride, child, W))
+        if (graph_of(a.offsets, G, v) == g && same_row(b.children + u64(v) * b.child_stride, child, W))
         {
             atomicMin(b.s.table + at, u32(e));
             break;
@@ -241,7 +250,7 @@ __global__ void __launch_bounds__(k_build_block) build_reps_kernel(const BuildAr
 {
     const u64 e = u64(blockIdx.x) * k_build_block + threadIdx.x;
     const auto& a = b.in.actions;
-    if (e >= a.capacity || !b.in.graphs || e >= rows_of(a, b.in.graphs) || b.s.rep[e] == k_root_node)
+    if (e >= a.capacity || e >= valid_rows(b) || b.s.rep[e] == k_root_node)
         return;
     const u32 g = b.s.graph[e], W = b.in.state_words;
     const u64* child = b.children + e * b.child_stride;
@@ -295,8 +304,7 @@ __global__ void __launch_bounds__(k_build_block) build_successors_kernel(const B
     if (e >= a.capacity)
         return;
     const u32 pad = u32(b.in.graphs + a.capacity);
-    const bool live = b.in.graphs && e < rows_of(a, b.in.graphs) && b.s.graph[e] < *b.s.invalid;
-    if (!live)
+    if (e >= valid_rows(b))
     {
         if (b.out.merge)
         {
