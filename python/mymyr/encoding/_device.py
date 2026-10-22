@@ -814,6 +814,28 @@ class DeviceFlatBatch:
 
     array_names = _OUTPUTS
 
+    @staticmethod
+    def _template(encoder: Any) -> tuple:
+        """What every capacity batch of ``encoder`` shares, for :meth:`_of`."""
+        layout = layout_of(encoder)
+        present = tuple((k, name) for k, name in enumerate(_ARRAYS) if layout.present(name))
+        return (encoder, encoder.schema, encoder.schema_fingerprint, encoder.table_fingerprint, encoder.options, layout,
+                present)
+
+    @classmethod
+    def _of(cls, template: tuple, outputs: Any) -> "DeviceFlatBatch":
+        """The capacity batch of the outputs of ``encode_flat`` (in ``array_names`` order) for a :meth:`_template`,
+        made with attribute writes only (so that torch.compile traces it without a break)."""
+        batch = object.__new__(cls)
+        batch._encoder, batch._schema, batch._fingerprint, batch._table_fingerprint, batch._options, batch._layout = (
+            template[:6]
+        )
+        batch._device_graphs = None
+        batch._arrays = {name: outputs[k] for k, name in template[6]}
+        batch._sizes = outputs[len(_ARRAYS)]
+        batch._graphs = outputs[0].shape[0]
+        return batch
+
 
 def _array_property(name: str) -> property:
     def get(self: DeviceFlatBatch) -> Any:

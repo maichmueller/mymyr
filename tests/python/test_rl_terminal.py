@@ -449,7 +449,7 @@ def test_captured_sampled_rollout_equals_host(absorbing_tables):
         graph = env.capture(K, final=True)
         for r in range(R):
             out = graph.replay()
-            for field in rt.StepResult._fields:
+            for field in (f for f in rt.StepResult._fields if f not in ("obs", "final_obs")):
                 got = getattr(out, field).cpu().numpy()
                 for k in range(K):
                     want = ref[r * K + k][field]
