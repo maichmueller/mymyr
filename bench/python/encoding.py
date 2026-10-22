@@ -61,6 +61,33 @@ def python_single(domain, problem):
     return {"min": min(samples), "median": statistics.median(samples)}
 
 
+def summarize(values):
+    """Summarize timings first, then form ratios of their minima and medians."""
+    metrics = {}
+    for key in values[0]:
+        column = [row[key] for row in values]
+        if isinstance(column[0], (int, float)):
+            metrics[key] = {"min": min(column), "median": statistics.median(column)}
+        else:
+            if any(value != column[0] for value in column):
+                raise RuntimeError(f"inconsistent {key} across rounds")
+            metrics[key] = column[0]
+    for statistic in ("min", "median"):
+        value = lambda key: metrics[key][statistic]
+        for ratio, numerator, denominator in (
+            ("eight_threads_speedup", "core_us", "eight_threads_us"),
+            ("relation_over_graph", "relation_us", "core_us"),
+            ("simple_over_core", "simple_us", "core_us"),
+        ):
+            metrics[ratio][statistic] = value(numerator) / value(denominator)
+        metrics["hgraph_with_encode_ratio"][statistic] = 1 + value("hgraph_us") / value("relation_us")
+        if metrics["action_ns_per_int"] is not None:
+            metrics["action_ns_per_int"][statistic] = (
+                (value("actions_us") - value("core_us")) * 1000 / value("action_args_per_state")
+            )
+    return metrics
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -123,15 +150,7 @@ def main():
                     server.stderr.close()
             single = None if args.skip_python else python_single(domain, problem)
             for label, values in samples.items():
-                metrics = {}
-                for key in values[0]:
-                    column = [row[key] for row in values]
-                    if isinstance(column[0], (int, float)):
-                        metrics[key] = {"min": min(column), "median": statistics.median(column)}
-                    else:
-                        if any(value != column[0] for value in column):
-                            raise RuntimeError(f"inconsistent {key} for {name}/{label}")
-                        metrics[key] = column[0]
+                metrics = summarize(values)
                 best = lambda key: metrics[key]["min"]
                 reference = references.get(name, {})
                 speedup = reference.get("flat_us", 0) / best("core_us") if reference.get("flat_us") else None
