@@ -18,6 +18,7 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
+from mymyr.encoding._device import _POINTER_FIELDS
 from conftest import ROOT, text_task, walk
 
 torch = pytest.importorskip("torch")
@@ -893,17 +894,12 @@ def test_the_encoder_without_a_device_encoding_is_refused_clearly():
         encoder.reserve_device(8)
 
 
-@pytest.mark.parametrize("lane", ["simple", "simple_numeric"])
-def test_the_simple_graph_is_refused_by_the_device_before_any_launch(lane):
+@pytest.mark.parametrize("outputs", [("simple",), ("relations", "simple")])
+def test_the_simple_graph_with_numeric_relations_is_refused_by_the_device_before_any_launch(outputs):
     dev = gpu()
-    if lane == "simple_numeric":
-        task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-        encoder = encoding.SimpleEncoder(task)
-        message = "^mymyr: encoding: the device does not encode Simple"
-    else:
-        task = text_task("gripper__prob05")
-        encoder = encoding.SimpleEncoder(task)
-        message = "^mymyr: encoding: the device does not encode Simple"
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    encoder = encoding.FlatRelationEncoder(task, outputs=outputs)
+    message = "^mymyr: encoding: the device does not encode Simple with numeric relations"
     rows = to_device(np.asarray(task.encode([task.initial_state])), dev)
     with pytest.raises(ValueError, match=message):
         encoder.encode(rows)
@@ -926,7 +922,7 @@ def test_the_simple_graph_is_refused_by_the_device_before_any_launch(lane):
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * len(encoding.DeviceFlatBatch.array_names)], [0])
+        NativeCollator([encoder], dev.index, 0, [[0] * _POINTER_FIELDS], [0])
 
 
 def test_shared_statics_are_refused_by_the_device_before_any_launch():
@@ -957,7 +953,7 @@ def test_shared_statics_are_refused_by_the_device_before_any_launch():
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * len(encoding.DeviceFlatBatch.array_names)], [0])
+        NativeCollator([encoder], dev.index, 0, [[0] * _POINTER_FIELDS], [0])
     assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
 
 
@@ -1175,8 +1171,8 @@ def test_short_graph_outputs_are_refused_before_fill(cases, monkeypatch):
     layout = encoding._device.layout_of(encoder)
     real = type(layout).specs
 
-    def short(self, torch_, graphs, entities, args, targets, history=0, numeric=0):
-        return real(self, torch_, graphs - 1, entities, args, targets, history, numeric)
+    def short(self, torch_, graphs, entities, args, targets, history=0, **sizes):
+        return real(self, torch_, graphs - 1, entities, args, targets, history, **sizes)
 
     monkeypatch.setattr(type(layout), "specs", short)
     with pytest.raises(ValueError, match="^mymyr: encoding: the batch has more graphs than the output capacity"):

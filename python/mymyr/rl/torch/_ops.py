@@ -39,7 +39,7 @@ the states again; required on a device).
   subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt,
   history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history, numeric=0)``: the
   encoding of device rows by a ``FlatRelationEncoder`` (``register`` handle) with the capacities ``graphs``,
-  ``entities``, ``args``, ``targets``, ``history`` and ``numeric`` (0 for an absent lane): a list of 18 tensors, the
+  ``entities``, ``args``, ``targets``, ``history`` and ``numeric`` (0 for an absent lane): a list of 23 tensors, the
   arrays of a batch in the order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty
   tensor) and ``sizes`` int64 [6] ([7] with the numeric value count appended). It waits for nothing and allocates
   only its outputs and scratch, on torch's current stream, so it captures in a CUDA graph (warm it once on the capture
@@ -633,7 +633,7 @@ def _encode_flat_outputs(
     n = states.shape[0] if states.ndim == 2 else 1
     if n > graphs:
         raise ValueError("mymyr: encoding: the batch has more graphs than the output capacity")
-    specs = layout.specs(torch, n, entities, args, targets, history, numeric)
+    specs = layout.specs(torch, n, entities, args, targets, history, numeric=numeric)
     return [torch.empty(specs[name][0], dtype=specs[name][1], device=states.device) for name in _device._OUTPUTS]
 
 
@@ -669,7 +669,7 @@ def encode_flat(
     [N or 1, D], the subgoal layers [N or 1, L, W] (and [N or 1, L, D]), the history masks [N, H, W] (and [N, H, D]),
     ``history_dt`` int32 [N, H] and ``history_count`` int32 [N] or None) with the capacities ``graphs``, ``entities``,
     ``args``, ``targets``, ``history`` and ``numeric`` (0 for an absent lane). ``encoder`` is a :func:`register`
-    handle of the encoder. Returns the 18 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
+    handle of the encoder. Returns the 23 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
     store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them. A batch exceeding ``graphs``
     raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
     the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA

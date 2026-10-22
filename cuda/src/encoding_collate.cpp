@@ -52,6 +52,8 @@ struct DeviceCollator::Impl
         params.grid = static_cast<u32>(std::max(sms, 1)) * k_blocks_per_sm;
         stored = first.stored;
         params.relations = first.relations;
+        params.relations_stored = stored.relations;
+        params.simple = stored.simple;
         params.index64 = first.index == encoding::IndexType::I64;
         params.relation_major = first.layout == encoding::Layout::Relation;
         params.batches = batches.size();
@@ -80,7 +82,7 @@ struct DeviceCollator::Impl
             host[i] = {b, params.graphs};
             params.graphs = add(params.graphs, b.graphs);
         }
-        params.cells = mul(params.graphs, params.relations);
+        params.cells = stored.relations ? mul(params.graphs, params.relations) : 0;
         (void)add(params.cells, 1);
         cell_offset = aligned(mul(add(params.graphs, 1), sizeof(detail::GraphCounts)));
         bad_offset = add(cell_offset, aligned(mul(add(params.cells, 1), sizeof(detail::CellCounts))));
@@ -121,7 +123,7 @@ struct DeviceCollator::Impl
         {
             const auto& a = output.arrays;
             if (output.capacities.graphs < params.graphs) invalid("collated graphs exceed the output capacity");
-            if (!a.entity_offsets || !a.relation_offsets || !a.relation_arg_offsets ||
+            if (!a.entity_offsets || (stored.relations && (!a.relation_offsets || !a.relation_arg_offsets)) ||
                 (params.graphs && (!a.task_ids || !a.num_objects)))
                 invalid("device collation needs the batch output arrays");
             if (stored.entity_arrays ? (output.capacities.entities && (!a.entity_role || !a.entity_ref))
@@ -135,7 +137,12 @@ struct DeviceCollator::Impl
                 (stored.targets ? (output.capacities.targets && (!a.target_entity || !a.target_group))
                                 : (a.target_entity || a.target_group)))
                 invalid("collation target arrays do not match the schema");
-            if (output.capacities.args && !a.relation_args) invalid("collation arguments are null");
+            if (stored.relations && output.capacities.args && !a.relation_args) invalid("collation arguments are null");
+            if (stored.simple && (!a.node_offsets || !a.edge_offsets ||
+                ((output.capacities.entities || output.capacities.args) && !a.node_label) ||
+                (output.capacities.args && (!a.edge_index || !a.edge_label)) ||
+                a.edge_stride < mul(2, output.capacities.args)))
+                invalid("collation Simple arrays do not hold the capacities");
             if (stored.numeric ? (output.capacities.numeric && !a.numeric_values) : a.numeric_values != nullptr)
                 invalid("collation numeric values do not match the schema");
             if (a.history_offsets || a.history_entity || a.history_dt)

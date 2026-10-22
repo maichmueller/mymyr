@@ -20,7 +20,7 @@
 //   attributes  args, entities, targets, history: the capacities of relation_args, of the entity arrays, of the
 //               target arrays and of the history step arrays; handle: the registry handle; threads: the CPU target's
 //               worker threads (0: one per hardware thread; the CUDA target ignores it)
-//   results     the 16 arrays of a batch in the order of mymyr.encoding.DeviceFlatBatch.array_names (an array the
+//   results     the 16 arrays of a batch in the order of mymyr.encoding.jax._ARRAYS (an array the
 //               schema does not store is [0]): the per-graph and per-cell arrays sized by N, the variable-size ones by
 //               the capacities; then sizes uint32 [S, 2] (the S 64-bit words of encoding::FlatSizes as uint32 halves,
 //               low half first, in the field order of the struct, the overflow flags among them); then, required on
@@ -882,10 +882,14 @@ void bind_encoding_jax(nb::module_& parent)
     m.def(
         "register",
         [](Arg<ann::Any> encoder) {
-            auto host = flat_encoder_of(encoder);
-            if (host->table().numeric() || host->schema().has_numeric())
-                throw nb::value_error("mymyr: encoding: JAX FFI has no numeric output buffer; encode numeric rows with torch or on the host");
-            auto e = std::make_shared<EncoderEntry>(std::move(host));
+            auto flat = flat_encoder_of(encoder);
+            if (flat->table().numeric() || flat->schema().has_numeric())
+                throw nb::value_error("mymyr: encoding: the JAX FFI has no numeric output buffer; encode numeric rows "
+                                      "with torch or on the host");
+            if (flat->schema().emits_simple())
+                throw nb::value_error("mymyr: encoding: the JAX FFI does not encode Simple: "
+                                      "its fixed result layout has no node or edge arrays");
+            auto e = std::make_shared<EncoderEntry>(std::move(flat));
             return ffi_registry().add(std::move(e));
         },
         "encoder"_a,
@@ -919,7 +923,7 @@ void bind_encoding_jax(nb::module_& parent)
             }
             nb::list needs;
             for (const bool layer_masks : {false, true})
-                for (const auto [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
+                for (const auto& [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
                     needs.append(cuda::DeviceEncoder::needs_derived(enc, goal_masks, derived_goal_masks, layer_masks));
             d["needs_derived"] = nb::tuple(needs);
             d["cuda"] = true;

@@ -44,7 +44,7 @@ from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
 
-_ARRAYS = tuple(name for name in _device._ARRAYS if name != "numeric_values")
+_ARRAYS = tuple(name for name in _device._ARRAYS if name not in (*_device._SIMPLE_ARRAYS, "numeric_values"))
 _SIZE_FIELDS = _device._SIZE_FIELDS
 _OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
@@ -547,9 +547,9 @@ def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Opt
 def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entities: int, args: int, targets: int,
           history: int, threads: int) -> tuple[dict[str, Any], Any]:
     """One mymyr_encode_flat call: the stored arrays by name and the sizes."""
+    # the FFI results: the arrays of _ARRAYS, in their order (no Simple arrays, no numeric values), then the sizes
     specs = reg.layout.specs(jnp, graphs, entities, args, targets, history)
-    del specs["sizes"]
-    del specs["numeric_values"]
+    specs = {name: specs[name] for name in _ARRAYS}
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
     results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))
 

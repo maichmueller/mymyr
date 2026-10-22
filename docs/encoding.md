@@ -784,6 +784,12 @@ the domain: a task read from mymyr's text format does not record them, so a tabl
 with `constant_labels=True` (a PDDL domain without constants has none to label). `entity_names` and `describe` read the
 relation arrays and raise `ValueError` for a Simple-only batch, and `hgraph` views relation arrays.
 
+Rows in CUDA memory give the same Simple arrays ([Encoding on the device](#encoding-on-the-device)), for both index
+types, in exact and capacity calls, the torch op, device row streams and collation; the fill kernels write the Simple
+graph from the tuples they fill, and a Simple-only batch fills them into private storage that it does not keep. The
+device refuses the Simple graph with numeric relations (`node_value`), and the JAX FFI refuses the Simple graph: its
+fixed result layout has no node or edge arrays.
+
 ```python needs-torch_geometric
 import torch_geometric
 
@@ -1113,12 +1119,15 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 The device (the torch path, the torch op, device streams and the CUDA target of `mymyr.encoding.jax`) encodes the rows
 of a `FlatRelationEncoder` with their task ids, goals, derived atoms (given, or evaluated on the device), subgoal
 layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, the
-[numeric relations](#numeric-functions) and their values, both layouts, both index types and the omitted arrays. What it does not encode raises `ValueError` with the `mymyr: encoding:` prefix (the
-schemas and calls below before any launch):
+[numeric relations](#numeric-functions) and their values, the [Simple graph](#the-simple-graph) (alone or next to the
+relation arrays), both layouts, both index types and the omitted arrays. What it does not encode raises `ValueError`
+with the `mymyr: encoding:` prefix (the schemas and calls below before any launch):
 
 - **Schemas:** an encoder with action targets, a horizon mode (the horizon, rooted horizon and transition encoders), the
-  Simple output (`"the device does not encode Simple"`), shared statics (`statics='shared'`); and a schema whose
-  kernels need more shared memory than a block has (very many predicate virtual nodes or relations).
+  Simple graph with numeric relations (`"the device does not encode Simple with numeric relations"`: its `node_value`
+  is not encoded on the device; `include_numeric=False` encodes the Simple graph of a numeric table), shared statics
+  (`statics='shared'`); and a schema whose kernels need more shared memory than a block has (very many predicate
+  virtual nodes or relations).
 - **Calls:** `actions=` (the action relations have no tuples on the device, and JAX cannot pass an expansion),
   `into=`, `pool=` (a pool of host threads means nothing for device rows), a `framework` other than `'torch'`, inputs
   of which some are on the device and some on the host, and subgoal layers or history given to an encoder whose schema
@@ -1190,7 +1199,7 @@ history_dt, history_count, history_derived_pos, history_derived_neg, graphs, ent
 numeric=0)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch`
 registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None`
 for an input that is absent) and the six ints are the capacities (`targets` 0 without target sources, `history` 0
-without history, `numeric` 0 without numeric values). It returns the list of 18 tensors that
+without history, `numeric` 0 without numeric values). It returns the list of 23 tensors that
 `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema
 does not store is an empty tensor, and `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch.
 The op waits for nothing, allocates only its outputs and scratch and has a fake implementation that gives their shapes
@@ -1308,14 +1317,15 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   fingerprint included). It is returned from jitted functions and stacked by
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
-- **What it encodes.** What [the device encodes](#what-the-device-encodes) but numeric tables, on both platforms: the
-  rows with their goals, subgoal layers and history steps. A schema or input the device refuses raises `ValueError` (`mymyr: encoding:
-  ...`) when the function is traced. Where an instance of the table has axioms the device cannot evaluate, a call
+- **What it encodes.** What [the device encodes](#what-the-device-encodes) but numeric tables and the Simple graph, on
+  both platforms: the rows with their goals, subgoal layers and history steps. A schema or input the device refuses
+  raises `ValueError` (`mymyr: encoding: ...`) when the function is traced. Where an instance of the table has axioms the device cannot evaluate, a call
   without `derived` raises `ValueError` when traced, whatever its rows (the torch path flags those rows in
   `invalid_input` instead). Otherwise the device evaluates missing derived words, as the CPU encoder does. In
   a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies, except that an
-  encoder of a numeric table (with or without `include_numeric`), of the Simple graph or with shared statics
-  (`statics='shared'`) has no device form on either target: registering it raises `ValueError`.
+  encoder of a numeric table (with or without `include_numeric`: the result layout has no numeric buffer), of the
+  Simple graph (it has no node or edge arrays) or with shared statics (`statics='shared'`) has no form on either
+  target: registering it raises `ValueError`.
 - **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
   `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place
   of the encoder, so a function can hold the integer only); the registry keeps the encoder, its table and its device

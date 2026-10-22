@@ -2921,16 +2921,23 @@ struct SimpleGraph
 };
 
 /// Writes the node labels of the graph's entities. `entity_role` is the batch's entity_role.
-template<class I>
-MYMYR_HD void simple_fill_entities(const SimpleParams& params, const SimpleOut<I>& out, const u8* entity_role,
-                                   const SimpleGraph& graph)
+template<class I, class Group>
+MYMYR_HD void simple_fill_entities_group(const Group& grp, const SimpleParams& params, const SimpleOut<I>& out,
+                                         const u8* entity_role, const SimpleGraph& graph)
 {
     i32* label = out.node_label + graph.entity_base + graph.tuple_base;
     const u8* role = entity_role + graph.entity_base;
     const i32 constants_at = static_cast<i32>(k_simple_roles + params.relations);
-    for (u64 j = 0; j < graph.entities; ++j)
+    for (u64 j = grp.lane(); j < graph.entities; j += grp.size())
         label[j] = role[j] == k_role_object && j < params.constants ? constants_at + static_cast<i32>(j)
                                                                     : static_cast<i32>(role[j]);
+}
+
+template<class I>
+MYMYR_HD void simple_fill_entities(const SimpleParams& params, const SimpleOut<I>& out, const u8* entity_role,
+                                   const SimpleGraph& graph)
+{
+    simple_fill_entities_group<I>(SoloGroup{}, params, out, entity_role, graph);
 }
 
 /// Writes a cell of K arguments per tuple in separate argument-copy and generated-column passes.
@@ -2984,12 +2991,11 @@ MYMYR_HD_COLD void simple_emit_large_cell(const SimpleParams& params, const Simp
 /// Writes the atom nodes and the edges of the `n` tuples of one cell: `args` are the cell's arguments (batch-global
 /// entity ids, `arity` per tuple), `graph_tuple` is the index of the cell's first tuple among the graph's tuples and
 /// `graph_arg` the index of its first argument among the graph's arguments (both in graph-major order).
-template<class I>
-MYMYR_HD void simple_emit_cell(const SimpleParams& params, const SimpleOut<I>& out, const SimpleGraph& graph,
-                               u32 relation, u32 arity, u32 n, const I* args, u64 graph_tuple, u64 graph_arg)
+template<class I, class Group>
+MYMYR_HD void simple_emit_cell_group(const Group& grp, const SimpleParams& params, const SimpleOut<I>& out,
+                                     const SimpleGraph& graph, u32 relation, u32 arity, u32 n, const I* args,
+                                     u64 graph_tuple, u64 graph_arg)
 {
-    if (n >= 16 && arity >= 1 && arity <= 4)
-        return simple_emit_large_cell(params, out, graph, relation, arity, n, args, graph_tuple, graph_arg);
     const i32 atom_label = static_cast<i32>(k_simple_roles + relation);
     const i32 back = static_cast<i32>(params.max_arity);
     const u64 shift = graph.tuple_base;
@@ -3000,22 +3006,52 @@ MYMYR_HD void simple_emit_cell(const SimpleParams& params, const SimpleOut<I>& o
     I* const back_target = forward_target + graph.args;
     i32* const back_label = forward_label + graph.args;
     const u64 first_atom = graph.entity_base + graph.tuple_base + graph.entities + graph_tuple;
-    for (u32 k = 0; k < n; ++k)
+    const auto emit = [&](u64 at, u32 slot, I atom)
+    {
+        const I entity = static_cast<I>(static_cast<u64>(args[at]) + shift);
+        forward_source[at] = entity;
+        forward_target[at] = atom;
+        forward_label[at] = static_cast<i32>(slot);
+        back_source[at] = atom;
+        back_target[at] = entity;
+        back_label[at] = back + static_cast<i32>(slot);
+    };
+    for (u64 k = grp.lane(); k < n; k += grp.size())
     {
         const I atom = static_cast<I>(first_atom + k);
         out.node_label[first_atom + k] = atom_label;
-        const u64 at = static_cast<u64>(k) * arity;
-        for (u32 slot = 0; slot < arity; ++slot)
+        if (grp.size() == 1)
+            for (u32 slot = 0; slot < arity; ++slot)
+                emit(k * arity + slot, slot, atom);
+    }
+    if (grp.size() == 1)
+        return;
+    // Adjacent lanes write adjacent arguments. Advancing the tuple and slot together avoids a division per argument.
+    const u64 arguments = static_cast<u64>(n) * arity;
+    const u32 tuple_step = grp.size() / arity, slot_step = grp.size() % arity;
+    u64 tuple = grp.lane() / arity;
+    u32 slot = grp.lane() % arity;
+    for (u64 at = grp.lane(); at < arguments; at += grp.size())
+    {
+        emit(at, slot, static_cast<I>(first_atom + tuple));
+        tuple += tuple_step;
+        slot += slot_step;
+        if (slot >= arity)
         {
-            const I entity = static_cast<I>(static_cast<u64>(args[at + slot]) + shift);
-            forward_source[at + slot] = entity;
-            forward_target[at + slot] = atom;
-            forward_label[at + slot] = static_cast<i32>(slot);
-            back_source[at + slot] = atom;
-            back_target[at + slot] = entity;
-            back_label[at + slot] = back + static_cast<i32>(slot);
+            slot -= arity;
+            ++tuple;
         }
     }
+}
+
+template<class I>
+MYMYR_HD void simple_emit_cell(const SimpleParams& params, const SimpleOut<I>& out, const SimpleGraph& graph,
+                               u32 relation, u32 arity, u32 n, const I* args, u64 graph_tuple, u64 graph_arg)
+{
+    // One thread writes the whole cell, so a long cell takes the column passes; a group of lanes strides its writes.
+    if (n >= 16 && arity >= 1 && arity <= 4)
+        return simple_emit_large_cell(params, out, graph, relation, arity, n, args, graph_tuple, graph_arg);
+    simple_emit_cell_group<I>(SoloGroup{}, params, out, graph, relation, arity, n, args, graph_tuple, graph_arg);
 }
 
 /// Writes graph `g` of the Simple graph after its relation tuples are written: its entry of node_offsets and

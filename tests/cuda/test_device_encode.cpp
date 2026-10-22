@@ -180,16 +180,21 @@ void expect_same_arrays(const rl::ArrayBundle& host, const DeviceResult& device)
                             {"entity_role", l.entity_role, a.entity_arrays},
                             {"entity_ref", l.entity_ref, a.entity_arrays},
                             {"relation_counts", l.relation_counts, a.counts},
-                            {"relation_offsets", l.relation_offsets, true},
-                            {"relation_arg_offsets", l.relation_arg_offsets, true},
-                            {"relation_args", l.relation_args, true},
+                            {"relation_offsets", l.relation_offsets, a.relations},
+                            {"relation_arg_offsets", l.relation_arg_offsets, a.relations},
+                            {"relation_args", l.relation_args, a.relations},
                             {"goal_complete", l.goal_complete, a.goal_complete},
                             {"target_offsets", l.target_offsets, a.targets},
                             {"target_entity", l.target_entity, a.targets},
                             {"target_group", l.target_group, a.targets},
                             {"history_offsets", l.history_offsets, a.history},
                             {"history_entity", l.history_entity, a.history},
-                            {"history_dt", l.history_dt, a.history}};
+                            {"history_dt", l.history_dt, a.history},
+                            {"node_offsets", l.node_offsets, a.simple},
+                            {"node_label", l.node_label, a.simple},
+                            {"edge_offsets", l.edge_offsets, a.simple},
+                            {"edge_index", l.edge_index, a.simple},
+                            {"edge_label", l.edge_label, a.simple}};
     for (const Array& array : arrays)
     {
         const rl::ArrayInfo* info = host.find(array.name);
@@ -2700,3 +2705,115 @@ TEST(DeviceEncode, LiveScratchRegionsNeverOverlap)
     }
 }
 }  // namespace
+
+TEST(DeviceEncode, SimpleEqualsTheHostForEveryCoreConfiguration)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    u32 compared = 0;
+    for (const Corpus& c : corpus())
+    {
+        SCOPED_TRACE(c.name);
+        const Batch batch = layered_batch(c.table, 17, c.walk, 13);
+        const DeviceRows rows(ctx, stream, batch);
+        for (const Config& config : all_configs())
+            for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                    for (const bool only : {false, true})
+                    {
+                        if (config.options.predicate_virtual_nodes || (only && layout == encoding::Layout::Relation))
+                            continue;
+                        SCOPED_TRACE(config.name);
+                        SCOPED_TRACE(std::string(only ? "simple-only " : "both ") +
+                                     (layout == encoding::Layout::Graph ? "graph " : "relation ") +
+                                     (index == encoding::IndexType::I32 ? "int32" : "int64"));
+                        auto options = with(config.options, layout, index);
+                        options.outputs = {encoding::Output::Simple};
+                        if (!only) options.outputs.insert(encoding::Output::Relations);
+                        options.entity_arrays = encoding::EntityArrays::Always;
+                        if (only) options.emit_counts = true;
+                        const auto encoder = encoding::FlatEncoder::create(c.table, options);
+                        cuda::DeviceEncoder device(ctx, encoder);
+                        device.reserve(cuda::BatchShape{17, 0, 0, 0, 0}, stream);
+                        for (const u64 n : {u64{0}, u64{1}, u64{17}})
+                        {
+                            SCOPED_TRACE("N = " + std::to_string(n));
+                            const Reference host = host_reference(*encoder, host_input(batch, n, config.inputs));
+                            const auto result = run_device(device, ctx, stream, rows.input(batch, n, config.inputs),
+                                                           shape_of(n, host.sizes));
+                            expect_sizes(host.sizes, result.sizes);
+                            expect_same_arrays(*host.bundle, result);
+                            ++compared;
+                            if (::testing::Test::HasFailure()) return;
+                        }
+                    }
+    }
+    EXPECT_GT(compared, 0u);
+    RecordProperty("compared", compared);
+}
+
+TEST(DeviceEncoderSchema, SimpleOutputsHaveTheirArraysAndPrivateRelationStorage)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    for (const bool only : {false, true})
+    {
+        auto options = test::encoder_options();
+        options.outputs = {encoding::Output::Simple};
+        if (!only) options.outputs.insert(encoding::Output::Relations);
+        const auto encoder = encoding::FlatEncoder::create(table, options);
+        EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(encoder->schema()));
+        const auto stored = cuda::output_arrays(encoder->schema());
+        EXPECT_TRUE(stored.simple);
+        EXPECT_EQ(stored.relations, !only);
+        EXPECT_EQ(stored.counts, !only);
+        const auto layout = cuda::output_layout({3, 20, 80}, options.index, encoder->schema().num_relations(), stored);
+        std::vector<std::byte> bytes(layout.bytes);
+        const auto out = cuda::output_of(layout, {3, 20, 80}, bytes.data());
+        EXPECT_NE(out.arrays.node_offsets, nullptr);
+        EXPECT_NE(out.arrays.edge_offsets, nullptr);
+        EXPECT_EQ(out.arrays.edge_stride, 160u);
+        EXPECT_EQ(out.arrays.relation_offsets != nullptr, !only);
+        EXPECT_EQ(out.scratch_relation_offsets != nullptr, only);
+    }
+}
+
+TEST(DeviceEncoderSchema, SimpleRefusesNumericRelationsAndKeepsTheDeviceLaneRefusals)
+{
+    const auto numeric = rl::TaskTable::single(test::pddl_task("counters", "p01"));
+    const auto plain = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    for (const bool only : {false, true})
+    {
+        auto options = test::encoder_options();
+        options.outputs = {encoding::Output::Simple};
+        if (!only) options.outputs.insert(encoding::Output::Relations);
+        for (const bool include : {false, true})
+        {
+            // the rows of a numeric table carry numeric words; only numeric relations have a node value
+            options.include_numeric = include;
+            const auto encoder = encoding::FlatEncoder::create(numeric, options);
+            if (include)
+            {
+                EXPECT_THROW(cuda::DeviceEncoder::check_encoder(*encoder), std::invalid_argument);
+                EXPECT_THROW((void)cuda::collation_batch(*encoder, {}, nullptr, 0), std::invalid_argument);
+            }
+            else
+            {
+                EXPECT_NO_THROW(cuda::DeviceEncoder::check_encoder(*encoder));
+                EXPECT_NO_THROW((void)cuda::collation_batch(*encoder, {}, nullptr, 0));
+            }
+        }
+        options.include_numeric = true;
+        for (const auto mode : {encoding::HorizonMode::Full, encoding::HorizonMode::Delta,
+                                encoding::HorizonMode::Action})
+        {
+            options.horizon.mode = mode;
+            const auto encoder = encoding::FlatEncoder::create(plain, options);
+            EXPECT_THROW(cuda::DeviceEncoder::check_schema(encoder->schema()), std::invalid_argument);
+        }
+        options.horizon = {};
+        options.targets = {encoding::TargetSource::Action};
+        const auto encoder = encoding::FlatEncoder::create(plain, options);
+        EXPECT_THROW(cuda::DeviceEncoder::check_schema(encoder->schema()), std::invalid_argument);
+    }
+}

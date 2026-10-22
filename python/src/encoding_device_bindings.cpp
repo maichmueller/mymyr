@@ -149,9 +149,11 @@ cuda::DeviceEncodeInput input_of(const Rows& r, u32 numeric_words = 0)
 
 /// The destination arrays, in the order of encoding._device: task_ids, num_objects, entity_offsets, entity_role,
 /// entity_ref, relation_counts, relation_offsets, relation_arg_offsets, relation_args, goal_complete, target_offsets,
-/// target_entity, target_group, history_offsets, history_entity, history_dt, numeric_values, sizes (0: the array is absent or has no
-/// entries).
-constexpr usize k_output_fields = 18;
+/// target_entity, target_group, history_offsets, history_entity, history_dt, the five Simple arrays (node_offsets,
+/// node_label, edge_offsets, edge_index, edge_label), numeric_values, sizes, then the three private relation arrays of a
+/// Simple-only fill and the edge_index row stride (0: the array is absent or has no entries). With numeric values the
+/// sizes are followed by the numeric value count.
+constexpr usize k_output_fields = 27;
 struct CountedSizes
 {
     encoding::FlatSizes flat;
@@ -161,7 +163,7 @@ struct CountedSizes
 cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities, bool numeric = false)
 {
     if (v.size() != k_output_fields)
-        throw nb::value_error(("mymyr: expected " + std::to_string(k_output_fields) + " output pointers").c_str());
+        throw nb::value_error(("mymyr: expected " + std::to_string(k_output_fields) + " output fields").c_str());
     cuda::DeviceOutput out;
     encoding::FlatBuffers& a = out.arrays;
     a.task_ids = ptr<i32>(v[0]);
@@ -180,9 +182,18 @@ cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encodin
     a.history_offsets = ptr<void>(v[13]);
     a.history_entity = ptr<void>(v[14]);
     a.history_dt = ptr<i32>(v[15]);
-    a.numeric_values = ptr<void>(v[16]);
-    out.sizes = ptr<encoding::FlatSizes>(v[17]);
+    a.node_offsets = ptr<void>(v[16]);
+    a.node_label = ptr<i32>(v[17]);
+    a.edge_offsets = ptr<void>(v[18]);
+    a.edge_index = ptr<void>(v[19]);
+    a.edge_label = ptr<i32>(v[20]);
+    a.numeric_values = ptr<void>(v[21]);
+    out.sizes = ptr<encoding::FlatSizes>(v[22]);
     if (numeric && out.sizes) out.numeric_size = reinterpret_cast<u64*>(out.sizes + 1);
+    out.scratch_relation_offsets = ptr<void>(v[23]);
+    out.scratch_relation_arg_offsets = ptr<void>(v[24]);
+    out.scratch_relation_args = ptr<void>(v[25]);
+    a.edge_stride = v[26];
     out.capacities = capacities;
     return out;
 }
@@ -396,7 +407,7 @@ public:
             const u64 n = static_cast<const CountedSizes*>(slot->staging.data(0))->numeric;
             outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.history, n, sizes.overflow);
             if (outputs.size() != k_output_fields + 1)
-                refuse("expected the output graph extent and eighteen pointers");
+                refuse("expected the output graph extent and " + std::to_string(k_output_fields) + " output fields");
             const encoding::BatchShape caps{outputs.front(), sizes.entities, sizes.args, sizes.targets, sizes.history, n};
             outputs.erase(outputs.begin());
             cuda::DeviceOutput out = output_of(outputs, caps, numeric());
@@ -562,11 +573,12 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 18 output "
-             "pointers, with the capacities (graphs, entities, args, targets, history, numeric), on `stream`. No host wait.")
+             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 23 output "
+             "arrays and their private storage, with the capacities (graphs, entities, args, targets, history, numeric), "
+             "on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, numeric, "
-             "flags) to check the flags and return the graph extent and eighteen pointers, then fills them on "
+             "flags) to check the flags and return the graph extent and the output fields, then fills them on "
              "`stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")

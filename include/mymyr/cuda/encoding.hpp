@@ -155,6 +155,7 @@ struct OutputLayout
         relation_offsets = 0, relation_arg_offsets = 0, relation_args = 0, goal_complete = 0, target_offsets = 0,
         target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0,
         numeric_values = 0, numeric_size = 0, sizes = 0;
+    u64 node_offsets = 0, node_label = 0, edge_offsets = 0, edge_index = 0, edge_label = 0;
     u64 bytes = 0;
     OutputArrays arrays;
 };
@@ -221,11 +222,11 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: action targets,
-    /// horizons (with the goal derivations that only a delta horizon has), the Simple graph and shared statics.
+    /// Throws std::invalid_argument for a schema the device does not encode: action targets, the Simple graph with
+    /// numeric relations, horizons (with the goal derivations that only a delta horizon has) and shared statics.
     static void check_schema(const encoding::EncodingSchema& schema);
-    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose predicate virtual nodes or relations need more shared memory than a block
-    /// has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared
+    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose
+    /// predicate virtual nodes or relations need more shared memory than a block has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared
     /// memory is not checked).
     static void check_encoder(const encoding::FlatEncoder& encoder);
 

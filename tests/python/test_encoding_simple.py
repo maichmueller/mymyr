@@ -545,7 +545,7 @@ def test_numeric_tasks_have_node_values():
     assert np.array_equal(batch.node_value[batch.node_value != 0], numeric.initial_state.numeric_values()[numeric.initial_state.numeric_values() != 0].astype(np.float32))
 
 
-def test_the_device_does_not_encode_simple():
+def test_the_device_encodes_the_same_simple_graph():
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("no visible CUDA device (set CUDA_VISIBLE_DEVICES)")
@@ -555,8 +555,11 @@ def test_the_device_does_not_encode_simple():
     task = text_task("gripper__prob05")
     rows = torch.from_numpy(np.ascontiguousarray(task.encode([task.initial_state])).view(np.int64)).cuda()
     for encoder in (encoding.SimpleEncoder(task), both(task)):
-        with pytest.raises(ValueError, match="^mymyr: encoding: the device does not encode Simple"):
-            encoder.encode(rows)
+        host = encoder.encode([task.initial_state]).as_dict()
+        device = encoder.encode(rows).as_dict("numpy")
+        assert host.keys() == device.keys()
+        for name, value in host.items():
+            assert np.array_equal(value, device[name]), name
 
 
 def test_pyg_accepts_a_batch_of_graphs():

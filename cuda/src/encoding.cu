@@ -330,7 +330,7 @@ __global__ void __launch_bounds__(k_block) count_kernel(const EncodeParams p)
 template<class I>
 __device__ ed::GraphOut<I> graph_out(const EncodeParams& p)
 {
-    const enc::FlatBuffers& o = p.out;
+    const enc::FlatBuffers& o = p.core;
     return {p.graphs,
             static_cast<I*>(o.num_objects),
             static_cast<I*>(o.relation_counts),
@@ -438,6 +438,8 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
     }
     const u64 limit = p.index64 ? u64{0x7fffffffffffffffull} : u64{0x7fffffffu};
     sizes.overflow = p.static_overflow;
+    if (p.simple && (sizes.entities > limit - sizes.tuples || sizes.args > limit / 2))
+        sizes.overflow |= enc::k_overflow_index;
     if (sizes.entities > p.capacities.entities || sizes.args > p.capacities.args ||
         sizes.targets > p.capacities.targets || sizes.history > p.capacities.history ||
         (p.numeric_at && totals.get(p.numeric_at + G) - totals.get(p.numeric_at) > p.capacities.numeric))
@@ -506,6 +508,11 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     const u64 numeric = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
     if (p.numeric_f64) zero_tail(static_cast<f64*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric);
     else zero_tail(static_cast<f32*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric);
+    zero_tail(a.node_label, overflow ? 0 : sizes.entities + sizes.tuples, p.capacities.entities + p.capacities.args);
+    zero_tail(a.edge_label, overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args);
+    zero_tail(static_cast<I*>(a.edge_index), overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args);
+    if (a.edge_index)
+        zero_tail(static_cast<I*>(a.edge_index) + a.edge_stride, overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args);
     if (overflow)
     {
         const u64 graphs = p.capacities.graphs;
@@ -518,6 +525,8 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
         zero_tail(static_cast<I*>(a.relation_arg_offsets), 0, cells + 1);
         zero_tail(a.goal_complete, 0, graphs);
         zero_tail(static_cast<I*>(a.target_offsets), 0, graphs + 1);
+        zero_tail(static_cast<I*>(a.node_offsets), 0, graphs + 1);
+        zero_tail(static_cast<I*>(a.edge_offsets), 0, graphs + 1);
     }
 }
 
@@ -579,6 +588,13 @@ __device__ void zero_unused_live(const EncodeParams& p, const enc::FlatSizes& si
         else zero_range(static_cast<f32*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric, stride);
         zero_range(static_cast<I*>(a.history_entity), overflow ? 0 : sizes.history, p.capacities.history, stride);
         zero_range(a.history_dt, overflow ? 0 : sizes.history, p.capacities.history, stride);
+        zero_range(a.node_label, overflow ? 0 : sizes.entities + sizes.tuples,
+                   p.capacities.entities + p.capacities.args, stride);
+        zero_range(a.edge_label, overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args, stride);
+        zero_range(static_cast<I*>(a.edge_index), overflow ? 0 : 2 * sizes.args, 2 * p.capacities.args, stride);
+        if (a.edge_index)
+            zero_range(static_cast<I*>(a.edge_index) + a.edge_stride, overflow ? 0 : 2 * sizes.args,
+                       2 * p.capacities.args, stride);
     }
     const u64 G = overflow ? 0 : p.graphs, R = p.context.num_relations;
     // the offsets of a batch that fits keep their closing entry at G (or G * R)
@@ -593,6 +609,58 @@ __device__ void zero_unused_live(const EncodeParams& p, const enc::FlatSizes& si
     zero_range(a.goal_complete, G, cap, stride);
     zero_range(static_cast<I*>(a.target_offsets), G + closed, cap + 1, stride);
     zero_range(static_cast<I*>(a.history_offsets), G + closed, cap + 1, stride);
+    zero_range(static_cast<I*>(a.node_offsets), G + closed, cap + 1, stride);
+    zero_range(static_cast<I*>(a.edge_offsets), G + closed, cap + 1, stride);
+}
+
+/// The incidence graph is emitted by the group that filled its relation arguments. Prefix differences of the
+/// relation-major scan give the graph-major tuple and argument bases without another scan or inter-block dependency.
+template<class I, bool RelationMajor, bool Layered, class Group>
+__device__ void fill_simple(const Group& grp, const EncodeParams& p, const RowView& r, u64 g,
+                            const ed::GraphTotals& totals, const ed::GraphOut<I>& core,
+                            const ScanPositions& positions, u64 entity_base, u64 tuple_base, u64 arg_base,
+                            const u32* counts)
+{
+    if (!p.simple)
+        return;
+    grp.sync();
+    if constexpr (RelationMajor)
+    {
+        tuple_base = 0;
+        arg_base = 0;
+        for (u32 relation = 0; relation < p.context.num_relations; ++relation)
+        {
+            const u64 start = u64{relation} * p.graphs;
+            const u64 before = positions.tuples_before(start + g) - positions.tuples_before(start);
+            tuple_base += before;
+            arg_base += before * p.context.relation_arity[relation];
+        }
+    }
+    const u64 entities = Totals{p.totals, p.wide}.get(g + 1) - entity_base;
+    const ed::SimpleGraph graph{entity_base, entities, tuple_base, totals.tuples, arg_base, totals.args};
+    I* const edge = static_cast<I*>(p.out.edge_index);
+    const ed::SimpleOut<I> simple{static_cast<I*>(p.out.node_offsets), static_cast<I*>(p.out.edge_offsets),
+                                 p.out.node_label, edge, edge ? edge + p.out.edge_stride : nullptr, p.out.edge_label};
+    if (grp.lane() == 0)
+    {
+        simple.node_offsets[g] = static_cast<I>(entity_base + tuple_base);
+        simple.edge_offsets[g] = static_cast<I>(2 * arg_base);
+    }
+    ed::simple_fill_entities_group<I>(grp, p.simple_params, simple, core.entity_role, graph);
+    const auto cells = ed::cell_list<Layered>(r.v, r.in);
+    u64 graph_tuple = 0, graph_arg = 0;
+    for (u32 i = 0; i < cells.count; ++i)
+    {
+        const auto& cell = cells.cells[i];
+        const u64 segment = ed::cell_segment(RelationMajor, g, cell.relation, p.graphs, p.context.num_relations);
+        const u32 n = RelationMajor ? positions.count(segment) : counts[i];
+        const u64 at = RelationMajor ? positions.args(segment, cell.relation) : arg_base + graph_arg;
+        if (n)
+            ed::simple_emit_cell_group<I>(grp, p.simple_params, simple, graph, cell.relation, cell.arity, n,
+                                           core.relation_args + at, graph_tuple, graph_arg);
+        graph_tuple += n;
+        graph_arg += u64{n} * cell.arity;
+    }
 }
 
 /// The fill of the graphs. `blocks` is the grid the loops over the cells and the tails stride with: the whole grid, or a
@@ -636,6 +704,11 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
         entity_offsets[G] = static_cast<I>(sizes.entities);
+        if (p.simple)
+        {
+            static_cast<I*>(p.out.node_offsets)[G] = static_cast<I>(sizes.entities + sizes.tuples);
+            static_cast<I*>(p.out.edge_offsets)[G] = static_cast<I>(2 * sizes.args);
+        }
         if (out.target_offsets)
             out.target_offsets[G] = static_cast<I>(sizes.targets);
         if (out.history_offsets)
@@ -703,6 +776,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
                 close_graph();
             ed::fill_graph_positioned_group<I, decltype(positions), Layered>(
                 grp, r.v, r.in, g, entity_base, graph, out, positions, target_base, virtual_scratch, nullptr, history_base);
+            fill_simple<I, true, Layered>(grp, p, r, g, graph, out, positions, entity_base, 0, 0, nullptr);
         }
         else
         {
@@ -713,6 +787,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
             close_graph();
             ed::fill_graph_positioned<I, decltype(positions), Layered>(r.v, r.in, g, entity_base, graph, out, positions,
                                                                        target_base, virtual_scratch, nullptr, history_base);
+            fill_simple<I, true, Layered>(ed::SoloGroup{}, p, r, g, graph, out, positions, entity_base, 0, 0, nullptr);
         }
     }
     else
@@ -731,6 +806,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
                 close_graph();
             ed::fill_graph_group<I, Layered>(grp, r.v, r.in, g, tuple_base, arg_base, entity_base, graph, out,
                                              target_base, virtual_scratch, counts, history_base, numeric_base);
+            fill_simple<I, false, Layered>(grp, p, r, g, graph, out, positions, entity_base, tuple_base, arg_base, counts);
         }
         else
         {
@@ -741,6 +817,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
             close_graph();
             ed::fill_graph<I, Layered>(r.v, r.in, g, tuple_base, arg_base, entity_base, graph, out, target_base,
                                        virtual_scratch, (virtual_nodes || Layered) ? counts : nullptr, history_base, numeric_base);
+            fill_simple<I, false, Layered>(ed::SoloGroup{}, p, r, g, graph, out, positions, entity_base, tuple_base, arg_base, counts);
         }
     }
 }

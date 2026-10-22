@@ -873,16 +873,18 @@ def test_shared_statics_are_refused_before_tracing_on_every_platform(cases):
     assert ej.registered(encoder) is None
 
 
-@pytest.mark.parametrize("lane", ["numeric", "numeric_table", "simple"])
+@pytest.mark.parametrize("lane", ["numeric", "numeric_table", "simple", "simple_numeric_table"])
 def test_numeric_relations_and_the_simple_graph_are_refused_before_tracing_on_every_platform(cases, lane):
     if lane == "simple":
         task = cases["gripper"].source
         encoder = encoding.SimpleEncoder(task)
-        message = r"^mymyr: encoding: the device does not encode Simple"
+        message = r"^mymyr: encoding: the JAX FFI does not encode Simple: its fixed result layout has no node or edge arrays"
     else:
+        # a numeric table is refused first, whatever the outputs
         task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-        encoder = encoding.FlatRelationEncoder(task, include_numeric=lane == "numeric")
-        message = r"^mymyr: encoding: JAX FFI has no numeric output buffer"
+        outputs = ("simple",) if lane == "simple_numeric_table" else ("relations",)
+        encoder = encoding.FlatRelationEncoder(task, include_numeric=lane == "numeric", outputs=outputs)
+        message = r"^mymyr: encoding: the JAX FFI has no numeric output buffer"
     rows = halves(np.asarray(task.encode([task.initial_state])))
     caps = dict(graphs=1, entities=64, args=64, targets=0)
     with pytest.raises(ValueError, match=message):
