@@ -83,7 +83,7 @@ def summarize(values):
         metrics["hgraph_with_encode_ratio"][statistic] = 1 + value("hgraph_us") / value("relation_us")
         if metrics["action_ns_per_int"] is not None:
             metrics["action_ns_per_int"][statistic] = (
-                (value("actions_us") - value("core_us")) * 1000 / value("action_args_per_state")
+                (value("actions_us") - value("action_core_us")) * 1000 / value("action_args_per_state")
             )
     return metrics
 

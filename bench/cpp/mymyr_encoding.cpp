@@ -8,6 +8,8 @@
 // calls, eight threads, relation-major with its HGraph view, and Simple. --targets-server keeps the task, walk and
 // expansion alive: each stdin line "run" emits one report and "quit" closes it. bench/python/encoding.py uses this
 // mode to interleave executables and rounds without repeating fixture preparation.
+// Target walks also restart on a one-in-twenty draw to sample early and late stages of long walks. Action timings use
+// at most 1024 rows and a matching core encode, so large branching factors fit in bounded memory.
 //
 // The walk starts at the initial state and restarts there at dead ends. The line reports the best of 5 timed encodes of
 // the whole batch (after one untimed): microseconds per state into a new bundle (us_per_state) and into preallocated
@@ -274,22 +276,33 @@ void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::
     options.goal_derivations = {};
     encoding::EncodeInput in;
     in.states = {rows.data(), n, table->words(), 0, 0};
-    const EncodeTimes graph = time_encode(*core, in, 1, true);
-    const EncodeTimes parallel = time_encode(*core, in, 8);
-    if (batch_hash(*graph.bundle) != batch_hash(*parallel.bundle))
+    EncodeTimes graph = time_encode(*core, in, 1, true);
+    const BatchSizes core_sizes = batch_sizes(*graph.bundle);
+    const std::string core_hash = batch_hash(*graph.bundle);
+    graph.bundle.reset();
+    EncodeTimes parallel = time_encode(*core, in, 8);
+    if (core_hash != batch_hash(*parallel.bundle))
         throw std::runtime_error("thread counts produced different batches");
+    parallel.bundle.reset();
 
     auto action_input = in;
+    const u64 action_n = std::min<u64>(n, 1024);
+    action_input.states.rows = action_n;
+    EncodeTimes action_core = time_encode(*core, action_input, 1);
     action_input.actions = &expanded->x;
-    const EncodeTimes actions = time_encode(*core, action_input, 1);
-    const double action_args = static_cast<double>(batch_sizes(*actions.bundle).args - batch_sizes(*graph.bundle).args)
-                               / static_cast<double>(n);
+    EncodeTimes actions = time_encode(*core, action_input, 1);
+    const double action_args = static_cast<double>(batch_sizes(*actions.bundle).args - batch_sizes(*action_core.bundle).args)
+                               / static_cast<double>(action_n);
+    action_core.bundle.reset();
+    actions.bundle.reset();
 
-    const EncodeTimes relation = time_encode(*relational, in, 1);
+    EncodeTimes relation = time_encode(*relational, in, 1);
     const HGraphTimes hgraph = time_hgraph(relation.bundle, relational->schema_ptr());
+    relation.bundle.reset();
     options.layout = encoding::Layout::Graph;
     options.outputs = {encoding::Output::Simple};
-    const EncodeTimes simple = time_encode(*encoding::FlatEncoder::create(table, options), in, 1);
+    EncodeTimes simple = time_encode(*encoding::FlatEncoder::create(table, options), in, 1);
+    simple.bundle.reset();
 
     const u32 derived_words = core->context().max_derived_words();
     std::vector<u64> derived(n * derived_words);
@@ -308,29 +321,32 @@ void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::
     auto reused_input = in;
     reused_input.derived = derived.empty() ? nullptr : derived.data();
     reused_input.derived_stride = derived_words;
-    const EncodeTimes reused = time_encode(*core, reused_input, 1);
-    if (batch_hash(*graph.bundle) != batch_hash(*reused.bundle))
+    EncodeTimes reused = time_encode(*core, reused_input, 1);
+    if (core_hash != batch_hash(*reused.bundle))
         throw std::runtime_error("supplied derived words produced a different batch");
+    reused.bundle.reset();
     options.outputs = {encoding::Output::Relations};
     options.include_derived = false;
     const EncodeTimes plain = time_encode(*encoding::FlatEncoder::create(table, options), in, 1);
-    const double args = static_cast<double>(batch_sizes(*graph.bundle).args) / static_cast<double>(n);
+    const double args = static_cast<double>(core_sizes.args) / static_cast<double>(n);
     char action_ns[32] = "null";
     if (action_args > 0)
-        std::snprintf(action_ns, sizeof action_ns, "%.6f", (actions.batch - graph.batch) * 1000 / action_args);
+        std::snprintf(action_ns, sizeof action_ns, "%.6f", (actions.batch - action_core.batch) * 1000 / action_args);
     std::printf("{\"N\":%llu,\"core_us\":%.6f,\"args_per_state\":%.3f,\"core_limit_us\":%.6f,"
-                "\"actions_us\":%.6f,\"action_args_per_state\":%.3f,\"action_ns_per_int\":%s,"
+                "\"actions_N\":%llu,\"action_core_us\":%.6f,\"actions_us\":%.6f,"
+                "\"action_args_per_state\":%.3f,\"action_ns_per_int\":%s,"
                 "\"derived_words\":%u,\"without_derived_us\":%.6f,\"reused_derived_us\":%.6f,"
                 "\"single_cpp_us\":%.6f,\"eight_threads_us\":%.6f,\"eight_threads_speedup\":%.4f,"
                 "\"relation_us\":%.6f,\"relation_over_graph\":%.4f,\"hgraph_us\":%.6f,"
                 "\"hgraph_with_encode_ratio\":%.4f,\"hgraph_full_us\":%.6f,"
                 "\"simple_us\":%.6f,\"simple_over_core\":%.4f,\"hash\":\"%s\"}\n",
-                static_cast<unsigned long long>(n), graph.batch, args, 0.3 + args * 0.001, actions.batch,
+                static_cast<unsigned long long>(n), graph.batch, args, 0.3 + args * 0.001,
+                static_cast<unsigned long long>(action_n), action_core.batch, actions.batch,
                 action_args, action_ns, derived_words, plain.batch, reused.batch, graph.single, parallel.batch,
                 graph.batch / parallel.batch, relation.batch, relation.batch / graph.batch,
                 hgraph.view * 1e6 / static_cast<double>(n), 1 + hgraph.view * 1e6 / static_cast<double>(n) / relation.batch,
                 hgraph.full * 1e6 / static_cast<double>(n), simple.batch, simple.batch / graph.batch,
-                batch_hash(*graph.bundle).c_str());
+                core_hash.c_str());
 }
 
 /// The nodes and edges of the horizons of `roots` (a root per graph), `depth` levels deep.
@@ -435,6 +451,8 @@ int main(int argc, char** argv)
                 current.assign(succ.begin() + static_cast<std::ptrdiff_t>(pick * words),
                                succ.begin() + static_cast<std::ptrdiff_t>((pick + 1) * words));
             }
+            if (targets && rng() % 20 == 0)
+                current.assign(init.begin(), init.end());
         }
 
         if (targets)
@@ -444,7 +462,7 @@ int main(int argc, char** argv)
             const auto core = encoding::FlatEncoder::create(table, target_options);
             target_options.layout = encoding::Layout::Relation;
             const auto relational = encoding::FlatEncoder::create(table, target_options);
-            const auto expanded = expand_rows(*table, rows.data(), n, words);
+            const auto expanded = expand_rows(*table, rows.data(), std::min<u64>(n, 1024), words);
             if (server)
             {
                 std::string command;
