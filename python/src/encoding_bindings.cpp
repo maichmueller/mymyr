@@ -1905,12 +1905,14 @@ PyFlatBatch batch_from_arrays(const PyEncodingSchema& schema, nb::handle arrays,
     out.schema = schema.schema;
     out.framework = parse_framework(framework);
     auto bundle = std::make_shared<const rl::ArrayBundle>(builder.build());
+    // every batch, also one that overflowed, is of this schema and version and has the arrays of its contract
+    encoding::validate(*bundle, *schema.schema);
     if (!sizes_arg.is_none())
     {
         const encoding::FlatSizes sizes = sizes_of(sizes_arg);
         if (sizes.overflowed())
         {
-            // a batch that did not fit its capacities is all zero and holds no encoding to check
+            // a batch that did not fit its capacities is all zero
             for (const rl::ArrayInfo& info : bundle->arrays())
             {
                 const auto* bytes = static_cast<const unsigned char*>(bundle->data(info));
@@ -1924,7 +1926,6 @@ PyFlatBatch batch_from_arrays(const PyEncodingSchema& schema, nb::handle arrays,
         }
         else
         {
-            encoding::validate(*bundle, *schema.schema);
             const bool wide = bundle->scalar("index_dtype") == 1;
             auto last = [&](const char* name) -> u64
             {
@@ -1943,8 +1944,6 @@ PyFlatBatch batch_from_arrays(const PyEncodingSchema& schema, nb::handle arrays,
         }
         out.sizes = sizes;
     }
-    else
-        encoding::validate(*bundle, *schema.schema);
     out.arrays = std::move(bundle);
     return out;
 }
@@ -2037,8 +2036,9 @@ void bind_encoding(nb::module_& parent)
         "entity roles and references, the order and uniqueness of the tuples. ValueError (\"mymyr: encoding: ...\") "
         "names the first violation, among them a batch of another schema (its `schema_fingerprint` differs) or a "
         "version of the format this build does not read. `sizes`: the dictionary `sizes` of a batch encoded with "
-        "capacities, which makes the arrays with their capacities' sizes a batch again. framework: the framework of the "
-        "batch's exports (default NumPy).");
+        "capacities, which makes the arrays with their capacities' sizes a batch again; they must match the offsets, "
+        "and a batch whose sizes say it overflowed passes the same checks and must in addition be all zero. framework: "
+        "the framework of the batch's exports (default NumPy).");
 
     nb::class_<PyFlatEncoder> encoder_class(
         module, "FlatRelationEncoder", nb::is_weak_referenceable(),

@@ -125,20 +125,29 @@ BATCH_OPTIONS = [
 ]
 
 
-@pytest.mark.parametrize("options", BATCH_OPTIONS, ids=["default", "levels", "relation-int64", "history"])
-@pytest.mark.parametrize("name", TASKS)
-def test_a_batch_round_trips_through_its_arrays_and_a_numpy_file(name, options, tmp_path):
-    task = text_task(name)
-    encoder = encoding.FlatRelationEncoder(task, **options)
-    states = walk(task, steps=6, walks=2)
-    extra = {}
+BATCH_IDS = ["default", "levels", "relation-int64", "history"]
+
+
+def batch_inputs(encoder, task, states):
+    """The inputs of `encode` that the schema's options read: the expansion, and zero history steps and subgoal
+    layers when the schema has them."""
+    extra = {"actions": rl.expand(rl.as_table(task), states)}
     if encoder.schema.options["history"]:
         zeros = np.zeros((len(states), 2, encoder.table.words), np.uint64)
         extra["history"] = (zeros, zeros, np.zeros((len(states), 2), np.int32))
     if encoder.schema.options["max_goal_level"]:
         layers = np.zeros((1, 1, encoder.table.words), np.uint64)
         extra["subgoals"] = (layers, layers)
-    batch = encoder.encode(states, actions=rl.expand(rl.as_table(task), states), **extra)
+    return extra
+
+
+@pytest.mark.parametrize("options", BATCH_OPTIONS, ids=BATCH_IDS)
+@pytest.mark.parametrize("name", TASKS)
+def test_a_batch_round_trips_through_its_arrays_and_a_numpy_file(name, options, tmp_path):
+    task = text_task(name)
+    encoder = encoding.FlatRelationEncoder(task, **options)
+    states = walk(task, steps=6, walks=2)
+    batch = encoder.encode(states, **batch_inputs(encoder, task, states))
 
     # the arrays as they are
     again = encoding.FlatBatch.from_arrays(batch.schema, batch.as_dict())
@@ -178,11 +187,47 @@ def test_a_batch_with_capacities_round_trips_with_its_sizes(tmp_path):
     tight = encoder.encode(states, actions=expansion, capacities=dict(capacities, entities=5))
     assert tight.sizes["overflow"]
     arrays_equal(encoding.FlatBatch.from_arrays(encoder.schema, tight.as_dict(), sizes=tight.sizes), tight)
-    broken = dict(tight.as_dict(), relation_args=np.ones_like(tight.relation_args))
-    with pytest.raises(ValueError, match="overflowed, but 'relation_args' is not zero"):
+    broken = dict(tight.as_dict(), task_ids=np.ones_like(tight.task_ids))
+    with pytest.raises(ValueError, match="overflowed, but 'task_ids' is not zero"):
         encoding.FlatBatch.from_arrays(encoder.schema, broken, sizes=tight.sizes)
     # without the sizes the batch is read as it is: the zeros past its contents are allowed
     assert encoding.FlatBatch.from_arrays(encoder.schema, batch.as_dict()).sizes is None
+
+
+@pytest.mark.parametrize("options", BATCH_OPTIONS, ids=BATCH_IDS)
+def test_an_overflowed_batch_is_checked_like_any_other_at_load(options):
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatRelationEncoder(task, **options)
+    states = walk(task, steps=4, walks=1)
+    capacities = dict(graphs=len(states), entities=3, args=3, targets=2, history=2)
+    tight = encoder.encode(states, capacities=capacities, **batch_inputs(encoder, task, states))
+    assert tight.sizes["capacity_overflow"]
+    arrays = dict(tight.as_dict())
+
+    def load(schema=encoder.schema, drop=(), **changes):
+        record = {k: v for k, v in dict(arrays, **changes).items() if k not in drop}
+        return encoding.FlatBatch.from_arrays(schema, record, sizes=tight.sizes)
+
+    arrays_equal(load(), tight)
+    with pytest.raises(ValueError, match="schema_fingerprint does not match"):
+        load(schema_fingerprint=arrays["schema_fingerprint"] ^ 1)
+    with pytest.raises(ValueError, match="unknown batch version 999"):
+        load(version=999)
+    with pytest.raises(ValueError, match="num_relations does not match the schema"):
+        load(encoding.FlatRelationEncoder(task, **dict(options, include_static=False)).schema)
+    with pytest.raises(ValueError, match="the array entity_offsets is missing"):
+        load(drop=("entity_offsets",))
+    with pytest.raises(ValueError, match="the array task_ids has the wrong shape"):
+        load(task_ids=np.zeros(len(states) + 1, np.int32))
+    wrong_width = np.int32 if np.asarray(arrays["relation_args"]).dtype == np.int64 else np.int64
+    with pytest.raises(ValueError, match="the array relation_args has the wrong dtype"):
+        load(relation_args=np.zeros(len(arrays["relation_args"]), wrong_width))
+    # identity comes first: a record of another schema is refused as that, whatever it holds
+    with pytest.raises(ValueError, match="schema_fingerprint does not match"):
+        load(schema_fingerprint=arrays["schema_fingerprint"] ^ 1, task_ids=np.ones(len(states), np.int32))
+    # a record that passes the checks but is not all zero contradicts its sizes
+    with pytest.raises(ValueError, match="overflowed, but 'task_ids' is not zero"):
+        load(task_ids=np.ones(len(states), np.int32))
 
 
 def test_a_batch_of_another_schema_or_version_is_refused_at_load():
