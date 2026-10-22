@@ -12,6 +12,13 @@ from test_encoding_statics import OPTION_SETS
 
 torch = pytest.importorskip("torch")
 
+DEVICE_STATIC_OPTIONS = {
+    ("equality-and-virtual" if name == "everything" else name): {
+        **options, "target_sources": tuple(source for source in options.get("target_sources", ()) if source != "action")
+    }
+    for name, options in OPTION_SETS.items()
+}
+
 
 def capacities(batch):
     result = exact_capacities(batch)
@@ -22,10 +29,9 @@ def capacities(batch):
 @pytest.mark.parametrize("name", ["gripper", "blocks_table", "philosophers"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
-@pytest.mark.parametrize("options", OPTION_SETS.values(), ids=OPTION_SETS)
+@pytest.mark.parametrize("options", DEVICE_STATIC_OPTIONS.values(), ids=DEVICE_STATIC_OPTIONS)
 def test_shared_static_device_forms_equal_cpu(cases, name, layout, index, options):
     device = gpu()
-    options = {**options, "target_sources": tuple(s for s in options.get("target_sources", ()) if s != "action")}
     encoder = encoding.FlatRelationEncoder(cases[name].source, statics="shared", layout=layout,
                                             index_dtype=index, **options)
     host = host_encode(encoder, cases[name])
@@ -34,6 +40,13 @@ def test_shared_static_device_forms_equal_cpu(cases, name, layout, index, option
     batch = device_encode(encoder, cases[name], device, capacities=caps)
     same_batch(host, batch)
     assert batch.sizes["static_instances"] == len(host.static_task_ids)
+    padded = {**caps, "static_instances": caps["static_instances"] + 2, "static_args": caps["static_args"] + 7}
+    same_batch(host_encode(encoder, cases[name], capacities=padded),
+               device_encode(encoder, cases[name], device, capacities=padded))
+    short_instances = {**caps, "static_instances": caps["static_instances"] - 1}
+    short = device_encode(encoder, cases[name], device, capacities=short_instances)
+    assert short.sizes["capacity_overflow"]
+    assert all(not v.any() for v in short.as_dict("numpy").values() if isinstance(v, np.ndarray))
     caps["static_args"] = max(0, caps["static_args"] - 1)
     if len(host.static_args):
         short = device_encode(encoder, cases[name], device, capacities=caps)

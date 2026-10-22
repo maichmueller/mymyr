@@ -35,7 +35,7 @@ class StateRow:
 class EncodedRows:
     """The encoded form of a batch of dataset rows, as ``EncodingCollate`` makes it:
 
-    - ``graphs``: the ``FlatBatch`` of the rows, one graph per row in the order of the call (a ``SuiteBatch`` for a
+    - ``graphs``: the ``FlatBatch`` or ``DeviceFlatBatch`` of the rows, one graph per row (a ``SuiteBatch`` for a
       ``SuiteEncoder``: one batch per domain);
     - ``task_ids``: int32 ``[N]``, the rows' instances;
     - ``labels``: the stacked labels, name to array ``[N, ...]``;
@@ -63,7 +63,7 @@ def _device_array(value: Any, device: Any, dtype: Any = None) -> Any:
 
 
 def _words(values: Any, what: str) -> Any:
-    """`values` as a C-contiguous uint64 array [N, W] (int64 words are reinterpreted)."""
+    """Contiguous 64-bit words [N, W]: uint64 on the host, an int64 view on CUDA."""
     if _on_device(values):
         import torch
 
@@ -86,6 +86,9 @@ class StateRows:
     A dataset stores what the state spaces hold: the rows of atom words and the instance of each row, never an encoding.
     The encoding happens when a batch is loaded: ``EncodingCollate(encoder)`` is the ``collate_fn`` that turns the
     items of a batch into an ``EncodedRows``, so an encoder (and its options) can change without touching the data.
+
+    CUDA DLPack rows are retained as torch int64 word views. Task ids, labels and goals stay on the same device;
+    a device ``StateRow.task_id`` is a scalar tensor. ``EncodingCollate`` encodes the stored rows without downloading them.
 
     ``StateRows(rows, task_ids=None, *, labels=None, goals=None)``: ``rows`` a ``uint64`` array ``[N, W]`` of state
     words of one table's instances (rows of instances with fewer words are padded with zeros), ``task_ids`` the
@@ -238,9 +241,9 @@ _FIRST, _SECOND = itemgetter(0), itemgetter(1)
 
 def _pack(
     items: Sequence[StateRow],
-) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], tuple[np.ndarray, np.ndarray] | None]:
-    """The rows, task ids, labels and goals of a list of items, stacked. The fields are gathered by ``map`` and stacked
-    by ``np.array``, which iterate in C: the cost per item is that of reading its fields, with no Python code per item."""
+) -> tuple[Any, Any, dict[str, Any], tuple[Any, Any] | None]:
+    """The rows, task ids, labels and goals of a list of items, stacked on their device. Host fields are gathered by
+    ``map`` and stacked by ``np.array``, which iterate in C without Python code per item."""
     n = len(items)
     if n == 0:
         raise ValueError("mymyr: datasets: cannot encode an empty batch of rows")
