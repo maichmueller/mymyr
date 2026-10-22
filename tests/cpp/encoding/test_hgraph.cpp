@@ -57,7 +57,6 @@ std::vector<i64> ints(const rl::ArrayBundle& bundle, const char* name)
     return out;
 }
 
-constexpr auto k_layouts = {Layout::Graph, Layout::Relation};
 constexpr auto k_indices = {IndexType::I32, IndexType::I64};
 
 FlatOptions as_layout(FlatOptions options, Layout layout, IndexType index)
