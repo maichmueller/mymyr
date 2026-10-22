@@ -283,3 +283,31 @@ def test_a_data_loader_fetches_each_batch_with_one_take(monkeypatch):
         assert np.array_equal(batch.labels["step"], indices)
     assert len(taken) == (len(rows) + 3) // 4
     assert sorted(np.concatenate(taken).tolist()) == list(range(len(rows)))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("statics", ["repeat", "shared"])
+def test_batches_loaded_in_chunks_collate_into_the_encoding_of_all_rows(layout, statics):
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    blocks = ROOT / "tests/data/pddl/blocks"
+    tasks = [mymyr.Task.from_pddl(blocks / "domain.pddl", blocks / f"{p}.pddl") for p in ("probBLOCKS-8-0", "smedium")]
+    table = rl.TaskTable(tasks)
+    encoded = [np.asarray(t.encode(walk(t, steps=6, walks=2, seed=3 + i))) for i, t in enumerate(tasks)]
+    width = max(e.shape[1] for e in encoded)
+    rows = np.concatenate([np.pad(e, ((0, 0), (0, width - e.shape[1]))) for e in encoded])
+    ids = np.concatenate([np.full(len(e), i, np.int32) for i, e in enumerate(encoded)])
+    order = np.random.default_rng(2).permutation(len(ids))
+    dataset = datasets.StateRows(rows[order], ids[order])
+    encoder = encoding.FlatRelationEncoder(table, layout=layout, statics=statics, target_sources=("goal",))
+    collate = datasets.EncodingCollate(encoder)
+    # chunks that hold one instance, the other or both
+    chunks = [np.arange(k, min(k + 5, len(dataset))) for k in range(0, len(dataset), 5)]
+    loaded = [collate(dataset.__getitems__(chunk)).graphs for chunk in chunks]
+    arrays_equal(encoding.collate(loaded), encoder.encode(dataset.rows, dataset.task_ids))
+    # the native checks of collation hold for loaded batches: another table's batch is refused
+    other = encoding.FlatRelationEncoder(rl.TaskTable(tasks[:1]), layout=layout, statics=statics,
+                                         target_sources=("goal",))
+    foreign = datasets.EncodingCollate(other)(datasets.StateRows(rows[ids == 0][:2]))
+    with pytest.raises(ValueError, match="different tables"):
+        encoding.collate([loaded[0], foreign.graphs])

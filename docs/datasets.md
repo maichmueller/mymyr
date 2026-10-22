@@ -149,7 +149,10 @@ per item as well.
 (the `FlatBatch`, or the `SuiteBatch` of one batch per domain when `encoder` is a `SuiteEncoder`), the rows'
 `task_ids`, the stacked `labels` and, with `actions=True`, the `actions` expansion the action entities index
 ([Reinforcement learning](rl.md#encoding-the-pools-states)). The collate function pickles with its encoder, so it works
-with data loader worker processes. With PyTorch, a loader encodes each batch to tensors that share the batch's memory:
+with data loader worker processes. Batches loaded in chunks combine with
+[`encoding.collate`](encoding.md#device-row-streams-and-collation) into the batch of all their rows, with its checks:
+the batches of another table or schema are refused. With PyTorch, a loader encodes each batch to tensors that share
+the batch's memory:
 
 ```python needs-torch
 import torch
