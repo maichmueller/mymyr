@@ -685,8 +685,8 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         GTEST_SKIP() << "no PDDL data";
     const cuda::DeviceEncoder device(device_context(), encoder);
     const cuda::GraphBounds& b = device.bounds();
-    // the bounds recomputed from the context's cells: the device has no expansion input, so its graphs have no action cell
-    // (these options have no goal, so the lists of the instance's goal and of a row's goal are the same)
+    // Fixed-row output bounds exclude expansion tuples; cell scratch also holds the optional action cells.
+    // These options have no goal, so the instance and row goal lists agree.
     const auto view = encoder->context().view();
     cuda::GraphBounds expected;
     for (u32 i = 0; i < encoder->table().size(); ++i)
@@ -703,7 +703,7 @@ TEST(DeviceEncoder, BytesNeededOfTheWorstCaseBatch)
         expected.entities = std::max<u64>(expected.entities, inst.num_objects + nullary);
         expected.tuples = std::max(expected.tuples, tuples);
         expected.args = std::max(expected.args, args);
-        expected.cells = std::max<u64>(expected.cells, inst.num_plain_cells);
+        expected.cells = std::max<u64>(expected.cells, inst.num_cells);
         expected.words = std::max<u64>(expected.words, inst.words);
         expected.state_words = std::max<u64>(expected.state_words, inst.words);
         expected.derived_words = std::max<u64>(expected.derived_words, inst.derived_words);
@@ -767,10 +767,10 @@ TEST(DeviceEncoder, PinnedBytesNeededOfBlocks)
     EXPECT_EQ(device.bounds().entities, 9u);
     EXPECT_EQ(device.bounds().tuples, 97u);
     EXPECT_EQ(device.bounds().args, 161u);
-    EXPECT_EQ(device.bounds().cells, 6u);
+    EXPECT_EQ(device.bounds().cells, 10u);
     EXPECT_EQ(encoder->schema().num_relations(), 25u);
     const auto scratch = cuda::detail::scratch_layout(device.worst_case(1000), device.bounds(), device.options().layout, device.schema().num_relations());
-    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1041472u);
+    EXPECT_EQ(device.bytes_needed(u64{1000}) - round_up(scratch.scan_temp_bytes), 1117504u);
 }
 
 void touch_scratch(const cuda::DeviceEncoder& device, const cuda::EncodingWorkspace& work, const cuda::ContextPtr& ctx)
@@ -1590,4 +1590,15 @@ TEST(DeviceEncoder, FillZerosUnusedTailsAndOverflowOutputsWhenRequested)
                 }
             }
 }
+}
+
+
+TEST(DeviceEncoderSchema, RowStreamsRefuseHorizonGraphs)
+{
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    encoding::FlatOptions options;
+    options.horizon.mode = encoding::HorizonMode::Full;
+    const auto schema = encoding::EncodingSchema::create(*table, options);
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*schema));
+    EXPECT_THROW(cuda::check_stream_schema(*schema), std::invalid_argument);
 }

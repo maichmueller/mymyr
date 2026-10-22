@@ -2726,7 +2726,7 @@ TEST(DeviceEncodeActions, SplitRunsAndMixedInstancesEqualTheHost)
         "(define (domain split) (:requirements :strips :typing :disjunctive-preconditions)"
         " (:types item) (:predicates (p ?x - item) (q ?x - item) (done ?x - item) (flag))"
         " (:action go :parameters (?x - item) :precondition (or (p ?x) (q ?x)) :effect (done ?x))"
-        " (:action flag :parameters () :precondition (and) :effect (flag)))");
+        " (:action arm :parameters () :precondition (and) :effect (flag)))");
     std::vector<TaskPtr> tasks;
     for (const std::string& objects : {std::string("a b c"), std::string("a b c d e")})
         tasks.push_back(Task::create(*domain->instantiate_string(

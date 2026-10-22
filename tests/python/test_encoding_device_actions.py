@@ -47,7 +47,7 @@ def upload(view, device):
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("count", [1, 5])
-@pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "philosophers__p03-phil4"])
+@pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "philosophers__p03-phil4", "logistics00__probLOGISTICS-6-1"])
 def test_expansion_action_entities_targets_and_capacity_match_host(layout, index, count, name):
     device = gpu()
     task = text_task(name)
@@ -59,7 +59,10 @@ def test_expansion_action_entities_targets_and_capacity_match_host(layout, index
     expected = encoder.encode(rows, actions=rl.expand(task, rows))
     words = tensor(rows, device)
     actions = rl.expand(task, words, framework="torch")
-    same(expected, encoder.encode(words, actions=actions))
+    actual = encoder.encode(words, actions=actions)
+    same(expected, actual)
+    np.testing.assert_array_equal(encoding.action_rows(actual, actions), encoding.action_rows(expected, rl.expand(task, rows)))
+    np.testing.assert_array_equal(encoding.action_indices(actual), encoding.action_indices(expected))
     same(expected, encoder.encode(words, actions=actions, capacities=caps(expected)))
 
 
@@ -109,9 +112,10 @@ def test_depth_one_horizon_modes_roots_kin_and_goals_match_host(layout, index, m
 
 @pytest.mark.parametrize("merge", [False, True])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
-def test_device_builder_and_transition_encoders_match_host(merge, layout):
+@pytest.mark.parametrize("name", ["blocks__probBLOCKS-8-0", "logistics00__probLOGISTICS-6-1"])
+def test_device_builder_and_transition_encoders_match_host(merge, layout, name):
     device = gpu()
-    task = text_task("blocks__probBLOCKS-8-0")
+    task = text_task(name)
     rows = np.asarray(task.encode(walk(task, steps=3, walks=1)))
     words = tensor(rows, device)
     view = encoding.horizon(task, words, depth=1, merge=merge)
@@ -163,7 +167,8 @@ def test_self_loop_has_no_delta_and_deeper_device_horizons_are_refused():
     encoder = encoding.FlatHorizonEncoder(task, horizon_mode="delta", root_policy="exclude", goal_derivations=())
     expected = encoder.encode(view)
     same(expected, encoder.encode(upload(view, device)))
-    assert all(expected.relation_counts[0, i] == 0 for i, lane in enumerate(encoder.relation_lanes) if lane == "delta")
+    delta = [i for i, name in enumerate(encoder.relation_names) if name.startswith(("[+]", "[-]"))]
+    assert delta and all(expected.relation_counts[0, i] == 0 for i in delta)
     with pytest.raises(ValueError, match="horizons of depth 2 or more"):
         encoding.horizon(task, tensor(row, device), depth=2)
     deeper = encoding.horizon(task, row, depth=2, merge=False)
@@ -183,11 +188,12 @@ def test_torch_op_actions_compile_and_capture():
     expected = encoder.encode(rows, actions=rl.expand(task, rows))
     handle = rt.register(encoder)
     capacity = caps(expected)
+    schema, binding, offsets, parent = x.schema, x.binding, x.offsets, x.parent
     def call():
         return torch.ops.mymyr.encode_flat(handle, words, None, None, None, None, None, None,
             None, None, None, None, None, None, None, None, None, None,
             len(rows), capacity["entities"], capacity["args"], capacity["targets"], 0,
-            x.schema, x.binding, x.offsets, x.parent)
+            schema, binding, offsets, parent)
     try:
         same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, call()))
         same(expected, encoding.DeviceFlatBatch.from_arrays(encoder, torch.compile(call, fullgraph=True)()))
@@ -261,12 +267,13 @@ def test_torch_horizon_op_compiles_and_captures_without_a_host_wait(layout):
     encoder = encoding.FlatHorizonEncoder(task, horizon_mode="delta", layout=layout, parent_relation=True)
     expected = encoder.encode(view)
     capacity = caps(expected)
+    graphs = expected.num_graphs
     handle = rt.register(encoder)
 
     def call():
         return torch.ops.mymyr.encode_flat(handle, inputs.nodes, None, None, None, None, None, None,
             None, None, None, None, None, None, None, None, None, None,
-            expected.num_graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
+            graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
             None, None, None, None, inputs.node_offsets, inputs.edge_offsets,
             inputs.edge_src, inputs.edge_dst, inputs.edge_schema, inputs.edge_binding)
 
@@ -320,3 +327,13 @@ def test_device_transition_supplied_derived_words_equal_the_host():
     actions = rl.expand(task, words, derived=True, framework="torch")
     same(encoder.encode(rows, derived=derived, actions=host_actions),
          encoder.encode(words, derived=tensor(derived, device), actions=actions))
+
+
+
+def test_rooted_horizon_subclass_encodes_its_state_targets_on_the_device():
+    device = gpu()
+    task = text_task("gripper__prob05")
+    rows = np.asarray(task.encode(walk(task, steps=1, walks=1)))
+    view = encoding.horizon(task, rows, depth=1)
+    encoder = encoding.FlatRootedHorizonEncoder(task, sibling_relation=True, cousin_relation=True)
+    same(encoder.encode(view), encoder.encode(upload(view, device)))

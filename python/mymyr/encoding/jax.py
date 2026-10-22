@@ -83,6 +83,8 @@ _registrations: dict[int, _Registration] = {}
 def register(encoder: Any) -> int:
     """The FFI handle of ``encoder``, a ``FlatRelationEncoder`` (the same handle for the same encoder while it is
     registered). The registry holds the encoder (its table, options and device contexts) until :func:`unregister`."""
+    if encoder.options["horizon_mode"] is not None:
+        raise _error("JAX FFI does not encode horizons or transitions: its operands carry no node offsets or edges; use the torch device encoder")
     with _lock:
         handle = _handles.get(encoder)
         if handle is not None and handle in _registrations:

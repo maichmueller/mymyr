@@ -38,6 +38,8 @@ void finish_rows(u64* status, u64 capacity, cudaStream_t stream)
 void check_stream_schema(const encoding::EncodingSchema& schema)
 {
     const auto& o = schema.options();
+    if (schema.has_horizon())
+        throw std::invalid_argument("mymyr: encoding: a device stream carries no horizon nodes or edges");
     if (o.max_goal_level != 0 || o.history)
         throw std::invalid_argument("mymyr: encoding: a device stream carries no subgoal layers or history steps");
 }

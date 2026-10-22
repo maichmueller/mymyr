@@ -19,7 +19,11 @@ _ACTION_ROLE = 4
 
 def _ints(values: object) -> np.ndarray:
     """`values` as a flat int64 host array: an array that speaks DLPack (NumPy, torch and JAX arrays on the CPU,
-    mymyr.DLArray) is read in place, anything else (a sequence of ints) through NumPy."""
+    mymyr.DLArray) is read in place, anything else (a sequence of ints) through NumPy. CUDA arrays are copied to the
+    host before reading their values."""
+    if hasattr(values, "__dlpack_device__") and values.__dlpack_device__()[0] == 2:
+        import torch
+        values = torch.from_dlpack(values).cpu().numpy()
     if not isinstance(values, np.ndarray) and hasattr(values, "__dlpack__"):
         values = np.from_dlpack(values)
     return np.asarray(values).astype(np.int64, copy=False).reshape(-1)

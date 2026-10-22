@@ -103,7 +103,7 @@ class _Layout:
         self.relations = encoder.num_relations
         self.entity_arrays = not encoder.implicit_entities
         self.counts = bool(options["emit_counts"])
-        self.targets = bool(options["target_sources"])
+        self.targets = bool(options["target_sources"]) or options["horizon_mode"] is not None
         self.history = bool(options["history"])
         self.goal_complete = any(lane in _GOAL_LANES for lane in encoder.relation_lanes)
 

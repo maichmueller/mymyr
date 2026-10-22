@@ -2476,6 +2476,12 @@ void bind_hgraph(nb::module_& module)
 
 std::shared_ptr<const encoding::FlatEncoder> flat_encoder_of(nb::handle obj)
 {
+    if (nb::isinstance<PyFlatHorizonEncoder>(obj))
+        return nb::cast<const PyFlatHorizonEncoder&>(obj).encoder;
+    if (nb::isinstance<PyFlatTransitionEncoder>(obj))
+        return nb::cast<const PyFlatTransitionEncoder&>(obj).encoder;
+    if (nb::isinstance<PyFlatTransitionEffectsEncoder>(obj))
+        return nb::cast<const PyFlatTransitionEffectsEncoder&>(obj).encoder;
     return nb::cast<const PyFlatEncoder&>(obj).encoder;
 }
 
@@ -2749,15 +2755,15 @@ void bind_encoding(nb::module_& parent)
     define_reduce(simple_class, "SimpleEncoder");
 
     nb::class_<PyFlatHorizonEncoder> horizon_class(
-        module, "FlatHorizonEncoder",
+        module, "FlatHorizonEncoder", nb::is_weak_referenceable(),
         "Encodes horizons into relational graphs: one graph per root state, holding the root and the nodes below it (a "
         "node is a state reached from the root by a path of actions) as state entities, next to the instance's objects "
         "(and the auxiliary entity when a nullary tuple exists). The relations hold the facts of the nodes (anchored by "
         "their state entity), the goal literals of the root, the goal's satisfaction at the nodes, what a node adds to or "
         "deletes from its root (the delta mode) and the edges of the horizon: one action tuple (the action relations, "
         "with the action's objects) and, with parent_relation, one `_parent_` tuple per edge. The nodes and edges are "
-        "given as a HorizonView (mymyr.encoding.HorizonView; `rl.expand` rows have this form). Streams and the device "
-        "do not encode horizons; the device encodes depth-one horizons into torch arrays.");
+        "given as a HorizonView (mymyr.encoding.HorizonView; `rl.expand` rows have this form). Streams do not encode "
+        "horizons. The device encodes depth-one horizons into torch arrays.");
     static const std::string horizon_doc =
         std::string("The horizon encoder of a Task, TaskHandle or one-domain TaskTable. horizon_mode ('full', 'delta' or "
                     "'action') is required; `history` is not an option of a horizon. ") +
@@ -2821,7 +2827,7 @@ void bind_encoding(nb::module_& parent)
         "(default: expanded here); its successor rows are encoded, so an expansion made with witness_pruning=True gives "
         "the pruned transitions. A state's successor equal to the state is a node of its own and the edge leads to it.";
     nb::class_<PyFlatTransitionEncoder> transition_class(
-        module, "FlatTransitionEncoder",
+        module, "FlatTransitionEncoder", nb::is_weak_referenceable(),
         "Encodes the transitions of states: one graph per state holding the state and its successors as state entities "
         "next to the instance's objects, each successor with its facts (horizon_mode 'full') and the action that leads to "
         "it (the action relations). The state itself is not encoded by default (root_policy 'exclude'): a graph is the "
@@ -2843,7 +2849,7 @@ void bind_encoding(nb::module_& parent)
                          "capacities"_a = nb::none(), transition_encode_doc);
 
     nb::class_<PyFlatTransitionEffectsEncoder> effects_class(
-        module, "FlatTransitionEffectsEncoder",
+        module, "FlatTransitionEffectsEncoder", nb::is_weak_referenceable(),
         "Encodes the effects of the transitions of states: FlatTransitionEncoder with the delta mode, so a successor "
         "holds what it adds to and deletes from its state (nothing for a transition that leaves the state unchanged, a "
         "self-loop included) instead of its facts.");

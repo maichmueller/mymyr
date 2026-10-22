@@ -177,7 +177,8 @@ void append_rows(const DeviceEncodeInput& input, const DeviceEncodeInput& ring, 
 void clear_rows(u64* status, u64 capacity, cudaStream_t stream);
 /// Empties the ring while preserving its sticky overflow flag.
 void finish_rows(u64* status, u64 capacity, cudaStream_t stream);
-/// Throws std::invalid_argument for a schema whose rows a device ring does not carry: subgoal layers and history steps.
+/// Throws std::invalid_argument for a schema whose rows a device ring does not carry: subgoal layers, history steps
+/// and horizon graphs.
 void check_stream_schema(const encoding::EncodingSchema& schema);
 
 /// Builds depth-one horizons from parent and successor rows on the stream. Output storage follows DeviceHorizonBuild;

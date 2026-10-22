@@ -229,7 +229,8 @@ Device rows accept a CUDA expansion as `actions=` or `(schema, binding, offsets)
 `expand_flat`'s six outputs. Split-schema runs use the same k-way merge as the host, and action targets, graph-local
 references, both layouts and both index widths have identical output. The torch `encode_flat` op accepts
 `action_schema`, `action_binding`, `action_offsets` and optional `action_parent` tensors. JAX FFI refuses action rows
-because its operand list has no expansion labels or offsets.
+because its operand list has no expansion labels or offsets. The action mapping helpers return host NumPy indices;
+reading CUDA offsets or chosen entities through them copies those arrays to the host.
 
 ### Predicate virtual nodes
 
