@@ -11,7 +11,7 @@ from mymyr.rl._sampling import _instance_sampler
 
 from . import _ffi
 
-__all__ = ["Env", "EnvState", "Observation", "PaddedExpansion", "FlatExpansion", "key_seed"]
+__all__ = ["Env", "EnvState", "Observation", "PaddedExpansion", "FlatExpansion", "SuiteObservation", "key_seed"]
 
 
 class EnvState(NamedTuple):
@@ -55,7 +55,8 @@ class Observation(NamedTuple):
     """What a policy sees: the state words (uint32 [N, 2 row_words]), the successor count [N] (the action mask of
     successor slots is ``arange(K) < count``), the instance [N], the per-env goal masks ([N, 2 words], or [N, 0]
     without goals=True) and whether the state is a goal already (bool [N]: a reset into a solved state, or a goal mask
-    that holds; the next step absorbs it)."""
+    that holds; the next step absorbs it). With an ``observation`` encoder, ``encoding`` is the encoding of the rows (a
+    ``mymyr.encoding.jax.JaxFlatBatch``); None without one."""
 
     state: Any
     count: Any
@@ -63,6 +64,25 @@ class Observation(NamedTuple):
     goal_pos: Any
     goal_neg: Any
     at_goal: Any
+    encoding: Any = None
+
+
+class SuiteObservation(NamedTuple):
+    """The encoding of the N rows of environments over a TaskSuite of several domains: one batch per domain, since
+    each domain has a relation catalog of its own (a pytree).
+
+    - ``batches[d]``: the ``JaxFlatBatch`` of domain ``d``'s rows, in row order (graph k is the k-th row of domain d);
+      its ``task_ids`` are the domain's instance numbers (``suite.local_ids``). With capacities every batch has an entry
+      for each of the N rows in its per-graph arrays, zero past the domain's rows, whose number is its
+      ``device_graphs``; an exact batch has the domain's rows only.
+    - ``domain``: int32 [N], the domain of each row.
+    - ``index``: int32 [N], the graph of each row in its domain's batch: row i is graph ``index[i]`` of
+      ``batches[domain[i]]``.
+    """
+
+    batches: tuple
+    domain: Any
+    index: Any
 
 
 class PaddedExpansion(NamedTuple):
@@ -170,6 +190,20 @@ class Env:
     a CUDA index; the arrays of a jitted rollout must live there. Numeric tables use the general expansion path on a CUDA device. ``path`` chooses the device path ('auto': the fast path where the table allows it; 'general': the
     device expansion, which synchronizes on the successor count every step). ``labels=False`` skips the binding labels
     and ``final_state=False`` the final states (both are written every step otherwise).
+
+    Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over
+    a suite of several domains: one encoder per domain, in the suite's order; an observation is then a
+    :class:`SuiteObservation`, one batch per domain and each row's index in its batch). Every
+    observation (of reset, reset_where and step) then carries the encoding of its rows (``Observation.encoding``,
+    through ``mymyr.encoding.jax.encode``: the device encoder on CUDA, the host encoder on the CPU, with equal arrays),
+    and a step with ``final_state=True`` the encoding of the reached states before the autoreset, with the instances
+    and goal masks they were reached in (``info["final_obs"]``; the observation's encoding without autoreset). The goal
+    relations hold the per-env goal masks with ``goals=True``. ``obs_capacities`` (``dict(entities=, args=)``, plus
+    ``targets=`` for target sources and ``graphs=``, by default the number of environments) gives the arrays static
+    shapes, which ``jax.jit`` and ``lax.scan`` need; the true sizes are in ``encoding.device_sizes``, and a batch that
+    does not fit is all zero with its overflow flag set; over a suite one dict serves every domain, or a sequence gives
+    one per domain. Without capacities the encodings are exact (eager calls only). The JAX encoding holds no action
+    relations.
     """
 
     def __init__(
@@ -192,6 +226,9 @@ class Env:
         labels: bool = True,
         final_state: bool = True,
         ctx: Any = None,
+        observation: Any = None,
+        obs_capacities: Optional[dict] = None,
+        obs_actions: bool = False,
     ) -> None:
         numeric = _numeric(table)
         self.device: jax.Device = _jax_device(device, numeric)
@@ -232,6 +269,12 @@ class Env:
         self.final_state = final_state
         rw2 = 2 * self.row_words
         self._initial_states = np.asarray(self.native.initial_states(), dtype=np.uint32).reshape(self.num_instances, rw2)
+        self.observation_encoders, self.obs_capacities, self._obs_goals = _observation(
+            table, observation, obs_capacities, obs_actions
+        )
+        if self.observation_encoders is not None and len(self.observation_encoders) > 1:
+            self._domain_of = np.asarray(table.domain_of, np.int32)
+            self._local_ids = np.asarray(table.local_ids, np.int32)
 
     def __repr__(self) -> str:
         return f"mymyr.rl.jax.Env({self.native!r}, device={self.device})"
@@ -283,8 +326,64 @@ class Env:
         return jnp.asarray(ids).astype(jnp.int32)
 
     def observation(self, state: EnvState) -> Observation:
-        """The observation of ``state``."""
-        return Observation(state.states, state.count, state.task_id, state.goal_pos, state.goal_neg, state.at_goal)
+        """The observation of ``state`` (with its encoding, given an observation encoder)."""
+        return Observation(state.states, state.count, state.task_id, state.goal_pos, state.goal_neg, state.at_goal,
+                           self.encode(state.states, state.task_id, state.goal_pos, state.goal_neg))
+
+    def encode(self, states: Any, task_ids: Any, goal_pos: Any = None, goal_neg: Any = None) -> Any:
+        """The encoding of rows (uint32 [N, 2 row_words]) of the instances ``task_ids`` with the observation encoders,
+        the goal relations from the goal masks with goals=True: a ``JaxFlatBatch`` over a table, a
+        :class:`SuiteObservation` over a suite of several domains; None without an encoder."""
+        encoders = self.observation_encoders
+        if encoders is None:
+            return None
+        from mymyr.encoding import jax as encoding_jax
+
+        with self._dev():
+            if len(encoders) == 1:
+                return encoding_jax.encode(encoders[0], states, task_ids, goals=self._obs_goal_pair(0, goal_pos, goal_neg),
+                                           capacities=self._obs_caps(0, states.shape[0]))
+            return self._encode_suite(encoding_jax, states, task_ids, goal_pos, goal_neg)
+
+    def _obs_goal_pair(self, d: int, goal_pos: Any, goal_neg: Any) -> Optional[tuple]:
+        return (goal_pos, goal_neg) if self.goals and self._obs_goals[d] else None
+
+    def _obs_caps(self, d: int, rows: int) -> Optional[dict]:
+        caps = self.obs_capacities
+        return None if caps is None else {"graphs": rows, **caps[d]}
+
+    def _encode_suite(self, encoding_jax: Any, states: Any, task_ids: Any, goal_pos: Any, goal_neg: Any) -> Any:
+        """One batch per domain: the rows of each domain moved to the front of rows of their own (in row order),
+        encoded as the live rows of a batch of N."""
+        D = len(self.observation_encoders)
+        n = states.shape[0]
+        ids = jnp.asarray(task_ids).astype(jnp.int32)
+        domain = jnp.asarray(self._domain_of)[ids]
+        local = jnp.asarray(self._local_ids)[ids]
+        within = jnp.cumsum(jax.nn.one_hot(domain, D, dtype=jnp.int32), axis=0)
+        index = jnp.take_along_axis(within, domain[:, None], axis=1)[:, 0] - 1
+        batches = []
+        if self.obs_capacities is None:  # exact batches: the rows of each domain, grouped on the host
+            host = np.asarray(domain)
+            for d in range(D):
+                rows = jnp.asarray(np.flatnonzero(host == d))
+                goals = self._obs_goal_pair(d, None if goal_pos is None else goal_pos[rows],
+                                            None if goal_neg is None else goal_neg[rows])
+                batches.append(encoding_jax.encode(self.observation_encoders[d], states[rows], local[rows], goals=goals))
+            return SuiteObservation(tuple(batches), domain, index.astype(jnp.int32))
+        counts = within[-1] if n else jnp.zeros((D,), jnp.int32)
+
+        def front(x: Any, at: Any) -> Any:
+            return jnp.zeros((n + 1, *x.shape[1:]), x.dtype).at[at].set(x)[:n]
+
+        for d in range(D):
+            at = jnp.where(domain == d, index, n)  # the rows of other domains go to a dropped row
+            goals = self._obs_goal_pair(d, goal_pos, goal_neg)
+            if goals is not None:
+                goals = (front(goals[0], at), front(goals[1], at))
+            batches.append(encoding_jax.encode(self.observation_encoders[d], front(states, at), front(local, at),
+                                               goals=goals, capacities=self._obs_caps(d, n), live=counts[d]))
+        return SuiteObservation(tuple(batches), domain, index.astype(jnp.int32))
 
     # ---------------------------------------------------------------------------------------------- env functions
 
@@ -436,9 +535,17 @@ class Env:
             info["binding"] = binding
         if self.final_state:
             info["final_state"] = final
+            if self.observation_encoders is not None:
+                if self.native.autoreset:
+                    info["final_obs"] = self.encode(final, state.task_id, state.goal_pos, state.goal_neg)
+                else:
+                    info["final_obs"] = None  # filled below: the reached states are the next observation
         if not self.native.autoreset:
             info["no_autoreset"] = ()
-        return s, self.observation(s), reward, terminated, truncated, info
+        obs = self.observation(s)
+        if info.get("final_obs", ()) is None:
+            info["final_obs"] = obs.encoding
+        return s, obs, reward, terminated, truncated, info
 
     def random_actions(self, key: Any, state: EnvState, max_actions: Optional[int] = None) -> Any:
         """The random policy's next choices without stepping (int32 [N]): the successor slots ``step(key, state)``
@@ -488,6 +595,51 @@ class Env:
         """Waits for this environment's device work and raises if a fast-path step met a stale cache (states written
         without :meth:`refresh`) or task ids outside the table."""
         self.native.check_errors()
+
+
+def _observation(table: Any, observation: Any, capacities: Any, actions: bool) -> tuple[Any, Any, Any]:
+    """The checked observation encoders (one per domain), their capacities and whether their schemas have goal
+    relations."""
+    if observation is None:
+        if capacities is not None or actions:
+            raise ValueError("mymyr: obs_capacities and obs_actions need an observation encoder")
+        return None, None, None
+    from collections.abc import Mapping, Sequence
+
+    from mymyr import rl
+    from mymyr._core._encoding import FlatRelationEncoder
+    from mymyr.encoding import _device
+
+    suite = isinstance(table, _rl.TaskSuite) and table.num_domains > 1
+    tables = list(table.tables) if suite else [table.tables[0] if isinstance(table, _rl.TaskSuite) else rl.as_table(table)]
+    if hasattr(observation, "encoders"):
+        observation = observation.encoders
+    encoders = list(observation) if isinstance(observation, (list, tuple)) else [observation]
+    if len(encoders) != len(tables):
+        raise ValueError(f"mymyr: observation needs {len(tables)} encoders, one per domain of the environments' "
+                         f"{'suite' if suite else 'table'}, got {len(encoders)}")
+    for d, (encoder, t) in enumerate(zip(encoders, tables, strict=True)):
+        if type(encoder) is not FlatRelationEncoder:
+            raise TypeError(f"mymyr: observation must be a FlatRelationEncoder (or one per domain), not "
+                            f"{type(encoder).__name__}")
+        if encoder.table_fingerprint != t.fingerprint:
+            where = f"domain {d} of the suite" if suite else "the environments' table"
+            raise ValueError(f"mymyr: observation: encoder {d} encodes another table than {where} (encode the table "
+                             "the environments run on)")
+    if actions:
+        raise ValueError("mymyr: obs_actions: the JAX encoding holds no action relations; leave obs_actions off")
+    caps = None
+    if capacities is not None:
+        if isinstance(capacities, Mapping):
+            caps = [dict(capacities)] * len(encoders)
+        elif isinstance(capacities, Sequence) and not isinstance(capacities, str) and len(capacities) == len(encoders) \
+                and all(isinstance(c, Mapping) for c in capacities):
+            caps = [dict(c) for c in capacities]
+        else:
+            raise ValueError(f"mymyr: obs_capacities must be a dict or a sequence of {len(encoders)} dicts (one per "
+                             "domain)")
+    goals = [any(lane in _device._GOAL_LANES for lane in e.relation_lanes) for e in encoders]
+    return encoders, caps, goals
 
 
 def _masks_hold(states: Any, goal_pos: Any, goal_neg: Any) -> Any:

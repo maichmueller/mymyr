@@ -165,28 +165,38 @@ class JaxFlatBatch:
     the variable-size arrays have the capacities' sizes and ``device_sizes`` holds the true sizes and flags; ``sizes``
     reads them on the host."""
 
-    __slots__ = ("_arrays", "_sizes", "_static")
+    __slots__ = ("_arrays", "_graphs", "_sizes", "_static")
 
     # (names of the stored arrays, num_relations, layout, index_dtype, schema fingerprint, implicit entities, schema,
     # table fingerprint)
-    def __init__(self, arrays: dict[str, Any], sizes: Optional[Any], static: tuple):
+    def __init__(self, arrays: dict[str, Any], sizes: Optional[Any], static: tuple, graphs: Optional[Any] = None):
         self._arrays = arrays
         self._sizes = sizes
         self._static = static
+        self._graphs = graphs
 
     def tree_flatten(self) -> tuple[tuple, tuple]:
         names = self._static[0]
-        return (*(self._arrays[n] for n in names), self._sizes), self._static
+        return (*(self._arrays[n] for n in names), self._sizes, self._graphs), self._static
 
     @classmethod
     def tree_unflatten(cls, static: tuple, children: tuple) -> "JaxFlatBatch":
         names = static[0]
-        return cls(dict(zip(names, children[:-1], strict=True)), children[-1], static)
+        return cls(dict(zip(names, children[:-2], strict=True)), children[-2], static, children[-1])
 
     @property
     def num_graphs(self) -> int:
-        """The number of graphs (states) in the batch."""
+        """The number of graphs (states) in the batch: its rows, or its live rows (``device_graphs``, read on the
+        host)."""
+        if self._graphs is not None:
+            return int(np.asarray(self._graphs))
         return int(self._arrays["task_ids"].shape[-1])
+
+    @property
+    def device_graphs(self) -> Optional[Any]:
+        """The live rows of a batch encoded with ``live=`` (int32 scalar: the graphs; the per-graph arrays have an
+        entry for every row and are zero past them); None otherwise."""
+        return self._graphs
 
     @property
     def num_relations(self) -> int:
@@ -234,9 +244,10 @@ class JaxFlatBatch:
         of the batch. framework: ``"jax"`` (default) or ``"dlpack"`` (the JAX arrays, which speak DLPack) or ``"numpy"``
         (host copies, which wait for the computation)."""
         _, relations, layout, index, fingerprint, _, _, table_fingerprint = self._static
+        graphs = self.num_graphs
         scalars = {
             "version": 1,
-            "num_graphs": self.num_graphs,
+            "num_graphs": graphs,
             "num_relations": relations,
             "layout": layout,
             "index_dtype": index,
@@ -244,10 +255,18 @@ class JaxFlatBatch:
             "table_fingerprint": table_fingerprint,
             "statics": 0,
         }
+        arrays = self._arrays
+        if self._graphs is not None:  # the live graphs' entries of the per-graph and per-cell arrays
+            g, r = graphs, relations
+            extents = {"task_ids": g, "num_objects": g, "entity_offsets": g + 1, "relation_counts": g * r,
+                       "relation_offsets": g * r + 1, "relation_arg_offsets": g * r + 1, "goal_complete": g,
+                       "target_offsets": g + 1}
+            arrays = {name: a.reshape(-1)[: extents[name]].reshape((-1, r) if name == "relation_counts" else (-1,))
+                      if name in extents else a for name, a in arrays.items()}
         if framework in (None, "jax", "dlpack"):
-            return {**scalars, **self._arrays}
+            return {**scalars, **arrays}
         if framework == "numpy":
-            return {**scalars, **{name: np.asarray(a) for name, a in self._arrays.items()}}
+            return {**scalars, **{name: np.asarray(a) for name, a in arrays.items()}}
         raise _error(f"a JAX batch exports to 'jax', 'dlpack' or 'numpy', not {framework!r}")
 
     def __getattr__(self, name: str) -> Any:
@@ -540,6 +559,7 @@ def encode(
     history: Any = None,
     capacities: Optional[dict] = None,
     threads: int = 1,
+    live: Any = None,
 ) -> JaxFlatBatch:
     """``FlatRelationEncoder.encode`` of the rows ``states`` as an XLA FFI call: the CPU encoder on the CPU, the device
     kernels on CUDA, with equal arrays. Usable inside ``jax.jit``, ``lax.scan`` and ``jax.vmap`` (each vmapped batch
@@ -568,7 +588,12 @@ def encode(
     invalid row and ``OverflowError`` when the index type is too narrow, and returns exact arrays.
 
     threads: the CPU target's worker threads (0: one per hardware thread); the result does not depend on it.
-    ``index_dtype='int64'`` needs ``jax_enable_x64``."""
+    ``index_dtype='int64'`` needs ``jax_enable_x64``.
+
+    live: an integer scalar array (traced or not), the live rows: only the first ``min(live, N)`` rows are encoded,
+    as a batch of that many graphs whose per-graph and per-cell arrays keep the entries of N graphs and are zero past
+    them (``batch.device_graphs`` holds the count; ``as_dict`` and ``num_graphs`` read it). It needs capacities and
+    takes no subgoal layers or history steps."""
     _ffi.register()
     handle, reg = _registration(encoder)
     info = reg.info
@@ -600,7 +625,17 @@ def encode(
             raise _error(f"'derived' has {derived_words.shape[0]} rows, the states {graphs}")
         if derived_words.shape[1] // 2 < info["derived_words"]:
             raise _error(f"'derived' needs at least {info['derived_words']} words per row")
-    operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps)
+    if live is None:
+        live_count, live_words = None, jnp.zeros((0,), jnp.uint32)
+    else:
+        if capacities is None:
+            raise _error("live rows need capacities (the arrays keep the entries of every row)")
+        if reg.layout.history or layers[0].ndim == 3 and layers[0].shape[1] != 0:
+            raise _error("a live row count carries no subgoal layers or history steps")
+        live_count = jnp.clip(jnp.asarray(live).reshape(()).astype(jnp.int32), 0, graphs)
+        live_words = jnp.stack([live_count.astype(jnp.uint32), jnp.uint32(0)])
+    operands = (rows, ids, derived_words, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg, *layers, *steps,
+                live_words)
     static = (
         tuple(n for n in _ARRAYS if reg.layout.present(n)),
         reg.layout.relations,
@@ -616,7 +651,7 @@ def encode(
         if caps_graphs < graphs:
             raise _error(f"the batch has {graphs} graphs, more than the capacity {caps_graphs}")
         arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, history_steps, threads)
-        return JaxFlatBatch(arrays, sizes, static)
+        return JaxFlatBatch(arrays, sizes, static, live_count)
     if _traced(*operands):
         raise _error("capacities are required under jax.jit and other transformations (the arrays need static shapes): "
                      "pass capacities=dict(graphs=, entities=, args=, targets=, history=)")

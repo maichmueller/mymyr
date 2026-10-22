@@ -29,7 +29,7 @@
 Numeric tasks use the general device environment path.
 """
 
-from ._env import Env, EnvState, FlatExpansion, Observation, PaddedExpansion, as_words, key_seed
+from ._env import Env, EnvState, FlatExpansion, Observation, PaddedExpansion, SuiteObservation, as_words, key_seed
 from ._ffi import register, registered
 from ._flashbax import transition_example, transition_item, transition_spec
 from ._mctx import goal_count_value, mctx_recurrent_fn, mctx_root
@@ -43,6 +43,7 @@ __all__ = [
     "HerBatch",
     "Observation",
     "PaddedExpansion",
+    "SuiteObservation",
     "as_words",
     "goal_count_value",
     "her_relabel",

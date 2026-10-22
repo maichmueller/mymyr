@@ -13,7 +13,9 @@ rounds per mode.
   - env_step_nN: the device environment step alone, a CUDA graph of 10 steps over N environments, replayed
     (microseconds per step and nanoseconds per environment). env_step_rand_nN is the same graph with a policy that only
     draws the random actions: the baseline of the step plus encoding. env_step_encode_nN adds the device encode of the
-    step's states to that policy.
+    step's states to that policy. env_step_obs_nN is the environment with encoded observations
+    (`BatchedEnv(observation=encoder, obs_capacities=...)`), the steps alone: every step encodes its next observation,
+    so its time over env_step_nN is the encoding added to a step.
   - device_encode_graph / device_encode_rel: `FlatRelationEncoder.encode` on the device rows of the largest environment,
     graph-major and relation-major, with `capacities=` measured from the CPU encoding of those rows. One encode is
     captured into a CUDA graph on a side stream and 10 replays are timed between CUDA events (median over the
@@ -575,6 +577,26 @@ def encode_session(gpu, encoder, states, eager):
 
 
 @contextlib.contextmanager
+def obs_step_session(gpu, task, env, encoder):
+    """The run of a captured step of an environment with encoded observations, at the capacities of the encoding of
+    `env`'s states (with headroom), from the same seed as `env`."""
+    obs_env = graph = None
+    try:
+        caps = padded_capacities(capacities_of(encoder, host_rows(env.states)))
+        del caps["graphs"]
+        obs_env = gpu.rt.BatchedEnv(task, env.num_envs, device=gpu.device, seed=1, observation=encoder,
+                                    obs_capacities=caps)
+        for _ in range(5):
+            obs_env.step(final=False)
+        gpu.sync()
+        graph = obs_env.capture(STEPS)
+        yield lambda: replay_and_sync(gpu, graph)
+    finally:
+        graph = obs_env = None
+        gpu.sync()
+
+
+@contextlib.contextmanager
 def encode_in_step_session(gpu, env, encoder):
     """The run of a captured environment step whose policy encodes the step's states."""
     run = DeviceRun(gpu, encoder, env.states, capture_stream(gpu))
@@ -613,7 +635,7 @@ class Resources:
             self.gpu.empty_cache()
 
 
-ENV_MODES = ("env_step_n{n}", "env_step_rand_n{n}", "env_step_encode_n{n}")
+ENV_MODES = ("env_step_n{n}", "env_step_rand_n{n}", "env_step_encode_n{n}", "env_step_obs_n{n}")
 DEVICE_MODES = (("device_encode_graph", "graph", False), ("device_encode_rel", "relation", False),
                 ("device_encode_graph_eager", "graph", True))
 
@@ -679,6 +701,16 @@ def device_modes(task, gpu, sizes, wants, encoders, resources):
             else:
                 mode.stats = (encoder, lambda e=env: host_rows(e.states))
                 mode.open = lambda e=env, enc=encoder: encode_in_step_session(gpu, e, enc)
+            modes.append(mode)
+        if names[n][3] in selected_env[n]:
+            mode = Mode(names[n][3], "env", unit="us_per_step", units=STEPS, **env_fields)
+            reason = unsupported(env)
+            encoder = encoders["graph"][0]
+            if reason is not None:
+                mode.skipped(reason, unavailable=True)
+            else:
+                mode.stats = (encoder, lambda e=env: host_rows(e.states))
+                mode.open = lambda e=env, enc=encoder: obs_step_session(gpu, task, e, enc)
             modes.append(mode)
         if need_device:
             for name, layout, eager in selected_device:
@@ -934,17 +966,26 @@ def gate_device_scratch(index, task):
 
 
 def gate_device_in_step(index, task):
-    """The largest environment size with an encode-in-step record: the added time per environment of the encode."""
-    sizes = [r["N"] for r in index.modes_of(task, "env_step_encode_n")]
+    """The largest environment size with an encode-in-step record: the added time per environment of the encode. The
+    environment's encoded observations (env_step_obs over env_step) where they were measured, else the encode in the
+    policy (env_step_encode over env_step_rand)."""
+    pairs = [("env_step_obs_n", "env_step_n"), ("env_step_encode_n", "env_step_rand_n")]
+    for with_encode, baseline in pairs:
+        sizes = [r["N"] for r in index.modes_of(task, with_encode)]
+        if sizes and not unavailable(index, task, [f"{baseline}{max(sizes)}", f"{with_encode}{max(sizes)}"]):
+            break
+    else:
+        with_encode, baseline = pairs[-1]
+        sizes = [r["N"] for r in index.modes_of(task, with_encode)]
     if not sizes:
-        return unavailable(index, task, ["env_step_encode_n*"])
+        return unavailable(index, task, [f"{with_encode}*"])
     n = max(sizes)
-    missing = unavailable(index, task, [f"env_step_rand_n{n}", f"env_step_encode_n{n}"])
+    missing = unavailable(index, task, [f"{baseline}{n}", f"{with_encode}{n}"])
     if missing:
         return missing
     if n < 4096:
         return outcome("n/a", f"N = {n}, under 4096")
-    enc, rand = index.rec[(task, f"env_step_encode_n{n}")], index.rec[(task, f"env_step_rand_n{n}")]
+    enc, rand = index.rec[(task, f"{with_encode}{n}")], index.rec[(task, f"{baseline}{n}")]
     added = enc["min_ns_per_env"] - rand["min_ns_per_env"]
     b = enc["bytes_per_state"]
     limit = 1.25 * STANDALONE_DEVICE_IN_STEP_NS[task]["full"] * b / STANDALONE_DEVICE[task]["bytes"]
