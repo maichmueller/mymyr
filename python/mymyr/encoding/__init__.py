@@ -32,7 +32,9 @@ encoder gives the Simple graph next to the relation arrays). ``schema.simple_lab
 
 ``hgraph(batch)`` views a relation-major batch as a heterogeneous graph (HGraphView): a node type per relation and one
 for the entities, an edge type per relation and tuple position, the edges' entity ids a strided view of the batch's
-arguments. The view copies no tuple and keeps the batch alive.
+arguments. The view copies no tuple and keeps the batch alive. Of a relation-major DeviceFlatBatch it is a
+DeviceHGraphView: the same types and arrays as torch tensors on the batch's device, the edge rows strided views of the
+device arguments.
 
 ``action_rows``, ``action_indices`` and ``action_entities`` map the action entities of a batch (the actions a policy
 chooses among) back to the rows of the expansion they were encoded from and to the actions an environment takes.
@@ -61,7 +63,7 @@ from mymyr._core._encoding import (
 )
 from mymyr.encoding._actions import action_entities, action_indices, action_rows
 from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatStream
-from mymyr.encoding._hgraph import hgraph
+from mymyr.encoding._hgraph import DeviceHGraphView, hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
@@ -72,6 +74,7 @@ __all__ = [
     "DeviceCollator",
     "DeviceFlatBatch",
     "DeviceFlatStream",
+    "DeviceHGraphView",
     "EncodingSchema",
     "FlatBatch",
     "FlatHorizonEncoder",

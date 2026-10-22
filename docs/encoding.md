@@ -700,7 +700,14 @@ batch holds.
   their state entities are `_symbol_` nodes.
 - **Refusals**: `ValueError` for a graph-major batch (the strided run needs the relation's tuples to be contiguous across
   the graphs), for `predicate_virtual_nodes` (the node type already is the predicate), for a batch whose static tuples
-  are not in every graph and for a batch that overflowed its capacities; `TypeError` for a device batch.
+  are not in every graph and for a batch that overflowed its capacities; `TypeError` for a `JaxFlatBatch` (a JAX
+  array has no strided views: every slice is a new array).
+- **On the device**: of a relation-major `DeviceFlatBatch`, `hgraph` gives a `DeviceHGraphView` with the same types,
+  methods and arrays as torch tensors on the batch's device, equal to the host view of the same rows. Row 1,
+  `ptr('_symbol_')` and the stored `entity_role` are the batch's own device memory (a strided slice of `relation_args`:
+  no copy, no kernel); row 0, a relation's `ptr` and implicit entity roles are made on request by torch on the current
+  stream. Making the view reads the relations' offsets on the host, so it waits for the device; its methods never wait.
+  `framework='numpy'` copies to the host. Writing into a row writes into the batch.
 
 ```python
 relation_encoder = encoding.FlatRelationEncoder(task, layout="relation", include_actions=False)
