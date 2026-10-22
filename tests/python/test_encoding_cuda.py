@@ -888,7 +888,8 @@ def test_action_target_schemas_without_expansion_rows_are_encoded():
     encoder = encoding.FlatRelationEncoder(task, target_sources=("action",))
     rows = to_device(np.asarray(task.encode(states)), dev)
     batch = encoder.encode(rows)
-    assert batch.sizes["targets"] == 0
+    same_batch(encoder.encode(np.asarray(task.encode(states))), batch)
+    assert len(batch.target_entity) == 0
     encoder.reserve_device(8)
 
 
