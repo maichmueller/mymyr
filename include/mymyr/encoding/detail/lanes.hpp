@@ -2938,20 +2938,40 @@ MYMYR_HD void simple_emit_cell_group(const Group& grp, const SimpleParams& param
     I* const back_target = forward_target + graph.args;
     i32* const back_label = forward_label + graph.args;
     const u64 first_atom = graph.entity_base + graph.tuple_base + graph.entities + graph_tuple;
+    const auto emit = [&](u64 at, u32 slot, I atom)
+    {
+        const I entity = static_cast<I>(static_cast<u64>(args[at]) + shift);
+        forward_source[at] = entity;
+        forward_target[at] = atom;
+        forward_label[at] = static_cast<i32>(slot);
+        back_source[at] = atom;
+        back_target[at] = entity;
+        back_label[at] = back + static_cast<i32>(slot);
+    };
     for (u64 k = grp.lane(); k < n; k += grp.size())
     {
         const I atom = static_cast<I>(first_atom + k);
         out.node_label[first_atom + k] = atom_label;
-        const u64 at = static_cast<u64>(k) * arity;
-        for (u32 slot = 0; slot < arity; ++slot)
+        if (grp.size() == 1)
+            for (u32 slot = 0; slot < arity; ++slot)
+                emit(k * arity + slot, slot, atom);
+    }
+    if (grp.size() == 1)
+        return;
+    // Adjacent lanes write adjacent arguments. Advancing the tuple and slot together avoids a division per argument.
+    const u64 arguments = static_cast<u64>(n) * arity;
+    const u32 tuple_step = grp.size() / arity, slot_step = grp.size() % arity;
+    u64 tuple = grp.lane() / arity;
+    u32 slot = grp.lane() % arity;
+    for (u64 at = grp.lane(); at < arguments; at += grp.size())
+    {
+        emit(at, slot, static_cast<I>(first_atom + tuple));
+        tuple += tuple_step;
+        slot += slot_step;
+        if (slot >= arity)
         {
-            const I entity = static_cast<I>(static_cast<u64>(args[at + slot]) + shift);
-            forward_source[at + slot] = entity;
-            forward_target[at + slot] = atom;
-            forward_label[at + slot] = static_cast<i32>(slot);
-            back_source[at + slot] = atom;
-            back_target[at + slot] = entity;
-            back_label[at + slot] = back + static_cast<i32>(slot);
+            slot -= arity;
+            ++tuple;
         }
     }
 }
