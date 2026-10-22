@@ -228,7 +228,7 @@ def test_numeric_environment_rows_on_the_general_device_path(name, layout, index
     torch = cuda()
     from mymyr.rl import torch as rt
     task = mymyr.Task.from_text(str(ROOT / f"tests/data/numeric_tasks/{name}.txt"))
-    env = rt.BatchedEnv(task, 4, device="cuda", seed=17, max_steps=7)
+    env = rt.BatchedEnv(task, 4, device="cuda", path="general", seed=17, max_steps=7)
     encoder = encoding.FlatRelationEncoder(task, layout=layout, index_dtype=index, numeric_dtype="float64",
                                            goal_derivations=())
     for _ in range(3):
