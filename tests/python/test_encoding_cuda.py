@@ -923,6 +923,11 @@ def test_numeric_relations_and_the_simple_graph_are_refused_by_the_device_before
             call_op(handle, mode.from_tensor(rows), None, None, [None] * 4, caps)
     finally:
         rt.unregister(handle)
+    # the native collator of an empty batch: nothing is read and no kernel is launched
+    from mymyr._core._encoding import DeviceCollator as NativeCollator
+
+    with pytest.raises(ValueError, match=message):
+        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
 
 
 def test_shared_statics_are_refused_by_the_device_before_any_launch():
@@ -952,7 +957,7 @@ def test_shared_statics_are_refused_by_the_device_before_any_launch():
     # the native collator of an empty batch: nothing is read and no kernel is launched
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
-    with pytest.raises(ValueError, match="statics"):
+    with pytest.raises(ValueError, match=message):
         NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
     assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
 

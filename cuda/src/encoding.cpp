@@ -51,6 +51,15 @@ void refuse_capture(cudaStream_t stream)
             "mymyr: encoding: acquire outside a stream capture and hold the acquisition through the last replay");
 }
 
+/// Throws std::invalid_argument for an encoder whose batches the device does not encode: a schema it does not encode
+/// (DeviceEncoder::check_schema) or a table with numeric state words, whose relations the encoder may leave out.
+void check_encodes(const encoding::FlatEncoder& encoder)
+{
+    DeviceEncoder::check_schema(encoder.schema());
+    if (encoder.table().numeric())
+        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
+}
+
 [[noreturn]] void not_an_extension(const std::string& why)
 {
     throw std::invalid_argument("mymyr: encoding: the grown context is not an extension of the uploaded one: " + why);
@@ -461,6 +470,7 @@ std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) cons
 DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const encoding::FlatBuffers& arrays,
                                      const encoding::FlatSizes* sizes, u64 graphs)
 {
+    check_encodes(encoder);
     const auto& schema = encoder.schema();
     DeviceCollationBatch batch;
     batch.arrays = arrays;
@@ -665,9 +675,7 @@ DeviceEncoder::DeviceEncoder(ContextPtr ctx, std::shared_ptr<const encoding::Fla
     if (!m_ctx || !m_encoder)
         throw std::invalid_argument("mymyr: encoding: a device encoder needs a device context and an encoder");
     m_schema = m_encoder->schema_ptr();
-    check_schema(*m_schema);
-    if (m_encoder->table().numeric())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
+    check_encodes(*m_encoder);
     m_context = DeviceEncodingContext::create(m_ctx, m_encoder->context_ptr(), true, nullptr);
     m_bounds = m_context->m_facts->bounds;
 }
@@ -923,9 +931,7 @@ LaunchPlan plan_launch(u32 virtual_nodes, u64 relations, bool relation_major, bo
 
 void DeviceEncoder::check_encoder(const encoding::FlatEncoder& encoder)
 {
-    check_schema(encoder.schema());
-    if (encoder.table().numeric())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
+    check_encodes(encoder);
     if (device_count() == 0)  // the shared memory of the kernels is read from the device
         return;
     const auto facts = context_facts(encoder.context());

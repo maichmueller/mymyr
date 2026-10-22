@@ -1334,8 +1334,58 @@ TEST(DeviceEncoderSchema, TheCollatorRefusesTheBatchesOfSharedStaticsWhenConstru
     }
     catch (const std::invalid_argument& e)
     {
-        EXPECT_NE(std::string(e.what()).find("statics"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode shared statics"),
+                  std::string::npos)
+            << e.what();
     }
+}
+TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncode)
+{
+    // descriptors of empty batches, on the host: no device is needed and nothing is launched
+    const auto table = rl::TaskTable::single(test::pddl_task("blocks", "smedium"));
+    const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
+    const auto numeric_table =
+        rl::TaskTable::single(Task::create(*frontend::load_task(dir + "domain.pddl", dir + "p01.pddl")));
+    struct Refused
+    {
+        const char* what;
+        rl::TaskTablePtr table;
+        encoding::FlatOptions options;
+    };
+    std::vector<Refused> cases;
+    auto add = [&](const char* what, const rl::TaskTablePtr& t, auto&& change)
+    {
+        encoding::FlatOptions o = test::encoder_options();
+        change(o);
+        cases.push_back({what, t, o});
+    };
+    add("numeric relations", numeric_table, [](auto&) {});
+    add("numeric relations (the table has numeric state words)", numeric_table, [](auto& o) { o.include_numeric = false; });
+    add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
+    add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Relations, encoding::Output::Simple}; });
+    add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });
+    add("action targets", table, [](auto& o) { o.targets = {encoding::TargetSource::Action}; });
+    add("horizons", table, [](auto& o) { o.horizon.mode = encoding::HorizonMode::Full; });
+    for (const Refused& c : cases)
+    {
+        const auto encoder = encoding::FlatEncoder::create(c.table, c.options);
+        try
+        {
+            (void)cuda::collation_batch(*encoder, {}, nullptr, 0);
+            ADD_FAILURE() << "the descriptor accepted " << c.what;
+        }
+        catch (const std::invalid_argument& e)
+        {
+            EXPECT_NE(std::string(e.what()).find(std::string("mymyr: encoding: the device does not encode ") + c.what),
+                      std::string::npos)
+                << e.what();
+        }
+    }
+    // what the device encodes is described
+    const auto accepted = encoding::FlatEncoder::create(table, test::encoder_options());
+    const cuda::DeviceCollationBatch batch = cuda::collation_batch(*accepted, {}, nullptr, 0);
+    EXPECT_EQ(batch.schema_fingerprint, accepted->schema().fingerprint());
+    EXPECT_FALSE(batch.shared_statics);
 }
 }
 

@@ -140,7 +140,9 @@ struct GraphBounds
 };
 
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
-/// The collation view of a device batch of `graphs` graphs that `encoder` (or a device encoder over it) wrote.
+/// The collation view of a device batch of `graphs` graphs that `encoder` (or a device encoder over it) wrote. Throws
+/// std::invalid_argument for an encoder whose batches the device does not encode (DeviceEncoder::check_schema, or a
+/// table with numeric state words).
 [[nodiscard]] DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder,
                                                    const encoding::FlatBuffers& arrays,
                                                    const encoding::FlatSizes* sizes, u64 graphs);
@@ -218,12 +220,13 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: action targets and horizons (with the
-    /// goal derivations that only a delta horizon has).
+    /// Throws std::invalid_argument for a schema the device does not encode: action targets, numeric relations,
+    /// horizons (with the goal derivations that only a delta horizon has), the Simple graph and shared statics.
     static void check_schema(const encoding::EncodingSchema& schema);
-    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose
-    /// predicate virtual nodes or relations need more shared memory than a block has for the default launch. Computed
-    /// on the host, without uploading a context (without a CUDA device only the schema is checked).
+    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, a table with
+    /// numeric state words, or a schema whose predicate virtual nodes or relations need more shared memory than a block
+    /// has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared
+    /// memory is not checked).
     static void check_encoder(const encoding::FlatEncoder& encoder);
 
     /// Each stream has its own scratch.
