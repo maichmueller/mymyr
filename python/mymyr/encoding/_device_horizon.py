@@ -128,6 +128,7 @@ def build_horizon(encoder: Any, parents: Any, task_ids: Any = None, actions: Any
     from mymyr.rl.torch._ops import _stream
 
     torch = d._torch()
+    d._drain(torch)
     if as_table(encoder.table).numeric:
         raise d._error("horizon encodings do not encode numeric state rows")
     keep: list = []
