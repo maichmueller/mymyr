@@ -1185,89 +1185,91 @@ PyFlatBatch run_encoding(PyFlatEncoder& self, ImportedRows& rows, Framework fram
     return run_encoding(self, rows, framework, threads, pool_in, capacities, [](ThreadPool&) {});
 }
 
-/// The destination arrays inside the bundle of `batch`, which must have been made for `caps` and `graphs` rows of
-/// `schema` (ValueError otherwise). The bundle is written in place: the batch was handed out as const, but its memory
-/// is the encoder's own block.
-encoding::FlatBuffers reusable_buffers(const encoding::EncodingSchema& schema, const PyFlatBatch& batch,
-                                       const encoding::BatchShape& caps, u64 graphs)
+/// The destination arrays inside the bundle of `batch`, which must have been made by an encoder of `encoder`'s schema
+/// and table for `caps` and `graphs` rows (ValueError otherwise). The bundle is written in place: the batch was handed
+/// out as const, but its memory is the encoder's own block.
+encoding::FlatBuffers reusable_buffers(const encoding::FlatEncoder& encoder, const PyFlatBatch& batch,
+                                       const Capacities& caps, u64 graphs)
 {
+    const encoding::EncodingSchema& schema = encoder.schema();
     auto refuse = [](const std::string& why) { throw nb::value_error(("mymyr: encoding: into " + why).c_str()); };
     if (!batch.sizes)
         refuse("must be a batch encoded with capacities");
     if (batch.schema->fingerprint() != schema.fingerprint() || batch.schema->num_relations() != schema.num_relations())
         refuse("is a batch of another schema");
+    // the task ids of the batch, and with shared statics its static blocks, are of the instances of its table
+    if (batch.arrays->scalar("table_fingerprint") != std::bit_cast<i64>(encoder.table_fingerprint()))
+        refuse("is a batch of another table");
     if (batch.arrays->scalar("num_graphs") != static_cast<i64>(graphs))
         refuse("has " + std::to_string(batch.arrays->scalar("num_graphs")) + " graphs, the call " + std::to_string(graphs));
+    const encoding::BatchShape& shape = caps.batch;
+    const encoding::StaticShape statics = caps.statics.value_or(encoding::StaticShape{});
+    const u64 Rs = schema.shared_statics() ? schema.static_relations().size() : 0;
     encoding::FlatBuffers out;
+    constexpr u64 any = std::numeric_limits<u64>::max();
     auto at = [&](const char* name, u64 elements) -> void*
     {
         const rl::ArrayInfo* info = batch.arrays->find(name);
         if (!info)
             return nullptr;
-        if (elements != std::numeric_limits<u64>::max() && info->elements() != elements)
+        if (elements != any && info->elements() != elements)
             refuse(std::string("has ") + std::to_string(info->elements()) + " entries in '" + name +
                    "', the capacities ask for " + std::to_string(elements));
         return const_cast<void*>(batch.arrays->data(*info));
     };
-    constexpr u64 any = std::numeric_limits<u64>::max();
     out.task_ids = static_cast<i32*>(at("task_ids", any));
     out.num_objects = at("num_objects", any);
     out.entity_offsets = at("entity_offsets", any);
-    out.entity_role = static_cast<u8*>(at("entity_role", caps.entities));
-    out.entity_ref = at("entity_ref", caps.entities);
+    out.entity_role = static_cast<u8*>(at("entity_role", shape.entities));
+    out.entity_ref = at("entity_ref", shape.entities);
     out.relation_counts = at("relation_counts", any);
     out.relation_offsets = at("relation_offsets", any);
     out.relation_arg_offsets = at("relation_arg_offsets", any);
-    out.relation_args = at("relation_args", caps.args);
+    out.relation_args = at("relation_args", shape.args);
     out.goal_complete = static_cast<u8*>(at("goal_complete", any));
     out.target_offsets = at("target_offsets", any);
-    out.target_entity = at("target_entity", caps.targets);
-    out.target_group = static_cast<u8*>(at("target_group", caps.targets));
+    out.target_entity = at("target_entity", shape.targets);
+    out.target_group = static_cast<u8*>(at("target_group", shape.targets));
+    out.static_task_ids = static_cast<i32*>(at("static_task_ids", statics.instances));
+    out.static_offsets = at("static_offsets", statics.instances * Rs + 1);
+    out.static_arg_offsets = at("static_arg_offsets", statics.instances * Rs + 1);
+    out.static_args = at("static_args", statics.args);
+    out.static_relations = at("static_relations", any);
     out.history_offsets = at("history_offsets", any);
-    out.history_entity = at("history_entity", caps.history);
-    out.history_dt = static_cast<i32*>(at("history_dt", caps.history));
+    out.history_entity = at("history_entity", shape.history);
+    out.history_dt = static_cast<i32*>(at("history_dt", shape.history));
+    out.node_offsets = at("node_offsets", any);
+    out.node_label = static_cast<i32*>(at("node_label", shape.entities + shape.args));
+    out.edge_offsets = at("edge_offsets", any);
+    out.edge_index = at("edge_index", 2 * (2 * shape.args));
+    out.edge_stride = 2 * shape.args;
+    out.edge_label = static_cast<i32*>(at("edge_label", 2 * shape.args));
+    out.numeric_values = at("numeric_values", shape.numeric);
+    out.node_value = static_cast<f32*>(at("node_value", shape.entities + shape.args));
     return out;
 }
 
-/// Encodes the imported rows into the arrays of `batch` (a batch of the same schema, rows and capacities), as
+/// Encodes the imported rows into the arrays of `batch` (a batch of the same schema, table, rows and capacities), as
 /// encode_capacity does into a new one: the entries past the sizes are zero, and a batch that does not fit is all zero.
-void encode_into_batch(PyFlatEncoder& self, ImportedRows& rows, u32 threads, PoolArg pool_in,
-                       const encoding::BatchShape& caps, PyFlatBatch& batch)
+void encode_into_batch(PyFlatEncoder& self, ImportedRows& rows, u32 threads, PoolArg pool_in, const Capacities& caps,
+                       PyFlatBatch& batch)
 {
-    const encoding::EncodingSchema& schema = self.encoder->schema();
-    const encoding::FlatBuffers out = reusable_buffers(schema, batch, caps, rows.input.states.rows);
+    const encoding::FlatEncoder& encoder = *self.encoder;
+    const encoding::FlatBuffers out = reusable_buffers(encoder, batch, caps, rows.input.states.rows);
+    const encoding::StaticShape* static_caps = caps.statics ? &*caps.statics : nullptr;
     encoding::EncodeScratch& scratch = encoding::EncodeScratch::of_this_thread();
     encoding::FlatSizes sizes;
+    encoding::ExtraSizes extra;
     run_on_pool(self, threads, pool_in,
-                [&](ThreadPool& pool) { sizes = self.encoder->encode_into(rows.input, caps, out, pool, scratch); });
-    const usize width = schema.options().index == encoding::IndexType::I64 ? 8 : 4;
-    auto zero = [](void* data, u64 from, u64 to, usize bytes)
-    { std::memset(static_cast<std::byte*>(data) + from * bytes, 0, (to - from) * bytes); };
+                [&](ThreadPool& pool)
+                { sizes = encoder.encode_into(rows.input, caps.batch, out, pool, scratch, static_caps, &extra); });
     if (sizes.overflowed())
-    {
         for (const rl::ArrayInfo& info : batch.arrays->arrays())
             std::memset(const_cast<void*>(batch.arrays->data(info)), 0, info.elements() * rl::dtype_bytes(info.dtype));
-    }
     else
-    {
-        zero(out.relation_args, sizes.args, caps.args, width);
-        if (out.entity_role)
-        {
-            zero(out.entity_role, sizes.entities, caps.entities, 1);
-            zero(out.entity_ref, sizes.entities, caps.entities, width);
-        }
-        if (out.target_entity)
-        {
-            zero(out.target_entity, sizes.targets, caps.targets, width);
-            zero(out.target_group, sizes.targets, caps.targets, 1);
-        }
-        if (out.history_entity)
-        {
-            zero(out.history_entity, sizes.history, caps.history, width);
-            zero(out.history_dt, sizes.history, caps.history, 4);
-        }
-    }
+        encoder.clear_capacity_tails(out, sizes, extra, caps.batch, caps.statics.value_or(encoding::StaticShape{}));
     batch.sizes = sizes;
+    batch.extra = extra;
 }
 
 /// A NumPy array, which is never on the device: the check that keeps host encodes at their cost.
@@ -1334,7 +1336,7 @@ Arg<ann::EncodingBatch> encode(PyFlatEncoder& self, StatesLike state_arg, TaskId
             throw nb::type_error("mymyr: encoding: into must be a FlatBatch");
         if (!capacities)
             throw nb::value_error("mymyr: encoding: into needs capacities");
-        encode_into_batch(self, rows, threads, pool_in, capacities->batch, nb::cast<PyFlatBatch&>(into));
+        encode_into_batch(self, rows, threads, pool_in, *capacities, nb::cast<PyFlatBatch&>(into));
         return Arg<ann::EncodingBatch>(into);
     }
     return Arg<ann::EncodingBatch>(
@@ -2619,8 +2621,9 @@ void bind_encoding(nb::module_& parent)
              "2 * sizes['args'] edges holding the graph. A batch that does not fit its "
              "capacities (or the index type) is all zero and has sizes['overflow'] "
              "set; nothing raises. into: a FlatBatch that an earlier call with the same capacities made for the same "
-             "number of rows of this schema; the encoding then overwrites its arrays in place and the call returns it, "
-             "with `sizes` updated (it needs capacities; ValueError if the batch does not fit the call). Every array "
+             "number of rows of this schema and table; the encoding then overwrites its arrays in place (all of them, the "
+             "static blocks of the call's instances included) and the call returns it, with `sizes` updated (it needs "
+             "capacities; ValueError if the batch does not fit the call). Every array "
              "or tensor exported from that batch changes with it and nothing waits for readers, so use it only once the "
              "batch's previous contents are no longer read. Rows (and task_ids, derived, goals, subgoals, history) in "
              "CUDA memory are encoded on the device into torch tensors: a DeviceFlatBatch is returned, actions and "

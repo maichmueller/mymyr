@@ -7,10 +7,11 @@ import pytest
 
 import mymyr
 from mymyr import encoding, rl
-from conftest import text_task, walk
+from conftest import BLOCKS, ROOT, text_task, walk
 from test_rl_table import sets  # noqa: F401  (a fixture: the table instances of several domains)
 
 OPTIONS = dict(target_sources=("action",), include_actions=True)
+NUMERIC = ROOT / "tests/data/numeric_tasks"
 SCALARS = {"version", "num_graphs", "num_relations", "layout", "index_dtype", "schema_fingerprint", "table_fingerprint",
            "statics", "numeric_dtype", "numeric_relations", "simple_node_labels", "simple_edge_labels"}
 
@@ -326,3 +327,102 @@ def test_encoding_into_a_batch_checks_that_it_fits_the_call():
         encoder.encode(states, actions=expansion, capacities=caps, into=object())
     # the batch is untouched by the refused calls
     arrays_equal(batch, encoder.encode(states, actions=expansion, capacities=caps))
+
+
+def blocks_rows():
+    """A table of two blocks instances and rows of each (padded to the table's width), with their task ids."""
+    if not hasattr(mymyr, "Domain"):
+        pytest.skip("built without the loki front end")
+    tasks = [mymyr.Task.from_pddl(BLOCKS / "domain.pddl", BLOCKS / f"{p}.pddl") for p in ("probBLOCKS-8-0", "smedium")]
+    encoded = [np.asarray(t.encode(walk(t, steps=6, walks=1, seed=5 + i))) for i, t in enumerate(tasks)]
+    width = max(e.shape[1] for e in encoded)
+    rows = [np.pad(e, ((0, 0), (0, width - e.shape[1])))[:4] for e in encoded]
+    return rl.TaskTable(tasks), rows
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_reuse_with_shared_statics_follows_the_instances_of_each_call(layout, index):
+    table, (first, second) = blocks_rows()
+    encoder = encoding.FlatRelationEncoder(
+        table, statics="shared", layout=layout, index_dtype=index, predicate_virtual_nodes=True,
+        target_sources=("goal",),
+    )
+    zeros, ones = np.zeros(4, np.int32), np.ones(4, np.int32)
+    caps = dict(graphs=4, entities=400, args=4000, targets=200, static_instances=2, static_args=4000)
+    calls = [  # one instance, the other, both interleaved, the first again
+        (first, zeros),
+        (second, ones),
+        (np.stack([first[0], second[1], first[2], second[3]]), np.array([0, 1, 0, 1], np.int32)),
+        (first[::-1].copy(), zeros),
+    ]
+    reused = encoder.encode(*calls[0], capacities=caps)
+    exported = reused.static_task_ids
+    for rows, ids in calls[1:] + calls[:1]:
+        fresh = encoder.encode(rows, ids, capacities=caps)
+        assert encoder.encode(rows, ids, capacities=caps, into=reused) is reused
+        arrays_equal(reused, fresh)
+        assert reused.sizes == fresh.sizes and not reused.sizes["overflow"]
+        assert reused.sizes["static_instances"] == len(set(ids.tolist()))
+        assert np.array_equal(exported, fresh.static_task_ids)  # the export follows the batch's memory
+
+
+def test_reuse_with_shared_statics_zeroes_on_overflow_and_recovers():
+    table, (first, second) = blocks_rows()
+    encoder = encoding.FlatRelationEncoder(table, statics="shared", target_sources=("goal",))
+    mixed, mixed_ids = np.stack([first[0], second[0], first[1], second[1]]), np.array([0, 1, 0, 1], np.int32)
+    zeros = np.zeros(4, np.int32)
+    caps = dict(graphs=4, entities=400, args=4000, targets=200, static_instances=1, static_args=4000)
+
+    def zero(batch):
+        return all(not np.any(v) for k, v in batch.as_dict().items() if k not in SCALARS)
+
+    reused = encoder.encode(first, zeros, capacities=caps)
+    encoder.encode(mixed, mixed_ids, capacities=caps, into=reused)  # two blocks, room for one
+    assert reused.sizes["capacity_overflow"] and reused.sizes["static_instances"] == 2 and zero(reused)
+    encoder.encode(first, zeros, capacities=caps, into=reused)
+    arrays_equal(reused, encoder.encode(first, zeros, capacities=caps))
+    assert not reused.sizes["overflow"]
+
+
+@pytest.mark.parametrize("outputs", [("relations", "simple"), ("simple",)])
+def test_reuse_writes_the_simple_graph_too(outputs):
+    task = text_task("gripper__prob05")
+    encoder = encoding.FlatRelationEncoder(task, outputs=outputs, **OPTIONS)
+    by_size = sorted(walk(task, steps=25, walks=3), key=lambda s: len(task.successor_states(s)))
+    big, small = [by_size[-1]] * 2, [by_size[0]] * 2
+    caps = dict(graphs=2, entities=300, args=3000, targets=150)
+    reused = encoder.encode(big, actions=rl.expand(task, big), capacities=caps)
+    encoder.encode(small, actions=rl.expand(task, small), capacities=caps, into=reused)
+    fresh = encoder.encode(small, actions=rl.expand(task, small), capacities=caps)
+    assert "edge_index" in fresh.as_dict()
+    arrays_equal(reused, fresh)
+    assert reused.sizes == fresh.sizes
+
+
+def test_reuse_writes_numeric_values_too():
+    task = mymyr.Task.from_text(str(NUMERIC / "cs-drone.txt"))
+    for dtype in ("float32", "float64"):
+        encoder = encoding.FlatRelationEncoder(task, numeric_dtype=dtype, outputs=("relations", "simple"),
+                                               goal_derivations=())
+        by_size = sorted(walk(task, steps=12, walks=2), key=lambda s: len(task.successor_states(s)))
+        big, small = [by_size[-1]] * 3, [by_size[0]] * 2 + [by_size[1]]
+        caps = dict(graphs=3, entities=400, args=4000, numeric=400)
+        reused = encoder.encode(big, capacities=caps)
+        encoder.encode(small, capacities=caps, into=reused)
+        fresh = encoder.encode(small, capacities=caps)
+        assert len(fresh.numeric_values) == 400 and fresh.sizes["numeric"] > 0
+        arrays_equal(reused, fresh)
+        assert reused.sizes == fresh.sizes
+
+
+def test_reuse_refuses_a_batch_of_another_table():
+    task = text_task("gripper__prob05")
+    one, two = rl.TaskTable([task]), rl.TaskTable([task, text_task("gripper__prob05")])
+    states, ids = [task.initial_state] * 2, np.zeros(2, np.int32)
+    caps = dict(graphs=2, entities=300, args=3000)
+    batch = encoding.FlatRelationEncoder(two, include_actions=False).encode(states, ids, capacities=caps)
+    encoder = encoding.FlatRelationEncoder(one, include_actions=False)
+    assert encoder.schema.schema_fingerprint == batch.schema.schema_fingerprint
+    with pytest.raises(ValueError, match="another table"):
+        encoder.encode(states, ids, capacities=caps, into=batch)

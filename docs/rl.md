@@ -223,8 +223,10 @@ print(total_reward)
 
 `encode(..., capacities=...)` gives every array the same size from call to call, which `jax.jit` and a fixed-shape
 model need. A call takes new memory for its batch by default. Passing an earlier batch of the same capacities
-as `into=` (the same schema, the same number of rows) writes the encoding into that batch's arrays instead, and returns
-the batch:
+as `into=` (the same schema and table, the same number of rows) writes the encoding into that batch's arrays instead,
+and returns the batch. Every array of the batch is rewritten as a fresh encode would make it: the Simple graph, the
+numeric values and, with `statics="shared"`, the static blocks of the call's instances, which change with the instance
+set of each call:
 
 ```python
 capacities = dict(graphs=4, entities=600, args=6000, targets=300)
@@ -243,8 +245,8 @@ Reuse is opt-in because it aliases: every array and every tensor exported from t
 `as_dict("torch")`, `as_dict("jax")`) shares the memory that the call overwrites, and nothing waits for readers or
 copies on write. Use it when the previous contents are no longer read (a model that has consumed the tensors, a rollout
 step that is finished), and copy what must survive. The call raises `ValueError` before writing if the batch does not
-fit (another schema, another number of rows, other capacities, or a batch encoded without capacities). A batch that
-does not fit its capacities becomes all zero, as it does without `into=`, and `batch.sizes` says so.
+fit (another schema or table, another number of rows, other capacities, or a batch encoded without capacities). A
+batch that does not fit its capacities becomes all zero, as it does without `into=`, and `batch.sizes` says so.
 
 ### Tensors and arrays
 
