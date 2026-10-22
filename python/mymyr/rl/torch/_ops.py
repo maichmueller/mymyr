@@ -39,7 +39,7 @@ the states again; required on a device).
   subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt,
   history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)``: the encoding of
   device rows by a ``FlatRelationEncoder`` (``register`` handle) with the capacities ``graphs``, ``entities``, ``args``,
-  ``targets`` and ``history`` (0 without target sources or history): a list of 17 tensors, the arrays of a batch in the
+  ``targets`` and ``history`` (0 without target sources or history): a list of 22 tensors, the arrays of a batch in the
   order of ``DeviceFlatBatch.array_names`` (an array the schema does not store is an empty tensor) and ``sizes`` int64
   [6]. It waits for nothing and allocates only its outputs, on torch's current stream, so it captures in a CUDA graph
   (after ``encoder.reserve_device`` on the capture stream) and traces under ``torch.compile``.

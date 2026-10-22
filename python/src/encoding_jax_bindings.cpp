@@ -20,7 +20,7 @@
 //   attributes  args, entities, targets, history: the capacities of relation_args, of the entity arrays, of the
 //               target arrays and of the history step arrays; handle: the registry handle; threads: the CPU target's
 //               worker threads (0: one per hardware thread; the CUDA target ignores it)
-//   results     the 16 arrays of a batch in the order of mymyr.encoding.DeviceFlatBatch.array_names (an array the
+//   results     the 16 arrays of a batch in the order of mymyr.encoding.jax._ARRAYS (an array the
 //               schema does not store is [0]): the per-graph and per-cell arrays sized by N, the variable-size ones by
 //               the capacities; then sizes uint32 [S, 2] (the S 64-bit words of encoding::FlatSizes as uint32 halves,
 //               low half first, in the field order of the struct, the overflow flags among them); then, required on

@@ -395,7 +395,7 @@ public:
             const encoding::FlatSizes sizes = *static_cast<const encoding::FlatSizes*>(slot->staging.data(0));
             outputs = allocate(sizes.entities, sizes.tuples, sizes.args, sizes.targets, sizes.history, sizes.overflow);
             if (outputs.size() != k_output_fields + 1)
-                refuse("expected the output graph extent and seventeen pointers");
+                refuse("expected the output graph extent and " + std::to_string(k_output_fields) + " output fields");
             const encoding::BatchShape caps{outputs.front(), sizes.entities, sizes.args, sizes.targets, sizes.history};
             outputs.erase(outputs.begin());
             cuda::DeviceOutput out = output_of(outputs, caps);
@@ -560,7 +560,7 @@ void bind_encoding_device(nb::module_& parent)
              "pointers, with the capacities (graphs, entities, args, targets, history), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, "
-             "flags) to check the flags and return the graph extent and seventeen pointers, then fills them on "
+             "flags) to check the flags and return the graph extent and output fields, then fills them on "
              "`stream`.");
 
     nb::class_<DeviceCollatorHandle>(module, "DeviceCollator", "An uploaded list of device batch views.")

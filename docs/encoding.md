@@ -987,7 +987,7 @@ subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos,
 history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)` is the capacity form as a torch
 custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch` registers it). `encoder` is the handle
 `mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that is absent) and the five
-ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It returns the list of 17
+ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It returns the list of 22
 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema does not store is an empty tensor, and
 `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch. The op waits for nothing, allocates only
 its outputs and scratch and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
