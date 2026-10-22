@@ -265,3 +265,21 @@ def test_undefined_nullary_and_ground_functions_on_device(layout, index, dtype):
     expected = encoder.encode(rows)
     assert np.isnan(expected.numeric_values).sum() == 2
     equal(expected, encoder.encode(tensor(torch, rows)))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_packed_int32_values_round_identically_on_device(numeric_cases, layout, index, dtype):
+    torch = cuda()
+    if "counters_i32" not in numeric_cases:
+        pytest.skip("PDDL front end required")
+    table = numeric_cases["counters_i32"].table
+    ids = np.array([1, 0, 1], np.int32)
+    rows = np.array(table.initial_states(ids), copy=True)
+    values = np.resize(np.array([16777217, -16777217, 2147483647, -2147483648], np.int32),
+                       (len(rows), 2 * table.numeric_words))
+    rows[:, table.words:] = values.view(np.uint64)
+    encoder = encoding.FlatRelationEncoder(table, layout=layout, index_dtype=index, numeric_dtype=dtype,
+                                           goal_derivations=())
+    equal(encoder.encode(rows, ids), encoder.encode(tensor(torch, rows), tensor(torch, ids)))

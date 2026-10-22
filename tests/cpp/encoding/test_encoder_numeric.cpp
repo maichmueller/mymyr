@@ -884,6 +884,7 @@ TEST(EncoderNumeric, TheLaneGroupFormsWriteTheSameValues)
                     const i32* arguments;
                     u32 count(u64 s) const { return static_cast<u32>(offsets[s + 1] - offsets[s]); }
                     u64 args(u64 s, u32) const { return static_cast<u64>(arguments[s]); }
+                    u64 numeric_before(u64 s, u64 block) const { return static_cast<u64>(offsets[s]) - block; }
                 } positions{offsets, arg_offsets};
                 const auto plain_out = out_of(plain, numeric_total);
                 const auto grouped_out = out_of(grouped, numeric_total);
