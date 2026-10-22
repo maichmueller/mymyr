@@ -2514,6 +2514,54 @@ TEST(DeviceEncode, TheCallRefusesLayersAndHistoryThatDoNotMatchTheSchema)
     cuda::check(cudaStreamSynchronize(stream), "wait");
 }
 
+TEST(DeviceEncode, TheCountsOfAnEmptyHistoryAreCheckedAsTheHostChecksThem)
+{
+    // H = 0: no count, zero counts and a count past the zero steps, with and without a history schema
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    const Corpus c = corpus()[0];
+    const u64 n = 8;
+    const Batch batch = make_batch(c.table, n, true, 137);
+    const DeviceRows rows(ctx, stream, batch);
+    for (const bool history : {false, true})
+    {
+        SCOPED_TRACE(history ? "history schema" : "no history schema");
+        auto options = test::encoder_options();
+        options.history = history;
+        const auto encoder = encoding::FlatEncoder::create(c.table, options);
+        cuda::DeviceEncoder device(ctx, encoder);
+        device.reserve(cuda::BatchShape{n, 0, 0, 0, 0}, stream);
+        for (const int counts : {-1, 0, 1})
+        {
+            SCOPED_TRACE(counts < 0 ? "no counts" : counts == 0 ? "zero counts" : "a count past the steps");
+            std::vector<i32> count(n, 0);
+            count[3] = counts > 0 ? 1 : 0;
+            cuda::DeviceBuffer device_count(ctx, n * sizeof(i32), stream);
+            cuda::check(cudaMemcpyAsync(device_count.data(), count.data(), n * sizeof(i32), cudaMemcpyHostToDevice, stream),
+                        "upload the counts");
+            auto host_in = host_input(batch, n, Inputs{});
+            auto in = rows.input(batch, n, Inputs{});
+            if (counts >= 0)
+            {
+                host_in.history.count = count.data();
+                in.history.count = static_cast<const i32*>(device_count.data());
+            }
+            if (counts > 0)
+            {
+                EXPECT_THROW((void)encoder->encode(host_in), std::invalid_argument);
+                const DeviceResult result = run_device(device, ctx, stream, in, {n, 64, 64, 0, 0});
+                EXPECT_NE(result.sizes.overflow & encoding::k_overflow_input, 0u);
+                continue;
+            }
+            const Reference host = host_reference(*encoder, host_in);
+            const DeviceResult result = run_device(device, ctx, stream, in, shape_of(n, host.sizes));
+            expect_sizes(host.sizes, result.sizes);
+            expect_same_arrays(*host.bundle, result);
+        }
+    }
+}
+
 /// The scratch of a layered batch holds the levels of every graph; scratch_bytes sizes exactly that and a call with a
 /// scratch of that size equals the host.
 TEST(DeviceEncode, TheScratchOfLayeredSchemasHoldsTheLevels)

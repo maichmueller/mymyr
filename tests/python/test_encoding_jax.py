@@ -774,6 +774,36 @@ def test_history_integers_that_int32_cannot_hold_raise_or_flag_their_row(cases, 
             same_batch(host, jax.jit(f)(put(rows, platform), on(with_fits, platform)))
 
 
+@pytest.mark.parametrize("history", [False, True])
+def test_an_empty_history_with_counts_equals_the_host_on_every_platform(cases, history):
+    # H = 0: no count, zero counts and a count past the zero steps
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, history=history)
+    n, words = case.rows.shape
+    masks = np.zeros((n, 0, words), np.uint64)
+    dt = np.zeros((n, 0), np.int32)
+    past = np.zeros(n, np.int32)
+    past[3] = 1
+    caps = exact_capacities(host_encode(encoder, case))
+    if history:
+        caps["history"] = 64
+    for count in (None, np.zeros(n, np.int32)):
+        steps = (masks, masks, dt, count)
+        host = host_encode(encoder, case, history=steps)
+        for platform in PLATFORMS:
+            same_batch(host, jax_encode(encoder, case, platform, jit=False, history=steps))
+            same_batch(host_encode(encoder, case, history=steps, capacities=caps),
+                       jax_encode(encoder, case, platform, capacities=caps, history=steps))
+    steps = (masks, masks, dt, past)
+    with pytest.raises(ValueError, match=r"^mymyr: encoding: the history count of row 3 is 1, outside \[0, 0\]"):
+        host_encode(encoder, case, history=steps)
+    for platform in PLATFORMS:
+        sizes = jax_encode(encoder, case, platform, capacities=caps, history=steps).sizes
+        assert sizes["overflow"] and sizes["invalid_input"] and not sizes["capacity_overflow"]
+        with pytest.raises(ValueError, match=r"^mymyr: encoding: a row is invalid"):
+            jax_encode(encoder, case, platform, jit=False, history=steps)
+
+
 # ------------------------------------------------------------------------------------------------ errors and flags
 
 

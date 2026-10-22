@@ -1017,9 +1017,11 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
                     std::to_string(opts.max_goal_level) + " levels");
         check_layers(sub, "subgoal layers", true);
     }
+    // a count without steps (H = 0) is checked against zero steps whether or not the schema has history, as the host
+    // encoder does
     if (hist.masks.layers != 0 || hist.count)
     {
-        if (!schema.has_history())
+        if (hist.masks.layers != 0 && !schema.has_history())
             invalid("history steps are given, but the schema has no history relations");
         if (hist.masks.layers != 0 && graphs != 0 && !hist.dt)
             invalid("the history steps need their dt");
