@@ -67,10 +67,27 @@ def test_shared_stream_collation_and_block_agreement(cases, layout, index):
     stream.append(rows[:3], ids[:3])
     stream.append(rows[3:], ids[3:])
     same_batch(host, stream.flush(capacities=caps))
+    short = {**caps, "static_instances": caps["static_instances"] - 1}
+    stream.append(rows, ids)
+    assert stream.flush(capacities=short).sizes["capacity_overflow"]
     pieces = [encoder.encode(rows[:3], ids[:3]), encoder.encode(rows[3:], ids[3:])]
     same_batch(host, encoding.collate(pieces))
     collator = encoding.DeviceCollator(pieces)
     same_batch(host, collator.encode(capacities=caps))
+    overflow = collator.encode(capacities=short)
+    assert overflow.sizes["capacity_overflow"]
+    assert all(not value.any() for value in overflow.as_dict("numpy").values() if isinstance(value, np.ndarray))
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(capture_stream):
+        captured_collator = encoding.DeviceCollator(pieces)
+        captured_collator.encode(capacities=caps)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=capture_stream):
+            captured = captured_collator.encode(capacities=caps)
+        graph.replay()
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    same_batch(host, captured)
     # Alter a valid local object id while retaining the static block's shape.
     changed = encoder.encode(rows[3:], ids[3:])
     common = set(pieces[0].static_task_ids.tolist()) & set(changed.static_task_ids.tolist())
