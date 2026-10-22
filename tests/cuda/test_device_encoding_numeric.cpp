@@ -76,6 +76,7 @@ TEST(DeviceEncodingNumeric, AllArraysMatchHostForBothStoragesLayoutsAndWidths)
                     const auto expected = host->encode(host_input);
                     cuda::DeviceEncoder encoder(context, host);
                     const auto shape = encoder.worst_case(rows.size());
+                    encoder.reserve(shape, stream);
                     const auto offsets = encoder.output_layout(shape);
                     cuda::DeviceBuffer block(context, offsets.bytes, stream);
                     auto output = cuda::output_of(offsets, shape, block.data());
