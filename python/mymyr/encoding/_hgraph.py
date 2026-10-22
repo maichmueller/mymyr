@@ -6,11 +6,12 @@ import sys
 from typing import Any, Optional, overload
 
 from mymyr._core._encoding import FlatBatch, HGraphView
-from mymyr.encoding._device import DeviceFlatBatch
+from mymyr.encoding._device import _SIZE_FIELDS, DeviceFlatBatch
 
 __all__ = ["DeviceHGraphView", "hgraph"]
 
 SYMBOL = "_symbol_"
+_OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
 
 def _error(message: str) -> ValueError:
@@ -64,8 +65,8 @@ class DeviceHGraphView:
         at = torch.arange(relations + 1, device=batch.device) * graphs
         parts = [arrays["relation_offsets"][at], arrays["relation_arg_offsets"][at], arrays["entity_offsets"][graphs],
                  graphs]
-        if sizes is not None:
-            parts.append(sizes)
+        if sizes is not None:  # the overflow flags, read by their position in the sizes
+            parts.append(sizes[_OVERFLOW_WORD : _OVERFLOW_WORD + 1])
         marks = torch.cat([p.to(torch.int64) for p in parts]).tolist()
         if sizes is not None and marks[-1]:
             raise _error("the batch overflowed its capacities, so it holds no encoding to view")
