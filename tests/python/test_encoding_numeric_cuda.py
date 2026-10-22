@@ -93,14 +93,15 @@ def test_device_numeric_matches_host(numeric_cases, name, layout, index, dtype):
     equal(encoder.encode(rows[:0], ids[:0]), encoder.encode(device_rows[:0], device_ids[:0]))
 
 
+@pytest.mark.parametrize("name", ["mixed", "counters_i32"])
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
-def test_numeric_stream_collation_and_capture(numeric_cases, layout, index, dtype):
+def test_numeric_stream_collation_and_capture(numeric_cases, name, layout, index, dtype):
     torch = cuda()
-    if "mixed" not in numeric_cases:
+    if name not in numeric_cases:
         pytest.skip("PDDL front end required")
-    case = numeric_cases["mixed"]
+    case = numeric_cases[name]
     rows, ids = rows_of(case), case.ids
     encoder = encoding.FlatRelationEncoder(case.table, layout=layout, index_dtype=index, numeric_dtype=dtype,
                                            goal_derivations=())
