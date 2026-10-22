@@ -15,6 +15,8 @@ struct OutputArrays
     bool goal_complete = false;
     bool targets = false;
     bool history = false;  // history_offsets, history_entity and history_dt
+    bool numeric = false;
+    encoding::NumericDtype numeric_dtype = encoding::NumericDtype::F32;
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 /// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities
@@ -30,6 +32,8 @@ struct DeviceOutput
     /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). The per-graph
     /// and per-cell arrays past the live graphs of such an input are zero up to the graph capacity.
     u64* graphs = nullptr;
+    /// Optional device scalar receiving the number of numeric values, including on count-only calls.
+    u64* numeric_size = nullptr;
 };
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
 struct DeviceEncodeInput
@@ -68,6 +72,8 @@ struct DeviceEncodeInput
     /// Optional device flag: nonzero says rows were dropped before this encode (an append to a full ring), and the batch
     /// reports k_overflow_capacity.
     const u64* dropped = nullptr;
+    /// Numeric words following the atom words in each state row, at the table-wide atom width.
+    u32 numeric_words = 0;
 };
 
 /// One valid batch to concatenate (cuda::collation_batch fills it from its encoder). Pointers name arrays in device
@@ -86,6 +92,7 @@ struct DeviceCollationBatch
     OutputArrays stored;
     u32 max_goal_level = 0;
     bool history = false;
+    u32 numeric_relations = 0;
 };
 
 }

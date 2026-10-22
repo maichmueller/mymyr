@@ -52,12 +52,10 @@ void refuse_capture(cudaStream_t stream)
 }
 
 /// Throws std::invalid_argument for an encoder whose batches the device does not encode: a schema it does not encode
-/// (DeviceEncoder::check_schema) or a table with numeric state words, whose relations the encoder may leave out.
+/// (DeviceEncoder::check_schema).
 void check_encodes(const encoding::FlatEncoder& encoder)
 {
     DeviceEncoder::check_schema(encoder.schema());
-    if (encoder.table().numeric())
-        throw std::invalid_argument("mymyr: encoding: the device does not encode numeric relations (the table has numeric state words)");
 }
 
 [[noreturn]] void not_an_extension(const std::string& why)
@@ -99,12 +97,15 @@ std::shared_ptr<detail::EncodingFacts> context_facts(const encoding::EncodingCon
     const bool history = schema.has_history();
     bounds.levels = levels ? schema.options().max_goal_level : 0;
     bounds.history = history;
+    bounds.numeric_words = host.table().numeric_words();
     const u32 instances = host.table().size();
     std::vector<u32> modes(instances, 0);
     for (u32 i = 0; i < instances; ++i)
     {
         const ed::InstanceView inst = ed::instance_view(v, i);
         facts.widths.push_back(ed::graph_width(inst));
+        if (schema.stores_numeric_values())
+            bounds.numeric = std::max<u64>(bounds.numeric, ed::numeric_slot_count(inst));
         bounds.words = std::max<u64>(bounds.words, std::max(inst.words, inst.derived_words));
         bounds.state_words = std::max<u64>(bounds.state_words, inst.words);
         bounds.derived_words = std::max<u64>(bounds.derived_words, inst.derived_words);
@@ -286,7 +287,7 @@ BatchShape worst_shape(u64 graphs, const GraphBounds& bounds, u64 steps)
             mul(graphs, add(bounds.entities, mul(steps, bounds.step_entities))),
             mul(graphs, add(bounds.args, mul(steps, bounds.step_args))),
             mul(graphs, add(bounds.targets, mul(steps, bounds.step_targets))),
-            mul(graphs, steps)};
+            mul(graphs, steps), mul(graphs, bounds.numeric)};
 }
 }  // namespace
 
@@ -485,6 +486,7 @@ DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const
     batch.stored = output_arrays(schema);
     batch.max_goal_level = schema.options().max_goal_level;
     batch.history = schema.options().history;
+    batch.numeric_relations = schema.has_numeric() ? schema.num_relations() - schema.first_numeric_relation() : 0;
     return batch;
 }
 
@@ -496,6 +498,8 @@ OutputArrays output_arrays(const encoding::EncodingSchema& schema)
     arrays.goal_complete = schema.has_goal_complete();
     arrays.targets = schema.has_targets();
     arrays.history = schema.has_history();
+    arrays.numeric = schema.stores_numeric_values();
+    arrays.numeric_dtype = arrays.numeric ? schema.options().numeric_dtype : encoding::NumericDtype::F32;
     return arrays;
 }
 
@@ -528,6 +532,9 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.history_offsets, arrays.history ? mul(I, add(G, 1)) : 0);
     place(out.history_entity, arrays.history ? mul(I, S) : 0);
     place(out.history_dt, arrays.history ? mul(4, S) : 0);
+    place(out.numeric_values, arrays.numeric
+        ? mul(shape.numeric, arrays.numeric_dtype == encoding::NumericDtype::F64 ? 8 : 4) : 0);
+    place(out.numeric_size, arrays.numeric ? sizeof(u64) : 0);
     place(out.sizes, sizeof(encoding::FlatSizes));
     out.bytes = at;
     return out;
@@ -555,6 +562,8 @@ DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void
     b.history_offsets = at(layout.history_offsets, a.history);
     b.history_entity = at(layout.history_entity, a.history);
     b.history_dt = static_cast<i32*>(at(layout.history_dt, a.history));
+    b.numeric_values = at(layout.numeric_values, a.numeric);
+    out.numeric_size = static_cast<u64*>(at(layout.numeric_size, a.numeric));
     out.capacities = shape;
     out.sizes = static_cast<encoding::FlatSizes*>(at(layout.sizes, true));
     return out;
@@ -570,8 +579,16 @@ u64 ScratchLayout::history_at(u64 graphs) const
         return mul(4, add(graphs, 1));
     return add(add(mul(2, add(graphs, 1)), mul(graphs, relations)), 1);
 }
+u64 ScratchLayout::numeric_at(u64 graphs) const
+{
+    if (!numeric) return 0;
+    return history ? add(history_at(graphs), add(graphs, 1))
+                   : (relation_major ? add(add(mul(2, add(graphs, 1)), mul(graphs, relations)), 1)
+                                     : mul(4, add(graphs, 1)));
+}
 u64 ScratchLayout::scanned(u64 graphs) const
 {
+    if (numeric) return add(numeric_at(graphs), add(graphs, 1));
     return history ? add(history_at(graphs), add(graphs, 1))
                    : (relation_major ? add(add(mul(2, add(graphs, 1)), mul(graphs, relations)), 1)
                                      : mul(4, add(graphs, 1)));
@@ -582,11 +599,13 @@ ScratchLayout scratch_layout(const BatchShape& shape, const GraphBounds& bounds,
     out.relation_major = layout == encoding::Layout::Relation;
     out.relations = relations;
     out.history = bounds.history;
+    out.numeric = bounds.numeric != 0;
     const u64 G = shape.graphs;
     // the largest value of the scan: the sum of the totals of every row (the argument row only graph-major)
     u64 scanned = add(add(mul(G, bounds.entities), mul(G, bounds.targets)), mul(G, bounds.tuples));
     if (!out.relation_major)
         scanned = add(scanned, mul(G, bounds.args));
+    scanned = add(scanned, mul(G, bounds.numeric));
     // the steps of a history are not bounded by the schema
     out.wide = bounds.history || scanned > std::numeric_limits<u32>::max();
     out.scan_length = out.scanned(G);
@@ -662,7 +681,6 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     const auto& o = schema.options();
     auto refuse = [](const char* what) { throw std::invalid_argument(std::string("mymyr: encoding: the device does not encode ") + what); };
     if (o.targets.contains(encoding::TargetSource::Action)) refuse("action targets");
-    if (schema.has_numeric()) refuse("numeric relations");
     // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
     if (o.outputs != encoding::Outputs{encoding::Output::Relations}) refuse("Simple");
@@ -758,7 +776,7 @@ void DeviceEncoder::reserve_workspace(Workspace& work, const BatchShape& shape)
     std::lock_guard lock(work.mutex);
     const BatchShape want{std::max(shape.graphs, work.shape.graphs), std::max(shape.entities, work.shape.entities),
                           std::max(shape.args, work.shape.args), std::max(shape.targets, work.shape.targets),
-                          std::max(shape.history, work.shape.history)};
+                          std::max(shape.history, work.shape.history), std::max(shape.numeric, work.shape.numeric)};
     (void)output_layout(want);
     const auto layout = detail::encoding_scratch_layout(want, *m_context->m_facts, options().layout, schema().num_relations());
     if (!work.scratch || layout != work.layout)
@@ -867,7 +885,6 @@ bool DeviceEncoder::refresh(std::shared_ptr<const encoding::FlatEncoder> grown, 
     std::unique_lock lock(m_state_mutex);
     if (grown->schema().fingerprint() != m_schema->fingerprint())
         throw std::invalid_argument("mymyr: encoding: the grown encoder has another schema or options");
-    // the grown table may have numeric state words that the schema (without include_numeric) does not show
     check_encoder(*grown);
     const bool copied = m_context->refresh(grown->context_ptr(), stream);
     m_encoder = std::move(grown);
@@ -984,7 +1001,9 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("a launch order needs the graph count on the host: it cannot order a live row count");
     if (graphs && !in.states)
         invalid("the state buffer is null");
-    if (in.state_stride < in.state_words)
+    if (in.numeric_words != facts.bounds.numeric_words)
+        invalid("the numeric word width differs from the table");
+    if (in.state_stride < u64{in.state_words} + in.numeric_words)
         invalid("the state row stride is smaller than its width");
     if (in.derived && in.derived_stride < facts.derived_words)
         invalid("the derived row stride is smaller than the derived words of an instance");
@@ -1073,6 +1092,8 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
             invalid("the history arrays must be given iff the schema has history");
         if (arrays.history && out.capacities.history && (!a.history_entity || !a.history_dt))
             invalid("the history arrays are null");
+        if (arrays.numeric ? (out.capacities.numeric && !a.numeric_values) : a.numeric_values != nullptr)
+            invalid("numeric_values must be given iff the schema stores numeric values");
     }
     if (launch.count_lanes != 0 && launch.count_lanes != 4 && launch.count_lanes != 8 && launch.count_lanes != 32)
         invalid("the count kernel runs 4, 8 or 32 lanes per graph");
@@ -1093,6 +1114,10 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.states = in.states;
     p.state_stride = in.state_stride;
     p.state_words = in.state_words;
+    p.numeric_words = in.numeric_words;
+    p.first_numeric = schema.first_numeric_relation();
+    p.numeric_f64 = opts.numeric_dtype == encoding::NumericDtype::F64;
+    p.numeric_size = out.numeric_size;
     p.task_ids = in.task_ids;
     p.derived = in.derived;
     p.derived_stride = in.derived_stride;
@@ -1114,7 +1139,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     {
         // counting reports the sizes against no capacity
         constexpr u64 unbounded = std::numeric_limits<u64>::max();
-        p.capacities = {graphs, unbounded, unbounded, unbounded, unbounded};
+        p.capacities = {graphs, unbounded, unbounded, unbounded, unbounded, unbounded};
     }
     else
     {
@@ -1130,6 +1155,7 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
     p.wide = scratch.wide;
     p.segments = mul(2, add(graphs, 1));
     p.history_at = layout.history_at(graphs);
+    p.numeric_at = layout.numeric_at(graphs);
     p.flags = scratch.flags;
     p.cell_counts = scratch.cell_counts;
     p.cell_stride = scratch.cell_stride;

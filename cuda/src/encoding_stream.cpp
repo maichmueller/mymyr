@@ -15,8 +15,9 @@ void append_rows(const DeviceEncodeInput& in, const DeviceEncodeInput& ring, u64
         throw std::invalid_argument("mymyr: encoding: a device ring carries no subgoal layers or history steps");
     auto invalid = [] { throw std::invalid_argument("mymyr: encoding: appended rows must match the device ring's columns and widths"); };
     if (!status || !ring.graphs || !ring.states || !ring.task_ids || in.graphs_device || in.row_start || in.dropped ||
-        !in.states || in.state_words != ring.state_words || in.state_stride < in.state_words ||
-        ring.state_stride < ring.state_words)
+        !in.states || in.state_words != ring.state_words || in.numeric_words != ring.numeric_words ||
+        in.state_stride < u64{in.state_words} + in.numeric_words ||
+        ring.state_stride < u64{ring.state_words} + ring.numeric_words)
         invalid();
     if (bool(in.derived) != bool(ring.derived) || (in.derived && in.derived_stride < ring.derived_stride) ||
         bool(in.goal_pos) != bool(ring.goal_pos) || bool(in.goal_neg) != bool(ring.goal_neg) ||
@@ -76,7 +77,8 @@ struct DeviceRowStream::Impl
         ring.graphs = capacity;
         ring.row_capacity = capacity;
         ring.state_words = host->table().words();
-        ring.state_stride = ring.state_words;
+        ring.numeric_words = host->table().numeric_words();
+        ring.state_stride = u64{ring.state_words} + ring.numeric_words;
         ring.derived_stride = host->table().derived_words();
         ring.goal_words = ring.state_words;
         ring.goal_stride = ring.state_words;
@@ -95,7 +97,7 @@ struct DeviceRowStream::Impl
         ring.row_start = status;
         ring.graphs_device = status + 1;
         ring.dropped = status + 2;
-        ring.states = static_cast<u64*>(allocate(capacity, ring.state_words * sizeof(u64)));
+        ring.states = static_cast<u64*>(allocate(capacity, ring.state_stride * sizeof(u64)));
         ring.task_ids = static_cast<i32*>(allocate(capacity, sizeof(i32)));
         if (derived && ring.derived_stride)
             ring.derived = static_cast<u64*>(allocate(capacity, ring.derived_stride * sizeof(u64)));

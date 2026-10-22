@@ -255,6 +255,8 @@ Values stored as `int32` pairs (`task.numeric_storage == 'i32'`) are decoded exa
 `state.numeric_values()` and `rl.numeric_values`. A table has one set of functions: all its instances declare the same
 ones, and an instance without slots of `f` has no tuples in its relation.
 
+The device encodes numeric rows into `numeric_values` with the same tuples, order and values as the CPU, for both layouts, index types and numeric dtypes, including mixed instances, capacity calls, the torch op, device streams and collation. Float64 to float32 conversion rounds to nearest with ties to even on both processors. Capacity calls need `numeric` as well as the other capacities. Device Simple with numeric functions is refused; the JAX FFI refuses numeric tables because its output signature has no numeric buffer.
+
 ```python
 import numpy as np
 import mymyr
@@ -947,8 +949,7 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   steps than `H`, down to none. The subgoal levels of a graph are computed once into the workspace's scratch, so a
   schema with levels needs scratch of one mask per level and sign over the instance's words for every graph of a
   batch, on top of the scratch of a schema without them.
-- **Refused.** `actions=` (the action relations are not encoded on the device), an encoder of a numeric table (with or
-  without `include_numeric`: "the device does not encode numeric relations"), `pool=` (a pool of host threads
+- **Refused.** `actions=` (the action relations are not encoded on the device), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
   prefix, as do an encoder with action targets or a horizon mode and layers or history given to an encoder whose
   schema has no subgoal or history relations; `threads` has no effect. A row that is invalid (a task id outside the

@@ -55,6 +55,8 @@ struct DeviceCollator::Impl
         params.index64 = first.index == encoding::IndexType::I64;
         params.relation_major = first.layout == encoding::Layout::Relation;
         params.batches = batches.size();
+        params.numeric_relations = first.numeric_relations;
+        params.numeric_f64 = stored.numeric_dtype == encoding::NumericDtype::F64;
         staging = context->lease_pinned(1, mul(batches.size(), sizeof(detail::CollationSlice)));
         auto* host = static_cast<detail::CollationSlice*>(staging.data(0));
         for (u64 i = 0; i < batches.size(); ++i)
@@ -66,6 +68,8 @@ struct DeviceCollator::Impl
             if (b.schema_fingerprint != first.schema_fingerprint) invalid("collate received mixed schemas");
             if (b.table_fingerprint != first.table_fingerprint)
                 invalid("collate received batches of different tables: their task ids name different instances");
+            if (b.numeric_relations != first.numeric_relations || b.numeric_relations > b.relations)
+                invalid("collate received different numeric_relations");
             if (b.shared_statics) invalid("device collate requires repeated statics");
             if (b.max_goal_level != 0 || b.history || b.arrays.history_offsets || b.arrays.history_entity ||
                 b.arrays.history_dt)
@@ -130,6 +134,8 @@ struct DeviceCollator::Impl
                                 : (a.target_entity || a.target_group)))
                 invalid("collation target arrays do not match the schema");
             if (output.capacities.args && !a.relation_args) invalid("collation arguments are null");
+            if (stored.numeric ? (output.capacities.numeric && !a.numeric_values) : a.numeric_values != nullptr)
+                invalid("collation numeric values do not match the schema");
             if (a.history_offsets || a.history_entity || a.history_dt)
                 invalid("device collation carries no subgoal layers or history steps");
         }
@@ -154,11 +160,12 @@ DeviceCollator::~DeviceCollator() = default;
 u64 DeviceCollator::graphs() const noexcept { return m_impl->params.graphs; }
 u64 DeviceCollator::scratch_bytes() const noexcept { return m_impl->total_bytes; }
 void DeviceCollator::encode(void* scratch, u64 bytes, const DeviceOutput& out) const { m_impl->run(0, scratch, bytes, out); }
-void DeviceCollator::count(void* scratch, u64 bytes, encoding::FlatSizes* sizes) const
+void DeviceCollator::count(void* scratch, u64 bytes, encoding::FlatSizes* sizes, u64* numeric_size) const
 {
     DeviceOutput out;
     out.sizes = sizes;
-    out.capacities = {graphs(), ~u64{0}, ~u64{0}, ~u64{0}};
+    out.numeric_size = numeric_size;
+    out.capacities = {graphs(), ~u64{0}, ~u64{0}, ~u64{0}, 0, ~u64{0}};
     m_impl->run(1, scratch, bytes, out);
 }
 void DeviceCollator::fill(void* scratch, u64 bytes, const DeviceOutput& out) const { m_impl->run(2, scratch, bytes, out); }

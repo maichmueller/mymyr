@@ -133,7 +133,8 @@ enum class DerivedWords : u8
 struct GraphBounds
 {
     u64 entities = 0, tuples = 0, args = 0, cells = 0, targets = 0, words = 0;
-    u64 state_words = 0, derived_words = 0;
+    u64 state_words = 0, derived_words = 0, numeric = 0;
+    u32 numeric_words = 0;
     u64 step_entities = 0, step_tuples = 0, step_args = 0, step_targets = 0;
     u32 levels = 0;
     bool history = false;
@@ -141,8 +142,7 @@ struct GraphBounds
 
 [[nodiscard]] OutputArrays output_arrays(const encoding::EncodingSchema& schema);
 /// The collation view of a device batch of `graphs` graphs that `encoder` (or a device encoder over it) wrote. Throws
-/// std::invalid_argument for an encoder whose batches the device does not encode (DeviceEncoder::check_schema, or a
-/// table with numeric state words).
+/// std::invalid_argument for an encoder whose batches the device does not encode (DeviceEncoder::check_schema).
 [[nodiscard]] DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder,
                                                    const encoding::FlatBuffers& arrays,
                                                    const encoding::FlatSizes* sizes, u64 graphs);
@@ -153,7 +153,8 @@ struct OutputLayout
 {
     u64 task_ids = 0, num_objects = 0, entity_offsets = 0, entity_role = 0, entity_ref = 0, relation_counts = 0,
         relation_offsets = 0, relation_arg_offsets = 0, relation_args = 0, goal_complete = 0, target_offsets = 0,
-        target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0, sizes = 0;
+        target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0,
+        numeric_values = 0, numeric_size = 0, sizes = 0;
     u64 bytes = 0;
     OutputArrays arrays;
 };
@@ -220,11 +221,10 @@ private:
 class DeviceEncoder
 {
 public:
-    /// Throws std::invalid_argument for a schema the device does not encode: action targets, numeric relations,
+    /// Throws std::invalid_argument for a schema the device does not encode: action targets,
     /// horizons (with the goal derivations that only a delta horizon has), the Simple graph and shared statics.
     static void check_schema(const encoding::EncodingSchema& schema);
-    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, a table with
-    /// numeric state words, or a schema whose predicate virtual nodes or relations need more shared memory than a block
+    /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, or one whose predicate virtual nodes or relations need more shared memory than a block
     /// has for the default launch. Computed on the host, without uploading a context (without a CUDA device the shared
     /// memory is not checked).
     static void check_encoder(const encoding::FlatEncoder& encoder);
@@ -404,7 +404,7 @@ public:
     void encode(void* scratch, u64 bytes, const DeviceOutput& out) const;
     /// count writes sizes with capacity unbounded; fill reuses its scratch and unchanged source arrays,
     /// with no intervening use of that scratch.
-    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes) const;
+    void count(void* scratch, u64 bytes, encoding::FlatSizes* sizes, u64* numeric_size = nullptr) const;
     void fill(void* scratch, u64 bytes, const DeviceOutput& out) const;
 private:
     struct Impl;

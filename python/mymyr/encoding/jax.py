@@ -44,7 +44,7 @@ from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
 
-_ARRAYS = _device._ARRAYS
+_ARRAYS = tuple(name for name in _device._ARRAYS if name != "numeric_values")
 _SIZE_FIELDS = _device._SIZE_FIELDS
 _OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
@@ -549,6 +549,7 @@ def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entitie
     """One mymyr_encode_flat call: the stored arrays by name and the sizes."""
     specs = reg.layout.specs(jnp, graphs, entities, args, targets, history)
     del specs["sizes"]
+    del specs["numeric_values"]
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
     results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))
 
@@ -654,7 +655,7 @@ def encode(
         _signed(reg.table_fingerprint),
     )
     if capacities is not None:
-        caps_graphs, entities, args, targets, history_steps = _device._capacities(capacities, reg.layout)
+        caps_graphs, entities, args, targets, history_steps, _ = _device._capacities(capacities, reg.layout)
         if caps_graphs < graphs:
             raise _error(f"the batch has {graphs} graphs, more than the capacity {caps_graphs}")
         arrays, sizes = _call(handle, reg, operands, graphs, entities, args, targets, history_steps, threads)

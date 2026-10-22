@@ -882,7 +882,10 @@ void bind_encoding_jax(nb::module_& parent)
     m.def(
         "register",
         [](Arg<ann::Any> encoder) {
-            auto e = std::make_shared<EncoderEntry>(flat_encoder_of(encoder));
+            auto host = flat_encoder_of(encoder);
+            if (host->table().numeric() || host->schema().has_numeric())
+                throw nb::value_error("mymyr: encoding: JAX FFI has no numeric output buffer; encode numeric rows with torch or on the host");
+            auto e = std::make_shared<EncoderEntry>(std::move(host));
             return ffi_registry().add(std::move(e));
         },
         "encoder"_a,

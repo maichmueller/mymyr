@@ -111,13 +111,16 @@ __device__ EncodeParams live_params(const EncodeParams& params)
         p.graphs = live < p.graphs ? live : p.graphs;
     }
     p.segments = 2 * (p.graphs + 1);
+    if (p.numeric_at)
+        p.numeric_at = p.relation_major ? p.segments + p.graphs * p.context.num_relations + 1 : 4 * (p.graphs + 1);
     return p;
 }
 
 /// The entries of the scanned array of a batch of `graphs` graphs (detail::ScratchLayout::scanned).
 __device__ u64 scanned_entries(const EncodeParams& p, u64 graphs)
 {
-    return p.relation_major ? 2 * (graphs + 1) + graphs * p.context.num_relations + 1 : 4 * (graphs + 1);
+    return (p.relation_major ? 2 * (graphs + 1) + graphs * p.context.num_relations + 1 : 4 * (graphs + 1)) +
+           (p.numeric_at ? graphs + 1 : 0);
 }
 
 /// The live scan's input: entry i of the totals, in place. The count kernel of a live launch writes entry i + 1 of the
@@ -131,12 +134,14 @@ struct LiveTotals
     u64 graphs;
     u32 relations;
     bool relation_major;
+    bool numeric;
     __device__ u64 live(u64 n) const
     {
         u64 g = graphs;
         if (graphs_device)
             g = *graphs_device < g ? *graphs_device : g;
-        const u64 items = (relation_major ? 2 * (g + 1) + g * relations + 1 : 4 * (g + 1)) - 1;
+        const u64 items = (relation_major ? 2 * (g + 1) + g * relations + 1 : 4 * (g + 1)) +
+                          (numeric ? g + 1 : 0) - 1;
         return items < n ? items : n;
     }
     __device__ u64 operator()(u64 i) const { return static_cast<u64>(data[i]); }
@@ -172,6 +177,8 @@ __device__ bool row_of(const EncodeParams& p, u64 g, RowView& r)
     r.instance = static_cast<u32>(id);
     r.v = ed::instance_view(p.context, r.instance);
     r.in = ed::RowInput{p.states + source * p.state_stride, nullptr};
+    if (p.numeric_words)
+        r.in.numeric = r.in.atoms + p.state_words;
     const bool layer_derived = Layered && p.layers.subgoals.layers != 0 && p.layers.subgoals.derived_pos != nullptr;
     if (p.derived && ed::reads_derived(r.v, p.goal_pos != nullptr, p.goal_derived_pos != nullptr, layer_derived))
         r.in.derived = p.derived + (Live && p.derived_logical ? g : source) * p.derived_stride;
@@ -216,6 +223,7 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
             totals.set(2 * row - 1, 0);
             if (!p.relation_major)
                 totals.set(3 * row - 1, 0);
+            if (p.numeric_at) totals.set(p.numeric_at - 1, 0);
         }
         if (p.first_class)
         {
@@ -240,6 +248,7 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
         }
         if (p.history_at)
             totals.set(p.history_at, 0);
+        if (p.numeric_at) totals.set(p.numeric_at, 0);
     }
     if (gi >= p.graphs)
         return;
@@ -301,6 +310,8 @@ __device__ __forceinline__ void count_graphs(const EncodeParams& p)
     }
     if (p.history_at)
         totals.set(p.history_at + 1 + g, t.history_steps);
+    if (p.numeric_at)
+        totals.set(p.numeric_at + 1 + g - shift, ok ? ed::numeric_slot_count(r.v) : 0);
 }
 
 /// A live launch carries no subgoal layers or history (the rings refuse them).
@@ -334,7 +345,12 @@ __device__ ed::GraphOut<I> graph_out(const EncodeParams& p)
             o.target_group,
             static_cast<I*>(o.history_offsets),
             static_cast<I*>(o.history_entity),
-            o.history_dt};
+            o.history_dt,
+            p.numeric_f64 ? nullptr : static_cast<f32*>(o.numeric_values),
+            p.numeric_f64 ? static_cast<f64*>(o.numeric_values) : nullptr,
+            p.relation_major && p.first_numeric < p.context.num_relations
+                ? Totals{p.totals, p.wide}.get(p.segments + u64{p.first_numeric} * p.graphs) -
+                      Totals{p.totals, p.wide}.get(p.segments) : 0};
 }
 
 /// The positions of the cells of a relation-major batch from the scanned cell row. The row holds, at entry s, the
@@ -422,7 +438,8 @@ __device__ enc::FlatSizes batch_sizes(const EncodeParams& p, const Totals& total
     const u64 limit = p.index64 ? u64{0x7fffffffffffffffull} : u64{0x7fffffffu};
     sizes.overflow = p.static_overflow;
     if (sizes.entities > p.capacities.entities || sizes.args > p.capacities.args ||
-        sizes.targets > p.capacities.targets || sizes.history > p.capacities.history)
+        sizes.targets > p.capacities.targets || sizes.history > p.capacities.history ||
+        (p.numeric_at && totals.get(p.numeric_at + G) - totals.get(p.numeric_at) > p.capacities.numeric))
         sizes.overflow |= enc::k_overflow_capacity;
     if (sizes.entities > limit || sizes.tuples > limit || sizes.args > limit || sizes.targets > limit ||
         sizes.history > limit)
@@ -447,6 +464,8 @@ __device__ __forceinline__ void write_sizes(const EncodeParams& p)
     if (threadIdx.x == 0)
     {
         *p.sizes = sizes;
+        if (p.numeric_size)
+            *p.numeric_size = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
         if constexpr (Live)
             if (p.output_graphs)
                 *p.output_graphs = p.graphs;
@@ -482,6 +501,10 @@ __device__ void zero_unused(const EncodeParams& p, const enc::FlatSizes& sizes)
     zero_tail(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args);
     zero_tail(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets);
     zero_tail(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets);
+    const Totals totals{p.totals, p.wide};
+    const u64 numeric = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
+    if (p.numeric_f64) zero_tail(static_cast<f64*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric);
+    else zero_tail(static_cast<f32*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric);
     if (overflow)
     {
         const u64 graphs = p.capacities.graphs;
@@ -549,6 +572,10 @@ __device__ void zero_unused_live(const EncodeParams& p, const enc::FlatSizes& si
         zero_range(static_cast<I*>(a.relation_args), overflow ? 0 : sizes.args, p.capacities.args, stride);
         zero_range(static_cast<I*>(a.target_entity), overflow ? 0 : sizes.targets, p.capacities.targets, stride);
         zero_range(a.target_group, overflow ? 0 : sizes.targets, p.capacities.targets, stride);
+        const Totals totals{p.totals, p.wide};
+        const u64 numeric = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
+        if (p.numeric_f64) zero_range(static_cast<f64*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric, stride);
+        else zero_range(static_cast<f32*>(a.numeric_values), overflow ? 0 : numeric, p.capacities.numeric, stride);
         zero_range(static_cast<I*>(a.history_entity), overflow ? 0 : sizes.history, p.capacities.history, stride);
         zero_range(a.history_dt, overflow ? 0 : sizes.history, p.capacities.history, stride);
     }
@@ -587,6 +614,8 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     if (blockIdx.x == 0 && threadIdx.x == 0)
     {
         *p.sizes = sizes;
+        if (p.numeric_size)
+            *p.numeric_size = p.numeric_at ? totals.get(p.numeric_at + p.graphs) - totals.get(p.numeric_at) : 0;
         if constexpr (Live)
             if (p.output_graphs)
                 *p.output_graphs = p.graphs;
@@ -652,6 +681,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
     const u64 entity_base = totals.get(g);
     const u64 target_base = totals.get(row + g) - totals.get(row);
     const u64 history_base = p.history_at ? totals.get(p.history_at + g) - totals.get(p.history_at) : 0;
+    const u64 numeric_base = p.numeric_at ? totals.get(p.numeric_at + g) - totals.get(p.numeric_at) : 0;
     u64* level_storage = Layered ? p.level_storage + g * p.level_stride : nullptr;
     const u32 instance = r.instance;
     auto close_graph = [&]
@@ -699,7 +729,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
             if (grp.lane() == 0)
                 close_graph();
             ed::fill_graph_group<I, Layered>(grp, r.v, r.in, g, tuple_base, arg_base, entity_base, graph, out,
-                                             target_base, virtual_scratch, counts, history_base);
+                                             target_base, virtual_scratch, counts, history_base, numeric_base);
         }
         else
         {
@@ -709,7 +739,7 @@ __device__ __forceinline__ void fill_graphs(const EncodeParams& p, u64 blocks)
                 ed::totals_from_counts<Layered>(r.v, r.in, [&](u32 i, const ed::Cell&) { return counts[i]; });
             close_graph();
             ed::fill_graph<I, Layered>(r.v, r.in, g, tuple_base, arg_base, entity_base, graph, out, target_base,
-                                       virtual_scratch, (virtual_nodes || Layered) ? counts : nullptr, history_base);
+                                       virtual_scratch, (virtual_nodes || Layered) ? counts : nullptr, history_base, numeric_base);
         }
     }
 }
@@ -883,10 +913,10 @@ cudaError_t launch_counts(const EncodeParams& p, const LaunchShape& shape, cudaS
         const live_scan::State st = live_scan::state_at(static_cast<u64*>(p.scan_state), p.scan_tiles, 1, 0);
         if (p.wide)
             return live_scan::launch(LiveTotals<u64>{static_cast<u64*>(p.totals), p.graphs_device, p.graphs,
-                                                     p.context.num_relations, p.relation_major},
+                                                     p.context.num_relations, p.relation_major, p.numeric_at != 0},
                                      shape.scan_length - 1, static_cast<u64*>(p.totals), st, stream);
         return live_scan::launch(LiveTotals<u32>{static_cast<u32*>(p.totals), p.graphs_device, p.graphs,
-                                                 p.context.num_relations, p.relation_major},
+                                                 p.context.num_relations, p.relation_major, p.numeric_at != 0},
                                  shape.scan_length - 1, static_cast<u32*>(p.totals), st, stream);
     }
     else
