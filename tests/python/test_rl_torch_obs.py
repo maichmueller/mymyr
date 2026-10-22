@@ -5,7 +5,10 @@ visible GPU, on the device (eager, captured and replayed), with per-env goals, o
     env CUDA_VISIBLE_DEVICES=0 .venv-rl/bin/python -m pytest tests/python/test_rl_torch_obs.py
 """
 
+import gc
+from types import SimpleNamespace
 import warnings
+import weakref
 
 import numpy as np
 import pytest
@@ -199,6 +202,81 @@ def test_an_obs_that_does_not_fit_is_flagged(gripper):
 
 
 # ------------------------------------------------------------------------------------------------ captured rollouts
+
+
+def test_observer_registrations_have_independent_ownership(gripper):
+    from mymyr.rl.torch import _ops
+    from mymyr.rl.torch._observation import Observer
+
+    encoder = encoding.FlatRelationEncoder(gripper)
+    external = _ops.register(encoder)
+    assert _ops.register(encoder) == external
+    # Registration and batch templates require no device allocation.
+    env = SimpleNamespace(core=SimpleNamespace(table=gripper), num_envs=4, device=torch.device("cuda", 0))
+    first = Observer(env, encoder, CAPS, False)
+    second = Observer(env, encoder, CAPS, False)
+    first_handle, second_handle = first.handles[0], second.handles[0]
+    try:
+        first.close()
+        first.close()
+        assert _ops.lookup(second_handle) is encoder
+        assert _ops.lookup(external) is encoder
+        with pytest.raises(ValueError, match="no object registered"):
+            _ops.lookup(first_handle)
+        second.close()
+        reference = weakref.ref(encoder)
+        del encoder, first, second
+        gc.collect()
+        assert reference() is _ops.lookup(external)
+        assert _ops.register(reference()) == external
+    finally:
+        _ops.unregister(first_handle)
+        _ops.unregister(second_handle)
+        _ops.unregister(external)
+    gc.collect()
+    assert reference() is None
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
+@pytest.mark.parametrize("external", [False, True], ids=["env_owned", "caller_registered"])
+@pytest.mark.parametrize("close", [False, True], ids=["destroy", "close"])
+@pytest.mark.needs_gil
+def test_shared_encoder_survives_other_environment_close(gripper, compiled, external, close):
+    from mymyr.rl.torch import _ops
+
+    device = gpu_device()
+    encoder = encoding.FlatRelationEncoder(gripper)
+    handle = _ops.register(encoder) if external else None
+    first = rt.BatchedEnv(gripper, 4, device=device, observation=encoder, obs_capacities=CAPS)
+    second = rt.BatchedEnv(gripper, 4, device=device, observation=encoder, obs_capacities=CAPS)
+    torch._dynamo.reset()
+
+    def step():
+        return second.step(final=False).obs.relation_args
+
+    call = torch.compile(step, fullgraph=True, backend="aot_eager") if compiled else step
+    try:
+        call()
+        torch.cuda.synchronize(device)
+        if close:
+            first.close()
+        else:
+            del first
+            gc.collect()
+        call()
+        torch.cuda.synchronize(device)
+        assert_same(second.encode_observation(), host(encoder, second.states, second.task_ids))
+        if external:
+            assert _ops.lookup(handle) is encoder
+    finally:
+        torch.cuda.synchronize(device)
+        second.close()
+        if close:
+            first.close()
+        if external:
+            assert _ops.lookup(handle) is encoder
+            _ops.unregister(handle)
+        torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("final", [False, True])

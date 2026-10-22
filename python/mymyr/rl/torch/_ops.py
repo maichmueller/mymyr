@@ -115,6 +115,14 @@ def unregister(handle: int) -> None:
             del _by_id[id(obj)]
 
 
+def _register_owned(obj: Any) -> int:
+    """An independent handle whose owner may unregister it without affecting other registrations of ``obj``."""
+    with _lock:
+        h = next(_ids)
+        _objects[h] = obj
+        return h
+
+
 def lookup(handle: int) -> Any:
     """The object registered under ``handle`` (:func:`register`). Raises ValueError for an unknown handle."""
     try:

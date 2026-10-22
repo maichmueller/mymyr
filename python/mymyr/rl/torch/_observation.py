@@ -109,7 +109,7 @@ class Observer:
                 from mymyr.rl.torch import _ops
 
                 # what a traced encoding needs, made eagerly: torch.compile traces the op and the batch only
-                self.handles = [_ops.register(e) for e in encoders]
+                self.handles = [_ops._register_owned(e) for e in encoders]
                 self._templates = [_device.DeviceFlatBatch._template(e) for e in encoders]
                 self._op_capacities = [(c["graphs"], c["entities"], c["args"], c.get("targets", 0), c.get("history", 0))
                                        for c in self.capacities]
@@ -265,6 +265,7 @@ class Observer:
 
         for h in getattr(self, "handles", ()):
             _ops.unregister(h)
+        self.handles = []
 
 
 def _table_of(table: Any) -> Any:
