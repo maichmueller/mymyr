@@ -1365,7 +1365,7 @@ void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb
     encoding::HorizonInput& horizon = rows.input.horizon;
     horizon.nodes = states.view;
 
-    rows.horizon_copies.resize(5);
+    rows.horizon_copies.resize(7);
     std::vector<i64> extent;
     const nb::object node_offsets = field("node_offsets");
     if (node_offsets.is_none())
@@ -1406,6 +1406,19 @@ void import_horizon(ImportedRows& rows, const encoding::FlatEncoder& encoder, nb
                                    " rows, edge_offsets ends at " + std::to_string(edges))
                                       .c_str());
         horizon.label_width = static_cast<u32>(binding_extent[1]);
+    }
+
+    const nb::object parent_offsets = nb::getattr(view, "parent_offsets", nb::none());
+    const nb::object parent_edges = nb::getattr(view, "parent_edges", nb::none());
+    if (parent_offsets.is_none() != parent_edges.is_none())
+        throw nb::value_error("mymyr: encoding: canonical parent pairs need both parent_offsets and parent_edges");
+    if (!parent_offsets.is_none())
+    {
+        horizon.parent_offsets = rows.imports.ints32(parent_offsets, "parent_offsets", {-1}, rows.horizon_copies[5], &extent);
+        if (static_cast<u64>(extent[0]) != horizon.graphs + 1)
+            throw nb::value_error("mymyr: encoding: parent_offsets must have G + 1 entries");
+        horizon.parent_edges = rows.imports.ints32(parent_edges, "parent_edges", {-1}, rows.horizon_copies[6], &extent);
+        horizon.parent_pairs = static_cast<u64>(extent[0]);
     }
 
     const i32* ids = import_task_ids(field("task_ids"), horizon.graphs, table.size(), rows.ids_copy, rows.ids_keep);
@@ -1681,6 +1694,9 @@ ResultDict horizon_view_arrays(encoding::HorizonGraphs&& graphs)
     out["edge_binding"] = numpy_array<i32>(std::move(graphs.edge_binding), {edges, graphs.label_width});
     out["task_ids"] = numpy_array<i32>(std::move(graphs.task_ids), {graph_count});
     out["truncated"] = numpy_array<u8>(std::move(graphs.truncated), {graph_count});
+    const usize pairs = graphs.parent_edges.size();
+    out["parent_offsets"] = numpy_array<i32>(std::move(graphs.parent_offsets), {graph_count + 1});
+    out["parent_edges"] = numpy_array<i32>(std::move(graphs.parent_edges), {pairs});
     return ResultDict(out);
 }
 

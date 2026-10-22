@@ -110,6 +110,8 @@ struct HorizonGraph
     bool use_cousins;            // the schema has the cousin relation
     bool exclude;                // the root has no entity
     bool root_target;            // the root is a target
+    const i32* parent_edges = nullptr;  // optional canonical pairs, graph-local edge indices
+    u32 parent_pairs = 0;
 };
 
 /// The words of the scratch `HorizonGraph::order` of a graph with `nodes` nodes and `edges` edges: the number of action
@@ -328,6 +330,28 @@ MYMYR_HD HorizonParents horizon_parents(const HorizonGraph& h)
     return {dst, dst + h.edges, dst + h.edges + (h.count + 1u)};
 }
 
+/// Visits canonical parent pairs in source/destination order, with the root policy applied.
+template<class Sink>
+MYMYR_HD void horizon_each_parent(const HorizonGraph& h, const Sink& sink)
+{
+    if (h.parent_edges)
+    {
+        for (u32 i = 0; i < h.parent_pairs; ++i)
+        {
+            const u32 e = static_cast<u32>(h.parent_edges[i]);
+            if (!h.exclude || (h.src[e] != 0 && h.dst[e] != 0))
+                sink(static_cast<u32>(h.src[e]), static_cast<u32>(h.dst[e]));
+        }
+    }
+    else if (h.order)
+    {
+        const HorizonParents pairs = horizon_parents(h);
+        for (u32 src = 0; src < h.count; ++src)
+            for (u32 i = 0; i < pairs.fill[src]; ++i)
+                sink(src, pairs.dst[pairs.begin[src] + i]);
+    }
+}
+
 /// The parent pairs of the graph, written into its order scratch (horizon_parents); returns their number. Under `exclude`
 /// the edges that touch the root are left out. The edges are taken in the order of their destinations, so that the
 /// destinations of one source come out ascending and a repeated pair is the last one of its source: an edge list that is
@@ -465,7 +489,23 @@ MYMYR_HD void canonical_horizon_edges(const HorizonGraph& h)
     if (h.use_actions)
         h.order[0] = horizon_canonical_actions(h, actions, counts);
     if (h.use_parents)
-        h.order[1] = horizon_canonical_parents(h, counts, counts + h.count);
+    {
+        if (h.parent_edges)
+        {
+            if (!h.exclude)
+                h.order[1] = h.parent_pairs;
+            else
+            {
+                for (u32 i = 0; i < h.parent_pairs; ++i)
+                {
+                    const u32 e = static_cast<u32>(h.parent_edges[i]);
+                    h.order[1] += static_cast<u32>(h.src[e] != 0 && h.dst[e] != 0);
+                }
+            }
+        }
+        else
+            h.order[1] = horizon_canonical_parents(h, counts, counts + h.count);
+    }
 }
 
 /// The tuples of the action cell of `relation` in the graph.
@@ -569,18 +609,15 @@ MYMYR_HD u64 horizon_kin_prepare(const HorizonGraph& h)
     const u32 n = k.nodes;
     for (u32 i = 0; i <= n; ++i)
         k.child_offsets[i] = k.parent_offsets[i] = k.far_offsets[i] = 0;
-    const HorizonParents pairs = horizon_parents(h);
     u32 total = 0;
-    for (u32 src = 0; src < n; ++src)
-        for (u32 i = 0; i < pairs.fill[src]; ++i)
-        {
-            const u32 dst = pairs.dst[pairs.begin[src] + i];
-            if (src == dst)
-                continue;
-            k.children[total++] = dst;
-            ++k.child_offsets[src + 1u];
-            ++k.parent_offsets[dst + 1u];
-        }
+    horizon_each_parent(h, [&](u32 src, u32 dst)
+    {
+        if (src == dst)
+            return;
+        k.children[total++] = dst;
+        ++k.child_offsets[src + 1u];
+        ++k.parent_offsets[dst + 1u];
+    });
     for (u32 i = 0; i < n; ++i)
     {
         k.child_offsets[i + 1u] += k.child_offsets[i];
@@ -936,13 +973,7 @@ MYMYR_HD void horizon_emit_cell(const Cell& c, const HorizonGraph& h, Out& out)
     }
     if (kind == HorizonKind::Parent)
     {
-        if (h.order)
-        {
-            const HorizonParents pairs = horizon_parents(h);
-            for (u32 src = 0; src < h.count; ++src)
-                for (u32 i = 0; i < pairs.fill[src]; ++i)
-                    out.put_pair(src, pairs.dst[pairs.begin[src] + i]);
-        }
+        horizon_each_parent(h, [&](u32 src, u32 dst) { out.put_pair(src, dst); });
         return;
     }
     if (kind == HorizonKind::Sibling || kind == HorizonKind::Cousin)
