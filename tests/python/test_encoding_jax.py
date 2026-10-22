@@ -740,8 +740,7 @@ def test_history_integers_that_int32_cannot_hold_raise_or_flag_their_row(cases, 
     # the forms of the history: with its count, and for dt also without (every step valid)
     forms = [with_wide] + ([with_wide[:3]] if k == 2 else [])
     narrow = (pos, neg, *(x.astype(np.int32) for x in with_fits[2:]))
-    caps = exact_capacities(host_encode(encoder, case, history=narrow))
-    caps["history"] = max(caps["history"], 64)
+    caps = exact_capacities(host_encode(encoder, case, history=narrow[:3]))  # every step valid: the most history
     message = rf"^mymyr: 'history\[{k}\] \({which}\)' has a value that int32 cannot hold"
     for form in forms:
         with pytest.raises(ValueError, match=message):
