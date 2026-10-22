@@ -1350,7 +1350,10 @@ namespace mymyr::cuda
 void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
                              const DeviceHorizonBuild& output, cudaStream_t stream)
 {
-    if (!parents.actions.offsets || !output.node_offsets ||
+    if ((parents.graphs && parents.state_words && !parents.states) || parents.state_stride < parents.state_words ||
+        !parents.actions.offsets || !output.node_offsets ||
+        (parents.actions.capacity && (!parents.actions.schema ||
+                                     (parents.actions.label_width && !parents.actions.binding))) ||
         ((parents.graphs + parents.actions.capacity) && parents.state_words && !output.nodes) ||
         (parents.actions.capacity && (!children || !output.src || !output.dst || !output.schema ||
                                      (parents.actions.label_width && !output.binding))) || child_stride < parents.state_words)
