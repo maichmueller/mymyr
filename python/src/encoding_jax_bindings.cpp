@@ -919,7 +919,7 @@ void bind_encoding_jax(nb::module_& parent)
             }
             nb::list needs;
             for (const bool layer_masks : {false, true})
-                for (const auto [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
+                for (const auto& [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
                     needs.append(cuda::DeviceEncoder::needs_derived(enc, goal_masks, derived_goal_masks, layer_masks));
             d["needs_derived"] = nb::tuple(needs);
             d["cuda"] = true;
