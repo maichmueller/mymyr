@@ -464,7 +464,10 @@ _pending_lock = threading.Lock()
 
 def _retain(torch: Any, keep: list, device: Any) -> None:
     """Keeps the wrappers of foreign arrays alive until the work enqueued so far has completed (their owners free the
-    memory when the wrappers go)."""
+    memory when the wrappers go). During capture, torch owns temporary allocations through the graph, and callers
+    keep external input owners alive across every replay."""
+    if torch.cuda.is_current_stream_capturing():
+        return
     event = torch.cuda.Event()
     event.record(torch.cuda.current_stream(device))
     with _pending_lock:
