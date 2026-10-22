@@ -152,6 +152,7 @@ def test_numeric_stream_collation_and_capture(numeric_cases, name, layout, index
 @pytest.mark.parametrize("layout", ["graph", "relation"])
 @pytest.mark.parametrize("index", ["int32", "int64"])
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.needs_gil
 def test_numeric_rounding_undefined_values_and_torch_op(numeric_cases, layout, index, dtype):
     torch = cuda()
     from mymyr.rl.torch import _ops as rt
@@ -173,11 +174,16 @@ def test_numeric_rounding_undefined_values_and_torch_op(numeric_cases, layout, i
     cap = capacities(expected)
     handle = rt.register(encoder)
     try:
+        def arrays_op(r):
+            return torch.ops.mymyr.encode_flat(handle, r, device_ids, *([None] * 15), cap["graphs"],
+                                               cap["entities"], cap["args"], cap["targets"], 0, cap["numeric"])
+
         def encode_op(r):
-            arrays = torch.ops.mymyr.encode_flat(handle, r, device_ids, *([None] * 15), cap["graphs"],
-                                                 cap["entities"], cap["args"], cap["targets"], 0, cap["numeric"])
-            return encoding.DeviceFlatBatch.from_arrays(encoder, arrays)
+            return encoding.DeviceFlatBatch.from_arrays(encoder, arrays_op(r))
+
         equal(expected, encode_op(device_rows))
+        compiled = torch.compile(arrays_op, backend="eager", fullgraph=True, dynamic=False)
+        equal(expected, encoding.DeviceFlatBatch.from_arrays(encoder, compiled(device_rows)))
         from torch._subclasses.fake_tensor import FakeTensorMode
         with FakeTensorMode(allow_non_fake_inputs=True):
             fake = encode_op(device_rows)
