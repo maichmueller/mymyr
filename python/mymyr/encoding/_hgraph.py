@@ -33,7 +33,7 @@ class DeviceHGraphView:
     current stream, in stream order. The view keeps the batch alive. ``mymyr.encoding.hgraph(batch)`` makes one; it
     refuses what the host view refuses."""
 
-    __slots__ = ("_arity", "_arrays", "_batch", "_edge_begin", "_edge_types", "_entities", "_first_arg",
+    __slots__ = ("_arity", "_arrays", "_batch", "_edge_types", "_entities", "_first_arg",
                  "_first_tuple", "_graphs", "_names", "_relation", "_schema", "_tuples")
 
     def __init__(self, batch: DeviceFlatBatch):
@@ -72,9 +72,6 @@ class DeviceHGraphView:
         self._names = list(schema.relation_names)
         self._arity = list(schema.relation_arities)
         self._relation = {name: r for r, name in enumerate(self._names)}
-        self._edge_begin = [0]
-        for arity in self._arity:
-            self._edge_begin.append(self._edge_begin[-1] + arity)
         self._edge_types = [(name, str(k), SYMBOL)
                             for name, arity in zip(self._names, self._arity, strict=True) for k in range(arity)]
         self._tuples = [self._first_tuple[r + 1] - self._first_tuple[r] for r in range(relations)]
