@@ -926,7 +926,7 @@ def test_the_simple_graph_is_refused_by_the_device_before_any_launch(lane):
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
+        NativeCollator([encoder], dev.index, 0, [[0] * len(encoding.DeviceFlatBatch.array_names)], [0])
 
 
 def test_shared_statics_are_refused_by_the_device_before_any_launch():
@@ -957,7 +957,7 @@ def test_shared_statics_are_refused_by_the_device_before_any_launch():
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
+        NativeCollator([encoder], dev.index, 0, [[0] * len(encoding.DeviceFlatBatch.array_names)], [0])
     assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
 
 

@@ -562,8 +562,8 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 17 output "
-             "pointers, with the capacities (graphs, entities, args, targets, history), on `stream`. No host wait.")
+             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 18 output "
+             "pointers, with the capacities (graphs, entities, args, targets, history, numeric), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, numeric, "
              "flags) to check the flags and return the graph extent and eighteen pointers, then fills them on "

@@ -983,10 +983,10 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 
 `torch.ops.mymyr.encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg,
 subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg, history_dt, history_count,
-history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)` is the capacity form as a torch
+history_derived_pos, history_derived_neg, graphs, entities, args, targets, history, numeric=0)` is the capacity form as a torch
 custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch` registers it). `encoder` is the handle
-`mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that is absent) and the five
-ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It returns the list of 17
+`mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that is absent) and the six
+ints are the capacities (`targets` 0 without target sources, `history` 0 without history, `numeric` 0 without numeric values). It returns the list of 18
 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema does not store is an empty tensor, and
 `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch. The op waits for nothing, allocates only
 its outputs and scratch and has a fake implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)`
