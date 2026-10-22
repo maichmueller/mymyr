@@ -172,6 +172,59 @@ def test_the_tables_of_several_instances_mix_their_graphs_in_one_view(cases):
 # ------------------------------------------------------------------------------------------------ batch forms
 
 
+def batch_form(case, dev, index, form, options="goal_targets"):
+    encoder = encoders_of(case, index_dtype=index, **OPTION_SETS[options])
+    host = host_encode(encoder, case)
+    capacities = exact_capacities(host, factor=2)
+    if form == "exact":
+        batch = device_encode(encoder, case, dev)
+    elif form == "capacity":
+        batch = device_encode(encoder, case, dev, capacities=capacities)
+    elif form == "collated":
+        rows = to_device(case.rows, dev)
+        batch = encoding.collate([encoder.encode(rows[:1]), encoder.encode(rows[1:])])
+    else:
+        ring = encoder.device_stream(2 * max(1, case.n))
+        ring.append(to_device(case.rows, dev))
+        batch = ring.flush(capacities=capacities | {"graphs": ring.capacity})
+    return host, batch
+
+
+@pytest.mark.parametrize("form", ["exact", "capacity", "stream", "collated"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+@pytest.mark.parametrize("n", [0, 3], ids=["empty", "nonempty"])
+@pytest.mark.parametrize("options", ["goal_targets", "implicit_entities"])
+def test_creating_a_device_view_waits_once(cases, form, index, n, options):
+    dev = gpu()
+    host, batch = batch_form(sliced(cases["gripper"], n), dev, index, form, options)
+    previous = torch.cuda.get_sync_debug_mode()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UserWarning)
+        torch.cuda.set_sync_debug_mode("warn")
+        try:
+            view = encoding.hgraph(batch)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous)
+    waits = [w for w in caught if "synchronizing CUDA operation" in str(w.message)]
+    assert len(waits) == 1, [str(w.message) for w in waits]
+    expect_same_view(encoding.hgraph(host), view)
+    expect_zero_copy(view, batch)
+
+
+@pytest.mark.filterwarnings("ignore:The CUDA Graph is empty")
+@pytest.mark.parametrize("form", ["exact", "capacity", "stream", "collated"])
+def test_creating_a_device_view_refuses_cuda_graph_capture(cases, form):
+    dev = gpu()
+    stream = torch.cuda.Stream(dev)
+    with torch.cuda.stream(stream):
+        _, batch = batch_form(sliced(cases["gripper"], 3), dev, "int32", form)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            with pytest.raises(ValueError, match="^mymyr: encoding: create a DeviceHGraphView outside capture"):
+                encoding.hgraph(batch)
+
+
 @pytest.mark.parametrize("index", ["int32", "int64"])
 def test_the_capacity_form_is_viewed_up_to_its_sizes(cases, index):
     dev = gpu()

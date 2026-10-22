@@ -77,7 +77,7 @@ Every encoder is built from a `Task`, a `TaskHandle` or a one-domain `rl.TaskTab
 | `outputs` | a collection of `'relations'`, `'simple'` | `('relations',)` | the relation arrays, the [Simple graph](#the-simple-graph) or both |
 | `constant_labels` | bool | `False` | a Simple node label of its own for each constant of the domain |
 | `horizon_mode` | `'full'`, `'delta'`, `'action'`, `None` | per encoder | the [horizon](#horizons-and-transitions) variant; `None` is no horizon |
-| `root_policy` | `'include'`, `'encode_only'`, `'exclude'` | `'include'` | whether a horizon's root is a state entity and a target |
+| `root_policy` | `None`, `'include'`, `'encode_only'`, `'exclude'` | `None` without a horizon; `'include'` with one | whether a horizon's root is a state entity and a target |
 | `parent_relation` | bool | `False` | the `_parent_` relation of a horizon's edges |
 | `sibling_relation`, `cousin_relation` | bool | `False` | the [kinship](#rooted-horizons) relations of a horizon's nodes |
 
@@ -675,7 +675,8 @@ whatever the batch holds (of a device batch, making the view waits once for the 
   methods and arrays as torch tensors on the batch's device, equal to the host view of the same rows. Row 1,
   `ptr('_symbol_')` and the stored `entity_role` are the batch's own device memory (a strided slice of `relation_args`:
   no copy, no kernel); row 0, a relation's `ptr` and implicit entity roles are made on request by torch on the current
-  stream. Making the view reads the relations' offsets on the host, so it waits for the device; its methods never wait.
+  stream. Making the view reads the graph count, sizes and relations' offsets on the host in one transfer, so it waits
+  for the device exactly once; create it outside CUDA graph capture. Its methods never wait.
   `framework='numpy'` copies to the host. Writing into a row writes into the batch. The view keeps the counts it read:
   a batch whose arrays are rewritten in place (a CUDA graph replay) needs a new view.
 - **Refusals**: `ValueError` for a graph-major batch (the strided run needs the relation's tuples to be contiguous
