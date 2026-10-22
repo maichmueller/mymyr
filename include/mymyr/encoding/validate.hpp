@@ -8,6 +8,13 @@
 
 namespace mymyr::encoding
 {
+/// What a batch holds: an encoding, or the all-zero arrays of an encoding that did not fit its capacities.
+enum class BatchForm : u8
+{
+    Encoded,
+    Overflowed,
+};
+
 /// Throws std::invalid_argument ("mymyr: encoding: ...") naming the first violation of the contract of a batch encoded
 /// for `schema`:
 /// - array names, dtypes and shapes, and the scalars; entity_role, entity_ref and relation_args may be longer than the
@@ -50,5 +57,9 @@ namespace mymyr::encoding
 ///   that is no numeric atom and, when the relation arrays are stored, equals the numeric value of every numeric atom
 ///   rounded to float32.
 /// The relation arrays are checked iff the schema stores them.
-void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema);
+///
+/// `form` Overflowed checks the batch of an encoding that did not fit its capacities (FlatSizes::overflowed): the same
+/// contract for its zero contents, except that static_relations is zero like every other array instead of listing the
+/// schema's static relations, and then that every array is zero.
+void validate(const rl::ArrayBundle& batch, const EncodingSchema& schema, BatchForm form = BatchForm::Encoded);
 }

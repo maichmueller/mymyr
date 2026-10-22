@@ -455,3 +455,77 @@ result = search.brfs(task, threads=4, observer=observer)
 assert sum(w.expanded for w in observer.workers) == result.stats.expanded
 print(len(result.plan), "steps;", len(set().union(*(w.threads for w in observer.workers))), "threads")
 ```
+
+## Encoding the states of a search
+
+The states a search meets, expanded or still on its frontier, encode into relational graphs for a learned heuristic or
+policy ([native encoding](encoding.md)). The encoder takes the rows of state words that a search and a state space
+already hold, so nothing is converted on the way.
+
+**Frontier states.** A search observer sees every generated state; collecting them and encoding the batch once encodes
+the frontier with one call:
+
+```python
+import mymyr
+import numpy as np
+from mymyr import datasets, encoding, search
+
+
+class Frontier(search.Observer):
+    def __init__(self):
+        self.states = []
+
+    def on_generate(self, parent, action, child, state, is_new):
+        if is_new:
+            self.states.append(state)
+
+
+puzzle = mymyr.Task.from_text("tests/data/tasks/depot__p02.txt")
+frontier = Frontier()
+search.astar(puzzle, heuristic="max", observer=frontier)
+encoder = encoding.FlatRelationEncoder(puzzle)
+batch = encoder.encode(frontier.states[:256])                       # the states of the frontier, one graph each
+assert batch.num_graphs == min(256, len(frontier.states))
+```
+
+**State spaces.** `StateSpace.arrays()` holds the rows of the states (`state_words`, one row per state id) and the
+edges of the transition graph (`forward_offsets`, `forward_targets` and the action labels `label_schemas`,
+`label_bindings`). Rows encode directly, and rows and edges together are the nodes and edges of a *horizon*: a state
+and the states within a few actions of it, as one graph, so that a model sees a state and its candidate successors
+together. `encoding.horizon_of_space(space, ids, depth)` builds the horizons of the states `ids` (merged by state, in the
+order they are reached) from the space's arrays, and the horizon encoder encodes them:
+
+```python
+space = datasets.generate(puzzle, max_states=100_000, remove_if_unsolvable=False).space
+arrays = space.arrays()
+ids = [0, 5, 17]
+
+# the rows of states encode directly
+rows = arrays["state_words"][ids]
+states = encoding.FlatRelationEncoder(puzzle).encode(rows)
+
+# the neighbourhood of state 17 from the arrays: its row, its successors' rows, and one edge per transition
+lo, hi = int(arrays["forward_offsets"][17]), int(arrays["forward_offsets"][18])
+view = encoding.HorizonView(
+    nodes=np.concatenate([arrays["state_words"][17:18], arrays["state_words"][arrays["forward_targets"][lo:hi]]]),
+    node_offsets=np.array([0, hi - lo + 1], np.int32),
+    edge_offsets=np.array([0, hi - lo], np.int32),
+    edge_src=np.zeros(hi - lo, np.int32),
+    edge_dst=np.arange(1, hi - lo + 1, dtype=np.int32),
+    edge_schema=arrays["label_schemas"][lo:hi].astype(np.int32),
+    edge_binding=arrays["label_bindings"][lo:hi].astype(np.int32),
+)
+horizon_encoder = encoding.FlatHorizonEncoder(puzzle, horizon_mode="full", parent_relation=True)
+by_hand = horizon_encoder.encode(view)
+
+# the same horizon from the space, and from expanding the state: all three give the same graph
+from_space = horizon_encoder.encode(encoding.horizon_of_space(space, [17], depth=1, merge=False))
+expanded = horizon_encoder.encode(encoding.horizon(puzzle, arrays["state_words"][17:18], depth=1, merge=False))
+for other in (from_space, expanded):
+    assert np.array_equal(by_hand.relation_args, other.relation_args)
+    assert np.array_equal(by_hand.entity_offsets, other.entity_offsets)
+```
+
+A horizon's graph lists its edges in a canonical order (by destination node, then action schema and objects), so a view
+that comes from a space, from an expansion or from a search's own bookkeeping gives the same batch whatever order its
+edges are in.

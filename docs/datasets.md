@@ -109,6 +109,64 @@ a = graphs[0].arrays()
 print(len(graphs), a["tuple_offsets"][:4], a["successors"][:4])
 ```
 
+## Training data encoded on load
+
+A dataset for a model stores states, not graphs: the rows of atom words and the instance of each row, which is all a
+state space holds and all a dataset file keeps. The [relational encoder](encoding.md) turns rows into graphs when a
+batch is loaded, so the encoding options can change without regenerating or rewriting any data, and the files stay
+small. `datasets.StateRows` is a map-style dataset (`len` and `dataset[i]`, so it works with
+`torch.utils.data.DataLoader` and anything alike) and `datasets.EncodingCollate(encoder)` is the `collate_fn` that
+encodes a batch of its items:
+
+```python
+import numpy as np
+
+from mymyr import datasets, encoding
+from mymyr.rl import TaskTable
+
+tasks = TaskTable.from_pddl("tests/data/pddl/gripper/domain.pddl", "tests/data/pddl/gripper/p*.pddl", atoms="dense")
+kb = datasets.KnowledgeBase(tasks)
+dataset = datasets.StateRows.from_knowledge_base(kb)    # every state of every space; labels: unit goal distances
+encoder = encoding.FlatRelationEncoder(tasks, target_sources=("goal",))
+collate = datasets.EncodingCollate(encoder)
+
+loaded = collate([dataset[i] for i in (0, 9, 20)])      # what a data loader hands to collate_fn
+direct = encoder.encode(dataset.rows[[0, 9, 20]], dataset.task_ids[[0, 9, 20]])
+assert all(np.array_equal(loaded.graphs.as_dict()[k], direct.as_dict()[k]) for k in direct.as_dict())
+print(loaded.task_ids, loaded.labels["unit_goal_distances"])
+```
+
+`StateRows(rows, task_ids=None, labels=None, goals=None)` is the plain form: `rows` a `uint64` array `[N, W]`, the
+instance of each row, labels (arrays with `N` entries) and, for goal-conditioned data, the goal masks of every row.
+`StateRows.from_state_space(space, ids, task_id=..., labels=...)` takes the rows of one space and
+`StateRows.from_knowledge_base(kb)` those of every space of a knowledge base, with the base's task indices as the rows'
+instances; encode them with an encoder over the base's tasks. `dataset.take(indices)` selects rows as a dataset, and
+`dataset.__getitems__(indices)` is the same call: a `torch.utils.data.DataLoader` fetches each batch of its sampler
+with it, once, and hands the `StateRows` to the collate function whole. A list of items is packed without Python code
+per item as well.
+
+`EncodingCollate(encoder, actions=False, framework=None, threads=1, pool=None)` returns an `EncodedRows`: `graphs`
+(the `FlatBatch`, or the `SuiteBatch` of one batch per domain when `encoder` is a `SuiteEncoder`), the rows'
+`task_ids`, the stacked `labels` and, with `actions=True`, the `actions` expansion the action entities index
+([Reinforcement learning](rl.md#encoding-the-pools-states)). The collate function pickles with its encoder, so it works
+with data loader worker processes. Batches loaded in chunks combine with
+[`encoding.collate`](encoding.md#device-row-streams-and-collation) into the batch of all their rows, with its checks:
+the batches of another table or schema are refused. With PyTorch, a loader encodes each batch to tensors that share
+the batch's memory:
+
+```python needs-torch
+import torch
+
+loader = torch.utils.data.DataLoader(
+    dataset, batch_size=8, shuffle=True, collate_fn=datasets.EncodingCollate(encoder, framework="torch"))
+for batch in loader:
+    assert isinstance(batch.graphs.relation_args, torch.Tensor)
+    assert batch.graphs.num_graphs == len(batch.task_ids)
+```
+
+Dataset files hold no encodings: `datasets.save` writes the rows and arrays named in the [file format](#file-format),
+and `datasets.load` followed by `StateRows` and an encoder gives the batches again, with any options.
+
 ## Saving and pickling
 
 State spaces, generalized state spaces, tuple graphs and knowledge bases pickle with what they computed, so they
@@ -163,6 +221,56 @@ mean something only together with that numbering. Its datasets round-trip exactl
 carry the slot table: unpickling and loading without `task=` give a task with the same numbering, and a given lazy
 task takes the saved numbering when the slots it has assigned so far agree with it (a task that numbered its atoms
 in another order is refused, and keeps its slots). `from_arrays` refuses such a task, as its `arrays()` hold no rows.
+
+### Encoders, schemas and batches
+
+What a model is trained on travels with the data it will meet, so the encoding is stored in three forms, each checked
+when it is read back:
+
+- An **encoder** pickles as its table and options with the fingerprint of its schema. Loading builds the encoder again
+  and raises `ValueError` if the schema that the table and options give now has another fingerprint (the catalog or its
+  rules changed). The same holds for a `SuiteEncoder` and the `EncodingCollate` made of one.
+- A **schema** is a function of a domain and the options, so it is stored as a record without the domain:
+  `encoding.schema_to_dict(schema)` gives a dictionary of `version`, `options`, `fingerprint` (16 hex digits) and the
+  `catalog` (the relations in id order, one list per column) that `json` writes and reads back unchanged, for instance
+  into a model checkpoint. `encoding.schema_from_dict(record, table)` rebuilds the schema over a table of the domain
+  and raises `ValueError` if the record's version, fingerprint or catalog differ from what the table and options give,
+  naming the first relation that differs.
+- A **batch** is its arrays and scalars: `batch.as_dict()` is the record, which `numpy.savez` writes, and
+  `encoding.FlatBatch.from_arrays(schema, arrays, sizes=None)` reads it back as a batch that owns a copy of the arrays.
+  The arrays are checked against the schema before the batch exists (names, dtypes and shapes, offsets, entity roles,
+  the order of the tuples), so a batch of another schema, another version or damaged arrays raises `ValueError`. A
+  batch encoded with capacities passes its `sizes` too.
+
+```python
+import json
+import pickle
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+state = tasks[1].initial_state
+loaded_encoder = pickle.loads(pickle.dumps(encoder))                 # table, options, fingerprint
+batch = encoder.encode([state], task_ids=[1])
+
+record = json.loads(json.dumps(encoding.schema_to_dict(encoder.schema)))
+schema = encoding.schema_from_dict(record, tasks)                    # rebuilt and checked over the table
+assert schema.schema_fingerprint == encoder.schema.schema_fingerprint
+assert loaded_encoder.encode([state], task_ids=[1]).relation_args.tolist() == batch.relation_args.tolist()
+
+with tempfile.TemporaryDirectory() as d:
+    np.savez(Path(d) / "batch.npz", **batch.as_dict())
+    with np.load(Path(d) / "batch.npz") as saved:
+        again = encoding.FlatBatch.from_arrays(schema, saved)
+assert np.array_equal(again.relation_args, batch.relation_args) and again.num_graphs == 1
+
+record["fingerprint"] = f"{int(record['fingerprint'], 16) ^ 1:016x}"
+try:
+    encoding.schema_from_dict(record, tasks)
+except ValueError as error:
+    print(error)                                                     # the fingerprint no longer matches
+```
 
 ### File format
 

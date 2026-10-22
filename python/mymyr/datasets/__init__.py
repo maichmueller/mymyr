@@ -30,6 +30,12 @@ On the device (CUDA builds; mymyr.cuda): ``device=`` a device ordinal or a mymyr
     spaces = mymyr.datasets.state_spaces(suite, device=0)        # a TaskSuite: one pipeline per domain, global order
     sampler = mymyr.datasets.StateSpaceSampler(spaces[0], seed=0)
 
+Datasets for models store rows and encode them when a batch is loaded:
+
+    rows = mymyr.datasets.StateRows.from_knowledge_base(kb)      # the rows and instances of every state; no graphs
+    collate = mymyr.datasets.EncodingCollate(encoder)            # collate_fn: encodes the items of a batch
+    loader = torch.utils.data.DataLoader(rows, batch_size=64, collate_fn=collate)
+
 Every applicable action is a transition, the goal distances
 are computed backward from the goal states, remove_if_unsolvable (default True) drops the whole space when
 the initial state cannot reach a goal, and a statically false goal gives no space at all. State ids are in
@@ -59,6 +65,7 @@ from mymyr._core._datasets import (
 from mymyr._core._datasets import state_space as _cpu_state_space
 from mymyr._core._rl import TaskSuite, TaskTable
 from mymyr.datasets._files import load, save
+from mymyr.datasets._rows import EncodedRows, EncodingCollate, StateRow, StateRows
 
 if TYPE_CHECKING:
     from mymyr.cuda import Context, DeviceStateSpace
@@ -273,9 +280,13 @@ def generalized_state_space(
 
 
 __all__ = [
+    "EncodedRows",
+    "EncodingCollate",
     "GeneralizedStateSpace",
     "GenerationResult",
     "KnowledgeBase",
+    "StateRow",
+    "StateRows",
     "StateSpace",
     "StateSpaceSampler",
     "TupleGraph",

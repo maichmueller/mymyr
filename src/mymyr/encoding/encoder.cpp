@@ -1078,6 +1078,63 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode(const EncodeInput& in
     return std::move(allocation.bundle);
 }
 
+void FlatEncoder::clear_capacity_tails(const FlatBuffers& out, const FlatSizes& sizes, const ExtraSizes& extra,
+                                       const BatchShape& capacities, const StaticShape& static_capacities) const
+{
+    const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
+    const StaticSizes& statics = extra.statics;
+    auto zero = [](void* data, u64 from, u64 to, usize width)
+    { std::memset(static_cast<std::byte*>(data) + from * width, 0, (to - from) * width); };
+    if (out.relation_args)
+        zero(out.relation_args, sizes.args, capacities.args, index_bytes);
+    if (out.numeric_values)
+        zero(out.numeric_values, extra.numeric, capacities.numeric,
+             m_schema->options().numeric_dtype == NumericDtype::F64 ? 8 : 4);
+    if (out.node_value)
+        zero(out.node_value, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
+    if (out.node_label)
+    {
+        zero(out.node_label, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
+        zero(out.edge_label, 2 * sizes.args, 2 * capacities.args, 4);
+        zero(out.edge_index, 2 * sizes.args, 2 * capacities.args, index_bytes);
+        zero(static_cast<std::byte*>(out.edge_index) + out.edge_stride * index_bytes, 2 * sizes.args,
+             2 * capacities.args, index_bytes);
+    }
+    if (out.entity_role)
+    {
+        zero(out.entity_role, sizes.entities, capacities.entities, 1);
+        zero(out.entity_ref, sizes.entities, capacities.entities, index_bytes);
+    }
+    if (out.target_entity)
+    {
+        zero(out.target_entity, sizes.targets, capacities.targets, index_bytes);
+        zero(out.target_group, sizes.targets, capacities.targets, 1);
+    }
+    if (out.history_entity)
+    {
+        zero(out.history_entity, sizes.history, capacities.history, index_bytes);
+        zero(out.history_dt, sizes.history, capacities.history, 4);
+    }
+    if (out.static_task_ids)
+    {
+        zero(out.static_task_ids, statics.instances, static_capacities.instances, 4);
+        zero(out.static_args, statics.args, static_capacities.args, index_bytes);
+        // the blocks past the batch's are empty: their offsets repeat the last entry
+        const u64 Rs = m_schema->static_relations().size();
+        auto repeat_last = [&]<class I>(void* offsets, I)
+        {
+            I* data = static_cast<I*>(offsets);
+            std::fill(data + statics.instances * Rs + 1, data + static_capacities.instances * Rs + 1,
+                      data[statics.instances * Rs]);
+        };
+        for (void* offsets : {out.static_offsets, out.static_arg_offsets})
+            if (m_schema->options().index == IndexType::I64)
+                repeat_last(offsets, i64{});
+            else
+                repeat_last(offsets, i32{});
+    }
+}
+
 std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const EncodeInput& in,
                                                                     const BatchShape& capacities, ThreadPool& pool,
                                                                     EncodeScratch& scratch, FlatSizes& sizes,
@@ -1091,7 +1148,6 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
     sizes = count(in, pool, scratch, &true_extra);
     if (extra)
         *extra = true_extra;
-    const StaticSizes& statics = true_extra.statics;
     if (exceeds_capacity(*m_schema, sizes, true_extra, capacities, static_capacities))
         sizes.overflow |= k_overflow_capacity;
     const u64 graphs = graphs_of(in);
@@ -1102,61 +1158,10 @@ std::shared_ptr<const rl::ArrayBundle> FlatEncoder::encode_capacity(const Encode
                                      2 * capacities.args, static_shape);
     const FlatBuffers out = allocation.buffers;
     const std::shared_ptr<rl::ArrayBundle>& bundle = allocation.bundle;
-    const usize index_bytes = m_schema->options().index == IndexType::I64 ? 8 : 4;
-    // the entries a batch does not use are zero, and an overflowing batch is all zero
-    auto zero = [](void* data, u64 from, u64 to, usize width)
-    { std::memset(static_cast<std::byte*>(data) + from * width, 0, (to - from) * width); };
     if (fits)
     {
         fill(in, sizes, out, pool, scratch);
-        if (out.relation_args)
-            zero(out.relation_args, sizes.args, capacities.args, index_bytes);
-        if (out.numeric_values)
-            zero(out.numeric_values, true_extra.numeric, capacities.numeric,
-                 m_schema->options().numeric_dtype == NumericDtype::F64 ? 8 : 4);
-        if (out.node_value)
-            zero(out.node_value, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
-        if (out.node_label)
-        {
-            zero(out.node_label, sizes.entities + sizes.tuples, capacities.entities + capacities.args, 4);
-            zero(out.edge_label, 2 * sizes.args, 2 * capacities.args, 4);
-            zero(out.edge_index, 2 * sizes.args, 2 * capacities.args, index_bytes);
-            zero(static_cast<std::byte*>(out.edge_index) + out.edge_stride * index_bytes, 2 * sizes.args,
-                 2 * capacities.args, index_bytes);
-        }
-        if (out.entity_role)
-        {
-            zero(out.entity_role, sizes.entities, capacities.entities, 1);
-            zero(out.entity_ref, sizes.entities, capacities.entities, index_bytes);
-        }
-        if (out.target_entity)
-        {
-            zero(out.target_entity, sizes.targets, capacities.targets, index_bytes);
-            zero(out.target_group, sizes.targets, capacities.targets, 1);
-        }
-        if (out.history_entity)
-        {
-            zero(out.history_entity, sizes.history, capacities.history, index_bytes);
-            zero(out.history_dt, sizes.history, capacities.history, 4);
-        }
-        if (out.static_task_ids)
-        {
-            zero(out.static_task_ids, statics.instances, static_shape.instances, 4);
-            zero(out.static_args, statics.args, static_shape.args, index_bytes);
-            // the blocks past the batch's are empty: their offsets repeat the last entry
-            const u64 Rs = m_schema->static_relations().size();
-            auto repeat_last = [&]<class I>(void* offsets, I)
-            {
-                I* data = static_cast<I*>(offsets);
-                std::fill(data + statics.instances * Rs + 1, data + static_shape.instances * Rs + 1,
-                          data[statics.instances * Rs]);
-            };
-            for (void* offsets : {out.static_offsets, out.static_arg_offsets})
-                if (m_schema->options().index == IndexType::I64)
-                    repeat_last(offsets, i64{});
-                else
-                    repeat_last(offsets, i32{});
-        }
+        clear_capacity_tails(out, sizes, true_extra, capacities, static_shape);
     }
     else
         for (const rl::ArrayInfo& info : bundle->arrays())

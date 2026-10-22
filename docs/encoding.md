@@ -1334,3 +1334,13 @@ instance view, unless the query passes `cuda::DerivedWords::Supplied`: that size
 derived words, and an encode that would evaluate them in such scratch is refused before any launch. The Python
 device encoder sizes its scratch that way when `derived=` is given. Split count/fill reuses the derived rows produced by count. Acquired generations retain their axiom
 tables and scratch requirements across refreshes.
+
+## Using the encoder
+
+- Encoding the states of a [CPU environment pool](rl.md#encoding-the-pools-states): the pool path, mapping a chosen
+  action entity back to the expansion row and to the environment's action, reusing a batch's memory with `into=`, and
+  [encoding the rows of a suite](rl.md#several-domains) as one batch per domain.
+- [Datasets that encode on load](datasets.md#training-data-encoded-on-load) with a collate function, and the storage of
+  [encoders, schemas and batches](datasets.md#encoders-schemas-and-batches).
+- [State spaces and search frontiers](search.md#encoding-the-states-of-a-search) as encoder input, and horizons built
+  from a state space's arrays.

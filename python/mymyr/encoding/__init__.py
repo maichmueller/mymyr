@@ -34,6 +34,14 @@ encoder gives the Simple graph next to the relation arrays). ``schema.simple_lab
 for the entities, an edge type per relation and tuple position, the edges' entity ids a strided view of the batch's
 arguments. The view copies no tuple and keeps the batch alive.
 
+``action_rows``, ``action_indices`` and ``action_entities`` map the action entities of a batch (the actions a policy
+chooses among) back to the rows of the expansion they were encoded from and to the actions an environment takes.
+``SuiteEncoder`` encodes the rows of a task suite, one encoder and one batch per domain, with each row's place in its
+batch (``SuiteBatch``). ``encode(..., capacities=..., into=batch)`` writes into the memory of an earlier batch of the
+same capacities (the arrays it exported change with it). ``schema_to_dict`` and ``schema_from_dict`` serialize a
+schema as options, catalog, fingerprint and version and check it when it is rebuilt over a table;
+``FlatBatch.from_arrays(schema, arrays)`` reads back a batch from ``batch.as_dict()`` and checks it against the schema.
+
 EncodingSchema is the relation catalog of an encoding: the relations a batch holds, sorted by name, with their
 arities, lanes and slot roles, and a fingerprint. It is a function of the domain and the options alone.
 """
@@ -51,11 +59,14 @@ from mymyr._core._encoding import (
     HGraphView,
     SimpleEncoder,
 )
+from mymyr.encoding._actions import action_entities, action_indices, action_rows
 from mymyr.encoding._device import DeviceCollator, DeviceFlatBatch, DeviceFlatStream
 from mymyr.encoding._hgraph import hgraph
 from mymyr.encoding._horizon import HorizonView, horizon, horizon_of_space
 from mymyr.encoding._literals import history_masks, subgoal_masks
 from mymyr.encoding._names import GraphDescription
+from mymyr.encoding._record import schema_from_dict, schema_to_dict
+from mymyr.encoding._suite import SuiteBatch, SuiteEncoder
 
 __all__ = [
     "DeviceCollator",
@@ -74,11 +85,18 @@ __all__ = [
     "HGraphView",
     "HorizonView",
     "SimpleEncoder",
+    "SuiteBatch",
+    "SuiteEncoder",
+    "action_entities",
+    "action_indices",
+    "action_rows",
     "collate",
     "hgraph",
     "history_masks",
     "horizon",
     "horizon_of_space",
+    "schema_from_dict",
+    "schema_to_dict",
     "subgoal_masks",
 ]
 

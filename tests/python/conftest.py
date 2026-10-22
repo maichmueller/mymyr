@@ -62,6 +62,28 @@ def walk(task, steps=20, seed=0, walks=2):
     return out
 
 
+def python_lines(file_suffix, call):
+    """The number of Python lines of the source file whose path ends in `file_suffix` that `call()` executes (line
+    events of the tracer): a call whose count does not grow with its input runs no Python code of that file per item."""
+    count = 0
+
+    def trace(frame, event, arg):
+        nonlocal count
+        if not frame.f_code.co_filename.endswith(file_suffix):
+            return None
+        if event == "line":
+            count += 1
+        return trace
+
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        call()
+    finally:
+        sys.settrace(previous)
+    return count
+
+
 # Tests that load an extension module which cannot run without the GIL (torchrl and tensordict import
 # torch._dynamo, which loads triton; so do torch.compile and torch._dynamo themselves) are marked
 # ``needs_gil``. Loading such a module enables the GIL for the rest of the process, and the free-threading
