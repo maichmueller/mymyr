@@ -158,10 +158,14 @@ template<class I> std::shared_ptr<const rl::ArrayBundle> concatenate(
     // A batch of the Simple graph alone has no relation arrays. The numeric values are those of the tuples of the last
     // numeric_relations relations, in segment order.
     const bool relation_arrays = first.find("relation_offsets"), simple = first.find("node_offsets");
-    const bool numeric = first.find("numeric_values");
+    // Every slice has the scalars of the first (collate checks them).
+    const rl::ArrayInfo* values_info = first.find("numeric_values");
+    const bool numeric = values_info != nullptr;
     const i64 numeric_scalar = first.scalar("numeric_relations");
-    if (numeric && (!relation_arrays || numeric_scalar < 0 || static_cast<u64>(numeric_scalar) > relations))
+    if (numeric && (!relation_arrays || numeric_scalar <= 0 || static_cast<u64>(numeric_scalar) > relations))
         invalid("a collated batch with numeric values has no valid numeric_relations");
+    if (numeric && first.scalar("numeric_dtype") != (values_info->dtype == rl::DType::F64 ? 1 : 0))
+        invalid("the numeric_dtype of a collated batch is not the dtype of its numeric values");
     const u64 numeric_relations = numeric ? static_cast<u64>(numeric_scalar) : 0;
     const u64 first_numeric = relations - numeric_relations;
     const IndexType index = sizeof(I) == 8 ? IndexType::I64 : IndexType::I32;
@@ -460,7 +464,8 @@ std::shared_ptr<const rl::ArrayBundle> collate(std::span<const std::shared_ptr<c
     const auto& first = *batches.front();
     for (const auto& b : batches)
     {
-        for (const char* field : {"version", "layout", "index_dtype", "statics", "schema_fingerprint", "num_relations"})
+        for (const char* field : {"version", "layout", "index_dtype", "statics", "schema_fingerprint", "num_relations",
+                                  "numeric_relations", "numeric_dtype"})
             if (b->scalar(field) != first.scalar(field))
                 invalid(std::string("collate received mixed ") + field);
         if (b->scalar("table_fingerprint") != first.scalar("table_fingerprint"))

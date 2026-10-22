@@ -438,3 +438,49 @@ TEST(EncodingCollate, RefusesNumericValuesWithoutTheirRelationCount)
     const std::vector<std::shared_ptr<const rl::ArrayBundle>> batches{stripped};
     EXPECT_THROW((void)encoding::collate(batches), std::invalid_argument);
 }
+
+namespace
+{
+/// A copy of `batch` with its scalar `key` set to `value`.
+std::shared_ptr<const rl::ArrayBundle> with_scalar(const rl::ArrayBundle& batch, std::string_view key, i64 value)
+{
+    rl::ArrayBundle::Builder builder;
+    for (const auto& [k, v] : batch.scalars())
+        builder.scalar(k, k.view() == key ? value : v);
+    for (const auto& info : batch.arrays())
+        builder.add_uninitialized(info.name, info.dtype, info.shape);
+    auto out = std::make_shared<rl::ArrayBundle>(builder.build());
+    for (const auto& info : batch.arrays())
+        std::memcpy(out->mutable_data(info.name.view()), batch.data(info), info.elements() * rl::dtype_bytes(info.dtype));
+    return out;
+}
+}
+
+TEST(EncodingCollate, RefusesNumericScalarsThatDifferBetweenSlicesOrDoNotDescribeTheValues)
+{
+    const auto c = numeric_corpus().front();
+    const test::Rows rows = walk_rows(*c.table, 6, 193);
+    const auto input = input_of(rows);
+    const auto encoder = encoding::FlatEncoder::create(c.table, test::encoder_options());
+    const auto slices = parts(input, c.table->row_words(), {3u, input.states.rows - 3});
+    const auto first = encoder->encode(slices[0]), second = encoder->encode(slices[1]);
+    const i64 numeric_relations = first->scalar("numeric_relations");
+    ASSERT_GT(numeric_relations, 0);
+    ASSERT_GT(first->find("numeric_values")->elements(), 0);
+    ASSERT_EQ(first->scalar("numeric_dtype"), 0);
+    same(*encoder->encode(input), *encoding::collate(std::vector{first, second}));
+    // a later slice with other numeric scalars
+    expect_refused({first, with_scalar(*second, "numeric_relations", numeric_relations - 1)},
+                   "collate received mixed numeric_relations");
+    expect_refused({first, with_scalar(*second, "numeric_dtype", 1)}, "collate received mixed numeric_dtype");
+    // no numeric relation for the stored values, and a numeric_dtype that is not the values' dtype
+    for (const auto& [key, value, message] :
+         {std::tuple{"numeric_relations", i64{0}, "has no valid numeric_relations"},
+          std::tuple{"numeric_dtype", i64{1}, "is not the dtype of its numeric values"}})
+    {
+        SCOPED_TRACE(key);
+        const auto a = with_scalar(*first, key, value), b = with_scalar(*second, key, value);
+        expect_refused({a}, message);
+        expect_refused({a, b}, message);
+    }
+}
