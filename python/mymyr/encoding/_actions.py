@@ -67,6 +67,8 @@ def action_indices(batch: FlatBatch, entities: SupportsDLPack | None = None) -> 
     batch. Raises ``ValueError`` for an id outside the batch or one that is not an action entity.
     """
     chosen = _checked(batch, entities)
+    if batch.implicit_entities:
+        return chosen
     return _ints(batch.entity_ref)[chosen]
 
 
@@ -86,5 +88,7 @@ def action_rows(batch: FlatBatch, actions: Expansion, entities: SupportsDLPack |
         raise ValueError(
             f"mymyr: encoding: the expansion has {len(offsets) - 1} states, the batch {batch.num_graphs} graphs"
         )
+    if batch.implicit_entities:
+        return chosen
     graphs = _graphs_of(batch, chosen)
     return offsets[graphs] + _ints(batch.entity_ref)[chosen]

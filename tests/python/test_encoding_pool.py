@@ -145,6 +145,25 @@ def test_action_entities_of_a_batch_without_actions():
     assert plain.implicit_entities and len(encoding.action_entities(plain)) == 0
     with pytest.raises(ValueError, match="no action entities"):
         encoding.action_indices(plain, [0])
+    with pytest.raises(ValueError, match="no action entities"):
+        encoding.action_rows(plain, rl.expand(task, [task.initial_state]), [0])
+
+
+@pytest.mark.parametrize(
+    "options", [dict(include_actions=False, entity_arrays="auto"), {}], ids=["implicit-entities", "default"]
+)
+def test_the_action_mappings_of_a_batch_without_actions_are_empty(options):
+    task = text_task("gripper__prob05")
+    states = walk(task, steps=3, walks=1)
+    expansion = rl.expand(rl.as_table(task), states)
+    batch = encoding.FlatRelationEncoder(task, **options).encode(states)
+    assert batch.implicit_entities == ("entity_arrays" in options)
+    for mapped in (
+        encoding.action_entities(batch),
+        encoding.action_indices(batch),
+        encoding.action_rows(batch, expansion),
+    ):
+        assert mapped.dtype == np.int64 and mapped.shape == (0,)
 
 
 def test_action_rows_refuse_what_is_not_an_action_entity_of_the_batch():
