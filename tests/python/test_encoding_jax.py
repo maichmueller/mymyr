@@ -722,6 +722,58 @@ def test_invalid_history_counts_and_layer_bits_are_flagged_or_raise(cases):
         assert jax_encode(encoder, case, platform, capacities=caps, **kwargs).sizes["overflow"] is False
 
 
+@pytest.mark.parametrize("dtype", ["int64", "uint64", "uint32"])
+@pytest.mark.parametrize("which", ["dt", "count"])
+def test_history_integers_that_int32_cannot_hold_raise_or_flag_their_row(cases, which, dtype):
+    # 2**32 + v narrows to v: a count or dt that wraps into the valid range is refused all the same
+    case = cases["gripper"]
+    options = LAYERED_OPTION_SETS["history"]
+    encoder = encoding.FlatRelationEncoder(case.source, **options)
+    pos, neg, dt, count = layered_kwargs(case, options)["history"]
+    k = 2 if which == "dt" else 3
+    fits = np.abs((dt, count)[k - 2]).astype(dtype)
+    wide = fits.copy()
+    at = (3, 0) if which == "dt" else 3
+    wide[at] += 2**31 if dtype == "uint32" else 2**32
+    with_fits = (pos, neg, *((fits, count) if k == 2 else (dt, fits)))
+    with_wide = (pos, neg, *((wide, count) if k == 2 else (dt, wide)))
+    # the forms of the history: with its count, and for dt also without (every step valid)
+    forms = [with_wide] + ([with_wide[:3]] if k == 2 else [])
+    narrow = (pos, neg, *(x.astype(np.int32) for x in with_fits[2:]))
+    caps = exact_capacities(host_encode(encoder, case, history=narrow))
+    caps["history"] = max(caps["history"], 64)
+    message = rf"^mymyr: 'history\[{k}\] \({which}\)' has a value that int32 cannot hold"
+    for form in forms:
+        with pytest.raises(ValueError, match=message):
+            host_encode(encoder, case, history=form)
+    rows = halves(case.rows)
+
+    def on(history, platform):
+        return (*(put(halves(m), platform) for m in history[:2]), *(put(x, platform) for x in history[2:]))
+
+    def f(rows, history):
+        return ej.encode(encoder, rows, history=history, capacities=caps)
+
+    with x64(dtype != "uint32"):
+        for platform in PLATFORMS:
+            for form in forms:
+                device_form = on(form, platform)
+                assert device_form[k].dtype == np.dtype(dtype)
+                # concrete NumPy or JAX arrays raise, with and without capacities
+                for given in (form, device_form):
+                    for c in (None, caps):
+                        with pytest.raises(ValueError, match=message):
+                            ej.encode(encoder, put(rows, platform), history=given, capacities=c)
+                # traced ones make the row invalid
+                batch = jax.jit(f)(put(rows, platform), device_form)
+                sizes = batch.sizes
+                assert sizes["overflow"] and sizes["invalid_input"] and not sizes["capacity_overflow"]
+                assert all(not np.asarray(a).any() for a in batch.as_dict().values() if hasattr(a, "shape"))
+            # the same dtype within int32 encodes as int32 does
+            host = host_encode(encoder, case, history=narrow, capacities=caps)
+            same_batch(host, jax.jit(f)(put(rows, platform), on(with_fits, platform)))
+
+
 # ------------------------------------------------------------------------------------------------ errors and flags
 
 
