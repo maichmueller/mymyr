@@ -120,9 +120,16 @@ def test_numeric_stream_collation_and_capture(numeric_cases, layout, index, dtyp
     equal(expected, ring.flush(capacities=cap))
     parts = [encoder.encode(device_rows[:3], device_ids[:3]), encoder.encode(device_rows[3:3], device_ids[3:3]),
              encoder.encode(device_rows[3:], device_ids[3:])]
+    empty_host = encoder.encode(rows[:0], ids[:0])
+    equal(empty_host, encoding.DeviceCollator([parts[1], parts[1]]).encode())
+    equal(empty_host, ring.flush(capacities=cap))
     prepared = encoding.DeviceCollator(parts)
     equal(expected, prepared.encode())
     equal(expected, prepared.encode(capacities=cap), capacity=True)
+    overflow = prepared.encode(capacities={**cap, "numeric": len(expected.numeric_values) - 1})
+    assert overflow.sizes["capacity_overflow"]
+    for array in overflow._arrays.values():
+        assert torch.count_nonzero(array).item() == 0
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         ring.append(device_rows, device_ids)
