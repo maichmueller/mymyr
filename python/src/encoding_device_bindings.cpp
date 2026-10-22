@@ -147,14 +147,16 @@ cuda::DeviceEncodeInput input_of(const Rows& r)
 
 /// The destination arrays, in the order of encoding._device: task_ids, num_objects, entity_offsets, entity_role,
 /// entity_ref, relation_counts, relation_offsets, relation_arg_offsets, relation_args, goal_complete, target_offsets,
-/// target_entity, target_group, history_offsets, history_entity, history_dt, the five static arrays, static_sizes, sizes (0: the array is absent or has no
-/// entries).
+/// target_entity, target_group, history_offsets, history_entity, history_dt, the five static arrays, static_sizes,
+/// sizes (0: the array is absent or has no entries).
 constexpr usize k_output_fields = 23;
 struct DeviceSizes
 {
     encoding::FlatSizes batch;
     encoding::StaticSizes statics;
 };
+using ExactAllocation = std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u32, u64, u64, u64)>;
+using CollationAllocation = std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u32, u64, u64, u64)>;
 
 cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities,
                               const encoding::StaticShape& statics = {})
@@ -362,10 +364,10 @@ public:
                                  input_of(rows), out);
     }
 
-    /// Counts, waits for the sizes, and calls `allocate(entities, tuples, args, targets, history, flags, static_instances, static_tuples, static_args)` to check the flags
-    /// and return the graph extent and output pointers (the sizes pointer ignored), then fills them.
+    /// Counts, waits for the dynamic and static sizes, and calls allocate to check the flags and return the graph
+    /// extent and output pointers (the sizes pointer ignored), then fills them.
     void encode_exact(std::intptr_t stream, const std::vector<std::uintptr_t>& row_fields,
-                      const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u64, u32, u64, u64, u64)>& allocate)
+                      const ExactAllocation& allocate)
     {
         const Rows rows = rows_of(row_fields);
         std::vector<std::uintptr_t> outputs;
@@ -501,7 +503,7 @@ public:
         m_collator->encode(ptr<void>(scratch), bytes, out);
     }
     void encode_exact(std::uintptr_t scratch, u64 bytes,
-                       const std::function<std::vector<std::uintptr_t>(u64, u64, u64, u64, u32, u64, u64, u64)>& allocate)
+                       const CollationAllocation& allocate)
     {
         nb::gil_scoped_release release;
         std::lock_guard lock(m_mutex);

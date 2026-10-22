@@ -521,3 +521,11 @@ def test_every_framework_exports_the_blocks(framework):
         assert np.array_equal(np.from_dlpack(exported[name]), numpy_arrays[name]) or np.array_equal(
             np.asarray(exported[name]), numpy_arrays[name]
         ), name
+
+
+def test_shared_statics_have_a_specific_jax_ffi_refusal():
+    from mymyr._core import _encoding_jax
+
+    encoder = encoding.FlatRelationEncoder(text_task("gripper__prob05"), statics="shared")
+    with pytest.raises(ValueError, match="JAX FFI does not encode shared statics: .*no static block arrays"):
+        _encoding_jax.register(encoder)

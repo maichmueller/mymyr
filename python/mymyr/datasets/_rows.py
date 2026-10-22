@@ -204,7 +204,8 @@ class StateRows:
             raise IndexError(f"mymyr: datasets: row {i} of a dataset of {n} rows")
         i %= n
         goal = None if self.goals is None else (self.goals[0][i], self.goals[1][i])
-        return StateRow(self.rows[i], self.task_ids[i] if _on_device(self.rows) else int(self.task_ids[i]), {name: v[i] for name, v in self.labels.items()}, goal)
+        task_id = self.task_ids[i] if _on_device(self.rows) else int(self.task_ids[i])
+        return StateRow(self.rows[i], task_id, {name: v[i] for name, v in self.labels.items()}, goal)
 
     def take(self, indices: SupportsDLPack | Sequence[int]) -> StateRows:
         """The dataset of the rows ``indices`` (any order, repeats allowed), as a copy: a batch loaded whole instead
@@ -279,7 +280,8 @@ class EncodingCollate:
     ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result). ``framework``,
     ``threads`` and ``pool`` are as in ``encoder.encode``. Rows with their own goal (a dataset made with ``goals``) are
     encoded with it. CUDA rows stay on the device and dispatch to the device encoder. ``capacities`` optionally
-    supplies its output capacities, avoiding the wait for exact allocation. The collate function is a plain callable object: it pickles with its encoder, so it works with
+    supplies its output capacities, avoiding the wait for exact allocation. The collate function is a plain callable
+    object: it pickles with its encoder, so it works with
     data loader worker processes.
     """
 

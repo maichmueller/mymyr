@@ -96,7 +96,12 @@ struct EncoderEntry : FfiEntry
 
     std::atomic<u64> cpu_calls{0}, cuda_calls{0}, captured_calls{0}, pools_built{0};
 
-    explicit EncoderEntry(std::shared_ptr<const encoding::FlatEncoder> e) : encoder(std::move(e)) {}
+    explicit EncoderEntry(std::shared_ptr<const encoding::FlatEncoder> e) : encoder(std::move(e))
+    {
+        if (encoder->schema().shared_statics())
+            throw std::invalid_argument("mymyr: encoding: JAX FFI does not encode shared statics: "
+                                        "its result signature has no static block arrays");
+    }
 
     /// The pool of `threads` workers (the caller holds host_mutex).
     ThreadPool& pool_of(u32 threads)
@@ -196,8 +201,6 @@ struct EncoderEntry : FfiEntry
             auto made = std::make_shared<Device>();
             made->ordinal = ordinal;
             made->ctx = cuda::DeviceContext::create(ordinal);
-            if (encoder->schema().shared_statics())
-                throw std::invalid_argument("mymyr: encoding: JAX FFI has no shared static block outputs");
             made->encoder = std::make_unique<cuda::DeviceEncoder>(made->ctx, encoder);
             made->held.emplace(made->encoder->context().acquire());
             cuda::DeviceGuard guard(ordinal);

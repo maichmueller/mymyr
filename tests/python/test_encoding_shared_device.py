@@ -105,6 +105,8 @@ def test_mixed_width_env_observations_and_dataset_rows_stay_on_device(wide_table
     try:
         for _ in range(2):
             obs = env.observation()
+            for row, instance in enumerate((2, 0, 1, 0, 2, 1)):
+                obs.states[row, (1, 42, 184)[instance]:] = -1
             host = encoder.encode(obs.states.cpu().numpy(), obs.task_ids.cpu().numpy())
             same_batch(host, encoder.encode(obs.states, obs.task_ids))
             dataset = StateRows(obs.states, obs.task_ids, labels={"value": ids})

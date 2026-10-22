@@ -90,7 +90,8 @@ def _native() -> Any:
 class _Layout:
     """Which arrays a batch of an encoder stores, and their dtypes."""
 
-    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets", "shared", "static_relations")
+    __slots__ = ("counts", "entity_arrays", "goal_complete", "history", "index", "relations", "targets", "shared",
+                 "static_relations")
 
     def __init__(self, encoder: Any):
         options = encoder.options
@@ -543,7 +544,8 @@ def encode_arrays(
         out = _outputs(torch, specs, device)
         scratch = _scratch(torch, native, stream, rows.graphs, device, derived is not None)
         native.encode(stream, rows.fields, _pointers(out),
-                      [out["task_ids"].shape[0], entities, args, targets, steps, static_instances, static_args], scratch.data_ptr(), scratch.numel())
+                      [out["task_ids"].shape[0], entities, args, targets, steps, static_instances, static_args],
+                      scratch.data_ptr(), scratch.numel())
     else:
 
         def allocate(entities: int, tuples: int, args: int, targets: int, steps: int, flags: int,
@@ -801,7 +803,8 @@ class DeviceFlatBatch:
             return None
         values = dict(zip(_SIZE_FIELDS, self._sizes.tolist(), strict=True))
         if self._layout.shared:
-            values.update(zip(("static_instances", "static_tuples", "static_args"), self._static_sizes.tolist(), strict=True))
+            fields = ("static_instances", "static_tuples", "static_args")
+            values.update(zip(fields, self._static_sizes.tolist(), strict=True))
         if not self._layout.history:
             del values["history"]  # a schema without history has the keys of a batch without it
         flags = values["overflow"]
@@ -1021,7 +1024,8 @@ class DeviceCollator:
         encoder = first._encoder
         # Keep capacity storage: empty live views have null data pointers.
         arrays = [batch._arrays.copy() for batch in batches]
-        inputs = [_pointers({**a, "sizes": batch._sizes, "static_sizes": batch._static_sizes}) for a, batch in zip(arrays, batches, strict=True)]
+        inputs = [_pointers({**a, "sizes": batch._sizes, "static_sizes": batch._static_sizes})
+                  for a, batch in zip(arrays, batches, strict=True)]
         counts = [batch.num_graphs for batch in batches]
         encoders = [batch._encoder for batch in batches]
         shapes = [[count, batch.static_task_ids.numel() if batch._layout.shared else 0,
@@ -1049,7 +1053,8 @@ class DeviceCollator:
                     raise OverflowError("mymyr: encoding: collated totals exceed the index type")
                 if flags:
                     raise _error("cannot collate an overflowed batch")
-                for name, (shape, dtype) in layout.specs(torch, graphs, entities, args, targets, 0, static_instances, static_args).items():
+                specs = layout.specs(torch, graphs, entities, args, targets, 0, static_instances, static_args)
+                for name, (shape, dtype) in specs.items():
                     if name != "sizes":
                         out[name] = torch.empty(shape, dtype=dtype, device=first.device)
                 return _pointers(out)

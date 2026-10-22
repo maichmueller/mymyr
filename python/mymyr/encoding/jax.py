@@ -67,8 +67,6 @@ class _Registration:
         self.fingerprint = encoder.schema_fingerprint
         self.table_fingerprint = encoder.table_fingerprint
         self.options = encoder.options
-        if encoder.options["statics"] == "shared":
-            raise _error("JAX FFI does not encode shared statics: its result signature has no static block arrays")
         self.layout = _device.layout_of(encoder)
         self.info = _encoding_jax.info(handle)
         self.scratch: dict[tuple[int, int, bool], int] = {}
