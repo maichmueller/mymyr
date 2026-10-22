@@ -41,6 +41,7 @@
 #include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/frontend/domain.hpp"
 #include "mymyr/rl/expand.hpp"
+#include "mymyr/task/workspace.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -215,6 +216,118 @@ std::shared_ptr<Expanded> expand_rows(const rl::TaskTable& table, const u64* row
     }
 }
 
+struct EncodeTimes
+{
+    double batch, single;
+    std::shared_ptr<const rl::ArrayBundle> bundle;
+};
+
+/// Allocation-inclusive times, with a persistent pool and two warmed bundle allocations.
+EncodeTimes time_encode(const encoding::FlatEncoder& encoder, const encoding::EncodeInput& in, u32 threads,
+                        bool singles = false)
+{
+    ThreadPool pool(threads);
+    encoding::EncodeScratch scratch;
+    EncodeTimes out{1e300, 1e300, encoder.encode(in, pool, scratch)};
+    out.bundle = encoder.encode(in, pool, scratch);
+    for (int rep = 0; rep < 9; ++rep)
+    {
+        const double start = now_s();
+        out.bundle = encoder.encode(in, pool, scratch);
+        out.batch = std::min(out.batch, now_s() - start);
+    }
+    out.batch *= 1e6 / static_cast<double>(in.states.rows);
+    if (singles)
+    {
+        const u64 count = std::min<u64>(32, in.states.rows);
+        for (int rep = 0; rep < 20; ++rep)
+        {
+            const double start = now_s();
+            for (u64 i = 0; i < count; ++i)
+            {
+                auto one = in;
+                one.states = {in.states.row(i), 1, in.states.words, 0, 0};
+                if (in.derived)
+                    one.derived += i * in.derived_stride;
+                const auto bundle = encoder.encode(one, pool, scratch);
+            }
+            out.single = std::min(out.single, (now_s() - start) * 1e6 / static_cast<double>(count));
+        }
+    }
+    return out;
+}
+
+/// Measures the core and each optional path over identical walk rows. Derived-word preparation and action expansion
+/// are outside the encoding timers. Ratios include output allocation and use the fastest of nine warmed calls.
+void time_targets(const std::shared_ptr<const rl::TaskTable>& table, const std::vector<u64>& rows, u64 n)
+{
+    encoding::FlatOptions options;
+    options.goal_derivations = {};
+    encoding::EncodeInput in;
+    in.states = {rows.data(), n, table->words(), 0, 0};
+    const auto core = encoding::FlatEncoder::create(table, options);
+    const EncodeTimes graph = time_encode(*core, in, 1, true);
+    const EncodeTimes parallel = time_encode(*core, in, 8);
+    if (batch_hash(*graph.bundle) != batch_hash(*parallel.bundle))
+        throw std::runtime_error("thread counts produced different batches");
+
+    const auto expanded = expand_rows(*table, rows.data(), n, table->words());
+    auto action_input = in;
+    action_input.actions = &expanded->x;
+    const EncodeTimes actions = time_encode(*core, action_input, 1);
+    const double action_args = static_cast<double>(batch_sizes(*actions.bundle).args - batch_sizes(*graph.bundle).args)
+                               / static_cast<double>(n);
+
+    options.layout = encoding::Layout::Relation;
+    const auto relational = encoding::FlatEncoder::create(table, options);
+    const EncodeTimes relation = time_encode(*relational, in, 1);
+    const HGraphTimes hgraph = time_hgraph(relation.bundle, relational->schema_ptr());
+    options.layout = encoding::Layout::Graph;
+    options.outputs = {encoding::Output::Simple};
+    const EncodeTimes simple = time_encode(*encoding::FlatEncoder::create(table, options), in, 1);
+
+    const u32 derived_words = core->context().max_derived_words();
+    std::vector<u64> derived(n * derived_words);
+    if (derived_words)
+    {
+        const auto workspace = table->instance(0).task->workspace();
+        auto& engine = workspace->engine();
+        for (u64 i = 0; i < n; ++i)
+        {
+            engine.set_state(in.states.row(i), table->words());
+            engine.build_view();
+            workspace->axioms().evaluate();
+            std::copy_n(engine.derived(), derived_words, derived.data() + i * derived_words);
+        }
+    }
+    auto reused_input = in;
+    reused_input.derived = derived.empty() ? nullptr : derived.data();
+    reused_input.derived_stride = derived_words;
+    const EncodeTimes reused = time_encode(*core, reused_input, 1);
+    if (batch_hash(*graph.bundle) != batch_hash(*reused.bundle))
+        throw std::runtime_error("supplied derived words produced a different batch");
+    options.outputs = {encoding::Output::Relations};
+    options.include_derived = false;
+    const EncodeTimes plain = time_encode(*encoding::FlatEncoder::create(table, options), in, 1);
+    const double args = static_cast<double>(batch_sizes(*graph.bundle).args) / static_cast<double>(n);
+    char action_ns[32] = "null";
+    if (action_args > 0)
+        std::snprintf(action_ns, sizeof action_ns, "%.6f", (actions.batch - graph.batch) * 1000 / action_args);
+    std::printf("{\"N\":%llu,\"core_us\":%.6f,\"args_per_state\":%.3f,\"core_limit_us\":%.6f,"
+                "\"actions_us\":%.6f,\"action_args_per_state\":%.3f,\"action_ns_per_int\":%s,"
+                "\"derived_words\":%u,\"without_derived_us\":%.6f,\"reused_derived_us\":%.6f,"
+                "\"single_cpp_us\":%.6f,\"eight_threads_us\":%.6f,\"eight_threads_speedup\":%.4f,"
+                "\"relation_us\":%.6f,\"relation_over_graph\":%.4f,\"hgraph_us\":%.6f,"
+                "\"hgraph_with_encode_ratio\":%.4f,\"hgraph_full_us\":%.6f,"
+                "\"simple_us\":%.6f,\"simple_over_core\":%.4f,\"hash\":\"%s\"}\n",
+                static_cast<unsigned long long>(n), graph.batch, args, 0.3 + args * 0.001, actions.batch,
+                action_args, action_ns, derived_words, plain.batch, reused.batch, graph.single, parallel.batch,
+                graph.batch / parallel.batch, relation.batch, relation.batch / graph.batch,
+                hgraph.view * 1e6 / static_cast<double>(n), 1 + hgraph.view * 1e6 / static_cast<double>(n) / relation.batch,
+                hgraph.full * 1e6 / static_cast<double>(n), simple.batch, simple.batch / graph.batch,
+                batch_hash(*graph.bundle).c_str());
+}
+
 /// The nodes and edges of the horizons of `roots` (a root per graph), `depth` levels deep.
 struct Horizon
 {
@@ -265,6 +378,12 @@ Horizon build_horizon(const rl::TaskTable& table, const std::vector<u64>& roots,
 
 int main(int argc, char** argv)
 {
+    const bool targets = argc > 1 && std::string(argv[1]) == "--targets";
+    if (targets)
+    {
+        --argc;
+        ++argv;
+    }
     if (argc < 3)
     {
         std::fprintf(stderr, "usage: mymyr_encoding domain.pddl problem.pddl [N] [seed]\n");
@@ -274,6 +393,8 @@ int main(int argc, char** argv)
     {
         const u64 n = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 1024;
         const u64 seed = argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 1;
+        if (n == 0)
+            throw std::invalid_argument("N must be positive");
         const TaskPtr task = Task::create(*frontend::load_task(argv[1], argv[2]));
         const auto table = rl::TaskTable::single(task);
         const u32 words = table->words();
@@ -310,6 +431,11 @@ int main(int argc, char** argv)
             }
         }
 
+        if (targets)
+        {
+            time_targets(table, rows, n);
+            return 0;
+        }
         const std::string layout = argc > 5 ? argv[5] : "graph";
         const u32 threads = argc > 6 ? static_cast<u32>(std::strtoul(argv[6], nullptr, 10)) : 1;
         encoding::FlatOptions options;
