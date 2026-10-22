@@ -80,6 +80,7 @@ void compare(const Batch& batch, const Config& config, encoding::Layout layout)
         const I* arguments;
         u32 count(u64 s) const { return static_cast<u32>(offsets[s + 1] - offsets[s]); }
         u64 args(u64 s, u32) const { return static_cast<u64>(arguments[s]); }
+        u64 numeric_before(u64 s, u64 block) const { return static_cast<u64>(offsets[s]) - block; }
     } positions{expected.at<I>("relation_offsets"), expected.at<I>("relation_arg_offsets")};
     for (u64 g = 0; g < G; ++g)
     {

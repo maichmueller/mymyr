@@ -28,6 +28,8 @@ struct ScratchLayout
     bool wide = false;
     bool relation_major = false;
     bool history = false;  // the totals have the history row
+    bool numeric = false;
+    [[nodiscard]] u64 numeric_at(u64 graphs) const;
     [[nodiscard]] friend bool operator==(const ScratchLayout&, const ScratchLayout&) noexcept = default;
     /// The entries of the scanned array for a batch of `graphs` graphs.
     [[nodiscard]] u64 scanned(u64 graphs) const;

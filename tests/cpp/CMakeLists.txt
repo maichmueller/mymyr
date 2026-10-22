@@ -191,6 +191,7 @@ if(TARGET mymyr_cuda)
         # the relational encoder on the device (cuda/encoding.hpp): its context, memory and kernels against the host
         add_executable(mymyr_device_encoding_tests ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encoding.cpp
                                                    ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encode.cpp
+                                                   ${PROJECT_SOURCE_DIR}/tests/cuda/test_device_encoding_numeric.cpp
                                                    ${PROJECT_SOURCE_DIR}/tests/cuda/context_probe.cu)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr::cuda mymyr::encoding mymyr::frontend GTest::gtest_main)
         target_link_libraries(mymyr_device_encoding_tests PRIVATE mymyr_warnings)

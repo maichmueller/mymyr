@@ -13,12 +13,12 @@ struct CollationSlice
 /// Scanned in place to the entities and targets before each graph (entry 0 stays zero).
 struct GraphCounts
 {
-    u64 entities = 0, targets = 0;
+    u64 entities = 0, targets = 0, numeric = 0;
 };
 /// Scanned in place to the tuples and arguments before each cell (entry 0 stays zero).
 struct CellCounts
 {
-    u64 tuples = 0, args = 0;
+    u64 tuples = 0, args = 0, numeric = 0;
 };
 /// Scratch: graph counts [graphs + 1], cell counts [cells + 1], the source overflow word, then the scan's temporary
 /// storage, each part 256-byte aligned.
@@ -26,7 +26,8 @@ struct CollationParams
 {
     const CollationSlice* slices = nullptr;
     u64 batches = 0, graphs = 0, relations = 0, cells = 0;
-    bool index64 = false, relation_major = false;
+    bool index64 = false, relation_major = false, numeric_f64 = false;
+    u32 numeric_relations = 0;
     u32 grid = 1;  // blocks of the grid-stride count and fill
     GraphCounts* graph_counts = nullptr;
     CellCounts* cell_counts = nullptr;

@@ -1115,7 +1115,7 @@ TEST(DeviceEncoder, GrowsWithItsTable)
     EXPECT_THROW(device.refresh(encoding::FlatEncoder::create(rl::TaskTable::create(tasks), other)), std::invalid_argument);
 }
 
-TEST(DeviceEncoder, RefusesToGrowIntoATableWithNumericStateWords)
+TEST(DeviceEncoder, GrowsIntoATableWithNumericStateWords)
 {
     // the first instance has no object of the numeric function's type: without include_numeric both tables have one
     // schema, and only the grown one has numeric state words
@@ -1136,21 +1136,10 @@ TEST(DeviceEncoder, RefusesToGrowIntoATableWithNumericStateWords)
     ASSERT_TRUE(grown->table().numeric());
     ASSERT_EQ(base->schema().fingerprint(), grown->schema().fingerprint());
     cuda::DeviceEncoder device(device_context(), base);
-    try
-    {
-        (void)device.refresh(grown);
-        ADD_FAILURE() << "the device grew into a table with numeric state words";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode numeric relations"),
-                  std::string::npos)
-            << e.what();
-    }
-    // nothing was uploaded
-    EXPECT_EQ(device.context().generation(), 1u);
-    EXPECT_EQ(device.context().num_instances(), 1u);
-    EXPECT_EQ(device.encoder(), base);
+    EXPECT_TRUE(device.refresh(grown));
+    EXPECT_EQ(device.context().generation(), 2u);
+    EXPECT_EQ(device.context().num_instances(), 2u);
+    EXPECT_EQ(device.encoder(), grown);
 }
 
 TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
@@ -1173,28 +1162,6 @@ TEST(DeviceEncoder, RefusesWhatTheDeviceDoesNotEncode)
         EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode action targets"),
                   std::string::npos)
             << e.what();
-    }
-    // numeric relations, and the numeric state words of a table whose encoder leaves the relations out
-    {
-        const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
-        const auto numeric_table = rl::TaskTable::single(
-            Task::create(*frontend::load_task(dir + "domain.pddl", dir + "p01.pddl")));
-        for (const bool include_numeric : {true, false})
-        {
-            encoding::FlatOptions numeric = test::encoder_options();
-            numeric.include_numeric = include_numeric;
-            try
-            {
-                cuda::DeviceEncoder device(ctx, encoding::FlatEncoder::create(numeric_table, numeric));
-                ADD_FAILURE() << "numeric relations were accepted (include_numeric " << include_numeric << ")";
-            }
-            catch (const std::invalid_argument& e)
-            {
-                EXPECT_NE(std::string(e.what()).find("mymyr: encoding: the device does not encode numeric relations"),
-                          std::string::npos)
-                    << e.what();
-            }
-        }
     }
     // horizon relations: every mode, the rooted horizon (parent, sibling and cousin relations), the transitions (the
     // depth-one horizons: full or delta, the root excluded)
@@ -1302,21 +1269,13 @@ TEST(DeviceEncoderSchema, RefusesActionTargets)
     o.targets = {encoding::TargetSource::Action};
     expect_schema_refusal(o, "action targets");
 }
-TEST(DeviceEncoderSchema, RefusesNumericRelations)
+TEST(DeviceEncoderSchema, AcceptsNumericRelations)
 {
     const std::string dir = std::string(MYMYR_TEST_DATA_DIR) + "/pddl/counters/";
     const auto table = rl::TaskTable::single(Task::create(*frontend::load_task(dir + "domain.pddl", dir + "p01.pddl")));
     const auto schema = encoding::EncodingSchema::create(*table, test::encoder_options());
     ASSERT_TRUE(schema->has_numeric());
-    try
-    {
-        cuda::DeviceEncoder::check_schema(*schema);
-        FAIL() << "the schema was accepted";
-    }
-    catch (const std::invalid_argument& e)
-    {
-        EXPECT_EQ(std::string(e.what()), "mymyr: encoding: the device does not encode numeric relations");
-    }
+    EXPECT_NO_THROW(cuda::DeviceEncoder::check_schema(*schema));
 }
 TEST(DeviceEncoderSchema, RefusesSharedStatics)
 {
@@ -1397,8 +1356,7 @@ TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncod
         change(o);
         cases.push_back({what, t, o});
     };
-    add("numeric relations", numeric_table, [](auto&) {});
-    add("numeric relations (the table has numeric state words)", numeric_table, [](auto& o) { o.include_numeric = false; });
+    add("Simple", numeric_table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
     add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
     add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Relations, encoding::Output::Simple}; });
     add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });

@@ -849,8 +849,13 @@ assert wide.relation_names.count("[num]battery-level") == 1
 their numeric words). The numeric lane is the one lane that reads the numeric part of a row: goals, subgoals, history
 and actions are over atoms, and a numeric constraint of the goal is no goal literal (`goal_complete` is 0 for a goal
 with one). The numeric relations are never static, so `statics='shared'` leaves them in the graphs. Horizon encoders
-refuse a domain with fluent numeric functions, and the device refuses numeric tables
-([Encoding on the device](#encoding-on-the-device)).
+refuse a domain with fluent numeric functions.
+
+The device ([Encoding on the device](#encoding-on-the-device)) encodes numeric rows into the same tuples, order and
+values as the CPU, for both layouts, both index types and both numeric dtypes, in exact and capacity calls, the torch
+op, device streams and collation; the conversion of a value to `float32` rounds to nearest, ties to even, on both
+processors. Capacity calls of a schema that stores `numeric_values` take the capacity `numeric`. The JAX FFI refuses
+numeric tables, with or without `include_numeric`: its result layout has no numeric buffer.
 
 ## Shared statics
 
@@ -1107,14 +1112,13 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
 
 The device (the torch path, the torch op, device streams and the CUDA target of `mymyr.encoding.jax`) encodes the rows
 of a `FlatRelationEncoder` with their task ids, goals, derived atoms (given, or evaluated on the device), subgoal
-layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, both layouts, both index
-types and the omitted arrays. What it does not encode raises `ValueError` with the `mymyr: encoding:` prefix (the
+layers and history steps, with goal, subgoal and history targets, predicate virtual nodes, the
+[numeric relations](#numeric-functions) and their values, both layouts, both index types and the omitted arrays. What it does not encode raises `ValueError` with the `mymyr: encoding:` prefix (the
 schemas and calls below before any launch):
 
 - **Schemas:** an encoder with action targets, a horizon mode (the horizon, rooted horizon and transition encoders), the
-  Simple output (`"the device does not encode Simple"`), shared statics (`statics='shared'`), or of a numeric table
-  (with or without `include_numeric`: `"the device does not encode numeric relations"`); and a schema whose kernels
-  need more shared memory than a block has (very many predicate virtual nodes or relations).
+  Simple output (`"the device does not encode Simple"`), shared statics (`statics='shared'`); and a schema whose
+  kernels need more shared memory than a block has (very many predicate virtual nodes or relations).
 - **Calls:** `actions=` (the action relations have no tuples on the device, and JAX cannot pass an expansion),
   `into=`, `pool=` (a pool of host threads means nothing for device rows), a `framework` other than `'torch'`, inputs
   of which some are on the device and some on the host, and subgoal layers or history given to an encoder whose schema
@@ -1160,11 +1164,12 @@ Encode the rows on the host for anything the device refuses.
   batch on the stream, copies the sizes to the host and waits for them (the only host wait of the call), allocates
   exact arrays and fills them. A batch that needs more indices than `int32` holds raises `OverflowError`; use
   `index_dtype='int64'`.
-- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=, history=)` (`targets` only
-  with target sources, `history` only with a history) every variable-size array is allocated at its capacity,
-  zero-filled, and the kernels write the true sizes into `batch.device_sizes` (an `int64` `[6]` tensor: entities,
-  tuples, args, targets, history steps and the overflow flags, 1 for a capacity, 2 for the index type, 4 for an invalid
-  row). The call never waits and can be captured in a CUDA graph. A batch that does not fit its capacities stays all
+- **No wait with capacities.** With `capacities=dict(graphs=, entities=, args=, targets=, history=, numeric=)`
+  (`targets` only with target sources, `history` only with a history, `numeric` only when the batch stores
+  `numeric_values`) every variable-size array is allocated at its capacity, zero-filled, and the kernels write the true
+  sizes into `batch.device_sizes` (an `int64` `[6]` tensor: entities, tuples, args, targets, history steps and the
+  overflow flags, 1 for a capacity, 2 for the index type, 4 for an invalid row; `[7]` with the numeric value count
+  appended when the batch stores numeric values). The call never waits and can be captured in a CUDA graph. A batch that does not fit its capacities stays all
   zero with the flag set. `batch.sizes` reads `device_sizes` into a dict (and waits).
 - **`DeviceFlatBatch`** has the accessors of `FlatBatch`: the arrays (an array the schema does not store raises
   `AttributeError`), `num_graphs`, `num_relations`, `schema`, `implicit_entities`, `as_dict(framework=None)` (torch
@@ -1181,16 +1186,17 @@ Encode the rows on the host for anything the device refuses.
 
 `torch.ops.mymyr.encode_flat(encoder, states, task_ids, derived, goal_pos, goal_neg, goal_derived_pos,
 goal_derived_neg, subgoal_pos, subgoal_neg, subgoal_derived_pos, subgoal_derived_neg, history_pos, history_neg,
-history_dt, history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history)` is the
-capacity form as a torch custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch` registers it).
-`encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None` for an input that
-is absent) and the five ints are the capacities (`targets` 0 without target sources, `history` 0 without history). It
-returns the list of 17 tensors that `DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and
-`sizes` last; an array the schema does not store is an empty tensor, and `DeviceFlatBatch.from_arrays(encoder,
-outputs)` wraps the list into a batch. The op waits for nothing, allocates only its outputs and scratch and has a fake
-implementation that gives their shapes from the capacities, so `torch.compile(fullgraph=True)` traces it without a
-graph break. The registry keeps the encoder alive until `unregister(handle)`. A compiled function specializes the
-handle: calling it with another registered encoder traces a graph for that encoder's schema.
+history_dt, history_count, history_derived_pos, history_derived_neg, graphs, entities, args, targets, history,
+numeric=0)` is the capacity form as a torch custom op, for `torch.compile` and CUDA graphs (`import mymyr.rl.torch`
+registers it). `encoder` is the handle `mymyr.rl.torch.register(encoder)` returns; the tensors are as above (`None`
+for an input that is absent) and the six ints are the capacities (`targets` 0 without target sources, `history` 0
+without history, `numeric` 0 without numeric values). It returns the list of 18 tensors that
+`DeviceFlatBatch.array_names` names, the arrays in the order of the batch table and `sizes` last; an array the schema
+does not store is an empty tensor, and `DeviceFlatBatch.from_arrays(encoder, outputs)` wraps the list into a batch.
+The op waits for nothing, allocates only its outputs and scratch and has a fake implementation that gives their shapes
+from the capacities, so `torch.compile(fullgraph=True)` traces it without a graph break. The registry keeps the
+encoder alive until `unregister(handle)`. A compiled function specializes the handle: calling it with another
+registered encoder traces a graph for that encoder's schema.
 
 To capture the op (or `encode` with capacities) in a `torch.cuda.CUDAGraph`, warm it once on the capture stream to
 upload and acquire its context. No scratch reservation is needed. An encoding without capacities waits for the sizes and
@@ -1302,8 +1308,8 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   fingerprint included). It is returned from jitted functions and stacked by
   `lax.scan`; under `jax.vmap` every vmapped batch is encoded on its own with the same capacities (the target loops over
   the mapped axis), and every array gains the leading axis. `index_dtype='int64'` needs `jax_enable_x64`.
-- **What it encodes.** What [the device encodes](#what-the-device-encodes), on both platforms: the rows with their
-  goals, subgoal layers and history steps. A schema or input the device refuses raises `ValueError` (`mymyr: encoding:
+- **What it encodes.** What [the device encodes](#what-the-device-encodes) but numeric tables, on both platforms: the
+  rows with their goals, subgoal layers and history steps. A schema or input the device refuses raises `ValueError` (`mymyr: encoding:
   ...`) when the function is traced. Where an instance of the table has axioms the device cannot evaluate, a call
   without `derived` raises `ValueError` when traced, whatever its rows (the torch path flags those rows in
   `invalid_input` instead). Otherwise the device evaluates missing derived words, as the CPU encoder does. In

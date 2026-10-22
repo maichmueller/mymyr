@@ -32,6 +32,7 @@ struct EncodeParams
     const u64* states = nullptr;
     u64 state_stride = 0;  // words from one row to the next
     u32 state_words = 0;
+    u32 numeric_words = 0;
     const i32* task_ids = nullptr;
     const u64* derived = nullptr;
     u64 derived_stride = 0;
@@ -62,6 +63,10 @@ struct EncodeParams
     void* totals = nullptr;  // the scanned array: u32, u64 when wide
     bool wide = false;
     u64 segments = 0;        // relation-major: the index of the first entry of the cell row in `totals`
+    u64 numeric_at = 0;  // the optional prefix row of numeric counts
+    u32 first_numeric = 0;
+    bool numeric_f64 = false;
+    u64* numeric_size = nullptr;
     u64 history_at = 0;      // the index of the first entry of the history row in `totals` (0: the schema has no history)
     u32* flags = nullptr;    // flags[0]: a row is invalid
     u32* cell_counts = nullptr;  // graph-major: [graphs, cell_stride] the counts of each graph's cells

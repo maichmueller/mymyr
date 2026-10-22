@@ -42,7 +42,7 @@ __global__ void __launch_bounds__(k_append_threads) append_copy_kernel(DeviceEnc
         u64 at = first + row;
         if (at >= ring.graphs)
             at -= ring.graphs;
-        copy_column(in.states, in.state_stride, ring.state_words, ring.states, ring.state_stride, row, at, lane);
+        copy_column(in.states, in.state_stride, u64{ring.state_words} + ring.numeric_words, ring.states, ring.state_stride, row, at, lane);
         if (ring.derived)
             copy_column(in.derived, in.derived_stride, static_cast<u32>(ring.derived_stride), ring.derived,
                         ring.derived_stride, row, at, lane);

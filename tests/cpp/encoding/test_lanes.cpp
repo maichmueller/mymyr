@@ -161,6 +161,10 @@ struct SegmentPositions
     const GraphOut<I>& out;
 
     u64 args(u64 segment, u32 /*relation*/) const { return static_cast<u64>(out.relation_arg_offsets[segment]); }
+    u64 numeric_before(u64 segment, u64 block) const
+    {
+        return static_cast<u64>(out.relation_offsets[segment]) - block;
+    }
     u32 count(u64 segment) const
     {
         return static_cast<u32>(out.relation_offsets[segment + 1] - out.relation_offsets[segment]);
