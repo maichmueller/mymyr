@@ -241,3 +241,23 @@ def test_device_data_loader_encodes_stored_goals_and_labels(cases, statics, monk
         expected = encoder.encode(case.rows[selection], goals=(case.rows[selection], np.zeros_like(case.rows[selection])))
         same_batch(expected, batch.graphs)
         assert batch.labels["value"].tolist() == list(range(start, min(start + 5, len(rows))))
+
+
+@pytest.mark.parametrize("layout", ["graph", "relation"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_shared_statics_with_layers_history_and_empty_batches(cases, layout, index):
+    device = gpu()
+    from test_encoding_cuda import layered_rows
+
+    case = cases["gripper"]
+    encoder = encoding.FlatRelationEncoder(case.source, statics="shared", layout=layout, index_dtype=index,
+                                            max_goal_level=3, history=True, predicate_virtual_nodes=True,
+                                            target_sources=("goal", "subgoal", "history"))
+    subgoals, history = layered_rows(case)
+    host = host_encode(encoder, case, subgoals=subgoals, history=history)
+    same_batch(host, device_encode(encoder, case, device, subgoals=subgoals, history=history))
+    same_batch(host, device_encode(encoder, case, device, subgoals=subgoals, history=history, capacities=capacities(host)))
+    rows = np.empty((0, case.rows.shape[1]), np.uint64)
+    empty = encoder.encode(rows)
+    same_batch(empty, encoder.encode(to_device(rows, device)))
+    same_batch(empty, encoder.encode(to_device(rows, device), capacities=capacities(empty)))

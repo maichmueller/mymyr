@@ -32,6 +32,8 @@ struct DeviceOutput
     /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). The per-graph
     /// and per-cell arrays past the live graphs of such an input are zero up to the graph capacity.
     u64* graphs = nullptr;
+    /// Shared-static output capacities and device counts. Required exactly for shared-static schemas; the counts
+    /// remain on the device. FlatSizes::overflow also reports a static capacity or index overflow.
     encoding::StaticShape static_capacities{};
     encoding::StaticSizes* static_sizes = nullptr;
 };

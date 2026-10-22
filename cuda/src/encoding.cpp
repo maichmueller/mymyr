@@ -468,13 +468,16 @@ std::vector<std::byte> DeviceEncodingContext::download(cudaStream_t stream) cons
 }
 
 DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder, const encoding::FlatBuffers& arrays,
-                                     const encoding::FlatSizes* sizes, u64 graphs)
+                                     const encoding::FlatSizes* sizes, u64 graphs,
+                                     const encoding::StaticSizes* static_sizes, const encoding::StaticShape& statics)
 {
     check_encodes(encoder);
     const auto& schema = encoder.schema();
     DeviceCollationBatch batch;
     batch.arrays = arrays;
     batch.sizes = sizes;
+    batch.static_sizes = static_sizes;
+    batch.static_capacities = statics;
     batch.graphs = graphs;
     batch.relations = schema.num_relations();
     batch.schema_fingerprint = schema.fingerprint();

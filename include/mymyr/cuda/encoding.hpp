@@ -145,7 +145,9 @@ struct GraphBounds
 /// table with numeric state words).
 [[nodiscard]] DeviceCollationBatch collation_batch(const encoding::FlatEncoder& encoder,
                                                    const encoding::FlatBuffers& arrays,
-                                                   const encoding::FlatSizes* sizes, u64 graphs);
+                                                   const encoding::FlatSizes* sizes, u64 graphs,
+                                                   const encoding::StaticSizes* static_sizes = nullptr,
+                                                   const encoding::StaticShape& statics = {});
 
 /// Byte offsets in a caller-owned output block; each array begins at a multiple of 64 bytes. An array that the batch
 /// does not store has no bytes. The last array is the FlatSizes the encoding writes.
@@ -248,6 +250,7 @@ public:
     /// (std::invalid_argument without it).
     [[nodiscard]] BatchShape worst_case(u64 graphs, u64 history_steps = 0) const;
     /// The arrays a batch of this schema stores, and their layout in a block.
+    /// The shared-static capacities cover the whole table; the free output_layout accepts explicit static capacities.
     [[nodiscard]] OutputLayout output_layout(const BatchShape& shape) const;
     /// Scratch plus caller-owned output bytes. Conservative bounds can be large; reserve by measured capacities.
     [[nodiscard]] u64 bytes_needed(const BatchShape& shape) const;

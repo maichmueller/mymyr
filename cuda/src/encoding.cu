@@ -127,6 +127,7 @@ __device__ bool static_instance_present(const EncodeParams& p, u32 instance)
     return false;
 }
 
+/// One ordered pass selects distinct instances without reading task ids on the host. Its work is O(I * G).
 __global__ void count_statics_kernel(EncodeParams p)
 {
     p = live_params(p);

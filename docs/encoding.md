@@ -1487,3 +1487,8 @@ derived_goals)` with `append`, `flush(DeviceOutput)`, `clear`, and `status()`; a
 batch_views, stream)` with caller scratch sized by `scratch_bytes()`. The batch views come from
 `cuda::collation_batch(encoder, arrays, sizes, graphs)`, which refuses an encoder that the device does not encode.
 `DeviceOutput::graphs` optionally receives a live graph count.
+
+For CUDA capacity encoding with shared statics, `DeviceOutput::static_capacities` bounds the instance blocks and their
+arguments, and `static_sizes` points to a device `StaticSizes`. The overflow flag includes these capacities. The free
+`cuda::output_layout` takes a `StaticShape`; `DeviceEncoder::output_layout` reserves blocks for the entire table.
+`cuda::collation_batch` accepts the source static sizes and capacities alongside its ordinary batch sizes.
