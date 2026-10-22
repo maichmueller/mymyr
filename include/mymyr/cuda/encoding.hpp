@@ -154,6 +154,7 @@ struct OutputLayout
     u64 task_ids = 0, num_objects = 0, entity_offsets = 0, entity_role = 0, entity_ref = 0, relation_counts = 0,
         relation_offsets = 0, relation_arg_offsets = 0, relation_args = 0, goal_complete = 0, target_offsets = 0,
         target_entity = 0, target_group = 0, history_offsets = 0, history_entity = 0, history_dt = 0, sizes = 0;
+    u64 node_offsets = 0, node_label = 0, edge_offsets = 0, edge_index = 0, edge_label = 0;
     u64 bytes = 0;
     OutputArrays arrays;
 };
@@ -221,7 +222,7 @@ class DeviceEncoder
 {
 public:
     /// Throws std::invalid_argument for a schema the device does not encode: action targets, numeric relations,
-    /// horizons (with the goal derivations that only a delta horizon has), the Simple graph and shared statics.
+    /// horizons (with the goal derivations that only a delta horizon has) and shared statics.
     static void check_schema(const encoding::EncodingSchema& schema);
     /// Throws std::invalid_argument for an encoder the device cannot encode: a schema it does not encode, a table with
     /// numeric state words, or a schema whose predicate virtual nodes or relations need more shared memory than a block

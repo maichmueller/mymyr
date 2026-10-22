@@ -15,6 +15,8 @@ struct OutputArrays
     bool goal_complete = false;
     bool targets = false;
     bool history = false;  // history_offsets, history_entity and history_dt
+    bool relations = true;
+    bool simple = false;
     [[nodiscard]] friend bool operator==(const OutputArrays&, const OutputArrays&) noexcept = default;
 };
 /// Where an encoding writes: the arrays of a batch (the pointers of arrays it does not store are null), the capacities
@@ -25,6 +27,11 @@ struct DeviceOutput
     encoding::FlatBuffers arrays;
     encoding::BatchShape capacities;
     encoding::FlatSizes* sizes = nullptr;
+    /// Temporary relation storage for Simple-only filling: [graphs * relations + 1] offsets and argument offsets,
+    /// and [capacities.args] arguments, all of the schema's index type. Null when relation arrays are stored.
+    void* scratch_relation_offsets = nullptr;
+    void* scratch_relation_arg_offsets = nullptr;
+    void* scratch_relation_args = nullptr;
     /// Zero the variable arrays' unused tails, and all output arrays on overflow, in the fill kernel.
     bool zero_unused = false;
     /// Optional device scalar receiving the number of graphs (the live ones of a dynamically sized input). The per-graph

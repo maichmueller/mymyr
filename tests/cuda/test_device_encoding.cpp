@@ -1399,8 +1399,6 @@ TEST(DeviceEncoderSchema, TheCollationDescriptorRefusesWhatTheDeviceDoesNotEncod
     };
     add("numeric relations", numeric_table, [](auto&) {});
     add("numeric relations (the table has numeric state words)", numeric_table, [](auto& o) { o.include_numeric = false; });
-    add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Simple}; });
-    add("Simple", table, [](auto& o) { o.outputs = {encoding::Output::Relations, encoding::Output::Simple}; });
     add("shared statics", table, [](auto& o) { o.statics = encoding::Statics::Shared; });
     add("action targets", table, [](auto& o) { o.targets = {encoding::TargetSource::Action}; });
     add("horizons", table, [](auto& o) { o.horizon.mode = encoding::HorizonMode::Full; });

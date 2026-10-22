@@ -6,7 +6,7 @@
 //                               [--lanes 4|8|32] [--fill auto|thread|warp] [--streams] [--collate-slices K]
 //                               [--ring-rows L] [--instances K]
 //                               [--levels L] [--history H] [--max-steps M] [--literals K] [--targets]
-//                               [--cpu-threads T]
+//                               [--cpu-threads T] [--outputs relations|simple|both]
 //
 // FILE holds the state rows, little-endian u64 [rows, W]; they are tiled to --n graphs. For each of the graph-major and
 // the relation-major layout the encode of the batch is captured into a CUDA graph on a stream and replayed --replays
@@ -61,7 +61,7 @@ namespace
 
 struct Args
 {
-    std::string domain, problem, secondary_problem, rows;
+    std::string domain, problem, secondary_problem, rows, outputs = "relations";
     u32 words = 0;
     u64 n = 16384;
     u32 rounds = 20, replays = 10;
@@ -86,7 +86,9 @@ Args parse(int argc, char** argv)
                 usage(("missing value for " + flag).c_str());
             return argv[++i];
         };
-        if (flag == "--domain")
+        if (flag == "--outputs")
+            a.outputs = value();
+        else if (flag == "--domain")
             a.domain = value();
         else if (flag == "--problem")
             a.problem = value();
@@ -294,7 +296,15 @@ struct Session
     {
         encoding::FlatOptions options;
         options.goal_derivations = {};
+        if (args.outputs == "both")
+            options.outputs = {encoding::Output::Relations, encoding::Output::Simple};
+        else if (args.outputs == "simple")
+            options.outputs = {encoding::Output::Simple};
+        else if (args.outputs != "relations")
+            usage("outputs must be relations, simple or both");
         options.layout = l;
+        if (args.outputs == "simple" && l == encoding::Layout::Relation)
+            options.outputs.insert(encoding::Output::Relations);
         if (args.levels)
         {
             options.max_goal_level = args.levels;
@@ -672,8 +682,8 @@ int main(int argc, char** argv)
                     default: relation_given_times.push_back(replay_us(stream, *relation_given, a.replays)); break;
                 }
         }
-        std::printf("{\"n\":%llu,\"words\":%u,\"instances\":%u,\"replays\":%u,\"rounds\":%u,\"times_us\":{",
-                    static_cast<unsigned long long>(a.n), a.words, table->size(), a.replays, a.rounds);
+        std::printf("{\"outputs\":\"%s\",\"n\":%llu,\"words\":%u,\"instances\":%u,\"replays\":%u,\"rounds\":%u,\"times_us\":{",
+                    a.outputs.c_str(), static_cast<unsigned long long>(a.n), a.words, table->size(), a.replays, a.rounds);
         print_times("graph", graph_times);
         std::printf(",");
         print_times("relation", relation_times);

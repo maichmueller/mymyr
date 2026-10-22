@@ -798,8 +798,10 @@ graph keeps the entity arrays) raise `ValueError` with Simple, and so do `layout
 without the `'relations'` output, since the batch has no relation arrays for them to shape. `constant_labels` needs the
 `'simple'` output and the constants of the domain: a task read from mymyr's text format does not record them, so a table
 with such a task raises `ValueError` with `constant_labels=True` (a PDDL domain without constants has none to label).
-The device does not encode Simple: an encoder with the Simple output raises `ValueError` ("the device does not encode
-Simple") for rows in CUDA memory. `entity_names` and `describe` read the relation arrays and raise for a Simple-only
+CUDA rows produce the same Simple arrays through `DeviceFlatBatch`, the torch op, device row streams and collation,
+with either index type and repeated statics. The fill kernel uses the core's scans; Simple-only filling uses temporary
+relation storage. Numeric tables and the other device encoder refusals still apply. JAX refuses Simple because its fixed
+FFI result layout has no node or edge arrays. `entity_names` and `describe` read the relation arrays and raise for a Simple-only
 batch, and `hgraph` views relation arrays.
 
 ```python needs-torch_geometric
@@ -1077,7 +1079,7 @@ assert np.array_equal(np.asarray(jax_batch.history_dt), host.history_dt)
   history steps that the schema has no relations for. Otherwise the device evaluates missing derived words, as the CPU
   encoder does. Action relations need an expansion, which JAX cannot pass, so their tuples are never encoded here. In
   a mymyr built without the CUDA backend, only the CPU target exists, and no device refusal applies, except that an
-  encoder of a numeric table (with or without `include_numeric`), of the Simple graph or with shared statics
+  encoder of a numeric table (with or without `include_numeric`) or with shared statics
   (`statics='shared'`) has no device form on either target: registering it raises `ValueError`.
 - **Handles and lifetime.** The target finds its encoder through the handle registry of the FFI targets.
   `ej.register(encoder)` returns the encoder's handle (`encode` registers it on first use, and takes the handle in place

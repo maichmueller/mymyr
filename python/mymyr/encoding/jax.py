@@ -44,7 +44,7 @@ from mymyr.rl.jax import _ffi
 
 __all__ = ["JaxFlatBatch", "encode", "register", "registered", "unregister"]
 
-_ARRAYS = _device._ARRAYS
+_ARRAYS = _device._ARRAYS[:16]
 _SIZE_FIELDS = _device._SIZE_FIELDS
 _OVERFLOW_WORD = _SIZE_FIELDS.index("overflow")
 
@@ -83,6 +83,8 @@ _registrations: dict[int, _Registration] = {}
 def register(encoder: Any) -> int:
     """The FFI handle of ``encoder``, a ``FlatRelationEncoder`` (the same handle for the same encoder while it is
     registered). The registry holds the encoder (its table, options and device contexts) until :func:`unregister`."""
+    if "simple" in encoder.options["outputs"]:
+        raise _error("the JAX FFI does not encode Simple: its fixed result layout has no node or edge arrays")
     with _lock:
         handle = _handles.get(encoder)
         if handle is not None and handle in _registrations:
@@ -99,6 +101,8 @@ def register(encoder: Any) -> int:
 
 def registered(encoder: Any) -> Optional[int]:
     """The handle of ``encoder`` if it is registered, else None."""
+    if "simple" in encoder.options["outputs"]:
+        raise _error("the JAX FFI does not encode Simple: its fixed result layout has no node or edge arrays")
     with _lock:
         handle = _handles.get(encoder)
         return handle if handle in _registrations else None
@@ -547,7 +551,8 @@ def _scratch(reg: _Registration, handle: int, graphs: int, derived: bool) -> Opt
 def _call(handle: int, reg: _Registration, operands: tuple, graphs: int, entities: int, args: int, targets: int,
           history: int, threads: int) -> tuple[dict[str, Any], Any]:
     """One mymyr_encode_flat call: the stored arrays by name and the sizes."""
-    specs = reg.layout.specs(jnp, graphs, entities, args, targets, history)
+    specs = {name: spec for name, spec in reg.layout.specs(jnp, graphs, entities, args, targets, history).items()
+             if name in _ARRAYS or name == "sizes"}
     del specs["sizes"]
     results = [jax.ShapeDtypeStruct(shape, dtype) for shape, dtype in specs.values()]
     results.append(jax.ShapeDtypeStruct((len(_SIZE_FIELDS), 2), jnp.uint32))

@@ -882,7 +882,11 @@ void bind_encoding_jax(nb::module_& parent)
     m.def(
         "register",
         [](Arg<ann::Any> encoder) {
-            auto e = std::make_shared<EncoderEntry>(flat_encoder_of(encoder));
+            auto flat = flat_encoder_of(encoder);
+            if (flat->schema().emits_simple())
+                throw nb::value_error("mymyr: encoding: the JAX FFI does not encode Simple: "
+                                      "its fixed result layout has no node or edge arrays");
+            auto e = std::make_shared<EncoderEntry>(std::move(flat));
             return ffi_registry().add(std::move(e));
         },
         "encoder"_a,

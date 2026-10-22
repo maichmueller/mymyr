@@ -893,18 +893,13 @@ def test_the_encoder_without_a_device_encoding_is_refused_clearly():
         encoder.reserve_device(8)
 
 
-@pytest.mark.parametrize("lane", ["numeric", "numeric_table", "simple"])
-def test_numeric_relations_and_the_simple_graph_are_refused_by_the_device_before_any_launch(lane):
+@pytest.mark.parametrize("lane", ["numeric", "numeric_table"])
+def test_numeric_relations_are_refused_by_the_device_before_any_launch(lane):
     dev = gpu()
-    if lane != "simple":
-        # without include_numeric the rows of a numeric table still carry their numeric words
-        task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
-        encoder = encoding.FlatRelationEncoder(task, include_numeric=lane == "numeric")
-        message = "^mymyr: encoding: the device does not encode numeric relations"
-    else:
-        task = text_task("gripper__prob05")
-        encoder = encoding.SimpleEncoder(task)
-        message = "^mymyr: encoding: the device does not encode Simple"
+    # A numeric table still carries its numeric words when the schema omits their relations.
+    task = mymyr.Task.from_text(str(ROOT / "tests/data/numeric_tasks/cs-counters.txt"))
+    encoder = encoding.FlatRelationEncoder(task, include_numeric=lane == "numeric")
+    message = "^mymyr: encoding: the device does not encode numeric relations"
     rows = to_device(np.asarray(task.encode([task.initial_state])), dev)
     with pytest.raises(ValueError, match=message):
         encoder.encode(rows)
@@ -927,7 +922,7 @@ def test_numeric_relations_and_the_simple_graph_are_refused_by_the_device_before
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
+        NativeCollator([encoder], dev.index, 0, [[0] * 26], [0])
 
 
 def test_shared_statics_are_refused_by_the_device_before_any_launch():
@@ -958,7 +953,7 @@ def test_shared_statics_are_refused_by_the_device_before_any_launch():
     from mymyr._core._encoding import DeviceCollator as NativeCollator
 
     with pytest.raises(ValueError, match=message):
-        NativeCollator([encoder], dev.index, 0, [[0] * 17], [0])
+        NativeCollator([encoder], dev.index, 0, [[0] * 26], [0])
     assert encoder.encode(np.asarray(task.encode(states))).as_dict()["statics"] == 1  # the host encodes them
 
 

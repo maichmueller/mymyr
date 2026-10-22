@@ -147,9 +147,10 @@ cuda::DeviceEncodeInput input_of(const Rows& r)
 
 /// The destination arrays, in the order of encoding._device: task_ids, num_objects, entity_offsets, entity_role,
 /// entity_ref, relation_counts, relation_offsets, relation_arg_offsets, relation_args, goal_complete, target_offsets,
-/// target_entity, target_group, history_offsets, history_entity, history_dt, sizes (0: the array is absent or has no
+/// target_entity, target_group, history_offsets, history_entity, history_dt, the five Simple arrays, sizes,
+/// three private relation arrays and the edge stride (0: the array is absent or has no
 /// entries).
-constexpr usize k_output_fields = 17;
+constexpr usize k_output_fields = 26;
 
 cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encoding::BatchShape& capacities)
 {
@@ -173,7 +174,16 @@ cuda::DeviceOutput output_of(const std::vector<std::uintptr_t>& v, const encodin
     a.history_offsets = ptr<void>(v[13]);
     a.history_entity = ptr<void>(v[14]);
     a.history_dt = ptr<i32>(v[15]);
-    out.sizes = ptr<encoding::FlatSizes>(v[16]);
+    a.node_offsets = ptr<void>(v[16]);
+    a.node_label = ptr<i32>(v[17]);
+    a.edge_offsets = ptr<void>(v[18]);
+    a.edge_index = ptr<void>(v[19]);
+    a.edge_label = ptr<i32>(v[20]);
+    out.sizes = ptr<encoding::FlatSizes>(v[21]);
+    out.scratch_relation_offsets = ptr<void>(v[22]);
+    out.scratch_relation_arg_offsets = ptr<void>(v[23]);
+    out.scratch_relation_args = ptr<void>(v[24]);
+    a.edge_stride = v[25];
     out.capacities = capacities;
     return out;
 }
@@ -546,7 +556,7 @@ void bind_encoding_device(nb::module_& parent)
                     "history steps).")
         .def("encode", &DeviceEncoderHandle::encode, "stream"_a, "rows"_a, "outputs"_a, "capacities"_a,
              "scratch"_a, "bytes"_a,
-             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the 17 output "
+             "Encodes the rows (35 integers: the graphs, then the pointers and strides of the arrays) into the output "
              "pointers, with the capacities (graphs, entities, args, targets, history), on `stream`. No host wait.")
         .def("encode_exact", &DeviceEncoderHandle::encode_exact, "stream"_a, "rows"_a, "allocate"_a,
              "Counts the rows, waits once for their sizes, calls allocate(entities, tuples, args, targets, history, "

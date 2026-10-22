@@ -667,7 +667,7 @@ def encode_flat(
     [N or 1, D], the subgoal layers [N or 1, L, W] (and [N or 1, L, D]), the history masks [N, H, W] (and [N, H, D]),
     ``history_dt`` int32 [N, H] and ``history_count`` int32 [N] or None) with the capacities ``graphs``, ``entities``,
     ``args``, ``targets`` and ``history`` (0 without target sources or history). ``encoder`` is a :func:`register`
-    handle of the encoder. Returns the 17 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
+    handle of the encoder. Returns the 22 arrays of ``DeviceFlatBatch.array_names`` (arrays that the schema does not
     store are empty) with ``sizes`` last; ``DeviceFlatBatch.from_arrays`` wraps them. A batch exceeding ``graphs``
     raises before launch. Nothing waits for the device, and a batch that exceeds its array capacities is all zero with
     the overflow flags in ``sizes``. Warm it on the capture stream to acquire its context before capturing a CUDA

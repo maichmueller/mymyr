@@ -16,7 +16,8 @@ struct AddGraphs
 {
     __host__ __device__ GraphCounts operator()(const GraphCounts& a, const GraphCounts& b) const
     {
-        return {saturating(a.entities, b.entities), saturating(a.targets, b.targets)};
+        return {saturating(a.entities, b.entities), saturating(a.targets, b.targets),
+                saturating(a.nodes, b.nodes), saturating(a.edges, b.edges)};
     }
 };
 struct AddCells
@@ -87,6 +88,11 @@ template<class I> __global__ void __launch_bounds__(k_block) count_kernel(Collat
                 const u64 g = graph - s.first;
                 const auto& a = s.batch.arrays;
                 counts.entities = static_cast<u64>(as<I>(a.entity_offsets)[g + 1] - as<I>(a.entity_offsets)[g]);
+                if (p.simple)
+                {
+                    counts.nodes = static_cast<u64>(as<I>(a.node_offsets)[g + 1] - as<I>(a.node_offsets)[g]);
+                    counts.edges = static_cast<u64>(as<I>(a.edge_offsets)[g + 1] - as<I>(a.edge_offsets)[g]);
+                }
                 if (a.target_offsets)
                     counts.targets = static_cast<u64>(as<I>(a.target_offsets)[g + 1] - as<I>(a.target_offsets)[g]);
             }
@@ -95,7 +101,7 @@ template<class I> __global__ void __launch_bounds__(k_block) count_kernel(Collat
         if (at <= p.cells)
         {
             CellCounts counts;
-            if (at)
+            if (at && p.relations_stored)
             {
                 const Cell cell = cell_of(p, at - 1);
                 const auto& s = slice_of(p, cell.graph);
@@ -115,11 +121,12 @@ __device__ encoding::FlatSizes sizes_of(const CollationParams& p)
     const CellCounts cells = p.cell_counts[p.cells];
     encoding::FlatSizes sizes;
     sizes.entities = graphs.entities;
-    sizes.tuples = cells.tuples;
-    sizes.args = cells.args;
+    sizes.tuples = p.simple ? graphs.nodes - graphs.entities : cells.tuples;
+    sizes.args = p.simple ? graphs.edges / 2 : cells.args;
     sizes.targets = graphs.targets;
     const u64 limit = p.index64 ? 0x7fffffffffffffffull : 0x7fffffffull;
-    if (sizes.entities > limit || sizes.tuples > limit || sizes.args > limit || sizes.targets > limit ||
+    if ((p.simple && (graphs.nodes > limit || graphs.edges > limit)) ||
+        sizes.entities > limit || sizes.tuples > limit || sizes.args > limit || sizes.targets > limit ||
         p.graphs >= limit || p.cells >= limit)
         sizes.overflow |= encoding::k_overflow_index;
     if (sizes.entities > p.output.capacities.entities || sizes.args > p.output.capacities.args ||
@@ -189,6 +196,11 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
         zero(as<I>(out.relation_args), bad ? 0 : sizes.args, capacities.args);
         zero(as<I>(out.target_entity), bad ? 0 : sizes.targets, capacities.targets);
         zero(out.target_group, bad ? 0 : sizes.targets, capacities.targets);
+        zero(out.node_label, bad ? 0 : sizes.entities + sizes.tuples, capacities.entities + capacities.args);
+        zero(out.edge_label, bad ? 0 : 2 * sizes.args, 2 * capacities.args);
+        zero(as<I>(out.edge_index), bad ? 0 : 2 * sizes.args, 2 * capacities.args);
+        if (out.edge_index)
+            zero(as<I>(out.edge_index) + out.edge_stride, bad ? 0 : 2 * sizes.args, 2 * capacities.args);
         const u64 graphs = bad ? 0 : p.graphs, cells = bad ? 0 : p.cells, closing = bad ? 0 : 1;
         const u64 capacity_cells = capacities.graphs * p.relations;
         zero(out.task_ids, graphs, capacities.graphs);
@@ -196,6 +208,8 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
         zero(out.goal_complete, graphs, capacities.graphs);
         zero(as<I>(out.entity_offsets), graphs + closing, capacities.graphs + 1);
         zero(as<I>(out.target_offsets), graphs + closing, capacities.graphs + 1);
+        zero(as<I>(out.node_offsets), graphs + closing, capacities.graphs + 1);
+        zero(as<I>(out.edge_offsets), graphs + closing, capacities.graphs + 1);
         zero(as<I>(out.relation_counts), cells, capacity_cells);
         zero(as<I>(out.relation_offsets), cells + closing, capacity_cells + 1);
         zero(as<I>(out.relation_arg_offsets), cells + closing, capacity_cells + 1);
@@ -206,6 +220,11 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
         const GraphCounts before = p.graph_counts[g];
         as<I>(out.entity_offsets)[g] = static_cast<I>(before.entities);
         if (out.target_offsets) as<I>(out.target_offsets)[g] = static_cast<I>(before.targets);
+        if (p.simple)
+        {
+            as<I>(out.node_offsets)[g] = static_cast<I>(before.nodes);
+            as<I>(out.edge_offsets)[g] = static_cast<I>(before.edges);
+        }
         if (g == p.graphs) continue;
         const auto& s = slice_of(p, g);
         const u64 local = g - s.first;
@@ -214,7 +233,7 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
         as<I>(out.num_objects)[g] = as<I>(a.num_objects)[local];
         if (out.goal_complete) out.goal_complete[g] = a.goal_complete[local];
     }
-    for (u64 c = thread; c <= p.cells; c += step)
+    for (u64 c = thread; p.relations_stored && c <= p.cells; c += step)
     {
         const CellCounts before = p.cell_counts[c];
         as<I>(out.relation_offsets)[c] = static_cast<I>(before.tuples);
@@ -249,7 +268,8 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
                          as<I>(out.target_entity)[t] = static_cast<I>(as<I>(a.target_entity)[src] + shift_of(s, g));
                          out.target_group[t] = a.target_group[src];
                      });
-    for_elements(sizes.args, p.cells - 1, [&](u64 c) { return p.cell_counts[c].args; },
+    if (p.relations_stored)
+        for_elements(sizes.args, p.cells - 1, [&](u64 c) { return p.cell_counts[c].args; },
                  [&](u64 j, u64 c)
                  {
                      const Cell cell = cell_of(p, c);
@@ -259,6 +279,33 @@ template<class I> __global__ void __launch_bounds__(k_block) fill_kernel(Collati
                                      p.cell_counts[c].args;
                      as<I>(out.relation_args)[j] = static_cast<I>(as<I>(a.relation_args)[src] + shift_of(s, cell.graph));
                  });
+    if (p.simple)
+    {
+        for_elements(sizes.entities + sizes.tuples, p.graphs - 1,
+                     [&](u64 g) { return p.graph_counts[g].nodes; },
+                     [&](u64 node, u64 g)
+                     {
+                         const auto& s = slice_of(p, g);
+                         const auto& a = s.batch.arrays;
+                         const u64 src = static_cast<u64>(as<I>(a.node_offsets)[g - s.first]) + node -
+                                         p.graph_counts[g].nodes;
+                         out.node_label[node] = a.node_label[src];
+                     });
+        for_elements(2 * sizes.args, p.graphs - 1,
+                     [&](u64 g) { return p.graph_counts[g].edges; },
+                     [&](u64 edge, u64 g)
+                     {
+                         const auto& s = slice_of(p, g);
+                         const auto& a = s.batch.arrays;
+                         const u64 local = g - s.first;
+                         const u64 src = static_cast<u64>(as<I>(a.edge_offsets)[local]) + edge -
+                                         p.graph_counts[g].edges;
+                         const I shift = static_cast<I>(p.graph_counts[g].nodes) - as<I>(a.node_offsets)[local];
+                         as<I>(out.edge_index)[edge] = as<I>(a.edge_index)[src] + shift;
+                         as<I>(out.edge_index)[out.edge_stride + edge] = as<I>(a.edge_index)[a.edge_stride + src] + shift;
+                         out.edge_label[edge] = a.edge_label[src];
+                     });
+    }
 }
 }
 

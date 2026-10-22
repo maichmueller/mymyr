@@ -52,6 +52,9 @@ struct EncodeParams
     const u32* order = nullptr;  // [graphs] the graph each thread or warp takes (null: in batch order)
     // the batch
     encoding::FlatBuffers out;
+    encoding::FlatBuffers core;  // relation arrays may be temporary storage for a Simple-only output
+    encoding::detail::SimpleParams simple_params{};
+    bool simple = false;
     encoding::FlatSizes* sizes = nullptr;
     encoding::BatchShape capacities;
     u32 static_overflow = 0;  // the k_overflow_ flags that follow from the shape alone

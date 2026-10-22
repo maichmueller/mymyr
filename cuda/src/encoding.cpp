@@ -492,10 +492,12 @@ OutputArrays output_arrays(const encoding::EncodingSchema& schema)
 {
     OutputArrays arrays;
     arrays.entity_arrays = !schema.implicit_entity_arrays();
-    arrays.counts = schema.emits_counts();
+    arrays.counts = schema.emits_relations() && schema.emits_counts();
     arrays.goal_complete = schema.has_goal_complete();
     arrays.targets = schema.has_targets();
     arrays.history = schema.has_history();
+    arrays.relations = schema.emits_relations();
+    arrays.simple = schema.emits_simple();
     return arrays;
 }
 
@@ -528,6 +530,11 @@ OutputLayout output_layout(const BatchShape& shape, encoding::IndexType index, u
     place(out.history_offsets, arrays.history ? mul(I, add(G, 1)) : 0);
     place(out.history_entity, arrays.history ? mul(I, S) : 0);
     place(out.history_dt, arrays.history ? mul(4, S) : 0);
+    place(out.node_offsets, arrays.simple ? mul(I, add(G, 1)) : 0);
+    place(out.node_label, arrays.simple ? mul(4, add(E, A)) : 0);
+    place(out.edge_offsets, arrays.simple ? mul(I, add(G, 1)) : 0);
+    place(out.edge_index, arrays.simple ? mul(I, mul(4, A)) : 0);
+    place(out.edge_label, arrays.simple ? mul(4, mul(2, A)) : 0);
     place(out.sizes, sizeof(encoding::FlatSizes));
     out.bytes = at;
     return out;
@@ -545,9 +552,12 @@ DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void
     b.entity_role = static_cast<u8*>(at(layout.entity_role, a.entity_arrays));
     b.entity_ref = at(layout.entity_ref, a.entity_arrays);
     b.relation_counts = at(layout.relation_counts, a.counts);
-    b.relation_offsets = at(layout.relation_offsets, true);
-    b.relation_arg_offsets = at(layout.relation_arg_offsets, true);
-    b.relation_args = at(layout.relation_args, true);
+    b.relation_offsets = at(layout.relation_offsets, a.relations);
+    b.relation_arg_offsets = at(layout.relation_arg_offsets, a.relations);
+    b.relation_args = at(layout.relation_args, a.relations);
+    out.scratch_relation_offsets = at(layout.relation_offsets, !a.relations);
+    out.scratch_relation_arg_offsets = at(layout.relation_arg_offsets, !a.relations);
+    out.scratch_relation_args = at(layout.relation_args, !a.relations);
     b.goal_complete = static_cast<u8*>(at(layout.goal_complete, a.goal_complete));
     b.target_offsets = at(layout.target_offsets, a.targets);
     b.target_entity = at(layout.target_entity, a.targets);
@@ -555,6 +565,12 @@ DeviceOutput output_of(const OutputLayout& layout, const BatchShape& shape, void
     b.history_offsets = at(layout.history_offsets, a.history);
     b.history_entity = at(layout.history_entity, a.history);
     b.history_dt = static_cast<i32*>(at(layout.history_dt, a.history));
+    b.node_offsets = at(layout.node_offsets, a.simple);
+    b.node_label = static_cast<i32*>(at(layout.node_label, a.simple));
+    b.edge_offsets = at(layout.edge_offsets, a.simple);
+    b.edge_index = at(layout.edge_index, a.simple);
+    b.edge_stride = a.simple ? mul(2, shape.args) : 0;
+    b.edge_label = static_cast<i32*>(at(layout.edge_label, a.simple));
     out.capacities = shape;
     out.sizes = static_cast<encoding::FlatSizes*>(at(layout.sizes, true));
     return out;
@@ -665,7 +681,6 @@ void DeviceEncoder::check_schema(const encoding::EncodingSchema& schema)
     if (schema.has_numeric()) refuse("numeric relations");
     // added_satisfied and added_unsatisfied need a delta horizon (FlatOptions): refused with it
     if (o.horizon != encoding::HorizonOptions{}) refuse("horizons");
-    if (o.outputs != encoding::Outputs{encoding::Output::Relations}) refuse("Simple");
     if (o.statics == encoding::Statics::Shared) refuse("shared statics (statics='shared')");
 }
 
@@ -1049,8 +1064,9 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         invalid("the output needs sizes");
     if (phase != Phase::Count)
     {
-        if ((graphs && (!a.task_ids || !a.num_objects)) || !a.entity_offsets || !a.relation_offsets ||
-            !a.relation_arg_offsets)
+        if ((graphs && (!a.task_ids || !a.num_objects)) || !a.entity_offsets ||
+            (arrays.relations ? (!a.relation_offsets || !a.relation_arg_offsets)
+                              : (!out.scratch_relation_offsets || !out.scratch_relation_arg_offsets)))
             invalid("the output needs task_ids, num_objects, entity_offsets, relation_offsets, relation_arg_offsets and sizes");
         // an array without entries may be null, so a batch of rows without objects needs no entity arrays
         const bool entity_given = (a.entity_role != nullptr) || (a.entity_ref != nullptr);
@@ -1064,8 +1080,20 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
         if ((a.target_offsets != nullptr) != arrays.targets ||
             (!arrays.targets && (a.target_entity != nullptr || a.target_group != nullptr)))
             invalid("the target arrays must be given iff the schema has target sources");
-        if (out.capacities.args && !a.relation_args)
-            invalid("relation_args is null");
+        if (out.capacities.args && !(arrays.relations ? a.relation_args : out.scratch_relation_args))
+            invalid("relation arguments are null");
+        if (!arrays.relations && (a.relation_offsets || a.relation_arg_offsets || a.relation_args))
+            invalid("the schema does not store relation arrays");
+        if (arrays.simple)
+        {
+            if (!a.node_offsets || !a.edge_offsets ||
+                ((out.capacities.entities || out.capacities.args) && !a.node_label) ||
+                (out.capacities.args && (!a.edge_index || !a.edge_label)) ||
+                a.edge_stride < mul(2, out.capacities.args))
+                invalid("the Simple arrays must hold the node and edge capacities");
+        }
+        else if (a.node_offsets || a.node_label || a.edge_offsets || a.edge_index || a.edge_label)
+            invalid("the schema does not store Simple arrays");
         if (arrays.targets && out.capacities.targets && (!a.target_entity || !a.target_group))
             invalid("the target arrays are null");
         if ((a.history_offsets != nullptr) != arrays.history ||
@@ -1089,6 +1117,15 @@ void DeviceEncoder::run(Phase phase, const detail::EncodingExecution& execution,
                                                        : static_cast<u64>(std::numeric_limits<i32>::max());
     detail::EncodeParams p;
     p.context = context.view;
+    p.simple = schema.emits_simple();
+    p.simple_params = {schema.num_relations(), schema.simple_max_arity(), schema.simple_constants()};
+    p.core = out.arrays;
+    if (!arrays.relations)
+    {
+        p.core.relation_offsets = out.scratch_relation_offsets;
+        p.core.relation_arg_offsets = out.scratch_relation_arg_offsets;
+        p.core.relation_args = out.scratch_relation_args;
+    }
     p.graphs = graphs;
     p.states = in.states;
     p.state_stride = in.state_stride;
