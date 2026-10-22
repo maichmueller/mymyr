@@ -30,7 +30,6 @@ import weakref
 from typing import Any, Optional
 
 from mymyr._core._encoding import FlatBatch
-from mymyr.rl import as_table
 
 __all__ = ["DeviceFlatBatch"]
 

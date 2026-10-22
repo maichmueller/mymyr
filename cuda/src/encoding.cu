@@ -365,6 +365,7 @@ struct ScanPositions
     const u32* arity;  // [relations]
 
     __device__ u64 tuples_before(u64 segment) const { return totals.get(segments + segment) - base; }
+    __device__ u64 numeric_before(u64 segment, u64 block) const { return tuples_before(segment) - block; }
     __device__ u32 count(u64 segment) const
     {
         return static_cast<u32>(totals.get(segments + segment + 1) - totals.get(segments + segment));

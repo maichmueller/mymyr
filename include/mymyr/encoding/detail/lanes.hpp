@@ -2548,6 +2548,10 @@ struct ArrayArgPositions
     const GraphOut<I>& out;
 
     MYMYR_HD u64 args(u64 segment, u32 /*relation*/) const { return static_cast<u64>(out.relation_arg_offsets[segment]); }
+    MYMYR_HD u64 numeric_before(u64 segment, u64 block) const
+    {
+        return static_cast<u64>(out.relation_offsets[segment]) - block;
+    }
 };
 
 /// Writes graph `g` of a relation-major batch: like fill_graph, except that a cell's position is not computed from a
@@ -2580,7 +2584,7 @@ MYMYR_HD void fill_graph_positioned(const InstanceView& v, const RowInput& in, u
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
         I* dst = out.relation_args + positions.args(segment, c.relation);
         if (is_numeric_op(c.op))  // the numeric segments follow all others: their tuples are the numeric values in order
-            cursor.numeric_at = static_cast<u64>(out.relation_offsets[segment]) - out.numeric_block;
+            cursor.numeric_at = positions.numeric_before(segment, out.numeric_block);
         const u32 n = is_action_op(c.op)
                           ? fill_action_cell<I>(v, c, in, entity_base, cursor, out, dst)
                       : Layered && cell_counts && cell_counts[i] == 0
@@ -2826,7 +2830,7 @@ MYMYR_HD void fill_graph_positioned_group(const Group& grp, const InstanceView& 
         const u64 segment = cell_segment(true, g, c.relation, out.graphs, R);
         const u32 n = positions.count(segment);
         if (is_numeric_op(c.op))
-            cursor.numeric_at = static_cast<u64>(out.relation_offsets[segment]) - out.numeric_block;
+            cursor.numeric_at = positions.numeric_before(segment, out.numeric_block);
         if (counts)
         {
             for (u32 q = r + grp.lane(); q < c.relation; q += grp.size())
