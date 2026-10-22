@@ -30,8 +30,9 @@ class DeviceHGraphView:
 
     Making the view reads the offsets of the batch at the relations' boundaries on the host, so it waits for the device;
     after that no method waits (except for ``framework='numpy'``): the new tensors are made by torch operations on the
-    current stream, in stream order. The view keeps the batch alive. ``mymyr.encoding.hgraph(batch)`` makes one; it
-    refuses what the host view refuses."""
+    current stream, in stream order. The view keeps the counts it read, so a batch whose arrays are rewritten in place
+    (a CUDA graph replay) needs a new view. The view keeps the batch alive. ``mymyr.encoding.hgraph(batch)`` makes
+    one; it refuses what the host view refuses."""
 
     __slots__ = ("_arity", "_arrays", "_batch", "_edge_types", "_entities", "_first_arg",
                  "_first_tuple", "_graphs", "_names", "_relation", "_schema", "_tuples")
