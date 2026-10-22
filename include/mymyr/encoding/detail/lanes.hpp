@@ -2929,6 +2929,54 @@ MYMYR_HD void simple_fill_entities(const SimpleParams& params, const SimpleOut<I
                                                                     : static_cast<i32>(role[j]);
 }
 
+/// Writes a cell of K arguments per tuple in separate argument-copy and generated-column passes.
+template<class I, u32 K>
+MYMYR_HD void simple_emit_cell_bulk(const SimpleParams& params, const SimpleOut<I>& out, const SimpleGraph& graph,
+                                    u32 relation, u32 n, const I* args, u64 graph_tuple, u64 graph_arg)
+{
+    const u64 first_atom = graph.entity_base + graph.tuple_base + graph.entities + graph_tuple;
+    const u64 shift = graph.tuple_base, reverse = graph.args;
+    const i32 back = static_cast<i32>(params.max_arity);
+    for (u32 k = 0; k < n; ++k)
+        out.node_label[first_atom + k] = static_cast<i32>(k_simple_roles + relation);
+    I* const source = out.edge_source + 2 * graph.arg_base + graph_arg;
+    I* const target = out.edge_target + 2 * graph.arg_base + graph_arg;
+    i32* const label = out.edge_label + 2 * graph.arg_base + graph_arg;
+    // Copy the arguments separately so that generating the remaining columns has no input-load dependencies.
+    const u64 entries = static_cast<u64>(n) * K;
+    for (u64 i = 0; i < entries; ++i)
+    {
+        const I entity = static_cast<I>(static_cast<u64>(args[i]) + shift);
+        source[i] = entity;
+        target[reverse + i] = entity;
+    }
+    for (u64 i = 0; i < entries; ++i)
+    {
+        const I atom = static_cast<I>(first_atom + i / K);
+        const i32 slot = static_cast<i32>(i % K);
+        target[i] = atom;
+        source[reverse + i] = atom;
+        label[i] = slot;
+        label[reverse + i] = back + slot;
+    }
+}
+
+/// The arity dispatch of the bulk emitter, kept outside the short-cell loop on the host.
+template<class I>
+MYMYR_HD_COLD void simple_emit_large_cell(const SimpleParams& params, const SimpleOut<I>& out,
+                                          const SimpleGraph& graph, u32 relation, u32 arity, u32 n, const I* args,
+                                          u64 graph_tuple, u64 graph_arg)
+{
+    switch (arity)
+    {
+    case 1: return simple_emit_cell_bulk<I, 1>(params, out, graph, relation, n, args, graph_tuple, graph_arg);
+    case 2: return simple_emit_cell_bulk<I, 2>(params, out, graph, relation, n, args, graph_tuple, graph_arg);
+    case 3: return simple_emit_cell_bulk<I, 3>(params, out, graph, relation, n, args, graph_tuple, graph_arg);
+    case 4: return simple_emit_cell_bulk<I, 4>(params, out, graph, relation, n, args, graph_tuple, graph_arg);
+    default: return;
+    }
+}
+
 /// Writes the atom nodes and the edges of the `n` tuples of one cell: `args` are the cell's arguments (batch-global
 /// entity ids, `arity` per tuple), `graph_tuple` is the index of the cell's first tuple among the graph's tuples and
 /// `graph_arg` the index of its first argument among the graph's arguments (both in graph-major order).
@@ -2936,6 +2984,8 @@ template<class I>
 MYMYR_HD void simple_emit_cell(const SimpleParams& params, const SimpleOut<I>& out, const SimpleGraph& graph,
                                u32 relation, u32 arity, u32 n, const I* args, u64 graph_tuple, u64 graph_arg)
 {
+    if (n >= 16 && arity >= 1 && arity <= 4)
+        return simple_emit_large_cell(params, out, graph, relation, arity, n, args, graph_tuple, graph_arg);
     const i32 atom_label = static_cast<i32>(k_simple_roles + relation);
     const i32 back = static_cast<i32>(params.max_arity);
     const u64 shift = graph.tuple_base;

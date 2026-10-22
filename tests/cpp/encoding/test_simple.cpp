@@ -7,6 +7,7 @@
 #include "support.hpp"
 
 #include "mymyr/encoding/encoder.hpp"
+#include "mymyr/encoding/detail/lanes.hpp"
 #include "mymyr/encoding/horizon_graphs.hpp"
 #include "mymyr/encoding/stream.hpp"
 #include "mymyr/encoding/validate.hpp"
@@ -23,6 +24,50 @@ using namespace mymyr::encoding;
 
 namespace
 {
+template<class I>
+void check_cell_incidence()
+{
+    for (const u32 arity : {0u, 1u, 2u, 3u, 4u, 5u, 6u})
+        for (const u32 n : {0u, 1u, 15u, 16u, 17u, 63u})
+        {
+            const encoding::detail::SimpleParams params{8, 6, 0};
+            const encoding::detail::SimpleGraph graph{13, 7, 17, n + 5u, 23, n * arity + 13u};
+            std::vector<I> args(static_cast<usize>(n) * arity);
+            for (usize i = 0; i < args.size(); ++i)
+                args[i] = static_cast<I>(13 + i % 7);
+            std::vector<i32> nodes(n + 80u, -99), labels(2 * graph.arg_base + 2 * graph.args + 17, -99);
+            std::vector<I> source(labels.size(), -99), target(labels.size(), -99);
+            auto expected_nodes = nodes, expected_labels = labels;
+            auto expected_source = source, expected_target = target;
+            for (u32 tuple = 0; tuple < n; ++tuple)
+            {
+                const u64 atom = graph.entity_base + graph.tuple_base + graph.entities + 2 + tuple;
+                expected_nodes[atom] = static_cast<i32>(encoding::detail::k_simple_roles + 3);
+                for (u32 slot = 0; slot < arity; ++slot)
+                {
+                    const u64 edge = 2 * graph.arg_base + 5 + static_cast<u64>(tuple) * arity + slot;
+                    const I entity = static_cast<I>(args[static_cast<usize>(tuple) * arity + slot] + graph.tuple_base);
+                    expected_source[edge] = expected_target[edge + graph.args] = entity;
+                    expected_target[edge] = expected_source[edge + graph.args] = static_cast<I>(atom);
+                    expected_labels[edge] = static_cast<i32>(slot);
+                    expected_labels[edge + graph.args] = static_cast<i32>(params.max_arity + slot);
+                }
+            }
+            const encoding::detail::SimpleOut<I> out{nullptr, nullptr, nodes.data(), source.data(), target.data(), labels.data()};
+            encoding::detail::simple_emit_cell(params, out, graph, 3, arity, n, args.data(), 2, 5);
+            EXPECT_EQ(nodes, expected_nodes);
+            EXPECT_EQ(source, expected_source);
+            EXPECT_EQ(target, expected_target);
+            EXPECT_EQ(labels, expected_labels);
+        }
+}
+
+TEST(Simple, LongCellsKeepTheTupleIncidenceOrder)
+{
+    check_cell_incidence<i32>();
+    check_cell_incidence<i64>();
+}
+
 std::vector<i64> ints(const rl::ArrayBundle& bundle, const char* name)
 {
     const rl::ArrayInfo* info = bundle.find(name);
