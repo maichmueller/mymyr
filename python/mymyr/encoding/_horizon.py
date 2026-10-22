@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from mymyr import State, Task, TaskHandle
     from mymyr._typing import SupportsDLPack
+    from mymyr.cuda import DeviceStateSpace
     from mymyr.datasets import StateSpace
     from mymyr.rl import TaskTable, ThreadPool
 
@@ -110,10 +111,9 @@ def horizon(
     if not cuda and hasattr(roots, "__dlpack_device__"):
         cuda = roots.__dlpack_device__()[0] == 2
     if cuda:
-        if depth >= 2:
-            raise ValueError("mymyr: encoding: the device does not encode horizons of depth 2 or more")
         if depth != 1 or max_nodes is not None or truncate or pool is not None:
-            raise ValueError("mymyr: encoding: device horizon construction needs depth=1 and no node limit or host pool")
+            raise ValueError("mymyr: encoding: expansion-based device horizon construction needs depth=1 and no node limit "
+                             "or host pool; for deeper views use horizon_of_space or upload a host HorizonView")
         from mymyr.encoding._device_horizon import build_horizon
         from mymyr.encoding import FlatHorizonEncoder
         return build_horizon(FlatHorizonEncoder(table, horizon_mode="full"), roots, task_ids, merge=merge)
@@ -124,7 +124,7 @@ def horizon(
 
 
 def horizon_of_space(
-    space: StateSpace,
+    space: StateSpace | DeviceStateSpace,
     roots: SupportsDLPack | Sequence[int] | None = None,
     depth: int = 1,
     *,
@@ -137,7 +137,17 @@ def horizon_of_space(
     order) has the states within ``depth`` transitions as nodes, in the order of the space's transitions of each state,
     and one edge per transition with its action label. The space needs its transition labels
     (``labels=True`` when generated) and its task is the one to encode with (``FlatHorizonEncoder(space.task)``);
-    ``max_nodes``, ``truncate``, ``merge`` and the memory are as in ``horizon``."""
+    ``max_nodes``, ``truncate``, ``merge`` and the memory are as in ``horizon``.
+
+    A CUDA DeviceStateSpace builds CUDA arrays on the current torch stream, traversing its recorded state ids with
+    ``merge=True``. It reserves at most ``G * min(max_nodes or N, N)`` node rows and ``G * E`` edge rows for G roots,
+    N recorded states and E transitions; the offsets delimit the used rows. It needs transition labels, refuses
+    numeric state spaces and ``merge=False``, and encodes with torch. An invalid device root or an exceeded node limit
+    without ``truncate=True`` produces invalid offsets, which the device encoder refuses.
+    """
+    if hasattr(space, "device"):
+        from mymyr.encoding._device_horizon import build_space_horizons
+        return build_space_horizons(space, roots, depth, max_nodes, truncate, merge)
     return HorizonView(**_core._build_horizon_of_space(
         space, roots, depth=depth, max_nodes=max_nodes, truncate=truncate, merge=merge,
     ))

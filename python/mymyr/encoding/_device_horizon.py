@@ -1,4 +1,4 @@
-"""Device expansion labels and depth-one horizons, in the encoder's stream order."""
+"""Device expansion labels and horizon arrays, in the encoder's stream order."""
 
 from __future__ import annotations
 
@@ -60,8 +60,6 @@ def bind_actions(encoder: Any, rows: Any, actions: Any) -> None:
 
 def horizon_rows(encoder: Any, view: Any, derived: Any, goals: Any, subgoals: Any) -> Any:
     torch = d._torch()
-    if getattr(view, "depth", 0) is not None and getattr(view, "depth", 0) >= 2:
-        raise d._error("the device does not encode horizons of depth 2 or more")
     keep: list = []
     nodes = d._words(torch, d._cuda_tensor(torch, view.nodes, "nodes", keep), "nodes")
     device = nodes.device
@@ -181,3 +179,62 @@ def encode_transitions(encoder: Any, states: Any, task_ids: Any, derived: Any, g
                                  parent=getattr(actions, "parent", None), offsets=actions.offsets)
         node_derived = build_horizon(encoder, derived, task_ids, labels, merge=False).nodes
     return encode_horizon(encoder, view, node_derived, goals, subgoals, framework, threads, pool, capacities)
+
+
+def build_space_horizons(space: Any, roots: Any, depth: int, max_nodes: int | None,
+                         truncate: bool, merge: bool) -> Any:
+    """Traverse recorded unique state ids into CUDA horizon arrays without reading state words on the host."""
+    import operator
+
+    from mymyr.encoding import FlatHorizonEncoder, HorizonView
+    from mymyr.rl.torch._ops import _stream
+
+    torch = d._torch()
+    depth = operator.index(depth)
+    if not 0 <= depth <= 1 << 20:
+        raise d._error("depth must be between 0 and 1048576")
+    if not merge:
+        raise d._error("device state-space horizons traverse recorded unique ids and require merge=True")
+    if space.numeric_words:
+        raise d._error("horizons do not encode numeric state spaces")
+    if not space.has_labels:
+        raise d._error("the state space needs transition labels: generate it with labels=True")
+    limit = 0 if max_nodes is None else operator.index(max_nodes)
+    if max_nodes is not None and not 1 <= limit <= 0x7fffffff:
+        raise d._error("max_nodes must be between 1 and 2147483647")
+    device = torch.device("cuda", space.device)
+    keep: list = []
+    if roots is None:
+        ids = torch.arange(space.num_states, dtype=torch.int32, device=device)
+    elif hasattr(roots, "__dlpack_device__") and roots.__dlpack_device__()[0] == 2:
+        ids = _integer(torch, roots, "roots", device, keep, 1)
+    else:
+        values = [operator.index(x) for x in roots]
+        if any(x < 0 or x >= space.num_states for x in values):
+            raise d._error("a root is outside the state space")
+        ids = torch.tensor(values, dtype=torch.int32, device=device)
+    graphs = ids.numel()
+    nodes = graphs * min(limit or space.num_states, space.num_states)
+    edges = graphs * space.num_transitions
+    if max(graphs, nodes, edges) > 0x7fffffff:
+        raise d._error("state-space horizon capacities must fit int32 offsets")
+    arrays = space.arrays(framework="torch")
+    rows = d._words(torch, arrays["state_words"], "state_words")
+    output_nodes = torch.empty((nodes, space.words), dtype=torch.int64, device=device)
+    no = torch.empty(graphs + 1, dtype=torch.int32, device=device)
+    eo = torch.empty_like(no)
+    src = torch.empty(edges, dtype=torch.int32, device=device)
+    dst, schema = torch.empty_like(src), torch.empty_like(src)
+    binding = torch.empty((edges, space.label_width), dtype=torch.int32, device=device)
+    scratch = torch.empty(max(1, 2 * space.num_states), dtype=torch.int32, device=device)
+    truncated = torch.zeros(graphs, dtype=torch.uint8, device=device)
+    encoder = FlatHorizonEncoder(space.task, horizon_mode="full")
+    native = d._device_encoder(encoder, space.device)
+    inputs = [rows, arrays["forward_offsets"], arrays["forward_targets"], arrays["label_schemas"],
+              arrays["label_bindings"], ids]
+    outputs = [output_nodes, no, eo, src, dst, schema, binding, scratch, truncated]
+    native.build_space_horizons(_stream(rows), [x.data_ptr() for x in inputs], [x.data_ptr() for x in outputs],
+                               space.num_states, space.num_transitions, space.words, space.label_width,
+                               graphs, depth, limit, truncate)
+    d._retain(torch, [space, arrays, *inputs, *outputs, *keep], device)
+    return HorizonView(output_nodes, no, eo, src, dst, schema, binding, truncated=truncated)

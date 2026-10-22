@@ -335,10 +335,13 @@ without any edge may be `None`. `derived` is per node row `[M, D]`; `goals` and 
 per graph (`[G, ...]`, or one row for all graphs) and replace the instance's goal and layers for that graph.
 Streams do not encode horizons (a horizon is a batch of graphs with offsets, not a row): the horizon encoder has no
 `stream` and C++ `FlatStream(encoder)` refuses it with `std::invalid_argument`. CUDA `HorizonView` arrays encode
-full, delta and action horizons of depth one, every root policy, parent relations and rooted kinship, into torch
-`DeviceFlatBatch` arrays. `horizon(table, cuda_rows, depth=1)` builds compact device nodes from an expansion;
+full, delta and action horizons of any depth, every root policy, parent relations and rooted kinship, into torch
+`DeviceFlatBatch` arrays. Upload a host view or use `horizon_of_space(device_space, roots, depth=k)` to traverse
+recorded state ids on the current torch stream (`merge=True`, labelled nonnumeric spaces); this reserves at most
+`G * min(max_nodes or N, N)` node rows and `G * E` edge rows. Offsets and graph-local indices are validated before
+encoding; cousin rows use linear scratch. `horizon(table, cuda_rows, depth=1)` builds compact device nodes from an expansion;
 `merge` controls first-seen state merging. Device construction requires `depth=1`; node limits and host pools raise
-`ValueError`. Encoding views of depth 2 or more is refused. Device transition encoders expand and encode
+`ValueError`. Device transition encoders expand and encode
 on the current stream; supplied expansions reuse their successor rows. The torch op takes node and edge offsets,
 endpoints and labels, or parent rows with `action_succ` and expansion labels to build transitions. JAX FFI refuses
 horizons and transitions because it has no node-offset or edge operands.
@@ -961,7 +964,7 @@ assert not fixed.sizes["overflow"]                        # reads the sizes: wai
   steps than `H`, down to none. The subgoal levels of a graph are computed once into the workspace's scratch, so a
   schema with levels needs scratch of one mask per level and sign over the instance's words for every graph of a
   batch, on top of the scratch of a schema without them.
-- **Refused.** Horizons of depth 2 or more, an encoder of a numeric table (with or
+- **Refused.** An encoder of a numeric table (with or
   without `include_numeric`: "the device does not encode numeric relations"), `pool=` (a pool of host threads
   means nothing for device rows) and a `framework` other than `'torch'` raise `ValueError` with the `mymyr: encoding:`
   prefix, as do layers or history given to an encoder whose

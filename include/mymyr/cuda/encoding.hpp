@@ -187,6 +187,10 @@ void check_stream_schema(const encoding::EncodingSchema& schema);
 void build_depth_one_horizon(const DeviceEncodeInput& parents, const u64* children, u64 child_stride,
                              const DeviceHorizonBuild& output, cudaStream_t stream);
 
+/// Builds horizons of any depth by traversing a labelled state space's recorded ids, without comparing state words.
+/// Uses the caller's stream and storage, with no allocation or host wait. Input CSR and labels must be valid.
+void build_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output, cudaStream_t stream);
+
 enum class FillMode : u8
 {
     Auto,  // per-instance work and layout select a thread or warp; shared-memory limits may require a warp

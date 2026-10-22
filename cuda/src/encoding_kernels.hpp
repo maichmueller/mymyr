@@ -24,6 +24,9 @@
 
 namespace mymyr::cuda::detail
 {
+cudaError_t launch_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output,
+                                cudaStream_t stream);
+
 /// Everything the kernels read: device pointers and sizes.
 struct EncodeParams
 {

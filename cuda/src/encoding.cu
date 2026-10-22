@@ -1009,4 +1009,13 @@ cudaError_t launch_horizon_builder(const DeviceEncodeInput& parents, const u64* 
     horizon_build_kernel<<<1, 1, 0, stream>>>(parents, children, child_stride, output);
     return cudaPeekAtLastError();
 }
+
+#include "encoding_space_horizon.cuh"
+
+cudaError_t launch_space_horizons(const DeviceHorizonSpace& space, const DeviceSpaceHorizonBuild& output,
+                                cudaStream_t stream)
+{
+    space_horizon_kernel<<<1, 1, 0, stream>>>(space, output);
+    return cudaPeekAtLastError();
+}
 }

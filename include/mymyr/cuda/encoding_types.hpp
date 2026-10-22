@@ -44,8 +44,8 @@ struct DeviceActionInput
     const u64* overflow = nullptr;
 };
 
-/// A depth-one horizon in device memory. Every edge starts at node zero; deeper views are invalid input. Node and
-/// edge offsets start at zero and delimit disjoint graph slices. Scratch holds horizon_scratch_words() uint32 words,
+/// A horizon in device memory. Edge endpoints are graph-local node indices. Node and edge offsets start at zero
+/// and delimit disjoint graph slices. Scratch holds horizon_scratch_words() uint32 words,
 /// remains alive and unchanged between count and fill, and belongs to this call (including captured replays).
 struct DeviceHorizonInput
 {
@@ -61,11 +61,44 @@ struct DeviceHorizonInput
     u64 scratch_words = 0;
 };
 
-/// Canonical edges and kinship storage for device depth-one horizons. Cousin lists are empty at this depth.
+/// Canonical edges and kinship storage. Cousin rows are gathered on demand so scratch is linear in the input size.
 MYMYR_HD constexpr u64 horizon_scratch_words(u64 graphs, u64 nodes, u64 edges)
 {
     return 6 * graphs + 8 * nodes + 5 * edges;
 }
+
+/// Recorded transitions of a deduplicated state space. The CSR and labels are immutable device arrays.
+struct DeviceHorizonSpace
+{
+    const u64* rows = nullptr;
+    const u64* offsets = nullptr;
+    const u32* targets = nullptr;
+    const u32* schemas = nullptr;
+    const u32* bindings = nullptr;
+    u32 states = 0, words = 0, label_width = 0;
+    u64 edges = 0;
+};
+
+/// Output of a breadth-first traversal of recorded state ids, with compact graph slices and graph-local endpoints.
+/// Storage holds graphs * min(limit or states, states) node rows and graphs * edges edge rows.
+/// Scratch holds 2 * states int32 entries.
+/// The builder reads roots[graphs], writes offsets[graphs + 1], and keeps at most limit nodes per graph (0: states).
+/// A limit reached with truncate=false or an invalid root writes negative offsets; truncated[graphs] records limits.
+struct DeviceSpaceHorizonBuild
+{
+    const i32* roots = nullptr;
+    u32 graphs = 0, depth = 1, limit = 0;
+    bool truncate = false;
+    u64* nodes = nullptr;
+    i32* node_offsets = nullptr;
+    i32* edge_offsets = nullptr;
+    i32* src = nullptr;
+    i32* dst = nullptr;
+    i32* schema = nullptr;
+    i32* binding = nullptr;
+    i32* scratch = nullptr;
+    u8* truncated = nullptr;
+};
 
 /// The rows of a batch, in device memory, as encoding::EncodeInput gives them to the host encoder.
 struct DeviceEncodeInput

@@ -2826,12 +2826,62 @@ TEST(DeviceEncodeHorizon, DepthOneModesRootPoliciesAndDerivedEqualTheHost)
     }
 }
 
-TEST(DeviceEncodeHorizon, DeeperViewsAndInvalidExpansionOffsetsSetTheInputFlag)
+TEST(DeviceEncodeHorizon, DeepModesRootPoliciesAndDerivedEqualTheHost)
+{
+    SKIP_WITHOUT_GPU();
+    const auto ctx = device_context();
+    cuda::Stream stream;
+    for (const u32 depth : {2u, 3u})
+    for (const auto& table : {table_of("blocks", {"smedium", "probBLOCKS-8-0"}),
+                              table_of("philosophers", {"p03-phil4"})})
+    {
+        auto roots = test::random_walk(*table, 0, 3, 2);
+        if (table->size() > 1)
+        {
+            const auto other = test::random_walk(*table, 1, 1, 3);
+            roots.data.insert(roots.data.end(), other.data.begin(), other.data.end());
+            roots.task_ids.insert(roots.task_ids.end(), other.task_ids.begin(), other.task_ids.end());
+        }
+        const auto view = test::horizon_of(*table, roots, depth);
+        LabelUploads upload{ctx, stream, {}};
+        cuda::DeviceEncodeInput input;
+        input.graphs = view.graphs(); input.states = upload.put(view.nodes); input.task_ids = upload.put(view.task_ids);
+        input.state_stride = input.state_words = view.words;
+        const u64 words = cuda::horizon_scratch_words(view.graphs(), view.num_nodes(), view.edge_src.size());
+        cuda::DeviceBuffer canonical(ctx, words * sizeof(u32), stream);
+        input.horizon = {upload.put(view.node_offsets), upload.put(view.edge_offsets), upload.put(view.edge_src),
+                         upload.put(view.edge_dst), upload.put(view.edge_schema), upload.put(view.edge_binding),
+                         view.num_nodes(), view.edge_src.size(), view.label_width,
+                         static_cast<u32*>(canonical.data()), words};
+        for (const auto mode : {encoding::HorizonMode::Full, encoding::HorizonMode::Delta, encoding::HorizonMode::Action})
+            for (const auto root : {encoding::RootPolicy::Include, encoding::RootPolicy::Exclude, encoding::RootPolicy::EncodeOnly})
+                for (const auto layout : {encoding::Layout::Graph, encoding::Layout::Relation})
+                    for (const auto index : {encoding::IndexType::I32, encoding::IndexType::I64})
+                    {
+                        encoding::FlatOptions options;
+                        options.layout = layout; options.index = index;
+                        options.horizon = {mode, root, true, true, true};
+                        options.predicate_virtual_nodes = true;
+                        const auto encoder = encoding::FlatEncoder::create(table, options);
+                        const auto reference = host_reference(*encoder, view.input());
+                        cuda::DeviceEncoder device(ctx, encoder);
+                        device.reserve({view.num_nodes(), 0, 0, 0}, stream);
+                        const auto result = run_device(device, ctx, stream, input, shape_of(input.graphs, reference.sizes));
+                        expect_sizes(reference.sizes, result.sizes);
+                        expect_same_arrays(*reference.bundle, result);
+                        if (HasFailure())
+                            return;
+                    }
+    }
+}
+
+TEST(DeviceEncodeHorizon, InvalidEndpointsAndExpansionOffsetsSetTheInputFlag)
 {
     SKIP_WITHOUT_GPU();
     const auto table = table_of("blocks", {"smedium"});
     const auto roots = test::random_walk(*table, 0, 1, 1);
-    const auto view = test::horizon_of(*table, roots, 2, 2);
+    auto view = test::horizon_of(*table, roots, 2, 2);
+    view.edge_src[0] = -1;
     const auto ctx = device_context();
     cuda::Stream stream;
     LabelUploads upload{ctx, stream, {}};

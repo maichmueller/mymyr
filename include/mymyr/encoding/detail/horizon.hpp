@@ -103,7 +103,7 @@ struct HorizonGraph
     const i32* schema_relation;  // [schemas] the relation of each action schema (-1: none)
     u32* order;                  // horizon_order_words(count, edges) words
     u32* kin;                    // horizon_kin_words(count, edges) words (null without sibling or cousin relations)
-    u32* far;                    // the far lists of the cousins (null without a cousin relation)
+    u32* far;                    // the far lists of the cousins (null: gather cousin rows on demand)
     bool use_actions;            // the schema has action relations: the edges' schemas and bindings are read
     bool one_schema_per_relation;  // no two schemas share an action relation
     bool use_parents;            // the canonical parent edges are needed: the schema has a parent, sibling or cousin relation
@@ -687,8 +687,25 @@ MYMYR_HD const u32* kin_relatives(const KinView& k, bool cousin, u32 n, u32& siz
     return k.row;
 }
 
-/// The tuples of a sibling or cousin cell in the graph, saturated at the largest u32 (the caller refuses a cell that
-/// large). A node with one parent is counted from its list's length, one with several by the union of the lists.
+/// Gathers one cousin row through recorded parent and child lists, using one stamp and row entry per node.
+MYMYR_HD const u32* kin_cousin_row(const KinView& k, u32 n, u32& size)
+{
+    u32 count = 0;
+    for (u32 i = k.parent_offsets[n]; i < k.parent_offsets[n + 1u]; ++i)
+        kin_visit_far(k, k.parents[i], [&](u32 x)
+        {
+            if (x != n && k.stamp[x] != n + 1u)
+            {
+                k.stamp[x] = n + 1u;
+                k.row[count++] = x;
+            }
+        });
+    size = horizon_sort_unique(k.row, count, HorizonValueBefore{});
+    return k.row;
+}
+
+/// The tuples of a sibling or cousin cell, saturated at the largest u32. Without stored far lists, cousins use
+/// linear scratch by gathering each node's row on demand.
 MYMYR_HD u32 horizon_kin_count(const HorizonGraph& h, bool cousin)
 {
     const KinView k = horizon_kin_view(h);
@@ -696,6 +713,13 @@ MYMYR_HD u32 horizon_kin_count(const HorizonGraph& h, bool cousin)
     u64 total = 0;
     for (u32 n = 0; n < k.nodes; ++n)
     {
+        if (cousin && !k.far)
+        {
+            u32 size;
+            kin_cousin_row(k, n, size);
+            total += size;
+            continue;
+        }
         const u32 first = k.parent_offsets[n], last = k.parent_offsets[n + 1u];
         if (last == first)
             continue;
@@ -730,7 +754,7 @@ MYMYR_HD void horizon_kin_emit(const HorizonGraph& h, bool cousin, Out& out)
     for (u32 n = 0; n < k.nodes; ++n)
     {
         u32 size;
-        const u32* list = kin_relatives(k, cousin, n, size);
+        const u32* list = cousin && !k.far ? kin_cousin_row(k, n, size) : kin_relatives(k, cousin, n, size);
         for (u32 i = 0; i < size; ++i)
             if (list[i] != n)
                 out.put_pair(n, list[i]);
