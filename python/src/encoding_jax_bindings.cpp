@@ -16,7 +16,10 @@
 //               of every row); history_pos and history_neg uint32 [N, H, 2 HW], history_dt int32 [N, H],
 //               history_count int32 [N] (or [0]: every step valid) and history_derived_pos and history_derived_neg
 //               uint32 [N, H, 2 HD] (or [0]: none), the H history steps of each row, oldest first (the layouts and
-//               rules of encoding::LayerInput and encoding::HistoryInput)
+//               rules of encoding::LayerInput and encoding::HistoryInput); live uint32 [2] (a u64 as halves, low first;
+//               or [0]: every row), the live rows: only the first min(live, N) rows are graphs, the per-graph and
+//               per-cell arrays keep the entries of N graphs and are zero past the live ones (no subgoal layers or
+//               history steps with it)
 //   attributes  args, entities, targets, history: the capacities of relation_args, of the entity arrays, of the
 //               target arrays and of the history step arrays; handle: the registry handle; threads: the CPU target's
 //               worker threads (0: one per hardware thread; the CUDA target ignores it)
@@ -61,6 +64,7 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -354,13 +358,14 @@ enum : usize
     history_count,
     history_derived_pos,
     history_derived_neg,
+    live,
     count
 };
 constexpr const char* names[count] = {
     "states",          "task_ids",          "derived",           "goal_pos",           "goal_neg",
     "goal_derived_pos", "goal_derived_neg", "subgoal_pos",       "subgoal_neg",        "subgoal_derived_pos",
     "subgoal_derived_neg", "history_pos",   "history_neg",       "history_dt",         "history_count",
-    "history_derived_pos", "history_derived_neg"};
+    "history_derived_pos", "history_derived_neg", "live"};
 }  // namespace operand
 
 /// One call's inputs and destinations, checked against the encoder (shapes and dtypes; the rows' contents are the
@@ -373,6 +378,7 @@ struct Call
     Words derived, goal_pos, goal_neg, goal_derived_pos, goal_derived_neg;
     encoding::LayerInput subgoals{};
     encoding::HistoryInput history{};
+    const u64* live = nullptr;  // the live rows, or null: every row
     encoding::BatchShape capacities;
     std::array<void*, k_arrays> arrays{};   // null: absent or without entries
     std::array<u64, k_arrays> bytes{};
@@ -530,6 +536,17 @@ Call call_of(const EncoderEntry& e, i64 args, i64 entities, i64 history, i64 tar
     set_layers(c, layers[operand::subgoal_derived_pos], layers[operand::subgoal_derived_neg], c.subgoals, true);
     set_layers(c, steps, layers[operand::history_neg], c.history.masks, false);
     set_layers(c, layers[operand::history_derived_pos], layers[operand::history_derived_neg], c.history.masks, true);
+    const ffi::AnyBuffer& live = buffers[operand::live];
+    if (live.element_type() != ffi::DataType::U32 || (live.element_count() != 0 && live.element_count() != 2))
+        fail("'live' must be uint32 [2] (the live rows as a u64) or [0]");
+    if (live.element_count())
+    {
+        if (reinterpret_cast<std::uintptr_t>(live.untyped_data()) % 8 != 0)
+            fail("'live' is not 8-byte aligned");
+        if (sub.layers != 0 || steps.layers != 0 || schema.has_history())
+            fail("a live row count carries no subgoal layers or history steps");
+        c.live = static_cast<const u64*>(live.untyped_data());
+    }
     c.capacities = {c.graphs, static_cast<u64>(entities), static_cast<u64>(args), static_cast<u64>(targets),
                     static_cast<u64>(history)};
 
@@ -666,7 +683,8 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
         EncoderEntry& e = *state_of(call)->entry;
         const Call c = call_of(e, args, entities, history, targets, ops, rets, false);
         ++e.cpu_calls;
-        if (c.graphs == 0)  // the empty batch: zero offsets and sizes
+        const u64 graphs = c.live ? std::min(*c.live, c.graphs) : c.graphs;
+        if (graphs == 0)  // the empty batch: zero offsets and sizes
         {
             for (usize k = 0; k < k_arrays; ++k)
                 if (c.arrays[k])
@@ -675,7 +693,7 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
             return;
         }
         encoding::EncodeInput in;
-        in.states = rl::StateBatchView{c.states.data, c.graphs, c.states.words, c.states.words, 0};
+        in.states = rl::StateBatchView{c.states.data, graphs, c.states.words, c.states.words, 0};
         in.task_ids = c.task_ids;
         in.derived = c.derived.data;
         in.derived_stride = c.derived.words;
@@ -718,6 +736,18 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
             zero_from(12, sizes.targets, 1);
             zero_from(14, sizes.history, I);
             zero_from(15, sizes.history, 4);
+            if (graphs < c.graphs)  // the per-graph and per-cell entries past the live graphs
+            {
+                const u64 R = e.encoder->schema().num_relations();
+                zero_from(0, graphs, 4);
+                zero_from(1, graphs, I);
+                zero_from(2, graphs + 1, I);
+                zero_from(5, graphs * R, I);
+                zero_from(6, graphs * R + 1, I);
+                zero_from(7, graphs * R + 1, I);
+                zero_from(9, graphs, 1);
+                zero_from(10, graphs + 1, I);
+            }
         }
         std::memcpy(c.sizes, &sizes, sizeof sizes);
     });
@@ -789,6 +819,7 @@ ffi::Error encode_cuda(cudaStream_t st, i32 ordinal, CudaCall* call, i64 args, i
         set_goal(c, c.goal_derived_pos, c.goal_derived_neg, in, true);
         in.subgoals = c.subgoals;
         in.history = c.history;
+        in.graphs_device = c.live;
         cuda::DeviceOutput out;
         out.arrays = buffers_of(c);
         out.capacities = shape;

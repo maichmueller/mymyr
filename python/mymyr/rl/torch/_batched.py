@@ -10,12 +10,14 @@ from mymyr.rl._sampling import _instance_sampler
 
 from . import _ops
 from ._graph import CapturedRollout
+from ._observation import Observer, SuiteObservation
 
-__all__ = ["BatchedEnv", "Observation", "StepResult"]
+__all__ = ["BatchedEnv", "Observation", "StepResult", "SuiteObservation"]
 
 
 class Observation(NamedTuple):
-    """Owned policy inputs by default; :meth:`BatchedEnv.observation` can explicitly borrow live tensors."""
+    """Owned policy inputs by default; :meth:`BatchedEnv.observation` can explicitly borrow live tensors. ``encoding``
+    is the encoded observation of an environment with an ``observation`` encoder (None without one)."""
 
     states: Tensor
     task_ids: Tensor
@@ -23,6 +25,7 @@ class Observation(NamedTuple):
     goal_pos: Tensor
     goal_neg: Tensor
     at_goal: Tensor  # bool: the state is a goal (a solved reset, a goal mask that holds): the next step absorbs it
+    encoding: Any = None  # the encoding of the rows (see BatchedEnv's observation)
 
 
 class StepResult(NamedTuple):
@@ -30,6 +33,11 @@ class StepResult(NamedTuple):
 
     ``final_states`` precedes autoreset; ``states`` / ``task_ids`` / goal masks describe the next policy observation.
     Empty goal masks have shape [N, 0]. The native environment's public tensors remain borrowed live buffers.
+
+    With an ``observation`` encoder, ``obs`` is the encoding of the next observation (the rows after the step and the
+    autoreset) and ``final_obs`` the encoding of the reached states before the autoreset, with the instances and goal
+    masks they were reached in (``final=True``; the same batch as ``obs`` without autoreset; None with
+    ``final=False``). Both are None without an encoder. Their arrays are new tensors of every step.
     """
 
     reward: Tensor  # float32
@@ -46,6 +54,8 @@ class StepResult(NamedTuple):
     goal_pos: Tensor
     goal_neg: Tensor
     at_goal: Tensor  # bool: the next observation's state is a goal (an autoreset into a solved initial state)
+    obs: Any = None  # the encoding of the next observation
+    final_obs: Any = None  # the encoding of the reached states before the autoreset (final=True)
 
 
 def _mark_static(t: Tensor) -> None:
@@ -115,11 +125,25 @@ class BatchedEnv:
     ``reset(mask)``. ``step(action=None)`` is the random policy: a uniform successor from the counter-based RNG (seed,
     env id ``first_env + i``, draw counter), the same on the CPU and on any device and batch split.
 
+    Encoded observations: ``observation`` is a ``mymyr.encoding.FlatRelationEncoder`` of the environments' table (over a
+    suite of several domains: one encoder per domain, in the suite's order). Every step then encodes the next
+    observation (``StepResult.obs``) and, with ``final=True``, the reached states before the autoreset
+    (``StepResult.final_obs``), from the environment tensors after the step and on torch's current stream; the goal
+    relations hold the per-env goal masks with ``goals=True``. On a device the encoding runs the device encoder; on the
+    CPU the host encoder. ``obs_capacities`` (``dict(entities=, args=)``, plus ``targets=`` for target sources and
+    ``graphs=``, by default N; over a suite one dict for every domain or one per domain) gives the arrays fixed sizes:
+    the true sizes are in the batch's ``device_sizes`` (``sizes``), and a batch that does not fit is all zero with its
+    overflow flag set. Without capacities each encoding is exact, which on a device waits for the batch's sizes once
+    (and cannot be captured). ``obs_actions=True`` adds the action relations of the observed states (their expansion;
+    a CPU environment only: the device encodes no actions); by default observations hold no action tuples. Over a
+    suite an observation is a :class:`SuiteObservation`: one batch per domain and each row's index in its batch.
+
     CUDA graphs: on a device's fast path (``capturable``) reset, refresh, step and random_actions synchronize nothing
     and allocate nothing (the environment's scratch is sized for N at construction), and the state tensors are marked
     static for torch.compile (they keep their addresses; assign into them in place). So loops of
     steps capture into CUDA graphs: :meth:`capture` (``torch.cuda.CUDAGraph``), ``torch.cuda.graph`` around the calls,
-    or ``torch.compile(mode="reduce-overhead")`` of a function that steps. On the general path the compiled calls are
+    or ``torch.compile(mode="reduce-overhead")`` of a function that steps; the encoding of observations with
+    ``obs_capacities`` waits for nothing, so it is captured with the steps. On the general path the compiled calls are
     the ``cudagraph_unsafe`` ops ``mymyr::step_sync`` / ``refresh_sync``, which torch.compile leaves out of its graphs.
     """
 
@@ -145,6 +169,9 @@ class BatchedEnv:
         threads: int = 1,
         ctx: Any = None,
         first_env: int = 0,
+        observation: Any = None,
+        obs_capacities: Any = None,
+        obs_actions: bool = False,
     ) -> None:
         self.device = torch.device(device)
         index = _device_index(self.device)
@@ -186,6 +213,9 @@ class BatchedEnv:
             self.core.reserve(n)
             for t in self._tensors():
                 _mark_static(t)
+        if observation is None and (obs_capacities is not None or obs_actions):
+            raise ValueError("mymyr: obs_capacities and obs_actions need an observation encoder")
+        self._observer = None if observation is None else Observer(self, observation, obs_capacities, obs_actions)
         initial_ids = None if task_ids is None else _task_ids(self.core, task_ids, None, n, d, "task_ids")
         self.reset(task_ids=initial_ids)
 
@@ -222,15 +252,45 @@ class BatchedEnv:
     def _ids(self) -> Optional[Tensor]:
         return self.task_ids if self.multi else None
 
+    @property
+    def observation_encoders(self) -> Optional[list]:
+        """The observation encoders (one per domain over a suite of several domains), or None."""
+        return None if self._observer is None else list(self._observer.encoders)
+
     def observation(self, *, copy: bool = True) -> Observation:
-        """Policy inputs that survive later steps/resets by default. ``copy=False`` borrows the live buffers."""
+        """Policy inputs that survive later steps/resets by default. ``copy=False`` borrows the live buffers. With an
+        observation encoder, ``encoding`` is the encoding of the current rows (new arrays either way)."""
         keep = (lambda tensor: tensor.clone()) if copy else (lambda tensor: tensor)
         empty = self.states.new_empty((self.num_envs, 0))
         return Observation(
             keep(self.states), keep(self.task_ids), keep(self.count),
             keep(self.goal_pos) if self.goals else empty, keep(self.goal_neg) if self.goals else empty,
-            keep(self.at_goal),
+            keep(self.at_goal), self.encode_observation(),
         )
+
+    def _goal_masks(self) -> Optional[tuple[Tensor, Tensor]]:
+        return (self.goal_pos, self.goal_neg) if self.goals else None
+
+    def encode_observation(self) -> Any:
+        """The encoding of the current rows (states, task ids and goal masks) with the observation encoder; None without
+        one. On torch's current stream, like a step's ``obs``."""
+        if self._observer is None:
+            return None
+        return self._observer.encode(self.states, self.task_ids, self._goal_masks())
+
+    def _before_step(self, final: bool) -> Optional[tuple]:
+        """What the final observation needs of the rows before an autoresetting step: their task ids and goals."""
+        if self._observer is None or not final or not self._autoreset:
+            return None
+        goals = self._goal_masks()
+        return self.task_ids.clone(), None if goals is None else (goals[0].clone(), goals[1].clone())
+
+    def _final_obs(self, before: Optional[tuple], final_states: Tensor, obs: Any, final: bool) -> Any:
+        if self._observer is None or not final:
+            return None
+        if before is None:
+            return obs  # without autoreset the reached states are the next observation
+        return self._observer.encode(final_states, before[0], before[1])
 
     def is_goal(self) -> Tensor:
         """Whether each environment's current state is a goal (the goal masks' test with goals=True): [N] bool on
@@ -315,6 +375,7 @@ class BatchedEnv:
         or keep their instances with sampler=None). ``final=True`` retains the reached state before reset;
         ``copy=True`` owns the next observation. ``copy=False`` explicitly borrows live observation buffers."""
         args = self._step_args(action, next_task_ids, final)
+        before = self._before_step(final)
         if torch.compiler.is_compiling():
             r = (torch.ops.mymyr.step if self.capturable else torch.ops.mymyr.step_sync)(*args)
         else:
@@ -322,8 +383,10 @@ class BatchedEnv:
         if self._autoreset:
             self._advance_resets(r[1] | r[2])
         observation = self.observation(copy=copy)
+        final_obs = self._final_obs(before, r[7], observation.encoding, final)
         return StepResult(*r, observation.count, observation.states, observation.task_ids,
-                          observation.goal_pos, observation.goal_neg, observation.at_goal)
+                          observation.goal_pos, observation.goal_neg, observation.at_goal, observation.encoding,
+                          final_obs)
 
     def _step_args(self, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool) -> tuple:
         if action is not None:
@@ -343,9 +406,10 @@ class BatchedEnv:
 
     def _step_into(
         self, out: StepResult, action: Optional[Tensor], next_task_ids: Optional[Tensor], final: bool
-    ) -> None:
+    ) -> tuple[Any, Any]:
         """step() writing its outputs into ``out``'s tensors (eager only; CapturedRollout's slices of its stacked
-        outputs)."""
+        outputs); returns the step's ``obs`` and ``final_obs``."""
+        before = self._before_step(final)
         _ops.step_impl(*self._step_args(action, next_task_ids, final), out=tuple(out)[:8])
         if self._autoreset:
             self._advance_resets(out.terminated | out.truncated)
@@ -356,6 +420,8 @@ class BatchedEnv:
         if self.goals:
             out.goal_pos.copy_(self.goal_pos)
             out.goal_neg.copy_(self.goal_neg)
+        obs = self.encode_observation()
+        return obs, self._final_obs(before, out.final_states, obs, final)
 
     def random_actions(self, max_actions: Optional[int] = None) -> Tensor:
         """The random policy's next choices without stepping ([N] int64 on ``device``): the successors ``step(None)``
@@ -407,12 +473,14 @@ class BatchedEnv:
         self.core.check_errors()
 
     def close(self) -> None:
-        """Releases the op handle (the tensors stay); also done when the BatchedEnv is collected."""
+        """Releases the op handles (the tensors stay); also done when the BatchedEnv is collected."""
         _ops.unregister(self.handle)
+        if getattr(self, "_observer", None) is not None:
+            self._observer.close()
 
     def __del__(self) -> None:
         try:
-            _ops.unregister(self.handle)
+            self.close()
         except Exception:  # interpreter shutdown, or a failed __init__
             pass
 

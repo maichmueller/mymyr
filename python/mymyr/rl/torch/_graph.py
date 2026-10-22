@@ -13,7 +13,13 @@ __all__ = ["CapturedRollout", "Rollout"]
 
 class Rollout(NamedTuple):
     """The outputs of a captured rollout's K steps, stacked over the steps ([K, N, ...] on the environments' device;
-    the same tensors after every replay, overwritten by the next one)."""
+    the same tensors after every replay, overwritten by the next one).
+
+    With an observation encoder, ``obs`` holds the K steps' encoded observations (step k's ``StepResult.obs``: a batch,
+    or a ``SuiteObservation`` over a suite of several domains) and ``final_obs`` those of the reached states before the
+    autoreset (with ``final=True``), each the same arrays after every replay. ``mymyr.encoding.collate(rollout.obs)``
+    concatenates them into one batch of the K * N rows in step order (over a suite: per domain,
+    ``collate([o.batches[d] for o in rollout.obs])``)."""
 
     action: Optional[Tensor]  # int64 [K, N]: the policy's actions (None: the random policy)
     reward: Tensor  # float32 [K, N]
@@ -30,6 +36,8 @@ class Rollout(NamedTuple):
     goal_pos: Tensor
     goal_neg: Tensor
     at_goal: Tensor  # bool [K, N]: the observed state after each step is a goal
+    obs: Optional[tuple] = None  # the K steps' encoded observations
+    final_obs: Optional[tuple] = None  # the K steps' encoded final observations (final=True)
 
 
 class CapturedRollout:
@@ -67,6 +75,10 @@ class CapturedRollout:
             raise ValueError(f"mymyr: this BatchedEnv's steps cannot be captured into a CUDA graph: {why}")
         if steps <= 0:
             raise ValueError("mymyr: a captured rollout needs steps > 0")
+        observer = env._observer
+        if observer is not None and observer.capacities is None:
+            raise ValueError("mymyr: a captured rollout encodes observations at fixed sizes: construct the BatchedEnv "
+                             "with obs_capacities")
         if next_task_ids is not None:
             n = env.num_envs
             if next_task_ids.dtype != torch.int32 or next_task_ids.device != env.device or tuple(next_task_ids.shape) != (n,):
@@ -77,18 +89,21 @@ class CapturedRollout:
         self.next_task_ids = next_task_ids
         self.final = bool(final)
         dev = env.device
-        if policy is not None:
-            side = torch.cuda.Stream(dev)
-            side.wait_stream(torch.cuda.current_stream(dev))
-            with torch.cuda.stream(side):
+        side = torch.cuda.Stream(dev)
+        side.wait_stream(torch.cuda.current_stream(dev))
+        with torch.cuda.stream(side):
+            if policy is not None:
                 for _ in range(2):
                     policy(env)
-            torch.cuda.current_stream(dev).wait_stream(side)
+            if observer is not None:
+                observer.warm(env.num_envs)
+        torch.cuda.current_stream(dev).wait_stream(side)
         from ._batched import StepResult
 
         self.graph = torch.cuda.CUDAGraph()
         K, n = self.steps, env.num_envs
-        with torch.cuda.graph(self.graph, pool=pool):
+        obs, final_obs = [], []
+        with torch.cuda.graph(self.graph, pool=pool, stream=side):
             # the steps write into slices of the stacked outputs (no stacking copies)
             b = torch.empty((K, n), dtype=torch.bool, device=dev)
             rows = n if final else 0
@@ -110,8 +125,11 @@ class CapturedRollout:
                 if actions is not None:
                     a = actions[k]
                     a.copy_(policy(env).reshape(n))
-                env._step_into(StepResult(*(x[k] for x in out)), a, next_task_ids, final)
-            self._result = Rollout(actions, *out)
+                step_obs, step_final = env._step_into(StepResult(*(x[k] for x in out[:14])), a, next_task_ids, final)
+                obs.append(step_obs)
+                final_obs.append(step_final)
+            self._result = Rollout(actions, *out[:14], tuple(obs) if observer is not None else None,
+                                   tuple(final_obs) if observer is not None and final else None)
 
     @property
     def result(self) -> Rollout:

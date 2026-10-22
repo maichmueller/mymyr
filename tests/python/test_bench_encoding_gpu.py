@@ -198,6 +198,34 @@ def test_t_c1_is_soft_and_the_table_says_so(bench):
     assert status["cpu-eight-threads"]["status"] == "fail" and "rerun on a quiet host" in status["cpu-eight-threads"]["detail"]
 
 
+@pytest.mark.parametrize("manual", [False, True])
+@pytest.mark.parametrize("status,unavailable,expected", [
+    ("error", False, "error"), ("skipped", False, "skipped"), ("skipped", True, "fallback"),
+])
+def test_in_step_gate_preserves_observation_failures(bench, manual, status, unavailable, expected):
+    task, n = "blocks-p01e", 16384
+    records = [record(task, "env_step_n16384", 1, N=n, min_ns_per_env=1),
+               dict(task=task, mode="env_step_obs_n16384", N=n, status=status, unavailable=unavailable,
+                    reason="observation unavailable")]
+    if manual:
+        records += [record(task, "env_step_rand_n16384", 1, N=n, min_ns_per_env=1),
+                    record(task, "env_step_encode_n16384", 2, N=n, min_ns_per_env=2)]
+    result = bench.gate_device_in_step(bench.Index(records), task)
+    expected_status = ("pass" if manual else "n/a") if expected == "fallback" else expected
+    assert result["status"] == expected_status
+    if expected != "fallback":
+        assert "env_step_obs_n16384: observation unavailable" in result["reason"]
+
+
+def test_in_step_gate_keeps_a_measured_observations_missing_baseline(bench):
+    task, n = "blocks-p01e", 16384
+    records = [record(task, "env_step_obs_n16384", 2, N=n, min_ns_per_env=2),
+               record(task, "env_step_rand_n16384", 1, N=n, min_ns_per_env=1),
+               record(task, "env_step_encode_n16384", 2, N=n, min_ns_per_env=2)]
+    result = bench.gate_device_in_step(bench.Index(records), task)
+    assert result["status"] == "n/a" and result["reason"] == "env_step_n16384 not selected"
+
+
 class FakeGpu:
     """What the device helpers use of the GPU: ok, sync and empty_cache, plus a torch.cuda that records the calls."""
 
@@ -426,6 +454,18 @@ def test_the_launch_gate_allows_four_kernels_and_nothing_but_memsets_besides(ben
     assert device_gate(bench, "device-launches", relation=dict(other_nodes=1))[0]["status"] == "fail"
 
 
+@pytest.mark.parametrize("gate,field", [("device-launches", "kernels"), ("device-launches", "other_nodes"),
+                                      ("device-scratch", "scratch_bytes"), ("device-scratch", "cub_bytes"),
+                                      ("device-scratch", "cells"), ("device-scratch", "relations")])
+def test_device_gates_require_their_measurements(bench, gate, field):
+    records = [device_record("device_encode_graph", "graph"), device_record("device_encode_rel", "relation")]
+    del records[1][field]
+    results, status, _ = gate_rows(bench, records, ["blocks-p01e"])
+    assert results[gate]["blocks-p01e"]["status"] == "n/a"
+    assert "not measured; use --device-bench" in results[gate]["blocks-p01e"]["reason"]
+    assert status[gate]["status"] == "n/a"
+
+
 def test_the_scratch_gate_counts_16_bytes_per_graph_and_4_per_cell_plus_the_scan(bench):
     base = device_record("device_encode_graph", "graph")["scratch_bytes"]
     rel = device_record("device_encode_rel", "relation")["scratch_bytes"]
@@ -514,4 +554,5 @@ def test_gpu_modes_run_the_device_environment_when_cuda_is_present(tmp_path):
     records = {r["mode"]: r for r in result["records"]}
     assert records["env_step_n256"]["status"] == "ok" and records["env_step_n256"]["min_ns_per_env"] > 0
     assert records["env_step_rand_n256"]["status"] == "ok"
+    assert records["env_step_obs_n256"]["status"] == "ok" and records["env_step_obs_n256"]["min_ns_per_env"] > 0
     assert result["environment"]["gpu"]["name"]

@@ -479,6 +479,85 @@ step = env.step(final=True)
 print(env.states.shape, step.reward.shape)
 ```
 
+## Encoded observations
+
+Both environments can hand the policy the [relational encoding](encoding.md) of what it observes instead of the raw
+state words: pass `observation=` a `mymyr.encoding.FlatRelationEncoder` of the environments' table. Every step then
+encodes the rows after the step and the autoreset, on the environments' device: the device encoder on CUDA, the host
+encoder on the CPU, with the same arrays bit for bit as `encoder.encode` of those rows on the host.
+
+- **What is encoded.** The next observation's states, instances and, with `goals=True`, the per-environment goal
+  masks as the goal relations (`goals=(goal_pos, goal_neg)` of `encode`). The reached states before the autoreset are
+  encoded too, with the instances and goal masks they were reached in: torch `StepResult.final_obs` (with
+  `final=True`) and JAX `info["final_obs"]` (with `final_state=True`), for bootstrapping truncated episodes. Without
+  autoreset the final observation is the observation itself.
+- **Capacities.** `obs_capacities=dict(entities=, args=)` (plus `targets=` for target sources; `graphs=` defaults to
+  the number of environments) gives every array a fixed size, so nothing waits for the device and the encoding is
+  captured with the step (`CapturedRollout`, `torch.cuda.graph`, `torch.compile`, `jax.jit`, `lax.scan`). The true
+  sizes are in the batch's `device_sizes` (`sizes` reads them on the host); a batch that does not fit is all zero with
+  its overflow flag set. Without capacities every encoding is exact: on a device it waits for the batch's sizes once,
+  and it cannot be captured or jitted.
+- **Actions** are off by default: an observation holds no action tuples even when the schema has action relations.
+  A CPU `BatchedEnv(..., obs_actions=True)` adds them from the expansion of the observed states; the device and the JAX
+  encoding do not encode actions.
+- **Suites.** The domains of a `TaskSuite` have relation catalogs of their own, so over a suite of several domains
+  `observation=` takes one encoder per domain and an observation is a `SuiteObservation`: `batches[d]` is the batch of
+  domain `d`'s rows in row order (with the domain's instance numbers as task ids), `domain[i]` the domain of row `i`
+  and `index[i]` its graph in that batch. With capacities a domain's batch has an entry for every environment in its
+  per-graph arrays and counts its rows on the device (`device_graphs`; `num_graphs` reads it).
+
+A torch environment on the CPU, whose observations are the host encoder's batches:
+
+```python needs-torch
+from pathlib import Path
+
+import mymyr
+from mymyr import encoding, rl
+from mymyr.rl.torch import BatchedEnv
+
+data = Path("tests/data/pddl/blocks")
+tasks = [mymyr.Task.from_pddl(data / "domain.pddl", data / p, atoms="dense") for p in ("probBLOCKS-8-0.pddl", "smedium.pddl")]
+table = rl.TaskTable(tasks)
+encoder = encoding.FlatRelationEncoder(table)
+env = BatchedEnv(table, 8, seed=0, max_steps=6, observation=encoder, obs_capacities=dict(entities=4096, args=16384))
+step = env.step()
+print(step.obs.num_graphs, step.obs.sizes["tuples"], step.final_obs.sizes["overflow"])
+```
+
+On CUDA the same environment encodes on the device, and a captured rollout returns the observation of each of its
+steps; `encoding.collate` concatenates them into one batch of all its rows:
+
+```python skip-if-no-cuda needs-torch
+import torch
+
+env = BatchedEnv(table, 1024, device=torch.device("cuda", 0), seed=0, max_steps=6, observation=encoder,
+                 obs_capacities=dict(entities=1 << 16, args=1 << 18))
+rollout = env.capture(4)
+result = rollout.replay()
+batch = encoding.collate(result.obs)
+print(len(result.obs), batch.num_graphs, result.obs[0].device)
+```
+
+The JAX environment carries the encoding in its observations, under `jax.jit` and `lax.scan`:
+
+```python needs-jax
+from pathlib import Path
+
+import jax
+import mymyr
+from mymyr import encoding, rl
+from mymyr.rl.jax import Env
+
+data = Path("tests/data/pddl/blocks")
+tasks = [mymyr.Task.from_pddl(data / "domain.pddl", data / p, atoms="dense") for p in ("probBLOCKS-8-0.pddl", "smedium.pddl")]
+table = rl.TaskTable(tasks)
+encoder = encoding.FlatRelationEncoder(table)
+env = Env(table, device="cpu", max_steps=6, observation=encoder, obs_capacities=dict(entities=4096, args=16384))
+state, observation = env.reset(jax.random.key(0), 8)
+state, observation, reward, terminated, truncated, info = jax.jit(env.step)(jax.random.key(1), state)
+print(observation.encoding.num_graphs, int(observation.encoding.overflow))
+```
+
 ## A learning smoke example
 
 Run `python examples/rl_learning.py` for a NumPy REINFORCE successor scorer. It scores each applicable action by an

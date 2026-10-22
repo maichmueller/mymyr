@@ -877,6 +877,28 @@ class DeviceFlatBatch:
 
     array_names = _OUTPUTS
 
+    @staticmethod
+    def _template(encoder: Any) -> tuple:
+        """What every capacity batch of ``encoder`` shares, for :meth:`_of`."""
+        layout = layout_of(encoder)
+        present = tuple((k, name) for k, name in enumerate(_ARRAYS) if layout.present(name))
+        return (encoder, encoder.schema, encoder.schema_fingerprint, encoder.table_fingerprint, encoder.options, layout,
+                present)
+
+    @classmethod
+    def _of(cls, template: tuple, outputs: Any) -> "DeviceFlatBatch":
+        """The capacity batch of the outputs of ``encode_flat`` (in ``array_names`` order) for a :meth:`_template`,
+        made with attribute writes only (so that torch.compile traces it without a break)."""
+        batch = object.__new__(cls)
+        batch._encoder, batch._schema, batch._fingerprint, batch._table_fingerprint, batch._options, batch._layout = (
+            template[:6]
+        )
+        batch._device_graphs = None
+        batch._arrays = {name: outputs[k] for k, name in template[6]}
+        batch._sizes = outputs[len(_ARRAYS)]
+        batch._graphs = outputs[0].shape[0]
+        return batch
+
 
 def _array_property(name: str) -> property:
     def get(self: DeviceFlatBatch) -> Any:
@@ -988,17 +1010,30 @@ class DeviceFlatStream:
         caps = _capacities(capacities, layout)
         if caps[0] < self.capacity:
             raise _error("flush graph capacity must cover the entire device ring")
-        # a ring's schema has no history steps: the history capacity plays no part
-        out = _outputs(torch, layout.specs(torch, self.capacity, *caps[1:5], numeric=caps[5]), self.device)
-        _relation_scratch(torch, out, layout, self.capacity, caps[2], self.device)
-        graphs = torch.empty(1, dtype=torch.int64, device=self.device)
-        scratch = _scratch(torch, self._native, self._stream_ptr, self.capacity, self.device, self._derived is not None)
-        self._native.flush(self._stream_ptr, self._rows.fields, self.device_status.data_ptr(), _pointers(out),
-                           [self.capacity, *caps[1:]], graphs.data_ptr(), scratch.data_ptr(), scratch.numel())
-        result = DeviceFlatBatch(self.encoder, out, exact=False)
-        result._device_graphs = graphs
+        result, scratch = _flush_rows(torch, self._native, self._stream_ptr, self._rows, self.device_status,
+                                      self.encoder, self.capacity, caps, self.device, self._derived is not None)
         result._keepalive = (self, scratch)
         return result
+
+
+def _flush_rows(torch: Any, native: Any, stream: int, rows: "_Rows", status: Any, encoder: Any, capacity: int,
+                caps: tuple, device: Any, derived: bool, zero_unused: bool = False) -> tuple[DeviceFlatBatch, Any]:
+    """Encodes the live rows of a ring (``rows``, with its int64 [3] ``status``: first row, live count, dropped rows)
+    into a batch of the graph capacity ``capacity`` and the capacities ``caps`` (of ``_capacities``), with the private
+    relation storage of a Simple-only fill, and empties the ring, on ``stream`` without a host wait. ``derived``: the
+    rows carry their derived words. ``zero_unused`` also zeroes the variable arrays past their sizes. Returns the batch
+    (its ``device_graphs`` the live count) and the scratch, which must live as long as the batch."""
+    layout = layout_of(encoder)
+    # a ring's schema has no history steps: the history capacity plays no part
+    out = _outputs(torch, layout.specs(torch, capacity, *caps[1:5], numeric=caps[5]), device)
+    _relation_scratch(torch, out, layout, capacity, caps[2], device)
+    graphs = torch.empty(1, dtype=torch.int64, device=device)
+    scratch = _scratch(torch, native, stream, capacity, device, derived)
+    native.flush(stream, rows.fields, status.data_ptr(), _pointers(out), [capacity, *caps[1:]], graphs.data_ptr(),
+                 scratch.data_ptr(), scratch.numel(), zero_unused=zero_unused)
+    batch = DeviceFlatBatch(encoder, out, exact=False)
+    batch._device_graphs = graphs
+    return batch, scratch
 
 
 class DeviceCollator:
