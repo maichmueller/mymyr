@@ -190,6 +190,37 @@ def test_simple_with_numeric_relations_is_refused(outputs):
         layout_of(encoder)
 
 
+@pytest.mark.parametrize("name", ["cs-drone", "counters_f64"])
+@pytest.mark.parametrize("form", ["graph", "relation", "simple"])
+@pytest.mark.parametrize("index", ["int32", "int64"])
+def test_simple_graphs_of_numeric_rows_without_numeric_relations(name, form, index):
+    """The rows of a numeric table carry their numeric words after the atom words; without numeric relations
+    (include_numeric=False) the Simple graph reads none of them and equals the host graph in every form."""
+    dev = gpu()
+    from test_encoding_numeric import build_cases
+    from test_encoding_numeric_cuda import rows_of
+
+    case = {c.name: c for c in build_cases()}.get(name)
+    if case is None:
+        pytest.skip("PDDL front end required")
+    encoder = encoder_of(case.table, form, index_dtype=index, include_numeric=False)
+    rows, ids = rows_of(case), np.asarray(case.ids, np.int32)
+    assert rows.shape[1] > case.table.words
+    host = encoder.encode(rows, ids)
+    device_rows, device_ids = to_device(rows, dev), to_device(ids, dev)
+    same_batch(host, encoder.encode(device_rows, device_ids))
+    caps = capacities(host, 2)
+    same_batch(encoder.encode(rows, ids, capacities=caps), encoder.encode(device_rows, device_ids, capacities=caps))
+    n, split = len(rows), len(rows) // 2
+    ring = encoder.device_stream(n + 3, device=dev)
+    ring.append(device_rows[:split], device_ids[:split])
+    ring.append(device_rows[split:], device_ids[split:])
+    same_batch(host, ring.flush(capacities={**caps, "graphs": n + 3}))
+    parts = [encoder.encode(device_rows[a:b], device_ids[a:b]) for a, b in ((0, split), (split, n))]
+    same_batch(host, encoding.collate(parts))
+    same_batch(encoder.encode(rows, ids, capacities=caps), encoding.collate(parts, capacities=caps))
+
+
 @pytest.mark.parametrize("outputs", [("simple",), BOTH])
 def test_simple_jax_refusal_explains_the_fixed_result_layout(outputs):
     pytest.importorskip("jax")
