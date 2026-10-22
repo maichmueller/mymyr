@@ -689,7 +689,7 @@ ffi::Error encode_cpu(CpuCall* call, i64 args, i64 entities, i64 /*handle*/, i64
             for (usize k = 0; k < k_arrays; ++k)
                 if (c.arrays[k])
                     std::memset(c.arrays[k], 0, c.bytes[k]);
-            std::memset(c.sizes, 0, sizeof(encoding::FlatSizes));
+            *c.sizes = {};
             return;
         }
         encoding::EncodeInput in;
@@ -947,7 +947,7 @@ void bind_encoding_jax(nb::module_& parent)
             }
             nb::list needs;
             for (const bool layer_masks : {false, true})
-                for (const auto [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
+                for (const auto& [goal_masks, derived_goal_masks] : {std::pair{false, false}, {true, false}, {true, true}})
                     needs.append(cuda::DeviceEncoder::needs_derived(enc, goal_masks, derived_goal_masks, layer_masks));
             d["needs_derived"] = nb::tuple(needs);
             d["cuda"] = true;

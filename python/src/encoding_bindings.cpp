@@ -1719,7 +1719,7 @@ void bind_encoding(nb::module_& parent)
             nb::gil_scoped_release release;
             result = encoding::collate(arrays);
         }
-        return PyFlatBatch{std::move(result), batches.front().schema, batches.front().framework, std::nullopt};
+        return PyFlatBatch{std::move(result), batches.front().schema, batches.front().framework, std::nullopt, std::nullopt};
     }, "batches"_a, "Concatenates host batches of one schema and layout, shifting offsets and entity ids.");
 
     nb::class_<PyEncodingSchema> schema_class(
