@@ -230,12 +230,13 @@ def test_deep_torch_op_compiles_and_replays_with_cousins(layout, index):
                                                sibling_relation=True, cousin_relation=True)
     expected = encoder.encode(view)
     capacity = caps(expected)
+    graphs = expected.num_graphs
     handle = rt.register(encoder)
 
     def call():
         return torch.ops.mymyr.encode_flat(handle, inputs.nodes, None, None, None, None, None, None,
             None, None, None, None, None, None, None, None, None, None,
-            expected.num_graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
+            graphs, capacity["entities"], capacity["args"], capacity["targets"], 0,
             None, None, None, None, inputs.node_offsets, inputs.edge_offsets,
             inputs.edge_src, inputs.edge_dst, inputs.edge_schema, inputs.edge_binding)
 
