@@ -726,7 +726,8 @@ OutputLayout DeviceEncoder::output_layout(const BatchShape& shape) const
     encoding::StaticShape statics{};
     if (schema().shared_statics())
     {
-        const auto view = m_context->m_host->view();
+        const auto host = m_context->host();
+        const auto view = host->view();
         statics.instances = view.num_instances;
         for (u32 i = 0; i < view.num_instances; ++i)
             statics.args = add(statics.args, encoding::detail::static_block_totals(

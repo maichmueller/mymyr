@@ -12,7 +12,7 @@ import numpy as np
 if TYPE_CHECKING:
     from mymyr._core._datasets import KnowledgeBase, StateSpace
     from mymyr._typing import SupportsDLPack
-    from mymyr.encoding import FlatBatch, SuiteBatch, SuiteEncoder
+    from mymyr.encoding import DeviceFlatBatch, FlatBatch, SuiteBatch, SuiteEncoder
     from mymyr.rl import Expansion, ThreadPool
 
 __all__ = ["EncodedRows", "EncodingCollate", "StateRow", "StateRows"]
@@ -25,10 +25,10 @@ class StateRow:
     """One item of a ``StateRows`` dataset: a state's row of atom words ``[W]`` (uint64), the instance it belongs to,
     its labels (name to value) and, for a dataset with goals, the goal masks ``(positive, negative)`` of the row."""
 
-    row: np.ndarray
-    task_id: int
+    row: SupportsDLPack
+    task_id: int | SupportsDLPack
     labels: dict[str, Any] = field(default_factory=dict)
-    goal: tuple[np.ndarray, np.ndarray] | None = None
+    goal: tuple[SupportsDLPack, SupportsDLPack] | None = None
 
 
 @dataclass(frozen=True)
@@ -43,9 +43,9 @@ class EncodedRows:
       for a ``SuiteEncoder`` the expansions are in ``graphs.expansions``.
     """
 
-    graphs: FlatBatch | SuiteBatch
-    task_ids: np.ndarray
-    labels: dict[str, np.ndarray]
+    graphs: FlatBatch | DeviceFlatBatch | SuiteBatch
+    task_ids: SupportsDLPack
+    labels: dict[str, SupportsDLPack]
     actions: Expansion | None = None
 
 
@@ -278,7 +278,8 @@ class EncodingCollate:
     ``SuiteEncoder`` when the rows are of the instances of a suite (global ids; the graphs are then one batch per domain).
     ``actions=True`` expands the rows' states and encodes their actions (the expansion is in the result). ``framework``,
     ``threads`` and ``pool`` are as in ``encoder.encode``. Rows with their own goal (a dataset made with ``goals``) are
-    encoded with it. The collate function is a plain callable object: it pickles with its encoder, so it works with
+    encoded with it. CUDA rows stay on the device and dispatch to the device encoder. ``capacities`` optionally
+    supplies its output capacities, avoiding the wait for exact allocation. The collate function is a plain callable object: it pickles with its encoder, so it works with
     data loader worker processes.
     """
 

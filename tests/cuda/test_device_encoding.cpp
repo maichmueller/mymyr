@@ -1643,9 +1643,8 @@ TEST(DeviceEncodingStatics, MixedInstancesMatchTheHostAndReportStaticOverflow)
             encoding::EncodeInput input;
             input.states = {rows.data(), ids.size(), table->words(), 0, 0};
             input.task_ids = ids.data();
-            ThreadPool pool(1);
-            const auto expected = host->encode(input, pool);
-            const cuda::DeviceEncoder device(ctx, host);
+            const auto expected = host->encode(input);
+            cuda::DeviceEncoder device(ctx, host);
             const auto shape = device.worst_case(ids.size());
             const encoding::StaticShape statics{3, expected->find("static_args")->elements()};
             const auto offsets = cuda::output_layout(shape, index, host->schema().num_relations(),

@@ -704,7 +704,8 @@ class _Host:
         self.relation_args = args.cpu().numpy() - begin
         if batch._layout.shared:
             ids = batch.static_task_ids
-            block = int(torch.searchsorted(ids, int(self.task_ids[0])).item())
+            blocks = ids.numel() if self.sizes is None else self.sizes["static_instances"]
+            block = int(torch.searchsorted(ids[:blocks], int(self.task_ids[0])).item())
             count = batch._layout.static_relations
             offsets = batch.static_arg_offsets[block * count:(block + 1) * count + 1].cpu().numpy()
             self.static_task_ids = self.task_ids.copy()
