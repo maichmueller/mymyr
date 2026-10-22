@@ -514,4 +514,5 @@ def test_gpu_modes_run_the_device_environment_when_cuda_is_present(tmp_path):
     records = {r["mode"]: r for r in result["records"]}
     assert records["env_step_n256"]["status"] == "ok" and records["env_step_n256"]["min_ns_per_env"] > 0
     assert records["env_step_rand_n256"]["status"] == "ok"
+    assert records["env_step_obs_n256"]["status"] == "ok" and records["env_step_obs_n256"]["min_ns_per_env"] > 0
     assert result["environment"]["gpu"]["name"]

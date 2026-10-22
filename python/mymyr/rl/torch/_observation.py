@@ -92,8 +92,7 @@ class Observer:
         self.tables = tables
         self.capacities = _capacities(capacities, len(encoders), n)
         self.actions = bool(actions)
-        self.goals = [_device.layout_of(e).goal_complete if self.device.type == "cuda" else _goal_lanes(e)
-                      for e in encoders]
+        self.goals = [_goal_lanes(e) for e in encoders]
         if self.actions:
             if self.device.type == "cuda":
                 raise ValueError("mymyr: obs_actions: the device does not encode action relations; encode the "
@@ -102,8 +101,10 @@ class Observer:
                 if not e.options["include_actions"]:
                     raise ValueError("mymyr: obs_actions needs an encoder with action relations (include_actions=True)")
         if self.device.type == "cuda":
-            for e in encoders:
-                _device.layout_of(e)  # refuses schemas the device does not encode
+            for k, e in enumerate(encoders):
+                layout = _device.layout_of(e)  # refuses schemas the device does not encode
+                if self.capacities is not None:
+                    _device._capacities(self.capacities[k], layout)
             if self.capacities is not None and self.suite is None:
                 from mymyr.rl.torch import _ops
 
@@ -119,6 +120,7 @@ class Observer:
             local = np.asarray(self.suite.local_ids, np.int32)
             self._domain_of = torch.as_tensor(domain_of, device=self.device)
             self._local_ids = torch.as_tensor(local, device=self.device)
+            self._domains = torch.arange(len(encoders), dtype=torch.int64, device=self.device)
 
     def warm(self, rows: int) -> None:
         """Acquires the device contexts of the encoders on torch's current stream (a capture stream, before the
@@ -198,7 +200,7 @@ class Observer:
         domain, in row order within one) and the rows of each domain [D] (int64 tensors on the device)."""
         ids = task_ids.to(torch.int64)
         domain = self._domain_of[ids].to(torch.int64)
-        one_hot = torch.nn.functional.one_hot(domain, len(self.encoders))
+        one_hot = (domain.unsqueeze(1) == self._domains).to(torch.int64)  # no host check of the values
         within = one_hot.cumsum(0)
         counts = within[-1] if within.shape[0] else one_hot.sum(0)
         index = (within - 1).gather(1, domain.unsqueeze(1)).squeeze(1)
@@ -241,7 +243,7 @@ class Observer:
         """Groups the rows on the host (a CPU environment, or exact encodings on a device, which wait anyway)."""
         ids = task_ids.to(torch.int64)
         domain = self._domain_of[ids].to(torch.int64)
-        one_hot = torch.nn.functional.one_hot(domain, len(self.encoders))
+        one_hot = (domain.unsqueeze(1) == self._domains).to(torch.int64)  # no host check of the values
         index = (one_hot.cumsum(0) - 1).gather(1, domain.unsqueeze(1)).squeeze(1)
         host_domain = domain.cpu()
         local = self._local_ids[ids]

@@ -5,6 +5,8 @@ visible GPU, on the device (eager, captured and replayed), with per-env goals, o
     env CUDA_VISIBLE_DEVICES=0 .venv-rl/bin/python -m pytest tests/python/test_rl_torch_obs.py
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -231,6 +233,37 @@ def test_captured_obs_equal_eager_obs(gripper):
         r = eager.step(final=False)
         assert_same(out.obs[k], r.obs)
         assert torch.equal(out.obs[k].device_sizes, r.obs.device_sizes)
+
+
+@pytest.mark.parametrize("dev", devices())
+def test_eager_step_obs_collate(gripper, dev):
+    encoder = encoding.FlatRelationEncoder(gripper)
+    env = rt.BatchedEnv(gripper, 10, device=device_of(dev), seed=3, max_steps=3, observation=encoder,
+                        obs_capacities=CAPS)
+    steps = [env.step(final=False) for _ in range(4)]
+    states = torch.cat([r.states for r in steps])
+    ids = torch.cat([r.task_ids for r in steps])
+    assert_same(encoding.collate([r.obs for r in steps]), host(encoder, states, ids))
+
+
+@pytest.mark.parametrize("over", ["table", "suite"])
+def test_device_obs_with_capacities_never_wait(gripper, suite, over):
+    device = gpu_device()
+    table = gripper if over == "table" else suite
+    encoders = [encoding.FlatRelationEncoder(t) for t in ([gripper] if over == "table" else suite.tables)]
+    env = rt.BatchedEnv(table, 16, device=device, seed=3, max_steps=3, observation=encoders, obs_capacities=CAPS)
+    env.step()  # the first calls make the per-stream state
+    torch.cuda.synchronize(device)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # torch calls the sync debug mode a prototype
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            for _ in range(3):
+                env.step()
+                env.encode_observation()
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize(device)
 
 
 def test_capture_needs_capacities(gripper):
